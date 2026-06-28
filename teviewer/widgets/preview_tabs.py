@@ -1,0 +1,1113 @@
+"""Tabbed document preview (text, PDF, HTML, images)."""
+
+from __future__ import annotations
+
+import gzip
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, QSize, QSizeF, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QPixmap, QShortcut, QTextCursor
+from PySide6.QtPdf import QPdfDocument
+from PySide6.QtWidgets import (
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from teviewer.backends.bismark_cov import is_bismark_cov_file
+from teviewer.widgets.html_preview import create_html_preview_widget
+from teviewer.widgets.sequence_map_viewer import SequenceMapPanel, _is_delete_key
+from teviewer.widgets.preview_zoom import (
+    MAX_PREVIEW_FONT_SIZE,
+    MIN_PREVIEW_FONT_SIZE,
+    DefaultFastaPreviewTab,
+    PreviewFitMode,
+    load_default_fasta_preview_tab,
+    load_preview_fit_mode,
+    load_preview_font_size,
+    load_preview_zoom_percent,
+)
+
+_FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
+
+
+def _count_fasta_sequences_fast(path: Path) -> int:
+    """Count FASTA records by header lines (no Biopython)."""
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        return 0
+    count = 0
+    try:
+        if resolved.name.lower().endswith(".gz"):
+            with gzip.open(resolved, "rt", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith(">"):
+                        count += 1
+        else:
+            with resolved.open(encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith(">"):
+                        count += 1
+    except OSError:
+        return 0
+    return count
+
+
+def _is_single_fasta_file(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix not in _FASTA_SUFFIXES and not path.name.lower().endswith(".fa.gz"):
+        return False
+    return _count_fasta_sequences_fast(path) == 1
+
+
+_TEXT_PREVIEW_SUFFIXES = _FASTA_SUFFIXES | {
+    ".txt",
+    ".text",
+    ".tsv",
+    ".csv",
+    ".bed",
+    ".gff",
+    ".gff3",
+    ".gtf",
+    ".log",
+    ".md",
+    ".json",
+    ".xml",
+    ".out",
+}
+_TEXT_PREVIEW_MAX_CHARS = 500_000
+_DEFAULT_TEXT_MAX_CHARS = 200_000
+_IMAGE_PREVIEW_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}
+_HTML_PREVIEW_SUFFIXES = {".html", ".htm"}
+_UNSUPPORTED_PREVIEW_SUFFIXES = {
+    ".docx",
+    ".doc",
+    ".xlsx",
+    ".xls",
+    ".pptx",
+    ".ppt",
+    ".odt",
+    ".ods",
+    ".odp",
+    ".zip",
+    ".gz",
+    ".bz2",
+    ".7z",
+    ".exe",
+    ".dmg",
+    ".deb",
+    ".rpm",
+}
+
+
+def _preview_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in _HTML_PREVIEW_SUFFIXES:
+        return "html"
+    if suffix in _FASTA_SUFFIXES or path.name.lower().endswith(".fa.gz"):
+        if _is_single_fasta_file(path):
+            return "fasta_annotation"
+        return "fasta"
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix in _IMAGE_PREVIEW_SUFFIXES:
+        return "image"
+    return "text"
+
+
+def _switching_html_preview(old_path: Path, new_path: Path) -> bool:
+    old_kind = _preview_kind(old_path)
+    new_kind = _preview_kind(new_path)
+    return (old_kind == "html") != (new_kind == "html")
+
+
+def _is_text_like_preview(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    name = path.name.lower()
+    if is_bismark_cov_file(path):
+        return True
+    return suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith("blast.txt")
+
+
+def _read_text_preview(path: Path, max_chars: int) -> str:
+    resolved = path.expanduser().resolve()
+    if resolved.name.lower().endswith(".gz"):
+        with gzip.open(resolved, "rt", encoding="utf-8", errors="replace") as handle:
+            text = handle.read(max_chars + 1)
+    else:
+        text = resolved.read_text(encoding="utf-8", errors="replace")
+        if len(text) > max_chars + 1:
+            text = text[: max_chars + 1]
+    if not text.strip():
+        return f"(empty file)\n\n{resolved}"
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n\n... (truncated preview)"
+    return text
+
+
+def is_previewable_file(path: Path) -> bool:
+    """Return True when TEviewer can show the file in the Preview panel."""
+    resolved = path.expanduser()
+    suffix = resolved.suffix.lower()
+    name = resolved.name.lower()
+    if is_bismark_cov_file(resolved):
+        return True
+    if suffix in _UNSUPPORTED_PREVIEW_SUFFIXES:
+        return False
+    if suffix in _HTML_PREVIEW_SUFFIXES | {".pdf"} | _IMAGE_PREVIEW_SUFFIXES:
+        return True
+    if suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith("blast.txt"):
+        return True
+    return False
+
+
+def preview_path_priority(path: Path) -> int:
+    """Lower values are preferred when auto-opening after a tool run."""
+    name = path.name.lower()
+    suffix = path.suffix.lower()
+    if suffix in _HTML_PREVIEW_SUFFIXES:
+        if "divergence" in name or "genome_map" in name:
+            return 0
+        return 1
+    if suffix == ".pdf":
+        return 2
+    if suffix in _IMAGE_PREVIEW_SUFFIXES:
+        return 3
+    if suffix in _FASTA_SUFFIXES or name.endswith("blast.txt"):
+        return 4
+    if is_bismark_cov_file(path):
+        return 4
+    if suffix in _TEXT_PREVIEW_SUFFIXES:
+        return 5
+    return 99
+
+
+def _looks_like_binary_file(path: Path) -> bool:
+    try:
+        head = path.read_bytes()[:512]
+    except OSError:
+        return False
+    if head.startswith(b"PK"):
+        return True
+    return b"\x00" in head
+
+
+class ScaledImagePreview(QWidget):
+    """PNG/JPEG preview with scroll bars (e.g. Flexidot dotplots)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._original: QPixmap | None = None
+        self._zoom_percent = load_preview_zoom_percent()
+        self._fit_mode = PreviewFitMode.FIT_WINDOW
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._scroll.setWidgetResizable(False)
+        self._scroll.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+
+        self._label = QLabel()
+        self._label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self._scroll.setWidget(self._label)
+        self._scroll.viewport().installEventFilter(self)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._scroll)
+
+    def set_image_file(self, path: Path) -> bool:
+        pix = QPixmap(str(path))
+        if pix.isNull():
+            self._original = None
+            self._label.clear()
+            return False
+        self._original = pix
+        self.refresh_scale()
+        return True
+
+    def reload_image_file(self, path: Path) -> bool:
+        """Re-read the file from disk (e.g. after Flexidot DPI post-processing)."""
+        return self.set_image_file(path)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self.refresh_scale()
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().resizeEvent(event)
+        self.refresh_scale()
+
+    def set_zoom_percent(self, percent: int) -> None:
+        self._zoom_percent = max(25, min(200, int(percent)))
+        self.refresh_scale()
+
+    def set_fit_mode(self, mode: PreviewFitMode | str) -> None:
+        if isinstance(mode, str):
+            try:
+                mode = PreviewFitMode(mode)
+            except ValueError:
+                mode = PreviewFitMode.FIT_WINDOW
+        self._fit_mode = mode
+        self.refresh_scale()
+
+    def refresh_scale(self) -> None:
+        if self._original is None or self._original.isNull():
+            return
+        viewport = self._scroll.viewport().size()
+        if viewport.width() < 20 or viewport.height() < 20:
+            return
+
+        ow = self._original.width()
+        oh = self._original.height()
+        vw = viewport.width()
+        vh = viewport.height()
+
+        if self._fit_mode == PreviewFitMode.ORIGINAL:
+            base_scale = 1.0
+        elif self._fit_mode == PreviewFitMode.FIT_WIDTH:
+            base_scale = vw / ow if ow > 0 else 1.0
+        else:
+            base_scale = min(vw / ow, vh / oh) if ow > 0 and oh > 0 else 1.0
+
+        scale = base_scale * (self._zoom_percent / 100.0)
+        target_w = max(1, int(ow * scale))
+        dpr = max(1.0, self.devicePixelRatioF())
+        physical_w = max(1, int(target_w * dpr))
+        display = self._original.scaledToWidth(
+            physical_w,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        display.setDevicePixelRatio(dpr)
+
+        self._label.setPixmap(display)
+        self._label.setFixedSize(display.size())
+        self._scroll.horizontalScrollBar().setValue(0)
+        self._scroll.verticalScrollBar().setValue(0)
+
+
+class PdfPreviewWidget(QWidget):
+    """PDF preview: fit-to-width pages at device resolution (ignores plot zoom settings)."""
+
+    _PAGE_GAP_PX = 10
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self._doc = QPdfDocument(self)
+        self._render_generation = 0
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.viewport().installEventFilter(self)
+
+        self._content = QWidget(self._scroll)
+        self._layout = QVBoxLayout(self._content)
+        self._layout.setContentsMargins(6, 6, 6, 6)
+        self._layout.setSpacing(self._PAGE_GAP_PX)
+        self._scroll.setWidget(self._content)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._scroll)
+
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(100)
+        self._render_timer.timeout.connect(self._render_pages)
+
+        self._doc.statusChanged.connect(self._on_doc_status)
+        if hasattr(self._doc, "pageCountChanged"):
+            self._doc.pageCountChanged.connect(self._schedule_render)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._schedule_render()
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().resizeEvent(event)
+        self._schedule_render()
+
+    def _on_doc_status(self, status: QPdfDocument.Status) -> None:
+        if status == QPdfDocument.Status.Ready:
+            self._schedule_render()
+            QTimer.singleShot(200, self._schedule_render)
+
+    def _schedule_render(self) -> None:
+        self._render_timer.start()
+
+    def _clear_pages(self) -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    @staticmethod
+    def _page_size(doc: QPdfDocument, page: int) -> QSizeF:
+        size = doc.pagePointSize(page)
+        if size.width() <= 0 or size.height() <= 0:
+            return QSizeF(612.0, 792.0)
+        return size
+
+    def _render_pages(self) -> None:
+        if self._doc.status() != QPdfDocument.Status.Ready:
+            return
+        page_count = self._doc.pageCount()
+        if page_count < 1:
+            return
+
+        logical_w = max(200, self._scroll.viewport().width())
+        dpr = max(1.0, self.devicePixelRatioF())
+        render_w = max(1, int(logical_w * dpr))
+
+        generation = self._render_generation + 1
+        self._render_generation = generation
+        self._clear_pages()
+
+        for page in range(page_count):
+            if self._render_generation != generation:
+                return
+            page_size = self._page_size(self._doc, page)
+            render_h = max(1, int(render_w * page_size.height() / page_size.width()))
+            image = self._doc.render(page, QSize(render_w, render_h))
+            label = QLabel(self._content)
+            label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+            if image.isNull():
+                label.setText(f"(Page {page + 1} could not be rendered)")
+                label.setMinimumWidth(logical_w)
+            else:
+                pixmap = QPixmap.fromImage(image)
+                pixmap.setDevicePixelRatio(dpr)
+                label.setPixmap(pixmap)
+                label.setFixedWidth(logical_w)
+            self._layout.addWidget(label)
+
+        self._content.adjustSize()
+
+    def load_file(self, path: Path) -> QPdfDocument.Error:
+        self._clear_pages()
+        resolved = path.expanduser().resolve()
+        status = self._doc.load(str(resolved))
+        if status == QPdfDocument.Error.None_:
+            self._schedule_render()
+        return status
+
+    def refresh(self) -> None:
+        """Re-render fit-to-width after tab show or resize."""
+        self._schedule_render()
+
+
+class FilePreviewPage(QWidget):
+    """Single-file preview page inside a tab."""
+
+    annotationsSaved = Signal(object)  # Path to a newly written annotation file
+
+    def __init__(self, path: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.path = path.expanduser().resolve()
+        self._single_fasta_mode = False
+        self._annotation_panel: SequenceMapPanel | None = None
+        self._stack = QStackedWidget(self)
+        self._stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._placeholder = QLabel("Loading…")
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._base_text_font_pt = load_preview_font_size()
+        self._text = QTextEdit()
+        self._text.setReadOnly(True)
+        self._text.setStyleSheet(
+            "QTextEdit { background: palette(base); color: palette(text); }"
+        )
+        self._text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._text.setMinimumSize(200, 120)
+        self._text_scroll = QScrollArea(self)
+        self._text_scroll.setWidgetResizable(True)
+        self._text_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._text_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._text_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._text_scroll.setWidget(self._text)
+
+        self._fasta_text = QTextEdit()
+        self._fasta_text.setReadOnly(True)
+        self._fasta_text.setStyleSheet(
+            "QTextEdit { background: palette(base); color: palette(text); }"
+        )
+        self._fasta_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._fasta_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._fasta_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._fasta_text.setMinimumSize(200, 120)
+        self._fasta_text_scroll = QScrollArea(self)
+        self._fasta_text_scroll.setWidgetResizable(True)
+        self._fasta_text_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._fasta_text_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._fasta_text_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._fasta_text_scroll.setWidget(self._fasta_text)
+
+        self.apply_text_font_size(self._base_text_font_pt)
+        self._pdf = PdfPreviewWidget(self)
+        self._html = create_html_preview_widget(self)
+        self._image = ScaledImagePreview(self)
+        self._fasta_tabs = QTabWidget(self)
+        self._fasta_tabs.setDocumentMode(False)
+        self._fasta_tabs.setTabPosition(QTabWidget.TabPosition.North)
+        fasta_tab_bar = self._fasta_tabs.tabBar()
+        fasta_tab_bar.setExpanding(False)
+        fasta_tab_bar.setDrawBase(False)
+        fasta_tab_spacer = QWidget(self)
+        fasta_tab_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._fasta_tabs.setCornerWidget(fasta_tab_spacer, Qt.Corner.TopRightCorner)
+        fasta_tab_bar.setStyleSheet(
+            "QTabBar::tab {"
+            "  min-height: 18px;"
+            "  max-height: 18px;"
+            "  padding: 2px 12px;"
+            "  margin-right: 2px;"
+            "  border: 1px solid palette(mid);"
+            "  border-bottom: none;"
+            "  border-top-left-radius: 4px;"
+            "  border-top-right-radius: 4px;"
+            "  background: palette(button);"
+            "}"
+            "QTabBar::tab:selected {"
+            "  background: palette(base);"
+            "  font-weight: 600;"
+            "}"
+        )
+        self._fasta_tabs.setStyleSheet(
+            "QTabWidget::pane {"
+            "  border: 1px solid palette(mid);"
+            "  background: palette(base);"
+            "  top: -1px;"
+            "}"
+            "QTabWidget::tab-bar {"
+            "  alignment: left;"
+            "}"
+        )
+        self._fasta_tabs.addTab(self._fasta_text_scroll, "Text")
+        self._fasta_tabs.addTab(QWidget(self), "Annotation")
+        self._fasta_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._fasta_tabs.currentChanged.connect(self._on_fasta_tab_changed)
+        self._fasta_tabs.hide()
+
+        for widget in (
+            self._placeholder,
+            self._text_scroll,
+            self._pdf,
+            self._html,
+            self._image,
+        ):
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self._stack.addWidget(widget)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._fasta_tabs, stretch=1)
+        layout.addWidget(self._stack, stretch=1)
+        self._load()
+        self._apply_view_mode()
+        self._install_annotation_delete_shortcuts()
+
+    def _install_annotation_delete_shortcuts(self) -> None:
+        for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
+            shortcut = QShortcut(key, self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(self._delete_annotation_features_if_active)
+
+    def _delete_annotation_features_if_active(self) -> None:
+        if not self.is_annotation_preview_active():
+            return
+        if self._annotation_panel is None:
+            return
+        self._annotation_panel._map._sync_feature_selection_from_annot_track()
+        self._annotation_panel._delete_feature(confirm_empty=False)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if _is_delete_key(event.key()) and self.is_annotation_preview_active():
+            if self._annotation_panel is not None:
+                self._annotation_panel._delete_feature(confirm_empty=False)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _apply_view_mode(self) -> None:
+        if self._single_fasta_mode:
+            self._fasta_tabs.show()
+            self._stack.hide()
+        else:
+            self._fasta_tabs.hide()
+            self._stack.show()
+
+    def load_path(self, path: Path) -> None:
+        """Show a different file in this page (reuse one preview tab)."""
+        old_path = self.path
+        self.path = path.expanduser().resolve()
+        if (
+            _preview_kind(old_path) == "html"
+            and _preview_kind(self.path) != "html"
+            and hasattr(self._html, "teardown")
+        ):
+            self._html.teardown()
+        self._load()
+        self._apply_view_mode()
+        QTimer.singleShot(0, self._after_load)
+
+    def is_single_fasta_preview(self) -> bool:
+        return self._single_fasta_mode
+
+    def is_text_preview_active(self) -> bool:
+        if self._single_fasta_mode:
+            return self._fasta_tabs.currentIndex() == 0
+        return self._stack.currentWidget() is self._text_scroll
+
+    def is_annotation_preview_active(self) -> bool:
+        return self._single_fasta_mode and self._fasta_tabs.currentIndex() == 1
+
+    def _on_fasta_tab_changed(self, index: int) -> None:
+        if not self._single_fasta_mode:
+            return
+        if index == 0:
+            QTimer.singleShot(0, self._refresh_text_view)
+        elif index == 1:
+            QTimer.singleShot(0, self._open_annotation_tab)
+        tab_host = self.parent()
+        while tab_host is not None and not isinstance(tab_host, PreviewTabWidget):
+            tab_host = tab_host.parent()
+        if isinstance(tab_host, PreviewTabWidget):
+            tab_host._sync_zoom_bar_enabled()
+
+    def _after_load(self) -> None:
+        if self._single_fasta_mode:
+            if self._fasta_tabs.currentIndex() == 0:
+                self._refresh_text_view()
+            elif self._fasta_tabs.currentIndex() == 1:
+                self._open_annotation_tab()
+            return
+        current = self._stack.currentWidget()
+        if current is self._text_scroll:
+            self._refresh_text_view()
+        elif current is self._html:
+            self._reload_html_if_needed()
+        elif current is self._image:
+            self._image.refresh_scale()
+        elif current is self._pdf:
+            self._pdf.refresh()
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().showEvent(event)
+        if self._single_fasta_mode:
+            if self._fasta_tabs.currentIndex() == 0:
+                self.apply_preview_zoom(
+                    load_preview_zoom_percent(),
+                    load_preview_fit_mode(),
+                )
+                QTimer.singleShot(0, self._refresh_text_view)
+            elif self._fasta_tabs.currentIndex() == 1:
+                QTimer.singleShot(0, self._open_annotation_tab)
+            return
+        current = self._stack.currentWidget()
+        if current in (self._html, self._image, self._text_scroll):
+            self.apply_preview_zoom(
+                load_preview_zoom_percent(),
+                load_preview_fit_mode(),
+            )
+        if current is self._html:
+            QTimer.singleShot(0, self._reload_html_if_needed)
+        elif current is self._image:
+            QTimer.singleShot(0, self._image.refresh_scale)
+        elif current is self._text_scroll:
+            QTimer.singleShot(0, self._refresh_text_view)
+        elif current is self._pdf:
+            QTimer.singleShot(0, self._pdf.refresh)
+
+    def _reload_html_if_needed(self) -> None:
+        if self.path.suffix.lower() in {".html", ".htm"}:
+            self._schedule_html_load(self.path)
+
+    def _schedule_html_load(self, path: Path) -> None:
+        self._stack.setCurrentWidget(self._html)
+        resolved = path.expanduser().resolve()
+        QTimer.singleShot(0, lambda p=resolved: self._html.load_html_file(p))
+
+    def apply_text_font_size(self, point_size: int) -> None:
+        self._base_text_font_pt = max(
+            MIN_PREVIEW_FONT_SIZE,
+            min(MAX_PREVIEW_FONT_SIZE, int(point_size)),
+        )
+        self._apply_text_zoom(load_preview_zoom_percent())
+
+    def _uses_text_preview(self) -> bool:
+        return _is_text_like_preview(self.path)
+
+    def _apply_text_zoom(self, percent: int) -> None:
+        scaled = max(
+            MIN_PREVIEW_FONT_SIZE,
+            min(
+                MAX_PREVIEW_FONT_SIZE,
+                int(round(self._base_text_font_pt * int(percent) / 100)),
+            ),
+        )
+        mono = QFont("Courier New", scaled)
+        if not mono.exactMatch():
+            mono = QFont("Menlo", scaled)
+        self._text.setFont(mono)
+        self._fasta_text.setFont(mono)
+        scroll = getattr(self, "_text_scroll", None)
+        fasta_mode = getattr(self, "_single_fasta_mode", False)
+        if scroll is not None and (
+            self._stack.currentWidget() is scroll
+            or (fasta_mode and self._fasta_tabs.currentIndex() == 0)
+        ):
+            QTimer.singleShot(0, self._refresh_text_view)
+
+    def apply_preview_zoom(self, percent: int, fit_mode: PreviewFitMode | str) -> None:
+        self._image.set_zoom_percent(percent)
+        self._image.set_fit_mode(fit_mode)
+        if hasattr(self._html, "set_zoom_percent"):
+            self._html.set_zoom_percent(percent)
+        if hasattr(self._html, "set_fit_mode"):
+            self._html.set_fit_mode(fit_mode)
+        if self._uses_text_preview():
+            self._apply_text_zoom(percent)
+
+    def reload_from_disk(self) -> None:
+        """Refresh the current view after the file on disk changed."""
+        suffix = self.path.suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}:
+            if self._stack.currentWidget() is self._image:
+                self._image.reload_image_file(self.path)
+            return
+        if suffix in {".html", ".htm"}:
+            if self._stack.currentWidget() is self._html:
+                self._schedule_html_load(self.path)
+            return
+        if suffix == ".pdf":
+            if self._stack.currentWidget() is self._pdf:
+                self._pdf.load_file(self.path)
+            return
+        self._load()
+
+    def _set_single_fasta_mode(self, enabled: bool) -> None:
+        self._single_fasta_mode = enabled
+        self._apply_view_mode()
+
+    def _ensure_annotation_panel(self) -> SequenceMapPanel:
+        if self._annotation_panel is None:
+            self._annotation_panel = SequenceMapPanel(self.path, self, autoload=False)
+            self._annotation_panel.annotationsSaved.connect(self.annotationsSaved.emit)
+            placeholder = self._fasta_tabs.widget(1)
+            self._fasta_tabs.removeTab(1)
+            if placeholder is not None:
+                placeholder.deleteLater()
+            self._fasta_tabs.insertTab(1, self._annotation_panel, "Annotation")
+        return self._annotation_panel
+
+    def _activate_fasta_tab(self, tab: DefaultFastaPreviewTab) -> None:
+        if tab == DefaultFastaPreviewTab.ANNOTATION:
+            self._fasta_tabs.blockSignals(True)
+            self._ensure_annotation_panel()
+            self._fasta_tabs.setCurrentIndex(1)
+            self._fasta_tabs.blockSignals(False)
+            QTimer.singleShot(0, self._open_annotation_tab)
+            return
+        self._fasta_tabs.setCurrentIndex(0)
+        QTimer.singleShot(0, self._refresh_text_view)
+
+    def _open_annotation_tab(self) -> None:
+        panel = self._ensure_annotation_panel()
+        if self._fasta_tabs.currentIndex() != 1:
+            self._fasta_tabs.setCurrentIndex(1)
+        panel.open_annotation_tab()
+
+    def refresh_nucleotide_colors(self) -> None:
+        if self._annotation_panel is not None:
+            self._annotation_panel.refresh_nucleotide_colors()
+
+    def refresh_similarity_databases(self) -> None:
+        if self._annotation_panel is not None:
+            self._annotation_panel.refresh_similarity_databases()
+
+    def _load_single_fasta_preview(self, path: Path) -> None:
+        self._set_single_fasta_mode(True)
+        try:
+            max_chars = _TEXT_PREVIEW_MAX_CHARS
+            text = _read_text_preview(path, max_chars)
+        except OSError as exc:
+            text = f"Could not read file:\n{path}\n{exc}"
+        self._fasta_text.setPlainText(text)
+        cursor = self._fasta_text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self._fasta_text.setTextCursor(cursor)
+        if self._annotation_panel is not None:
+            self._annotation_panel.load_path(path)
+        self._activate_fasta_tab(load_default_fasta_preview_tab())
+
+    def _load(self) -> None:
+        path = self.path
+        if _is_single_fasta_file(path):
+            self._load_single_fasta_preview(path)
+            return
+        self._set_single_fasta_mode(False)
+        suffix = path.suffix.lower()
+        if not is_previewable_file(path):
+            self._show_text(
+                f"Preview is not available for this file type ({suffix or 'unknown'}).\n\n"
+                f"{path}\n\n"
+                "Open it with an external application (for example Word or Excel)."
+            )
+            return
+        if suffix == ".pdf":
+            status = self._pdf.load_file(path)
+            if status == QPdfDocument.Error.None_:
+                self._stack.setCurrentWidget(self._pdf)
+            else:
+                self._show_text(f"Could not load PDF:\n{path}\nstatus={status}")
+            return
+        if suffix in {".html", ".htm"}:
+            self._schedule_html_load(path)
+            return
+        if suffix in {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}:
+            if not self._image.set_image_file(path):
+                self._show_text(f"Could not load image:\n{path}")
+                return
+            self._stack.setCurrentWidget(self._image)
+            return
+        if _is_text_like_preview(path):
+            try:
+                max_chars = (
+                    _TEXT_PREVIEW_MAX_CHARS
+                    if _is_text_like_preview(path)
+                    else _DEFAULT_TEXT_MAX_CHARS
+                )
+                self._show_text(_read_text_preview(path, max_chars))
+            except OSError as exc:
+                self._show_text(f"Could not read file:\n{path}\n{exc}")
+            return
+        if _looks_like_binary_file(path):
+            self._show_text(
+                f"Preview is not available for this binary file.\n\n{path}\n\n"
+                "Open it with an external application."
+            )
+            return
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if not text.strip():
+                text = f"(empty file)\n\n{path}"
+            max_chars = _DEFAULT_TEXT_MAX_CHARS
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n\n... (truncated preview)"
+            self._show_text(text)
+        except OSError as exc:
+            self._show_text(f"Could not read file:\n{path}\n{exc}")
+
+    def _refresh_text_view(self) -> None:
+        editor = self._fasta_text if self._single_fasta_mode else self._text
+        editor.document().setTextWidth(editor.viewport().width())
+        editor.updateGeometry()
+
+    def _active_text_editor(self) -> QTextEdit:
+        return self._fasta_text if self._single_fasta_mode else self._text
+
+    def _show_text(self, text: str) -> None:
+        self._text.setPlainText(text)
+        cursor = self._text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self._text.setTextCursor(cursor)
+        self._stack.setCurrentWidget(self._text_scroll)
+        self._text_scroll.show()
+        self._text.show()
+        QTimer.singleShot(0, self._refresh_text_view)
+
+
+class PreviewTabWidget(QTabWidget):
+    """Tab bar for open files; reuses tabs when the same path is opened again."""
+
+    annotationsSaved = Signal(object)  # Path to a newly written annotation file
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        zoom_bar: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        from teviewer.widgets.preview_controls import PreviewZoomBar
+
+        self._zoom_bar = zoom_bar if zoom_bar is not None else PreviewZoomBar(self)
+        self._zoom_bar.zoom_changed.connect(self._on_preview_zoom_changed)
+        self._zoom_bar.fit_mode_changed.connect(self._on_preview_fit_changed)
+
+        self.setTabsClosable(True)
+        self.setMovable(True)
+        self.setDocumentMode(True)
+        self.setUsesScrollButtons(True)
+        self.tabCloseRequested.connect(self._close_tab)
+        self._path_to_index: dict[str, int] = {}
+
+        tab_bar = self.tabBar()
+        tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
+        tab_bar.setExpanding(False)
+        tab_bar.setDrawBase(False)
+        tab_bar.setMaximumHeight(28)
+        tab_bar.setStyleSheet(
+            "QTabBar::tab {"
+            "  min-height: 22px;"
+            "  max-height: 22px;"
+            "  padding: 3px 10px;"
+            "  margin-right: 1px;"
+            "}"
+        )
+        self.setStyleSheet(
+            "QTabWidget::pane { border: 1px solid palette(mid); background: palette(base); }"
+        )
+        self.setMinimumHeight(120)
+
+        # Spacer on the right keeps tabs pinned to the left on macOS.
+        tab_spacer = QWidget()
+        tab_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setCornerWidget(tab_spacer, Qt.Corner.TopRightCorner)
+        self.currentChanged.connect(self._sync_zoom_bar_enabled)
+        self._apply_zoom_to_current_tab()
+        self._install_annotation_delete_shortcuts()
+
+    def _install_annotation_delete_shortcuts(self) -> None:
+        for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
+            shortcut = QShortcut(key, self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(self._delete_annotation_features_on_current_tab)
+
+    def _delete_annotation_features_on_current_tab(self) -> None:
+        widget = self.currentWidget()
+        if isinstance(widget, FilePreviewPage):
+            widget._delete_annotation_features_if_active()
+
+    def _wire_preview_page(self, page: FilePreviewPage) -> None:
+        page.annotationsSaved.connect(self.annotationsSaved.emit)
+
+    def _add_preview_page(self, page: FilePreviewPage, *, name: str) -> int:
+        self._wire_preview_page(page)
+        return self.addTab(page, name)
+
+    @property
+    def zoom_bar(self):
+        return self._zoom_bar
+
+    def _on_preview_zoom_changed(self, percent: int) -> None:
+        self._apply_zoom_to_current_tab(percent=percent)
+
+    def _on_preview_fit_changed(self, fit_mode: str) -> None:
+        self._apply_zoom_to_current_tab(fit_mode=fit_mode)
+
+    def apply_preview_font_size(self, point_size: int | None = None) -> None:
+        size = load_preview_font_size() if point_size is None else point_size
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage):
+                widget.apply_text_font_size(size)
+
+    def refresh_nucleotide_color_scheme(self) -> None:
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage):
+                widget.refresh_nucleotide_colors()
+
+    def refresh_similarity_databases(self) -> None:
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage):
+                widget.refresh_similarity_databases()
+
+    def _apply_zoom_to_current_tab(
+        self,
+        *,
+        percent: int | None = None,
+        fit_mode: str | None = None,
+    ) -> None:
+        from teviewer.widgets.preview_zoom import load_preview_fit_mode
+
+        if percent is None:
+            percent = load_preview_zoom_percent()
+            if self._zoom_bar.isVisible():
+                percent = self._zoom_bar.current_zoom_percent()
+        if fit_mode is None:
+            fit_mode = load_preview_fit_mode().value
+            if self._zoom_bar.isVisible():
+                fit_mode = self._zoom_bar.current_fit_mode().value
+        else:
+            fit_mode = str(fit_mode)
+
+        widget = self.currentWidget()
+        if isinstance(widget, FilePreviewPage):
+            widget.apply_preview_zoom(percent, fit_mode)
+        self._sync_zoom_bar_enabled()
+
+    def _sync_zoom_bar_enabled(self, _index: int | None = None) -> None:
+        widget = self.currentWidget()
+        is_text = False
+        is_media = False
+        is_pdf = False
+        if isinstance(widget, FilePreviewPage):
+            if widget.is_annotation_preview_active():
+                is_text = False
+                is_media = False
+                is_pdf = False
+            elif widget.is_single_fasta_preview():
+                is_text = widget.is_text_preview_active()
+                is_media = False
+                is_pdf = False
+            else:
+                current = widget._stack.currentWidget()
+                is_text = current is widget._text_scroll
+                is_media = current in (widget._html, widget._image)
+                is_pdf = current is widget._pdf
+        can_adjust = is_text or is_media
+        self._zoom_bar.setVisible(not is_pdf and not (
+            isinstance(widget, FilePreviewPage) and widget.is_annotation_preview_active()
+        ))
+        self._zoom_bar._fit_combo.setEnabled(can_adjust)
+        for control in (
+            self._zoom_bar._slider,
+            self._zoom_bar._pct_label,
+            self._zoom_bar._reset_btn,
+        ):
+            control.setEnabled(can_adjust)
+
+    def open_file(self, path: Path, *, replace: bool = False) -> None:
+        """Open one file. replace=True uses a single reusable preview tab."""
+        resolved = path.expanduser().resolve()
+        key = str(resolved)
+
+        if replace:
+            if self.count() == 1:
+                widget = self.widget(0)
+                if isinstance(widget, FilePreviewPage):
+                    if str(widget.path) == key:
+                        widget.reload_from_disk()
+                    elif _switching_html_preview(widget.path, resolved):
+                        widget.deleteLater()
+                        self.removeTab(0)
+                        page = FilePreviewPage(resolved)
+                        self._add_preview_page(page, name=resolved.name)
+                        self._path_to_index = {key: 0}
+                        self.setCurrentIndex(0)
+                        self.setCurrentWidget(page)
+                        page.show()
+                        self._apply_zoom_to_current_tab()
+                        return
+                    else:
+                        widget.load_path(resolved)
+                    self.setTabText(0, resolved.name)
+                    self._path_to_index = {key: 0}
+                    self.setCurrentIndex(0)
+                    self._apply_zoom_to_current_tab()
+                    return
+            self.close_all_tabs()
+            page = FilePreviewPage(resolved)
+            self._add_preview_page(page, name=resolved.name)
+            self._path_to_index = {key: 0}
+            self.setCurrentIndex(0)
+            self.setCurrentWidget(page)
+            page.show()
+            self._apply_zoom_to_current_tab()
+            return
+
+        if key in self._path_to_index:
+            index = self._path_to_index[key]
+            if 0 <= index < self.count():
+                widget = self.widget(index)
+                if isinstance(widget, FilePreviewPage):
+                    widget.reload_from_disk()
+                self.setCurrentIndex(index)
+                self._apply_zoom_to_current_tab()
+                return
+            del self._path_to_index[key]
+
+        page = FilePreviewPage(resolved)
+        index = self._add_preview_page(page, name=resolved.name)
+        self._path_to_index[key] = index
+        self.setCurrentIndex(index)
+        self.setCurrentWidget(page)
+        page.show()
+        self._apply_zoom_to_current_tab()
+
+    def open_files_in_tabs(self, paths: list[Path]) -> None:
+        """Open many files (e.g. right-click); keeps existing tabs and adds new ones."""
+        for path in paths:
+            self.open_file(path, replace=False)
+
+    def reload_paths(self, paths: list[Path]) -> None:
+        """Reload open preview tabs whose paths match (e.g. after DPI change)."""
+        keys = {str(p.expanduser().resolve()) for p in paths}
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage) and str(widget.path) in keys:
+                widget.reload_from_disk()
+        if self.currentWidget() and str(getattr(self.currentWidget(), "path", "")) in keys:
+            self._apply_zoom_to_current_tab()
+
+    def close_all_tabs(self) -> None:
+        while self.count():
+            widget = self.widget(0)
+            self.removeTab(0)
+            if widget is not None:
+                widget.deleteLater()
+        self._path_to_index.clear()
+
+    def close_paths(self, paths: list[Path]) -> None:
+        """Close preview tabs whose files were deleted."""
+        keys = {str(p.expanduser().resolve()) for p in paths}
+        for index in range(self.count() - 1, -1, -1):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage) and str(widget.path) in keys:
+                self._close_tab(index)
+
+    def close_under_folder(self, folder: Path) -> None:
+        """Close preview tabs for files inside a deleted folder."""
+        folder = folder.expanduser().resolve()
+        for index in range(self.count() - 1, -1, -1):
+            widget = self.widget(index)
+            if not isinstance(widget, FilePreviewPage):
+                continue
+            try:
+                if widget.path.resolve().is_relative_to(folder):
+                    self._close_tab(index)
+            except ValueError:
+                continue
+
+    def _close_tab(self, index: int) -> None:
+        widget = self.widget(index)
+        if isinstance(widget, FilePreviewPage):
+            key = str(widget.path)
+            self._path_to_index.pop(key, None)
+        self.removeTab(index)
+        self._rebuild_path_index()
+
+    def _rebuild_path_index(self) -> None:
+        self._path_to_index.clear()
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage):
+                self._path_to_index[str(widget.path)] = index
