@@ -70,6 +70,10 @@ from teviewer.plot_preferences import (
 
 logger = logging.getLogger(__name__)
 
+
+class GenomeMapNothingToPlotError(ValueError):
+    """No plottable features and no selected chromosomes to render as empty tracks."""
+
 ensure_default_prefs_file()
 _VIEW_LIMITS = load_view_limits()
 
@@ -6662,6 +6666,47 @@ def _empty_chrom_order_hint(
     return "<br>".join(hints)
 
 
+def _nothing_to_plot_message(
+    *,
+    te_paths: list[Path],
+    gene_paths: list[Path],
+    methylation_paths: list[Path],
+    chromosomes_only: list[str] | None,
+    chrom_sizes: dict[str, int],
+) -> str:
+    lines = ["There is nothing to plot for the current inputs."]
+    if te_paths and not gene_paths and not methylation_paths:
+        lines.append("The TE input file(s) contain no genome hits.")
+    elif not te_paths and gene_paths and not methylation_paths:
+        lines.append("The annotation file(s) contain no features mapped to this genome.")
+    elif not te_paths and not gene_paths and methylation_paths:
+        lines.append("The methylation file(s) contain no sites mapped to this genome.")
+    else:
+        lines.append("No TE hits, gene features, or methylation sites were loaded.")
+    if chromosomes_only and chrom_sizes:
+        allowed = _map_chromosome_filter_to_genome(chromosomes_only, list(chrom_sizes.keys()))
+        if not allowed:
+            lines.append(
+                "The selected chromosome name(s) do not match the genome FASTA. "
+                "Clear the chromosome filter or pick names from the list."
+            )
+        else:
+            names = ", ".join(sorted(allowed, key=_natural_sort_key)[:4])
+            if len(allowed) > 4:
+                names += ", …"
+            lines.append(
+                f"No data on the selected chromosome(s) ({names}). "
+                "Try another chromosome, run Blast on the TE consensus first, "
+                "or confirm the genome FASTA matches the hit table."
+            )
+    elif te_paths:
+        lines.append(
+            "If you use a TE consensus FASTA, run Blast against the genome first. "
+            "RepeatMasker or masking output must be from the same genome as the project FASTA."
+        )
+    return "\n\n".join(lines)
+
+
 def _pident_colorscale(z: np.ndarray, zmin: float, zmax: float) -> list[str]:
     if z.size == 0:
         return []
@@ -7532,7 +7577,8 @@ def build_blast_genome_map_figure(
             methylation_df,
             prepared_methylation_cov_by_source,
         )
-        if data_chroms and len(chrom_order) > 1:
+        # Keep explicitly selected chromosomes even when they have no TE/annotation hits.
+        if data_chroms and len(chrom_order) > 1 and not chromosomes_only:
             chrom_order, dropped_empty = _prune_chromosomes_without_data(
                 chrom_order,
                 data_chroms,
@@ -9128,8 +9174,31 @@ def write_blast_genome_map_html(
         for cov in src.values()
     )
     if hits.empty and gene_hits.empty and not has_methylation_data:
-        logger.warning("TE genome map: no TE, gene, or methylation features to plot")
-        return None
+        selected_chroms: set[str] = set()
+        if chromosomes_only and chrom_sizes:
+            selected_chroms = _map_chromosome_filter_to_genome(
+                chromosomes_only,
+                list(chrom_sizes.keys()),
+            )
+        has_track_sources = bool(
+            te_source_specs or gene_source_specs or methylation_source_specs
+        )
+        if selected_chroms and has_track_sources and chrom_sizes:
+            logger.info(
+                "TE genome map: no features in inputs; showing %d selected "
+                "chromosome(s) as empty tracks",
+                len(selected_chroms),
+            )
+        else:
+            message = _nothing_to_plot_message(
+                te_paths=te_paths,
+                gene_paths=gene_paths,
+                methylation_paths=methylation_paths,
+                chromosomes_only=chromosomes_only,
+                chrom_sizes=chrom_sizes,
+            )
+            logger.info("TE genome map: %s", message.replace("\n\n", " "))
+            raise GenomeMapNothingToPlotError(message)
     if query_label:
         label = query_label
     elif te_paths:

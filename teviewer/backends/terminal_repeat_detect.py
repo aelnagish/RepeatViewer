@@ -30,6 +30,21 @@ TIR_ADJ = 50
 LTR_ADJ = 100
 MIN_LTR_LEN = 100
 MIN_TIR_LEN = 20
+DEFAULT_TERMINAL_REPEAT_WORD_SIZE = 11
+MIN_TERMINAL_REPEAT_WORD_SIZE = 4
+
+
+def word_size_for_terminal_repeat(min_repeat_length: int) -> int:
+    """
+    Self-BLAST ``-word_size`` for LTR or TIR detection.
+
+    Default 11. When the module's minimum repeat length is below 11 bp, use that
+    value instead (floored at 4). LTR and TIR settings are independent.
+    """
+    min_repeat_length = int(min_repeat_length)
+    if min_repeat_length < DEFAULT_TERMINAL_REPEAT_WORD_SIZE:
+        return max(MIN_TERMINAL_REPEAT_WORD_SIZE, min_repeat_length)
+    return DEFAULT_TERMINAL_REPEAT_WORD_SIZE
 
 
 @dataclass(frozen=True)
@@ -349,6 +364,7 @@ def _run_cancellable_self_blastn(
     *,
     cancel: JobCancellation | None = None,
     use_system_blast: bool = False,
+    word_size: int = DEFAULT_TERMINAL_REPEAT_WORD_SIZE,
 ) -> Path:
     os_type = platform.system()
     script_dir = Path(get_original_file_path())
@@ -356,6 +372,7 @@ def _run_cancellable_self_blastn(
     blast_raw = work_dir / f"{fasta_path.name}_no_header.b"
     blast_header = work_dir / f"{fasta_path.name}_blast.txt"
     blastn = _blastn_executable(blast_dir, os_type, use_system_blast=use_system_blast)
+    effective_ws = max(MIN_TERMINAL_REPEAT_WORD_SIZE, int(word_size))
     cmd = [
         blastn,
         "-query",
@@ -373,7 +390,7 @@ def _run_cancellable_self_blastn(
         "-num_threads",
         "1",
         "-word_size",
-        "11",
+        str(effective_ws),
         "-gapopen",
         "5",
         "-gapextend",
@@ -423,6 +440,7 @@ def run_self_blast(
     *,
     cancel: JobCancellation | None = None,
     use_system_blast: bool = False,
+    word_size: int = DEFAULT_TERMINAL_REPEAT_WORD_SIZE,
 ) -> Path:
     """Build a database and run self-BLAST; return the headered BLAST table path."""
     check_cancelled(cancel)
@@ -450,6 +468,7 @@ def run_self_blast(
         work_dir,
         cancel=cancel,
         use_system_blast=use_system_blast,
+        word_size=word_size,
     )
 
 
@@ -467,6 +486,17 @@ def auto_annotate_terminal_repeats(
     """Run self-BLAST on a single-sequence FASTA and detect LTR or TIR features."""
     fasta_path = fasta_path.expanduser().resolve()
     record_len = _record_length(fasta_path)
+    ltr_cfg = ltr_settings or TerminalRepeatSettings(
+        min_length=MIN_LTR_LEN,
+        similarity_threshold=DEFAULT_LTR_SIMILARITY_THRESHOLD,
+    )
+    tir_cfg = tir_settings or TerminalRepeatSettings(
+        min_length=MIN_TIR_LEN,
+        similarity_threshold=DEFAULT_TIR_SIMILARITY_THRESHOLD,
+    )
+    ltr_word_size = word_size_for_terminal_repeat(ltr_cfg.min_length)
+    tir_word_size = word_size_for_terminal_repeat(tir_cfg.min_length)
+    mode = repeat_mode.strip().upper()
 
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
     if work_dir is None:
@@ -477,19 +507,90 @@ def auto_annotate_terminal_repeats(
         work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        blast_table = run_self_blast(
+        if mode == "LTR":
+            blast_table = run_self_blast(
+                fasta_path,
+                work_dir,
+                cancel=cancel,
+                use_system_blast=use_system_blast,
+                word_size=ltr_word_size,
+            )
+            df = _load_self_blast_table(blast_table)
+            return detect_terminal_repeat_features(
+                df,
+                record_len,
+                repeat_mode="LTR",
+                ltr_settings=ltr_cfg,
+                tir_settings=tir_cfg,
+            )
+
+        if mode == "TIR":
+            blast_table = run_self_blast(
+                fasta_path,
+                work_dir / "tir_self_blast",
+                cancel=cancel,
+                use_system_blast=use_system_blast,
+                word_size=tir_word_size,
+            )
+            df = _load_self_blast_table(blast_table)
+            return detect_terminal_repeat_features(
+                df,
+                record_len,
+                repeat_mode="TIR",
+                ltr_settings=ltr_cfg,
+                tir_settings=tir_cfg,
+            )
+
+        # BOTH: LTR and TIR word sizes are independent — separate self-BLAST when they differ.
+        if ltr_word_size == tir_word_size:
+            blast_table = run_self_blast(
+                fasta_path,
+                work_dir,
+                cancel=cancel,
+                use_system_blast=use_system_blast,
+                word_size=ltr_word_size,
+            )
+            df = _load_self_blast_table(blast_table)
+            return detect_terminal_repeat_features(
+                df,
+                record_len,
+                repeat_mode="BOTH",
+                ltr_settings=ltr_cfg,
+                tir_settings=tir_cfg,
+            )
+
+        ltr_table = run_self_blast(
             fasta_path,
-            work_dir,
+            work_dir / "ltr_self_blast",
             cancel=cancel,
             use_system_blast=use_system_blast,
+            word_size=ltr_word_size,
         )
-        df = _load_self_blast_table(blast_table)
-        return detect_terminal_repeat_features(
-            df,
+        ltr_df = _load_self_blast_table(ltr_table)
+        ltr_result = detect_terminal_repeat_features(
+            ltr_df,
             record_len,
-            repeat_mode=repeat_mode,
-            ltr_settings=ltr_settings,
-            tir_settings=tir_settings,
+            repeat_mode="LTR",
+            ltr_settings=ltr_cfg,
+            tir_settings=tir_cfg,
+        )
+        if ltr_result.repeat_type == "LTR":
+            return ltr_result
+
+        tir_table = run_self_blast(
+            fasta_path,
+            work_dir / "tir_self_blast",
+            cancel=cancel,
+            use_system_blast=use_system_blast,
+            word_size=tir_word_size,
+        )
+        tir_df = _load_self_blast_table(tir_table)
+        return detect_terminal_repeat_features(
+            tir_df,
+            record_len,
+            repeat_mode="TIR",
+            ltr_settings=ltr_cfg,
+            tir_settings=tir_cfg,
         )
     except JobCancelledError:
         raise

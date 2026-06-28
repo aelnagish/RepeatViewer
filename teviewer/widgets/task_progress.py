@@ -12,6 +12,21 @@ def truncate_filename(name: str, max_len: int = 20) -> str:
     return name[:max_len] + "…"
 
 
+def _strip_leading_running(text: str) -> str:
+    lowered = text.lower()
+    if lowered.startswith("running "):
+        return text[8:].lstrip()
+    return text
+
+
+def format_job_status_label(job_title: str, detail: str = "") -> str:
+    """Build one status line without repeating the word 'running'."""
+    detail = _strip_leading_running(detail.strip())
+    if not detail:
+        return job_title
+    return f"{job_title} {truncate_filename(detail, 20)}"
+
+
 class TaskProgressPanel(QWidget):
     """Task label (always) and optional batch progress bar (2+ sequences)."""
 
@@ -65,8 +80,4 @@ class TaskProgressPanel(QWidget):
         self.hide()
 
     def _set_running_label(self, filename: str) -> None:
-        short = truncate_filename(filename, 20) if filename else ""
-        if short:
-            self._label.setText(f"{self._job_title} running {short}")
-        else:
-            self._label.setText(f"{self._job_title} running")
+        self._label.setText(format_job_status_label(self._job_title, filename))

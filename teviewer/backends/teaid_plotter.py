@@ -14,6 +14,10 @@ from Bio.SeqRecord import SeqRecord
 from plotly.subplots import make_subplots
 
 from teviewer.backends.gui_functions import blast, check_database
+from teviewer.job_options import (
+    DEFAULT_TE_DIVERGENCE_BIN_WIDTH,
+    clamp_teaid_self_blast_word_size,
+)
 
 # Suppress all deprecation warnings
 warnings.filterwarnings('ignore', category=BiopythonDeprecationWarning)
@@ -26,31 +30,38 @@ Developer: Jiangzhao Qian
 
 os_type = platform.system()
 
+TEAID_DIVERGENCE_HIST_MAX = 0.6
 
-def con_generater_backup(input_file, output_dir, threshold=0.8, ambiguous='N'):
-    # Read input file
-    alignment = AlignIO.read(input_file, 'fasta')
 
-    # Generate a summary of the alignment
-    summary_align = AlignInfo.SummaryInfo(alignment)
+def _consensus_position_ticks(max_len: int) -> list[int]:
+    """1-based TE consensus tick values; always includes 1, never the exact sequence end."""
+    max_len = max(1, int(max_len))
+    if max_len <= 100:
+        step = 10
+    elif max_len <= 250:
+        step = 25
+    elif max_len <= 500:
+        step = 50
+    elif max_len <= 1000:
+        step = 100
+    elif max_len <= 2500:
+        step = 500
+    else:
+        step = 1000
+    ticks = [1]
+    pos = step
+    while pos < max_len:
+        ticks.append(pos)
+        pos += step
+    return ticks
 
-    # Calculate consensus sequence with the specified threshold
-    consensus = summary_align.dumb_consensus(threshold=threshold, ambiguous=ambiguous)
 
-    # Create SeqRecord for consensus sequence
-    consensus_record = SeqRecord(
-        consensus, id=os.path.basename(input_file), description=''
-    )
-
-    # Determine the length of the consensus sequence
-    consensus_length = len(consensus)
-
-    # Write consensus sequence to a FASTA file
-    output_file = os.path.join(output_dir, f'{os.path.basename(input_file)}_cons.fa')
-    with open(output_file, 'w') as file:
-        SeqIO.write(consensus_record, file, 'fasta')
-
-    return output_file, consensus_length
+def _consensus_axis_tick_kwargs(max_len: int) -> dict:
+    return {
+        'tickmode': 'array',
+        'tickvals': _consensus_position_ticks(max_len),
+        'tickangle': 0,
+    }
 
 
 def con_generater(input_file, output_dir, threshold=0.8, ambiguous='N'):
@@ -264,7 +275,8 @@ def empty_plot(seq_len, width_n=600, height_n=600, custom_text=None):
             'linewidth': 1,
             'linecolor': 'black',
             'mirror': True,
-            'range': [0, int(seq_len)],  # Adjusted range for normalization
+            'range': [1, int(seq_len)],  # BLAST positions are 1-based
+            **_consensus_axis_tick_kwargs(int(seq_len)),
             'ticks': '',  # Hide tick marks
             'showticklabels': True,  # Hide tick labels
         },
@@ -348,7 +360,8 @@ def blast_plot(df, cons_len, full_len_thr=0.8):
         xaxis={
             'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
             'showgrid': False,
-            'range': [0, cons_len],
+            'range': [1, cons_len],
+            **_consensus_axis_tick_kwargs(cons_len),
             'linewidth': 1,
             'linecolor': 'black',
             'mirror': True,
@@ -413,7 +426,8 @@ def coverage_plot(df, cons_len):
         xaxis={
             'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
             'showgrid': False,
-            'range': [0, cons_len],
+            'range': [1, cons_len],
+            **_consensus_axis_tick_kwargs(cons_len),
             'linewidth': 1,
             'linecolor': 'black',
             'mirror': True,
@@ -437,6 +451,142 @@ def coverage_plot(df, cons_len):
     )
     # fig.show()
     return fig, max_coverage
+
+
+#####################################################################################################
+# Code block: divergence histogram (TE divergence plot logic, single TE)
+#####################################################################################################
+def empty_divergence_histogram(custom_text=None):
+    fig = go.Figure()
+    if custom_text:
+        fig.add_trace(
+            go.Scatter(
+                x=[0.5],
+                y=[5],
+                text=[custom_text],
+                mode='text',
+                textfont={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
+                showlegend=False,
+                hoverinfo='none',
+            )
+        )
+    fig.update_layout(
+        title='Divergence Plot',
+        xaxis_title='Divergence',
+        yaxis_title='Total length (bp)',
+        xaxis={
+            'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
+            'showgrid': True,
+            'gridcolor': '#f0f0f0',
+            'range': [0, TEAID_DIVERGENCE_HIST_MAX],
+            'linewidth': 1,
+            'linecolor': 'black',
+            'mirror': True,
+        },
+        yaxis={
+            'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
+            'showgrid': True,
+            'gridcolor': '#f4f4f4',
+            'range': [0, 10],
+            'linewidth': 1,
+            'linecolor': 'black',
+            'mirror': True,
+        },
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        margin={'l': 60, 'r': 60, 't': 60, 'b': 60},
+        font={'family': 'Arial, sans-serif', 'size': 12, 'color': 'black'},
+        width=600,
+        height=600,
+    )
+    return fig, 10
+
+
+def divergence_histogram_plot(
+    df,
+    *,
+    bin_width: float = DEFAULT_TE_DIVERGENCE_BIN_WIDTH,
+):
+    """
+    Histogram of genome BLAST hit divergence (1 - identity), weighted by alignment length.
+
+    Matches ``write_blast_divergence_plot_html`` in ``blast_genome_plot.py``.
+    """
+    bw = max(0.001, float(bin_width))
+    div_max = TEAID_DIVERGENCE_HIST_MAX
+    n_bins = int(np.ceil(div_max / bw))
+    edges = np.linspace(0.0, div_max, n_bins + 1)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+
+    div = ((100.0 - df['V3'].astype(float)) / 100.0).clip(lower=0.0, upper=div_max)
+    bp = df['V4'].astype(float).clip(lower=0.0)
+    bp_per_bin, _ = np.histogram(
+        div.to_numpy(dtype=float),
+        bins=edges,
+        weights=bp.to_numpy(dtype=float),
+    )
+    active = bp_per_bin > 0
+    if not np.any(active):
+        return empty_divergence_histogram('No aligned length in divergence bins')
+
+    active_idx = np.where(active)[0]
+    plot_centers = centers[active]
+    plot_bp = bp_per_bin[active]
+    plot_edges_lo = edges[active_idx]
+    plot_edges_hi = edges[active_idx + 1]
+    y_max = max(1.0, float(plot_bp.max()))
+
+    hover = [
+        (
+            f'Divergence: {lo:.3f} - {hi:.3f}<br>'
+            f'Total length: {int(val):,} bp'
+        )
+        for lo, hi, val in zip(plot_edges_lo, plot_edges_hi, plot_bp)
+    ]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=plot_centers,
+            y=plot_bp,
+            width=[bw] * len(plot_centers),
+            marker={'color': 'black', 'line': {'width': 0}},
+            hovertext=hover,
+            hoverinfo='text',
+            showlegend=False,
+        )
+    )
+    fig.update_layout(
+        title='Divergence Plot',
+        xaxis_title='Divergence',
+        yaxis_title='Total length (bp)',
+        xaxis={
+            'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
+            'showgrid': True,
+            'gridcolor': '#f0f0f0',
+            'range': [0, TEAID_DIVERGENCE_HIST_MAX],
+            'linewidth': 1,
+            'linecolor': 'black',
+            'mirror': True,
+        },
+        yaxis={
+            'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
+            'showgrid': True,
+            'gridcolor': '#f4f4f4',
+            'range': [0, y_max * 1.08],
+            'linewidth': 1,
+            'linecolor': 'black',
+            'mirror': True,
+        },
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        margin={'l': 60, 'r': 60, 't': 60, 'b': 60},
+        font={'family': 'Arial, sans-serif', 'size': 12, 'color': 'black'},
+        width=600,
+        height=600,
+        bargap=0,
+    )
+    return fig, y_max
 
 
 #####################################################################################################
@@ -464,6 +614,15 @@ def dot_plot(df):
             )
         )
 
+    axis_max = int(
+        max(
+            df['V7'].max(),
+            df['V8'].max(),
+            df['V9'].max(),
+            df['V10'].max(),
+        )
+    )
+    axis_ticks = _consensus_axis_tick_kwargs(axis_max)
     fig.update_layout(
         title='Self dot plot',
         xaxis_title='TE consensus self dotplot (bp)',
@@ -471,7 +630,8 @@ def dot_plot(df):
         xaxis={
             'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
             'showgrid': False,
-            'range': [0, max(df['V8'])],
+            'range': [1, axis_max],
+            **axis_ticks,
             'linewidth': 1,
             'linecolor': 'black',
             'mirror': True,
@@ -479,7 +639,8 @@ def dot_plot(df):
         yaxis={
             'showgrid': False,
             'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-            'range': [0, max(df['V8'])],
+            'range': [1, axis_max],
+            **axis_ticks,
             'linewidth': 1,
             'linecolor': 'black',
             'mirror': True,
@@ -787,7 +948,7 @@ def plot_rpsblast_hits(input_file, cons_len):
         yaxis_title='TE Protein Domains',
         font={'family': 'Arial, sans-serif', 'size': 14, 'color': 'black'},
         xaxis={
-            'range': [0, cons_len],
+            'range': [1, cons_len],
             'side': 'bottom',
             'showgrid': False,
             'zeroline': False,
@@ -881,15 +1042,19 @@ def teaid_plotter(
                 cons_len, custom_text='No genome BLAST hits found'
             )
             coverage_max = 10
+            fig_div_hist, div_hist_max = empty_divergence_histogram(
+                'No genome BLAST hits found'
+            )
         else:
             df_genome_blast_out = pd.read_csv(genome_blast_out)
 
-            # Genome blast plot and blast coverage plot
+            # Genome blast plot, coverage, and divergence histogram
             fig_blast, divergence_max, blast_plot_title = blast_plot(
                 df_genome_blast_out, cons_len
             )
 
             fig_coverage, coverage_max = coverage_plot(df_genome_blast_out, cons_len)
+            fig_div_hist, div_hist_max = divergence_histogram_plot(df_genome_blast_out)
     else:
         fig_blast = empty_plot(
             cons_len,
@@ -905,13 +1070,17 @@ def teaid_plotter(
             'Please provide a genome file if it has not been specified.',
         )
         coverage_max = 10
+        fig_div_hist, div_hist_max = empty_divergence_histogram(
+            'An error occurred. Please check the terminal for details.'
+        )
 
-    # Perform self blast
+    # Perform self blast (word size clamped 4–20; lowered on short consensus)
+    self_word_size = clamp_teaid_self_blast_word_size(self_blast_word_size)
     dotplot_blast = self_blast(
         con_seq,
         output_dir,
         use_system_blast=use_system_blast,
-        word_size=self_blast_word_size,
+        word_size=self_word_size,
     )
 
     if dotplot_blast == 'blast_n_zero':
@@ -929,75 +1098,54 @@ def teaid_plotter(
             custom_text='An error occurred. Please check the terminal for details.',
         )
 
-    # TEviewer: CDD/rpstblastn disabled by default (use Similarity annotation instead).
-    fig_rpstblastn = empty_plot(
-        cons_len,
-        width_n=1350,
-        height_n=60,
-        custom_text=(
-            "Use Similarity annotation on the Annotation tab for protein domain search."
-        ),
-    )
-    num_tracks = 1
+    # 2×2 layout: equal square panels with extra space between rows.
+    panel_px = 380
+    gap_between_row = 90
+    top_margin = 100
+    bottom_margin = 70
+    side_margin = 70
+    plot_block = 2 * panel_px + gap_between_row
+    total_fig_height = plot_block + top_margin + bottom_margin
+    total_fig_width = total_fig_height
+    vertical_spacing = gap_between_row / plot_block
 
-    # only_plot_total_height don't include margin and the distance between two rows
-    only_plot_total_height = 350 + 5 + num_tracks * 40
-
-    gap_between_row = 150  # pixel
-    top_margin = 80  # pixel
-    bottom_margin = 60  # pixel
-    total_fig_height = (
-        only_plot_total_height + gap_between_row + top_margin + bottom_margin
-    )
-
-    # Create a subplot layout with the rpstblastn plot spanning all columns in the second row
     fig = make_subplots(
         rows=2,
-        cols=3,
+        cols=2,
         subplot_titles=(
             blast_plot_title,
             'BLAST Coverage Plot',
             'Self Dot Plot',
-            'TE Protein Domain Plot',
+            'Divergence Plot',
         ),
-        specs=[[{}, {}, {}], [{'colspan': 3}, None, None]],
-        vertical_spacing=gap_between_row / total_fig_height,
-        row_heights=[
-            350 / only_plot_total_height,
-            (5 + num_tracks * 40) / only_plot_total_height,
-        ],  # Adjust heights as needed
+        vertical_spacing=vertical_spacing,
+        horizontal_spacing=0.10,
+        row_heights=[1, 1],
+        column_widths=[1, 1],
     )
 
-    # Merge plots into the combined subplot layout
     for trace in fig_blast.data:
         fig.add_trace(trace, row=1, col=1)
     for trace in fig_coverage.data:
         fig.add_trace(trace, row=1, col=2)
     for trace in fig_dot.data:
-        fig.add_trace(trace, row=1, col=3)
-    for trace in fig_rpstblastn.data:
         fig.add_trace(trace, row=2, col=1)
+    for trace in fig_div_hist.data:
+        fig.add_trace(trace, row=2, col=2)
 
-    # Update the font size of subplot titles
-    for annotation in fig['layout']['annotations']:
-        annotation['font'] = {'size': 13, 'family': 'Arial, sans-serif', 'color': 'black'}
+    fig.update_annotations(
+        font={'size': 13, 'family': 'Arial, sans-serif', 'color': 'black'},
+    )
 
-    # Copy annotations from fig_rpstblastn to the combined figure and adjust references
-    if 'annotations' in fig_rpstblastn.layout:
-        rpstblastn_annotations = fig_rpstblastn.layout.annotations
-        for ann in rpstblastn_annotations:
-            # Adjust the annotation references to correspond with the subplot
-            ann['xref'] = 'x4'  # Adjust based on the subplot's x-axis reference
-            ann['yref'] = 'y4'  # Adjust based on the subplot's y-axis reference
-            fig.add_annotation(ann)
-
+    consensus_ticks = _consensus_axis_tick_kwargs(cons_len)
     # Configuring subplot 1
     fig.update_xaxes(
         title_text='TE consensus (bp)',
         showgrid=False,
         showticklabels=True,
         title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[0, cons_len],
+        range=[1, cons_len],
+        **consensus_ticks,
         linewidth=1,
         linecolor='black',
         mirror=True,
@@ -1017,13 +1165,14 @@ def teaid_plotter(
         col=1,
     )
 
-    # Configuring subplot 2
+    # Configuring subplot 2 (coverage)
     fig.update_xaxes(
         title_text='TE consensus (bp)',
         showgrid=False,
         showticklabels=True,
         title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[0, cons_len],
+        range=[1, cons_len],
+        **consensus_ticks,
         linewidth=1,
         linecolor='black',
         mirror=True,
@@ -1043,39 +1192,14 @@ def teaid_plotter(
         col=2,
     )
 
-    # Configuring subplot 3
+    # Configuring subplot 3 (self dot plot: 1-based coordinates)
     fig.update_xaxes(
         title_text='TE consensus (bp)',
         showgrid=False,
         showticklabels=True,
         title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[0, cons_len],
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=1,
-        col=3,
-    )
-    fig.update_yaxes(
-        title_text='TE consensus (bp)',
-        showgrid=False,
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[0, cons_len],
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=1,
-        col=3,
-    )
-
-    # Configuring subplot 4 (rpstblastn plot)
-    fig.update_xaxes(
-        title_text='TE consensus (bp)',
-        showgrid=False,
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[0, cons_len],
+        range=[1, cons_len],
+        **consensus_ticks,
         linewidth=1,
         linecolor='black',
         mirror=True,
@@ -1083,25 +1207,58 @@ def teaid_plotter(
         col=1,
     )
     fig.update_yaxes(
+        title_text='TE consensus (bp)',
         showgrid=False,
-        showticklabels=False,
-        autorange=True,
+        showticklabels=True,
+        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
+        range=[1, cons_len],
+        tickmode='array',
+        tickvals=_consensus_position_ticks(cons_len),
+        tickangle=0,
+        linewidth=1,
         linecolor='black',
         mirror=True,
-        linewidth=1,
         row=2,
         col=1,
     )
 
-    # Calculate the total height based on the number of tracks in the rpstblastn plot
+    # Configuring subplot 4 (divergence plot)
+    fig.update_xaxes(
+        title_text='Divergence',
+        showgrid=True,
+        gridcolor='#f0f0f0',
+        showticklabels=True,
+        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
+        range=[0, TEAID_DIVERGENCE_HIST_MAX],
+        tickangle=0,
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=2,
+        col=2,
+    )
+    fig.update_yaxes(
+        title_text='Total length (bp)',
+        showgrid=True,
+        gridcolor='#f4f4f4',
+        showticklabels=True,
+        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
+        range=[0, div_hist_max * 1.08],
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=2,
+        col=2,
+    )
+
     fig.update_layout(
         height=total_fig_height,
-        width=1600,
+        width=total_fig_width,
         title_text=plot_main_title,
         title_font={'size': 26, 'family': 'Arial, sans-serif', 'color': 'black'},
         plot_bgcolor='white',
         paper_bgcolor='white',
-        margin={'t': top_margin, 'b': bottom_margin, 'l': 60, 'r': 60},
+        margin={'t': top_margin, 'b': bottom_margin, 'l': side_margin, 'r': side_margin},
     )
     # Save the figure as an HTML file
     output_html_path = os.path.join(

@@ -265,7 +265,7 @@ def blast(
     if self_blast:
         # Add more parameters for self-blast
         blast_cmd.extend([
-            "-word_size", str(max(4, min(20, int(word_size)))),
+            "-word_size", str(max(4, min(25, int(word_size)))),
             "-gapopen", "5",
             "-gapextend", "2",
             "-reward", "2",

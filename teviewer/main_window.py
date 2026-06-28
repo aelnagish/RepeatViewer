@@ -61,6 +61,7 @@ from teviewer.backends.blast_genome_plot import (
     is_teviewer_hits_cache_file,
     te_hit_table_stem,
     write_blast_divergence_plot_html,
+    GenomeMapNothingToPlotError,
     write_blast_genome_map_html,
     TE_INPUT_KIND_CONSENSUS,
     TE_INPUT_KIND_MASKING,
@@ -364,6 +365,8 @@ class GenomeMapWorker(QObject):
             self.finished.emit(html_path)
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
+        except GenomeMapNothingToPlotError as exc:
+            self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
 
@@ -1053,11 +1056,17 @@ class MainWindow(QMainWindow):
             return ""
         return part
 
-    def _show_job_progress(self, title: str, total_steps: int) -> None:
+    def _running_job_title(self, job_title: str) -> str:
+        display = self._job_display_title(job_title)
+        if display.lower().startswith("running "):
+            return display if display.endswith("…") else f"{display}…"
+        return f"Running {display}…"
+
+    def _show_job_progress(self, job_title: str, total_steps: int) -> None:
         self._job_running = True
         self.statusBar().clearMessage()
         if self._task_progress is not None:
-            self._task_progress.start(self._job_display_title(title), total_steps)
+            self._task_progress.start(self._running_job_title(job_title), total_steps)
         if self._stop_btn is not None:
             self._stop_btn.setEnabled(True)
 
@@ -3510,7 +3519,7 @@ class MainWindow(QMainWindow):
         worker_note = f" ({workers} workers)" if workers > 1 else ""
         self._set_status_message(f"Building TE genome map{worker_note}…", 0)
         if self._task_progress is not None:
-            self._task_progress.start("TE genome map", 6)
+            self._task_progress.start(self._running_job_title("TE genome map"), 6)
         if self._stop_btn is not None:
             self._stop_btn.setEnabled(True)
         self._genome_map_thread = QThread(self)
@@ -3588,6 +3597,10 @@ class MainWindow(QMainWindow):
             self._task_progress.reset()
         if error == CANCELLED_MESSAGE:
             self._set_status_message("Stopped TE genome map", 6000)
+            return
+        if error.startswith("There is nothing to plot"):
+            QMessageBox.information(self, "TE density plot", error)
+            self._set_status_message("TE density plot: nothing to plot", 8000)
             return
         QMessageBox.critical(self, "TE genome map failed", error)
         self._set_status_message("TE genome map failed", 6000)
@@ -4546,7 +4559,7 @@ class MainWindow(QMainWindow):
 
         self._last_job_source_files = list(source_files or [])
         self._job_cancel.reset()
-        self._show_job_progress(f"Running {job_title}…", total_steps)
+        self._show_job_progress(job_title, total_steps)
         self._set_job_actions_enabled(False)
 
         self._worker_thread = QThread(self)

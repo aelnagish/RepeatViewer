@@ -647,10 +647,13 @@ class FilePreviewPage(QWidget):
         if self.path.suffix.lower() in {".html", ".htm"}:
             self._schedule_html_load(self.path)
 
-    def _schedule_html_load(self, path: Path) -> None:
+    def _schedule_html_load(self, path: Path, *, force: bool = False) -> None:
         self._stack.setCurrentWidget(self._html)
         resolved = path.expanduser().resolve()
-        QTimer.singleShot(0, lambda p=resolved: self._html.load_html_file(p))
+        QTimer.singleShot(
+            0,
+            lambda p=resolved, f=force: self._html.load_html_file(p, force=f),
+        )
 
     def apply_text_font_size(self, point_size: int) -> None:
         self._base_text_font_pt = max(
@@ -702,7 +705,7 @@ class FilePreviewPage(QWidget):
             return
         if suffix in {".html", ".htm"}:
             if self._stack.currentWidget() is self._html:
-                self._schedule_html_load(self.path)
+                self._schedule_html_load(self.path, force=True)
             return
         if suffix == ".pdf":
             if self._stack.currentWidget() is self._pdf:

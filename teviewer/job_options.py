@@ -152,7 +152,15 @@ DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
 DEFAULT_TEAID_THREADS = 1
 DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 11
 MIN_TEAID_SELF_BLAST_WORD_SIZE = 4
-MAX_TEAID_SELF_BLAST_WORD_SIZE = 20
+MAX_TEAID_SELF_BLAST_WORD_SIZE = 25
+
+
+def clamp_teaid_self_blast_word_size(requested: int) -> int:
+    """Clamp TEAid self-BLAST ``-word_size`` to 4–25."""
+    return max(
+        MIN_TEAID_SELF_BLAST_WORD_SIZE,
+        min(MAX_TEAID_SELF_BLAST_WORD_SIZE, int(requested)),
+    )
 
 
 def configure_report_evalue_spinbox(spin) -> None:

@@ -2695,6 +2695,10 @@ class AutoAnnotationSettingsDialog(QDialog):
         min_len = QSpinBox(self)
         min_len.setRange(1, 1_000_000)
         min_len.setValue(cfg.min_length)
+        min_len.setToolTip(
+            "Minimum repeat length (bp). Values below 11 also set the self-BLAST "
+            "word size for this repeat type only (minimum word size 4; default 11)."
+        )
         max_len = QSpinBox(self)
         max_len.setRange(1, 1_000_000)
         max_len.setValue(cfg.max_length)

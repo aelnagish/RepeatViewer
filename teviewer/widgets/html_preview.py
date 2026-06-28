@@ -149,7 +149,7 @@ class LazyHtmlPreview(QWidget):
         if self._inner is not None and hasattr(self._inner, "set_fit_mode"):
             self._inner.set_fit_mode(mode)
 
-    def load_html_file(self, path: Path) -> None:
+    def load_html_file(self, path: Path, *, force: bool = False) -> None:
         if not use_embedded_html_preview():
             if self._inner is None:
                 self._inner = HtmlFallbackPreview(
@@ -166,7 +166,7 @@ class LazyHtmlPreview(QWidget):
             self._layout.addWidget(self._inner, stretch=1)
 
         if hasattr(self._inner, "load_html_file"):
-            self._inner.load_html_file(path)
+            self._inner.load_html_file(path, force=force)
         if hasattr(self._inner, "set_zoom_percent"):
             self._inner.set_zoom_percent(self._zoom_percent)
         if hasattr(self._inner, "set_fit_mode"):
@@ -222,6 +222,7 @@ class HtmlWebEnginePreview(QWidget):
         self._view.loadFinished.connect(self._on_load_finished)
         self._view.installEventFilter(self)
         self._current_path: Path | None = None
+        self._current_mtime_ns: int | None = None
         self._last_load_ok = False
         self._used_html_fallback = False
         self._zoom_percent = load_preview_zoom_percent()
@@ -286,16 +287,24 @@ class HtmlWebEnginePreview(QWidget):
             self._content_h = int(h)
             self._apply_zoom()
 
-    def load_html_file(self, path: Path) -> None:
+    def load_html_file(self, path: Path, *, force: bool = False) -> None:
         resolved = path.expanduser().resolve()
+        try:
+            mtime_ns = resolved.stat().st_mtime_ns if resolved.is_file() else None
+        except OSError:
+            mtime_ns = None
         if (
-            resolved == self._current_path
+            not force
+            and resolved == self._current_path
+            and mtime_ns is not None
+            and mtime_ns == self._current_mtime_ns
             and self._last_load_ok
             and not self._used_html_fallback
         ):
             return
 
         self._current_path = resolved
+        self._current_mtime_ns = mtime_ns
         if self._prefs_save_timer is not None:
             self._prefs_save_timer.stop()
         self._last_load_ok = False
@@ -391,6 +400,7 @@ class HtmlWebEnginePreview(QWidget):
         except Exception:
             logger.debug("WebEngine teardown stop failed", exc_info=True)
         self._current_path = None
+        self._current_mtime_ns = None
         self._last_load_ok = False
 
 

@@ -662,7 +662,7 @@ class TeaAidParamsDialog(QDialog):
             )
         )
         self._word_size.setToolTip(
-            "BLASTN word size (-word_size) for the self BLAST dot plot."
+            "BLASTN word size (-word_size) for the TEAid self-BLAST dot plot only (4–25)."
         )
 
         form = QFormLayout()
@@ -994,7 +994,15 @@ class ChromosomeMultiSelectWidget(QWidget):
             cb.setVisible(not needle or needle in cb.text().lower())
 
     def selected_names(self) -> list[str]:
-        return [self._chrom_name_from_checkbox(cb) for cb in self._check_boxes if cb.isChecked()]
+        needle = self._filter.text().strip().lower()
+        names: list[str] = []
+        for cb in self._check_boxes:
+            if not cb.isChecked():
+                continue
+            if needle and not cb.isVisible():
+                continue
+            names.append(self._chrom_name_from_checkbox(cb))
+        return names
 
     def _check_all(self) -> None:
         for cb in self._check_boxes:
