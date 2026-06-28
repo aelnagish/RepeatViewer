@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from teviewer.pan_genome import GENOME_MODE_SINGLE, parse_pan_genomes_json
 from teviewer.project import TEviewerProject
 from teviewer.views.toolbar_dialog import load_toolbar_font_size, save_toolbar_font_size
 from teviewer.widgets.preview_zoom import (
@@ -79,6 +80,10 @@ def save_workspace(
     s.beginGroup(SETTINGS_GROUP)
     s.setValue("input_dir", str(project.input_dir) if project.input_dir else "")
     s.setValue("genome_file", str(project.genome_file) if project.genome_file else "")
+    s.setValue("genome_mode", project.genome_mode)
+    from teviewer.pan_genome import pan_genomes_to_json
+
+    s.setValue("pan_genomes_json", pan_genomes_to_json(project.pan_genomes))
     save_database_settings(
         cdd_dirs=project.cdd_dirs,
         user_databases=project.user_databases,
@@ -409,6 +414,8 @@ class SettingsDialog(QDialog):
             input_dir=_path_from_settings(s.value("input_dir"))
             or _path_from_settings(s.value("proof_curation_dir")),
             genome_file=_path_from_settings(s.value("genome_file")),
+            genome_mode=str(s.value("genome_mode", GENOME_MODE_SINGLE)),
+            pan_genomes=parse_pan_genomes_json(s.value("pan_genomes_json")),
             cdd_dirs=load_cdd_dirs_from_settings(s),
             user_databases=load_user_databases_from_settings(),
             use_system_blast=bool(s.value("use_system_blast", False)),

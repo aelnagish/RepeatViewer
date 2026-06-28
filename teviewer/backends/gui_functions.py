@@ -26,7 +26,11 @@ special_character = {
     '"': '_',
     '*': '_',
     '?': '_',
+    '#': '_',
 }
+
+_blast_db_locks: dict[str, threading.Lock] = {}
+_blast_db_locks_guard = threading.Lock()
 
 # Cache genome FASTA records to avoid re-reading huge genome files
 # on every Extend/Blast extraction call.
@@ -61,6 +65,18 @@ def sanitize_name(name):
     for char, replacement in special_character.items():
         name = name.replace(char, replacement)
     return name
+
+
+def _blast_db_lock(key: str) -> threading.Lock:
+    with _blast_db_locks_guard:
+        if key not in _blast_db_locks:
+            _blast_db_locks[key] = threading.Lock()
+        return _blast_db_locks[key]
+
+
+def blast_database_basename(genome_file: str | os.PathLike) -> str:
+    """Safe BLAST database basename (``#`` and path separators break BLAST index lookup)."""
+    return sanitize_name(os.path.basename(str(genome_file)))
 
 
 _FLEXIDOT_UNSAFE_ID_CHARS = frozenset("/\\")
@@ -160,54 +176,54 @@ def check_database(
     script_dir = get_original_file_path()
 
     blast_dir = os.path.join(script_dir, "blast")
-    # Define database path
-    genome_n = os.path.basename(genome_file)
+    # Define database path (sanitize basename: ``#`` breaks BLAST index files)
+    genome_n = blast_database_basename(genome_file)
     if output_dir is None:
-        database_path = genome_file
+        database_path = os.path.join(os.path.dirname(str(genome_file)), genome_n)
     else:
         database_path = os.path.join(output_dir, genome_n)
 
     database_file = f'{database_path}.nin'
+    lock_key = os.path.abspath(database_path)
 
-    if not os.path.isfile(database_file):
-        try:
+    with _blast_db_lock(lock_key):
+        if not os.path.isfile(database_file):
+            try:
 
-            makeblastdb_cmd = [
-                _makeblastdb_executable(
-                    blast_dir, os_type, use_system_blast=use_system_blast
-                ),
-                "-in",
-                str(genome_file),
-                "-dbtype",
-                "nucl",
-                "-out",
-                str(database_path),
-            ]
+                makeblastdb_cmd = [
+                    _makeblastdb_executable(
+                        blast_dir, os_type, use_system_blast=use_system_blast
+                    ),
+                    "-in",
+                    str(genome_file),
+                    "-dbtype",
+                    "nucl",
+                    "-out",
+                    str(database_path),
+                ]
 
-            subprocess.run(
-                makeblastdb_cmd,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            return database_path
+                subprocess.run(
+                    makeblastdb_cmd,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
 
-        except FileNotFoundError:
-            logging.error(
-                f"'makeblastdb' command not found. Please ensure 'makeblastdb' is installed correctly.\n"
-                f'{traceback.format_exc()}'
-            )
-            return 'makeblastdb_not_found'
+            except FileNotFoundError:
+                logging.error(
+                    f"'makeblastdb' command not found. Please ensure 'makeblastdb' is installed correctly.\n"
+                    f'{traceback.format_exc()}'
+                )
+                return 'makeblastdb_not_found'
 
-        except subprocess.CalledProcessError as e:
-            logging.error(
-                f'makeblastdb failed with exit code {e.returncode} \n'
-                f'{traceback.format_exc()}'
-            )
-            logging.error(e.stderr)
-            return 'makeblastdb_got_error'
-    else:
+            except subprocess.CalledProcessError as e:
+                logging.error(
+                    f'makeblastdb failed with exit code {e.returncode} \n'
+                    f'{traceback.format_exc()}'
+                )
+                logging.error(e.stderr)
+                return 'makeblastdb_got_error'
         return database_path
 
 
@@ -221,7 +237,8 @@ def blast(
     word_size=11,
     os_type='Darwin',
     num_threads=1,
-    use_system_blast=False
+    use_system_blast=False,
+    output_label=None,
 ):
     from teviewer.job_options import normalize_blast_evalue
 
@@ -229,13 +246,16 @@ def blast(
     script_dir = get_original_file_path()
     blast_dir = os.path.join(script_dir, 'blast')
 
+    base_name = os.path.basename(input_file)
+    label_suffix = f"_{output_label}" if output_label else ""
+
     # Define blast out without header
     blast_out_file = os.path.join(
-        blast_out_dir, f'{os.path.basename(input_file)}_no_header.b'
+        blast_out_dir, f'{base_name}{label_suffix}_no_header.b'
     )
     # Define blast out with header
     blast_out_file_header = os.path.join(
-        blast_out_dir, f'{os.path.basename(input_file)}_blast.txt'
+        blast_out_dir, f'{base_name}{label_suffix}_blast.txt'
     )
 
     # Check if the blastn command is available in PATH
@@ -293,6 +313,10 @@ def blast(
     # Check if the blast hit number is 0
     if os.path.isfile(blast_out_file) and os.path.getsize(blast_out_file) == 0:
         return 'blast_n_zero', False
+
+    if not os.path.isfile(blast_out_file):
+        logging.error(f"BLAST produced no output file: {blast_out_file}")
+        return 'blastn_got_error', False
 
     try:
         # Always produce one canonical BLAST table with header.

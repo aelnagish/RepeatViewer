@@ -143,7 +143,7 @@ from teviewer.backends.separate_fasta import (
     separate_sequences,
     separation_output_dir,
 )
-from teviewer.views.genome_dialog import GenomeDialog
+from teviewer.views.genome_dialog import GenomeDialog, is_genome_fasta
 from teviewer.views.define_database_dialog import DefineDatabaseDialog
 from teviewer.views.settings_dialog import (
     SettingsDialog,
@@ -867,6 +867,7 @@ class MainWindow(QMainWindow):
         self._cached_folder_files: list[Path] = []
         self._highlight_output_keys: set[str] = set()
         self._highlight_source_keys: set[str] = set()
+        self._genome_dialog: GenomeDialog | None = None
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
         self._extend_options = load_extend_options()
@@ -1637,14 +1638,65 @@ class MainWindow(QMainWindow):
             return None
         return path if path.is_file() else None
 
-    def _on_genome_changed(self, genome_before: Path | None, genome_after: Path | None) -> None:
-        if genome_before == genome_after:
+    def _pan_genome_names(self) -> list[str]:
+        if self._project.is_pan_genome_mode:
+            return [entry.name for entry in self._project.pan_genomes]
+        return []
+
+    def _job_total_steps(
+        self,
+        func_name: str,
+        seq_files: list[Path],
+        job_kwargs: dict[str, Any],
+    ) -> int:
+        n = len(seq_files)
+        if not self._project.is_pan_genome_mode:
+            if func_name == "flexidot" and n > 1 and job_kwargs.get("flexidot_combined", True):
+                return 1
+            return n
+        pan_n = len(self._project.pan_genomes)
+        if func_name in {"blast", "teaid"}:
+            return n * pan_n
+        if func_name == "flexidot":
+            if n > 1 and job_kwargs.get("flexidot_combined", True):
+                return pan_n
+            return n * pan_n
+        return n
+
+    def _prepare_configured_genomes(self) -> None:
+        targets = self._project.genome_targets()
+        if not targets:
             return
+        self._set_status_message("Preparing genome index and chromosome sizes…", 0)
+        QApplication.processEvents()
+        messages: list[str] = []
+        ok_all = True
+        for label, path in targets:
+            ok, msg = ensure_genome_artifacts(
+                path,
+                use_system_blast=self._project.use_system_blast,
+            )
+            ok_all = ok_all and ok
+            messages.append(f"{label}: {msg}" if label else msg)
+        if ok_all:
+            preview = "; ".join(messages[:3])
+            if len(messages) > 3:
+                preview += f" (+{len(messages) - 3} more)"
+            self._set_status_message(preview, 10000)
+        else:
+            QMessageBox.warning(self, "Genome preparation", "\n".join(messages))
+            self._set_status_message("Genome preparation incomplete", 8000)
+
+    def _on_genome_changed(self, genome_before: Path | None, genome_after: Path | None) -> None:
         invalidate_genome_chromosome_cache()
         self._genome_chrom_names_cache = []
         self._genome_chrom_sizes_cache = {}
         self._genome_chrom_cache_path = None
-        if genome_after is not None and genome_after.is_file():
+        if (
+            not self._project.is_pan_genome_mode
+            and genome_after is not None
+            and genome_after.is_file()
+        ):
             new_chroms = set(chromosome_names_from_genome(genome_after))
             old_filter = self._te_genome_map_options.chromosomes_only
             if new_chroms and old_filter and not _map_chromosome_filter_to_genome(
@@ -1659,30 +1711,49 @@ class MainWindow(QMainWindow):
                     "Cleared TE genome map chromosome filter (previous genome).",
                     8000,
                 )
-            self._set_status_message("Preparing genome index and chromosome sizes…", 0)
-            QApplication.processEvents()
-            ok, msg = ensure_genome_artifacts(
-                genome_after,
-                use_system_blast=self._project.use_system_blast,
-            )
-            if ok:
-                self._set_status_message(msg, 10000)
-            else:
-                QMessageBox.warning(self, "Genome preparation", msg)
-                self._set_status_message("Genome preparation incomplete", 8000)
+        if self._project.has_genome_configured():
+            self._prepare_configured_genomes()
         self._update_status()
 
     def _open_set_genome(self) -> None:
+        if self._genome_dialog is not None:
+            self._genome_dialog.raise_()
+            self._genome_dialog.activateWindow()
+            return
         self._persist_workspace()
         genome_before = self._genome_path_resolved()
-        dialog = GenomeDialog(self._project, self)
-        if not dialog.exec():
+        dialog = GenomeDialog(
+            self._project,
+            self,
+            selected_paths=self._selected_genome_fastas(),
+        )
+        self._genome_dialog = dialog
+        dialog.finished.connect(self._on_genome_dialog_finished)
+        dialog.show()
+
+    def _selected_genome_fastas(self) -> list[Path]:
+        return [
+            p.expanduser().resolve()
+            for p in self._selected_files()
+            if is_genome_fasta(p)
+        ]
+
+    def _on_genome_dialog_finished(self, result: int) -> None:
+        dialog = self._genome_dialog
+        self._genome_dialog = None
+        if dialog is None or result != int(QDialog.DialogCode.Accepted):
             return
+        genome_before = self._genome_path_resolved()
         self._project = dialog.apply_to_project()
         genome_after = self._genome_path_resolved()
         self._on_genome_changed(genome_before, genome_after)
         self._persist_workspace()
-        if genome_after is not None:
+        if self._project.is_pan_genome_mode:
+            self._set_status_message(
+                f"Pan-genome mode: {len(self._project.pan_genomes)} genome(s)",
+                8000,
+            )
+        elif genome_after is not None:
             self._set_status_message(f"Genome: {genome_after.name}", 8000)
         else:
             self._set_status_message("Genome cleared", 5000)
@@ -2656,6 +2727,8 @@ class MainWindow(QMainWindow):
     def _on_file_item_clicked(self, item: QListWidgetItem) -> None:
         path = self._preview_path_from_item(item)
         if path is not None:
+            if self._genome_dialog is not None and is_genome_fasta(path):
+                self._genome_dialog.apply_file_from_panel(path)
             self._sync_te_viz_dialog_input_from_files()
             self._schedule_raise_te_viz_dialog()
 
@@ -3232,6 +3305,14 @@ class MainWindow(QMainWindow):
             self._benchmark_thread = None
 
     def _open_te_density_plot_dialog(self, *, input_file: Path | None = None) -> None:
+        if self._project.is_pan_genome_mode:
+            QMessageBox.information(
+                self,
+                "TE visualization",
+                "TE visualization is available only in single-genome mode.\n\n"
+                f"Switch to single genome under {self._genome_menu_hint()}.",
+            )
+            return
         if not self._project.genome_file or not self._project.genome_file.is_file():
             QMessageBox.warning(
                 self,
@@ -3762,18 +3843,25 @@ class MainWindow(QMainWindow):
         )
 
     def _modify_extend_parameters(self) -> None:
-        dialog = ExtendParamsDialog(initial=self._extend_options, parent=self)
+        dialog = ExtendParamsDialog(
+            initial=self._extend_options,
+            pan_genome_names=self._pan_genome_names(),
+            parent=self,
+        )
         if dialog.exec():
             self._extend_options = dialog.options()
             save_extend_options(self._extend_options)
+            genome_note = ""
+            if self._extend_options.pan_genome_name:
+                genome_note = f", genome {self._extend_options.pan_genome_name}"
             self._set_status_message(
                 f"Extend defaults: {self._extend_options.left} bp left, "
-                f"{self._extend_options.right} bp right",
+                f"{self._extend_options.right} bp right{genome_note}",
                 5000,
             )
 
     def _extend_with_different_distances(self) -> None:
-        if not self._project.genome_file:
+        if not self._project.has_genome_configured():
             QMessageBox.warning(
                 self,
                 "Genome required",
@@ -3793,6 +3881,7 @@ class MainWindow(QMainWindow):
         dialog = ExtendParamsDialog(
             initial=self._extend_options,
             title="Extend with different distances",
+            pan_genome_names=self._pan_genome_names(),
             parent=self,
         )
         if not dialog.exec():
@@ -4495,13 +4584,19 @@ class MainWindow(QMainWindow):
         if not seq_files:
             QMessageBox.warning(self, "Invalid selection", "Selected files do not include FASTA sequence files.")
             return
-        if func_name in {"blast", "extend"} and not self._project.genome_file:
+        if func_name in {"blast", "extend", "teaid", "flexidot"} and not self._project.has_genome_configured():
             QMessageBox.warning(
                 self,
                 "Genome required",
-                f"Define genome FASTA under {self._genome_menu_hint()} before running Blast/Extend.",
+                f"Define genome under {self._genome_menu_hint()} before running this tool.",
             )
             return
+        if func_name == "extend" and self._project.is_pan_genome_mode:
+            names = self._pan_genome_names()
+            extend_opts = job_kwargs.get("extend") or self._extend_options
+            if names and not extend_opts.pan_genome_name:
+                extend_opts = replace(extend_opts, pan_genome_name=names[0])
+                job_kwargs["extend"] = extend_opts
         if func_name == "flexidot":
             if flexidot_executable() is None:
                 QMessageBox.warning(
@@ -4515,7 +4610,7 @@ class MainWindow(QMainWindow):
         self._start_background_job(
             FunctionWorker(self._run_function_job, func_name, seq_files, job_kwargs),
             job_title=func_name,
-            total_steps=len(seq_files),
+            total_steps=self._job_total_steps(func_name, seq_files, job_kwargs),
             source_files=seq_files,
             on_finished=self._on_worker_finished,
             on_failed=self._on_worker_failed,
@@ -4840,7 +4935,9 @@ class MainWindow(QMainWindow):
         parts = ["TEviewer"]
         if self._project.input_dir:
             parts.append(self._project.input_dir.name)
-        if self._project.genome_file:
+        if self._project.is_pan_genome_mode:
+            parts.append(f"pan ({len(self._project.pan_genomes)})")
+        elif self._project.genome_file:
             parts.append(self._project.genome_file.name)
         self._set_status_message(" · ".join(parts))
 

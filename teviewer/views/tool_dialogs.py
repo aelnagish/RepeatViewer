@@ -181,6 +181,7 @@ class ExtendParamsDialog(QDialog):
         *,
         initial: ExtendOptions | None = None,
         title: str = "Extend default distances",
+        pan_genome_names: list[str] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -195,7 +196,18 @@ class ExtendParamsDialog(QDialog):
         self._right.setValue(opts.right)
         self._right.setSuffix(" bp")
 
+        self._pan_genome = QComboBox()
+        self._pan_genome_names = list(pan_genome_names or [])
+        if self._pan_genome_names:
+            self._pan_genome.addItems(self._pan_genome_names)
+            selected = opts.pan_genome_name or self._pan_genome_names[0]
+            index = self._pan_genome.findText(selected)
+            if index >= 0:
+                self._pan_genome.setCurrentIndex(index)
+
         form = QFormLayout()
+        if self._pan_genome_names:
+            form.addRow("Pan-genome:", self._pan_genome)
         form.addRow("Extend left of MSA:", self._left)
         form.addRow("Extend right of MSA:", self._right)
 
@@ -210,7 +222,14 @@ class ExtendParamsDialog(QDialog):
         layout.addWidget(buttons)
 
     def options(self) -> ExtendOptions:
-        return ExtendOptions(left=self._left.value(), right=self._right.value())
+        pan_name = None
+        if self._pan_genome_names:
+            pan_name = self._pan_genome.currentText().strip() or None
+        return ExtendOptions(
+            left=self._left.value(),
+            right=self._right.value(),
+            pan_genome_name=pan_name,
+        )
 
 
 class BlastParamsDialog(QDialog):

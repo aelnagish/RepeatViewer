@@ -33,6 +33,73 @@ os_type = platform.system()
 TEAID_DIVERGENCE_HIST_MAX = 0.6
 
 
+class TeaidInputError(ValueError):
+    """Input FASTA is not suitable for TEAid consensus generation."""
+
+
+def con_generater(input_file, output_dir, threshold=0.8, ambiguous='N'):
+    """
+    Build a consensus sequence for TEAid.
+
+    Accepts a single-sequence FASTA or a multiple sequence alignment (all rows
+    the same length). Unaligned multi-FASTA files are rejected with a clear error.
+    """
+    records = list(SeqIO.parse(input_file, "fasta"))
+    if not records:
+        raise TeaidInputError(
+            f"No sequences found in {os.path.basename(input_file)}."
+        )
+
+    if len(records) == 1:
+        consensus_seq = Seq(str(records[0].seq).replace("-", "")).upper()
+    else:
+        lengths = {len(rec.seq) for rec in records}
+        if len(lengths) > 1:
+            min_len = min(lengths)
+            max_len = max(lengths)
+            raise TeaidInputError(
+                f"{os.path.basename(input_file)} contains {len(records)} sequences "
+                f"with different lengths ({min_len}–{max_len} bp). "
+                "TEAid requires a multiple sequence alignment (all rows the same length). "
+                "Align the sequences first (Align menu) or use a single-sequence FASTA."
+            )
+
+        n_cols = len(records[0].seq)
+        consensus_chars = []
+        for i in range(n_cols):
+            col = "".join(str(rec.seq[i]).upper() for rec in records)
+            bases = [b for b in col if b in {"A", "C", "G", "T"}]
+
+            if not bases:
+                consensus_chars.append(ambiguous)
+                continue
+
+            counts = {
+                "A": bases.count("A"),
+                "C": bases.count("C"),
+                "G": bases.count("G"),
+                "T": bases.count("T"),
+            }
+            winner = max(counts, key=counts.get)
+            freq = counts[winner] / len(bases)
+            consensus_chars.append(winner if freq >= threshold else ambiguous)
+
+        consensus_seq = Seq("".join(consensus_chars)).upper()
+
+    consensus_seq_len = len(consensus_seq)
+    consensus_seq_obj = SeqRecord(
+        consensus_seq,
+        id="consensus",
+        description=f"threshold={threshold};amb={ambiguous}",
+    )
+
+    output_file = os.path.join(output_dir, f'{os.path.basename(input_file)}_{threshold}_co.fa')
+    with open(output_file, 'w') as file:
+        SeqIO.write(consensus_seq_obj, file, 'fasta')
+
+    return output_file, consensus_seq_len
+
+
 def _consensus_position_ticks(max_len: int) -> list[int]:
     """1-based TE consensus tick values; always includes 1, never the exact sequence end."""
     max_len = max(1, int(max_len))
@@ -64,55 +131,11 @@ def _consensus_axis_tick_kwargs(max_len: int) -> dict:
     }
 
 
-def con_generater(input_file, output_dir, threshold=0.8, ambiguous='N'):
-    """
-    Mimic a 'dumb consensus' without using AlignInfo.dumb_consensus.
-    Counts only A/C/G/T, ignores gaps and other symbols.
-    Returns a Bio.Seq.Seq (uppercased), same as the upper function.
-    """
-    alignment = AlignIO.read(input_file, "fasta")
-    n_cols = alignment.get_alignment_length()
-
-    consensus_chars = []
-    for i in range(n_cols):
-        col = alignment[:, i].upper()
-        bases = [b for b in col if b in {"A", "C", "G", "T"}]
-
-        if not bases:  # no A/C/G/T at this column
-            consensus_chars.append(ambiguous)
-            continue
-
-        a = bases.count("A")
-        c = bases.count("C")
-        g = bases.count("G")
-        t = bases.count("T")
-        counts = {"A": a, "C": c, "G": g, "T": t}
-
-        winner = max(counts, key=counts.get)
-        freq = counts[winner] / len(bases)
-
-        consensus_chars.append(winner if freq >= threshold else ambiguous)
-
-    consensus_seq = Seq("".join(consensus_chars)).upper()
-
-    consensus_seq_len = len(consensus_seq)
-
-    consensus_seq_obj = SeqRecord(consensus_seq, id="consensus", description=f"threshold={threshold};amb={ambiguous}")
-
-    # Write consensus sequence to a FASTA file
-    output_file = os.path.join(output_dir, f'{os.path.basename(input_file)}_{threshold}_co.fa')
-    with open(output_file, 'w') as file:
-        SeqIO.write(consensus_seq_obj, file, 'fasta')
-
-    # Return a Bio.Seq.Seq in uppercase (to match the upper function’s output type)
-    return output_file, consensus_seq_len
-
-
 #####################################################################################################
 # Code block: genome blast
 #####################################################################################################
 def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads=1,
-                       use_system_blast=False):
+                       use_system_blast=False, output_label=None):
     # input_file: fasta file contain only one sequence
     # Used global variable: os_type
 
@@ -152,7 +175,8 @@ def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads
         e_value=e_value,
         os_type=os_type,
         num_threads=num_threads,
-        use_system_blast=use_system_blast
+        use_system_blast=use_system_blast,
+        output_label=output_label,
     )
 
     if genome_blast_out == 'blastn_not_found':
@@ -458,14 +482,17 @@ def coverage_plot(df, cons_len):
 #####################################################################################################
 def empty_divergence_histogram(custom_text=None):
     fig = go.Figure()
+    y_max = 10
+    y_center = (y_max * 1.08) / 2
     if custom_text:
         fig.add_trace(
             go.Scatter(
-                x=[0.5],
-                y=[5],
+                x=[TEAID_DIVERGENCE_HIST_MAX / 2],
+                y=[y_center],
                 text=[custom_text],
                 mode='text',
                 textfont={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
+                textposition='middle center',
                 showlegend=False,
                 hoverinfo='none',
             )
@@ -487,7 +514,7 @@ def empty_divergence_histogram(custom_text=None):
             'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
             'showgrid': True,
             'gridcolor': '#f4f4f4',
-            'range': [0, 10],
+            'range': [0, y_max],
             'linewidth': 1,
             'linecolor': 'black',
             'mirror': True,
@@ -499,7 +526,7 @@ def empty_divergence_histogram(custom_text=None):
         width=600,
         height=600,
     )
-    return fig, 10
+    return fig, y_max
 
 
 def divergence_histogram_plot(
@@ -1000,6 +1027,7 @@ def teaid_plotter(
     self_blast_word_size=11,
     conduct_cdd=False,
     prepared_cdd=None,
+    output_name_tag=None,
 ):
     # Used global variable: os_type
 
@@ -1013,6 +1041,9 @@ def teaid_plotter(
         # Generate consensus sequence
         con_seq, cons_len = con_generater(input_file, output_dir, threshold=0.3)
 
+    except TeaidInputError as e:
+        logging.error("TEAid input: %s", e)
+        raise
     except Exception as e:
         logging.error(
             f'An error for consensus sequence generation: \n {traceback.format_exc()}'
@@ -1028,7 +1059,13 @@ def teaid_plotter(
 
     # Perform genome blast
     genome_blast_out = teaid_genome_blast(
-        con_seq, genome_file, output_dir, e_value, num_threads=num_threads, use_system_blast=use_system_blast
+        con_seq,
+        genome_file,
+        output_dir,
+        e_value,
+        num_threads=num_threads,
+        use_system_blast=use_system_blast,
+        output_label=output_name_tag,
     )
 
     if genome_blast_out:
@@ -1261,8 +1298,11 @@ def teaid_plotter(
         margin={'t': top_margin, 'b': bottom_margin, 'l': side_margin, 'r': side_margin},
     )
     # Save the figure as an HTML file
+    from teviewer.pan_genome import genome_output_suffix
+
+    tag = genome_output_suffix(output_name_tag) if output_name_tag else ""
     output_html_path = os.path.join(
-        output_dir, f'{os.path.basename(input_file)}_TEAid.html'
+        output_dir, f'{os.path.basename(input_file)}{tag}_TEAid.html'
     )
     pio.write_html(fig, file=output_html_path, auto_open=False)
 

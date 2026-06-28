@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from teviewer.backends.bismark_cov import is_bismark_cov_file
-from teviewer.widgets.html_preview import create_html_preview_widget
+from teviewer.widgets.html_preview import _qobject_alive, create_html_preview_widget
 from teviewer.widgets.sequence_map_viewer import SequenceMapPanel, _is_delete_key
 from teviewer.widgets.preview_zoom import (
     MAX_PREVIEW_FONT_SIZE,
@@ -650,10 +650,16 @@ class FilePreviewPage(QWidget):
     def _schedule_html_load(self, path: Path, *, force: bool = False) -> None:
         self._stack.setCurrentWidget(self._html)
         resolved = path.expanduser().resolve()
-        QTimer.singleShot(
-            0,
-            lambda p=resolved, f=force: self._html.load_html_file(p, force=f),
-        )
+        page = self
+
+        def _load() -> None:
+            if not _qobject_alive(page):
+                return
+            if page._stack.currentWidget() is not page._html:
+                return
+            page._html.load_html_file(resolved, force=force)
+
+        QTimer.singleShot(0, _load)
 
     def apply_text_font_size(self, point_size: int) -> None:
         self._base_text_font_pt = max(

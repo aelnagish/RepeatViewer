@@ -96,6 +96,7 @@ class TeLibraryBenchmarkOptions:
 class ExtendOptions:
     left: int = DEFAULT_EXTEND_LEFT
     right: int = DEFAULT_EXTEND_RIGHT
+    pan_genome_name: str | None = None
 
 
 ALIGN_BACKEND_AUTO = "auto"
@@ -355,14 +356,23 @@ def save_blast_options(opts: BlastOptions) -> None:
 
 def load_extend_options() -> ExtendOptions:
     v = _load_settings_group("extend")
+    pan_name = v.get("pan_genome_name")
     return ExtendOptions(
         left=int(v.get("left", DEFAULT_EXTEND_LEFT)),
         right=int(v.get("right", DEFAULT_EXTEND_RIGHT)),
+        pan_genome_name=str(pan_name).strip() if pan_name else None,
     )
 
 
 def save_extend_options(opts: ExtendOptions) -> None:
-    _save_settings_group("extend", {"left": opts.left, "right": opts.right})
+    _save_settings_group(
+        "extend",
+        {
+            "left": opts.left,
+            "right": opts.right,
+            "pan_genome_name": opts.pan_genome_name or "",
+        },
+    )
 
 
 def load_teaid_options() -> TeaAidOptions:

@@ -29,6 +29,21 @@ from teviewer.widgets.preview_zoom import (
 
 logger = logging.getLogger(__name__)
 
+try:
+    from shiboken6 import isValid as _qt_is_valid
+except ImportError:  # pragma: no cover
+    def _qt_is_valid(obj) -> bool:  # type: ignore[misc]
+        return obj is not None
+
+
+def _qobject_alive(obj) -> bool:
+    if obj is None:
+        return False
+    try:
+        return _qt_is_valid(obj)
+    except RuntimeError:
+        return False
+
 # Nominal report size when content dimensions are not yet measured.
 TEAID_NOMINAL_WIDTH = 1600
 TEAID_NOMINAL_HEIGHT = 900
@@ -40,10 +55,13 @@ _CONTENT_SIZE_JS = """
   const plot = document.querySelector('.plotly-graph-div');
   if (plot) {
     const r = plot.getBoundingClientRect();
-    return [Math.ceil(r.width || plot.scrollWidth), Math.ceil(r.height || plot.scrollHeight)];
+    return [Math.ceil(r.width || plot.scrollWidth || 0), Math.ceil(r.height || plot.scrollHeight || 0)];
   }
   const de = document.documentElement;
-  return [de.scrollWidth, de.scrollHeight];
+  if (!de) {
+    return [0, 0];
+  }
+  return [de.scrollWidth || 0, de.scrollHeight || 0];
 })()
 """
 
@@ -137,6 +155,8 @@ class LazyHtmlPreview(QWidget):
     def set_zoom_percent(self, percent: int) -> None:
         self._zoom_percent = max(25, min(200, int(percent)))
         if self._inner is not None and hasattr(self._inner, "set_zoom_percent"):
+            if hasattr(self._inner, "is_view_active") and not self._inner.is_view_active():
+                return
             self._inner.set_zoom_percent(self._zoom_percent)
 
     def set_fit_mode(self, mode: PreviewFitMode | str) -> None:
@@ -147,6 +167,8 @@ class LazyHtmlPreview(QWidget):
                 mode = PreviewFitMode.FIT_WINDOW
         self._fit_mode = mode
         if self._inner is not None and hasattr(self._inner, "set_fit_mode"):
+            if hasattr(self._inner, "is_view_active") and not self._inner.is_view_active():
+                return
             self._inner.set_fit_mode(mode)
 
     def load_html_file(self, path: Path, *, force: bool = False) -> None:
@@ -167,6 +189,8 @@ class LazyHtmlPreview(QWidget):
 
         if hasattr(self._inner, "load_html_file"):
             self._inner.load_html_file(path, force=force)
+        if hasattr(self._inner, "is_view_active") and not self._inner.is_view_active():
+            return
         if hasattr(self._inner, "set_zoom_percent"):
             self._inner.set_zoom_percent(self._zoom_percent)
         if hasattr(self._inner, "set_fit_mode"):
@@ -230,12 +254,38 @@ class HtmlWebEnginePreview(QWidget):
         self._content_w = TEAID_NOMINAL_WIDTH
         self._content_h = TEAID_NOMINAL_HEIGHT
         self._prefs_save_timer: QTimer | None = None
+        self._work_generation = 0
+
+    def is_view_active(self) -> bool:
+        return _qobject_alive(self._view)
+
+    def _view_active(self) -> bool:
+        return _qobject_alive(self._view) and _qobject_alive(self._view.page())
+
+    def _defer(self, delay_ms: int, callback) -> None:
+        generation = self._work_generation
+
+        def _run() -> None:
+            if generation != self._work_generation or not self._view_active():
+                return
+            callback()
+
+        QTimer.singleShot(delay_ms, _run)
+
+    def _invalidate_pending_work(self) -> None:
+        self._work_generation += 1
+        if self._prefs_save_timer is not None:
+            self._prefs_save_timer.stop()
 
     def set_zoom_percent(self, percent: int) -> None:
+        if not self._view_active():
+            return
         self._zoom_percent = max(25, min(200, int(percent)))
         self._apply_zoom()
 
     def set_fit_mode(self, mode: PreviewFitMode | str) -> None:
+        if not self._view_active():
+            return
         if isinstance(mode, str):
             try:
                 mode = PreviewFitMode(mode)
@@ -246,15 +296,22 @@ class HtmlWebEnginePreview(QWidget):
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
         if watched is self._view and event.type() == QEvent.Type.Resize:
-            self._apply_zoom()
+            if self._view_active():
+                self._apply_zoom()
         return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         super().resizeEvent(event)
-        self._apply_zoom()
+        if self._view_active():
+            self._apply_zoom()
 
     def _apply_zoom(self) -> None:
-        vp = self._view.size()
+        if not self._view_active():
+            return
+        try:
+            vp = self._view.size()
+        except RuntimeError:
+            return
         vw = max(1, vp.width())
         vh = max(1, vp.height())
         cw = max(1, self._content_w)
@@ -269,12 +326,19 @@ class HtmlWebEnginePreview(QWidget):
 
         factor = base * (self._zoom_percent / 100.0)
         factor = max(0.05, min(5.0, factor))
-        self._view.setZoomFactor(factor)
+        try:
+            self._view.setZoomFactor(factor)
+        except RuntimeError:
+            return
 
     def _query_content_size(self) -> None:
+        if not self._view_active():
+            return
         self._view.page().runJavaScript(_CONTENT_SIZE_JS, 0, self._on_content_size)
 
     def _on_content_size(self, size) -> None:
+        if not self._view_active():
+            return
         if not size or not isinstance(size, (list, tuple)) or len(size) < 2:
             return
         try:
@@ -288,6 +352,8 @@ class HtmlWebEnginePreview(QWidget):
             self._apply_zoom()
 
     def load_html_file(self, path: Path, *, force: bool = False) -> None:
+        if not self._view_active():
+            return
         resolved = path.expanduser().resolve()
         try:
             mtime_ns = resolved.stat().st_mtime_ns if resolved.is_file() else None
@@ -313,19 +379,27 @@ class HtmlWebEnginePreview(QWidget):
         self._content_h = TEAID_NOMINAL_HEIGHT
 
         if not resolved.is_file():
-            self._view.setHtml(f"<p>File not found: {resolved}</p>")
+            try:
+                self._view.setHtml(f"<p>File not found: {resolved}</p>")
+            except RuntimeError:
+                return
             return
 
-        self._view.load(_local_file_url(resolved))
+        try:
+            self._view.load(_local_file_url(resolved))
+        except RuntimeError:
+            return
 
     def _on_load_finished(self, ok: bool) -> None:
+        if not self._view_active():
+            return
         if ok:
             self._last_load_ok = True
             self._install_plot_prefs_bridge()
             self._apply_zoom()
-            QTimer.singleShot(50, self._query_content_size)
-            QTimer.singleShot(250, self._query_content_size)
-            QTimer.singleShot(600, self._query_content_size)
+            self._defer(50, self._query_content_size)
+            self._defer(250, self._query_content_size)
+            self._defer(600, self._query_content_size)
         if ok or self._used_html_fallback or self._current_path is None:
             return
         self._used_html_fallback = True
@@ -342,16 +416,23 @@ class HtmlWebEnginePreview(QWidget):
         base_url = _local_file_url(resolved.parent)
 
         def _load_fallback() -> None:
-            self._view.setHtml(html, base_url)
+            if not self._view_active():
+                return
+            try:
+                self._view.setHtml(html, base_url)
+            except RuntimeError:
+                return
             self._last_load_ok = True
             self._apply_zoom()
-            QTimer.singleShot(50, self._query_content_size)
-            QTimer.singleShot(250, self._query_content_size)
-            QTimer.singleShot(600, self._query_content_size)
+            self._defer(50, self._query_content_size)
+            self._defer(250, self._query_content_size)
+            self._defer(600, self._query_content_size)
 
-        QTimer.singleShot(0, _load_fallback)
+        self._defer(0, _load_fallback)
 
     def _install_plot_prefs_bridge(self) -> None:
+        if not self._view_active():
+            return
         if self._current_path is None or not is_genome_map_html_file(self._current_path):
             return
         prefs_path = sidecar_prefs_path(self._current_path)
@@ -369,10 +450,14 @@ class HtmlWebEnginePreview(QWidget):
         self._prefs_save_timer.start()
 
     def _poll_plot_prefs_save(self) -> None:
+        if not self._view_active():
+            return
         if self._current_path is None or not is_genome_map_html_file(self._current_path):
             return
 
         def _on_payload(payload) -> None:
+            if not self._view_active():
+                return
             if not isinstance(payload, dict) or self._current_path is None:
                 return
             try:
@@ -391,12 +476,16 @@ class HtmlWebEnginePreview(QWidget):
             QDesktopServices.openUrl(_local_file_url(self._current_path))
 
     def teardown(self) -> None:
-        if self._prefs_save_timer is not None:
-            self._prefs_save_timer.stop()
-            self._prefs_save_timer = None
+        self._invalidate_pending_work()
+        try:
+            self._view.loadFinished.disconnect(self._on_load_finished)
+        except (RuntimeError, TypeError):
+            pass
         try:
             self._view.stop()
             self._view.setUrl(QUrl("about:blank"))
+        except RuntimeError:
+            logger.debug("WebEngine teardown stop failed", exc_info=True)
         except Exception:
             logger.debug("WebEngine teardown stop failed", exc_info=True)
         self._current_path = None
@@ -442,6 +531,9 @@ class HtmlFallbackPreview(QWidget):
 
     def set_fit_mode(self, mode: PreviewFitMode | str) -> None:
         del mode
+
+    def is_view_active(self) -> bool:
+        return True
 
     def _open_in_browser(self) -> None:
         if self._current_path and self._current_path.is_file():
