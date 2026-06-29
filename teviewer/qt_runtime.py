@@ -22,6 +22,8 @@ def configure_qt_runtime() -> None:
     Reduce noisy stderr from Qt WebEngine and macOS pointer synthesis.
 
     Set TEVIEWER_QUIET_QT=0 to disable these defaults when debugging.
+    On macOS, harmless TSM/IMK stderr lines are filtered by default; set
+    TEVIEWER_FILTER_STDERR_FD=0 if the HTML preview (TEAid / genome map) misbehaves.
     """
     _configure_macos_app_name()
     if os.environ.get("TEVIEWER_QUIET_QT", "1").lower() in {"0", "false", "no"}:
@@ -30,7 +32,8 @@ def configure_qt_runtime() -> None:
     _configure_qt_logging()
     _configure_macos_pointer()
     _configure_webengine()
-    # Redirecting POSIX stderr (fd 2) breaks Qt WebEngine/Chromium on many Macs.
+    if sys.platform == "darwin":
+        os.environ.setdefault("TEVIEWER_FILTER_STDERR_FD", "1")
     if os.environ.get("TEVIEWER_FILTER_STDERR_FD", "0").lower() in {"1", "true", "yes"}:
         _install_macos_stderr_fd_filter()
     _install_stderr_filter()

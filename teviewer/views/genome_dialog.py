@@ -284,6 +284,25 @@ class PanGenomeListWidget(QWidget):
         if self._focused_row is row:
             self._focused_row = self._rows[-1] if self._rows else None
 
+    def snapshot_rows(self) -> list[tuple[str, str]]:
+        """Capture all row text, including partial or not-yet-validated entries."""
+        return [(row.name.text(), row.path.text()) for row in self._rows]
+
+    def restore_snapshot(self, snapshot: list[tuple[str, str]]) -> None:
+        for row in list(self._rows):
+            self._rows.remove(row)
+            self._rows_layout.removeWidget(row)
+            row.deleteLater()
+        items = list(snapshot)
+        while len(items) < MIN_PAN_GENOMES:
+            items.append(('', ''))
+        for name, path in items:
+            row = self.add_row()
+            row.name.setText(name)
+            row.path.setText(path)
+        self._focused_row = self._rows[0] if self._rows else None
+        self._update_scroll_height()
+
     def set_entries(self, entries: list[PanGenomeEntry]) -> None:
         for row in list(self._rows):
             self._rows.remove(row)
@@ -370,15 +389,21 @@ class GenomeDialog(QDialog):
         self._pan_list = PanGenomeListWidget()
         self._pan_list.size_changed.connect(self._adjust_dialog_size)
 
-        if project.genome_mode == GENOME_MODE_PAN and project.pan_genomes:
-            self._pan_list.set_entries(list(project.pan_genomes))
-        else:
-            self._pan_list.set_entries([])
+        self._pan_snapshot: list[tuple[str, str]] = [
+            (entry.name, str(entry.path)) for entry in project.pan_genomes
+        ]
+        self._single_genome_snapshot = (
+            self._path_str(project.genome_file) if project.genome_file is not None else ''
+        )
 
         if project.genome_mode == GENOME_MODE_PAN:
             self._mode_pan.setChecked(True)
         else:
             self._mode_single.setChecked(True)
+
+        self._pan_list.restore_snapshot(self._pan_snapshot)
+        if self._single_genome_snapshot:
+            self._genome.lineEdit().setText(self._single_genome_snapshot)
 
         mode_row = QHBoxLayout()
         mode_row.setContentsMargins(0, 0, 0, 0)
@@ -431,7 +456,7 @@ class GenomeDialog(QDialog):
         self._mode_single.toggled.connect(self._sync_mode_widgets)
         self._sync_mode_widgets()
 
-        if selected_paths:
+        if selected_paths and not self._project.has_genome_configured():
             self._apply_initial_paths(selected_paths)
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -476,14 +501,22 @@ class GenomeDialog(QDialog):
                 for path in genomes
             ]
             self._pan_list.set_entries(entries)
+            self._pan_snapshot = self._pan_list.snapshot_rows()
             self._adjust_dialog_size()
         else:
             self._mode_single.setChecked(True)
             self._genome.lineEdit().setText(str(genomes[0]))
 
     def _sync_mode_widgets(self) -> None:
-        pan = self._mode_pan.isChecked()
-        self._content_stack.setCurrentIndex(1 if pan else 0)
+        if self._mode_pan.isChecked():
+            self._content_stack.setCurrentIndex(1)
+            self._pan_list.restore_snapshot(self._pan_snapshot)
+        else:
+            self._pan_snapshot = self._pan_list.snapshot_rows()
+            self._single_genome_snapshot = self._genome.lineEdit().text()
+            self._content_stack.setCurrentIndex(0)
+            if self._single_genome_snapshot:
+                self._genome.lineEdit().setText(self._single_genome_snapshot)
         self._update_hint()
         self._adjust_dialog_size()
 
@@ -624,8 +657,20 @@ class GenomeDialog(QDialog):
         else:
             genome = self._current_genome_path()
             self._project.genome_mode = GENOME_MODE_SINGLE
-            self._project.pan_genomes = []
             self._project.genome_file = genome
+            self._pan_snapshot = self._pan_list.snapshot_rows()
+            complete_pan: list[PanGenomeEntry] = []
+            for name, path_text in self._pan_snapshot:
+                name = name.strip()
+                path_text = path_text.strip()
+                if not name or not path_text:
+                    continue
+                try:
+                    complete_pan.append(PanGenomeEntry(name=name, path=Path(path_text)))
+                except ValueError:
+                    continue
+            if complete_pan:
+                self._project.pan_genomes = complete_pan
             if genome is not None and genome.is_file():
                 add_genome_to_history(genome)
         save_workspace(self._project)

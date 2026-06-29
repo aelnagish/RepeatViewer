@@ -25,7 +25,12 @@ from teviewer.backends.gui_functions import (
     run_flexidot,
 )
 from teviewer.backends.remove_gap import remove_gaps_with_similarity_check
-from teviewer.backends.teaid_plotter import TeaidInputError, con_generater, teaid_plotter
+from teviewer.backends.teaid_plotter import (
+    TeaidInputError,
+    con_generater,
+    teaid_pan_genome_plotter,
+    teaid_plotter,
+)
 from teviewer.backends.job_cancel import JobCancelledError, JobCancellation, check_cancelled
 from teviewer.backends.thread_budget import analysis_threads_per_job
 from teviewer.job_options import (
@@ -426,23 +431,44 @@ def run_on_sequence(
         html_path = out_dir / f"{seq_path.name}{label_suffix}_TEAid.html"
         teaid_work_dir = out_dir
         scratch_dir: Path | None = None
-        if genome_label:
+        pan_genome_run = project.is_pan_genome_mode and len(project.pan_genomes) >= 2
+        if pan_genome_run:
+            scratch_dir = out_dir / f"_teaid_{seq_path.stem}_pan"
+            scratch_dir.mkdir(parents=True, exist_ok=True)
+            teaid_work_dir = scratch_dir
+            html_path = out_dir / f"{seq_path.name}_TEAid.html"
+        elif genome_label:
             scratch_dir = out_dir / f"_teaid_{seq_path.stem}{label_suffix}"
             scratch_dir.mkdir(parents=True, exist_ok=True)
             teaid_work_dir = scratch_dir
         _patch_plotly_no_auto_open()
         try:
-            run_ok = teaid_plotter(
-                str(seq_path),
-                str(teaid_work_dir),
-                str(active_genome) if active_genome else None,
-                None,
-                e_value=teaid_opts.e_value,
-                num_threads=analysis_threads_per_job(project.batch_workers),
-                use_system_blast=project.use_system_blast,
-                self_blast_word_size=teaid_opts.self_blast_word_size,
-                output_name_tag=genome_label or None,
-            )
+            if pan_genome_run:
+                genome_targets = [
+                    (entry.name, str(entry.path.expanduser().resolve()))
+                    for entry in project.pan_genomes
+                ]
+                run_ok = teaid_pan_genome_plotter(
+                    str(seq_path),
+                    str(teaid_work_dir),
+                    genome_targets,
+                    e_value=teaid_opts.e_value,
+                    num_threads=analysis_threads_per_job(project.batch_workers),
+                    use_system_blast=project.use_system_blast,
+                    self_blast_word_size=teaid_opts.self_blast_word_size,
+                )
+            else:
+                run_ok = teaid_plotter(
+                    str(seq_path),
+                    str(teaid_work_dir),
+                    str(active_genome) if active_genome else None,
+                    None,
+                    e_value=teaid_opts.e_value,
+                    num_threads=analysis_threads_per_job(project.batch_workers),
+                    use_system_blast=project.use_system_blast,
+                    self_blast_word_size=teaid_opts.self_blast_word_size,
+                    output_name_tag=genome_label or None,
+                )
         except TeaidInputError as exc:
             if scratch_dir is not None:
                 shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -451,7 +477,10 @@ def run_on_sequence(
             if scratch_dir is not None:
                 shutil.rmtree(scratch_dir, ignore_errors=True)
             raise RuntimeError("TEAid returned failure.")
-        scratch_html = teaid_work_dir / f"{seq_path.name}{label_suffix}_TEAid.html"
+        scratch_name = f"{seq_path.name}_TEAid.html" if pan_genome_run else (
+            f"{seq_path.name}{label_suffix}_TEAid.html"
+        )
+        scratch_html = teaid_work_dir / scratch_name
         if scratch_dir is not None:
             if not scratch_html.is_file():
                 shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -648,9 +677,13 @@ def run_batch(
 
     work_items: list[tuple[Path, str, Path | None]] = []
     if genome_dependent and genome_items:
-        for seq_path in seq_list:
-            for genome_label, genome_path in genome_items:
-                work_items.append((seq_path, genome_label, genome_path))
+        if func_name == "teaid" and project.is_pan_genome_mode:
+            for seq_path in seq_list:
+                work_items.append((seq_path, "", None))
+        else:
+            for seq_path in seq_list:
+                for genome_label, genome_path in genome_items:
+                    work_items.append((seq_path, genome_label, genome_path))
     else:
         for seq_path in seq_list:
             work_items.append((seq_path, "", None))

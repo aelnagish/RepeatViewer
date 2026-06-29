@@ -31,10 +31,31 @@ Developer: Jiangzhao Qian
 os_type = platform.system()
 
 TEAID_DIVERGENCE_HIST_MAX = 0.6
+TEAID_PAN_PANEL_PX_MIN = 260
+TEAID_PAN_PANEL_PX_MAX = 380
+TEAID_PAN_X_TICKANGLE = -45
 
 
 class TeaidInputError(ValueError):
     """Input FASTA is not suitable for TEAid consensus generation."""
+
+
+def _pan_blast_subplot_title(genome_name: str, blast_plot_title: str) -> str:
+    """Two-line pan-genome BLAST panel title: genome + fragments, then full length."""
+    marker = '; full length: '
+    if marker in blast_plot_title:
+        fragments_part, full_length_part = blast_plot_title.split(marker, 1)
+        return f'{genome_name}: {fragments_part}<br>full length: {full_length_part}'
+    return f'{genome_name}: {blast_plot_title}'
+
+
+def _pan_genome_panel_px(num_genomes: int) -> int:
+    """Per-column panel width: never below the 5-genome baseline; expand when n grows."""
+    if num_genomes <= 0:
+        return TEAID_PAN_PANEL_PX_MIN
+    if num_genomes <= 5:
+        return max(TEAID_PAN_PANEL_PX_MIN, min(TEAID_PAN_PANEL_PX_MAX, int(1200 / num_genomes)))
+    return TEAID_PAN_PANEL_PX_MIN
 
 
 def con_generater(input_file, output_dir, threshold=0.8, ambiguous='N'):
@@ -123,11 +144,11 @@ def _consensus_position_ticks(max_len: int) -> list[int]:
     return ticks
 
 
-def _consensus_axis_tick_kwargs(max_len: int) -> dict:
+def _consensus_axis_tick_kwargs(max_len: int, *, tickangle: int = 0) -> dict:
     return {
         'tickmode': 'array',
         'tickvals': _consensus_position_ticks(max_len),
-        'tickangle': 0,
+        'tickangle': tickangle,
     }
 
 
@@ -1016,6 +1037,627 @@ def plot_rpsblast_hits(input_file, cons_len):
 #####################################################################################################
 # Code block: TEtrimmer GUI plotter, integrate all plots
 #####################################################################################################
+_AXIS_TITLE_FONT = {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'}
+_SUBPLOT_TITLE_FONT = {'size': 13, 'family': 'Arial, sans-serif', 'color': 'black'}
+
+
+def _build_genome_teaid_panels(
+    con_seq,
+    cons_len,
+    genome_file,
+    output_dir,
+    e_value,
+    *,
+    num_threads=5,
+    use_system_blast=False,
+    output_label=None,
+):
+    """BLAST hits, coverage, and divergence panels for one genome."""
+    genome_blast_out = teaid_genome_blast(
+        con_seq,
+        genome_file,
+        output_dir,
+        e_value,
+        num_threads=num_threads,
+        use_system_blast=use_system_blast,
+        output_label=output_label,
+    )
+
+    if genome_blast_out:
+        if genome_blast_out == 'blast_n_zero':
+            fig_blast = empty_plot(cons_len, custom_text='No genome BLAST hits found')
+            divergence_max = 10
+            blast_plot_title = 'BLAST hits Plot'
+            fig_coverage = empty_plot(
+                cons_len, custom_text='No genome BLAST hits found'
+            )
+            coverage_max = 10
+            fig_div_hist, div_hist_max = empty_divergence_histogram(
+                'No genome BLAST hits found'
+            )
+        else:
+            df_genome_blast_out = pd.read_csv(genome_blast_out)
+            fig_blast, divergence_max, blast_plot_title = blast_plot(
+                df_genome_blast_out, cons_len
+            )
+            fig_coverage, coverage_max = coverage_plot(df_genome_blast_out, cons_len)
+            fig_div_hist, div_hist_max = divergence_histogram_plot(df_genome_blast_out)
+    else:
+        error_text = (
+            'An error occurred. Please check the terminal for details.<br> '
+            'Please provide a genome file if it has not been specified.'
+        )
+        fig_blast = empty_plot(cons_len, custom_text=error_text)
+        divergence_max = 10
+        blast_plot_title = 'BLAST hit Plot'
+        fig_coverage = empty_plot(cons_len, custom_text=error_text)
+        coverage_max = 10
+        fig_div_hist, div_hist_max = empty_divergence_histogram(
+            'An error occurred. Please check the terminal for details.'
+        )
+
+    return {
+        'fig_blast': fig_blast,
+        'fig_coverage': fig_coverage,
+        'fig_div_hist': fig_div_hist,
+        'divergence_max': divergence_max,
+        'coverage_max': coverage_max,
+        'div_hist_max': div_hist_max,
+        'blast_plot_title': blast_plot_title,
+    }
+
+
+def _build_self_dot_figure(
+    con_seq,
+    output_dir,
+    cons_len,
+    *,
+    use_system_blast=False,
+    self_blast_word_size=11,
+):
+    self_word_size = clamp_teaid_self_blast_word_size(self_blast_word_size)
+    dotplot_blast = self_blast(
+        con_seq,
+        output_dir,
+        use_system_blast=use_system_blast,
+        word_size=self_word_size,
+    )
+
+    if dotplot_blast == 'blast_n_zero':
+        return empty_plot(
+            cons_len,
+            custom_text='No self BLAST hits found for this sequence.',
+        )
+    if dotplot_blast:
+        df_dotplot_blast = pd.read_csv(dotplot_blast)
+        return dot_plot(df_dotplot_blast)
+    return empty_plot(
+        cons_len,
+        custom_text='An error occurred. Please check the terminal for details.',
+    )
+
+
+def _configure_blast_subplot(
+    fig,
+    row,
+    col,
+    cons_len,
+    divergence_max,
+    consensus_ticks,
+    *,
+    show_x_title=True,
+    show_y_title=True,
+    x_tickangle=0,
+):
+    fig.update_xaxes(
+        title_text='TE consensus (bp)' if show_x_title else '',
+        showgrid=False,
+        showticklabels=True,
+        title_font=_AXIS_TITLE_FONT,
+        range=[1, cons_len],
+        **_consensus_axis_tick_kwargs(cons_len, tickangle=x_tickangle),
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=row,
+        col=col,
+    )
+    fig.update_yaxes(
+        title_text='Divergence to consensus (%)' if show_y_title else '',
+        showgrid=False,
+        showticklabels=True,
+        title_font=_AXIS_TITLE_FONT,
+        range=[-(divergence_max / 30), divergence_max + (divergence_max / 30)],
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=row,
+        col=col,
+    )
+
+
+def _configure_coverage_subplot(
+    fig,
+    row,
+    col,
+    cons_len,
+    coverage_max,
+    consensus_ticks,
+    *,
+    show_x_title=True,
+    show_y_title=True,
+    x_tickangle=0,
+):
+    fig.update_xaxes(
+        title_text='TE consensus (bp)' if show_x_title else '',
+        showgrid=False,
+        showticklabels=True,
+        title_font=_AXIS_TITLE_FONT,
+        range=[1, cons_len],
+        **_consensus_axis_tick_kwargs(cons_len, tickangle=x_tickangle),
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=row,
+        col=col,
+    )
+    fig.update_yaxes(
+        title_text='Coverage (bp)' if show_y_title else '',
+        showgrid=False,
+        showticklabels=True,
+        title_font=_AXIS_TITLE_FONT,
+        range=[-(coverage_max / 30), coverage_max + (coverage_max / 30)],
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=row,
+        col=col,
+    )
+
+
+def _configure_self_dot_subplot(
+    fig,
+    row,
+    col,
+    cons_len,
+    *,
+    show_x_title=True,
+    show_y_title=True,
+    x_tickangle=0,
+):
+    fig.update_xaxes(
+        title_text='TE consensus (bp)' if show_x_title else '',
+        showgrid=False,
+        showticklabels=True,
+        title_font=_AXIS_TITLE_FONT,
+        range=[1, cons_len],
+        **_consensus_axis_tick_kwargs(cons_len, tickangle=x_tickangle),
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=row,
+        col=col,
+    )
+    fig.update_yaxes(
+        title_text='TE consensus (bp)' if show_y_title else '',
+        showgrid=False,
+        showticklabels=True,
+        title_font=_AXIS_TITLE_FONT,
+        range=[1, cons_len],
+        tickmode='array',
+        tickvals=_consensus_position_ticks(cons_len),
+        tickangle=0,
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=row,
+        col=col,
+    )
+
+
+def _configure_divergence_subplot(
+    fig,
+    row,
+    col,
+    div_hist_max,
+    *,
+    show_x_title=True,
+    show_y_title=True,
+    x_tickangle=0,
+):
+    fig.update_xaxes(
+        title_text='Divergence' if show_x_title else '',
+        showgrid=True,
+        gridcolor='#f0f0f0',
+        showticklabels=True,
+        title_font=_AXIS_TITLE_FONT,
+        range=[0, TEAID_DIVERGENCE_HIST_MAX],
+        tickangle=x_tickangle,
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=row,
+        col=col,
+    )
+    fig.update_yaxes(
+        title_text='Total length (bp)' if show_y_title else '',
+        showgrid=True,
+        gridcolor='#f4f4f4',
+        showticklabels=True,
+        title_font=_AXIS_TITLE_FONT,
+        range=[0, div_hist_max * 1.08],
+        linewidth=1,
+        linecolor='black',
+        mirror=True,
+        row=row,
+        col=col,
+    )
+
+
+def _consensus_axis_center(cons_len):
+    return (1 + int(cons_len)) / 2
+
+
+def _divergence_axis_center(divergence_max):
+    lo = -(divergence_max / 30)
+    hi = divergence_max + (divergence_max / 30)
+    return (lo + hi) / 2
+
+
+def _coverage_axis_center(coverage_max):
+    lo = -(coverage_max / 30)
+    hi = coverage_max + (coverage_max / 30)
+    return (lo + hi) / 2
+
+
+def _div_hist_axis_center(div_hist_max):
+    return (div_hist_max * 1.08) / 2
+
+
+def _add_subplot_traces(fig, source_fig, row, col, *, text_x=None, text_y=None):
+    """Copy traces into a subplot, recentering text-mode empty-state labels."""
+    for trace in source_fig.data:
+        if (
+            text_x is not None
+            and text_y is not None
+            and getattr(trace, 'mode', None) == 'text'
+        ):
+            textfont = trace.textfont
+            if not textfont:
+                textfont = {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'}
+            fig.add_trace(
+                go.Scatter(
+                    x=[text_x],
+                    y=[text_y],
+                    text=list(trace.text) if trace.text is not None else [''],
+                    mode='text',
+                    textfont=textfont,
+                    textposition='middle center',
+                    showlegend=False,
+                    hoverinfo='none',
+                ),
+                row=row,
+                col=col,
+            )
+        else:
+            fig.add_trace(trace, row=row, col=col)
+
+
+def _assemble_teaid_2x2_figure(
+    plot_main_title,
+    cons_len,
+    panels,
+    fig_dot,
+):
+    divergence_max = panels['divergence_max']
+    coverage_max = panels['coverage_max']
+    div_hist_max = panels['div_hist_max']
+    blast_plot_title = panels['blast_plot_title']
+
+    panel_px = 380
+    gap_between_row = 90
+    top_margin = 100
+    bottom_margin = 70
+    side_margin = 70
+    plot_block = 2 * panel_px + gap_between_row
+    total_fig_height = plot_block + top_margin + bottom_margin
+    total_fig_width = total_fig_height
+    vertical_spacing = gap_between_row / plot_block
+    consensus_ticks = _consensus_axis_tick_kwargs(cons_len)
+    consensus_center = _consensus_axis_center(cons_len)
+
+    fig = make_subplots(
+        rows=2,
+        cols=2,
+        subplot_titles=(
+            blast_plot_title,
+            'BLAST Coverage Plot',
+            'Self Dot Plot',
+            'Divergence Plot',
+        ),
+        vertical_spacing=vertical_spacing,
+        horizontal_spacing=0.10,
+        row_heights=[1, 1],
+        column_widths=[1, 1],
+    )
+
+    _add_subplot_traces(
+        fig,
+        panels['fig_blast'],
+        1,
+        1,
+        text_x=consensus_center,
+        text_y=_divergence_axis_center(divergence_max),
+    )
+    _add_subplot_traces(
+        fig,
+        panels['fig_coverage'],
+        1,
+        2,
+        text_x=consensus_center,
+        text_y=_coverage_axis_center(coverage_max),
+    )
+    _add_subplot_traces(
+        fig,
+        fig_dot,
+        2,
+        1,
+        text_x=consensus_center,
+        text_y=consensus_center,
+    )
+    _add_subplot_traces(
+        fig,
+        panels['fig_div_hist'],
+        2,
+        2,
+        text_x=TEAID_DIVERGENCE_HIST_MAX / 2,
+        text_y=_div_hist_axis_center(div_hist_max),
+    )
+
+    fig.update_annotations(font=_SUBPLOT_TITLE_FONT)
+    _configure_blast_subplot(fig, 1, 1, cons_len, divergence_max, consensus_ticks)
+    _configure_coverage_subplot(fig, 1, 2, cons_len, coverage_max, consensus_ticks)
+    _configure_self_dot_subplot(fig, 2, 1, cons_len)
+    _configure_divergence_subplot(fig, 2, 2, div_hist_max)
+
+    fig.update_layout(
+        height=total_fig_height,
+        width=total_fig_width,
+        title_text=plot_main_title,
+        title_font={'size': 26, 'family': 'Arial, sans-serif', 'color': 'black'},
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        margin={'t': top_margin, 'b': bottom_margin, 'l': side_margin, 'r': side_margin},
+    )
+    return fig
+
+
+def _assemble_teaid_pan_genome_figure(
+    plot_main_title,
+    cons_len,
+    genome_panels,
+    fig_dot,
+):
+    """
+    Pan-genome layout: four rows (BLAST hits, coverage, divergence, self dot),
+    one column per genome. Self dot sits in the bottom-left cell only.
+    """
+    n = len(genome_panels)
+    if n < 1:
+        raise ValueError('Pan-genome TEAid requires at least one genome.')
+
+    specs = [[{} for _ in range(n)] for _ in range(4)]
+    specs[3] = [{}] + [None] * (n - 1)
+
+    subplot_titles: list[str] = []
+    for name, panels in genome_panels:
+        subplot_titles.append(
+            _pan_blast_subplot_title(name, panels['blast_plot_title'])
+        )
+    for name, _panels in genome_panels:
+        subplot_titles.append(f'{name}:<br>BLAST Coverage Plot')
+    for name, _panels in genome_panels:
+        subplot_titles.append(f'{name}:<br>Divergence Plot')
+    subplot_titles.append('Self Dot Plot')
+
+    panel_px = _pan_genome_panel_px(n)
+    row_gap = 24
+    top_margin = 100
+    bottom_margin = 90
+    side_margin = 70
+    plot_block = 4 * panel_px + 3 * row_gap
+    vertical_spacing = row_gap / (panel_px + row_gap)
+    total_fig_width = n * panel_px + side_margin * 2
+    total_fig_height = plot_block + top_margin + bottom_margin
+    consensus_ticks = _consensus_axis_tick_kwargs(cons_len)
+    consensus_center = _consensus_axis_center(cons_len)
+
+    divergence_max = max(panels['divergence_max'] for _name, panels in genome_panels)
+    coverage_max = max(panels['coverage_max'] for _name, panels in genome_panels)
+    div_hist_max = max(panels['div_hist_max'] for _name, panels in genome_panels)
+
+    blast_text_y = _divergence_axis_center(divergence_max)
+    coverage_text_y = _coverage_axis_center(coverage_max)
+    div_text_x = TEAID_DIVERGENCE_HIST_MAX / 2
+    div_text_y = _div_hist_axis_center(div_hist_max)
+
+    fig = make_subplots(
+        rows=4,
+        cols=n,
+        specs=specs,
+        subplot_titles=tuple(subplot_titles),
+        vertical_spacing=vertical_spacing,
+        horizontal_spacing=0.04,
+        row_heights=[1, 1, 1, 1],
+        column_widths=[1] * n,
+    )
+
+    for col_idx, (_name, panels) in enumerate(genome_panels, start=1):
+        left_col = col_idx == 1
+        _add_subplot_traces(
+            fig,
+            panels['fig_blast'],
+            1,
+            col_idx,
+            text_x=consensus_center,
+            text_y=blast_text_y,
+        )
+        _add_subplot_traces(
+            fig,
+            panels['fig_coverage'],
+            2,
+            col_idx,
+            text_x=consensus_center,
+            text_y=coverage_text_y,
+        )
+        _add_subplot_traces(
+            fig,
+            panels['fig_div_hist'],
+            3,
+            col_idx,
+            text_x=div_text_x,
+            text_y=div_text_y,
+        )
+        _configure_blast_subplot(
+            fig,
+            1,
+            col_idx,
+            cons_len,
+            divergence_max,
+            consensus_ticks,
+            show_x_title=False,
+            show_y_title=left_col,
+            x_tickangle=TEAID_PAN_X_TICKANGLE,
+        )
+        _configure_coverage_subplot(
+            fig,
+            2,
+            col_idx,
+            cons_len,
+            coverage_max,
+            consensus_ticks,
+            show_x_title=False,
+            show_y_title=left_col,
+            x_tickangle=TEAID_PAN_X_TICKANGLE,
+        )
+        _configure_divergence_subplot(
+            fig,
+            3,
+            col_idx,
+            div_hist_max,
+            show_x_title=left_col,
+            show_y_title=left_col,
+            x_tickangle=TEAID_PAN_X_TICKANGLE,
+        )
+
+    _add_subplot_traces(
+        fig,
+        fig_dot,
+        4,
+        1,
+        text_x=consensus_center,
+        text_y=consensus_center,
+    )
+    _configure_self_dot_subplot(
+        fig, 4, 1, cons_len, x_tickangle=TEAID_PAN_X_TICKANGLE
+    )
+
+    fig.update_annotations(font={'size': 12, 'family': 'Arial, sans-serif', 'color': 'black'})
+    genome_names = ', '.join(name for name, _panels in genome_panels)
+    fig.update_layout(
+        height=total_fig_height,
+        width=total_fig_width,
+        title_text=f'{plot_main_title} | Pan-genome ({genome_names})',
+        title_font={'size': 24, 'family': 'Arial, sans-serif', 'color': 'black'},
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        margin={'t': top_margin, 'b': bottom_margin, 'l': side_margin, 'r': side_margin},
+        autosize=False,
+    )
+    return fig
+
+
+def _write_teaid_html(fig, output_dir, input_file, *, output_name_tag=None):
+    from teviewer.pan_genome import genome_output_suffix
+
+    tag = genome_output_suffix(output_name_tag) if output_name_tag else ''
+    output_html_path = os.path.join(
+        output_dir, f'{os.path.basename(input_file)}{tag}_TEAid.html'
+    )
+    pio.write_html(
+        fig,
+        file=output_html_path,
+        auto_open=False,
+        config={'responsive': False},
+    )
+    return output_html_path
+
+
+def teaid_pan_genome_plotter(
+    input_file,
+    output_dir,
+    genome_targets,
+    e_value=1e-40,
+    num_threads=5,
+    use_system_blast=False,
+    self_blast_word_size=11,
+):
+    """
+    Combined TEAid report for pan-genome mode.
+
+    ``genome_targets`` is a list of ``(short_name, genome_fasta_path)`` pairs.
+    """
+    logging.info(
+        'TEAid pan-genome is running for:%s (%d genomes)',
+        os.path.basename(input_file),
+        len(genome_targets),
+    )
+
+    try:
+        con_seq, cons_len = con_generater(input_file, output_dir, threshold=0.3)
+    except TeaidInputError:
+        raise
+    except Exception:
+        logging.error(
+            'An error for consensus sequence generation: \n %s',
+            traceback.format_exc(),
+        )
+        return False
+
+    plot_main_title = f'TE: {os.path.basename(input_file)} | {cons_len} bp'
+
+    genome_panels = []
+    for name, genome_file in genome_targets:
+        panels = _build_genome_teaid_panels(
+            con_seq,
+            cons_len,
+            genome_file,
+            output_dir,
+            e_value,
+            num_threads=num_threads,
+            use_system_blast=use_system_blast,
+            output_label=name,
+        )
+        genome_panels.append((name, panels))
+
+    fig_dot = _build_self_dot_figure(
+        con_seq,
+        output_dir,
+        cons_len,
+        use_system_blast=use_system_blast,
+        self_blast_word_size=self_blast_word_size,
+    )
+    fig = _assemble_teaid_pan_genome_figure(
+        plot_main_title,
+        cons_len,
+        genome_panels,
+        fig_dot,
+    )
+    _write_teaid_html(fig, output_dir, input_file)
+    logging.info('TEAid pan-genome finished: %s.', os.path.basename(input_file))
+    return True
+
+
 def teaid_plotter(
     input_file,
     output_dir,
@@ -1057,9 +1699,9 @@ def teaid_plotter(
     # Define main plot title
     plot_main_title = f'TE: {os.path.basename(input_file)} | {cons_len} bp'
 
-    # Perform genome blast
-    genome_blast_out = teaid_genome_blast(
+    panels = _build_genome_teaid_panels(
         con_seq,
+        cons_len,
         genome_file,
         output_dir,
         e_value,
@@ -1067,244 +1709,15 @@ def teaid_plotter(
         use_system_blast=use_system_blast,
         output_label=output_name_tag,
     )
-
-    if genome_blast_out:
-        # Check if blast hit number is zero
-        if genome_blast_out == 'blast_n_zero':
-            fig_blast = empty_plot(cons_len, custom_text='No genome BLAST hits found')
-            divergence_max = 10
-            blast_plot_title = 'BLAST hits Plot'
-
-            fig_coverage = empty_plot(
-                cons_len, custom_text='No genome BLAST hits found'
-            )
-            coverage_max = 10
-            fig_div_hist, div_hist_max = empty_divergence_histogram(
-                'No genome BLAST hits found'
-            )
-        else:
-            df_genome_blast_out = pd.read_csv(genome_blast_out)
-
-            # Genome blast plot, coverage, and divergence histogram
-            fig_blast, divergence_max, blast_plot_title = blast_plot(
-                df_genome_blast_out, cons_len
-            )
-
-            fig_coverage, coverage_max = coverage_plot(df_genome_blast_out, cons_len)
-            fig_div_hist, div_hist_max = divergence_histogram_plot(df_genome_blast_out)
-    else:
-        fig_blast = empty_plot(
-            cons_len,
-            custom_text='An error occurred. Please check the terminal for details.<br> '
-            'Please provide a genome file if it has not been specified.',
-        )
-        divergence_max = 10
-        blast_plot_title = 'BLAST hit Plot'
-
-        fig_coverage = empty_plot(
-            cons_len,
-            custom_text='An error occurred. Please check the terminal for details.<br> '
-            'Please provide a genome file if it has not been specified.',
-        )
-        coverage_max = 10
-        fig_div_hist, div_hist_max = empty_divergence_histogram(
-            'An error occurred. Please check the terminal for details.'
-        )
-
-    # Perform self blast (word size clamped 4–20; lowered on short consensus)
-    self_word_size = clamp_teaid_self_blast_word_size(self_blast_word_size)
-    dotplot_blast = self_blast(
+    fig_dot = _build_self_dot_figure(
         con_seq,
         output_dir,
+        cons_len,
         use_system_blast=use_system_blast,
-        word_size=self_word_size,
+        self_blast_word_size=self_blast_word_size,
     )
-
-    if dotplot_blast == 'blast_n_zero':
-        fig_dot = empty_plot(
-            cons_len,
-            custom_text='No self BLAST hits found for this sequence.',
-        )
-    elif dotplot_blast:
-        # self blast dot plot
-        df_dotplot_blast = pd.read_csv(dotplot_blast)
-        fig_dot = dot_plot(df_dotplot_blast)
-    else:
-        fig_dot = empty_plot(
-            cons_len,
-            custom_text='An error occurred. Please check the terminal for details.',
-        )
-
-    # 2×2 layout: equal square panels with extra space between rows.
-    panel_px = 380
-    gap_between_row = 90
-    top_margin = 100
-    bottom_margin = 70
-    side_margin = 70
-    plot_block = 2 * panel_px + gap_between_row
-    total_fig_height = plot_block + top_margin + bottom_margin
-    total_fig_width = total_fig_height
-    vertical_spacing = gap_between_row / plot_block
-
-    fig = make_subplots(
-        rows=2,
-        cols=2,
-        subplot_titles=(
-            blast_plot_title,
-            'BLAST Coverage Plot',
-            'Self Dot Plot',
-            'Divergence Plot',
-        ),
-        vertical_spacing=vertical_spacing,
-        horizontal_spacing=0.10,
-        row_heights=[1, 1],
-        column_widths=[1, 1],
-    )
-
-    for trace in fig_blast.data:
-        fig.add_trace(trace, row=1, col=1)
-    for trace in fig_coverage.data:
-        fig.add_trace(trace, row=1, col=2)
-    for trace in fig_dot.data:
-        fig.add_trace(trace, row=2, col=1)
-    for trace in fig_div_hist.data:
-        fig.add_trace(trace, row=2, col=2)
-
-    fig.update_annotations(
-        font={'size': 13, 'family': 'Arial, sans-serif', 'color': 'black'},
-    )
-
-    consensus_ticks = _consensus_axis_tick_kwargs(cons_len)
-    # Configuring subplot 1
-    fig.update_xaxes(
-        title_text='TE consensus (bp)',
-        showgrid=False,
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[1, cons_len],
-        **consensus_ticks,
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=1,
-        col=1,
-    )
-    fig.update_yaxes(
-        title_text='Divergence to consensus (%)',
-        showgrid=False,
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[-(divergence_max / 30), divergence_max + (divergence_max / 30)],
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=1,
-        col=1,
-    )
-
-    # Configuring subplot 2 (coverage)
-    fig.update_xaxes(
-        title_text='TE consensus (bp)',
-        showgrid=False,
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[1, cons_len],
-        **consensus_ticks,
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=1,
-        col=2,
-    )
-    fig.update_yaxes(
-        title_text='Coverage (bp)',
-        showgrid=False,
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[-(coverage_max / 30), coverage_max + (coverage_max / 30)],
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=1,
-        col=2,
-    )
-
-    # Configuring subplot 3 (self dot plot: 1-based coordinates)
-    fig.update_xaxes(
-        title_text='TE consensus (bp)',
-        showgrid=False,
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[1, cons_len],
-        **consensus_ticks,
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=2,
-        col=1,
-    )
-    fig.update_yaxes(
-        title_text='TE consensus (bp)',
-        showgrid=False,
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[1, cons_len],
-        tickmode='array',
-        tickvals=_consensus_position_ticks(cons_len),
-        tickangle=0,
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=2,
-        col=1,
-    )
-
-    # Configuring subplot 4 (divergence plot)
-    fig.update_xaxes(
-        title_text='Divergence',
-        showgrid=True,
-        gridcolor='#f0f0f0',
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[0, TEAID_DIVERGENCE_HIST_MAX],
-        tickangle=0,
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=2,
-        col=2,
-    )
-    fig.update_yaxes(
-        title_text='Total length (bp)',
-        showgrid=True,
-        gridcolor='#f4f4f4',
-        showticklabels=True,
-        title_font={'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
-        range=[0, div_hist_max * 1.08],
-        linewidth=1,
-        linecolor='black',
-        mirror=True,
-        row=2,
-        col=2,
-    )
-
-    fig.update_layout(
-        height=total_fig_height,
-        width=total_fig_width,
-        title_text=plot_main_title,
-        title_font={'size': 26, 'family': 'Arial, sans-serif', 'color': 'black'},
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        margin={'t': top_margin, 'b': bottom_margin, 'l': side_margin, 'r': side_margin},
-    )
-    # Save the figure as an HTML file
-    from teviewer.pan_genome import genome_output_suffix
-
-    tag = genome_output_suffix(output_name_tag) if output_name_tag else ""
-    output_html_path = os.path.join(
-        output_dir, f'{os.path.basename(input_file)}{tag}_TEAid.html'
-    )
-    pio.write_html(fig, file=output_html_path, auto_open=False)
+    fig = _assemble_teaid_2x2_figure(plot_main_title, cons_len, panels, fig_dot)
+    _write_teaid_html(fig, output_dir, input_file, output_name_tag=output_name_tag)
 
     logging.info(f'TEAid finished: {os.path.basename(input_file)}.')
     # fig.show()

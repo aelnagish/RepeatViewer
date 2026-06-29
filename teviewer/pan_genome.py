@@ -78,8 +78,6 @@ def parse_pan_genomes_json(raw) -> list[PanGenomeEntry]:
             entry = PanGenomeEntry(name=name, path=Path(str(path_raw)))
         except ValueError:
             continue
-        if not entry.path.is_file():
-            continue
         if entry.name in seen:
             continue
         seen.add(entry.name)
