@@ -110,8 +110,10 @@ def cleanup_teaid_side_files(
         name = entry.name
         if name.endswith("_TEAid.html"):
             continue
-        if name == f"{input_name}_self_blast" and entry.is_dir():
-            to_remove.append(resolved)
+        if entry.is_dir() and name.endswith("_self_blast"):
+            prefix = name[: -len("_self_blast")]
+            if prefix == input_name or prefix.startswith(f"{input_name}_"):
+                to_remove.append(resolved)
             continue
         if not (entry.is_file() or entry.is_symlink()):
             continue

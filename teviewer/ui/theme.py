@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 
-def application_stylesheet(*, toolbar_font_pt: int) -> str:
+def application_stylesheet(
+    *,
+    toolbar_font_pt: int,
+    browser_panel_font_pt: int = 12,
+) -> str:
     size = toolbar_font_pt
+    panel_size = browser_panel_font_pt
     return f"""
     QMainWindow {{
         background: palette(window);
@@ -21,9 +26,10 @@ def application_stylesheet(*, toolbar_font_pt: int) -> str:
         border: 1px solid palette(mid);
         border-radius: 4px;
         outline: none;
+        font-size: {panel_size}pt;
     }}
     QTreeWidget::item, QListWidget::item {{
-        padding: 2px 4px;
+        padding: 0px 3px;
     }}
     QTreeWidget::item:selected, QListWidget::item:selected {{
         background: #3d6ea8;

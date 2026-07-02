@@ -26,6 +26,10 @@ from PySide6.QtWidgets import (
 from teviewer.pan_genome import GENOME_MODE_SINGLE, parse_pan_genomes_json
 from teviewer.project import TEviewerProject
 from teviewer.views.toolbar_dialog import load_toolbar_font_size, save_toolbar_font_size
+from teviewer.widgets.browser_panel_settings import (
+    load_browser_panel_font_size,
+    save_browser_panel_font_size,
+)
 from teviewer.widgets.preview_zoom import (
     MAX_PREVIEW_ZOOM_PERCENT,
     MIN_PREVIEW_ZOOM_PERCENT,
@@ -319,6 +323,13 @@ class SettingsDialog(QDialog):
         self._toolbar_font.setValue(load_toolbar_font_size())
         self._toolbar_font.setSuffix(" pt")
         self._toolbar_font.setToolTip("Font size for function toolbar button labels.")
+        self._browser_panel_font = QSpinBox()
+        self._browser_panel_font.setRange(8, 16)
+        self._browser_panel_font.setValue(load_browser_panel_font_size())
+        self._browser_panel_font.setSuffix(" pt")
+        self._browser_panel_font.setToolTip(
+            "Font size for folder and file names in the Folders and Files panels."
+        )
         self._preview_zoom = QSpinBox()
         self._preview_zoom.setRange(MIN_PREVIEW_ZOOM_PERCENT, MAX_PREVIEW_ZOOM_PERCENT)
         self._preview_zoom.setValue(load_preview_zoom_percent())
@@ -351,7 +362,12 @@ class SettingsDialog(QDialog):
         if fit_index >= 0:
             self._preview_fit.setCurrentIndex(fit_index)
 
-        for spin in (self._batch_workers, self._toolbar_font, self._preview_zoom):
+        for spin in (
+            self._batch_workers,
+            self._toolbar_font,
+            self._browser_panel_font,
+            self._preview_zoom,
+        ):
             spin.setFixedWidth(88)
         self._preview_fit.setFixedWidth(160)
         self._fasta_default_tab.setFixedWidth(160)
@@ -367,6 +383,7 @@ class SettingsDialog(QDialog):
         form.addRow("Color-blind nucleotide:", self._color_blind_scheme)
         form.addRow("Parallel batch workers:", self._batch_workers)
         form.addRow("Toolbar button font:", self._toolbar_font)
+        form.addRow("Folders / Files font:", self._browser_panel_font)
         form.addRow("Default preview zoom:", self._preview_zoom)
         form.addRow("Default preview fit:", self._preview_fit)
         form.addRow("Default FASTA preview tab:", self._fasta_default_tab)
@@ -388,6 +405,7 @@ class SettingsDialog(QDialog):
         self._project.use_system_sequence_viewer = self._system_viewer.isChecked()
         self._project.batch_workers = self._batch_workers.value()
         save_toolbar_font_size(self._toolbar_font.value())
+        save_browser_panel_font_size(self._browser_panel_font.value())
         save_preview_zoom_percent(self._preview_zoom.value())
         save_preview_fit_mode(PreviewFitMode(str(self._preview_fit.currentData())))
         save_default_fasta_preview_tab(

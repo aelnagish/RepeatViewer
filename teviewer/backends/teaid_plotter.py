@@ -1,6 +1,8 @@
 import logging
 import os
 import platform
+import shutil
+import tempfile
 import traceback
 import warnings
 import numpy as np
@@ -230,34 +232,34 @@ def self_blast(input_file, output_dir, use_system_blast=False, word_size=11):
     # input_file: fasta file contain only one sequence
     # Used global variable: os_type
 
-    input_n = os.path.basename(input_file)
-
-    output_dir_self_blast = os.path.join(output_dir, f'{input_n}_self_blast')
-
-    os.makedirs(output_dir_self_blast, exist_ok=True)
+    work_dir = tempfile.mkdtemp(prefix=".teviewer_selfblast_", dir=output_dir)
 
     # Build blast database
-    blast_database = check_database(input_file, output_dir_self_blast, os_type=os_type,
-                                    use_system_blast=use_system_blast)
+    blast_database = check_database(
+        input_file,
+        work_dir,
+        os_type=os_type,
+        use_system_blast=use_system_blast,
+    )
 
     # Check if makeblastdb is correctly installed
     if blast_database == 'makeblastdb_not_found':
         logging.error(
             "Error: makeblastdb command not found. TEAid can't perform self blast."
         )
-        return False
+        return False, work_dir
 
     # Check if error happened
     elif blast_database == 'makeblastdb_got_error':
         logging.error(
             "Error: BLAST database can't be established for the genome. TEAid can't perform self blast."
         )
-        return False
+        return False, work_dir
 
     self_blast_out, _ = blast(
         input_file,
         blast_database,
-        output_dir_self_blast,
+        work_dir,
         e_value=0.05,
         self_blast=True,
         word_size=word_size,
@@ -267,25 +269,25 @@ def self_blast(input_file, output_dir, use_system_blast=False, word_size=11):
 
     if self_blast_out == 'blastn_not_found':
         logging.error("Error: BLAST command not found. TEAid can't perform self blast.")
-        return False
+        return False, work_dir
 
     elif self_blast_out == 'blastn_got_error':
         logging.error(
             "TEAid can't perform self blast. Refer to terminal for more information."
         )
-        return False
+        return False, work_dir
 
     elif self_blast_out == 'blast_n_zero':
         logging.warning('Self blast hit number is 0 for this sequence.')
-        return 'blast_n_zero'
+        return 'blast_n_zero', work_dir
 
     elif not self_blast_out:
         logging.error(
             "TEAid can't perform self blast. Refer to terminal for more information."
         )
-        return False
+        return False, work_dir
 
-    return self_blast_out
+    return self_blast_out, work_dir
 
 
 #####################################################################################################
@@ -1116,25 +1118,27 @@ def _build_self_dot_figure(
     self_blast_word_size=11,
 ):
     self_word_size = clamp_teaid_self_blast_word_size(self_blast_word_size)
-    dotplot_blast = self_blast(
+    dotplot_blast, work_dir = self_blast(
         con_seq,
         output_dir,
         use_system_blast=use_system_blast,
         word_size=self_word_size,
     )
-
-    if dotplot_blast == 'blast_n_zero':
+    try:
+        if dotplot_blast == 'blast_n_zero':
+            return empty_plot(
+                cons_len,
+                custom_text='No self BLAST hits found for this sequence.',
+            )
+        if dotplot_blast:
+            df_dotplot_blast = pd.read_csv(dotplot_blast)
+            return dot_plot(df_dotplot_blast)
         return empty_plot(
             cons_len,
-            custom_text='No self BLAST hits found for this sequence.',
+            custom_text='An error occurred. Please check the terminal for details.',
         )
-    if dotplot_blast:
-        df_dotplot_blast = pd.read_csv(dotplot_blast)
-        return dot_plot(df_dotplot_blast)
-    return empty_plot(
-        cons_len,
-        custom_text='An error occurred. Please check the terminal for details.',
-    )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _configure_blast_subplot(

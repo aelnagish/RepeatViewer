@@ -161,6 +161,7 @@ from teviewer.views.toolbar_dialog import (
     load_toolbar_order,
     save_toolbar_order,
 )
+from teviewer.widgets.browser_panel_settings import load_browser_panel_font_size
 from teviewer.ui.platform import reveal_in_file_manager
 from teviewer.ui.theme import application_stylesheet
 from teviewer.widgets.hidden_folders import (
@@ -855,8 +856,10 @@ class MainWindow(QMainWindow):
         self.resize(1680, 980)
         self.setMinimumSize(1100, 700)
         self._toolbar_font_size = load_toolbar_font_size()
+        self._browser_panel_font_size = load_browser_panel_font_size()
         self._functions_toolbar = None
         self._toolbar_font = QFont(self.font())
+        self._browser_panel_font = QFont(self.font())
         self._apply_toolbar_theme()
 
         self._project = SettingsDialog.load_project_from_settings()
@@ -922,6 +925,7 @@ class MainWindow(QMainWindow):
         self.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.TabPosition.North)
 
         self._folder_tree = FolderTreeWidget()
+        self._folder_tree.setObjectName("FolderTree")
         self._folder_tree.folder_selected.connect(self._on_folder_selected)
         self._folder_tree.files_dropped_to_folder.connect(self._copy_files_to_folder)
         self._folder_tree.folder_dropped.connect(
@@ -929,6 +933,7 @@ class MainWindow(QMainWindow):
         )
 
         self._file_list = FileListWidget()
+        self._file_list.setObjectName("FileList")
         self._file_list.currentItemChanged.connect(self._on_file_current_item_changed)
         self._file_list.itemClicked.connect(self._on_file_item_clicked)
         self._file_list.itemSelectionChanged.connect(self._sync_dialog_input_from_files)
@@ -949,6 +954,7 @@ class MainWindow(QMainWindow):
         self._folder_tree.clear_root_folders_requested.connect(self._clear_root_folders)
         self._folder_tree.itemExpanded.connect(self._on_folder_tree_expanded)
         self._folder_tree.itemCollapsed.connect(lambda _item: self._schedule_persist_workspace())
+        self._apply_browser_panel_font()
         self._folder_persist_timer = QTimer(self)
         self._folder_persist_timer.setSingleShot(True)
         self._folder_persist_timer.setInterval(250)
@@ -1427,9 +1433,24 @@ class MainWindow(QMainWindow):
         self._toolbar_font = QFont(self.font())
         self._toolbar_font.setPointSize(size)
         self._toolbar_font.setBold(False)
-        self.setStyleSheet(application_stylesheet(toolbar_font_pt=size))
+        self.setStyleSheet(
+            application_stylesheet(
+                toolbar_font_pt=size,
+                browser_panel_font_pt=self._browser_panel_font_size,
+            )
+        )
         if self._functions_toolbar is not None:
             self._compact_functions_toolbar(self._functions_toolbar)
+
+    def _apply_browser_panel_font(self) -> None:
+        self._browser_panel_font = QFont(self.font())
+        self._browser_panel_font.setPointSize(self._browser_panel_font_size)
+        self._browser_panel_font.setBold(False)
+        if hasattr(self, "_folder_tree"):
+            self._folder_tree.setFont(self._browser_panel_font)
+            self._folder_tree.resizeColumnToContents(0)
+        if hasattr(self, "_file_list"):
+            self._file_list.setFont(self._browser_panel_font)
 
     def _rebuild_top_toolbar(self) -> None:
         if self._functions_toolbar is not None:
@@ -1844,10 +1865,16 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             self._project = dialog.apply_to_project()
             self._persist_workspace()
+            old_toolbar_size = self._toolbar_font_size
+            old_browser_size = self._browser_panel_font_size
             new_size = load_toolbar_font_size()
-            if new_size != self._toolbar_font_size:
-                self._toolbar_font_size = new_size
+            new_browser_size = load_browser_panel_font_size()
+            self._toolbar_font_size = new_size
+            self._browser_panel_font_size = new_browser_size
+            if new_size != old_toolbar_size or new_browser_size != old_browser_size:
                 self._apply_toolbar_theme()
+                self._apply_browser_panel_font()
+            if new_size != old_toolbar_size:
                 self._rebuild_top_toolbar()
             self._update_status()
             if self._preview_tabs is not None:
@@ -2049,10 +2076,20 @@ class MainWindow(QMainWindow):
     def _is_lazy_folder_placeholder(item: QTreeWidgetItem) -> bool:
         return bool(item.data(0, ROLE_LAZY_PLACEHOLDER))
 
+    @staticmethod
+    def _is_intermediate_teaid_folder(name: str) -> bool:
+        return name.endswith("_self_blast")
+
     def _list_subfolders(self, folder: Path) -> list[Path]:
         try:
             return sorted(
-                [p for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")],
+                [
+                    p
+                    for p in folder.iterdir()
+                    if p.is_dir()
+                    and not p.name.startswith(".")
+                    and not self._is_intermediate_teaid_folder(p.name)
+                ],
                 key=lambda p: p.name.lower(),
             )
         except OSError:
@@ -2062,7 +2099,11 @@ class MainWindow(QMainWindow):
     def _folder_has_subfolders(folder: Path) -> bool:
         try:
             for entry in folder.iterdir():
-                if entry.is_dir() and not entry.name.startswith("."):
+                if (
+                    entry.is_dir()
+                    and not entry.name.startswith(".")
+                    and not MainWindow._is_intermediate_teaid_folder(entry.name)
+                ):
                     return True
         except OSError:
             return False

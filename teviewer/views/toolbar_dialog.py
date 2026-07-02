@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 TOOLBAR_SETTINGS_GROUP = "toolbar"
+DEFAULT_TOOLBAR_FONT_SIZE = 13
 
 DEFAULT_TOOLBAR_ORDER: list[str] = [
     "aliview",
@@ -102,7 +103,7 @@ def load_toolbar_font_size() -> int:
 
     s = QSettings()
     s.beginGroup(TOOLBAR_SETTINGS_GROUP)
-    size = int(s.value("font_size", 11))
+    size = int(s.value("font_size", DEFAULT_TOOLBAR_FONT_SIZE))
     s.endGroup()
     return max(8, min(16, size))
 
