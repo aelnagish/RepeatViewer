@@ -155,7 +155,11 @@ from teviewer.views.settings_dialog import (
 )
 from teviewer.views.toolbar_dialog import (
     DEFAULT_TOOLBAR_ORDER,
+    ToolbarCustomizeDialog,
+    build_toolbar_catalog,
     load_toolbar_font_size,
+    load_toolbar_order,
+    save_toolbar_order,
 )
 from teviewer.ui.platform import reveal_in_file_manager
 from teviewer.ui.theme import application_stylesheet
@@ -883,7 +887,7 @@ class MainWindow(QMainWindow):
         self._te_confusion_benchmark_options = load_te_confusion_matrix_benchmark_options()
         self._te_library_benchmark_options = load_te_library_benchmark_options()
         self.database_index_runner = DatabaseIndexRunner(self)
-        self._toolbar_order = list(DEFAULT_TOOLBAR_ORDER)
+        self._toolbar_order = load_toolbar_order()
         self._dock_folders: QDockWidget | None = None
         self._dock_files: QDockWidget | None = None
         self._dock_preview: QDockWidget | None = None
@@ -1339,7 +1343,9 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
-        file_menu.addAction("Define &genome", self._open_set_genome)
+        genome_action = file_menu.addAction("Define &genome", self._open_set_genome)
+        genome_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
+        genome_action.setStatusTip("Set reference or pan-genome FASTA files")
         define_db_action = file_menu.addAction("Define &database", self._open_define_database)
         define_db_action.setStatusTip("Configure CDD and similarity annotation databases")
         file_menu.addAction("Restore deleted &files", self._restore_removed_folders)
@@ -1376,6 +1382,15 @@ class MainWindow(QMainWindow):
             if dock is not None:
                 view_menu.addAction(dock.toggleViewAction())
         view_menu.addSeparator()
+        view_menu.addAction(
+            "Customize function &toolbar…",
+            self._customize_toolbar_order,
+        )
+        view_menu.addAction(
+            "Reset function toolbar",
+            self._reset_toolbar_order,
+        )
+        view_menu.addSeparator()
         view_menu.addAction("Reset panel &layout", self._reset_dock_layout)
 
         help_menu = self.menuBar().addMenu("&Help")
@@ -1383,6 +1398,7 @@ class MainWindow(QMainWindow):
         self._rebuild_top_toolbar()
 
     def _install_shortcuts(self) -> None:
+        QShortcut(QKeySequence("Ctrl+Shift+G"), self, self._open_set_genome)
         QShortcut(QKeySequence.StandardKey.Refresh, self, self._refresh_current_folder)
         QShortcut(QKeySequence(Qt.Key.Key_F5), self, self._refresh_current_folder)
         QShortcut(QKeySequence.StandardKey.Find, self, lambda: self._file_filter.setFocus())
@@ -1412,6 +1428,30 @@ class MainWindow(QMainWindow):
             self._functions_toolbar = None
         self._job_toolbar_actions = []
         self._build_top_toolbar()
+
+    def _toolbar_context_menu(self, position) -> None:
+        bar = self.sender()
+        if not isinstance(bar, QToolBar):
+            return
+        menu = QMenu(self)
+        menu.addAction("Customize toolbar…", self._customize_toolbar_order)
+        menu.addAction("Reset toolbar", self._reset_toolbar_order)
+        menu.exec(bar.mapToGlobal(position))
+
+    def _customize_toolbar_order(self) -> None:
+        catalog = build_toolbar_catalog(self._toolbar_order)
+        dialog = ToolbarCustomizeDialog(catalog, self)
+        if dialog.exec():
+            self._toolbar_order = dialog.result_order()
+            save_toolbar_order(self._toolbar_order)
+            self._rebuild_top_toolbar()
+            self._set_status_message("Function toolbar updated", 4000)
+
+    def _reset_toolbar_order(self) -> None:
+        self._toolbar_order = list(DEFAULT_TOOLBAR_ORDER)
+        save_toolbar_order(self._toolbar_order)
+        self._rebuild_top_toolbar()
+        self._set_status_message("Function toolbar reset to default", 4000)
 
     def _toolbar_button_height(self) -> int:
         return QFontMetrics(self._toolbar_font).height() + 4
@@ -1509,10 +1549,12 @@ class MainWindow(QMainWindow):
             | Qt.ToolBarArea.RightToolBarArea
         )
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        bar.customContextMenuRequested.connect(self._toolbar_context_menu)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
         self._functions_toolbar = bar
 
-        for tool_id in DEFAULT_TOOLBAR_ORDER:
+        for tool_id in self._toolbar_order:
             self._add_toolbar_tool(bar, tool_id)
         self._compact_functions_toolbar(bar)
 
