@@ -64,6 +64,8 @@ def _type_group_key(path: Path) -> tuple[str, str]:
         ("annotation", ".gff"),
         ("annotation", ".gtf"),
         ("annotation", ".bed"),
+        ("annotation", ".vcf.gz"),
+        ("annotation", ".vcf"),
         ("fasta", ".fasta"),
         ("fasta", ".fa"),
         ("fasta", ".fas"),

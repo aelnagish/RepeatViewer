@@ -1,19 +1,33 @@
-"""Parse GFF/GTF and build a simple sequence feature map for preview."""
+"""Parse GFF/GTF, BED, and VCF and build a simple sequence feature map for preview."""
 
 from __future__ import annotations
 
+import gzip
 import html
 from dataclasses import dataclass
 from pathlib import Path
 
-_ANNOTATION_SUFFIXES = (".gff", ".gff3", ".gtf", ".bed")
+_ANNOTATION_SUFFIXES = (".gff", ".gff3", ".gtf", ".bed", ".vcf", ".vcf.gz")
 _GFF_SUFFIXES = (".gff", ".gff3", ".gtf")
 
 
 def is_gene_annotation_file(path: Path) -> bool:
-    """True for GFF/GTF/BED annotation files usable as genome-map feature input."""
+    """True for GFF/GTF/BED/VCF annotation files usable as genome-map feature input."""
     name = path.name.lower()
-    return any(name.endswith(suffix) for suffix in _ANNOTATION_SUFFIXES)
+    if any(name.endswith(suffix) for suffix in _ANNOTATION_SUFFIXES):
+        return True
+    return name.endswith(".gz") and name[:-3].endswith(".vcf")
+
+
+def _is_vcf_path(path: Path) -> bool:
+    name = path.name.lower()
+    return name.endswith(".vcf") or (name.endswith(".gz") and name[:-3].endswith(".vcf"))
+
+
+def _open_annotation_text(path: Path):
+    if path.name.lower().endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    return path.open(encoding="utf-8", errors="replace")
 
 
 @dataclass(frozen=True)
@@ -179,20 +193,127 @@ def parse_bed(path: Path) -> list[GffFeature]:
     return features
 
 
+def _vcf_variant_type(ref: str, alt: str) -> str:
+    ref = ref.strip().upper()
+    first_alt = alt.strip().split(",")[0].upper()
+    if not first_alt or first_alt in {".", "<*>"}:
+        return "other"
+    if first_alt.startswith("<") and first_alt.endswith(">"):
+        return "SV"
+    if len(ref) == 1 and len(first_alt) == 1:
+        return "SNP"
+    if len(ref) != len(first_alt):
+        return "INDEL"
+    if len(ref) > 1:
+        return "MNP"
+    return "variant"
+
+
+def _parse_vcf_info(raw: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    if not raw or raw == ".":
+        return attrs
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            key, value = part.split("=", 1)
+            attrs[key.strip()] = value.strip()
+        else:
+            attrs[part] = "true"
+    return attrs
+
+
+def parse_vcf(path: Path) -> list[GffFeature]:
+    """Parse VCF variant rows (1-based POS, inclusive end from REF length)."""
+    features: list[GffFeature] = []
+    try:
+        with _open_annotation_text(path) as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                cols = line.split("\t")
+                if len(cols) < 8:
+                    continue
+                chrom = cols[0].strip()
+                try:
+                    pos = int(cols[1])
+                except ValueError:
+                    continue
+                variant_id = cols[2].strip()
+                ref = cols[3].strip()
+                alt = cols[4].strip()
+                qual = cols[5].strip()
+                filt = cols[6].strip()
+                info = cols[7].strip()
+                if not chrom or not alt or alt == ".":
+                    continue
+                if ref in {".", ""}:
+                    end = pos
+                else:
+                    end = pos + max(0, len(ref) - 1)
+                if end < pos:
+                    continue
+                variant_type = _vcf_variant_type(ref, alt)
+                attrs = _parse_vcf_info(info)
+                if variant_id and variant_id != ".":
+                    attrs.setdefault("ID", variant_id)
+                attrs.setdefault("Name", f"{ref}>{alt.split(',')[0]}")
+                if filt and filt != ".":
+                    attrs.setdefault("FILTER", filt)
+                features.append(
+                    GffFeature(
+                        seqid=chrom,
+                        source="vcf",
+                        feature_type=variant_type,
+                        start=pos,
+                        end=end,
+                        strand=".",
+                        score=qual,
+                        phase=".",
+                        attributes=attrs,
+                    )
+                )
+    except OSError:
+        return features
+    return features
+
+
 def parse_annotation(path: Path) -> list[GffFeature]:
-    """Parse GFF/GTF (all rows) or BED (interval rows) from an annotation file."""
+    """Parse GFF/GTF, BED intervals, or VCF variants from an annotation file."""
     if path.name.lower().endswith(".bed"):
         return parse_bed(path)
+    if _is_vcf_path(path):
+        return parse_vcf(path)
     return parse_gff(path)
 
 
 def list_feature_types_in_annotation(path: Path, *, max_lines: int = 200_000) -> list[str]:
-    """Return sorted unique feature types in a GFF/GTF/BED annotation file."""
+    """Return sorted unique feature types in a GFF/GTF/BED/VCF annotation file."""
     path = path.expanduser().resolve()
     if not path.is_file():
         return []
     if path.name.lower().endswith(".bed"):
         return ["interval"]
+    if _is_vcf_path(path):
+        found: set[str] = set()
+        try:
+            with _open_annotation_text(path) as handle:
+                for line_no, line in enumerate(handle):
+                    if line_no >= max_lines:
+                        break
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    cols = line.split("\t")
+                    if len(cols) < 5:
+                        continue
+                    found.add(_vcf_variant_type(cols[3], cols[4]))
+        except OSError:
+            return []
+        return sorted(found, key=str.lower)
     found: set[str] = set()
     try:
         with path.open(encoding="utf-8", errors="replace") as handle:
@@ -245,6 +366,10 @@ _TYPE_COLORS = {
     "transposable_element": "#c9302c",
     "ltr": "#e67e22",
     "tir": "#9b59b6",
+    "snp": "#3498db",
+    "indel": "#e74c3c",
+    "mnp": "#e67e22",
+    "sv": "#8e44ad",
 }
 
 

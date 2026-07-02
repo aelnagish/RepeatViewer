@@ -2702,7 +2702,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "TE visualization",
-                "Annotation input must be a GFF, GFF3, GTF, or BED file.",
+                "Annotation input must be a GFF, GFF3, GTF, BED, or VCF file.",
             )
             return None
         return gene_path.resolve()

@@ -71,6 +71,7 @@ _TEXT_PREVIEW_SUFFIXES = _FASTA_SUFFIXES | {
     ".tsv",
     ".csv",
     ".bed",
+    ".vcf",
     ".gff",
     ".gff3",
     ".gtf",

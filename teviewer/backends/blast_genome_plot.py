@@ -5183,18 +5183,26 @@ def gene_hits_from_gff(
     feature_types: list[str] | None = None,
 ) -> pd.DataFrame:
     """Convert GFF/GTF feature rows or BED intervals into a hit table for genome-map binning."""
-    from teviewer.backends.gff_features import parse_annotation
+    from teviewer.backends.gff_features import _is_vcf_path, parse_annotation
 
     gff_path = gff_path.expanduser().resolve()
     if not gff_path.is_file():
         return pd.DataFrame()
     is_bed = gff_path.name.lower().endswith(".bed")
+    is_vcf = _is_vcf_path(gff_path)
     features = parse_annotation(gff_path)
     if not features:
         return pd.DataFrame()
 
     if is_bed:
         picked = features
+    elif is_vcf:
+        want = {str(t).strip().lower() for t in (feature_types or []) if str(t).strip()}
+        picked = (
+            [f for f in features if f.feature_type.lower() in want]
+            if want
+            else features
+        )
     else:
         want = {str(t).strip().lower() for t in (feature_types or ["gene"]) if str(t).strip()}
         picked = [f for f in features if f.feature_type.lower() in want]
@@ -8445,18 +8453,19 @@ def build_blast_genome_map_figure(
             else ""
         )
         + (
-            " GFF/GTF/BED annotations: separate forward and reverse tracks per chromosome."
+            " GFF/GTF/BED/VCF annotations: separate forward and reverse tracks per chromosome."
             if split_strand_gene_tracks and not any(spec.split_strand for spec in (te_sources or []))
             else ""
         )
         + (
-            " RepeatMasker .out and GFF/GTF/BED annotations: separate forward and reverse tracks."
+            " RepeatMasker .out and GFF/GTF/BED/VCF annotations: separate forward and reverse tracks."
             if split_strand_gene_tracks
             and any(spec.split_strand for spec in (te_sources or []))
             else ""
         )
         + (
-            " Annotation tracks use features from GFF/GTF (gene rows) or BED intervals "
+            " Annotation tracks use features from GFF/GTF (gene rows), BED intervals, "
+            "or VCF variants (SNP, INDEL, MNP, SV)."
             "with an independent y-axis scale."
             if include_gene_tracks and not gene_only
             else ""

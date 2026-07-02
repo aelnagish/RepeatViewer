@@ -1278,12 +1278,12 @@ class TeHitTableInputWidget(QWidget):
 
 
 class GeneInputFileWidget(QWidget):
-    """Optional GFF/GTF/BED annotation path entry."""
+    """Optional GFF/GTF/BED/VCF annotation path entry."""
 
     def __init__(self, parent: QWidget | None = None, *, initial: Path | None = None) -> None:
         super().__init__(parent)
         self._path = QLineEdit(self)
-        self._path.setPlaceholderText("Optional GFF/GTF/BED annotation")
+        self._path.setPlaceholderText("Optional GFF/GTF/BED/VCF annotation")
         self._path.setMinimumWidth(280)
         self._path.setFixedHeight(26)
         if initial is not None:
@@ -1315,7 +1315,7 @@ class GeneInputFileWidget(QWidget):
             self,
             "Select annotation file",
             start,
-            "Annotations (*.gff *.gff3 *.gtf *.bed);;All files (*)",
+            "Annotations (*.gff *.gff3 *.gtf *.bed *.vcf *.vcf.gz);;All files (*)",
         )
         if picked:
             self._path.setText(picked)
@@ -1354,7 +1354,7 @@ class AnnotationFeatureTypesWidget(QWidget):
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._list.setToolTip(
             "Feature types from column 3 of GFF/GTF files. BED files use a single "
-            "'interval' type."
+            "'interval' type. VCF files use SNP, INDEL, MNP, SV, and other variant classes."
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1413,6 +1413,17 @@ class AnnotationFeatureTypesWidget(QWidget):
             return
         if merged == {"interval"}:
             self._set_types(["interval"], checked={"interval"})
+            return
+        merged_lower = {t.lower() for t in merged}
+        if merged_lower.issubset({"snp", "indel", "mnp", "sv", "variant", "other"}):
+            default = [
+                t for t in sorted(merged, key=str.lower)
+                if t.lower() in {"snp", "indel", "mnp", "sv"}
+            ]
+            if not default:
+                default = sorted(merged, key=str.lower)
+            prev = {t.lower() for t in self.selected_types()} or {t.lower() for t in default}
+            self._set_types(sorted(merged, key=str.lower), checked=prev)
             return
         prev = {t.lower() for t in self.selected_types()} or {"gene"}
         self._set_types(sorted(merged, key=str.lower), checked=prev)
@@ -1566,12 +1577,12 @@ class TeDensityPlotDialog(QDialog):
         )
         self._gene_input = TeMultiInputFilesWidget(
             self,
-            placeholder="Optional GFF/GTF/BED annotation",
+            placeholder="Optional GFF/GTF/BED/VCF annotation",
             browse_title="Select annotation file",
-            file_filter="Annotations (*.gff *.gff3 *.gtf *.bed);;All files (*)",
+            file_filter="Annotations (*.gff *.gff3 *.gtf *.bed *.vcf *.vcf.gz);;All files (*)",
             add_button_label="Add another annotation file",
             add_button_tooltip=(
-                "Add another GFF, GTF, or BED annotation file. "
+                "Add another GFF, GTF, BED, or VCF annotation file. "
                 "Each file is drawn on its own track below TE tracks."
             ),
         )
@@ -1618,7 +1629,7 @@ class TeDensityPlotDialog(QDialog):
         self._split_strand.setChecked(bool(self._opts.split_strand_tracks))
         self._split_strand.setToolTip(
             "Draw separate forward- and reverse-strand tracks per chromosome for "
-            "RepeatMasker .out TE hits and for GFF/GTF/BED annotation features."
+            "RepeatMasker .out TE hits and for GFF/GTF/BED/VCF annotation features."
         )
         self._collapse_overlaps = QCheckBox("Collapse overlapped TEs", self)
         self._collapse_overlaps.setChecked(bool(self._opts.collapse_overlaps))
