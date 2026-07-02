@@ -144,7 +144,7 @@ from teviewer.backends.separate_fasta import (
     separation_output_dir,
 )
 from teviewer.views.genome_dialog import GenomeDialog, is_genome_fasta
-from teviewer.views.define_database_dialog import DefineDatabaseDialog
+from teviewer.views.define_database_dialog import DefineDatabaseDialog, resolve_panel_database_path
 from teviewer.views.settings_dialog import (
     SettingsDialog,
     add_genome_to_history,
@@ -868,6 +868,7 @@ class MainWindow(QMainWindow):
         self._highlight_output_keys: set[str] = set()
         self._highlight_source_keys: set[str] = set()
         self._genome_dialog: GenomeDialog | None = None
+        self._define_database_dialog: DefineDatabaseDialog | None = None
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
         self._extend_options = load_extend_options()
@@ -924,7 +925,7 @@ class MainWindow(QMainWindow):
         self._file_list = FileListWidget()
         self._file_list.currentItemChanged.connect(self._on_file_current_item_changed)
         self._file_list.itemClicked.connect(self._on_file_item_clicked)
-        self._file_list.itemSelectionChanged.connect(self._sync_te_viz_dialog_input_from_files)
+        self._file_list.itemSelectionChanged.connect(self._sync_dialog_input_from_files)
         self._file_list.itemDoubleClicked.connect(self._on_file_double_clicked)
         self._file_list.open_in_preview_requested.connect(self._open_files_in_preview_tabs)
         self._file_list.delete_files_requested.connect(self._delete_selected_files)
@@ -1759,12 +1760,32 @@ class MainWindow(QMainWindow):
             self._set_status_message("Genome cleared", 5000)
 
     def _open_define_database(self) -> None:
+        if self._define_database_dialog is not None:
+            self._define_database_dialog.raise_()
+            self._define_database_dialog.activateWindow()
+            return
         dialog = DefineDatabaseDialog(self._project, self)
-        if dialog.exec():
+        self._define_database_dialog = dialog
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        dialog.finished.connect(self._on_define_database_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self._sync_define_database_dialog_from_files()
+
+    def _on_define_database_finished(self, result: int) -> None:
+        dialog = self._define_database_dialog
+        self._define_database_dialog = None
+        if dialog is None:
+            return
+        if result == int(QDialog.DialogCode.Accepted):
             self._project = dialog.project()
             self._persist_workspace()
             if self._preview_tabs is not None:
                 self._preview_tabs.refresh_similarity_databases()
+        dialog.deleteLater()
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self._project, self)
@@ -2471,6 +2492,40 @@ class MainWindow(QMainWindow):
                 return self._resolve_te_hit_input_path(path)
         return None
 
+    def _sync_dialog_input_from_files(self) -> None:
+        self._sync_te_viz_dialog_input_from_files()
+        self._sync_define_database_dialog_from_files()
+
+    def _guess_database_input_file(self) -> Path | None:
+        for path in self._selected_files():
+            if resolve_panel_database_path(path) is not None:
+                return path.expanduser().resolve()
+        current = self._file_list.currentItem()
+        if current is not None:
+            path = self._preview_path_from_item(current)
+            if path is not None and resolve_panel_database_path(path) is not None:
+                return path.expanduser().resolve()
+        return None
+
+    def _sync_define_database_dialog_from_files(self) -> None:
+        dialog = self._define_database_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        path = self._guess_database_input_file()
+        if path is not None:
+            dialog.apply_file_from_panel(path)
+        self._schedule_raise_define_database_dialog()
+
+    def _schedule_raise_define_database_dialog(self) -> None:
+        QTimer.singleShot(0, self._raise_define_database_dialog)
+
+    def _raise_define_database_dialog(self) -> None:
+        dialog = self._define_database_dialog
+        if dialog is not None and dialog.isVisible():
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+
     def _sync_te_viz_dialog_input_from_files(self) -> None:
         dialog = self._te_viz_input_dialog
         if dialog is None or not dialog.isVisible():
@@ -2718,8 +2773,9 @@ class MainWindow(QMainWindow):
         if path is not None:
             if self._genome_dialog is not None and is_genome_fasta(path):
                 self._genome_dialog.apply_file_from_panel(path)
-            self._sync_te_viz_dialog_input_from_files()
+            self._sync_dialog_input_from_files()
             self._schedule_raise_te_viz_dialog()
+            self._schedule_raise_define_database_dialog()
 
     def _on_file_double_clicked(self, item: QListWidgetItem) -> None:
         raw = item.data(ROLE_PATH)

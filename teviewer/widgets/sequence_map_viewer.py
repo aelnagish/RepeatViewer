@@ -413,8 +413,12 @@ class _SimilarityDbFlowWidget(QWidget):
         self._chips = list(chips)
         for chip in self._chips:
             chip.setParent(self)
+            if isinstance(chip, QLabel):
+                h_policy = QSizePolicy.Policy.Expanding
+            else:
+                h_policy = QSizePolicy.Policy.Maximum
             chip.setSizePolicy(
-                QSizePolicy.Policy.Maximum,
+                h_policy,
                 QSizePolicy.Policy.Fixed,
             )
             self._row.addWidget(chip, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -3076,7 +3080,6 @@ class SequenceMapPanel(QWidget):
 
         sim_row.addWidget(self._similarity_db_panel, 1)
 
-        sim_row.addStretch(1)
         self._similarity_ann_run_btn = QPushButton("Run", self._sim_row_container)
         self._similarity_ann_run_btn.setToolTip(
             "Run similarity annotation with the selected databases"
@@ -3662,8 +3665,13 @@ class SequenceMapPanel(QWidget):
                 "No databases defined. Add them in File → Define database.",
                 self._similarity_db_flow,
             )
-            self._similarity_db_empty.setWordWrap(True)
+            self._similarity_db_empty.setWordWrap(False)
+            self._similarity_db_empty.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
             self._similarity_db_flow.set_chips([self._similarity_db_empty])
+            self._similarity_ann_all_check.setParent(self._sim_row_container)
+            self._similarity_ann_all_check.hide()
             self._sync_similarity_annotation_all_check()
             return
 
@@ -3674,6 +3682,7 @@ class SequenceMapPanel(QWidget):
             self._similarity_db_rows.append((entry, check))
         chips.append(self._similarity_ann_all_check)
         self._similarity_db_flow.set_chips(chips)
+        self._similarity_ann_all_check.show()
         self._sync_similarity_annotation_all_check()
 
     def _selected_similarity_databases(self) -> list[SimilarityDatabaseRun]:

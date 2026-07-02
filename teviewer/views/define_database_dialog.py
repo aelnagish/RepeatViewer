@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -17,11 +17,13 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from teviewer.backends.database_prepare import (
+    CDD_MARKER,
     collect_prepare_targets,
     describe_database_problem,
 )
@@ -36,6 +38,52 @@ from teviewer.views.settings_dialog import _path_browse_row, _section_label, sav
 from teviewer.widgets.database_index_runner import find_database_index_runner
 
 _MAX_USER_DATABASE_NAME_LENGTH = 10
+
+_BLAST_DNA_INDEX_SUFFIXES = frozenset(
+    {".nhr", ".nin", ".nsq", ".ndb", ".not", ".nto", ".ntf", ".nog", ".nos"}
+)
+_BLAST_PROT_INDEX_SUFFIXES = frozenset(
+    {".phr", ".pin", ".psq", ".pog", ".pos", ".pod", ".pot", ".pdb", ".pto", ".ptf", ".pni"}
+)
+_HMM_INDEX_SUFFIXES = frozenset({".h3m", ".h3f", ".h3i", ".h3p"})
+_DATABASE_FASTA_SUFFIXES = frozenset({".fa", ".fasta", ".faa", ".fna", ".fas", ".hmm"})
+
+
+def resolve_panel_database_path(path: Path) -> tuple[str, Path] | None:
+    """Map a Files-panel entry to a CDD directory or user database file path."""
+    path = path.expanduser().resolve()
+    if not path.is_file():
+        return None
+    if path.name.lower() == CDD_MARKER.lower():
+        return ("cdd", path.parent)
+    suffix = path.suffix.lower()
+    if suffix == ".hmm":
+        return ("user", path)
+    if suffix in _HMM_INDEX_SUFFIXES:
+        base = path.with_suffix("")
+        if base.suffix.lower() == ".hmm":
+            return ("user", base)
+        return None
+    if suffix in _BLAST_DNA_INDEX_SUFFIXES | _BLAST_PROT_INDEX_SUFFIXES:
+        return ("user", path.with_suffix(""))
+    if suffix in _DATABASE_FASTA_SUFFIXES:
+        return ("user", path)
+    return None
+
+
+def infer_user_database_defaults(path: Path) -> tuple[str, str, bool]:
+    """Derive display name, database type, and HMM flag from a file path."""
+    suffix = path.suffix.lower()
+    name = path.stem[:_MAX_USER_DATABASE_NAME_LENGTH]
+    if suffix == ".hmm":
+        return name, DATABASE_TYPE_PROTEIN, True
+    if suffix in _HMM_INDEX_SUFFIXES and path.with_suffix("").suffix.lower() == ".hmm":
+        return path.with_suffix("").stem[:_MAX_USER_DATABASE_NAME_LENGTH], DATABASE_TYPE_PROTEIN, True
+    if suffix in _BLAST_DNA_INDEX_SUFFIXES or suffix == ".fna":
+        return name, DATABASE_TYPE_DNA, False
+    if suffix in _BLAST_PROT_INDEX_SUFFIXES or suffix == ".faa":
+        return name, DATABASE_TYPE_PROTEIN, False
+    return name, DATABASE_TYPE_PROTEIN, False
 
 
 class _UserDatabaseRow(QWidget):
@@ -52,15 +100,18 @@ class _UserDatabaseRow(QWidget):
         self._name = QLineEdit(self)
         self._name.setPlaceholderText("Database name")
         self._name.setMaxLength(_MAX_USER_DATABASE_NAME_LENGTH)
-        self._name.setFixedWidth(120)
+        self._name.setFixedWidth(96)
         self._name.setToolTip(f"Up to {_MAX_USER_DATABASE_NAME_LENGTH} characters.")
         self._path = QLineEdit(self)
         self._path.setPlaceholderText("Database file path")
+        self._path.setMinimumWidth(140)
         self._type = QComboBox(self)
         self._type.setFixedWidth(88)
         for db_type in USER_DATABASE_TYPES:
             self._type.addItem(db_type)
         self._hmm = QCheckBox("HMM", self)
+        self._hmm.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._hmm.setMinimumWidth(self._hmm.sizeHint().width() + 4)
         self._hmm.setToolTip(
             "Profile HMM model (hmmpress / pyhmmer). "
             "Protein HMM searches ORF amino acids; DNA HMM searches the nucleotide sequence."
@@ -76,6 +127,7 @@ class _UserDatabaseRow(QWidget):
         browse_btn = QPushButton("Browse", self)
         browse_btn.clicked.connect(self._browse)
         self._remove_btn = QPushButton("Remove", self)
+        self._remove_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._remove_btn.setVisible(removable)
         self._remove_btn.clicked.connect(self.remove_requested.emit)
 
@@ -95,8 +147,8 @@ class _UserDatabaseRow(QWidget):
         layout.addWidget(path_container, stretch=1)
         layout.addWidget(QLabel("Type", self))
         layout.addWidget(self._type)
-        layout.addWidget(self._hmm)
-        layout.addWidget(self._remove_btn)
+        layout.addWidget(self._hmm, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._remove_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def _browse(self) -> None:
         start = self._path.text().strip() or str(Path.home())
@@ -114,6 +166,17 @@ class _UserDatabaseRow(QWidget):
         )
         if picked:
             self._path.setText(picked)
+
+    def apply_path_from_panel(self, path: Path) -> None:
+        path = path.expanduser().resolve()
+        self._path.setText(str(path))
+        name, db_type, is_hmm = infer_user_database_defaults(path)
+        if not self._name.text().strip():
+            self._name.setText(name)
+        type_index = self._type.findText(db_type)
+        if type_index >= 0:
+            self._type.setCurrentIndex(type_index)
+        self._hmm.setChecked(is_hmm)
 
     def database(self) -> UserDatabase | None:
         name = self._name.text().strip()
@@ -139,6 +202,7 @@ class UserDatabasesWidget(QWidget):
     ) -> None:
         super().__init__(parent)
         self._rows: list[_UserDatabaseRow] = []
+        self._active_row: _UserDatabaseRow | None = None
 
         self._rows_layout = QVBoxLayout()
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -165,9 +229,34 @@ class UserDatabasesWidget(QWidget):
     def add_row(self, entry: UserDatabase | None = None) -> None:
         row = _UserDatabaseRow(self, initial=entry, removable=len(self._rows) >= 1)
         row.remove_requested.connect(lambda r=row: self._remove_row(r))
+        row._path.installEventFilter(self)
         self._rows.append(row)
         self._rows_layout.addWidget(row)
+        if self._active_row is None:
+            self._active_row = row
         self._refresh_remove_buttons()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        if event.type() == QEvent.Type.FocusIn:
+            for row in self._rows:
+                if watched is row._path:
+                    self._active_row = row
+                    break
+        return super().eventFilter(watched, event)
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        path = path.expanduser().resolve()
+        if not path.is_file():
+            return False
+        target = self._active_row
+        if target is None:
+            target = next((row for row in self._rows if not row._path.text().strip()), None)
+        if target is None and self._rows:
+            target = self._rows[-1]
+        if target is None:
+            return False
+        target.apply_path_from_panel(path)
+        return True
 
     def _remove_row(self, row: _UserDatabaseRow) -> None:
         if row not in self._rows or len(self._rows) <= 1:
@@ -197,7 +286,8 @@ class DefineDatabaseDialog(QDialog):
     def __init__(self, project: TEviewerProject, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Define databases")
-        self.setMinimumWidth(680)
+        self.setMinimumWidth(780)
+        self.resize(820, self.sizeHint().height())
         self._project = project
 
         self._cdd_path = QLineEdit()
@@ -239,6 +329,19 @@ class DefineDatabaseDialog(QDialog):
         layout.addWidget(_section_label("Other databases", self))
         layout.addWidget(self._user_databases)
         layout.addWidget(buttons)
+
+    def apply_file_from_panel(self, path: Path) -> bool:
+        """Fill CDD dir or the active user-database path from a Files panel click."""
+        resolved = resolve_panel_database_path(path)
+        if resolved is None:
+            return False
+        kind, target_path = resolved
+        self.raise_()
+        self.activateWindow()
+        if kind == "cdd":
+            self._cdd_path.setText(str(target_path))
+            return True
+        return self._user_databases.apply_path_from_panel(target_path)
 
     def accept(self) -> None:
         pending = self._pending_database_index_targets()
