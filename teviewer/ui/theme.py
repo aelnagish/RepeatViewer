@@ -22,6 +22,9 @@ def application_stylesheet(*, toolbar_font_pt: int) -> str:
         border-radius: 4px;
         outline: none;
     }}
+    QTreeWidget::item, QListWidget::item {{
+        padding: 2px 4px;
+    }}
     QTreeWidget::item:selected, QListWidget::item:selected {{
         background: #3d6ea8;
         color: white;

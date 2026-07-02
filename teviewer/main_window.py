@@ -523,6 +523,7 @@ class FileListWidget(QListWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSpacing(0)
         self.setDragEnabled(True)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
@@ -655,7 +656,8 @@ class FolderTreeWidget(QTreeWidget):
         self.setDropIndicatorShown(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setTextElideMode(Qt.TextElideMode.ElideNone)
-        self.setUniformRowHeights(True)
+        self.setUniformRowHeights(False)
+        self.setAnimated(False)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         header = self.header()
@@ -1094,6 +1096,10 @@ class MainWindow(QMainWindow):
         folders_layout.setContentsMargins(6, 4, 6, 4)
         folders_layout.setSpacing(2)
         folders_layout.addWidget(self._folder_tree, stretch=1)
+        self._folder_tree.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         left_btns = QHBoxLayout()
         left_btns.setContentsMargins(0, 0, 0, 0)
         left_btns.setSpacing(4)
@@ -1188,6 +1194,10 @@ class MainWindow(QMainWindow):
         self._preview_host.setMinimumHeight(200)
 
         files_layout.addWidget(self._file_list, stretch=1)
+        self._file_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
 
         central = QWidget()
         central.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
@@ -1954,11 +1964,24 @@ class MainWindow(QMainWindow):
                 select=False,
                 expand_root=False,
             )
+        self._strip_lazy_folder_placeholders()
         self._apply_expanded_folders(saved_expanded)
         if saved_last is not None:
             self._saved_last_folder = saved_last
         elif roots:
             self._saved_last_folder = roots[0].resolve()
+
+    def _strip_lazy_folder_placeholders(self) -> None:
+        def walk(item: QTreeWidgetItem) -> None:
+            for index in range(item.childCount() - 1, -1, -1):
+                child = item.child(index)
+                if self._is_lazy_folder_placeholder(child):
+                    item.removeChild(child)
+                else:
+                    walk(child)
+
+        for index in range(self._folder_tree.topLevelItemCount()):
+            walk(self._folder_tree.topLevelItem(index))
 
     def _apply_startup_folder(self) -> None:
         folder = self._saved_last_folder
@@ -2007,6 +2030,7 @@ class MainWindow(QMainWindow):
         apply_folder_item_color(root, folder)
         self._folder_tree.addTopLevelItem(root)
         self._populate_subfolders(folder, root)
+        self._set_folder_expandable(root, folder)
         self._folder_tree.resizeColumnToContents(0)
         root.setExpanded(expand_root)
         if select:
@@ -2045,10 +2069,11 @@ class MainWindow(QMainWindow):
         return False
 
     def _populate_folder_tree_children(self, item: QTreeWidgetItem) -> None:
-        if item.childCount() == 1 and self._is_lazy_folder_placeholder(item.child(0)):
-            item.removeChild(item.child(0))
-        elif item.childCount() > 0:
-            return
+        if item.childCount() > 0:
+            if item.childCount() == 1 and self._is_lazy_folder_placeholder(item.child(0)):
+                item.removeChild(item.child(0))
+            else:
+                return
         raw = item.data(0, ROLE_PATH)
         if not raw:
             return
@@ -2057,6 +2082,16 @@ class MainWindow(QMainWindow):
             return
         self._populate_subfolders(folder, item)
 
+    def _set_folder_expandable(self, item: QTreeWidgetItem, folder: Path) -> None:
+        if self._folder_has_subfolders(folder):
+            item.setChildIndicatorPolicy(
+                QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+            )
+        else:
+            item.setChildIndicatorPolicy(
+                QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless
+            )
+
     def _populate_subfolders(self, folder: Path, parent: QTreeWidgetItem) -> None:
         for child in self._list_subfolders(folder):
             item = QTreeWidgetItem([child.name])
@@ -2064,10 +2099,7 @@ class MainWindow(QMainWindow):
             item.setToolTip(0, str(child))
             apply_folder_item_color(item, child)
             parent.addChild(item)
-            if self._folder_has_subfolders(child):
-                placeholder = QTreeWidgetItem([""])
-                placeholder.setData(0, ROLE_LAZY_PLACEHOLDER, True)
-                item.addChild(placeholder)
+            self._set_folder_expandable(item, child)
         self._folder_tree.resizeColumnToContents(0)
 
     def _ensure_folder_tree_path(self, folder: Path) -> QTreeWidgetItem | None:
@@ -2102,6 +2134,8 @@ class MainWindow(QMainWindow):
         folder = folder.expanduser().resolve()
 
         def walk(item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+            if self._is_lazy_folder_placeholder(item):
+                return None
             raw = item.data(0, ROLE_PATH)
             if not raw:
                 return None

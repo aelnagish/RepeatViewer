@@ -137,6 +137,15 @@ _ANNOTATION_CONTROLS_STYLE = (
     " spacing: 4px;"
     " background: transparent;"
     " border: none;"
+    " min-height: 22px;"
+    "}"
+    " QWidget#annotationControlsPanel QCheckBox::indicator {"
+    " width: 14px;"
+    " height: 14px;"
+    "}"
+    " QWidget#annotationFeatureColumnCell {"
+    " background: transparent;"
+    " min-height: 22px;"
     "}"
     " QLabel#annotationJobStatus {"
     " color: palette(placeholder-text);"
@@ -187,6 +196,7 @@ _ANNOTATION_ROW_LABEL_WIDTH = 118
 _ANNOTATION_RUN_SETTINGS_WIDTH = 128
 _CONTROL_BAND_HEIGHT = 30
 _AUTO_ANN_CHECK_EXTRA_SPACING = 6
+_MIN_FEATURE_COLUMN_WIDTH = 54
 _SIMILARITY_DB_CHIP_SPACING = 4
 _MARQUEE_DRAG_THRESHOLD = 3.0
 _ANNOT_TRACK_VPAD = 8
@@ -284,6 +294,8 @@ class _ColumnCell(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("annotationFeatureColumnCell")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -303,7 +315,8 @@ class _ColumnCell(QWidget):
         )
 
     def set_column_width(self, width: int) -> None:
-        self.setFixedWidth(max(0, int(width)))
+        width = max(_MIN_FEATURE_COLUMN_WIDTH, int(width))
+        self.setFixedWidth(width)
 
 
 class _FeatureColumnRow(QWidget):
@@ -351,7 +364,7 @@ class _FeatureColumnRow(QWidget):
 
 
 def _column_content_width(widget: QWidget) -> int:
-    return max(0, widget.sizeHint().width())
+    return max(_MIN_FEATURE_COLUMN_WIDTH, widget.sizeHint().width())
 
 
 def _checkbox_label_offset(widget: QWidget) -> int:
@@ -2960,6 +2973,7 @@ class SequenceMapPanel(QWidget):
 
         controls = QWidget(self)
         controls.setObjectName("annotationControlsPanel")
+        self._controls_panel = controls
         controls.setMinimumWidth(0)
         controls.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -3139,6 +3153,7 @@ class SequenceMapPanel(QWidget):
         layout.setSpacing(0)
         layout.addWidget(self._map, stretch=1)
         layout.addWidget(controls)
+        controls.installEventFilter(self)
 
         if autoload:
             self.load_path(self._path)
@@ -3147,6 +3162,21 @@ class SequenceMapPanel(QWidget):
             self._similarity_ann_settings.show_database_name_on_track
         )
         self._install_annotation_shortcuts()
+        QTimer.singleShot(0, self._sync_annotation_control_rows)
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().showEvent(event)
+        QTimer.singleShot(0, self._sync_annotation_control_rows)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        if watched is getattr(self, "_controls_panel", None) and event.type() in (
+            QEvent.Type.FocusIn,
+            QEvent.Type.FocusOut,
+            QEvent.Type.Show,
+            QEvent.Type.Resize,
+        ):
+            QTimer.singleShot(0, self._sync_annotation_control_rows)
+        return super().eventFilter(watched, event)
 
     def _install_annotation_shortcuts(self) -> None:
         for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
@@ -3275,6 +3305,10 @@ class SequenceMapPanel(QWidget):
             self._add_feature_overflow.show()
             self._add_feature_columns.sync_column_widths(widths)
             self._auto_feature_columns.sync_column_widths(widths)
+        self._add_feature_columns.updateGeometry()
+        self._auto_feature_columns.updateGeometry()
+        self._add_row_container.updateGeometry()
+        self._auto_row_container.updateGeometry()
 
     def _sync_auto_annotation_row_alignment(self) -> None:
         self._sync_add_feature_row()
