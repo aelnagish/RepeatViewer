@@ -1767,26 +1767,15 @@ class MainWindow(QMainWindow):
                 self._preview_tabs.refresh_similarity_databases()
 
     def _open_settings(self) -> None:
-        self._persist_workspace()
-        roots_before = self._collect_root_folders()
-        last_before = self._current_folder
         dialog = SettingsDialog(self._project, self)
         if dialog.exec():
             self._project = dialog.apply_to_project()
-            if self._project.input_dir and self._project.input_dir.is_dir():
-                self._add_root_folder(self._project.input_dir, unhide=True)
             self._persist_workspace()
             new_size = load_toolbar_font_size()
             if new_size != self._toolbar_font_size:
                 self._toolbar_font_size = new_size
                 self._apply_toolbar_theme()
                 self._rebuild_top_toolbar()
-            self._load_initial_roots(reset=True)
-            if self._folder_tree.topLevelItemCount() == 0 and roots_before:
-                for p in roots_before:
-                    self._add_root_folder(p, unhide=True)
-                if last_before is not None and last_before.is_dir():
-                    self._navigate_to_folder(last_before)
             self._update_status()
             if self._preview_tabs is not None:
                 from teviewer.widgets.preview_zoom import (
