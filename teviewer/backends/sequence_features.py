@@ -222,10 +222,20 @@ def summarize_single_sequence_fasta(path: Path) -> SingleSequenceSummary:
 
 
 def format_single_sequence_summary_text(summary: SingleSequenceSummary) -> str:
+    length_part, gc_part = format_single_sequence_summary_parts(summary)
+    if gc_part is None:
+        return length_part
+    return f"{length_part} | {gc_part}"
+
+
+def format_single_sequence_summary_parts(
+    summary: SingleSequenceSummary,
+) -> tuple[str, str | None]:
     length_text = f"{summary.length:,}"
+    length_part = f"Length: {length_text} bp"
     if summary.gc_percent is None:
-        return f"Length: {length_text}"
-    return f"Length: {length_text} bp  ·  GC: {summary.gc_percent:.1f}%"
+        return length_part, None
+    return length_part, f"GC: {summary.gc_percent:.1f}%"
 
 
 def format_multi_sequence_fasta_summary_text(sequence_count: int) -> str:

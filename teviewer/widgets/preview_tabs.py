@@ -802,15 +802,18 @@ class FilePreviewPage(QWidget):
             self._ensure_annotation_panel()
             self._fasta_tabs.setCurrentIndex(1)
             self._fasta_tabs.blockSignals(False)
+            self._refresh_sequence_info_bar()
             QTimer.singleShot(0, self._open_annotation_tab)
             return
         self._fasta_tabs.setCurrentIndex(0)
+        self._refresh_sequence_info_bar()
         QTimer.singleShot(0, self._refresh_text_view)
 
     def _open_annotation_tab(self) -> None:
         panel = self._ensure_annotation_panel()
         if self._fasta_tabs.currentIndex() != 1:
             self._fasta_tabs.setCurrentIndex(1)
+        self._refresh_sequence_info_bar()
         panel.open_annotation_tab()
 
     def refresh_nucleotide_colors(self) -> None:
@@ -835,6 +838,7 @@ class FilePreviewPage(QWidget):
         if self._annotation_panel is not None:
             self._annotation_panel.load_path(path)
         self._activate_fasta_tab(load_default_fasta_preview_tab())
+        self._refresh_sequence_info_bar()
 
     def _load(self) -> None:
         path = self.path
