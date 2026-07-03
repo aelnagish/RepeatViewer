@@ -73,9 +73,11 @@ from teviewer.backends.sequence_features import (
     SequenceFeature,
     SequenceMapData,
     features_gff_path,
+    format_single_sequence_summary_text,
     load_sequence_map_data,
     resolve_features_gff_path,
     save_annotations,
+    summarize_single_sequence_fasta,
 )
 from teviewer.database_settings import load_similarity_annotation_databases
 from teviewer.backends.similarity_annotation_settings import (
@@ -300,7 +302,6 @@ class _ColumnCell(QWidget):
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
-        self._layout.addStretch(1)
         self._child: QWidget | None = None
 
     def set_widget(self, widget: QWidget) -> None:
@@ -311,8 +312,9 @@ class _ColumnCell(QWidget):
         self._layout.addWidget(
             widget,
             0,
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
+        self._layout.addStretch(1)
 
     def set_column_width(self, width: int) -> None:
         width = max(_MIN_FEATURE_COLUMN_WIDTH, int(width))
@@ -346,7 +348,7 @@ class _FeatureColumnRow(QWidget):
                 cell,
                 0,
                 column,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             )
         cell.set_widget(widget)
 
@@ -1926,7 +1928,7 @@ class SequenceMapWidget(QWidget):
         self._zoom_slider.setObjectName("annotationZoomSlider")
         self._zoom_slider.setRange(0, 100)
         self._zoom_slider.setValue(0)
-        self._zoom_slider.setMinimumWidth(120)
+        self._zoom_slider.setMinimumWidth(72)
         self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
         self._zoom_slider.setToolTip(
             "Left: fit full sequence in window. Right: maximum zoom-in."
@@ -1938,9 +1940,17 @@ class SequenceMapWidget(QWidget):
         zoom_strip_layout.addWidget(zoom_out_btn)
         zoom_strip_layout.addWidget(zoom_in_btn)
         zoom_strip_layout.addWidget(self._zoom_slider, 1)
-        self._color_bases_cb = QCheckBox("Color nucleotides")
-        self._color_bases_cb.setChecked(True)
-        self._color_bases_cb.toggled.connect(self._on_color_bases_toggled)
+
+        self._sequence_stats_label = QLabel("", self)
+        self._sequence_stats_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._sequence_stats_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._sequence_stats_label.setStyleSheet(
+            "QLabel { color: palette(text); padding: 0 2px; }"
+        )
 
         self._font_size = QSpinBox()
         self._font_size.setRange(_MIN_NUC_FONT_PT, _MAX_NUC_FONT_PT)
@@ -1974,7 +1984,13 @@ class SequenceMapWidget(QWidget):
         zoom_row.addWidget(select_btn)
         zoom_row.addWidget(QLabel("Font:"))
         zoom_row.addWidget(self._font_size)
-        zoom_row.addWidget(self._color_bases_cb)
+        zoom_row.addWidget(self._sequence_stats_label)
+
+        self._canvas = SequenceMapCanvas(self)
+        self._canvas.set_color_bases(True)
+        self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._canvas.selectionChanged.connect(self._on_selection_changed)
+        self._canvas.featureClicked.connect(self._on_canvas_feature_clicked)
 
         self._ruler = ViewportRulerWidget(self)
         self._annot_track = AnnotationTrackWidget(self)
@@ -1991,11 +2007,6 @@ class SequenceMapWidget(QWidget):
         header_layout.setSpacing(0)
         header_layout.addWidget(self._overview)
         header_layout.addWidget(self._ruler)
-
-        self._canvas = SequenceMapCanvas(self)
-        self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._canvas.selectionChanged.connect(self._on_selection_changed)
-        self._canvas.featureClicked.connect(self._on_canvas_feature_clicked)
 
         self._canvas_row = QWidget(self)
         self._canvas_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -2474,8 +2485,9 @@ class SequenceMapWidget(QWidget):
         self._annot_track.set_show_similarity_database_name(show)
         self.update()
 
-    def _on_color_bases_toggled(self, checked: bool) -> None:
-        self._canvas.set_color_bases(checked)
+    def set_sequence_summary_text(self, text: str) -> None:
+        self._sequence_stats_label.setText(text.strip())
+        self._sequence_stats_label.setVisible(bool(text.strip()))
 
     def _on_font_size_changed(self, point_size: int) -> None:
         self._canvas.set_font_point_size(point_size)
@@ -3071,6 +3083,13 @@ class SequenceMapPanel(QWidget):
         )
         sim_row.addWidget(homology_title, 0, Qt.AlignmentFlag.AlignVCenter)
 
+        self._similarity_feature_columns = _FeatureColumnRow(self._sim_row_container)
+        self._similarity_db_flow = _SimilarityDbFlowWidget(self._similarity_feature_columns)
+        self._similarity_feature_columns.place(0, self._similarity_db_flow)
+        sim_row.addWidget(self._similarity_feature_columns, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        sim_row.addStretch(1)
+
         self._similarity_ann_all_check = QCheckBox("All", self._sim_row_container)
         self._similarity_ann_all_check.setToolTip("Select or clear all similarity databases")
         self._similarity_ann_all_check.setSizePolicy(
@@ -3078,21 +3097,6 @@ class SequenceMapPanel(QWidget):
             QSizePolicy.Policy.Fixed,
         )
         self._similarity_ann_all_check.toggled.connect(self._on_similarity_annotation_all_toggled)
-
-        self._similarity_db_panel = QWidget(self._sim_row_container)
-        self._similarity_db_panel.setMinimumWidth(0)
-        self._similarity_db_panel.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        db_panel_layout = QHBoxLayout(self._similarity_db_panel)
-        db_panel_layout.setContentsMargins(0, 0, 0, 0)
-        db_panel_layout.setSpacing(0)
-
-        self._similarity_db_flow = _SimilarityDbFlowWidget(self._similarity_db_panel)
-        db_panel_layout.addWidget(self._similarity_db_flow)
-
-        sim_row.addWidget(self._similarity_db_panel, 1)
 
         self._similarity_ann_run_btn = QPushButton("Run", self._sim_row_container)
         self._similarity_ann_run_btn.setToolTip(
@@ -3115,13 +3119,15 @@ class SequenceMapPanel(QWidget):
 
         self._action_row_container, action_row = _control_band(controls)
         self._action_row_container.setObjectName("annotationActionBand")
-        action_row.setSpacing(10)
-        action_label_spacer = QWidget(self._action_row_container)
-        action_label_spacer.setFixedWidth(_ANNOTATION_ROW_LABEL_WIDTH)
-        action_row.addWidget(action_label_spacer, 0, Qt.AlignmentFlag.AlignVCenter)
-        fit_btn = QPushButton("Fit window", self._action_row_container)
-        fit_btn.setToolTip("Scale the sequence so the full length fits in the visible width")
-        fit_btn.clicked.connect(self._map.fit_window)
+        action_row.setSpacing(6)
+        self._action_row_label = _annotation_row_label("", self._action_row_container)
+        action_row.addWidget(self._action_row_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._fit_control = _AddFeatureControl("Fit window", self._action_row_container)
+        self._fit_control.setToolTip(
+            "Scale the sequence so the full length fits in the visible width"
+        )
+        self._fit_control.clicked.connect(self._map.fit_window)
+        action_row.addWidget(self._fit_control, 0, Qt.AlignmentFlag.AlignVCenter)
         del_btn = QPushButton("Delete feature", self._action_row_container)
         del_btn.setToolTip("Delete selected feature(s). Select on the track below, then press Delete or Backspace.")
         del_btn.clicked.connect(lambda: self._delete_feature(confirm_empty=True))
@@ -3130,13 +3136,13 @@ class SequenceMapPanel(QWidget):
         restore_btn.clicked.connect(self._restore_features)
         color_btn = QPushButton("Color", self._action_row_container)
         color_btn.setToolTip(
-            "Set colors for feature types (LTR, TIR, ORF, …) and similarity databases"
+            "Set colors for feature types, similarity databases, and nucleotides (A/C/G/T)"
         )
         color_btn.clicked.connect(self._open_element_colors_dialog)
         save_btn = QPushButton("Save", self._action_row_container)
         save_btn.setToolTip("Write annotation changes to the JSON sidecar and GFF3 file")
         save_btn.clicked.connect(lambda: self._save_annotations(silent=True))
-        for btn in (fit_btn, del_btn, restore_btn, color_btn, save_btn):
+        for btn in (del_btn, restore_btn, color_btn, save_btn):
             action_row.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
         action_row.addStretch()
         self._annotation_job_status = QLabel("", self._action_row_container)
@@ -3280,9 +3286,15 @@ class SequenceMapPanel(QWidget):
             control.set_label_offset(label_offset)
             column = _ANNOTATION_FEATURE_COLUMN.get(label, 0)
             widths[column] = max(widths[column], _column_content_width(control))
+        self._fit_control.set_label_offset(label_offset)
         for mode, check in self._auto_ann_checks.items():
             column = _AUTO_CHECK_COLUMN[mode]
             widths[column] = max(widths[column], _column_content_width(check))
+        if hasattr(self, "_similarity_db_flow"):
+            widths[0] = max(
+                widths[0],
+                _column_content_width(self._similarity_db_flow),
+            )
         spacing = _AUTO_ANN_CHECK_EXTRA_SPACING
         add_total = sum(widths) + spacing * max(0, _ANNOTATION_FEATURE_COLUMN_COUNT - 1)
         if add_total <= grid_budget:
@@ -3295,6 +3307,7 @@ class SequenceMapPanel(QWidget):
             self._add_feature_overflow.hide()
             self._add_feature_columns.sync_column_widths(widths)
             self._auto_feature_columns.sync_column_widths(widths)
+            self._similarity_feature_columns.sync_column_widths(widths)
         else:
             for control in self._add_feature_buttons:
                 control.hide()
@@ -3305,8 +3318,10 @@ class SequenceMapPanel(QWidget):
             self._add_feature_overflow.show()
             self._add_feature_columns.sync_column_widths(widths)
             self._auto_feature_columns.sync_column_widths(widths)
+            self._similarity_feature_columns.sync_column_widths(widths)
         self._add_feature_columns.updateGeometry()
         self._auto_feature_columns.updateGeometry()
+        self._similarity_feature_columns.updateGeometry()
         self._add_row_container.updateGeometry()
         self._auto_row_container.updateGeometry()
 
@@ -3381,6 +3396,7 @@ class SequenceMapPanel(QWidget):
                 dialog.new_database_colors(),
             )
         self._refresh_similarity_database_rows()
+        self._map.refresh_nucleotide_colors()
         self._map.update()
         self.statusMessage.emit("Element colors updated.")
 
@@ -3447,6 +3463,15 @@ class SequenceMapPanel(QWidget):
             return
         self._map.load(data)
         self._feature_undo_stack.clear()
+        self.refresh_sequence_summary()
+
+    def refresh_sequence_summary(self) -> None:
+        try:
+            summary = summarize_single_sequence_fasta(self._path)
+        except (OSError, ValueError):
+            self._map.set_sequence_summary_text("")
+            return
+        self._map.set_sequence_summary_text(format_single_sequence_summary_text(summary))
 
     def reload_annotations(self) -> None:
         """Reload features from the companion GFF3 on disk (Annotation tab open)."""

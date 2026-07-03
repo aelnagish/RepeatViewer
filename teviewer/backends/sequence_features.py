@@ -228,6 +228,10 @@ def format_single_sequence_summary_text(summary: SingleSequenceSummary) -> str:
     return f"Length: {length_text} bp  ·  GC: {summary.gc_percent:.1f}%"
 
 
+def format_multi_sequence_fasta_summary_text(sequence_count: int) -> str:
+    return f"Sequence number: {sequence_count:,}"
+
+
 def _infer_feature_color(name: str, feature_type: str) -> str:
     """Best-effort color when loading annotations without an explicit color."""
     if feature_type == "domain" and ": " in name:

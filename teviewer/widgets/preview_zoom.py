@@ -140,8 +140,49 @@ def save_color_blind_nucleotide_scheme(enabled: bool) -> None:
     s.endGroup()
 
 
-def nucleotide_base_color_map() -> dict[str, tuple[str, str]]:
-    """Return bg/fg hex colors for A/C/G/T/U/N."""
+def _scheme_base_colors() -> dict[str, tuple[str, str]]:
     if load_color_blind_nucleotide_scheme():
         return dict(_COLORBLIND_BASE_COLORS)
     return dict(_STANDARD_BASE_COLORS)
+
+
+def load_custom_nucleotide_backgrounds() -> dict[str, str]:
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    custom: dict[str, str] = {}
+    for base in ("A", "C", "G", "T"):
+        raw = s.value(f"nucleotide_{base}_bg")
+        if raw:
+            custom[base] = str(raw)
+    s.endGroup()
+    return custom
+
+
+def save_custom_nucleotide_backgrounds(colors: dict[str, str]) -> None:
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    for base in ("A", "C", "G", "T"):
+        s.remove(f"nucleotide_{base}_bg")
+    for base, bg in colors.items():
+        if base in {"A", "C", "G", "T"} and bg:
+            s.setValue(f"nucleotide_{base}_bg", str(bg))
+    s.endGroup()
+
+
+def clear_custom_nucleotide_backgrounds() -> None:
+    save_custom_nucleotide_backgrounds({})
+
+
+def default_nucleotide_backgrounds() -> dict[str, str]:
+    return {base: colors[0] for base, colors in _scheme_base_colors().items() if base in "ACGT"}
+
+
+def nucleotide_base_color_map() -> dict[str, tuple[str, str]]:
+    """Return bg/fg hex colors for A/C/G/T/U/N."""
+    colors = _scheme_base_colors()
+    for base, bg in load_custom_nucleotide_backgrounds().items():
+        if base in colors:
+            colors[base] = (bg, colors[base][1])
+    if "T" in colors:
+        colors["U"] = colors["T"]
+    return colors

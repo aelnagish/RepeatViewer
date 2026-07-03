@@ -30,6 +30,11 @@ from teviewer.backends.annotation_colors import (
 )
 from teviewer.backends.similarity_annotation import SIMILARITY_DB_COLORS
 from teviewer.database_settings import load_similarity_annotation_databases
+from teviewer.widgets.preview_zoom import (
+    default_nucleotide_backgrounds,
+    load_custom_nucleotide_backgrounds,
+    save_custom_nucleotide_backgrounds,
+)
 
 
 class _ColorPickerRow(QWidget):
@@ -88,6 +93,7 @@ class AnnotationElementColorsDialog(QDialog):
         self.resize(420, 520)
 
         self._feature_rows: dict[str, _ColorPickerRow] = {}
+        self._nucleotide_rows: dict[str, _ColorPickerRow] = {}
         self._database_rows: dict[str, _ColorPickerRow] = {}
         databases = load_similarity_annotation_databases()
 
@@ -107,6 +113,18 @@ class AnnotationElementColorsDialog(QDialog):
             self._feature_rows[feature_type] = row
             feature_form.addRow(row)
         body_layout.addLayout(feature_form)
+
+        body_layout.addWidget(self._section_label("Nucleotides"))
+        nucleotide_form = QFormLayout()
+        nucleotide_form.setSpacing(8)
+        custom_nucleotide = load_custom_nucleotide_backgrounds()
+        scheme_nucleotide = default_nucleotide_backgrounds()
+        for base in ("A", "C", "G", "T"):
+            color = custom_nucleotide.get(base, scheme_nucleotide[base])
+            row = _ColorPickerRow(base, color, body)
+            self._nucleotide_rows[base] = row
+            nucleotide_form.addRow(row)
+        body_layout.addLayout(nucleotide_form)
 
         body_layout.addWidget(self._section_label("Similarity databases"))
         database_form = QFormLayout()
@@ -167,6 +185,8 @@ class AnnotationElementColorsDialog(QDialog):
         for index, name in enumerate(self._database_rows):
             row = self._database_rows[name]
             row.set_color_hex(SIMILARITY_DB_COLORS[index % len(SIMILARITY_DB_COLORS)])
+        for base, row in self._nucleotide_rows.items():
+            row.set_color_hex(default_nucleotide_backgrounds()[base])
 
     def apply_to_current_sequence(self) -> bool:
         return self._apply_current.isChecked()
@@ -177,6 +197,9 @@ class AnnotationElementColorsDialog(QDialog):
     def new_database_colors(self) -> dict[str, str]:
         return {name: row.color_hex() for name, row in self._database_rows.items()}
 
+    def new_nucleotide_backgrounds(self) -> dict[str, str]:
+        return {base: row.color_hex() for base, row in self._nucleotide_rows.items()}
+
     def old_feature_type_colors(self) -> dict[str, str]:
         return dict(self._old_feature_colors)
 
@@ -186,6 +209,7 @@ class AnnotationElementColorsDialog(QDialog):
     def accept(self) -> None:
         save_feature_type_colors(self.new_feature_type_colors())
         save_similarity_database_colors(self.new_database_colors())
+        save_custom_nucleotide_backgrounds(self.new_nucleotide_backgrounds())
         super().accept()
 
 

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from teviewer.backends.bismark_cov import is_bismark_cov_file
 from teviewer.backends.sequence_features import (
+    format_multi_sequence_fasta_summary_text,
     format_single_sequence_summary_text,
     summarize_single_sequence_fasta,
 )
@@ -62,9 +63,13 @@ def _count_fasta_sequences_fast(path: Path) -> int:
     return count
 
 
-def _is_single_fasta_file(path: Path) -> bool:
+def _is_fasta_file(path: Path) -> bool:
     suffix = path.suffix.lower()
-    if suffix not in _FASTA_SUFFIXES and not path.name.lower().endswith(".fa.gz"):
+    return suffix in _FASTA_SUFFIXES or path.name.lower().endswith(".fa.gz")
+
+
+def _is_single_fasta_file(path: Path) -> bool:
+    if not _is_fasta_file(path):
         return False
     return _count_fasta_sequences_fast(path) == 1
 
@@ -610,6 +615,7 @@ class FilePreviewPage(QWidget):
     def _on_fasta_tab_changed(self, index: int) -> None:
         if not self._single_fasta_mode:
             return
+        self._refresh_sequence_info_bar()
         if index == 0:
             QTimer.singleShot(0, self._refresh_text_view)
         elif index == 1:
@@ -742,23 +748,41 @@ class FilePreviewPage(QWidget):
 
     def _set_single_fasta_mode(self, enabled: bool) -> None:
         self._single_fasta_mode = enabled
-        if enabled:
-            self._refresh_sequence_info_bar()
-        else:
-            self._sequence_info_bar.clear()
-            self._sequence_info_bar.hide()
         self._apply_view_mode()
+        self._refresh_sequence_info_bar()
 
     def _refresh_sequence_info_bar(self) -> None:
-        if not self._single_fasta_mode:
+        path = self.path
+        if (
+            self._single_fasta_mode
+            and self.is_annotation_preview_active()
+            and self._annotation_panel is not None
+        ):
+            self._sequence_info_bar.hide()
+            self._annotation_panel.refresh_sequence_summary()
+            return
+
+        if not _is_fasta_file(path):
+            self._sequence_info_bar.clear()
             self._sequence_info_bar.hide()
             return
-        try:
-            summary = summarize_single_sequence_fasta(self.path)
-        except (OSError, ValueError):
+
+        sequence_count = _count_fasta_sequences_fast(path)
+        if sequence_count <= 0:
             self._sequence_info_bar.hide()
             return
-        self._sequence_info_bar.setText(format_single_sequence_summary_text(summary))
+
+        if sequence_count == 1:
+            try:
+                summary = summarize_single_sequence_fasta(path)
+            except (OSError, ValueError):
+                self._sequence_info_bar.hide()
+                return
+            self._sequence_info_bar.setText(format_single_sequence_summary_text(summary))
+        else:
+            self._sequence_info_bar.setText(
+                format_multi_sequence_fasta_summary_text(sequence_count)
+            )
         self._sequence_info_bar.show()
 
     def _ensure_annotation_panel(self) -> SequenceMapPanel:
@@ -808,7 +832,6 @@ class FilePreviewPage(QWidget):
         cursor = self._fasta_text.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
         self._fasta_text.setTextCursor(cursor)
-        self._refresh_sequence_info_bar()
         if self._annotation_panel is not None:
             self._annotation_panel.load_path(path)
         self._activate_fasta_tab(load_default_fasta_preview_tab())
