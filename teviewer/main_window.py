@@ -518,6 +518,7 @@ class FileListWidget(QListWidget):
     duplicate_files_requested = Signal(list)
     rename_file_requested = Signal(Path)
     separate_fasta_requested = Signal(Path)
+    separate_fasta_subfolders_requested = Signal(Path)
     blast_genome_map_requested = Signal(Path)
     blast_divergence_requested = Signal(Path)
 
@@ -545,8 +546,12 @@ class FileListWidget(QListWidget):
                     seq_n = 0
                 if seq_n > 1:
                     menu.addAction(
-                        f"Separate {seq_n} FASTA sequences",
+                        f"Separate sequence into {seq_n} files",
                         lambda: self.separate_fasta_requested.emit(path),
+                    )
+                    menu.addAction(
+                        f"Separate sequence into {seq_n} folders",
+                        lambda: self.separate_fasta_subfolders_requested.emit(path),
                     )
                 blast_txt = find_blast_table_for_query(path)
                 if blast_txt is not None:
@@ -943,6 +948,9 @@ class MainWindow(QMainWindow):
         self._file_list.duplicate_files_requested.connect(self._duplicate_selected_files)
         self._file_list.rename_file_requested.connect(self._rename_file)
         self._file_list.separate_fasta_requested.connect(self._separate_fasta_file)
+        self._file_list.separate_fasta_subfolders_requested.connect(
+            self._separate_fasta_to_subfolders_file,
+        )
         self._file_list.blast_genome_map_requested.connect(
             lambda p: self._open_te_density_plot_dialog(input_file=p),
         )
@@ -4548,7 +4556,7 @@ class MainWindow(QMainWindow):
             walk(self._folder_tree.topLevelItem(index))
         self._folder_tree.resizeColumnToContents(0)
 
-    def _separate_fasta_file(self, path: Path) -> None:
+    def _separate_fasta_file(self, path: Path, *, subfolder_per_sequence: bool = False) -> None:
         path = path.expanduser().resolve()
         if path.suffix.lower() not in _FASTA_SUFFIXES:
             QMessageBox.warning(self, "Not a FASTA file", "Select a .fa / .fasta file.")
@@ -4572,11 +4580,22 @@ class MainWindow(QMainWindow):
             if output_dir.name == SEPARATED_TE_DIR
             else f"Sequence_name_mapping_{sanitize_name(path.stem)}.txt will be written next to the input file."
         )
+        if subfolder_per_sequence:
+            title = "Separate into subfolders"
+            layout_note = (
+                f"Each sequence will be written to its own subfolder under:\n{output_dir}\n"
+                f"(e.g. {output_dir.name}/sequence_name/sequence_name.fa)\n\n"
+            )
+            done_title = "Separate into subfolders completed"
+        else:
+            title = "Separate FASTA sequences"
+            layout_note = f"into separate files under:\n{output_dir}\n\n"
+            done_title = "Separate FASTA completed"
         answer = QMessageBox.question(
             self,
-            "Separate FASTA sequences",
+            title,
             f"Split {seq_count} sequences from\n{path.name}\n\n"
-            f"into separate files under:\n{output_dir}\n\n"
+            f"{layout_note}"
             f"Special characters in headers will be sanitized. {mapping_note}\n\n"
             "Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -4586,7 +4605,11 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            created, written = separate_sequences(path, output_dir)
+            created, written = separate_sequences(
+                path,
+                output_dir,
+                subfolder_per_sequence=subfolder_per_sequence,
+            )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Separate FASTA failed", str(exc))
             return
@@ -4597,15 +4620,17 @@ class MainWindow(QMainWindow):
             new_outputs=created,
             source_files=[path],
         )
-        self._set_status_message(
-            f"Created {written} single-sequence file(s) in {output_dir.name}/",
-            10000,
-        )
-        QMessageBox.information(
-            self,
-            "Separate FASTA completed",
-            f"Wrote {written} file(s) to:\n{output_dir}",
-        )
+        if subfolder_per_sequence:
+            status = f"Created {written} subfolder(s) in {output_dir.name}/"
+            done_msg = f"Wrote {written} sequence(s), each in its own subfolder under:\n{output_dir}"
+        else:
+            status = f"Created {written} single-sequence file(s) in {output_dir.name}/"
+            done_msg = f"Wrote {written} file(s) to:\n{output_dir}"
+        self._set_status_message(status, 10000)
+        QMessageBox.information(self, done_title, done_msg)
+
+    def _separate_fasta_to_subfolders_file(self, path: Path) -> None:
+        self._separate_fasta_file(path, subfolder_per_sequence=True)
 
     def _duplicate_selected_files(self, paths: list[Path]) -> None:
         if not paths:

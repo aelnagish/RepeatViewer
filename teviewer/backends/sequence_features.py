@@ -186,6 +186,48 @@ def load_single_sequence_fasta(path: Path) -> tuple[str, str]:
     return str(record.id), seq
 
 
+@dataclass(frozen=True)
+class SingleSequenceSummary:
+    sequence_id: str
+    length: int
+    gc_percent: float | None = None
+
+
+_DNA_LETTERS = frozenset("ACGTN")
+
+
+def _gc_percent_for_dna_sequence(sequence: str) -> float | None:
+    """Return G+C percent on unambiguous A/C/G/T bases, or None if not DNA-like."""
+    letters = [base for base in sequence.upper() if base.isalpha()]
+    if not letters:
+        return None
+    dna_like = sum(1 for base in letters if base in _DNA_LETTERS)
+    if dna_like / len(letters) < 0.85:
+        return None
+    acgt = [base for base in letters if base in "ACGT"]
+    if not acgt:
+        return None
+    gc = sum(1 for base in acgt if base in "GC")
+    return 100.0 * gc / len(acgt)
+
+
+def summarize_single_sequence_fasta(path: Path) -> SingleSequenceSummary:
+    """Length and optional GC content for a one-record FASTA file."""
+    sequence_id, sequence = load_single_sequence_fasta(path)
+    return SingleSequenceSummary(
+        sequence_id=sequence_id,
+        length=len(sequence),
+        gc_percent=_gc_percent_for_dna_sequence(sequence),
+    )
+
+
+def format_single_sequence_summary_text(summary: SingleSequenceSummary) -> str:
+    length_text = f"{summary.length:,}"
+    if summary.gc_percent is None:
+        return f"Length: {length_text}"
+    return f"Length: {length_text} bp  ·  GC: {summary.gc_percent:.1f}%"
+
+
 def _infer_feature_color(name: str, feature_type: str) -> str:
     """Best-effort color when loading annotations without an explicit color."""
     if feature_type == "domain" and ": " in name:
