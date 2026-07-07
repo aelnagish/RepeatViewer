@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,6 +34,7 @@ from teviewer.backends.teaid_plotter import (
 )
 from teviewer.backends.job_cancel import JobCancelledError, JobCancellation, check_cancelled
 from teviewer.backends.thread_budget import analysis_threads_per_job
+from teviewer.backends.tsd_search import TSD_identifier
 from teviewer.job_options import (
     BlastOptions,
     ConsensusOptions,
@@ -40,6 +42,7 @@ from teviewer.job_options import (
     FlexidotOptions,
     MsaCleanOptions,
     TeaAidOptions,
+    TsdSearchOptions,
 )
 from teviewer.pan_genome import genome_output_suffix
 from teviewer.backends.te_annotation_batch import TeAnnotationOptions, run_te_annotation_on_fasta
@@ -59,6 +62,7 @@ _DISPLAY_NAMES = {
     "consensus_generation": "Consensus",
     "flexidot": "Flexidot",
     "te_annotation": "TE annotation",
+    "tsd_search": "TSD search",
 }
 
 
@@ -145,6 +149,29 @@ def flexidot_output_stem(seq_files: list[Path], genome_label: str = "") -> str:
     if len(seq_files) >= 2:
         return f"{stem}_flexidot_multi{suffix}"
     return f"{stem}_flexidot{suffix}"
+
+
+_FLEXIDOT_EXTRA_PNG_RE = re.compile(
+    r".+_flexidot(?:_multi)?.*_(\d+)\.png$",
+    re.IGNORECASE,
+)
+
+
+def is_flexidot_extra_plot_file(path: Path) -> bool:
+    """True for secondary Flexidot PNGs (``*_flexidot_2.png``, etc.)."""
+    match = _FLEXIDOT_EXTRA_PNG_RE.match(path.name)
+    return match is not None and int(match.group(1)) >= 2
+
+
+def _remove_flexidot_extra_pngs(output_dir: Path, base: str) -> None:
+    """Delete numbered Flexidot extras left from older runs."""
+    output_dir = output_dir.expanduser().resolve()
+    for index in range(2, 20):
+        extra = output_dir / f"{base}_{index}.png"
+        try:
+            extra.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _genome_work_items(
@@ -248,26 +275,33 @@ def finalize_flexidot_outputs(
     seq_files: list[Path],
     before: set[Path],
 ) -> list[str]:
-    """Rename new Flexidot PNGs to ``{stem}_flexidot[.png|_N.png]``."""
+    """Keep the primary Flexidot PNG as ``{stem}_flexidot.png``; drop extra panels."""
     output_dir = output_dir.expanduser().resolve()
     new_files = _flexidot_pngs_for_run(output_dir, before, seq_files)
     if not new_files:
         return []
 
     base = flexidot_output_stem(seq_files)
-    created: list[str] = []
-    dest_paths: list[Path] = []
-    for index, src in enumerate(new_files):
-        dest = output_dir / (f"{base}.png" if index == 0 else f"{base}_{index + 1}.png")
-        if dest.exists():
-            dest.unlink()
-        if not src.is_file():
-            continue
-        src.rename(dest)
-        dest_paths.append(dest)
-        created.append(str(dest.resolve()))
-    cleanup_flexidot_intermediates(output_dir, dest_paths)
-    return created
+    _remove_flexidot_extra_pngs(output_dir, base)
+
+    src = new_files[0]
+    dest = output_dir / f"{base}.png"
+    if dest.exists():
+        dest.unlink()
+    if not src.is_file():
+        cleanup_flexidot_intermediates(output_dir, [])
+        return []
+
+    src.rename(dest)
+    for extra in new_files[1:]:
+        try:
+            if extra.is_file():
+                extra.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    cleanup_flexidot_intermediates(output_dir, [dest])
+    return [str(dest.resolve())]
 
 
 def effective_batch_workers(requested: int, num_sequences: int) -> int:
@@ -353,6 +387,7 @@ def run_on_sequence(
     msa_clean_options: MsaCleanOptions | None = None,
     consensus_options: ConsensusOptions | None = None,
     te_annotation_options: TeAnnotationOptions | None = None,
+    tsd_search_options: TsdSearchOptions | None = None,
     cancel: JobCancellation | None = None,
 ) -> list[str]:
     """Run one tool on one FASTA. Returns list of created output paths (strings)."""
@@ -599,6 +634,27 @@ def run_on_sequence(
         )
         created.extend(str(p) for p in outs)
 
+    elif func_name == "tsd_search":
+        tsd_opts = tsd_search_options or TsdSearchOptions()
+        if tsd_opts.left_boundary <= 0 or tsd_opts.right_boundary <= 0:
+            raise RuntimeError(
+                "Set left and right MSA boundary columns before running TSD search."
+            )
+        if tsd_opts.left_boundary >= tsd_opts.right_boundary:
+            raise RuntimeError("Left boundary must be less than the right boundary.")
+        out_file = out_dir / f"{seq_path.stem}.tsd_search.txt"
+        TSD_identifier(
+            tsd_opts.left_boundary,
+            tsd_opts.right_boundary,
+            tsd_opts.nt_radius,
+            seq_path,
+            out_file,
+            max_sim_threshold=tsd_opts.max_sim_threshold,
+            nt_threshold=tsd_opts.nt_threshold,
+            cluster_eps=tsd_opts.cluster_eps,
+        )
+        created.append(str(out_file.resolve()))
+
     else:
         raise ValueError(f"Unknown function: {func_name}")
 
@@ -619,6 +675,7 @@ def run_batch(
     msa_clean_options: MsaCleanOptions | None = None,
     consensus_options: ConsensusOptions | None = None,
     te_annotation_options: TeAnnotationOptions | None = None,
+    tsd_search_options: TsdSearchOptions | None = None,
     max_workers: int = 4,
     flexidot_combined: bool = True,
     cancel: JobCancellation | None = None,
@@ -719,6 +776,7 @@ def run_batch(
                 msa_clean_options=msa_clean_options,
                 consensus_options=consensus_options,
                 te_annotation_options=te_annotation_options,
+                tsd_search_options=tsd_search_options,
                 cancel=cancel,
             )
             return seq_path, genome_label, outs, None

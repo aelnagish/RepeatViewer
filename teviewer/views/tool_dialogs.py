@@ -124,6 +124,7 @@ from teviewer.job_options import (
     MSA_CLEAN_METHOD_CHOICES,
     MsaCleanOptions,
     TeaAidOptions,
+    TsdSearchOptions,
     msa_clean_method_description,
     normalize_blast_evalue,
 )
@@ -229,6 +230,88 @@ class ExtendParamsDialog(QDialog):
             left=self._left.value(),
             right=self._right.value(),
             pan_genome_name=pan_name,
+        )
+
+
+class TsdSearchParamsDialog(QDialog):
+    def __init__(
+        self,
+        *,
+        initial: TsdSearchOptions | None = None,
+        title: str = "TSD search parameters",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        opts = initial or TsdSearchOptions()
+
+        self._left = QSpinBox()
+        self._left.setRange(0, 10_000_000)
+        self._left.setValue(opts.left_boundary)
+        self._left.setToolTip("MSA column index for the left TE boundary.")
+
+        self._right = QSpinBox()
+        self._right.setRange(0, 10_000_000)
+        self._right.setValue(opts.right_boundary)
+        self._right.setToolTip("MSA column index for the right TE boundary.")
+
+        self._radius = QSpinBox()
+        self._radius.setRange(1, 10_000)
+        self._radius.setValue(opts.nt_radius)
+        self._radius.setSuffix(" nt")
+        self._radius.setToolTip("Search window size on each side of the boundary.")
+
+        self._max_sim = QDoubleSpinBox()
+        self._max_sim.setRange(0.0, 1.0)
+        self._max_sim.setDecimals(2)
+        self._max_sim.setSingleStep(0.05)
+        self._max_sim.setValue(opts.max_sim_threshold)
+
+        self._nt_threshold = QDoubleSpinBox()
+        self._nt_threshold.setRange(0.0, 1.0)
+        self._nt_threshold.setDecimals(2)
+        self._nt_threshold.setSingleStep(0.05)
+        self._nt_threshold.setValue(opts.nt_threshold)
+
+        self._cluster_eps = QDoubleSpinBox()
+        self._cluster_eps.setRange(0.1, 10.0)
+        self._cluster_eps.setDecimals(1)
+        self._cluster_eps.setSingleStep(0.1)
+        self._cluster_eps.setValue(opts.cluster_eps)
+
+        form = QFormLayout()
+        form.addRow("Left boundary (MSA column):", self._left)
+        form.addRow("Right boundary (MSA column):", self._right)
+        form.addRow("Search radius:", self._radius)
+        form.addRow("Max TSD similarity:", self._max_sim)
+        form.addRow("Poly-N threshold:", self._nt_threshold)
+        form.addRow("Cluster distance (eps):", self._cluster_eps)
+
+        hint = QLabel(
+            "Run on an aligned multi-sequence FASTA. Boundaries are column positions "
+            "in the MSA where TSDs are searched between left and right TE ends."
+        )
+        hint.setWordWrap(True)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(hint)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def options(self) -> TsdSearchOptions:
+        return TsdSearchOptions(
+            left_boundary=self._left.value(),
+            right_boundary=self._right.value(),
+            nt_radius=self._radius.value(),
+            max_sim_threshold=self._max_sim.value(),
+            nt_threshold=self._nt_threshold.value(),
+            cluster_eps=self._cluster_eps.value(),
         )
 
 

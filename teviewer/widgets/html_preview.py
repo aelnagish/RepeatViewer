@@ -11,8 +11,10 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -20,6 +22,12 @@ from PySide6.QtWidgets import (
 )
 
 from teviewer.backends.blast_genome_plot import is_genome_map_html_file
+from teviewer.backends.igv_viewer import (
+    IgvPreviewError,
+    add_track_to_igv_session,
+    is_igv_view_url,
+    parse_igv_session_id,
+)
 from teviewer.plot_preferences import save_view_state, sidecar_prefs_path, view_state_from_dict
 from teviewer.widgets.preview_zoom import (
     PreviewFitMode,
@@ -196,6 +204,30 @@ class LazyHtmlPreview(QWidget):
         if hasattr(self._inner, "set_fit_mode"):
             self._inner.set_fit_mode(self._fit_mode)
 
+    def load_url(self, url: str) -> None:
+        """Load an http(s) page (for example igv.js served on localhost)."""
+        if not use_embedded_html_preview():
+            if self._inner is None:
+                self._inner = HtmlFallbackPreview(
+                    self,
+                    reason="Embedded HTML preview disabled (TEVIEWER_EMBED_HTML=0).",
+                )
+                self._status.hide()
+                self._layout.addWidget(self._inner, stretch=1)
+            if hasattr(self._inner, "load_url"):
+                self._inner.load_url(url)
+            return
+        if self._inner is None:
+            self._inner = self._create_inner_viewer()
+            self._status.hide()
+            self._layout.addWidget(self._inner, stretch=1)
+        if hasattr(self._inner, "load_url"):
+            self._inner.load_url(url)
+        if hasattr(self._inner, "set_zoom_percent"):
+            self._inner.set_zoom_percent(self._zoom_percent)
+        if hasattr(self._inner, "set_fit_mode"):
+            self._inner.set_fit_mode(self._fit_mode)
+
     def teardown(self) -> None:
         """Release WebEngine before showing a non-HTML preview in the same tab."""
         if self._inner is None:
@@ -232,6 +264,13 @@ class HtmlWebEnginePreview(QWidget):
         layout.setSpacing(2)
 
         toolbar = QHBoxLayout()
+        self._add_igv_track_btn = QPushButton("Add track…")
+        self._add_igv_track_btn.setToolTip(
+            "Add GFF, GTF, BED, BAM, or SAM track to the igv.js viewer"
+        )
+        self._add_igv_track_btn.clicked.connect(self._add_igv_track)
+        self._add_igv_track_btn.hide()
+        toolbar.addWidget(self._add_igv_track_btn)
         toolbar.addStretch()
         open_browser = QPushButton("Open in browser")
         open_browser.clicked.connect(self._open_in_browser)
@@ -247,6 +286,7 @@ class HtmlWebEnginePreview(QWidget):
         self._view.installEventFilter(self)
         self._current_path: Path | None = None
         self._current_mtime_ns: int | None = None
+        self._current_url: str | None = None
         self._last_load_ok = False
         self._used_html_fallback = False
         self._zoom_percent = load_preview_zoom_percent()
@@ -371,6 +411,7 @@ class HtmlWebEnginePreview(QWidget):
 
         self._current_path = resolved
         self._current_mtime_ns = mtime_ns
+        self._current_url = None
         if self._prefs_save_timer is not None:
             self._prefs_save_timer.stop()
         self._last_load_ok = False
@@ -389,6 +430,67 @@ class HtmlWebEnginePreview(QWidget):
             self._view.load(_local_file_url(resolved))
         except RuntimeError:
             return
+        self._sync_igv_toolbar()
+
+    def load_url(self, url: str) -> None:
+        if not self._view_active():
+            return
+        self._current_path = None
+        self._current_mtime_ns = None
+        self._current_url = url
+        if self._prefs_save_timer is not None:
+            self._prefs_save_timer.stop()
+        self._last_load_ok = False
+        self._used_html_fallback = False
+        self._content_w = TEAID_NOMINAL_WIDTH
+        self._content_h = TEAID_NOMINAL_HEIGHT
+        try:
+            self._view.load(QUrl(url))
+        except RuntimeError:
+            return
+        self._sync_igv_toolbar()
+
+    def _sync_igv_toolbar(self) -> None:
+        show = is_igv_view_url(self._current_url)
+        self._add_igv_track_btn.setVisible(show)
+
+    def _add_igv_track(self) -> None:
+        session_id = parse_igv_session_id(self._current_url or "")
+        if not session_id:
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add track to igv.js",
+            "",
+            "Tracks (*.gff *.gff3 *.gtf *.bed *.bam *.sam);;All files (*)",
+        )
+        if not paths:
+            return
+        errors: list[str] = []
+        for raw in paths:
+            try:
+                track = add_track_to_igv_session(session_id, Path(raw))
+            except IgvPreviewError as exc:
+                errors.append(f"{Path(raw).name}: {exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{Path(raw).name}: {exc}")
+                continue
+            script = (
+                "window.teviewerIgvLoadTrack("
+                + json.dumps(track)
+                + ").catch(function(err){"
+                + 'alert("Add track failed:\\n" + err);'
+                + "});"
+            )
+            if self._view_active():
+                self._view.page().runJavaScript(script)
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Add track",
+                "Some tracks could not be added:\n\n" + "\n".join(errors),
+            )
 
     def _on_load_finished(self, ok: bool) -> None:
         if not self._view_active():
@@ -472,6 +574,9 @@ class HtmlWebEnginePreview(QWidget):
         )
 
     def _open_in_browser(self) -> None:
+        if self._current_url:
+            QDesktopServices.openUrl(QUrl(self._current_url))
+            return
         if self._current_path and self._current_path.is_file():
             QDesktopServices.openUrl(_local_file_url(self._current_path))
 
@@ -518,12 +623,22 @@ class HtmlFallbackPreview(QWidget):
         layout.addWidget(self._open_btn)
         layout.addStretch()
         self._current_path: Path | None = None
+        self._current_url: str | None = None
 
     def load_html_file(self, path: Path) -> None:
         self._current_path = path.expanduser().resolve()
+        self._current_url = None
         self._label.setText(
             "HTML report — open in browser\n\n"
             f"File:\n{self._current_path}"
+        )
+
+    def load_url(self, url: str) -> None:
+        self._current_url = url
+        self._current_path = None
+        self._label.setText(
+            "Alignment viewer — open in browser\n\n"
+            f"URL:\n{url}"
         )
 
     def set_zoom_percent(self, percent: int) -> None:
@@ -536,5 +651,8 @@ class HtmlFallbackPreview(QWidget):
         return True
 
     def _open_in_browser(self) -> None:
+        if self._current_url:
+            QDesktopServices.openUrl(QUrl(self._current_url))
+            return
         if self._current_path and self._current_path.is_file():
             QDesktopServices.openUrl(_local_file_url(self._current_path))

@@ -55,6 +55,8 @@ class TEviewerPlugin(ABC):
     file_suffixes: set[str] | None = None
     #: If True, the tool may run on multiple files in parallel (uses batch_workers).
     supports_parallel: bool = True
+    #: If True, ``prepare_job`` shows a dialog where the user picks input files.
+    picks_files_in_dialog: bool = False
 
     @abstractmethod
     def validate(

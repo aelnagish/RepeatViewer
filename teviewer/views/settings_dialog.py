@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
@@ -17,15 +18,26 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+if TYPE_CHECKING:
+    from teviewer.plugins.registry import PluginRegistry
+
 from teviewer.pan_genome import GENOME_MODE_SINGLE, parse_pan_genomes_json
 from teviewer.project import TEviewerProject
-from teviewer.views.toolbar_dialog import load_toolbar_font_size, save_toolbar_font_size
+from teviewer.views.toolbar_dialog import (
+    ToolbarCustomizeWidget,
+    build_toolbar_catalog,
+    load_toolbar_order,
+    save_toolbar_font_size,
+    save_toolbar_order,
+)
 from teviewer.widgets.browser_panel_settings import (
     load_browser_panel_font_size,
     save_browser_panel_font_size,
@@ -293,12 +305,21 @@ def _section_label(text: str, parent: QWidget) -> QLabel:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, project: TEviewerProject, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        project: TEviewerProject,
+        parent: QWidget | None = None,
+        *,
+        plugin_registry: PluginRegistry | None = None,
+        toolbar_order: list[str] | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("TEviewer — Preferences")
+        self.setWindowTitle("TEviewer — Setting")
         self.setMinimumWidth(520)
+        self.setMinimumHeight(420)
         self._project = project
         self._settings = QSettings()
+        self._plugin_registry = plugin_registry
 
         self._system_blast = QCheckBox()
         self._system_blast.setChecked(project.use_system_blast)
@@ -318,11 +339,6 @@ class SettingsDialog(QDialog):
             "BLAST and TEAid thread counts are derived from CPU cores minus a small "
             "reserve for TEviewer, divided by this worker count."
         )
-        self._toolbar_font = QSpinBox()
-        self._toolbar_font.setRange(8, 16)
-        self._toolbar_font.setValue(load_toolbar_font_size())
-        self._toolbar_font.setSuffix(" pt")
-        self._toolbar_font.setToolTip("Font size for function toolbar button labels.")
         self._browser_panel_font = QSpinBox()
         self._browser_panel_font.setRange(8, 16)
         self._browser_panel_font.setValue(load_browser_panel_font_size())
@@ -364,7 +380,6 @@ class SettingsDialog(QDialog):
 
         for spin in (
             self._batch_workers,
-            self._toolbar_font,
             self._browser_panel_font,
             self._preview_zoom,
         ):
@@ -382,11 +397,33 @@ class SettingsDialog(QDialog):
         form.addRow("Use system sequence viewer:", self._system_viewer)
         form.addRow("Color-blind nucleotide:", self._color_blind_scheme)
         form.addRow("Parallel batch workers:", self._batch_workers)
-        form.addRow("Toolbar button font:", self._toolbar_font)
         form.addRow("Folders / Files font:", self._browser_panel_font)
         form.addRow("Default preview zoom:", self._preview_zoom)
         form.addRow("Default preview fit:", self._preview_fit)
         form.addRow("Default FASTA preview tab:", self._fasta_default_tab)
+
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
+        general_layout.setContentsMargins(8, 8, 8, 8)
+        general_layout.addLayout(form)
+        general_layout.addStretch()
+
+        order = toolbar_order if toolbar_order is not None else load_toolbar_order(
+            plugin_registry
+        )
+        catalog = build_toolbar_catalog(order, plugin_registry)
+        self._toolbar_panel = ToolbarCustomizeWidget(
+            catalog,
+            registry=plugin_registry,
+        )
+        toolbar_tab = QWidget()
+        toolbar_layout = QVBoxLayout(toolbar_tab)
+        toolbar_layout.setContentsMargins(12, 12, 12, 16)
+        toolbar_layout.addWidget(self._toolbar_panel)
+
+        tabs = QTabWidget()
+        tabs.addTab(general_tab, "General")
+        tabs.addTab(toolbar_tab, "Toolbar")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -397,14 +434,30 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
-        layout.addLayout(form)
+        layout.addWidget(tabs)
         layout.addWidget(buttons)
+
+    def accept(self) -> None:
+        if not self._toolbar_panel.has_visible_tools():
+            QMessageBox.warning(
+                self,
+                "Setting",
+                "Show at least one toolbar button.",
+            )
+            return
+        super().accept()
+
+    def apply_toolbar_settings(self) -> tuple[list[str], int]:
+        order = self._toolbar_panel.result_order()
+        font_size = self._toolbar_panel.result_font_size()
+        save_toolbar_order(order, self._plugin_registry)
+        save_toolbar_font_size(font_size)
+        return order, font_size
 
     def apply_to_project(self) -> TEviewerProject:
         self._project.use_system_blast = self._system_blast.isChecked()
         self._project.use_system_sequence_viewer = self._system_viewer.isChecked()
         self._project.batch_workers = self._batch_workers.value()
-        save_toolbar_font_size(self._toolbar_font.value())
         save_browser_panel_font_size(self._browser_panel_font.value())
         save_preview_zoom_percent(self._preview_zoom.value())
         save_preview_fit_mode(PreviewFitMode(str(self._preview_fit.currentData())))

@@ -99,6 +99,26 @@ class ExtendOptions:
     pan_genome_name: str | None = None
 
 
+DEFAULT_TSD_LEFT_BOUNDARY = 0
+DEFAULT_TSD_RIGHT_BOUNDARY = 0
+DEFAULT_TSD_NT_RADIUS = 100
+DEFAULT_TSD_MAX_SIM_THRESHOLD = 0.3
+DEFAULT_TSD_NT_THRESHOLD = 0.95
+DEFAULT_TSD_CLUSTER_EPS = 1.0
+
+
+@dataclass
+class TsdSearchOptions:
+    """TSD search boundaries and filtering (MSA column positions)."""
+
+    left_boundary: int = DEFAULT_TSD_LEFT_BOUNDARY
+    right_boundary: int = DEFAULT_TSD_RIGHT_BOUNDARY
+    nt_radius: int = DEFAULT_TSD_NT_RADIUS
+    max_sim_threshold: float = DEFAULT_TSD_MAX_SIM_THRESHOLD
+    nt_threshold: float = DEFAULT_TSD_NT_THRESHOLD
+    cluster_eps: float = DEFAULT_TSD_CLUSTER_EPS
+
+
 ALIGN_BACKEND_AUTO = "auto"
 ALIGN_BACKEND_MAFFT = "mafft"
 ALIGN_BACKEND_CLUSTALO = "clustalo"
@@ -371,6 +391,34 @@ def save_extend_options(opts: ExtendOptions) -> None:
             "left": opts.left,
             "right": opts.right,
             "pan_genome_name": opts.pan_genome_name or "",
+        },
+    )
+
+
+def load_tsd_search_options() -> TsdSearchOptions:
+    v = _load_settings_group("tsd_search")
+    return TsdSearchOptions(
+        left_boundary=int(v.get("left_boundary", DEFAULT_TSD_LEFT_BOUNDARY)),
+        right_boundary=int(v.get("right_boundary", DEFAULT_TSD_RIGHT_BOUNDARY)),
+        nt_radius=max(1, int(v.get("nt_radius", DEFAULT_TSD_NT_RADIUS))),
+        max_sim_threshold=float(
+            v.get("max_sim_threshold", DEFAULT_TSD_MAX_SIM_THRESHOLD)
+        ),
+        nt_threshold=float(v.get("nt_threshold", DEFAULT_TSD_NT_THRESHOLD)),
+        cluster_eps=float(v.get("cluster_eps", DEFAULT_TSD_CLUSTER_EPS)),
+    )
+
+
+def save_tsd_search_options(opts: TsdSearchOptions) -> None:
+    _save_settings_group(
+        "tsd_search",
+        {
+            "left_boundary": opts.left_boundary,
+            "right_boundary": opts.right_boundary,
+            "nt_radius": opts.nt_radius,
+            "max_sim_threshold": opts.max_sim_threshold,
+            "nt_threshold": opts.nt_threshold,
+            "cluster_eps": opts.cluster_eps,
         },
     )
 

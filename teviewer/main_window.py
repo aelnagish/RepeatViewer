@@ -10,7 +10,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QMimeData, QObject, QSettings, QSize, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QFileSystemWatcher,
+    QMimeData,
+    QObject,
+    QSettings,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QFont, QFontMetrics, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -66,7 +77,11 @@ from teviewer.backends.blast_genome_plot import (
     TE_INPUT_KIND_CONSENSUS,
     TE_INPUT_KIND_MASKING,
 )
-from teviewer.backends.gui_functions import flexidot_executable
+from teviewer.backends.igv_viewer import (
+    discover_igv_annotations,
+    is_alignment_preview_file,
+    set_igv_extra_annotations_provider,
+)
 from teviewer.backends.job_cancel import CANCELLED_MESSAGE, JobCancellation, JobCancelledError
 
 logger = logging.getLogger(__name__)
@@ -76,7 +91,7 @@ from teviewer.backends.te_benchmark import (
     run_confusion_matrix_benchmark,
 )
 from teviewer.backends.te_library_benchmark import run_te_library_benchmark
-from teviewer.backends.curation import effective_batch_workers, run_batch
+from teviewer.backends.curation import effective_batch_workers, is_flexidot_extra_plot_file, run_batch
 from teviewer.backends.sequence_aligner import (
     alignment_backends,
     run_alignment,
@@ -89,6 +104,7 @@ from teviewer.backends.gff_features import (
     is_gene_annotation_file,
 )
 from teviewer.backends.sequence_features import is_sequence_map_hidden_file
+from teviewer.plugins import get_registry, load_plugins
 from teviewer.backends.sequence_viewer import open_fasta
 from teviewer.job_options import (
     ALIGN_MODE_COMBINED,
@@ -103,6 +119,7 @@ from teviewer.job_options import (
     load_te_divergence_plot_options,
     load_te_confusion_matrix_benchmark_options,
     load_te_library_benchmark_options,
+    load_tsd_search_options,
     msa_clean_method_description,
     msa_clean_method_label,
     save_align_options,
@@ -116,10 +133,12 @@ from teviewer.job_options import (
     save_te_divergence_plot_options,
     save_te_confusion_matrix_benchmark_options,
     save_te_library_benchmark_options,
+    save_tsd_search_options,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
     TeConfusionMatrixBenchmarkOptions,
     TeLibraryBenchmarkOptions,
+    TsdSearchOptions,
 )
 from teviewer.views.tool_dialogs import (
     AlignParamsDialog,
@@ -130,6 +149,7 @@ from teviewer.views.tool_dialogs import (
     TeAnnotationDialog,
     MsaCleanParamsDialog,
     TeaAidParamsDialog,
+    TsdSearchParamsDialog,
     TeDensityPlotDialog,
     TeDivergencePlotDialog,
     ConfusionMatrixBenchmarkDialog,
@@ -155,11 +175,8 @@ from teviewer.views.settings_dialog import (
 )
 from teviewer.views.toolbar_dialog import (
     DEFAULT_TOOLBAR_ORDER,
-    ToolbarCustomizeDialog,
-    build_toolbar_catalog,
     load_toolbar_font_size,
     load_toolbar_order,
-    save_toolbar_order,
 )
 from teviewer.widgets.browser_panel_settings import load_browser_panel_font_size
 from teviewer.ui.platform import reveal_in_file_manager
@@ -187,7 +204,7 @@ from teviewer.widgets.file_sort import (
     save_file_sort_mode,
     sort_file_paths,
 )
-from teviewer.widgets.preview_tabs import PreviewTabWidget, is_previewable_file, preview_path_priority
+from teviewer.widgets.preview_tabs import PreviewTabWidget, is_previewable_file, preview_path_priority, set_genome_path_provider
 from teviewer.widgets.task_progress import TaskProgressPanel
 from teviewer.widgets.database_index_runner import DatabaseIndexRunner
 
@@ -228,6 +245,7 @@ _TOOLBAR_TOOLTIPS = {
     "msa_clean": "Trim or clean MSA using default parameters",
     "flexidot": "Dotplot comparison of selected sequences using default parameters",
     "consensus": "Build consensus from selected MSA using default parameters",
+    "plugin:minimap2": "Map selected FASTA to reference with minimap2",
 }
 
 _JOB_DISPLAY_TITLES = {
@@ -242,6 +260,7 @@ _JOB_DISPLAY_TITLES = {
     "consensus_generation": "Consensus",
     "flexidot": "Flexidot",
     "te_annotation": "TE annotation",
+    "tsd_search": "TSD search",
     "te_confusion_benchmark": "Confusion matrix benchmark",
     "te_library_benchmark": "TE library benchmark",
 }
@@ -886,6 +905,7 @@ class MainWindow(QMainWindow):
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
         self._extend_options = load_extend_options()
+        self._tsd_search_options = load_tsd_search_options()
         self._teaid_options = load_teaid_options()
         self._align_options = load_align_options()
         self._te_genome_map_options = load_te_genome_map_options()
@@ -897,7 +917,8 @@ class MainWindow(QMainWindow):
         self._te_confusion_benchmark_options = load_te_confusion_matrix_benchmark_options()
         self._te_library_benchmark_options = load_te_library_benchmark_options()
         self.database_index_runner = DatabaseIndexRunner(self)
-        self._toolbar_order = load_toolbar_order()
+        self._plugin_registry = load_plugins()
+        self._toolbar_order = load_toolbar_order(self._plugin_registry)
         self._dock_folders: QDockWidget | None = None
         self._dock_files: QDockWidget | None = None
         self._dock_preview: QDockWidget | None = None
@@ -963,6 +984,8 @@ class MainWindow(QMainWindow):
         self._folder_tree.itemExpanded.connect(self._on_folder_tree_expanded)
         self._folder_tree.itemCollapsed.connect(lambda _item: self._schedule_persist_workspace())
         self._apply_browser_panel_font()
+        self._fs_watcher = QFileSystemWatcher(self)
+        self._fs_watcher.directoryChanged.connect(self._on_watched_directory_changed)
         self._folder_persist_timer = QTimer(self)
         self._folder_persist_timer.setSingleShot(True)
         self._folder_persist_timer.setInterval(250)
@@ -991,7 +1014,41 @@ class MainWindow(QMainWindow):
         """Load workspace folders after the window is shown (avoids blocking startup)."""
         self._load_initial_roots()
         self._apply_startup_folder()
+        self._update_directory_watchers()
         self._update_status()
+
+    def _update_directory_watchers(self) -> None:
+        watched: set[str] = set()
+        for root in self._collect_root_folders():
+            if root.is_dir():
+                watched.add(str(root.expanduser().resolve()))
+        if self._current_folder and self._current_folder.is_dir():
+            watched.add(str(self._current_folder.expanduser().resolve()))
+
+        current = set(self._fs_watcher.directories())
+        to_remove = sorted(current - watched)
+        if to_remove:
+            self._fs_watcher.removePaths(to_remove)
+        to_add = sorted(watched - current)
+        if to_add:
+            self._fs_watcher.addPaths(to_add)
+
+    def _on_watched_directory_changed(self, directory: str) -> None:
+        changed = Path(directory).expanduser().resolve()
+        refreshed = False
+
+        if changed.is_dir():
+            refreshed = self._refresh_subfolders_under(changed) is not None
+            parent = changed.parent
+            if parent != changed:
+                refreshed = self._refresh_subfolders_under(parent) is not None or refreshed
+
+        if not refreshed:
+            self._refresh_tree()
+
+        if self._current_folder and self._current_folder.is_dir():
+            self._populate_file_list(self._current_folder, open_preview=False)
+        self._update_directory_watchers()
 
     def _restore_window_layout(self) -> None:
         settings = QSettings()
@@ -1062,6 +1119,10 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _job_display_title(job_title: str) -> str:
+        if job_title.startswith("plugin:"):
+            plugin = get_registry().get(job_title[len("plugin:") :])
+            if plugin is not None:
+                return plugin.label
         key = job_title.strip().lower().replace(" ", "_")
         return _JOB_DISPLAY_TITLES.get(key, job_title)
 
@@ -1202,6 +1263,8 @@ class MainWindow(QMainWindow):
         self._preview_zoom_bar = PreviewZoomBar(self._preview_host)
         preview_layout.addWidget(self._preview_zoom_bar)
         self._preview_tabs = PreviewTabWidget(zoom_bar=self._preview_zoom_bar)
+        set_genome_path_provider(self._genome_path_resolved)
+        set_igv_extra_annotations_provider(self._igv_extra_annotations_for_alignment)
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
         preview_layout.addWidget(self._preview_tabs, stretch=1)
         self._preview_zoom_bar.setVisible(True)
@@ -1282,10 +1345,10 @@ class MainWindow(QMainWindow):
             self._apply_default_dock_sizes()
 
     @staticmethod
-    def _preferences_menu_hint() -> str:
+    def _settings_menu_hint() -> str:
         if platform.system() == "Darwin":
-            return "TEviewer → Preferences"
-        return "File → Preferences"
+            return "TEviewer → Setting"
+        return "File → Setting"
 
     @staticmethod
     def _genome_menu_hint() -> str:
@@ -1318,6 +1381,11 @@ class MainWindow(QMainWindow):
         menu.addAction("Extend with different distances", self._extend_with_different_distances)
         menu.addSeparator()
         menu.addAction("Change extension parameters", self._modify_extend_parameters)
+
+    def _populate_tsd_search_menu(self, menu: QMenu) -> None:
+        menu.addAction("TSD search with default parameters", self._run_tsd_search)
+        menu.addSeparator()
+        menu.addAction("Change TSD search parameters", self._modify_tsd_search_parameters)
 
     def _populate_teaid_menu(self, menu: QMenu) -> None:
         menu.addAction("TEAid with default parameters", self._run_teaid)
@@ -1374,16 +1442,16 @@ class MainWindow(QMainWindow):
         define_db_action.setStatusTip("Configure CDD and similarity annotation databases")
         file_menu.addAction("Restore deleted &files", self._restore_removed_folders)
         file_menu.addSeparator()
-        prefs_action = QAction("&Preferences", self)
-        prefs_action.setShortcut(QKeySequence.StandardKey.Preferences)
-        prefs_action.setStatusTip("Preview defaults, BLAST options, and batch workers")
-        prefs_action.triggered.connect(self._open_settings)
-        prefs_action.setMenuRole(
+        settings_action = QAction("&Setting", self)
+        settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
+        settings_action.setStatusTip("Preview defaults, BLAST options, and batch workers")
+        settings_action.triggered.connect(self._open_settings)
+        settings_action.setMenuRole(
             QAction.MenuRole.PreferencesRole
             if platform.system() == "Darwin"
             else QAction.MenuRole.ApplicationSpecificRole
         )
-        file_menu.addAction(prefs_action)
+        file_menu.addAction(settings_action)
         file_menu.addSeparator()
         file_menu.addAction("&Quit", self.close, "Ctrl+Q")
 
@@ -1393,6 +1461,7 @@ class MainWindow(QMainWindow):
         self._populate_blast_menu(seq_menu.addMenu("&Blast"))
         self._populate_align_menu(seq_menu.addMenu("&Align"))
         self._populate_extend_menu(seq_menu.addMenu("&Extend"))
+        self._populate_tsd_search_menu(seq_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(seq_menu.addMenu("&TEAid"))
         self._populate_msa_clean_menu(seq_menu.addMenu("MSA &clean"))
         self._populate_consensus_menu(seq_menu.addMenu("&Consensus"))
@@ -1401,19 +1470,22 @@ class MainWindow(QMainWindow):
         self._populate_te_visualization_menu(seq_menu.addMenu("TE &visualization"))
         self._populate_benchmarking_menu(seq_menu.addMenu("&Benchmarking"))
 
+        plugins_menu = self.menuBar().addMenu("&Plugins")
+        loaded_plugins = self._plugin_registry.all_plugins()
+        if loaded_plugins:
+            for plugin in loaded_plugins:
+                plugins_menu.addAction(
+                    plugin.label,
+                    lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
+                )
+        else:
+            none_action = plugins_menu.addAction("(No plugins loaded)")
+            none_action.setEnabled(False)
+
         view_menu = self.menuBar().addMenu("&View")
         for dock in (self._dock_folders, self._dock_files, self._dock_preview):
             if dock is not None:
                 view_menu.addAction(dock.toggleViewAction())
-        view_menu.addSeparator()
-        view_menu.addAction(
-            "Customize function &toolbar…",
-            self._customize_toolbar_order,
-        )
-        view_menu.addAction(
-            "Reset function toolbar",
-            self._reset_toolbar_order,
-        )
         view_menu.addSeparator()
         view_menu.addAction("Reset panel &layout", self._reset_dock_layout)
 
@@ -1467,30 +1539,6 @@ class MainWindow(QMainWindow):
             self._functions_toolbar = None
         self._job_toolbar_actions = []
         self._build_top_toolbar()
-
-    def _toolbar_context_menu(self, position) -> None:
-        bar = self.sender()
-        if not isinstance(bar, QToolBar):
-            return
-        menu = QMenu(self)
-        menu.addAction("Customize toolbar…", self._customize_toolbar_order)
-        menu.addAction("Reset toolbar", self._reset_toolbar_order)
-        menu.exec(bar.mapToGlobal(position))
-
-    def _customize_toolbar_order(self) -> None:
-        catalog = build_toolbar_catalog(self._toolbar_order)
-        dialog = ToolbarCustomizeDialog(catalog, self)
-        if dialog.exec():
-            self._toolbar_order = dialog.result_order()
-            save_toolbar_order(self._toolbar_order)
-            self._rebuild_top_toolbar()
-            self._set_status_message("Function toolbar updated", 4000)
-
-    def _reset_toolbar_order(self) -> None:
-        self._toolbar_order = list(DEFAULT_TOOLBAR_ORDER)
-        save_toolbar_order(self._toolbar_order)
-        self._rebuild_top_toolbar()
-        self._set_status_message("Function toolbar reset to default", 4000)
 
     def _toolbar_button_height(self) -> int:
         return QFontMetrics(self._toolbar_font).height() + 4
@@ -1588,8 +1636,6 @@ class MainWindow(QMainWindow):
             | Qt.ToolBarArea.RightToolBarArea
         )
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        bar.customContextMenuRequested.connect(self._toolbar_context_menu)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
         self._functions_toolbar = bar
 
@@ -1690,6 +1736,19 @@ class MainWindow(QMainWindow):
                 self._populate_flexidot_menu,
                 tooltip=tip,
             )
+        elif tool_id == "_sep_plugins":
+            bar.addSeparator()
+        elif tool_id.startswith("plugin:"):
+            plugin_id = tool_id[len("plugin:") :]
+            plugin = self._plugin_registry.get(plugin_id)
+            if plugin is None:
+                return
+            self._add_toolbar_text_action(
+                bar,
+                plugin.label,
+                lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
+                tooltip=plugin.tooltip or tip,
+            )
 
     def _select_all_fasta_in_folder(self) -> None:
         if self._file_list.count() == 0:
@@ -1735,6 +1794,10 @@ class MainWindow(QMainWindow):
         if not self._project.is_pan_genome_mode:
             if func_name == "flexidot" and n > 1 and job_kwargs.get("flexidot_combined", True):
                 return 1
+            if func_name.startswith("plugin:"):
+                plugin = self._plugin_registry.get(func_name[len("plugin:") :])
+                if plugin is not None and not plugin.supports_parallel:
+                    return n
             return n
         pan_n = len(self._project.pan_genomes)
         if func_name in {"blast", "teaid"}:
@@ -1743,6 +1806,11 @@ class MainWindow(QMainWindow):
             if n > 1 and job_kwargs.get("flexidot_combined", True):
                 return pan_n
             return n * pan_n
+        if func_name.startswith("plugin:"):
+            plugin = self._plugin_registry.get(func_name[len("plugin:") :])
+            if plugin is not None and not plugin.supports_parallel:
+                return n
+            return n
         return n
 
     def _prepare_configured_genomes(self) -> None:
@@ -1869,21 +1937,26 @@ class MainWindow(QMainWindow):
         dialog.deleteLater()
 
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(self._project, self)
+        dialog = SettingsDialog(
+            self._project,
+            self,
+            plugin_registry=self._plugin_registry,
+            toolbar_order=self._toolbar_order,
+        )
         if dialog.exec():
             self._project = dialog.apply_to_project()
             self._persist_workspace()
-            old_toolbar_size = self._toolbar_font_size
+            old_font_size = self._toolbar_font_size
             old_browser_size = self._browser_panel_font_size
-            new_size = load_toolbar_font_size()
+            self._toolbar_order, new_font_size = dialog.apply_toolbar_settings()
+            self._toolbar_font_size = new_font_size
             new_browser_size = load_browser_panel_font_size()
-            self._toolbar_font_size = new_size
             self._browser_panel_font_size = new_browser_size
-            if new_size != old_toolbar_size or new_browser_size != old_browser_size:
+            if new_font_size != old_font_size or new_browser_size != old_browser_size:
                 self._apply_toolbar_theme()
+            if new_browser_size != old_browser_size:
                 self._apply_browser_panel_font()
-            if new_size != old_toolbar_size:
-                self._rebuild_top_toolbar()
+            self._rebuild_top_toolbar()
             self._update_status()
             if self._preview_tabs is not None:
                 from teviewer.widgets.preview_zoom import (
@@ -2240,6 +2313,7 @@ class MainWindow(QMainWindow):
 
     def _on_folder_selected(self, folder: Path) -> None:
         self._populate_file_list(folder)
+        self._update_directory_watchers()
         self._persist_workspace()
 
     def _refresh_current_folder(self) -> None:
@@ -2348,6 +2422,7 @@ class MainWindow(QMainWindow):
                 and not p.name.startswith(".")
                 and not is_teviewer_hits_cache_file(p)
                 and not is_sequence_map_hidden_file(p)
+                and not is_flexidot_extra_plot_file(p)
             ]
         except OSError as exc:
             self._cached_folder_files = []
@@ -2503,9 +2578,32 @@ class MainWindow(QMainWindow):
         path = Path(str(raw))
         return path if path.is_file() else None
 
+    def _igv_extra_annotations_for_alignment(self, _alignment: Path) -> list[Path]:
+        """GFF/GTF files explicitly selected in the Files panel."""
+        gff_suffixes = {".gff", ".gff3", ".gtf"}
+        paths: list[Path] = []
+        for path in self._selected_files():
+            if path.suffix.lower() in gff_suffixes and path.is_file():
+                paths.append(path.expanduser().resolve())
+        return paths
+
     def _open_file_in_preview(self, path: Path) -> None:
         self._open_preview_tab(path, replace=True)
-        if is_genome_map_html_file(path):
+        if is_alignment_preview_file(path):
+            annotations = discover_igv_annotations(path)
+            if annotations:
+                names = ", ".join(item.name for item in annotations[:3])
+                extra = f" (+{len(annotations) - 3} more)" if len(annotations) > 3 else ""
+                self._set_status_message(
+                    f"Alignment: {path.name} — igv.js with {names}{extra}",
+                    8000,
+                )
+            else:
+                self._set_status_message(
+                    f"Alignment: {path.name} (igv.js — add .gff/.gff3/.gtf in the same folder)",
+                    8000,
+                )
+        elif is_genome_map_html_file(path):
             self._set_status_message(
                 f"Genome map: {path.name} (TE density along chromosomes, Mbp axis)",
                 8000,
@@ -3948,6 +4046,9 @@ class MainWindow(QMainWindow):
     def _run_extend(self) -> None:
         self._apply_function("extend", extend=self._extend_options)
 
+    def _run_tsd_search(self) -> None:
+        self._apply_function("tsd_search", tsd_search_options=self._tsd_search_options)
+
     def _run_teaid(self) -> None:
         self._apply_function("teaid", teaid_options=self._teaid_options)
 
@@ -4027,6 +4128,22 @@ class MainWindow(QMainWindow):
             self._set_status_message(
                 f"Extend defaults: {self._extend_options.left} bp left, "
                 f"{self._extend_options.right} bp right{genome_note}",
+                5000,
+            )
+
+    def _modify_tsd_search_parameters(self) -> None:
+        dialog = TsdSearchParamsDialog(
+            initial=self._tsd_search_options,
+            parent=self,
+        )
+        if dialog.exec():
+            self._tsd_search_options = dialog.options()
+            save_tsd_search_options(self._tsd_search_options)
+            self._set_status_message(
+                "TSD search defaults: "
+                f"left {self._tsd_search_options.left_boundary}, "
+                f"right {self._tsd_search_options.right_boundary}, "
+                f"radius {self._tsd_search_options.nt_radius} nt",
                 5000,
             )
 
@@ -4761,6 +4878,7 @@ class MainWindow(QMainWindow):
         for root in roots:
             if root.is_dir():
                 self._add_root_folder(root)
+        self._update_directory_watchers()
 
     def _apply_function(self, func_name: str, *, preselected: list[Path] | None = None, **job_kwargs) -> None:
         selected = preselected or self._selected_files()
@@ -4794,6 +4912,25 @@ class MainWindow(QMainWindow):
                     "(e.g. ~/Library/Python/3.x/bin on macOS).",
                 )
                 return
+        if func_name == "tsd_search":
+            tsd_opts = job_kwargs.get("tsd_search_options") or self._tsd_search_options
+            if tsd_opts.left_boundary <= 0 or tsd_opts.right_boundary <= 0:
+                dialog = TsdSearchParamsDialog(
+                    initial=tsd_opts,
+                    title="TSD search parameters",
+                    parent=self,
+                )
+                if not dialog.exec():
+                    return
+                tsd_opts = dialog.options()
+                job_kwargs["tsd_search_options"] = tsd_opts
+            if tsd_opts.left_boundary >= tsd_opts.right_boundary:
+                QMessageBox.warning(
+                    self,
+                    "TSD search",
+                    "Left boundary must be less than the right boundary.",
+                )
+                return
         self._start_background_job(
             FunctionWorker(self._run_function_job, func_name, seq_files, job_kwargs),
             job_title=func_name,
@@ -4801,6 +4938,80 @@ class MainWindow(QMainWindow):
             source_files=seq_files,
             on_finished=self._on_worker_finished,
             on_failed=self._on_worker_failed,
+        )
+
+    def _apply_plugin(self, plugin_id: str, *, preselected: list[Path] | None = None) -> None:
+        plugin = self._plugin_registry.get(plugin_id)
+        if plugin is None:
+            QMessageBox.warning(self, "Plugin", f"Plugin not found: {plugin_id}")
+            return
+        selected = preselected or self._selected_files()
+        initial: list[Path] = []
+        if selected:
+            initial = self._plugin_registry.filter_files(
+                plugin,
+                [path.expanduser().resolve() for path in selected],
+            )
+        if not initial and not plugin.picks_files_in_dialog:
+            if plugin.fasta_only:
+                QMessageBox.information(
+                    self,
+                    plugin.label,
+                    "Select one or more FASTA files in the Files panel.",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    plugin.label,
+                    "Select files in the Files panel.",
+                )
+            return
+        if not plugin.prepare_job(self, initial, self._project):
+            return
+        job_options = getattr(plugin, "_job_options", {})
+        raw_files = job_options.get("query_files") or [str(path) for path in initial]
+        files = self._plugin_registry.filter_files(
+            plugin,
+            [Path(str(path)).expanduser().resolve() for path in raw_files],
+        )
+        if not files:
+            if plugin.fasta_only:
+                QMessageBox.warning(
+                    self,
+                    plugin.label,
+                    "No valid query FASTA files were selected.",
+                )
+            else:
+                QMessageBox.warning(self, plugin.label, "No files match this plugin.")
+            return
+        error = plugin.validate(files, self._project)
+        if error:
+            QMessageBox.warning(self, plugin.label, error)
+            return
+        func_name = f"plugin:{plugin_id}"
+        self._start_background_job(
+            FunctionWorker(self._run_plugin_job, func_name, files, {}),
+            job_title=func_name,
+            total_steps=self._job_total_steps(func_name, files, {}),
+            source_files=files,
+            on_finished=self._on_worker_finished,
+            on_failed=self._on_worker_failed,
+        )
+
+    def _run_plugin_job(
+        self,
+        func_name: str,
+        seq_files: list[Path],
+        progress_cb,
+        **job_kwargs: Any,
+    ) -> dict:
+        plugin_id = func_name[len("plugin:") :]
+        return self._plugin_registry.run_plugin(
+            plugin_id,
+            seq_files,
+            self._project,
+            progress_cb,
+            max_workers=self._project.batch_workers,
         )
 
     def _run_function_job(

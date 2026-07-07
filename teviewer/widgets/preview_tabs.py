@@ -1,8 +1,9 @@
-"""Tabbed document preview (text, PDF, HTML, images)."""
+"""Tabbed document preview (text, PDF, HTML, images, alignments)."""
 
 from __future__ import annotations
 
 import gzip
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, QSizeF, Qt, QTimer, Signal
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from teviewer.backends.bismark_cov import is_bismark_cov_file
+from teviewer.backends.igv_viewer import IgvPreviewError, build_igv_view_url, is_alignment_preview_file
 from teviewer.backends.sequence_features import (
     format_multi_sequence_fasta_summary_text,
     format_single_sequence_summary_text,
@@ -39,6 +41,33 @@ from teviewer.widgets.preview_zoom import (
 )
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
+_ALIGNMENT_PREVIEW_SUFFIXES = {".bam", ".sam"}
+_FASTA_PREVIEW_MAX_BYTES = 1024**3
+_FASTA_TOO_LARGE_MESSAGE = "The file size is too big to show"
+
+_genome_path_provider: Callable[[], Path | None] | None = None
+
+
+def set_genome_path_provider(provider: Callable[[], Path | None] | None) -> None:
+    """Return project reference FASTA for igv.js alignment preview."""
+    global _genome_path_provider
+    _genome_path_provider = provider
+
+
+def _genome_path_for_preview() -> Path | None:
+    if _genome_path_provider is None:
+        return None
+    try:
+        path = _genome_path_provider()
+    except Exception:
+        return None
+    if path is None:
+        return None
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        return None
+    return resolved if resolved.is_file() else None
 
 
 def _count_fasta_sequences_fast(path: Path) -> int:
@@ -68,8 +97,19 @@ def _is_fasta_file(path: Path) -> bool:
     return suffix in _FASTA_SUFFIXES or path.name.lower().endswith(".fa.gz")
 
 
+def _is_fasta_too_large_for_preview(path: Path) -> bool:
+    if not _is_fasta_file(path):
+        return False
+    try:
+        return path.expanduser().resolve().stat().st_size > _FASTA_PREVIEW_MAX_BYTES
+    except OSError:
+        return False
+
+
 def _is_single_fasta_file(path: Path) -> bool:
     if not _is_fasta_file(path):
+        return False
+    if _is_fasta_too_large_for_preview(path):
         return False
     return _count_fasta_sequences_fast(path) == 1
 
@@ -117,6 +157,8 @@ _UNSUPPORTED_PREVIEW_SUFFIXES = {
 
 def _preview_kind(path: Path) -> str:
     suffix = path.suffix.lower()
+    if suffix in _ALIGNMENT_PREVIEW_SUFFIXES:
+        return "igv"
     if suffix in _HTML_PREVIEW_SUFFIXES:
         return "html"
     if suffix in _FASTA_SUFFIXES or path.name.lower().endswith(".fa.gz"):
@@ -133,7 +175,8 @@ def _preview_kind(path: Path) -> str:
 def _switching_html_preview(old_path: Path, new_path: Path) -> bool:
     old_kind = _preview_kind(old_path)
     new_kind = _preview_kind(new_path)
-    return (old_kind == "html") != (new_kind == "html")
+    html_like = {"html", "igv"}
+    return (old_kind in html_like) != (new_kind in html_like)
 
 
 def _is_text_like_preview(path: Path) -> bool:
@@ -150,9 +193,8 @@ def _read_text_preview(path: Path, max_chars: int) -> str:
         with gzip.open(resolved, "rt", encoding="utf-8", errors="replace") as handle:
             text = handle.read(max_chars + 1)
     else:
-        text = resolved.read_text(encoding="utf-8", errors="replace")
-        if len(text) > max_chars + 1:
-            text = text[: max_chars + 1]
+        with resolved.open(encoding="utf-8", errors="replace") as handle:
+            text = handle.read(max_chars + 1)
     if not text.strip():
         return f"(empty file)\n\n{resolved}"
     if len(text) > max_chars:
@@ -169,6 +211,8 @@ def is_previewable_file(path: Path) -> bool:
         return True
     if suffix in _UNSUPPORTED_PREVIEW_SUFFIXES:
         return False
+    if suffix in _ALIGNMENT_PREVIEW_SUFFIXES:
+        return True
     if suffix in _HTML_PREVIEW_SUFFIXES | {".pdf"} | _IMAGE_PREVIEW_SUFFIXES:
         return True
     if suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith("blast.txt"):
@@ -184,16 +228,18 @@ def preview_path_priority(path: Path) -> int:
         if "divergence" in name or "genome_map" in name:
             return 0
         return 1
-    if suffix == ".pdf":
+    if suffix in _ALIGNMENT_PREVIEW_SUFFIXES:
         return 2
-    if suffix in _IMAGE_PREVIEW_SUFFIXES:
+    if suffix == ".pdf":
         return 3
+    if suffix in _IMAGE_PREVIEW_SUFFIXES:
+        return 4
     if suffix in _FASTA_SUFFIXES or name.endswith("blast.txt"):
-        return 4
-    if is_bismark_cov_file(path):
-        return 4
-    if suffix in _TEXT_PREVIEW_SUFFIXES:
         return 5
+    if is_bismark_cov_file(path):
+        return 5
+    if suffix in _TEXT_PREVIEW_SUFFIXES:
+        return 6
     return 99
 
 
@@ -592,8 +638,8 @@ class FilePreviewPage(QWidget):
         old_path = self.path
         self.path = path.expanduser().resolve()
         if (
-            _preview_kind(old_path) == "html"
-            and _preview_kind(self.path) != "html"
+            _preview_kind(old_path) in {"html", "igv"}
+            and _preview_kind(self.path) not in {"html", "igv"}
             and hasattr(self._html, "teardown")
         ):
             self._html.teardown()
@@ -673,6 +719,13 @@ class FilePreviewPage(QWidget):
     def _reload_html_if_needed(self) -> None:
         if self.path.suffix.lower() in {".html", ".htm"}:
             self._schedule_html_load(self.path)
+            return
+        if is_alignment_preview_file(self.path):
+            try:
+                url = build_igv_view_url(self.path, _genome_path_for_preview())
+            except IgvPreviewError:
+                return
+            self._schedule_igv_load(url)
 
     def _schedule_html_load(self, path: Path, *, force: bool = False) -> None:
         self._stack.setCurrentWidget(self._html)
@@ -685,6 +738,19 @@ class FilePreviewPage(QWidget):
             if page._stack.currentWidget() is not page._html:
                 return
             page._html.load_html_file(resolved, force=force)
+
+        QTimer.singleShot(0, _load)
+
+    def _schedule_igv_load(self, url: str) -> None:
+        self._stack.setCurrentWidget(self._html)
+        page = self
+
+        def _load() -> None:
+            if not _qobject_alive(page):
+                return
+            if page._stack.currentWidget() is not page._html:
+                return
+            page._html.load_url(url)
 
         QTimer.singleShot(0, _load)
 
@@ -740,6 +806,10 @@ class FilePreviewPage(QWidget):
             if self._stack.currentWidget() is self._html:
                 self._schedule_html_load(self.path, force=True)
             return
+        if is_alignment_preview_file(self.path):
+            if self._stack.currentWidget() is self._html:
+                self._load()
+            return
         if suffix == ".pdf":
             if self._stack.currentWidget() is self._pdf:
                 self._pdf.load_file(self.path)
@@ -764,6 +834,10 @@ class FilePreviewPage(QWidget):
 
         if not _is_fasta_file(path):
             self._sequence_info_bar.clear()
+            self._sequence_info_bar.hide()
+            return
+
+        if _is_fasta_too_large_for_preview(path):
             self._sequence_info_bar.hide()
             return
 
@@ -825,6 +899,10 @@ class FilePreviewPage(QWidget):
             self._annotation_panel.refresh_similarity_databases()
 
     def _load_single_fasta_preview(self, path: Path) -> None:
+        if _is_fasta_too_large_for_preview(path):
+            self._set_single_fasta_mode(False)
+            self._show_text(_FASTA_TOO_LARGE_MESSAGE)
+            return
         self._set_single_fasta_mode(True)
         try:
             max_chars = _TEXT_PREVIEW_MAX_CHARS
@@ -842,6 +920,10 @@ class FilePreviewPage(QWidget):
 
     def _load(self) -> None:
         path = self.path
+        if _is_fasta_too_large_for_preview(path):
+            self._set_single_fasta_mode(False)
+            self._show_text(_FASTA_TOO_LARGE_MESSAGE)
+            return
         if _is_single_fasta_file(path):
             self._load_single_fasta_preview(path)
             return
@@ -863,6 +945,18 @@ class FilePreviewPage(QWidget):
             return
         if suffix in {".html", ".htm"}:
             self._schedule_html_load(path)
+            return
+        if is_alignment_preview_file(path):
+            try:
+                url = build_igv_view_url(path, _genome_path_for_preview())
+            except IgvPreviewError as exc:
+                self._show_text(
+                    "Alignment preview (igv.js)\n\n"
+                    f"{path}\n\n"
+                    f"{exc}"
+                )
+                return
+            self._schedule_igv_load(url)
             return
         if suffix in {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}:
             if not self._image.set_image_file(path):
@@ -888,13 +982,7 @@ class FilePreviewPage(QWidget):
             )
             return
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if not text.strip():
-                text = f"(empty file)\n\n{path}"
-            max_chars = _DEFAULT_TEXT_MAX_CHARS
-            if len(text) > max_chars:
-                text = text[:max_chars] + "\n\n... (truncated preview)"
-            self._show_text(text)
+            self._show_text(_read_text_preview(path, _DEFAULT_TEXT_MAX_CHARS))
         except OSError as exc:
             self._show_text(f"Could not read file:\n{path}\n{exc}")
 

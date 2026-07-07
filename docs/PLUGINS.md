@@ -1,8 +1,8 @@
-# TEviewer plugins (API only — not loaded in the GUI)
-
-> **Note:** Plugin loading is **disabled** in the current TEviewer build so built-in toolbar tools stay reliable. The `teviewer/plugins/` package remains for future use; do not `pip install` plugin packages until UI support is re-enabled.
+# TEviewer plugins
 
 Plugins add **new toolbar tools** that use the same file list and job flow as Blast, TEAid, Flexidot, etc.
+
+> **Note:** Plugin loading is enabled in the current build. The bundled **Minimap2** plugin ships with TEviewer (`pip install -e .`). Additional plugins can be installed with their own `pip install -e .` packages.
 
 ## What plugins receive
 
@@ -44,6 +44,8 @@ pip install -e ./my-teviewer-plugin
 ```
 
 Restart TEviewer. The plugin appears on the function toolbar after a separator.
+
+Open **TEviewer → Setting → Toolbar** to choose visible tools and button order.
 
 ## Examples
 
