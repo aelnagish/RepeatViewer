@@ -1055,10 +1055,10 @@ class MainWindow(QMainWindow):
         refreshed = False
 
         if changed.is_dir():
+            # Refresh only the changed directory. Rebuilding the parent folder's
+            # children (e.g. after saving a GFF in a subfolder) destroys the
+            # selected tree item and Qt jumps to the next folder below.
             refreshed = self._refresh_subfolders_under(changed) is not None
-            parent = changed.parent
-            if parent != changed:
-                refreshed = self._refresh_subfolders_under(parent) is not None or refreshed
 
         if not refreshed:
             self._refresh_tree()
@@ -2293,11 +2293,22 @@ class MainWindow(QMainWindow):
         item = self._find_tree_item_for_path(parent_folder)
         if item is None:
             return None
+        keep_folder = (
+            self._current_folder.expanduser().resolve()
+            if self._current_folder is not None
+            else None
+        )
         while item.childCount():
             item.removeChild(item.child(0))
         self._populate_subfolders(parent_folder, item)
         item.setExpanded(True)
         self._folder_tree.resizeColumnToContents(0)
+        if keep_folder is not None:
+            keep_item = self._find_tree_item_for_path(keep_folder)
+            if keep_item is not None:
+                self._folder_tree.blockSignals(True)
+                self._folder_tree.setCurrentItem(keep_item)
+                self._folder_tree.blockSignals(False)
         return item
 
     def _ensure_folder_visible_in_tree(self, folder: Path) -> QTreeWidgetItem | None:
@@ -2343,22 +2354,54 @@ class MainWindow(QMainWindow):
         resolved = path.expanduser().resolve()
         if resolved.parent != self._current_folder:
             return
-        # If the user is not currently interacting with the Files panel,
-        # avoid re-selecting items (which steals focus and makes the UI jump).
-        files_panel_active = self._file_list.hasFocus()
-        keep_path: Path | None = None
-        if files_panel_active:
-            current = self._file_list.currentItem()
-            if current is not None:
-                keep_path = self._preview_path_from_item(current)
-        self._refresh_current_folder()
-        if keep_path is not None and keep_path.is_file():
-            self._file_list.blockSignals(True)
-            self._select_path_in_file_list(keep_path)
+        # Saving annotations should not rebuild the whole folder tree.
+        # But the newly written GFF3 should appear in the Files list immediately,
+        # without the panel jumping to a different folder.
+
+        selected_key = str(resolved)
+        prev_key: str | None = None
+        current = self._file_list.currentItem()
+        if current is not None:
+            prev_path = self._preview_path_from_item(current)
+            if prev_path is not None:
+                prev_key = str(prev_path.expanduser().resolve())
+
+        def _find_item_for_key(key: str) -> QListWidgetItem | None:
+            for index in range(self._file_list.count()):
+                item = self._file_list.item(index)
+                raw = item.data(ROLE_PATH)
+                if not raw:
+                    continue
+                if str(Path(str(raw)).expanduser().resolve()) == key:
+                    return item
+            return None
+
+        found_item = _find_item_for_key(selected_key)
+
+        self._file_list.blockSignals(True)
+        try:
+            reveal_item: QListWidgetItem | None = None
+            if found_item is not None:
+                reveal_item = found_item
+            else:
+                # Refresh only the current folder's file list so the saved GFF3 shows up.
+                # open_preview=False prevents any preview tab changes.
+                self._populate_file_list(self._current_folder, open_preview=False)
+                reveal_item = _find_item_for_key(selected_key)
+                if reveal_item is None and prev_key is not None:
+                    reveal_item = _find_item_for_key(prev_key)
+
+            if reveal_item is not None:
+                self._style_new_output_item(reveal_item)
+                self._reveal_file_list_item(
+                    reveal_item,
+                    scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
+                )
+        finally:
             self._file_list.blockSignals(False)
 
         # Ensure focus returns to the preview area after saving.
-        if not files_panel_active:
+        if not self._file_list.hasFocus():
             QTimer.singleShot(0, self._focus_preview_widget)
 
     def _focus_preview_widget(self) -> None:
@@ -2443,7 +2486,15 @@ class MainWindow(QMainWindow):
         source_files: list[Path] | None = None,
         open_preview: bool = True,
     ) -> None:
-        self._current_folder = folder.expanduser().resolve()
+        target_folder = folder.expanduser().resolve()
+        prev_folder = self._current_folder
+        same_folder = False
+        if prev_folder is not None:
+            try:
+                same_folder = prev_folder.expanduser().resolve() == target_folder
+            except OSError:
+                same_folder = False
+        self._current_folder = target_folder
         try:
             self._cached_folder_files = [
                 p
@@ -2482,6 +2533,17 @@ class MainWindow(QMainWindow):
             for path in source_files:
                 _track(path, as_output=False)
 
+        preserve_ui = same_folder
+        prev_key: str | None = None
+        prev_scroll: int | None = None
+        if preserve_ui:
+            current = self._file_list.currentItem()
+            if current is not None:
+                prev_path = self._preview_path_from_item(current)
+                if prev_path is not None:
+                    prev_key = str(prev_path.expanduser().resolve())
+            prev_scroll = int(self._file_list.verticalScrollBar().value())
+
         self._file_list.blockSignals(True)
         self._apply_file_filter()
 
@@ -2501,6 +2563,25 @@ class MainWindow(QMainWindow):
                 len(self._cached_folder_files),
                 len(self._cached_folder_files),
             )
+
+        # When refreshing the same folder without new outputs, keep scroll stable.
+        if preserve_ui and not highlight_paths:
+            if prev_key:
+                match: QListWidgetItem | None = None
+                for index in range(self._file_list.count()):
+                    item = self._file_list.item(index)
+                    raw = item.data(ROLE_PATH)
+                    if not raw:
+                        continue
+                    if str(Path(str(raw)).expanduser().resolve()) == prev_key:
+                        match = item
+                        break
+                if match is not None:
+                    match.setSelected(True)
+                    self._file_list.setCurrentItem(match)
+            if prev_scroll is not None:
+                vsb = self._file_list.verticalScrollBar()
+                vsb.setValue(min(prev_scroll, vsb.maximum()))
         self._file_list.blockSignals(False)
         if highlight_paths and open_preview:
             self._open_best_preview_path(highlight_paths)
@@ -2521,18 +2602,23 @@ class MainWindow(QMainWindow):
         item.setFont(font)
         item.setToolTip("Input file used for the last job")
 
+    def _reveal_file_list_item(
+        self,
+        item: QListWidgetItem,
+        *,
+        scroll_hint: QAbstractItemView.ScrollHint = QAbstractItemView.ScrollHint.EnsureVisible,
+    ) -> None:
+        """Select a file in the list and scroll it into view (default: bottom)."""
+        item.setSelected(True)
+        self._file_list.setCurrentItem(item)
+        self._file_list.scrollToItem(item, scroll_hint)
+
     def _select_and_scroll_outputs(
         self,
         paths: list[Path],
         *,
         open_preview: bool = True,
     ) -> None:
-        # When we're not explicitly opening a preview, avoid stealing focus
-        # by changing the Files-panel selection unless the user is already
-        # interacting with that panel.
-        if not open_preview and not self._file_list.hasFocus():
-            return
-
         path_set = {str(p.expanduser().resolve()) for p in paths}
         first_item: QListWidgetItem | None = None
         preferred_item: QListWidgetItem | None = None
@@ -2552,10 +2638,9 @@ class MainWindow(QMainWindow):
                     preferred_item = item
         focus_item = preferred_item or first_item
         if focus_item is not None:
-            self._file_list.setCurrentItem(focus_item)
-            self._file_list.scrollToItem(
+            self._reveal_file_list_item(
                 focus_item,
-                QAbstractItemView.ScrollHint.PositionAtCenter,
+                scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
             )
         if open_preview and focus_item is not None:
             path = self._preview_path_from_item(focus_item)
@@ -2575,23 +2660,15 @@ class MainWindow(QMainWindow):
 
     def _select_path_in_file_list(self, path: Path) -> None:
         """Select one file in the list (used after creating a genome map HTML)."""
-        # Avoid stealing focus from the current working view.
-        if not self._file_list.hasFocus():
-            focus_widget = QApplication.focusWidget()
-            if focus_widget is None or not self._file_list.isAncestorOf(focus_widget):
-                return
-
         resolved = path.expanduser().resolve()
         key = str(resolved)
         for index in range(self._file_list.count()):
             item = self._file_list.item(index)
             raw = item.data(ROLE_PATH)
             if raw and str(Path(str(raw)).resolve()) == key:
-                self._file_list.setCurrentItem(item)
-                item.setSelected(True)
-                self._file_list.scrollToItem(
+                self._reveal_file_list_item(
                     item,
-                    QAbstractItemView.ScrollHint.PositionAtCenter,
+                    scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
                 )
                 return
 
@@ -5005,10 +5082,21 @@ class MainWindow(QMainWindow):
             raw = item.data(0, ROLE_PATH)
             if raw:
                 roots.append(Path(str(raw)))
+        keep_folder = (
+            self._current_folder.expanduser().resolve()
+            if self._current_folder is not None
+            else None
+        )
         self._folder_tree.clear()
         for root in roots:
             if root.is_dir():
-                self._add_root_folder(root)
+                self._add_root_folder(root, select=False)
+        if keep_folder is not None:
+            keep_item = self._find_tree_item_for_path(keep_folder)
+            if keep_item is not None:
+                self._folder_tree.blockSignals(True)
+                self._folder_tree.setCurrentItem(keep_item)
+                self._folder_tree.blockSignals(False)
         self._update_directory_watchers()
 
     def _apply_function(self, func_name: str, *, preselected: list[Path] | None = None, **job_kwargs) -> None:

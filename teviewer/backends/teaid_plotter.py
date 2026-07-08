@@ -1271,8 +1271,7 @@ def _configure_divergence_subplot(
 ):
     fig.update_xaxes(
         title_text='Divergence' if show_x_title else '',
-        showgrid=True,
-        gridcolor='#f0f0f0',
+        showgrid=False,
         showticklabels=True,
         title_font=_AXIS_TITLE_FONT,
         range=[0, TEAID_DIVERGENCE_HIST_MAX],
@@ -1285,8 +1284,7 @@ def _configure_divergence_subplot(
     )
     fig.update_yaxes(
         title_text='Total length (bp)' if show_y_title else '',
-        showgrid=True,
-        gridcolor='#f4f4f4',
+        showgrid=False,
         showticklabels=True,
         title_font=_AXIS_TITLE_FONT,
         range=[0, div_hist_max * 1.08],
