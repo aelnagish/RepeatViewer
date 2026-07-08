@@ -482,8 +482,6 @@ class GenomeDialog(QDialog):
         if not is_genome_fasta(path):
             return False
         resolved = path.expanduser().resolve()
-        self.raise_()
-        self.activateWindow()
         if self._mode_pan.isChecked():
             self._pan_list.apply_path(resolved)
         else:

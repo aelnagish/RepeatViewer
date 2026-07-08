@@ -598,6 +598,8 @@ def build_igv_view_url(
         base_url=base_url,
     )
     config = {
+        # Enable IGV's built-in "Save SVG" control in the preview window.
+        "showSVGButton": True,
         "reference": {
             "id": reference.stem,
             "name": reference.name,

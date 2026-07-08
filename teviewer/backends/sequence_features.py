@@ -14,7 +14,7 @@ FEATURE_TYPE_COLORS: dict[str, str] = {
     "PBS": "#d35400",
     "PPT": "#e67e22",
     "ORF": "#27ae60",
-    "tandem repeat": "#16a085",
+    "tandem repeat": "#000000",
     "domain": "#2980b9",
     "others": "#7f8c8d",
     # Legacy labels from older annotations

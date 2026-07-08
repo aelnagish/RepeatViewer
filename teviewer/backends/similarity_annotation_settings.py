@@ -8,7 +8,7 @@ from PySide6.QtCore import QSettings
 
 
 DEFAULT_SIMILARITY_EVALUE = 1e-4
-SETTINGS_VERSION = 5
+SETTINGS_VERSION = 6
 
 
 @dataclass
@@ -20,6 +20,7 @@ class SimilarityAnnotationSettings:
     cdd_evalue: float = DEFAULT_SIMILARITY_EVALUE
     max_hits_per_database: int = 10
     show_database_name_on_track: bool = True
+    show_info_window_after_run: bool = True
 
 
 def format_similarity_evalue_suffix(evalue: float | str | None) -> str:
@@ -98,6 +99,7 @@ def load_similarity_annotation_settings() -> SimilarityAnnotationSettings:
     version = _get_int(s, f"{prefix}settings_version", 0)
     max_hits = _get_int(s, f"{prefix}max_hits_per_database", 10)
     show_db_name = _get_bool(s, f"{prefix}show_database_name_on_track", True)
+    show_info = _get_bool(s, f"{prefix}show_info_window_after_run", True)
     if version < SETTINGS_VERSION:
         settings = SimilarityAnnotationSettings(
             blast_evalue=_get_float(s, f"{prefix}blast_evalue", DEFAULT_SIMILARITY_EVALUE),
@@ -105,6 +107,7 @@ def load_similarity_annotation_settings() -> SimilarityAnnotationSettings:
             cdd_evalue=_get_float(s, f"{prefix}cdd_evalue", DEFAULT_SIMILARITY_EVALUE),
             max_hits_per_database=max_hits,
             show_database_name_on_track=show_db_name,
+            show_info_window_after_run=show_info,
         )
         save_similarity_annotation_settings(settings)
         return settings
@@ -114,6 +117,7 @@ def load_similarity_annotation_settings() -> SimilarityAnnotationSettings:
         cdd_evalue=_get_float(s, f"{prefix}cdd_evalue", DEFAULT_SIMILARITY_EVALUE),
         max_hits_per_database=max_hits,
         show_database_name_on_track=show_db_name,
+        show_info_window_after_run=show_info,
     )
 
 
@@ -126,3 +130,4 @@ def save_similarity_annotation_settings(settings: SimilarityAnnotationSettings) 
     s.setValue(f"{prefix}cdd_evalue", settings.cdd_evalue)
     s.setValue(f"{prefix}max_hits_per_database", settings.max_hits_per_database)
     s.setValue(f"{prefix}show_database_name_on_track", settings.show_database_name_on_track)
+    s.setValue(f"{prefix}show_info_window_after_run", settings.show_info_window_after_run)

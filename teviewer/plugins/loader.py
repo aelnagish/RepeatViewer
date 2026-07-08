@@ -6,6 +6,10 @@ import logging
 import sys
 from importlib.metadata import entry_points
 
+from teviewer.plugins.custom_command import (
+    UserCommandPlugin,
+    load_user_command_plugin_specs,
+)
 from teviewer.plugins.api import TEviewerPlugin
 from teviewer.plugins.registry import PluginRegistry, get_registry, reset_registry
 
@@ -51,6 +55,15 @@ def load_plugins(registry: PluginRegistry | None = None) -> PluginRegistry:
             msg = f"{ep.name}: {exc}"
             errors.append(msg)
             logger.exception("Failed to load TEviewer plugin %s", ep.name)
+
+    for spec in load_user_command_plugin_specs():
+        try:
+            reg.register(UserCommandPlugin(spec))
+            logger.info("Loaded user command plugin: %s (%s)", spec.label, spec.id)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"{spec.id}: {exc}"
+            errors.append(msg)
+            logger.exception("Failed to load user command plugin %s", spec.id)
 
     if errors:
         logger.warning("Plugin load errors:\n%s", "\n".join(errors))

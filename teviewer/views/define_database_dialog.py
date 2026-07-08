@@ -26,7 +26,11 @@ from teviewer.backends.database_prepare import (
     CDD_MARKER,
     collect_prepare_targets,
     describe_database_problem,
+    hmm_indexing_available,
+    index_is_ready,
+    pyhmmer_install_hint,
 )
+from teviewer.backends.pyhmmer_search import hmm_uses_nucleotide_query
 from teviewer.project import (
     DATABASE_TYPE_DNA,
     DATABASE_TYPE_PROTEIN,
@@ -76,9 +80,20 @@ def infer_user_database_defaults(path: Path) -> tuple[str, str, bool]:
     suffix = path.suffix.lower()
     name = path.stem[:_MAX_USER_DATABASE_NAME_LENGTH]
     if suffix == ".hmm":
-        return name, DATABASE_TYPE_PROTEIN, True
+        db_type = (
+            DATABASE_TYPE_DNA
+            if hmm_uses_nucleotide_query(path)
+            else DATABASE_TYPE_PROTEIN
+        )
+        return name, db_type, True
     if suffix in _HMM_INDEX_SUFFIXES and path.with_suffix("").suffix.lower() == ".hmm":
-        return path.with_suffix("").stem[:_MAX_USER_DATABASE_NAME_LENGTH], DATABASE_TYPE_PROTEIN, True
+        hmm_path = path.with_suffix("")
+        db_type = (
+            DATABASE_TYPE_DNA
+            if hmm_uses_nucleotide_query(hmm_path)
+            else DATABASE_TYPE_PROTEIN
+        )
+        return hmm_path.stem[:_MAX_USER_DATABASE_NAME_LENGTH], db_type, True
     if suffix in _BLAST_DNA_INDEX_SUFFIXES or suffix == ".fna":
         return name, DATABASE_TYPE_DNA, False
     if suffix in _BLAST_PROT_INDEX_SUFFIXES or suffix == ".faa":
@@ -130,6 +145,7 @@ class _UserDatabaseRow(QWidget):
         self._remove_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._remove_btn.setVisible(removable)
         self._remove_btn.clicked.connect(self.remove_requested.emit)
+        self._path.editingFinished.connect(self._apply_inferred_defaults)
 
         path_container = QWidget(self)
         path_layout = QHBoxLayout(path_container)
@@ -166,6 +182,27 @@ class _UserDatabaseRow(QWidget):
         )
         if picked:
             self._path.setText(picked)
+            self._apply_inferred_defaults()
+
+    def _apply_inferred_defaults(self) -> None:
+        text = self._path.text().strip()
+        if not text:
+            return
+        path = Path(text).expanduser()
+        if not path.is_file():
+            return
+        name, db_type, is_hmm = infer_user_database_defaults(path)
+        if not self._name.text().strip():
+            self._name.setText(name)
+        type_index = self._type.findText(db_type)
+        if type_index >= 0:
+            self._type.setCurrentIndex(type_index)
+        if path.suffix.lower() == ".hmm" or any(
+            path.name.endswith(suffix) for suffix in _HMM_INDEX_SUFFIXES
+        ):
+            self._hmm.setChecked(True)
+        else:
+            self._hmm.setChecked(is_hmm)
 
     def apply_path_from_panel(self, path: Path) -> None:
         path = path.expanduser().resolve()
@@ -336,20 +373,19 @@ class DefineDatabaseDialog(QDialog):
         if resolved is None:
             return False
         kind, target_path = resolved
-        self.raise_()
-        self.activateWindow()
         if kind == "cdd":
             self._cdd_path.setText(str(target_path))
             return True
         return self._user_databases.apply_path_from_panel(target_path)
 
     def accept(self) -> None:
-        pending = self._pending_database_index_targets()
-        if pending is None:
+        pending, blocked = self._pending_database_index_targets()
+        if blocked:
             return
         use_system_blast = self._project.use_system_blast
+        saved_targets = self._collect_database_targets()
         self._apply_to_project()
-        host = self.parent() if self.parent() else self
+        host = self.parentWidget() or self.parent() or self
         super().accept()
         if pending:
             runner = find_database_index_runner(host)
@@ -361,6 +397,20 @@ class DefineDatabaseDialog(QDialog):
                     show_success=True,
                 ),
             )
+        elif saved_targets:
+            already_ready = [
+                target.label
+                for target in saved_targets
+                if index_is_ready(target.kind, target.path)
+            ]
+            if already_ready:
+                QMessageBox.information(
+                    self,
+                    "Define databases",
+                    "Database settings saved.\n\n"
+                    "No indexing was needed (index files already present):\n"
+                    + "\n".join(f"  • {label}" for label in already_ready),
+                )
 
     def _collect_database_targets(self):
         cdd_text = self._cdd_path.text().strip()
@@ -370,31 +420,56 @@ class DefineDatabaseDialog(QDialog):
             user_databases=self._user_databases.databases(),
         )
 
-    def _pending_database_index_targets(self) -> list | None:
+    def _pending_database_index_targets(self) -> tuple[list, bool]:
         targets = self._collect_database_targets()
         if not targets:
-            return []
+            return [], False
 
+        valid: list = []
         problems: list[str] = []
         for target in targets:
             problem = describe_database_problem(target.kind, target.path)
             if problem:
                 problems.append(f"{target.label}\n{problem}")
+            else:
+                valid.append(target)
+
         if problems:
+            extra = (
+                "\n\nOther valid databases will still be saved and indexed."
+                if valid
+                else ""
+            )
             QMessageBox.warning(
                 self,
                 "Database path",
-                "\n\n".join(problems),
+                "\n\n".join(problems) + extra,
             )
-            return None
+            if not valid:
+                return [], True
 
-        return [target for target in targets if target.needs_index]
+        pending = [target for target in valid if target.needs_index]
+        if pending and any(target.kind == "hmm" for target in pending):
+            if not hmm_indexing_available():
+                QMessageBox.warning(
+                    self,
+                    "HMM database",
+                    "An HMM database (e.g. Dfam) needs either:\n\n"
+                    "  • HMMER with hmmpress (conda install -c bioconda hmmer), or\n"
+                    f"  • pyhmmer ({pyhmmer_install_hint()})\n\n"
+                    "Check the HMM box for .hmm files, then try again.",
+                )
+                return [], True
+        return pending, False
 
     def _apply_to_project(self) -> TEviewerProject:
         cdd_text = self._cdd_path.text().strip()
-        self._project.cdd_dirs = (
-            [Path(cdd_text).expanduser().resolve()] if cdd_text else []
-        )
+        if cdd_text:
+            cdd_dir = Path(cdd_text).expanduser().resolve()
+            if describe_database_problem("cdd", cdd_dir) is None:
+                self._project.cdd_dirs = [cdd_dir]
+        else:
+            self._project.cdd_dirs = []
         self._project.user_databases = self._user_databases.databases()
         save_workspace(self._project)
         return self._project

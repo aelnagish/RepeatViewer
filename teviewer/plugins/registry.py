@@ -25,6 +25,15 @@ class PluginRegistry:
             raise ValueError(f"Duplicate plugin id: {plugin_id}")
         self._plugins[plugin_id] = plugin
 
+    def register_or_replace(self, plugin: TEviewerPlugin) -> None:
+        plugin_id = plugin.id.strip()
+        if not plugin_id or not plugin_id.replace("_", "").isalnum():
+            raise ValueError(f"Invalid plugin id: {plugin.id!r}")
+        self._plugins[plugin_id] = plugin
+
+    def unregister(self, plugin_id: str) -> bool:
+        return self._plugins.pop(plugin_id, None) is not None
+
     def all_plugins(self) -> list[TEviewerPlugin]:
         return sorted(self._plugins.values(), key=lambda p: p.label.lower())
 

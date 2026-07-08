@@ -5,7 +5,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -147,14 +146,9 @@ class AnnotationElementColorsDialog(QDialog):
         scroll.setWidget(body)
         root.addWidget(scroll, stretch=1)
 
-        self._apply_current = QCheckBox("Apply to features on this sequence", self)
-        self._apply_current.setToolTip(
-            "Update colors of features already drawn on the current sequence map"
-        )
-        if show_apply_to_sequence:
-            root.addWidget(self._apply_current)
-        else:
-            self._apply_current.hide()
+        # Kept for compatibility with older call sites; this dialog no longer
+        # exposes a per-sequence apply toggle and always applies to current sequence.
+        _ = show_apply_to_sequence
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -189,7 +183,7 @@ class AnnotationElementColorsDialog(QDialog):
             row.set_color_hex(default_nucleotide_backgrounds()[base])
 
     def apply_to_current_sequence(self) -> bool:
-        return self._apply_current.isChecked()
+        return True
 
     def new_feature_type_colors(self) -> dict[str, str]:
         return {key: row.color_hex() for key, row in self._feature_rows.items()}

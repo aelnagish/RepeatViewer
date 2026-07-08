@@ -19,6 +19,10 @@ class OrfDetectResult:
     message: str
 
 
+def orfipy_available() -> bool:
+    return orfipy_core is not None
+
+
 def _require_orfipy() -> None:
     if orfipy_core is None:
         raise RuntimeError(

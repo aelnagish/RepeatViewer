@@ -57,6 +57,8 @@ class TEviewerPlugin(ABC):
     supports_parallel: bool = True
     #: If True, ``prepare_job`` shows a dialog where the user picks input files.
     picks_files_in_dialog: bool = False
+    #: If False, the plugin can run without a pre-selected Files panel entry.
+    needs_selected_files: bool = True
 
     @abstractmethod
     def validate(

@@ -15,9 +15,12 @@ from PySide6.QtGui import (
     QMouseEvent,
     QNativeGestureEvent,
     QPainter,
+    QImage,
     QPen,
     QPolygonF,
     QShortcut,
+    QPageSize,
+    QPdfWriter,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
@@ -68,6 +71,7 @@ from teviewer.backends.auto_annotation_settings import (
 )
 from teviewer.backends.job_cancel import JobCancellation
 from teviewer.backends.annotation_colors import feature_type_color, similarity_database_color
+from teviewer.backends.database_prepare import database_search_readiness
 from teviewer.backends.sequence_features import (
     DEFAULT_FEATURE_TYPES,
     SequenceFeature,
@@ -89,11 +93,13 @@ from teviewer.backends.similarity_annotation_settings import (
     similarity_feature_track_label,
 )
 from teviewer.job_options import configure_report_evalue_spinbox
+from teviewer.backends.orf_detect import orfipy_available
 from teviewer.backends.similarity_annotation import (
     SimilarityAnnotationResult,
     SimilarityDatabaseRun,
     load_use_system_blast_from_settings,
     run_similarity_annotations,
+    similarity_search_needs_orfs,
 )
 from teviewer.project import UserDatabase
 from teviewer.workers.base import Worker
@@ -2970,6 +2976,14 @@ class SimilarityAnnotationSettingsDialog(QDialog):
             "When unchecked, only the target or domain name is shown."
         )
         form.addRow("Show database name on feature track:", self._show_db_name)
+
+        self._show_info_dialog = QCheckBox(self)
+        self._show_info_dialog.setChecked(settings.show_info_window_after_run)
+        self._show_info_dialog.setToolTip(
+            "When checked, TEviewer shows an information dialog with the similarity search summary "
+            "(e.g. hits/no hits or database-readiness problems)."
+        )
+        form.addRow("Show info window after run:", self._show_info_dialog)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -2986,6 +3000,7 @@ class SimilarityAnnotationSettingsDialog(QDialog):
             cdd_evalue=self._cdd_evalue.value(),
             max_hits_per_database=self._max_hits.value(),
             show_database_name_on_track=self._show_db_name.isChecked(),
+            show_info_window_after_run=self._show_info_dialog.isChecked(),
         )
 
 
@@ -3178,10 +3193,15 @@ class SequenceMapPanel(QWidget):
             "Set colors for feature types, similarity databases, and nucleotides (A/C/G/T)"
         )
         color_btn.clicked.connect(self._open_element_colors_dialog)
+        export_btn = QPushButton("Export", self._action_row_container)
+        export_btn.setToolTip(
+            "Export the current annotation view as SVG / PNG / PDF"
+        )
+        export_btn.clicked.connect(self._export_annotation_view)
         save_btn = QPushButton("Save", self._action_row_container)
         save_btn.setToolTip("Write annotation changes to the JSON sidecar and GFF3 file")
         save_btn.clicked.connect(lambda: self._save_annotations(silent=True))
-        for btn in (del_btn, restore_btn, color_btn, save_btn):
+        for btn in (del_btn, restore_btn, color_btn, export_btn, save_btn):
             action_row.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
         action_row.addStretch()
         self._annotation_job_status = QLabel("", self._action_row_container)
@@ -3731,8 +3751,14 @@ class SequenceMapPanel(QWidget):
     def _make_similarity_db_check(self, entry: UserDatabase, index: int) -> QCheckBox:
         color = similarity_database_color(entry.name, index)
         check = QCheckBox(entry.name, self._similarity_db_flow)
-        check.setToolTip(f"{entry.display_type_label}\n{entry.path}")
-        check.setChecked(True)
+        readiness = database_search_readiness(entry)
+        tooltip = f"{entry.display_type_label}\n{entry.path}"
+        if readiness is not None:
+            tooltip += f"\n\nNot ready: {readiness}"
+            check.setChecked(False)
+        else:
+            check.setChecked(True)
+        check.setToolTip(tooltip)
         check.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
         check.setSizePolicy(
             QSizePolicy.Policy.Maximum,
@@ -3810,6 +3836,35 @@ class SequenceMapPanel(QWidget):
                 "Select at least one database to search.",
             )
             return
+        readiness_issues = []
+        for entry in databases:
+            readiness = database_search_readiness(entry.database)
+            if readiness is not None:
+                readiness_issues.append(f"{entry.database.name}: {readiness}")
+        if readiness_issues:
+            QMessageBox.warning(
+                self,
+                "Similarity annotation",
+                "These databases are not ready to search:\n\n"
+                + "\n\n".join(readiness_issues),
+            )
+            return
+        if similarity_search_needs_orfs(tuple(databases)):
+            map_orfs = [
+                feat
+                for feat in self._map.features()
+                if str(feat.feature_type).upper() == "ORF"
+                or str(feat.name or "").upper() == "ORF"
+            ]
+            if not map_orfs and not orfipy_available():
+                QMessageBox.warning(
+                    self,
+                    "Similarity annotation",
+                    "Protein similarity search needs ORF intervals on the sequence.\n\n"
+                    "Run auto annotation with ORF checked first, or install orfipy:\n"
+                    "  pip install orfipy",
+                )
+                return
 
         self._push_feature_undo_snapshot()
         self._sim_ann_cancel.reset()
@@ -3859,9 +3914,35 @@ class SequenceMapPanel(QWidget):
         if data is None:
             self._clear_annotation_job_status()
             return
+        before_domains = sum(
+            1 for feat in self._map.features() if feat.feature_type == "domain"
+        )
         self._map.set_features(list(result.features))
+        after_domains = sum(
+            1 for feat in result.features if feat.feature_type == "domain"
+        )
         self._clear_annotation_job_status()
         self.statusMessage.emit(f"{result.message} Click Save to write changes to disk.")
+        added_domains = after_domains - before_domains
+        lower_message = result.message.lower()
+        needs_dialog = (
+            added_domains <= 0
+            or "not indexed" in lower_message
+            or "not prepared" in lower_message
+            or "no blast" in lower_message
+            or "no hmm" in lower_message
+            or "no cdd" in lower_message
+            or "no orf" in lower_message
+            or "failed" in lower_message
+            or "not installed" in lower_message
+            or "unchanged (0 hit" in lower_message
+        )
+        if (
+            self._similarity_ann_settings.show_info_window_after_run
+            and needs_dialog
+            and result.message.strip()
+        ):
+            QMessageBox.information(self, "Similarity annotation", result.message)
 
     def _on_similarity_annotation_error(self, message: str) -> None:
         self._clear_annotation_job_status()
@@ -3984,3 +4065,114 @@ class SequenceMapPanel(QWidget):
 
     def _export_gff(self) -> None:
         self._save_annotations(silent=True)
+
+    def _export_annotation_view_to_file(
+        self,
+        out_path: Path,
+    ) -> None:
+        """Export the current SequenceMapWidget view to disk."""
+        widget = self._map
+        header = getattr(widget, "_header", None)
+        seq_block = getattr(widget, "_sequence_block", None)
+        # Compose: [header (overview+ruler)] + [main sequence/annotation block]
+        if header is not None and seq_block is not None:
+            header_size = header.rect().size()
+            if header_size.width() <= 0 or header_size.height() <= 0:
+                header_size = header.sizeHint()
+            seq_size = seq_block.rect().size()
+            if seq_size.width() <= 0 or seq_size.height() <= 0:
+                seq_size = seq_block.sizeHint()
+            width = max(1, int(max(header_size.width(), seq_size.width())))
+            height = max(1, int(header_size.height() + seq_size.height()))
+            export_sizes = (width, height, header_size.height())
+        else:
+            export_sizes = (max(1, int(widget.rect().width())), max(1, int(widget.rect().height())), 0)
+        width, height, header_h = export_sizes
+        if width <= 0 or height <= 0:
+            QMessageBox.information(self, "Export", "Nothing to export (empty view).")
+            return
+        size = QSize(width, height)
+
+        suffix = out_path.suffix.lower()
+        if suffix == ".svg":
+            try:
+                from PySide6.QtSvg import QSvgGenerator  # type: ignore
+            except Exception:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Export",
+                    "SVG export needs PySide6 QtSvg module. Install it and retry.",
+                )
+                return
+
+            gen = QSvgGenerator()
+            gen.setFileName(str(out_path))
+            gen.setSize(size)
+            gen.setViewBox(QRect(0, 0, size.width(), size.height()))
+            gen.setResolution(96)
+            painter = QPainter(gen)
+            try:
+                if header is not None and seq_block is not None:
+                    header.render(painter, QPoint(0, 0))
+                    seq_block.render(painter, QPoint(0, int(header_h)))
+                else:
+                    widget.render(painter, QPoint(0, 0))
+            finally:
+                painter.end()
+            return
+
+        # Render once (PNG-friendly) then reuse for PNG/PDF.
+        img = QImage(size, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(img)
+        try:
+            if header is not None and seq_block is not None:
+                header.render(painter, QPoint(0, 0))
+                seq_block.render(painter, QPoint(0, int(header_h)))
+            else:
+                widget.render(painter, QPoint(0, 0))
+        finally:
+            painter.end()
+
+        if suffix == ".png":
+            if not img.save(str(out_path), "PNG"):
+                QMessageBox.warning(self, "Export", "Could not save PNG.")
+            return
+
+        if suffix == ".pdf":
+            writer = QPdfWriter(str(out_path))
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            writer.setResolution(96)
+            pdf_painter = QPainter(writer)
+            try:
+                page_rect = writer.pageRect()
+                scaled = img.scaled(
+                    page_rect.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                x = page_rect.x() + (page_rect.width() - scaled.width()) // 2
+                y = page_rect.y() + (page_rect.height() - scaled.height()) // 2
+                pdf_painter.drawImage(QPoint(x, y), scaled)
+            finally:
+                pdf_painter.end()
+            return
+
+        QMessageBox.warning(
+            self,
+            "Export",
+            f"Unsupported export format: {suffix!r}. Use .svg, .png, or .pdf.",
+        )
+
+    def _export_annotation_view(self) -> None:
+        out, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Export annotation view",
+            str(self._path.with_suffix(".svg")),
+            "SVG (*.svg);;PNG (*.png);;PDF (*.pdf)",
+        )
+        if not out:
+            return
+        self._export_annotation_view_to_file(Path(out))
+        # Avoid letting focus fall back to the left Files panel after export.
+        QTimer.singleShot(0, self._map.setFocus)

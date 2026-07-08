@@ -92,6 +92,40 @@ def pyhmmer_install_hint() -> str:
     return "pip install pyhmmer"
 
 
+def hmm_indexing_available() -> bool:
+    return check_cmd_in_path("hmmpress") or _pyhmmer_importable()
+
+
+def database_search_readiness(db: UserDatabase) -> str | None:
+    """Return a user-facing reason when a database cannot be searched yet."""
+    path = db.path.expanduser().resolve()
+    kind = db.prepare_kind
+    problem = describe_database_problem(kind, path)
+    if problem:
+        return problem.replace("\n", " ")
+    if kind == "protein":
+        if not blast_index_file(path, protein=True).is_file():
+            return "Protein database is not indexed. Use File → Define database."
+    elif kind == "dna":
+        if not blast_index_file(path, protein=False).is_file():
+            return "DNA database is not indexed. Use File → Define database."
+    elif kind == "cdd":
+        if not check_cdd_index_files(str(path)):
+            return "CDD database is not indexed. Use File → Define database."
+    elif kind == "hmm":
+        if not _hmm_prepare_ready(path):
+            if not hmm_indexing_available():
+                return (
+                    "HMM database is not prepared. Install hmmpress or "
+                    f"pyhmmer ({pyhmmer_install_hint()}), then use File → Define database."
+                )
+            return (
+                "HMM database is not prepared. Use File → Define database to index it "
+                "(required for large databases such as Dfam)."
+            )
+    return None
+
+
 def _hmm_pressed(hmm_path: Path) -> bool:
     return all(p.is_file() for p in hmm_index_files(hmm_path))
 
@@ -382,13 +416,10 @@ def _run_hmm_test(hmm_path: Path) -> None:
         logger.warning("pyhmmer is not installed; skipped HMM validation search.")
         return
 
-    with tempfile.TemporaryDirectory(prefix="teviewer_dbcheck_") as tmp:
-        query = Path(tmp) / "query.faa"
-        query.write_text(">test\nMKLLVVVFCLGVLA\n", encoding="utf-8")
-        try:
-            validate_hmm_search(hmm_path, query)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("pyhmmer HMM validation search failed: %s", exc)
+    try:
+        validate_hmm_search(hmm_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pyhmmer HMM validation search failed: %s", exc)
 
 
 def validate_database_search(

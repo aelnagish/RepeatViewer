@@ -17,19 +17,19 @@ from Bio.SeqRecord import SeqRecord
 
 from teviewer.backends.thread_budget import analysis_threads_per_job, load_batch_workers
 from teviewer.backends.auto_annotation_settings import OrfSettings
-from teviewer.backends.pyhmmer_search import collect_pyhmmer_domain_hits
+from teviewer.backends.pyhmmer_search import collect_pyhmmer_domain_hits, hmm_uses_nucleotide_query
 from teviewer.backends.similarity_annotation_settings import (
     SimilarityAnnotationSettings,
     similarity_feature_name,
 )
 from teviewer.backends.database_prepare import (
-    index_is_ready,
+    database_search_readiness,
     prepared_cdd_prefix,
     pyhmmer_install_hint,
 )
 from teviewer.backends.gui_functions import check_cmd_in_path, get_original_file_path
 from teviewer.backends.job_cancel import JobCancellation, check_cancelled
-from teviewer.backends.orf_detect import detect_orf_features
+from teviewer.backends.orf_detect import OrfDetectResult, detect_orf_features
 from teviewer.backends.sequence_features import SequenceFeature, load_sequence_map_data
 from teviewer.project import (
     DATABASE_TYPE_CDD,
@@ -93,6 +93,45 @@ def _blast_executable(name: str, *, use_system_blast: bool) -> str:
     raise FileNotFoundError(
         f"'{name}' was not found. Install BLAST+ or enable system BLAST in Preferences."
     )
+
+
+def similarity_search_needs_orfs(databases: tuple[SimilarityDatabaseRun, ...]) -> bool:
+    """Whether any selected database searches translated ORF products."""
+    for entry in databases:
+        db = entry.database
+        if db.db_type == DATABASE_TYPE_CDD:
+            continue
+        if db.is_hmm:
+            if hmm_uses_nucleotide_query(db.path):
+                continue
+            return True
+        if db.db_type == DATABASE_TYPE_PROTEIN:
+            return True
+    return False
+
+
+def _orfs_from_features(features: tuple[SequenceFeature, ...]) -> tuple[SequenceFeature, ...]:
+    return tuple(
+        feat
+        for feat in features
+        if str(feat.feature_type).upper() == "ORF" or str(feat.name or "").upper() == "ORF"
+    )
+
+
+def _resolve_orfs_for_similarity(
+    *,
+    sequence_id: str,
+    sequence: str,
+    features: list[SequenceFeature],
+    orf_settings: OrfSettings | None,
+) -> OrfDetectResult:
+    existing = _orfs_from_features(tuple(features))
+    if existing:
+        return OrfDetectResult(
+            existing,
+            f"Using {len(existing)} ORF(s) from the current annotation.",
+        )
+    return detect_orf_features(sequence_id, sequence, settings=orf_settings)
 
 
 def _orf_id(orf: SequenceFeature) -> str:
@@ -783,8 +822,9 @@ def _annotate_protein_database(
     blast_threads: int = 1,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     db_path = database.path.expanduser().resolve()
-    if not index_is_ready("protein", db_path):
-        return (), f"{database.name}: protein database is not indexed (File → Define database)."
+    readiness = database_search_readiness(database)
+    if readiness is not None:
+        return (), f"{database.name}: {readiness}"
     proteins = _protein_records_from_orfs(sequence, orfs)
     if not proteins:
         return (), f"{database.name}: no ORFs long enough for BLASTP."
@@ -876,8 +916,9 @@ def _annotate_dna_database(
     blast_threads: int = 1,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     db_path = database.path.expanduser().resolve()
-    if not index_is_ready("dna", db_path):
-        return (), f"{database.name}: DNA database is not indexed (File → Define database)."
+    readiness = database_search_readiness(database)
+    if readiness is not None:
+        return (), f"{database.name}: {readiness}"
     report_evalue = _clamp_evalue(settings.blast_evalue, default=DEFAULT_BLAST_EVALUE)
     max_hits = _max_hits(settings.max_hits_per_database)
     with tempfile.TemporaryDirectory(prefix="teviewer_simann_dna_") as tmp:
@@ -954,11 +995,10 @@ def _annotate_cdd_database(
     cdd_evalue = _clamp_evalue(settings.cdd_evalue, default=DEFAULT_CDD_EVALUE)
     max_hits = _max_hits(settings.max_hits_per_database)
     cdd_dir = database.path.expanduser().resolve()
-    if not index_is_ready("cdd", cdd_dir):
-        return (), f"{database.name}: CDD profile index is not ready (File → Define database)."
+    readiness = database_search_readiness(database)
+    if readiness is not None:
+        return (), f"{database.name}: {readiness}"
     cdd_profile = prepared_cdd_prefix(cdd_dir)
-    if cdd_profile is None:
-        return (), f"{database.name}: CDD database is not indexed (File → Define database)."
 
     with tempfile.TemporaryDirectory(prefix="teviewer_simann_cdd_") as tmp:
         query_fa = Path(tmp) / "query.fa"
@@ -1189,10 +1229,11 @@ def _annotate_hmm_database(
     settings: SimilarityAnnotationSettings,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     hmm_path = database.path.expanduser().resolve()
-    if not index_is_ready("hmm", hmm_path):
-        return (), f"{database.name}: HMM database is not prepared (File → Define database)."
+    readiness = database_search_readiness(database)
+    if readiness is not None:
+        return (), f"{database.name}: {readiness}"
 
-    if database.db_type == DATABASE_TYPE_DNA:
+    if hmm_uses_nucleotide_query(hmm_path):
         return _annotate_dna_hmm_database(sequence, seq_id, database, settings=settings)
     return _annotate_protein_hmm_database(sequence, orfs, database, settings=settings)
 
@@ -1342,14 +1383,22 @@ def run_similarity_annotations(
     messages: list[str] = []
     track = _next_track(features)
 
-    try:
-        orf_result = detect_orf_features(seq_id, sequence, settings=orf_settings)
-        orfs = orf_result.features
-        if orf_result.message:
-            messages.append(orf_result.message)
-    except RuntimeError as exc:
-        orfs = ()
-        messages.append(str(exc))
+    needs_orfs = similarity_search_needs_orfs(databases)
+    orfs: tuple[SequenceFeature, ...] = ()
+    if needs_orfs:
+        try:
+            orf_result = _resolve_orfs_for_similarity(
+                sequence_id=seq_id,
+                sequence=sequence,
+                features=features,
+                orf_settings=orf_settings,
+            )
+            orfs = orf_result.features
+            if orf_result.message:
+                messages.append(orf_result.message)
+        except RuntimeError as exc:
+            orfs = ()
+            messages.append(str(exc))
 
     total = len(databases)
     workers = _similarity_parallel_workers(total)

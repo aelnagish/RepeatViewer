@@ -92,6 +92,7 @@ from teviewer.backends.te_benchmark import (
 )
 from teviewer.backends.te_library_benchmark import run_te_library_benchmark
 from teviewer.backends.curation import effective_batch_workers, is_flexidot_extra_plot_file, run_batch
+from teviewer.backends.gui_functions import flexidot_executable
 from teviewer.backends.sequence_aligner import (
     alignment_backends,
     run_alignment,
@@ -105,6 +106,14 @@ from teviewer.backends.gff_features import (
 )
 from teviewer.backends.sequence_features import is_sequence_map_hidden_file
 from teviewer.plugins import get_registry, load_plugins
+from teviewer.plugins.custom_command import (
+    UserCommandPlugin,
+    UserCommandRunDialog,
+    delete_user_command_plugin_spec,
+    existing_output_files,
+    normalize_var_mode,
+    save_user_command_plugin_spec,
+)
 from teviewer.backends.sequence_viewer import open_fasta
 from teviewer.job_options import (
     ALIGN_MODE_COMBINED,
@@ -154,6 +163,8 @@ from teviewer.views.tool_dialogs import (
     TeDivergencePlotDialog,
     ConfusionMatrixBenchmarkDialog,
     TeLibraryBenchmarkDialog,
+    CommandPluginDesignerDialog,
+    PluginManageDialog,
     exec_modal_dialog,
 )
 from teviewer.backends.separate_fasta import (
@@ -902,6 +913,8 @@ class MainWindow(QMainWindow):
         self._highlight_source_keys: set[str] = set()
         self._genome_dialog: GenomeDialog | None = None
         self._define_database_dialog: DefineDatabaseDialog | None = None
+        self._command_plugin_dialog: CommandPluginDesignerDialog | None = None
+        self._plugin_run_dialog: UserCommandRunDialog | None = None
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
         self._extend_options = load_extend_options()
@@ -918,6 +931,7 @@ class MainWindow(QMainWindow):
         self._te_library_benchmark_options = load_te_library_benchmark_options()
         self.database_index_runner = DatabaseIndexRunner(self)
         self._plugin_registry = load_plugins()
+        self._plugins_menu: QMenu | None = None
         self._toolbar_order = load_toolbar_order(self._plugin_registry)
         self._dock_folders: QDockWidget | None = None
         self._dock_files: QDockWidget | None = None
@@ -960,9 +974,12 @@ class MainWindow(QMainWindow):
 
         self._file_list = FileListWidget()
         self._file_list.setObjectName("FileList")
+        # Open preview on single click/selection changes (unless a dialog is
+        # currently visible that should receive the panel click for path filling).
         self._file_list.currentItemChanged.connect(self._on_file_current_item_changed)
         self._file_list.itemClicked.connect(self._on_file_item_clicked)
-        self._file_list.itemSelectionChanged.connect(self._sync_dialog_input_from_files)
+        # Only sync dialog inputs from an explicit Files-panel click.
+        # (itemSelectionChanged can also fire on non-click selection changes.)
         self._file_list.itemDoubleClicked.connect(self._on_file_double_clicked)
         self._file_list.open_in_preview_requested.connect(self._open_files_in_preview_tabs)
         self._file_list.delete_files_requested.connect(self._delete_selected_files)
@@ -1471,16 +1488,11 @@ class MainWindow(QMainWindow):
         self._populate_benchmarking_menu(seq_menu.addMenu("&Benchmarking"))
 
         plugins_menu = self.menuBar().addMenu("&Plugins")
-        loaded_plugins = self._plugin_registry.all_plugins()
-        if loaded_plugins:
-            for plugin in loaded_plugins:
-                plugins_menu.addAction(
-                    plugin.label,
-                    lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
-                )
-        else:
-            none_action = plugins_menu.addAction("(No plugins loaded)")
-            none_action.setEnabled(False)
+        self._plugins_menu = plugins_menu
+        plugins_menu.addAction("Manage plugins…", self._open_plugin_manager)
+        plugins_menu.addAction("Design your plugin…", self._open_command_plugin_designer)
+        plugins_menu.addSeparator()
+        self._populate_plugins_menu_actions()
 
         view_menu = self.menuBar().addMenu("&View")
         for dock in (self._dock_folders, self._dock_files, self._dock_preview):
@@ -1922,7 +1934,8 @@ class MainWindow(QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        self._sync_define_database_dialog_from_files()
+        # Do not auto-fill from the currently selected Files-panel item.
+        # The dialog should only fill paths on an explicit Files-panel click.
 
     def _on_define_database_finished(self, result: int) -> None:
         dialog = self._define_database_dialog
@@ -2315,6 +2328,8 @@ class MainWindow(QMainWindow):
         self._populate_file_list(folder)
         self._update_directory_watchers()
         self._persist_workspace()
+        # Do not auto-fill plugin inputs from the current selection when the
+        # folder changes; let explicit Files-panel clicks drive the sync.
 
     def _refresh_current_folder(self) -> None:
         if self._current_folder and self._current_folder.is_dir():
@@ -2328,15 +2343,30 @@ class MainWindow(QMainWindow):
         resolved = path.expanduser().resolve()
         if resolved.parent != self._current_folder:
             return
+        # If the user is not currently interacting with the Files panel,
+        # avoid re-selecting items (which steals focus and makes the UI jump).
+        files_panel_active = self._file_list.hasFocus()
         keep_path: Path | None = None
-        current = self._file_list.currentItem()
-        if current is not None:
-            keep_path = self._preview_path_from_item(current)
+        if files_panel_active:
+            current = self._file_list.currentItem()
+            if current is not None:
+                keep_path = self._preview_path_from_item(current)
         self._refresh_current_folder()
         if keep_path is not None and keep_path.is_file():
             self._file_list.blockSignals(True)
             self._select_path_in_file_list(keep_path)
             self._file_list.blockSignals(False)
+
+        # Ensure focus returns to the preview area after saving.
+        if not files_panel_active:
+            QTimer.singleShot(0, self._focus_preview_widget)
+
+    def _focus_preview_widget(self) -> None:
+        if self._preview_tabs is None:
+            return
+        current = self._preview_tabs.currentWidget()
+        if current is not None:
+            current.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _current_file_sort_mode(self) -> FileSortMode:
         index = self._file_sort_combo.currentIndex()
@@ -2497,6 +2527,12 @@ class MainWindow(QMainWindow):
         *,
         open_preview: bool = True,
     ) -> None:
+        # When we're not explicitly opening a preview, avoid stealing focus
+        # by changing the Files-panel selection unless the user is already
+        # interacting with that panel.
+        if not open_preview and not self._file_list.hasFocus():
+            return
+
         path_set = {str(p.expanduser().resolve()) for p in paths}
         first_item: QListWidgetItem | None = None
         preferred_item: QListWidgetItem | None = None
@@ -2539,6 +2575,12 @@ class MainWindow(QMainWindow):
 
     def _select_path_in_file_list(self, path: Path) -> None:
         """Select one file in the list (used after creating a genome map HTML)."""
+        # Avoid stealing focus from the current working view.
+        if not self._file_list.hasFocus():
+            focus_widget = QApplication.focusWidget()
+            if focus_widget is None or not self._file_list.isAncestorOf(focus_widget):
+                return
+
         resolved = path.expanduser().resolve()
         key = str(resolved)
         for index in range(self._file_list.count()):
@@ -2621,6 +2663,15 @@ class MainWindow(QMainWindow):
         current: QListWidgetItem | None,
         _previous: QListWidgetItem | None,
     ) -> None:
+        # If a non-modal dialog is currently open that expects panel clicks to
+        # fill its path fields, do not steal the click by opening preview.
+        if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
+            return
+        if self._te_viz_input_dialog is not None and self._te_viz_input_dialog.isVisible():
+            return
+        if self._plugin_run_dialog is not None and self._plugin_run_dialog.isVisible():
+            return
+
         path = self._preview_path_from_item(current)
         if path is not None and is_previewable_file(path):
             QTimer.singleShot(0, lambda p=path: self._open_file_in_preview(p))
@@ -2718,6 +2769,49 @@ class MainWindow(QMainWindow):
     def _sync_dialog_input_from_files(self) -> None:
         self._sync_te_viz_dialog_input_from_files()
         self._sync_define_database_dialog_from_files()
+        self._sync_plugin_run_dialog_from_files()
+
+    def _panel_path_for_plugin_sync(self) -> Path | None:
+        items = self._file_list.selectedItems()
+        if not items:
+            current = self._file_list.currentItem()
+            if current is not None:
+                items = [current]
+        for item in items:
+            raw = item.data(ROLE_PATH)
+            if not raw:
+                continue
+            path = Path(str(raw)).expanduser()
+            if path.exists():
+                return path.resolve()
+        folder_item = self._folder_tree.currentItem()
+        if folder_item is not None:
+            raw = folder_item.data(0, ROLE_PATH)
+            if raw:
+                folder = Path(str(raw)).expanduser()
+                if folder.is_dir():
+                    return folder.resolve()
+        return None
+
+    def _sync_plugin_run_dialog_from_files(self, path: Path | None = None) -> None:
+        resolved = path
+        if resolved is None:
+            resolved = self._panel_path_for_plugin_sync()
+        if resolved is None:
+            return
+        dialog = self._plugin_run_dialog
+        if dialog is not None and dialog.isVisible():
+            dialog.apply_path_from_panel(resolved)
+            dialog.raise_()
+            return
+        for plugin in self._plugin_registry.all_plugins():
+            if not isinstance(plugin, UserCommandPlugin):
+                continue
+            active = plugin._active_run_dialog
+            if isinstance(active, UserCommandRunDialog) and active.isVisible():
+                active.apply_path_from_panel(resolved)
+                active.raise_()
+                return
 
     def _guess_database_input_file(self) -> Path | None:
         for path in self._selected_files():
@@ -2730,13 +2824,15 @@ class MainWindow(QMainWindow):
                 return path.expanduser().resolve()
         return None
 
-    def _sync_define_database_dialog_from_files(self) -> None:
+    def _sync_define_database_dialog_from_files(self, clicked_path: Path | None = None) -> None:
         dialog = self._define_database_dialog
         if dialog is None or not dialog.isVisible():
             return
-        path = self._guess_database_input_file()
-        if path is not None:
-            dialog.apply_file_from_panel(path)
+        resolved = clicked_path
+        if resolved is None:
+            resolved = self._guess_database_input_file()
+        if resolved is not None:
+            dialog.apply_file_from_panel(resolved)
         self._schedule_raise_define_database_dialog()
 
     def _schedule_raise_define_database_dialog(self) -> None:
@@ -2744,25 +2840,46 @@ class MainWindow(QMainWindow):
 
     def _raise_define_database_dialog(self) -> None:
         dialog = self._define_database_dialog
-        if dialog is not None and dialog.isVisible():
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
+        if dialog is None:
+            return
+        # Avoid stealing focus / flashing if already visible; the textbox change
+        # from panel click is enough.
+        if dialog.isVisible():
+            return
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
-    def _sync_te_viz_dialog_input_from_files(self) -> None:
+    def _sync_te_viz_dialog_input_from_files(self, clicked_path: Path | None = None) -> None:
         dialog = self._te_viz_input_dialog
         if dialog is None or not dialog.isVisible():
             return
-        masking_path = self._guess_te_masking_input_file()
+        masking_path = (
+            self._resolve_te_masking_input_path(clicked_path)
+            if clicked_path is not None
+            else self._guess_te_masking_input_file()
+        )
         if masking_path is not None and hasattr(dialog, "set_te_input_file"):
             dialog.set_te_input_file(masking_path)
-        consensus_path = self._guess_te_consensus_input_file()
+        consensus_path = (
+            self._resolve_te_consensus_input_path(clicked_path)
+            if clicked_path is not None
+            else self._guess_te_consensus_input_file()
+        )
         if consensus_path is not None and hasattr(dialog, "set_te_consensus_input_file"):
             dialog.set_te_consensus_input_file(consensus_path)
-        gene_path = self._guess_gene_input_file()
+        gene_path = (
+            self._resolve_gene_input_path(clicked_path)
+            if clicked_path is not None
+            else self._guess_gene_input_file()
+        )
         if gene_path is not None and hasattr(dialog, "set_gene_input_file"):
             dialog.set_gene_input_file(gene_path)
-        methylation_path = self._guess_methylation_input_file()
+        methylation_path = (
+            self._resolve_methylation_input_path(clicked_path)
+            if clicked_path is not None
+            else self._guess_methylation_input_file()
+        )
         if methylation_path is not None and hasattr(dialog, "set_methylation_input_file"):
             dialog.set_methylation_input_file(methylation_path)
         self._schedule_raise_te_viz_dialog()
@@ -2772,10 +2889,14 @@ class MainWindow(QMainWindow):
 
     def _raise_te_viz_dialog(self) -> None:
         dialog = self._te_viz_input_dialog
-        if dialog is not None and dialog.isVisible():
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
+        if dialog is None:
+            return
+        # Avoid stealing focus / flashing if already visible.
+        if dialog.isVisible():
+            return
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _present_te_viz_dialog(self, dialog: QDialog, on_accept) -> None:
         """Show a non-modal TE settings dialog so the Files panel stays clickable."""
@@ -2797,7 +2918,8 @@ class MainWindow(QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        self._sync_te_viz_dialog_input_from_files()
+        # Do not auto-fill from the currently selected Files-panel item.
+        # The user should click a file in the panel to fill inputs.
 
     def _is_fasta_file(self, path: Path) -> bool:
         return path.suffix.lower() in {".fa", ".fasta", ".fna", ".fas"}
@@ -2992,13 +3114,22 @@ class MainWindow(QMainWindow):
         return hit_path.expanduser().resolve()
 
     def _on_file_item_clicked(self, item: QListWidgetItem) -> None:
-        path = self._preview_path_from_item(item)
-        if path is not None:
-            if self._genome_dialog is not None and is_genome_fasta(path):
-                self._genome_dialog.apply_file_from_panel(path)
-            self._sync_dialog_input_from_files()
-            self._schedule_raise_te_viz_dialog()
-            self._schedule_raise_define_database_dialog()
+        raw = item.data(ROLE_PATH)
+        panel_path: Path | None = None
+        if raw:
+            candidate = Path(str(raw)).expanduser()
+            if candidate.exists():
+                panel_path = candidate.resolve()
+            preview_path = self._preview_path_from_item(item)
+            if preview_path is not None:
+                if self._genome_dialog is not None and is_genome_fasta(preview_path):
+                    self._genome_dialog.apply_file_from_panel(preview_path)
+        if panel_path is not None:
+            self._sync_plugin_run_dialog_from_files(panel_path)
+        self._sync_te_viz_dialog_input_from_files(panel_path)
+        self._sync_define_database_dialog_from_files(panel_path)
+        self._schedule_raise_te_viz_dialog()
+        self._schedule_raise_define_database_dialog()
 
     def _on_file_double_clicked(self, item: QListWidgetItem) -> None:
         raw = item.data(ROLE_PATH)
@@ -4940,10 +5071,89 @@ class MainWindow(QMainWindow):
             on_failed=self._on_worker_failed,
         )
 
+    def _plugin_job_source_files(self, plugin: UserCommandPlugin, work_dir: Path) -> list[Path]:
+        runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
+        sources: list[Path] = []
+        for name, defn in plugin._defs.items():
+            if name in plugin.spec.output_vars:
+                continue
+            if normalize_var_mode(defn.mode) != "path":
+                continue
+            raw = str(runtime.get(name, "")).strip()
+            if not raw:
+                continue
+            path = Path(raw).expanduser()
+            if path.is_file():
+                sources.append(path.resolve())
+        resolved_work_dir = work_dir.expanduser().resolve()
+        if resolved_work_dir.is_dir():
+            sources.append(resolved_work_dir)
+        return sources
+
+    def _command_plugin_work_dir(self, plugin: UserCommandPlugin) -> Path:
+        runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
+        for name, defn in plugin._defs.items():
+            if normalize_var_mode(defn.mode) != "path":
+                continue
+            raw = str(runtime.get(name, "")).strip()
+            if not raw:
+                continue
+            path = Path(raw).expanduser()
+            if path.is_file():
+                return path.parent.resolve()
+            if path.is_dir():
+                return path.resolve()
+            if path.parent.exists():
+                return path.parent.resolve()
+        if self._current_folder and self._current_folder.is_dir():
+            return self._current_folder.expanduser().resolve()
+        if self._project.input_dir and self._project.input_dir.is_dir():
+            return self._project.input_dir.expanduser().resolve()
+        return Path.cwd()
+
     def _apply_plugin(self, plugin_id: str, *, preselected: list[Path] | None = None) -> None:
         plugin = self._plugin_registry.get(plugin_id)
         if plugin is None:
             QMessageBox.warning(self, "Plugin", f"Plugin not found: {plugin_id}")
+            return
+        if isinstance(plugin, UserCommandPlugin):
+            if not plugin.prepare_job(self, [], self._project):
+                return
+            work_dir = self._command_plugin_work_dir(plugin)
+            files = [work_dir]
+            error = plugin.validate(files, self._project)
+            if error:
+                QMessageBox.warning(self, plugin.label, error)
+                return
+            runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
+            existing_outputs = existing_output_files(
+                plugin.spec,
+                plugin._defs,
+                runtime_values=runtime,
+                work_dir=work_dir,
+            )
+            if existing_outputs:
+                listing = "\n".join(f"  • {path}" for path in existing_outputs)
+                answer = QMessageBox.question(
+                    self,
+                    plugin.label,
+                    "The following output path(s) already exist:\n\n"
+                    f"{listing}\n\n"
+                    "Running this plugin may overwrite them. Continue?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+            func_name = f"plugin:{plugin_id}"
+            self._start_background_job(
+                FunctionWorker(self._run_plugin_job, func_name, files, {}),
+                job_title=func_name,
+                total_steps=self._job_total_steps(func_name, files, {}),
+                source_files=self._plugin_job_source_files(plugin, work_dir),
+                on_finished=self._on_worker_finished,
+                on_failed=self._on_worker_failed,
+            )
             return
         selected = preselected or self._selected_files()
         initial: list[Path] = []
@@ -4952,7 +5162,7 @@ class MainWindow(QMainWindow):
                 plugin,
                 [path.expanduser().resolve() for path in selected],
             )
-        if not initial and not plugin.picks_files_in_dialog:
+        if not initial and not plugin.picks_files_in_dialog and plugin.needs_selected_files:
             if plugin.fasta_only:
                 QMessageBox.information(
                     self,
@@ -4997,6 +5207,85 @@ class MainWindow(QMainWindow):
             on_finished=self._on_worker_finished,
             on_failed=self._on_worker_failed,
         )
+
+    def _populate_plugins_menu_actions(self) -> None:
+        if self._plugins_menu is None:
+            return
+        loaded_plugins = self._plugin_registry.all_plugins()
+        if loaded_plugins:
+            for plugin in loaded_plugins:
+                self._plugins_menu.addAction(
+                    plugin.label,
+                    lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
+                )
+        else:
+            none_action = self._plugins_menu.addAction("(No plugins loaded)")
+            none_action.setEnabled(False)
+
+    def _rebuild_plugins_menu(self) -> None:
+        if self._plugins_menu is None:
+            return
+        self._plugins_menu.clear()
+        self._plugins_menu.addAction("Manage plugins…", self._open_plugin_manager)
+        self._plugins_menu.addAction("Design your plugin…", self._open_command_plugin_designer)
+        self._plugins_menu.addSeparator()
+        self._populate_plugins_menu_actions()
+
+    def _open_plugin_manager(self) -> None:
+        dialog = PluginManageDialog(
+            self._plugin_registry,
+            on_save=self._save_designed_plugin,
+            on_delete=self._delete_custom_plugin,
+            parent=self,
+        )
+        exec_modal_dialog(dialog)
+
+    def _delete_custom_plugin(self, plugin_id: str) -> bool:
+        if not delete_user_command_plugin_spec(plugin_id):
+            return False
+        self._plugin_registry.unregister(plugin_id)
+        self._rebuild_plugins_menu()
+        self._rebuild_top_toolbar()
+        self._set_status_message(f"Deleted plugin {plugin_id}", 5000)
+        return True
+
+    def _open_command_plugin_designer(self) -> None:
+        if self._command_plugin_dialog is not None and self._command_plugin_dialog.isVisible():
+            self._command_plugin_dialog.raise_()
+            self._command_plugin_dialog.activateWindow()
+            return
+        dialog = CommandPluginDesignerDialog(parent=self)
+        self._command_plugin_dialog = dialog
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.accepted.connect(lambda d=dialog: self._save_designed_plugin(d.spec()))
+        dialog.finished.connect(self._on_command_plugin_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_command_plugin_dialog_finished(self, _code: int) -> None:
+        if self._command_plugin_dialog is not None:
+            self._command_plugin_dialog.deleteLater()
+            self._command_plugin_dialog = None
+
+    def _save_designed_plugin(self, spec, *, previous_id: str | None = None) -> None:
+        plugin = UserCommandPlugin(spec)
+        try:
+            if previous_id and previous_id != spec.id:
+                delete_user_command_plugin_spec(previous_id)
+                self._plugin_registry.unregister(previous_id)
+            was_existing = self._plugin_registry.get(spec.id) is not None
+            save_user_command_plugin_spec(spec)
+            self._plugin_registry.register_or_replace(plugin)
+            self._rebuild_plugins_menu()
+            self._rebuild_top_toolbar()
+            if was_existing or (previous_id and previous_id != spec.id):
+                self._set_status_message(f"Updated plugin {spec.label}", 5000)
+            else:
+                self._set_status_message(f"Added plugin {spec.label}", 5000)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Design your plugin", str(exc))
 
     def _run_plugin_job(
         self,
@@ -5088,11 +5377,15 @@ class MainWindow(QMainWindow):
         self,
         created_paths: list[Path],
         source_paths: list[Path],
+        *,
+        extra_folders: set[Path] | None = None,
     ) -> None:
         """Refresh file list; show outputs in each input file's folder."""
         touched = {p.parent.resolve() for p in created_paths} | {
             p.parent.resolve() for p in source_paths
         }
+        if extra_folders:
+            touched |= {folder.resolve() for folder in extra_folders}
         for folder in touched:
             ancestor = folder.parent
             while ancestor != ancestor.parent:
@@ -5123,9 +5416,26 @@ class MainWindow(QMainWindow):
 
     @Slot(dict)
     def _on_worker_finished(self, result: dict) -> None:
-        created_paths = [Path(p) for p in result.get("created_outputs", []) if Path(p).is_file()]
-        source_paths = [Path(p) for p in result.get("source_files", []) if Path(p).is_file()]
-        self._refresh_folders_after_job(created_paths, source_paths)
+        created_paths: list[Path] = []
+        for raw in result.get("created_outputs", []):
+            path = Path(str(raw)).expanduser()
+            if path.is_file():
+                created_paths.append(path.resolve())
+
+        source_paths: list[Path] = []
+        extra_folders: set[Path] = set()
+        for raw in result.get("source_files", []):
+            path = Path(str(raw)).expanduser()
+            if path.is_file():
+                source_paths.append(path.resolve())
+            elif path.is_dir():
+                extra_folders.add(path.resolve())
+
+        self._refresh_folders_after_job(
+            created_paths,
+            source_paths,
+            extra_folders=extra_folders,
+        )
         func_name = result.get("func_name")
         if func_name == "te_annotation":
             fasta_sources = [
