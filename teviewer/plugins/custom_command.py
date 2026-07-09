@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QEventLoop, QSettings, Qt, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -34,21 +34,39 @@ _VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def normalize_var_mode(mode: str) -> str:
-    """Map stored / legacy modes to path, text, or number."""
+    """Map stored / legacy modes to file, folder, text, or number."""
     key = (mode or "text").strip().lower()
-    if key in {"file", "input", "output"}:
-        return "path"
-    if key in {"path", "text", "number"}:
+    if key in {"path", "input", "output"}:
+        return "file"
+    if key in {"file", "folder", "text", "number"}:
         return key
     return "text"
+
+
+def is_path_var_mode(mode: str) -> bool:
+    return normalize_var_mode(mode) in {"file", "folder"}
+
+
+def is_file_var_mode(mode: str) -> bool:
+    return normalize_var_mode(mode) == "file"
+
+
+def is_folder_var_mode(mode: str) -> bool:
+    return normalize_var_mode(mode) == "folder"
+
+
+def plugin_id_from_label(label: str) -> str:
+    """Derive a stable internal plugin id from the user-visible name."""
+    text = re.sub(r"[^a-zA-Z0-9]+", "_", (label or "").strip().lower())
+    text = text.strip("_")
+    return text or "plugin"
 
 
 @dataclass
 class CommandVarDef:
     name: str
-    mode: str  # path|text|number
+    mode: str  # file|folder|text|number
     value: str = ""
-    output_suffix: str = ""  # e.g. .1aln when tools append an extension
 
 
 @dataclass
@@ -72,7 +90,6 @@ class UserCommandPluginSpec:
                     "name": v.name,
                     "mode": normalize_var_mode(v.mode),
                     "value": v.value,
-                    "output_suffix": v.output_suffix,
                 }
                 for v in self.var_defs
             ],
@@ -89,18 +106,18 @@ class UserCommandPluginSpec:
                 continue
             mode = normalize_var_mode(str(item.get("mode", "text")))
             value = str(item.get("value", ""))
-            output_suffix = str(item.get("output_suffix", ""))
             defs.append(
                 CommandVarDef(
                     name=name,
                     mode=mode,
                     value=value,
-                    output_suffix=output_suffix,
                 )
             )
+        label = str(raw.get("label", "")).strip()
+        plugin_id = str(raw.get("id", "")).strip() or plugin_id_from_label(label)
         return UserCommandPluginSpec(
-            id=str(raw.get("id", "")).strip(),
-            label=str(raw.get("label", "")).strip(),
+            id=plugin_id,
+            label=label,
             command_template=str(raw.get("command_template", "")),
             output_vars=[str(v).strip() for v in raw.get("output_vars", []) if str(v).strip()],
             var_defs=defs,
@@ -273,6 +290,18 @@ class UserCommandPlugin(TEviewerPlugin):
         if not commands:
             raise RuntimeError("No commands to run.")
 
+        before_names: dict[str, set[str]] = {}
+        for name in self.spec.output_vars:
+            value = context.get(name, "")
+            if not value:
+                continue
+            expected = Path(value).expanduser().resolve()
+            defn = self._defs.get(name)
+            if defn is not None and is_folder_var_mode(defn.mode):
+                expected.mkdir(parents=True, exist_ok=True)
+            parent = expected.parent if expected.parent != Path(".") else work_dir
+            before_names[name] = _snapshot_directory_names(parent)
+
         for index, command in enumerate(commands, start=1):
             proc = subprocess.run(
                 command,
@@ -295,22 +324,19 @@ class UserCommandPlugin(TEviewerPlugin):
                 continue
             expected = Path(value).expanduser().resolve()
             defn = self._defs.get(name)
-            suffix = defn.output_suffix if defn is not None else ""
-            found = find_created_output_file(expected, suffix=suffix)
+            found = find_created_output_file(
+                expected,
+                before_names=before_names.get(name),
+                is_folder=is_folder_var_mode(defn.mode) if defn else False,
+            )
             if found is not None:
                 outputs.append(str(found))
                 context[name] = str(found)
             else:
                 missing_outputs.append(f"{name} ({expected})")
         if missing_outputs:
-            hint = (
-                " If the tool adds a file extension automatically, set “Added suffix” "
-                "for that output variable in the plugin design."
-            )
             raise RuntimeError(
-                "Expected output file(s) were not created: "
-                + ", ".join(missing_outputs)
-                + hint
+                "Expected output was not created: " + ", ".join(missing_outputs)
             )
         return outputs
 
@@ -357,7 +383,7 @@ def build_command_context(
                 changed = True
                 continue
             expanded = _replace_vars(raw_value, context)
-            if name in output_vars or normalize_var_mode(defn.mode) == "path":
+            if name in output_vars or is_path_var_mode(defn.mode):
                 out_path = Path(expanded).expanduser()
                 if not out_path.is_absolute():
                     out_path = work_dir / out_path
@@ -368,6 +394,13 @@ def build_command_context(
         if not changed:
             break
     return context
+
+
+def _snapshot_directory_names(directory: Path) -> set[str]:
+    try:
+        return {entry.name for entry in directory.iterdir()}
+    except OSError:
+        return set()
 
 
 _COMMON_OUTPUT_SUFFIXES = (
@@ -384,14 +417,7 @@ _COMMON_OUTPUT_SUFFIXES = (
 )
 
 
-def normalize_output_suffix(suffix: str) -> str:
-    text = suffix.strip()
-    if not text:
-        return ""
-    return text if text.startswith(".") else f".{text}"
-
-
-def candidate_output_paths(expected: Path, *, suffix: str = "") -> list[Path]:
+def candidate_output_paths(expected: Path) -> list[Path]:
     """Possible on-disk paths for a declared output (exact path + common extensions)."""
     path = expected.expanduser()
     parent = path.parent if path.parent != Path(".") else Path.cwd()
@@ -411,10 +437,6 @@ def candidate_output_paths(expected: Path, *, suffix: str = "") -> list[Path]:
 
     add(path if path.is_absolute() else parent / name)
 
-    user_suffix = normalize_output_suffix(suffix)
-    if user_suffix and not name.endswith(user_suffix):
-        add(parent / f"{stem}{user_suffix}")
-
     extension_bases = [stem] if not path.suffix else [name, stem]
     for base in extension_bases:
         for ext in _COMMON_OUTPUT_SUFFIXES:
@@ -425,10 +447,43 @@ def candidate_output_paths(expected: Path, *, suffix: str = "") -> list[Path]:
     return candidates
 
 
-def find_created_output_file(expected: Path, *, suffix: str = "") -> Path | None:
-    for candidate in candidate_output_paths(expected, suffix=suffix):
+def find_created_output_file(
+    expected: Path,
+    *,
+    before_names: set[str] | None = None,
+    is_folder: bool = False,
+) -> Path | None:
+    """Resolve an output path after a command finishes."""
+    path = expected.expanduser()
+    if path.is_file():
+        return path.resolve()
+    if is_folder and path.is_dir():
+        return path.resolve()
+
+    for candidate in candidate_output_paths(path):
         if candidate.is_file():
             return candidate.resolve()
+
+    parent = path.parent if path.parent != Path(".") else Path.cwd()
+    if not parent.is_dir():
+        return None
+
+    stem = path.stem if path.suffix else path.name
+    expected_name = path.name
+
+    if before_names is not None:
+        for entry in sorted(parent.iterdir(), key=lambda p: p.name.lower()):
+            if not entry.is_file():
+                continue
+            if entry.name in before_names:
+                continue
+            if entry.name == expected_name:
+                return entry.resolve()
+            if entry.stem == stem and entry.name != expected_name:
+                return entry.resolve()
+            if not path.suffix and entry.name.startswith(f"{stem}."):
+                return entry.resolve()
+
     return None
 
 
@@ -454,8 +509,15 @@ def existing_output_files(
             continue
         expected = Path(value).expanduser().resolve()
         defn = defs.get(name)
-        suffix = defn.output_suffix if defn is not None else ""
-        for candidate in candidate_output_paths(expected, suffix=suffix):
+        is_folder = is_folder_var_mode(defn.mode) if defn is not None else False
+        if is_folder:
+            if expected.is_dir():
+                key = str(expected)
+                if key not in seen:
+                    seen.add(key)
+                    existing.append(expected)
+            continue
+        for candidate in candidate_output_paths(expected):
             if candidate.is_file():
                 resolved = candidate.resolve()
                 key = str(resolved)
@@ -487,13 +549,15 @@ def resolve_plugin_output_paths(
             continue
         expected = Path(value).expanduser().resolve()
         defn = defs.get(name)
-        suffix = defn.output_suffix if defn is not None else ""
-        found = find_created_output_file(expected, suffix=suffix)
+        found = find_created_output_file(
+            expected,
+            is_folder=is_folder_var_mode(defn.mode) if defn is not None else False,
+        )
         paths.append(found if found is not None else expected)
     return paths
 
 
-class _PathInputRow(QWidget):
+class _FileInputRow(QWidget):
     activated = Signal(object)
 
     def __init__(self, *, initial: str = "", parent: QWidget | None = None) -> None:
@@ -514,12 +578,58 @@ class _PathInputRow(QWidget):
 
     def _pick_path(self) -> None:
         start = self._edit.text().strip() or str(Path.home())
-        picked, _ = QFileDialog.getOpenFileName(self, "Select file or folder", start, "All files (*)")
+        picked, _ = QFileDialog.getOpenFileName(self, "Select file", start, "All files (*)")
         if picked:
             self._edit.setText(picked)
 
-    def set_path(self, path: Path) -> None:
-        self._edit.setText(str(path.expanduser().resolve()))
+    def set_path(self, path: Path) -> bool:
+        resolved = path.expanduser().resolve()
+        if not resolved.is_file():
+            return False
+        self._edit.setText(str(resolved))
+        return True
+
+    def focus_field(self) -> None:
+        self._edit.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def value(self) -> str:
+        return self._edit.text().strip()
+
+
+class _FolderInputRow(QWidget):
+    activated = Signal(object)
+
+    def __init__(self, *, initial: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._edit = QLineEdit(initial, self)
+        self._browse = QPushButton("Browse…", self)
+        self._browse.clicked.connect(self._pick_path)
+        self._edit.installEventFilter(self)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self._edit, 1)
+        row.addWidget(self._browse, 0)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.FocusIn and obj is self._edit:
+            self.activated.emit(self)
+        return super().eventFilter(obj, event)
+
+    def _pick_path(self) -> None:
+        start = self._edit.text().strip() or str(Path.home())
+        picked = QFileDialog.getExistingDirectory(self, "Select folder", start)
+        if picked:
+            self._edit.setText(picked)
+
+    def set_path(self, path: Path) -> bool:
+        resolved = path.expanduser().resolve()
+        if not resolved.is_dir():
+            return False
+        self._edit.setText(str(resolved))
+        return True
+
+    def focus_field(self) -> None:
+        self._edit.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def value(self) -> str:
         return self._edit.text().strip()
@@ -540,6 +650,9 @@ class _TextInputRow(QWidget):
         if event.type() == QEvent.Type.FocusIn and obj is self._edit:
             self.activated.emit(self)
         return super().eventFilter(obj, event)
+
+    def focus_field(self) -> None:
+        self._edit.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def value(self) -> str:
         return self._edit.text().strip()
@@ -569,6 +682,9 @@ class _NumberInputRow(QWidget):
             self.activated.emit(self)
         return super().eventFilter(obj, event)
 
+    def focus_field(self) -> None:
+        self._spin.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def value(self) -> str:
         return str(self._spin.value())
 
@@ -586,10 +702,11 @@ class UserCommandRunDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(spec.label)
         self.setMinimumWidth(560)
-        self._active_path_row: _PathInputRow | None = None
+        self._active_path_row: _FileInputRow | _FolderInputRow | None = None
         self._rows: dict[str, QWidget] = {}
         self._modes: dict[str, str] = {}
         self._outputs = set(spec.output_vars)
+        self._var_order: list[str] = []
 
         title = QLabel(spec.label)
         title_font = title.font()
@@ -598,8 +715,8 @@ class UserCommandRunDialog(QDialog):
         title.setFont(title_font)
 
         hint = QLabel(
-            "Set a value for each variable (defaults are pre-filled). For path fields, click a "
-            "file or folder in the panel to fill the active path."
+            "Set a value for each variable. Click in a file or folder field, then click "
+            "a matching entry in the Files panel to fill that field."
         )
         hint.setWordWrap(True)
 
@@ -615,6 +732,7 @@ class UserCommandRunDialog(QDialog):
         if not vars_in_cmd:
             form.addRow("(No variables)", QLabel("This command has no ${variables}."))
         for name in vars_in_cmd:
+            self._var_order.append(name)
             defn = defs.get(name)
             if defn is None:
                 form.addRow(
@@ -626,13 +744,19 @@ class UserCommandRunDialog(QDialog):
             self._modes[name] = mode
             if mode == "number":
                 row: QWidget = _NumberInputRow(initial=defn.value, parent=self)
-            elif mode == "path":
-                row = _PathInputRow(initial=defn.value, parent=self)
+            elif mode == "folder":
+                row = _FolderInputRow(initial=defn.value, parent=self)
+                row.activated.connect(self._on_path_row_activated)
+            elif mode == "file":
+                row = _FileInputRow(initial=defn.value, parent=self)
                 row.activated.connect(self._on_path_row_activated)
             else:
                 row = _TextInputRow(initial=defn.value, parent=self)
             self._rows[name] = row
-            kind = "path (output)" if name in self._outputs else mode
+            if name in self._outputs:
+                kind = f"{mode} (output)"
+            else:
+                kind = mode
             form.addRow(f"{name} ({kind}):", row)
 
         buttons = QDialogButtonBox(
@@ -652,21 +776,33 @@ class UserCommandRunDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
-        path_rows = [row for row in self._rows.values() if isinstance(row, _PathInputRow)]
-        if path_rows:
-            self._active_path_row = path_rows[0]
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._focus_first_field)
 
-    def _on_path_row_activated(self, row: _PathInputRow) -> None:
-        self._active_path_row = row
+    def _focus_first_field(self) -> None:
+        for name in self._var_order:
+            row = self._rows.get(name)
+            if row is None or not hasattr(row, "focus_field"):
+                continue
+            row.focus_field()  # type: ignore[union-attr]
+            if isinstance(row, (_FileInputRow, _FolderInputRow)):
+                self._active_path_row = row
+            return
+
+    def _on_path_row_activated(self, row: QWidget) -> None:
+        if isinstance(row, (_FileInputRow, _FolderInputRow)):
+            self._active_path_row = row
 
     def apply_path_from_panel(self, path: Path) -> bool:
         if self._active_path_row is None:
-            path_rows = [row for row in self._rows.values() if isinstance(row, _PathInputRow)]
-            if not path_rows:
-                return False
-            self._active_path_row = path_rows[0]
-        self._active_path_row.set_path(path)
-        # Reorder z-stack after panel click; keeps dialog visible.
+            return False
+        if isinstance(self._active_path_row, _FileInputRow) and not path.is_file():
+            return False
+        if isinstance(self._active_path_row, _FolderInputRow) and not path.is_dir():
+            return False
+        if not self._active_path_row.set_path(path):
+            return False
         self.raise_()
         return True
 

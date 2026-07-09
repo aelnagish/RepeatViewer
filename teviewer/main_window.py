@@ -111,6 +111,9 @@ from teviewer.plugins.custom_command import (
     UserCommandRunDialog,
     delete_user_command_plugin_spec,
     existing_output_files,
+    is_file_var_mode,
+    is_folder_var_mode,
+    is_path_var_mode,
     normalize_var_mode,
     save_user_command_plugin_spec,
 )
@@ -2871,14 +2874,11 @@ class MainWindow(QMainWindow):
         return None
 
     def _sync_plugin_run_dialog_from_files(self, path: Path | None = None) -> None:
-        resolved = path
-        if resolved is None:
-            resolved = self._panel_path_for_plugin_sync()
-        if resolved is None:
+        if path is None:
             return
         dialog = self._plugin_run_dialog
         if dialog is not None and dialog.isVisible():
-            dialog.apply_path_from_panel(resolved)
+            dialog.apply_path_from_panel(path)
             dialog.raise_()
             return
         for plugin in self._plugin_registry.all_plugins():
@@ -2886,7 +2886,7 @@ class MainWindow(QMainWindow):
                 continue
             active = plugin._active_run_dialog
             if isinstance(active, UserCommandRunDialog) and active.isVisible():
-                active.apply_path_from_panel(resolved)
+                active.apply_path_from_panel(path)
                 active.raise_()
                 return
 
@@ -2903,14 +2903,10 @@ class MainWindow(QMainWindow):
 
     def _sync_define_database_dialog_from_files(self, clicked_path: Path | None = None) -> None:
         dialog = self._define_database_dialog
-        if dialog is None or not dialog.isVisible():
+        if dialog is None or not dialog.isVisible() or clicked_path is None:
             return
-        resolved = clicked_path
-        if resolved is None:
-            resolved = self._guess_database_input_file()
-        if resolved is not None:
-            dialog.apply_file_from_panel(resolved)
-        self._schedule_raise_define_database_dialog()
+        if dialog.apply_file_from_panel(clicked_path):
+            self._schedule_raise_define_database_dialog()
 
     def _schedule_raise_define_database_dialog(self) -> None:
         QTimer.singleShot(0, self._raise_define_database_dialog)
@@ -2929,37 +2925,27 @@ class MainWindow(QMainWindow):
 
     def _sync_te_viz_dialog_input_from_files(self, clicked_path: Path | None = None) -> None:
         dialog = self._te_viz_input_dialog
-        if dialog is None or not dialog.isVisible():
+        if dialog is None or not dialog.isVisible() or clicked_path is None:
             return
-        masking_path = (
-            self._resolve_te_masking_input_path(clicked_path)
-            if clicked_path is not None
-            else self._guess_te_masking_input_file()
-        )
+        if hasattr(dialog, "apply_path_from_panel"):
+            if dialog.apply_path_from_panel(clicked_path):
+                self._schedule_raise_te_viz_dialog()
+            return
+        filled = False
+        masking_path = self._resolve_te_masking_input_path(clicked_path)
         if masking_path is not None and hasattr(dialog, "set_te_input_file"):
-            dialog.set_te_input_file(masking_path)
-        consensus_path = (
-            self._resolve_te_consensus_input_path(clicked_path)
-            if clicked_path is not None
-            else self._guess_te_consensus_input_file()
-        )
+            filled = dialog.set_te_input_file(masking_path) or filled
+        consensus_path = self._resolve_te_consensus_input_path(clicked_path)
         if consensus_path is not None and hasattr(dialog, "set_te_consensus_input_file"):
-            dialog.set_te_consensus_input_file(consensus_path)
-        gene_path = (
-            self._resolve_gene_input_path(clicked_path)
-            if clicked_path is not None
-            else self._guess_gene_input_file()
-        )
+            filled = dialog.set_te_consensus_input_file(consensus_path) or filled
+        gene_path = self._resolve_gene_input_path(clicked_path)
         if gene_path is not None and hasattr(dialog, "set_gene_input_file"):
-            dialog.set_gene_input_file(gene_path)
-        methylation_path = (
-            self._resolve_methylation_input_path(clicked_path)
-            if clicked_path is not None
-            else self._guess_methylation_input_file()
-        )
+            filled = dialog.set_gene_input_file(gene_path) or filled
+        methylation_path = self._resolve_methylation_input_path(clicked_path)
         if methylation_path is not None and hasattr(dialog, "set_methylation_input_file"):
-            dialog.set_methylation_input_file(methylation_path)
-        self._schedule_raise_te_viz_dialog()
+            filled = dialog.set_methylation_input_file(methylation_path) or filled
+        if filled:
+            self._schedule_raise_te_viz_dialog()
 
     def _schedule_raise_te_viz_dialog(self) -> None:
         QTimer.singleShot(0, self._raise_te_viz_dialog)
@@ -3203,10 +3189,8 @@ class MainWindow(QMainWindow):
                     self._genome_dialog.apply_file_from_panel(preview_path)
         if panel_path is not None:
             self._sync_plugin_run_dialog_from_files(panel_path)
-        self._sync_te_viz_dialog_input_from_files(panel_path)
-        self._sync_define_database_dialog_from_files(panel_path)
-        self._schedule_raise_te_viz_dialog()
-        self._schedule_raise_define_database_dialog()
+            self._sync_te_viz_dialog_input_from_files(panel_path)
+            self._sync_define_database_dialog_from_files(panel_path)
 
     def _on_file_double_clicked(self, item: QListWidgetItem) -> None:
         raw = item.data(ROLE_PATH)
@@ -5165,7 +5149,7 @@ class MainWindow(QMainWindow):
         for name, defn in plugin._defs.items():
             if name in plugin.spec.output_vars:
                 continue
-            if normalize_var_mode(defn.mode) != "path":
+            if not is_file_var_mode(defn.mode):
                 continue
             raw = str(runtime.get(name, "")).strip()
             if not raw:
@@ -5181,7 +5165,7 @@ class MainWindow(QMainWindow):
     def _command_plugin_work_dir(self, plugin: UserCommandPlugin) -> Path:
         runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
         for name, defn in plugin._defs.items():
-            if normalize_var_mode(defn.mode) != "path":
+            if not is_path_var_mode(defn.mode):
                 continue
             raw = str(runtime.get(name, "")).strip()
             if not raw:
@@ -5214,12 +5198,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, plugin.label, error)
                 return
             runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
-            existing_outputs = existing_output_files(
-                plugin.spec,
-                plugin._defs,
-                runtime_values=runtime,
-                work_dir=work_dir,
-            )
+            existing_outputs = [
+                path
+                for path in existing_output_files(
+                    plugin.spec,
+                    plugin._defs,
+                    runtime_values=runtime,
+                    work_dir=work_dir,
+                )
+                if path.is_file()
+            ]
             if existing_outputs:
                 listing = "\n".join(f"  • {path}" for path in existing_outputs)
                 answer = QMessageBox.question(
@@ -5509,6 +5497,8 @@ class MainWindow(QMainWindow):
             path = Path(str(raw)).expanduser()
             if path.is_file():
                 created_paths.append(path.resolve())
+            elif path.is_dir():
+                created_paths.append(path.resolve())
 
         source_paths: list[Path] = []
         extra_folders: set[Path] = set()
@@ -5531,6 +5521,9 @@ class MainWindow(QMainWindow):
             ]
             if fasta_sources:
                 self._auto_open_outputs(fasta_sources)
+        elif func_name and str(func_name).startswith("plugin:"):
+            preview_files = [p for p in created_paths if p.is_file()]
+            self._auto_open_outputs(preview_files)
         else:
             self._auto_open_outputs(created_paths)
 

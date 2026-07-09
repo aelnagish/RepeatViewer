@@ -134,7 +134,9 @@ from teviewer.plugins.custom_command import (
     CommandVarDef,
     UserCommandPluginSpec,
     get_user_command_plugin_spec,
+    load_user_command_plugin_specs,
     normalize_var_mode,
+    plugin_id_from_label,
     template_variables,
     user_command_plugin_ids,
 )
@@ -142,48 +144,63 @@ from teviewer.plugins.custom_command import (
 
 class _CommandVarRow(QWidget):
     remove_requested = Signal(object)
+    output_toggled = Signal(object, bool)
 
     def __init__(self, initial: CommandVarDef | None = None, *, is_output: bool = False, parent=None) -> None:
         super().__init__(parent)
-        var = initial or CommandVarDef(name="", mode="text", value="")
+        var = initial or CommandVarDef(name="", mode="file", value="")
         self._name = QLineEdit(var.name, self)
         self._name.setPlaceholderText("variable_name")
         self._mode = QComboBox(self)
-        self._mode.addItem("Path", "path")
+        self._mode.addItem("File", "file")
+        self._mode.addItem("Folder", "folder")
         self._mode.addItem("Text", "text")
         self._mode.addItem("Number", "number")
-        index = self._mode.findData(normalize_var_mode(var.mode))
+        self._mode.setMinimumWidth(76)
+        mode_key = normalize_var_mode(var.mode)
+        index = self._mode.findData(mode_key)
         if index >= 0:
             self._mode.setCurrentIndex(index)
         self._default = QLineEdit(var.value, self)
         self._default.setPlaceholderText("Default value (optional)")
-        self._suffix = QLineEdit(var.output_suffix, self)
-        self._suffix.setPlaceholderText("Added suffix")
-        self._suffix.setToolTip("If the tool appends an extension (e.g. FastGA adds .1aln), enter it here.")
         self._is_output = QCheckBox("Output", self)
         self._is_output.setChecked(is_output)
+        self._is_output.setMinimumWidth(self._is_output.fontMetrics().horizontalAdvance("Output") + 28)
+        self._is_output.toggled.connect(self._on_output_toggled)
         self._is_output.toggled.connect(self._refresh_output_fields)
         remove_btn = QPushButton("Remove", self)
         remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
         self._remove_btn = remove_btn
+        remove_btn.setMinimumWidth(72)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
         row.addWidget(self._name, 1)
         row.addWidget(self._mode, 0)
-        row.addWidget(self._default, 2)
-        row.addWidget(self._suffix, 0)
+        row.addWidget(self._default, 1)
         row.addWidget(self._is_output, 0)
         row.addWidget(remove_btn, 0)
         self._refresh_output_fields()
 
+    def _on_output_toggled(self, checked: bool) -> None:
+        if checked:
+            self.output_toggled.emit(self, True)
+
+    def set_output_checked(self, checked: bool) -> None:
+        self._is_output.blockSignals(True)
+        self._is_output.setChecked(checked)
+        self._is_output.blockSignals(False)
+        self._refresh_output_fields()
+
     def _refresh_output_fields(self) -> None:
         is_output = self._is_output.isChecked()
-        self._suffix.setVisible(is_output)
-        if is_output and normalize_var_mode(str(self._mode.currentData())) != "path":
-            index = self._mode.findData("path")
-            if index >= 0:
-                self._mode.setCurrentIndex(index)
+        if is_output:
+            mode = normalize_var_mode(str(self._mode.currentData()))
+            if mode not in {"file", "folder"}:
+                index = self._mode.findData("file")
+                if index >= 0:
+                    self._mode.setCurrentIndex(index)
 
     def definition(self) -> tuple[CommandVarDef | None, bool]:
         name = self._name.text().strip()
@@ -194,7 +211,6 @@ class _CommandVarRow(QWidget):
             name=name,
             mode=str(self._mode.currentData()),
             value=self._default.text().strip(),
-            output_suffix=self._suffix.text().strip() if is_output else "",
         )
         return var, is_output
 
@@ -213,7 +229,7 @@ class CommandPluginDesignerDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Design your plugin")
-        self.setMinimumWidth(720)
+        self.setMinimumWidth(760)
         spec = initial or UserCommandPluginSpec(
             id="",
             label="",
@@ -223,12 +239,15 @@ class CommandPluginDesignerDialog(QDialog):
             fasta_only=True,
         )
         self._initial_fasta_only = spec.fasta_only
+        self._initial_id = spec.id
         self._rebuilding_rows = False
-        self._id = QLineEdit(spec.id, self)
         self._label = QLineEdit(spec.label, self)
-        self._label.setPlaceholderText("Plugin name")
-        self._tooltip = QLineEdit(spec.tooltip, self)
-        self._tooltip.setPlaceholderText("Description")
+        self._label.setPlaceholderText("Plugin name (must be unique)")
+        self._tooltip = QTextEdit(self)
+        self._tooltip.setPlaceholderText("Short description (optional)")
+        self._tooltip.setPlainText(spec.tooltip)
+        self._tooltip.setFixedHeight(52)
+        self._tooltip.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._command = QTextEdit(self)
         self._command.setFixedHeight(120)
         self._command.setPlaceholderText(
@@ -255,7 +274,6 @@ class CommandPluginDesignerDialog(QDialog):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
-        form.addRow("Plugin id:", self._id)
         form.addRow("Plugin name:", self._label)
         form.addRow("Description:", self._tooltip)
         form.addRow("Command template:", self._command)
@@ -274,13 +292,8 @@ class CommandPluginDesignerDialog(QDialog):
         form.addRow("", add_row)
 
         hint = QLabel(
-            "Use ${variable_name} in the command for any value you want to configure at run time. "
-            "Define each variable’s type and optional default below. "
-            "Enter one command per line to run multiple commands in order. "
-            "Plugin id = unique internal name (letters, numbers, underscores). "
-            "Mark output files with the Output checkbox. If the program adds an extension "
-            "(e.g. FastGA writes .1aln), set Added suffix on that output variable. "
-            "Output names may reference other variables, e.g. ${genome1}_result."
+            "Use ${variable_name} in the command. Define each variable below. "
+            "Mark one output as File or Folder. One command per line."
         )
         hint.setWordWrap(True)
 
@@ -295,11 +308,16 @@ class CommandPluginDesignerDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._label.setFocus)
+
     def _add_var_row(self, var: CommandVarDef | None = None, *, is_output: bool = False) -> None:
         if not hasattr(self, "_rows_host"):
             return
         row = _CommandVarRow(var, is_output=is_output, parent=self._rows_host)
         row.remove_requested.connect(self._remove_var_row)
+        row.output_toggled.connect(self._on_output_toggled)
         self._rows.append(row)
         self._rows_layout.addWidget(row)
         self._refresh_remove_buttons()
@@ -310,9 +328,8 @@ class CommandPluginDesignerDialog(QDialog):
         if len(self._rows) <= 1:
             row._name.clear()
             row._default.clear()
-            row._suffix.clear()
             row._is_output.setChecked(False)
-            row._mode.setCurrentIndex(row._mode.findData("text"))
+            row._mode.setCurrentIndex(row._mode.findData("file"))
             row._refresh_output_fields()
             return
         self._rows.remove(row)
@@ -325,6 +342,13 @@ class CommandPluginDesignerDialog(QDialog):
         removable = len(self._rows) > 1
         for row in self._rows:
             row.mark_removable(removable)
+
+    def _on_output_toggled(self, source_row: _CommandVarRow, checked: bool) -> None:
+        if not checked:
+            return
+        for row in self._rows:
+            if row is not source_row:
+                row.set_output_checked(False)
 
     def _detect_variables(self) -> None:
         current_defs = {}
@@ -339,7 +363,7 @@ class CommandPluginDesignerDialog(QDialog):
         vars_in_cmd = template_variables(self._command.toPlainText())
         for name in vars_in_cmd:
             if name not in current_defs:
-                current_defs[name] = CommandVarDef(name=name, mode="text", value="")
+                current_defs[name] = CommandVarDef(name=name, mode="file", value="")
         self._rebuilding_rows = True
         try:
             for row in list(self._rows):
@@ -365,41 +389,55 @@ class CommandPluginDesignerDialog(QDialog):
             if is_output:
                 outputs.append(var.name)
         return UserCommandPluginSpec(
-            id=self._id.text().strip(),
+            id=plugin_id_from_label(self._label.text().strip()),
             label=self._label.text().strip(),
             command_template=self._command.toPlainText().strip(),
-            output_vars=outputs,
+            output_vars=outputs[:1],
             var_defs=var_defs,
             fasta_only=self._initial_fasta_only,
-            tooltip=self._tooltip.text().strip(),
+            tooltip=self._tooltip.toPlainText().strip(),
         )
 
     def accept(self) -> None:
         spec = self.spec()
-        if not spec.id or not spec.id.replace("_", "").isalnum():
-            QMessageBox.warning(
-                self,
-                "Design your plugin",
-                "Plugin id is required and must contain letters, numbers, or underscores.",
-            )
-            return
         if not spec.label:
-            QMessageBox.warning(self, "Design your plugin", "Plugin label is required.")
+            QMessageBox.warning(self, "Design your plugin", "Plugin name is required.")
             return
+        label_key = spec.label.strip().lower()
+        for existing in load_user_command_plugin_specs():
+            if existing.id == self._initial_id:
+                continue
+            if existing.label.strip().lower() == label_key:
+                QMessageBox.warning(
+                    self,
+                    "Design your plugin",
+                    f"A plugin named “{spec.label}” already exists. Choose a different name.",
+                )
+                return
         if not spec.command_template:
             QMessageBox.warning(self, "Design your plugin", "Command template is required.")
             return
+        output_count = 0
         for row in self._rows:
             var, is_output = row.definition()
             if var is None:
                 continue
-            if is_output and var.mode != "path":
-                QMessageBox.warning(
-                    self,
-                    "Design your plugin",
-                    f"Output variable “{var.name}” must use type Path.",
-                )
-                return
+            if is_output:
+                output_count += 1
+                if normalize_var_mode(var.mode) not in {"file", "folder"}:
+                    QMessageBox.warning(
+                        self,
+                        "Design your plugin",
+                        f"Output variable “{var.name}” must use type File or Folder.",
+                    )
+                    return
+        if output_count > 1:
+            QMessageBox.warning(
+                self,
+                "Design your plugin",
+                "Only one variable can be marked as Output.",
+            )
+            return
         super().accept()
 
 
@@ -472,7 +510,7 @@ class PluginManageDialog(QDialog):
         for plugin in plugins:
             kind = "Custom" if plugin.id in custom_ids else "Installed"
             tooltip = (plugin.tooltip or "").strip()
-            text = f"{plugin.label}  ({plugin.id}) — {kind}"
+            text = f"{plugin.label} — {kind}"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, plugin.id)
             item.setData(Qt.ItemDataRole.UserRole + 1, plugin.id in custom_ids)
@@ -1609,7 +1647,6 @@ class _TeInputFileRow(QWidget):
         return Path(text).expanduser()
 
     def _browse(self) -> None:
-        self.activated.emit(self)
         start = self._path.text().strip() or str(Path.home())
         picked, _ = QFileDialog.getOpenFileName(
             self,
@@ -1626,6 +1663,7 @@ class TeMultiInputFilesWidget(QWidget):
     """One or more file paths with add/remove controls."""
 
     paths_changed = Signal()
+    field_activated = Signal()
 
     def __init__(
         self,
@@ -1677,11 +1715,11 @@ class TeMultiInputFilesWidget(QWidget):
             self.add_row()
 
     def _on_add_clicked(self) -> None:
-        self.add_row()
+        self.add_row(focus=True)
         self._add_btn.setEnabled(False)
         QTimer.singleShot(0, lambda: self._add_btn.setEnabled(True))
 
-    def add_row(self, path: Path | None = None) -> None:
+    def add_row(self, path: Path | None = None, *, focus: bool = False) -> None:
         row = _TeInputFileRow(
             self,
             initial=path,
@@ -1696,11 +1734,13 @@ class TeMultiInputFilesWidget(QWidget):
         self._rows.append(row)
         self._rows_layout.addWidget(row)
         self._refresh_remove_buttons()
-        self._on_row_activated(row)
-        row._path.setFocus(Qt.FocusReason.OtherFocusReason)
+        if focus:
+            self._on_row_activated(row)
+            row._path.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _on_row_activated(self, row: _TeInputFileRow) -> None:
         self._active_row = row
+        self.field_activated.emit()
         for item in self._rows:
             item._path.setStyleSheet(
                 ""
@@ -1717,8 +1757,6 @@ class TeMultiInputFilesWidget(QWidget):
         self._rows_layout.removeWidget(row)
         row.deleteLater()
         self._refresh_remove_buttons()
-        if self._rows:
-            self._on_row_activated(self._rows[-1])
         self._emit_paths_changed()
 
     def _emit_paths_changed(self) -> None:
@@ -1729,20 +1767,15 @@ class TeMultiInputFilesWidget(QWidget):
         for row in self._rows:
             row.set_removable(removable)
 
-    def set_path_at_focus(self, path: Path) -> None:
-        """Fill the focused TE row, or the first empty row, or append a new row."""
-        if self._active_row is not None and self._active_row in self._rows:
-            self._active_row.set_path(path)
-            return
-        for row in self._rows:
-            if row.path() is None:
-                row.set_path(path)
-                self._on_row_activated(row)
-                return
-        self.add_row(path)
+    def set_path_at_focus(self, path: Path) -> bool:
+        """Fill the path field that last had keyboard focus."""
+        if self._active_row is None or self._active_row not in self._rows:
+            return False
+        self._active_row.set_path(path)
+        return True
 
-    def set_primary_path(self, path: Path) -> None:
-        self.set_path_at_focus(path)
+    def set_primary_path(self, path: Path) -> bool:
+        return self.set_path_at_focus(path)
 
     def paths(self) -> list[Path]:
         out: list[Path] = []
@@ -2094,6 +2127,14 @@ class TeDensityPlotDialog(QDialog):
                 "and methylation level (0–1)."
             ),
         )
+        self._focused_file_input: TeMultiInputFilesWidget | None = None
+        for widget in (
+            self._masking_input,
+            self._consensus_input,
+            self._gene_input,
+            self._methylation_input,
+        ):
+            widget.field_activated.connect(self._on_file_input_field_activated)
 
         self._bin_kb = QSpinBox(self)
         self._bin_kb.setRange(5, 500)
@@ -2252,15 +2293,30 @@ class TeDensityPlotDialog(QDialog):
         layout.addWidget(buttons)
         self.setLayout(layout)
 
-    def set_te_input_file(self, path: Path) -> None:
-        self._masking_input.set_path_at_focus(path)
+    def _on_file_input_field_activated(self) -> None:
+        sender = self.sender()
+        if isinstance(sender, TeMultiInputFilesWidget):
+            self._focused_file_input = sender
 
-    def set_te_consensus_input_file(self, path: Path) -> None:
-        self._consensus_input.set_path_at_focus(path)
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self._focused_file_input is None:
+            return False
+        filled = self._focused_file_input.set_path_at_focus(path)
+        if filled and self._focused_file_input is self._gene_input:
+            self._refresh_annotation_feature_types()
+        return filled
 
-    def set_gene_input_file(self, path: Path) -> None:
-        self._gene_input.set_path_at_focus(path)
-        self._refresh_annotation_feature_types()
+    def set_te_input_file(self, path: Path) -> bool:
+        return self._masking_input.set_path_at_focus(path)
+
+    def set_te_consensus_input_file(self, path: Path) -> bool:
+        return self._consensus_input.set_path_at_focus(path)
+
+    def set_gene_input_file(self, path: Path) -> bool:
+        filled = self._gene_input.set_path_at_focus(path)
+        if filled:
+            self._refresh_annotation_feature_types()
+        return filled
 
     def _refresh_annotation_feature_types(self) -> None:
         self._annotation_features.refresh_from_paths(self.gene_input_files())
@@ -2269,8 +2325,8 @@ class TeDensityPlotDialog(QDialog):
         mode = str(self._chromosome_sort.currentData() or CHROMOSOME_SORT_NATURAL)
         self._chrom_picker.set_chromosome_sort(mode)
 
-    def set_methylation_input_file(self, path: Path) -> None:
-        self._methylation_input.set_path_at_focus(path)
+    def set_methylation_input_file(self, path: Path) -> bool:
+        return self._methylation_input.set_path_at_focus(path)
 
     def te_masking_files(self) -> list[Path]:
         return self._masking_input.paths()
@@ -2350,6 +2406,9 @@ class TeDivergencePlotDialog(QDialog):
             self,
             initial=[input_file] if input_file is not None else None,
         )
+        self._focused_file_input: TeMultiInputFilesWidget | None = None
+        self._input.field_activated.connect(self._on_file_input_field_activated)
+
         self._bin_width = QDoubleSpinBox(self)
         self._bin_width.setRange(0.001, 0.25)
         self._bin_width.setDecimals(3)
@@ -2371,8 +2430,18 @@ class TeDivergencePlotDialog(QDialog):
         layout.addWidget(buttons)
         self.setLayout(layout)
 
-    def set_te_input_file(self, path: Path) -> None:
-        self._input.set_path_at_focus(path)
+    def _on_file_input_field_activated(self) -> None:
+        sender = self.sender()
+        if isinstance(sender, TeMultiInputFilesWidget):
+            self._focused_file_input = sender
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self._focused_file_input is None:
+            return False
+        return self._focused_file_input.set_path_at_focus(path)
+
+    def set_te_input_file(self, path: Path) -> bool:
+        return self._input.set_path_at_focus(path)
 
     def te_input_files(self) -> list[Path]:
         return self._input.paths()

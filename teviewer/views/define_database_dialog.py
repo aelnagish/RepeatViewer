@@ -269,8 +269,6 @@ class UserDatabasesWidget(QWidget):
         row._path.installEventFilter(self)
         self._rows.append(row)
         self._rows_layout.addWidget(row)
-        if self._active_row is None:
-            self._active_row = row
         self._refresh_remove_buttons()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
@@ -286,10 +284,6 @@ class UserDatabasesWidget(QWidget):
         if not path.is_file():
             return False
         target = self._active_row
-        if target is None:
-            target = next((row for row in self._rows if not row._path.text().strip()), None)
-        if target is None and self._rows:
-            target = self._rows[-1]
         if target is None:
             return False
         target.apply_path_from_panel(path)
@@ -336,6 +330,8 @@ class DefineDatabaseDialog(QDialog):
             self,
             initial=list(project.user_databases),
         )
+        self._focused_path_edit: QLineEdit | None = None
+        self._cdd_path.installEventFilter(self)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -367,16 +363,38 @@ class DefineDatabaseDialog(QDialog):
         layout.addWidget(self._user_databases)
         layout.addWidget(buttons)
 
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        if event.type() == QEvent.Type.FocusIn:
+            if watched is self._cdd_path:
+                self._focused_path_edit = self._cdd_path
+            else:
+                for row in self._user_databases._rows:
+                    if watched is row._path:
+                        self._focused_path_edit = row._path
+                        self._user_databases._active_row = row
+                        break
+        return super().eventFilter(watched, event)
+
     def apply_file_from_panel(self, path: Path) -> bool:
-        """Fill CDD dir or the active user-database path from a Files panel click."""
+        """Fill the focused CDD or user-database path field from a Files panel click."""
+        if self._focused_path_edit is None:
+            return False
         resolved = resolve_panel_database_path(path)
         if resolved is None:
             return False
         kind, target_path = resolved
-        if kind == "cdd":
+        if self._focused_path_edit is self._cdd_path:
+            if kind != "cdd":
+                return False
             self._cdd_path.setText(str(target_path))
             return True
-        return self._user_databases.apply_path_from_panel(target_path)
+        for row in self._user_databases._rows:
+            if self._focused_path_edit is row._path:
+                if kind != "user":
+                    return False
+                row.apply_path_from_panel(target_path)
+                return True
+        return False
 
     def accept(self) -> None:
         pending, blocked = self._pending_database_index_targets()

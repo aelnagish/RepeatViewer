@@ -220,6 +220,7 @@ class PanGenomeListWidget(QWidget):
         outer.addLayout(add_row_layout)
 
         self._focused_row: _PanGenomeRow | None = None
+        self._path_field_focused = False
 
     def _on_add_genome(self) -> None:
         self.add_row(focus=True, expand=True)
@@ -260,8 +261,13 @@ class PanGenomeListWidget(QWidget):
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.FocusIn:
             for row in self._rows:
-                if watched in (row.path, row.name):
+                if watched is row.path:
                     self._focused_row = row
+                    self._path_field_focused = True
+                    break
+                if watched is row.name:
+                    self._focused_row = row
+                    self._path_field_focused = False
                     break
         return super().eventFilter(watched, event)
 
@@ -300,7 +306,8 @@ class PanGenomeListWidget(QWidget):
             row = self.add_row()
             row.name.setText(name)
             row.path.setText(path)
-        self._focused_row = self._rows[0] if self._rows else None
+        self._focused_row = None
+        self._path_field_focused = False
         self._update_scroll_height()
 
     def set_entries(self, entries: list[PanGenomeEntry]) -> None:
@@ -313,18 +320,18 @@ class PanGenomeListWidget(QWidget):
             items.append(None)
         for entry in items:
             self.add_row(entry if isinstance(entry, PanGenomeEntry) else None)
-        self._focused_row = self._rows[0] if self._rows else None
+        self._focused_row = None
+        self._path_field_focused = False
         self._update_scroll_height()
 
-    def apply_path(self, path: Path) -> None:
+    def apply_path(self, path: Path) -> bool:
         if not is_genome_fasta(path):
-            return
+            return False
         row = self._focused_row
-        if row is None or row.has_path():
-            row = next((r for r in self._rows if not r.has_path()), None)
-        if row is None:
-            row = self.add_row(focus=True, expand=True)
+        if row is None or not self._path_field_focused:
+            return False
         row.path.set_path(path)
+        return True
 
     def apply_paths(self, paths: list[Path]) -> None:
         for path in paths:
@@ -388,6 +395,7 @@ class GenomeDialog(QDialog):
 
         self._pan_list = PanGenomeListWidget()
         self._pan_list.size_changed.connect(self._adjust_dialog_size)
+        self._single_genome_path_focused = False
 
         self._pan_snapshot: list[tuple[str, str]] = [
             (entry.name, str(entry.path)) for entry in project.pan_genomes
@@ -478,14 +486,18 @@ class GenomeDialog(QDialog):
         self.resize(max(self.minimumWidth(), self.width()), hint.height())
 
     def apply_file_from_panel(self, path: Path) -> bool:
-        """Fill the active genome path field from a Files panel click."""
+        """Fill the focused genome path field from a Files panel click."""
         if not is_genome_fasta(path):
             return False
         resolved = path.expanduser().resolve()
         if self._mode_pan.isChecked():
-            self._pan_list.apply_path(resolved)
-        else:
-            self._genome.lineEdit().setText(str(resolved))
+            return self._pan_list.apply_path(resolved)
+        if not self._single_genome_path_focused:
+            return False
+        line = self._genome.lineEdit()
+        if line is None:
+            return False
+        line.setText(str(resolved))
         return True
 
     def _apply_initial_paths(self, paths: list[Path]) -> None:
@@ -522,14 +534,16 @@ class GenomeDialog(QDialog):
         if self._mode_pan.isChecked():
             self._hint.setText(
                 "Pan-genome mode: at least two genomes, each with a unique name (≤10 characters). "
-                "Drag FASTA files onto a path field, browse, or click files in the Files panel. "
+                "Click in a Genome FASTA field, then click a file in the Files panel, or drag "
+                "FASTA files onto a path field or browse. "
                 "Blast, TEAid, and Flexidot run against every genome; Extend uses the genome you pick. "
                 "TE visualization is available only in single-genome mode."
             )
         else:
             self._hint.setText(
-                "Single-genome mode: drag a FASTA onto the path field, browse, or click a file "
-                "in the Files panel. Chromosome sizes and the BLAST index are prepared after you choose a genome."
+                "Single-genome mode: click in the path field, then click a file in the Files panel, "
+                "or drag a FASTA onto the path field or browse. Chromosome sizes and the BLAST "
+                "index are prepared after you choose a genome."
             )
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
@@ -578,6 +592,9 @@ class GenomeDialog(QDialog):
                     return True
                 event.ignore()
                 return True
+            if event.type() == QEvent.Type.FocusIn:
+                self._single_genome_path_focused = True
+                return False
         return super().eventFilter(watched, event)
 
     def _path_str(self, path: Path | None) -> str:
