@@ -2272,15 +2272,23 @@ class SequenceMapWidget(QWidget):
         self._hbar.setValue(max(0, min(max_scroll, target)))
         self._sync_overview_now()
 
-    def select_by_position(self, start: int, end: int) -> None:
+    def select_by_position(self, start: int, end: int, *, _attempt: int = 0) -> None:
         if self._data is None:
+            return
+        viewport_w = self._scroll_viewport_width()
+        if (not self.isVisible() or viewport_w <= 20) and _attempt < 40:
+            QTimer.singleShot(
+                50,
+                lambda s=int(start), e=int(end), a=_attempt + 1: self.select_by_position(
+                    s, e, _attempt=a
+                ),
+            )
             return
         a, b = sorted((int(start), int(end)))
         self._canvas.set_selection_range(a, b)
         self._sync_position_spins(a, b)
 
         span = max(1, b - a + 1)
-        viewport_w = self._scroll_viewport_width()
         usable_w = max(1.0, float(viewport_w - _LEFT_MARGIN - _RIGHT_MARGIN))
         if usable_w > 0:
             target_ppb = max(_FIT_MIN_PPB, min(self._canvas.zoom_ppb_max(), usable_w / span))
@@ -2288,6 +2296,7 @@ class SequenceMapWidget(QWidget):
 
         self._scroll_to_bp_range(a, b)
         QTimer.singleShot(0, lambda lo=a, hi=b: self._scroll_to_bp_range(lo, hi))
+        self.refresh_layout()
 
     def _select_by_position(self) -> None:
         if self._data is None:
@@ -2309,7 +2318,7 @@ class SequenceMapWidget(QWidget):
     def data(self) -> SequenceMapData | None:
         return self._data
 
-    def load(self, data: SequenceMapData) -> None:
+    def load(self, data: SequenceMapData, *, fit_after_load: bool = True) -> None:
         self._data = data
         self._dirty = False
         self._set_position_spin_limits(data.length)
@@ -2331,7 +2340,8 @@ class SequenceMapWidget(QWidget):
             self.statusMessage.emit(
                 f"Long sequence ({seq_len:,} bp): letter mode disabled for performance."
             )
-        QTimer.singleShot(0, self.fit_window)
+        if fit_after_load:
+            QTimer.singleShot(0, self.fit_window)
 
     def features(self) -> list[SequenceFeature]:
         if self._data is None:
@@ -3498,15 +3508,24 @@ class SequenceMapPanel(QWidget):
     def refresh_nucleotide_colors(self) -> None:
         self._map.refresh_nucleotide_colors()
 
-    def open_annotation_tab(self) -> None:
-        """Load/reload annotations and fit the sequence to the visible window width."""
-        self.load_path(self._path)
-        QTimer.singleShot(0, self._map.fit_window)
-        QTimer.singleShot(50, self._map.refresh_layout)
+    def open_annotation_tab(self, *, reload: bool = False) -> None:
+        """Load annotations and fit the sequence to the visible window width."""
+        if reload or self._map.data() is None:
+            self.load_path(self._path, fit_after_load=True)
+            QTimer.singleShot(0, self._map.fit_window)
+            QTimer.singleShot(50, self._map.refresh_layout)
+        else:
+            QTimer.singleShot(0, self._map.refresh_layout)
+
+    def jump_to_region(self, start: int, end: int) -> None:
+        """Zoom/scroll to a bp range without reloading or fit-to-window reset."""
+        if self._map.data() is None:
+            self.load_path(self._path, fit_after_load=False)
+        self._map.select_by_position(start, end)
 
     def select_region(self, start: int, end: int) -> None:
         """Select and zoom/scroll the map to a (1-based, inclusive) bp range."""
-        self._map.select_by_position(start, end)
+        self.jump_to_region(start, end)
 
     def fasta_path(self) -> Path:
         return self._path
@@ -3514,14 +3533,14 @@ class SequenceMapPanel(QWidget):
     def is_dirty(self) -> bool:
         return self._map.is_dirty()
 
-    def load_path(self, path: Path) -> None:
+    def load_path(self, path: Path, *, fit_after_load: bool = True) -> None:
         self._path = path.expanduser().resolve()
         try:
             data = load_sequence_map_data(self._path)
         except (OSError, ValueError) as exc:
             self.statusMessage.emit(str(exc))
             return
-        self._map.load(data)
+        self._map.load(data, fit_after_load=fit_after_load)
         self._feature_undo_stack.clear()
         self.refresh_sequence_summary()
 
@@ -3535,7 +3554,7 @@ class SequenceMapPanel(QWidget):
 
     def reload_annotations(self) -> None:
         """Reload features from the companion GFF3 on disk (Annotation tab open)."""
-        self.open_annotation_tab()
+        self.open_annotation_tab(reload=True)
 
     def save_annotations(self, *, silent: bool = False) -> bool:
         return self._save_annotations(silent=silent)

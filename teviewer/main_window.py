@@ -2419,7 +2419,7 @@ class MainWindow(QMainWindow):
     def _on_dotplot_region_selected(self, payload: object) -> None:
         """Open (if needed) and jump the Annotation view to the region clicked in a
         Flexidot dotplot."""
-        logger.warning("Go-to: received dotplot region-selected payload: %r", payload)
+        logger.debug("Go-to: received dotplot region-selected payload: %r", payload)
         if not isinstance(payload, dict):
             return
         x_seq = payload.get("x_seq")
@@ -2441,7 +2441,7 @@ class MainWindow(QMainWindow):
                 already_open = self._preview_tabs.show_annotation_region_for_sequence(
                     seq, start, end
                 )
-                logger.warning(
+                logger.debug(
                     "Go-to: seq=%r %d-%d - already-open-tab match: %s",
                     seq,
                     start,
@@ -2452,12 +2452,12 @@ class MainWindow(QMainWindow):
                     matched.append(f"{seq}:{start}-{end}")
                     continue
                 fasta_path = self._find_fasta_for_sequence_id(seq)
-                logger.warning("Go-to: seq=%r - folder search found: %s", seq, fasta_path)
+                logger.debug("Go-to: seq=%r - folder search found: %s", seq, fasta_path)
                 if fasta_path is None:
                     continue
                 self._open_preview_tab(fasta_path)
                 jumped = self._preview_tabs.show_annotation_region_for_sequence(seq, start, end)
-                logger.warning("Go-to: seq=%r - jump after opening tab: %s", seq, jumped)
+                logger.debug("Go-to: seq=%r - jump after opening tab: %s", seq, jumped)
                 if jumped:
                     matched.append(f"{seq}:{start}-{end}")
         except Exception:  # noqa: BLE001

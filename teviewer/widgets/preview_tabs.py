@@ -707,7 +707,7 @@ class FilePreviewPage(QWidget):
                 )
                 QTimer.singleShot(0, self._refresh_text_view)
             elif self._fasta_tabs.currentIndex() == 1:
-                QTimer.singleShot(0, self._open_annotation_tab)
+                QTimer.singleShot(0, self._refresh_annotation_view)
             return
         current = self._stack.currentWidget()
         if current in (self._html, self._image, self._text_scroll):
@@ -896,7 +896,17 @@ class FilePreviewPage(QWidget):
         if self._fasta_tabs.currentIndex() != 1:
             self._fasta_tabs.setCurrentIndex(1)
         self._refresh_sequence_info_bar()
-        panel.open_annotation_tab()
+        panel.open_annotation_tab(reload=False)
+
+    def _refresh_annotation_view(self) -> None:
+        """Sync layout when the Annotation sub-tab is shown (preserve selection/zoom)."""
+        if self._annotation_panel is None:
+            self._open_annotation_tab()
+            return
+        if self._annotation_panel._map.data() is None:
+            self._open_annotation_tab()
+            return
+        self._annotation_panel._map.refresh_layout()
 
     def contains_sequence_id(self, seq_id: str) -> bool:
         """True if this tab's FASTA is a single-sequence file with the given record id.
@@ -913,44 +923,26 @@ class FilePreviewPage(QWidget):
         return record_id == seq_id or sanitize_name(record_id) == seq_id
 
     def show_annotation_region_if_matches(self, seq_id: str, start: int, end: int) -> bool:
-        """If this tab's sequence matches seq_id, jump its Annotation view to [start, end].
-
-        A freshly-opened FASTA tab runs its own independent load/fit sequence on
-        open (``_load_single_fasta_preview`` -> ``_activate_fasta_tab`` using the
-        user's "default FASTA tab" preference), which can race with - and reset -
-        the selection we're about to apply here. Re-applying at a few delays makes
-        our selection win regardless of how long that competing sequence takes.
-        """
+        """If this tab's sequence matches seq_id, jump its Annotation view to [start, end]."""
         if not self.contains_sequence_id(seq_id):
             return False
-        had_panel_already = self._annotation_panel is not None
-        prev_tab_index = self._fasta_tabs.currentIndex()
-        logger.warning(
-            "Go-to: %s matches seq=%r - had_annotation_panel_already=%s, "
-            "fasta_tabs.currentIndex_before=%s",
+        if not self._single_fasta_mode:
+            return False
+        self._ensure_annotation_panel()
+        if self._fasta_tabs.currentIndex() != 1:
+            self._fasta_tabs.blockSignals(True)
+            self._fasta_tabs.setCurrentIndex(1)
+            self._fasta_tabs.blockSignals(False)
+            self._refresh_sequence_info_bar()
+        panel = self._ensure_annotation_panel()
+        logger.debug(
+            "Go-to: %s matches seq=%r -> jump_to_region(%d, %d)",
             self.path.name,
             seq_id,
-            had_panel_already,
-            prev_tab_index,
+            start,
+            end,
         )
-        self._activate_fasta_tab(DefaultFastaPreviewTab.ANNOTATION)
-
-        def _apply_selection(attempt: int) -> None:
-            panel = self._ensure_annotation_panel()
-            panel.select_region(start, end)
-            logger.warning(
-                "Go-to: %s applied select_region(%d, %d) attempt=%d -> selection_range()=%s, "
-                "fasta_tabs.currentIndex_after=%s",
-                self.path.name,
-                start,
-                end,
-                attempt,
-                panel._map.selection_range(),
-                self._fasta_tabs.currentIndex(),
-            )
-
-        for delay_ms, attempt in ((80, 1), (350, 2), (700, 3)):
-            QTimer.singleShot(delay_ms, lambda a=attempt: _apply_selection(a))
+        panel.jump_to_region(start, end)
         return True
 
     def refresh_nucleotide_colors(self) -> None:
@@ -1161,20 +1153,19 @@ class PreviewTabWidget(QTabWidget):
     def show_annotation_region_for_sequence(self, seq_id: str, start: int, end: int) -> bool:
         """Jump the Annotation view of whichever open tab holds ``seq_id`` to [start, end]."""
         matched = False
-        open_pages = [
-            self.widget(i).path.name
-            for i in range(self.count())
-            if isinstance(self.widget(i), FilePreviewPage)
-        ]
-        logger.warning(
-            "Go-to: checking seq=%r against %d open tab(s): %s", seq_id, len(open_pages), open_pages
-        )
         for index in range(self.count()):
             widget = self.widget(index)
-            if isinstance(widget, FilePreviewPage) and widget.show_annotation_region_if_matches(
-                seq_id, start, end
-            ):
-                matched = True
+            if not isinstance(widget, FilePreviewPage):
+                continue
+            if not widget.show_annotation_region_if_matches(seq_id, start, end):
+                continue
+            matched = True
+            self.setCurrentIndex(index)
+            self.setCurrentWidget(widget)
+            widget.show()
+            widget.setFocus(Qt.FocusReason.OtherFocusReason)
+        if matched:
+            logger.debug("Go-to: jumped to seq=%r %d-%d", seq_id, start, end)
         return matched
 
     @property

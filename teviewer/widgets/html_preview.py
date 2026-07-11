@@ -619,7 +619,7 @@ class HtmlWebEnginePreview(QWidget):
             return
         if self._current_path is None or not is_flexidot_html_file(self._current_path):
             return
-        logger.warning("Flexidot Go-to bridge: starting poll timer for %s", self._current_path)
+        logger.debug("Flexidot Go-to bridge: starting poll timer for %s", self._current_path)
         if self._dotplot_click_timer is None:
             self._dotplot_click_timer = QTimer(self)
             self._dotplot_click_timer.setInterval(400)
@@ -654,7 +654,7 @@ class HtmlWebEnginePreview(QWidget):
                 )
                 return
             self._last_dotplot_click_ts = ts
-            logger.warning(
+            logger.debug(
                 "Flexidot Go-to bridge: detected new click x_seq=%r y_seq=%r ts=%s - emitting signal",
                 payload.get("x_seq"),
                 payload.get("y_seq"),
