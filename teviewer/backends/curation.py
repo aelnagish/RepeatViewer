@@ -137,9 +137,13 @@ def cleanup_teaid_side_files(
             pass
 
 
-def _png_paths_in_dir(folder: Path) -> set[Path]:
+def _output_paths_in_dir(folder: Path, ext: str) -> set[Path]:
     folder = folder.expanduser().resolve()
-    return {p.resolve() for p in folder.glob("*.png") if p.is_file()}
+    return {p.resolve() for p in folder.glob(f"*.{ext}") if p.is_file()}
+
+
+def _png_paths_in_dir(folder: Path) -> set[Path]:
+    return _output_paths_in_dir(folder, "png")
 
 
 def flexidot_output_stem(seq_files: list[Path], genome_label: str = "") -> str:
@@ -151,23 +155,31 @@ def flexidot_output_stem(seq_files: list[Path], genome_label: str = "") -> str:
     return f"{stem}_flexidot{suffix}"
 
 
-_FLEXIDOT_EXTRA_PNG_RE = re.compile(
-    r".+_flexidot(?:_multi)?.*_(\d+)\.png$",
+def is_flexidot_html_file(path: Path) -> bool:
+    """True for a Flexidot interactive dotplot HTML output (``*_flexidot*.html``)."""
+    name = path.name.lower()
+    if not name.endswith((".html", ".htm")):
+        return False
+    return "_flexidot" in name
+
+
+_FLEXIDOT_EXTRA_FILE_RE = re.compile(
+    r".+_flexidot(?:_multi)?.*_(\d+)\.(?:png|html)$",
     re.IGNORECASE,
 )
 
 
 def is_flexidot_extra_plot_file(path: Path) -> bool:
-    """True for secondary Flexidot PNGs (``*_flexidot_2.png``, etc.)."""
-    match = _FLEXIDOT_EXTRA_PNG_RE.match(path.name)
+    """True for secondary Flexidot outputs (``*_flexidot_2.png``/``.html``, etc.)."""
+    match = _FLEXIDOT_EXTRA_FILE_RE.match(path.name)
     return match is not None and int(match.group(1)) >= 2
 
 
-def _remove_flexidot_extra_pngs(output_dir: Path, base: str) -> None:
+def _remove_flexidot_extra_outputs(output_dir: Path, base: str, ext: str) -> None:
     """Delete numbered Flexidot extras left from older runs."""
     output_dir = output_dir.expanduser().resolve()
     for index in range(2, 20):
-        extra = output_dir / f"{base}_{index}.png"
+        extra = output_dir / f"{base}_{index}.{ext}"
         try:
             extra.unlink(missing_ok=True)
         except OSError:
@@ -229,13 +241,14 @@ def _prepare_genome_resources(
     return db_cache, chrom_cache
 
 
-def _flexidot_pngs_for_run(
+def _flexidot_outputs_for_run(
     output_dir: Path,
     before: set[Path],
     seq_files: list[Path],
+    ext: str,
 ) -> list[Path]:
-    """New PNGs from one Flexidot run (optionally filtered to one input stem)."""
-    after = _png_paths_in_dir(output_dir)
+    """New Flexidot output files of ``ext`` from one run (optionally filtered to one input stem)."""
+    after = _output_paths_in_dir(output_dir, ext)
     new_files = sorted(
         after - before,
         key=lambda p: p.stat().st_size,
@@ -274,18 +287,23 @@ def finalize_flexidot_outputs(
     output_dir: Path,
     seq_files: list[Path],
     before: set[Path],
+    ext: str = "html",
 ) -> list[str]:
-    """Keep the primary Flexidot PNG as ``{stem}_flexidot.png``; drop extra panels."""
+    """Keep the primary Flexidot output as ``{stem}_flexidot.{ext}``; drop extra panels.
+
+    ``before`` must be the snapshot taken with the same ``ext`` (e.g. via
+    ``_output_paths_in_dir(out_dir, ext)``) right before the run.
+    """
     output_dir = output_dir.expanduser().resolve()
-    new_files = _flexidot_pngs_for_run(output_dir, before, seq_files)
+    new_files = _flexidot_outputs_for_run(output_dir, before, seq_files, ext)
     if not new_files:
         return []
 
     base = flexidot_output_stem(seq_files)
-    _remove_flexidot_extra_pngs(output_dir, base)
+    _remove_flexidot_extra_outputs(output_dir, base, ext)
 
     src = new_files[0]
-    dest = output_dir / f"{base}.png"
+    dest = output_dir / f"{base}.{ext}"
     if dest.exists():
         dest.unlink()
     if not src.is_file():
@@ -327,6 +345,7 @@ def run_flexidot_combined(
     flexidot_options: FlexidotOptions | None = None,
     cancel: JobCancellation | None = None,
     genome_label: str = "",
+    filetype: str = "html",
 ) -> list[str]:
     """Flexidot for 2+ inputs: mode 1 (paired) or 2 (poly)."""
     if len(seq_files) < 2:
@@ -351,13 +370,14 @@ def run_flexidot_combined(
         record.description = safe
     SeqIO.write(records, str(combined), "fasta")
     with _flexidot_dir_lock(out_dir):
-        before = _png_paths_in_dir(out_dir)
+        before = _output_paths_in_dir(out_dir, filetype)
         try:
             run_flexidot(
                 str(combined),
                 str(out_dir),
                 wordsize=flex_opts.wordsize,
                 mode=mode,
+                filetype=filetype,
                 lcs_shading=flex_opts.lcs_shading,
                 use_gff=flex_opts.use_gff,
                 gff_source_fastas=[str(path) for path in seq_files],
@@ -367,7 +387,7 @@ def run_flexidot_combined(
         finally:
             if combined.is_file():
                 combined.unlink(missing_ok=True)
-        return finalize_flexidot_outputs(out_dir, seq_files, before)
+        return finalize_flexidot_outputs(out_dir, seq_files, before, ext=filetype)
 
 
 def run_on_sequence(
@@ -608,13 +628,15 @@ def run_on_sequence(
         if seq_count < 1:
             raise RuntimeError(f"No sequences in {seq_path.name} (Flexidot needs at least one).")
         out_path = Path(out_dir).resolve()
+        flexidot_filetype = "html"
         with _flexidot_dir_lock(out_path):
-            before = _png_paths_in_dir(out_path)
+            before = _output_paths_in_dir(out_path, flexidot_filetype)
             run_flexidot(
                 str(seq_path),
                 str(out_path),
                 wordsize=flex_opts.wordsize,
                 mode=flexidot_mode,
+                filetype=flexidot_filetype,
                 lcs_shading=flex_opts.lcs_shading,
                 use_gff=flex_opts.use_gff,
                 gff_source_fastas=[str(seq_path)],
@@ -622,7 +644,9 @@ def run_on_sequence(
                 cancel=cancel,
             )
             created.extend(
-                finalize_flexidot_outputs(out_path, [seq_path.resolve()], before)
+                finalize_flexidot_outputs(
+                    out_path, [seq_path.resolve()], before, ext=flexidot_filetype
+                )
             )
 
     elif func_name == "te_annotation":

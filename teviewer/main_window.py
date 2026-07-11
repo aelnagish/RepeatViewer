@@ -93,6 +93,7 @@ from teviewer.backends.te_benchmark import (
 from teviewer.backends.te_library_benchmark import run_te_library_benchmark
 from teviewer.backends.curation import effective_batch_workers, is_flexidot_extra_plot_file, run_batch
 from teviewer.backends.gui_functions import flexidot_executable
+from teviewer.backends.gui_functions import sanitize_name as flexidot_sanitize_name
 from teviewer.backends.sequence_aligner import (
     alignment_backends,
     run_alignment,
@@ -104,7 +105,10 @@ from teviewer.backends.gff_features import (
     find_companion_gff,
     is_gene_annotation_file,
 )
-from teviewer.backends.sequence_features import is_sequence_map_hidden_file
+from teviewer.backends.sequence_features import (
+    is_sequence_map_hidden_file,
+    load_single_sequence_fasta,
+)
 from teviewer.plugins import get_registry, load_plugins
 from teviewer.plugins.custom_command import (
     UserCommandPlugin,
@@ -1274,18 +1278,18 @@ class MainWindow(QMainWindow):
 
         files_layout.addLayout(filter_row)
 
-        from teviewer.widgets.preview_controls import PreviewZoomBar
+        from teviewer.widgets.preview_controls import PreviewZoomBar, attach_preview_zoom_to_dock_title
 
         self._preview_host = QWidget()
         preview_layout = QVBoxLayout(self._preview_host)
         preview_layout.setContentsMargins(4, 2, 4, 2)
         preview_layout.setSpacing(2)
-        self._preview_zoom_bar = PreviewZoomBar(self._preview_host)
-        preview_layout.addWidget(self._preview_zoom_bar)
+        self._preview_zoom_bar = PreviewZoomBar(show_heading=False)
         self._preview_tabs = PreviewTabWidget(zoom_bar=self._preview_zoom_bar)
         set_genome_path_provider(self._genome_path_resolved)
         set_igv_extra_annotations_provider(self._igv_extra_annotations_for_alignment)
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
+        self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         preview_layout.addWidget(self._preview_tabs, stretch=1)
         self._preview_zoom_bar.setVisible(True)
         self._preview_host.setMinimumHeight(200)
@@ -1304,6 +1308,7 @@ class MainWindow(QMainWindow):
         self._dock_folders = self._make_dock("Folders", folders_panel, fixed=False)
         self._dock_files = self._make_dock("Files", files_panel, fixed=False)
         self._dock_preview = self._make_dock("Preview", self._preview_host, fixed=False)
+        attach_preview_zoom_to_dock_title(self._dock_preview, self._preview_zoom_bar)
         self._dock_files.setMinimumWidth(280)
         self._dock_preview.setMinimumWidth(360)
 
@@ -1959,6 +1964,10 @@ class MainWindow(QMainWindow):
             plugin_registry=self._plugin_registry,
             toolbar_order=self._toolbar_order,
         )
+        if self._preview_tabs is not None:
+            dialog.colorBlindToggled.connect(
+                lambda _checked: self._preview_tabs.refresh_nucleotide_color_scheme()
+            )
         if dialog.exec():
             self._project = dialog.apply_to_project()
             self._persist_workspace()
@@ -2406,6 +2415,83 @@ class MainWindow(QMainWindow):
         # Ensure focus returns to the preview area after saving.
         if not self._file_list.hasFocus():
             QTimer.singleShot(0, self._focus_preview_widget)
+
+    def _on_dotplot_region_selected(self, payload: object) -> None:
+        """Open (if needed) and jump the Annotation view to the region clicked in a
+        Flexidot dotplot."""
+        logger.warning("Go-to: received dotplot region-selected payload: %r", payload)
+        if not isinstance(payload, dict):
+            return
+        x_seq = payload.get("x_seq")
+        y_seq = payload.get("y_seq")
+        try:
+            x_start, x_end = int(payload["x_start"]), int(payload["x_end"])
+            y_start, y_end = int(payload["y_start"]), int(payload["y_end"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning("Dotplot region-selected payload missing coordinates: %r", payload)
+            return
+
+        matched: list[str] = []
+        seen: set[str] = set()
+        try:
+            for seq, start, end in ((x_seq, x_start, x_end), (y_seq, y_start, y_end)):
+                if not seq or seq in seen:
+                    continue
+                seen.add(seq)
+                already_open = self._preview_tabs.show_annotation_region_for_sequence(
+                    seq, start, end
+                )
+                logger.warning(
+                    "Go-to: seq=%r %d-%d - already-open-tab match: %s",
+                    seq,
+                    start,
+                    end,
+                    already_open,
+                )
+                if already_open:
+                    matched.append(f"{seq}:{start}-{end}")
+                    continue
+                fasta_path = self._find_fasta_for_sequence_id(seq)
+                logger.warning("Go-to: seq=%r - folder search found: %s", seq, fasta_path)
+                if fasta_path is None:
+                    continue
+                self._open_preview_tab(fasta_path)
+                jumped = self._preview_tabs.show_annotation_region_for_sequence(seq, start, end)
+                logger.warning("Go-to: seq=%r - jump after opening tab: %s", seq, jumped)
+                if jumped:
+                    matched.append(f"{seq}:{start}-{end}")
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to jump Annotation view for dotplot selection %r", payload)
+            self._set_status_message(
+                "Go-to-region failed - see terminal/log output for details", 6000
+            )
+            return
+
+        if matched:
+            self._set_status_message(f"Jumped Annotation view to {', '.join(matched)}", 4000)
+        elif x_seq or y_seq:
+            self._set_status_message(
+                f"Could not find a FASTA file for {x_seq or y_seq} in this folder", 4000
+            )
+
+    def _find_fasta_for_sequence_id(self, seq_id: str) -> Path | None:
+        """Find a single-sequence FASTA in the current folder whose record id matches
+        ``seq_id`` (allowing for the sanitization Flexidot applies to special characters)."""
+        if not self._current_folder:
+            return None
+        candidates = self._cached_folder_files or [
+            p for p in self._current_folder.iterdir() if p.is_file()
+        ]
+        for path in candidates:
+            if path.suffix.lower() not in _FASTA_SUFFIXES:
+                continue
+            try:
+                record_id, _ = load_single_sequence_fasta(path)
+            except (OSError, ValueError):
+                continue
+            if record_id == seq_id or flexidot_sanitize_name(record_id) == seq_id:
+                return path
+        return None
 
     def _focus_preview_widget(self) -> None:
         if self._preview_tabs is None:

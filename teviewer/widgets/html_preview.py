@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from teviewer.backends.blast_genome_plot import is_genome_map_html_file
+from teviewer.backends.curation import is_flexidot_html_file
 from teviewer.backends.igv_viewer import (
     IgvPreviewError,
     add_track_to_igv_session,
@@ -148,6 +149,8 @@ def _configure_web_settings(settings) -> None:
 class LazyHtmlPreview(QWidget):
     """Defers Qt WebEngine creation until the first HTML file is opened."""
 
+    dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -243,7 +246,9 @@ class LazyHtmlPreview(QWidget):
         try:
             from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
-            return HtmlWebEnginePreview(self)
+            viewer = HtmlWebEnginePreview(self)
+            viewer.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
+            return viewer
         except ImportError:
             return HtmlFallbackPreview(self, reason="PySide6-Addons not installed")
         except Exception as exc:  # noqa: BLE001
@@ -254,6 +259,8 @@ class LazyHtmlPreview(QWidget):
 class HtmlWebEnginePreview(QWidget):
     """In-app viewer for Plotly HTML (TEAid, genome maps)."""
 
+    dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -261,21 +268,38 @@ class HtmlWebEnginePreview(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
+        layout.setSpacing(0)
 
-        toolbar = QHBoxLayout()
+        toolbar = QWidget(self)
+        toolbar.setObjectName("htmlPreviewToolbar")
+        toolbar.setFixedHeight(22)
+        toolbar.setStyleSheet(
+            "QWidget#htmlPreviewToolbar {"
+            "  background: palette(midlight);"
+            "  border-bottom: 1px solid palette(mid);"
+            "}"
+            "QWidget#htmlPreviewToolbar QPushButton {"
+            "  min-height: 18px;"
+            "  max-height: 18px;"
+            "  padding: 0px 8px;"
+            "  margin: 0px;"
+            "}"
+        )
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(4, 1, 4, 1)
+        toolbar_layout.setSpacing(4)
         self._add_igv_track_btn = QPushButton("Add track…")
         self._add_igv_track_btn.setToolTip(
             "Add GFF, GTF, BED, BAM, or SAM track to the igv.js viewer"
         )
         self._add_igv_track_btn.clicked.connect(self._add_igv_track)
         self._add_igv_track_btn.hide()
-        toolbar.addWidget(self._add_igv_track_btn)
-        toolbar.addStretch()
+        toolbar_layout.addWidget(self._add_igv_track_btn)
+        toolbar_layout.addStretch()
         open_browser = QPushButton("Open in browser")
         open_browser.clicked.connect(self._open_in_browser)
-        toolbar.addWidget(open_browser)
-        layout.addLayout(toolbar)
+        toolbar_layout.addWidget(open_browser)
+        layout.addWidget(toolbar)
 
         self._view = QWebEngineView(self)
         self._view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -294,6 +318,8 @@ class HtmlWebEnginePreview(QWidget):
         self._content_w = TEAID_NOMINAL_WIDTH
         self._content_h = TEAID_NOMINAL_HEIGHT
         self._prefs_save_timer: QTimer | None = None
+        self._dotplot_click_timer: QTimer | None = None
+        self._last_dotplot_click_ts: float | None = None
         self._work_generation = 0
 
     def is_view_active(self) -> bool:
@@ -301,6 +327,14 @@ class HtmlWebEnginePreview(QWidget):
 
     def _view_active(self) -> bool:
         return _qobject_alive(self._view) and _qobject_alive(self._view.page())
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # Force a repaint when this tab becomes visible again after being hidden
+        # behind another preview tab, in case Chromium's background-tab throttling
+        # left it in a stale render state that would make clicks miss their target.
+        if self._view_active():
+            self._view.update()
 
     def _defer(self, delay_ms: int, callback) -> None:
         generation = self._work_generation
@@ -316,6 +350,8 @@ class HtmlWebEnginePreview(QWidget):
         self._work_generation += 1
         if self._prefs_save_timer is not None:
             self._prefs_save_timer.stop()
+        if self._dotplot_click_timer is not None:
+            self._dotplot_click_timer.stop()
 
     def set_zoom_percent(self, percent: int) -> None:
         if not self._view_active():
@@ -414,6 +450,9 @@ class HtmlWebEnginePreview(QWidget):
         self._current_url = None
         if self._prefs_save_timer is not None:
             self._prefs_save_timer.stop()
+        if self._dotplot_click_timer is not None:
+            self._dotplot_click_timer.stop()
+        self._last_dotplot_click_ts = None
         self._last_load_ok = False
         self._used_html_fallback = False
         self._content_w = TEAID_NOMINAL_WIDTH
@@ -498,6 +537,7 @@ class HtmlWebEnginePreview(QWidget):
         if ok:
             self._last_load_ok = True
             self._install_plot_prefs_bridge()
+            self._install_dotplot_click_bridge()
             self._apply_zoom()
             self._defer(50, self._query_content_size)
             self._defer(250, self._query_content_size)
@@ -569,6 +609,63 @@ class HtmlWebEnginePreview(QWidget):
 
         self._view.page().runJavaScript(
             "window.teviewerCollectPlotPrefs ? window.teviewerCollectPlotPrefs() : null",
+            0,
+            _on_payload,
+        )
+
+    def _install_dotplot_click_bridge(self) -> None:
+        """Poll a Flexidot dotplot HTML for match-line clicks (window.__flexidotLastClick)."""
+        if not self._view_active():
+            return
+        if self._current_path is None or not is_flexidot_html_file(self._current_path):
+            return
+        logger.warning("Flexidot Go-to bridge: starting poll timer for %s", self._current_path)
+        if self._dotplot_click_timer is None:
+            self._dotplot_click_timer = QTimer(self)
+            self._dotplot_click_timer.setInterval(400)
+            self._dotplot_click_timer.timeout.connect(self._poll_dotplot_click)
+        self._dotplot_click_timer.start()
+
+    def _poll_dotplot_click(self) -> None:
+        if not self._view_active():
+            return
+        if self._current_path is None or not is_flexidot_html_file(self._current_path):
+            return
+
+        def _on_payload(raw) -> None:
+            if not self._view_active() or not isinstance(raw, str) or not raw:
+                return
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                logger.debug("Dotplot click payload was not valid JSON: %r", raw)
+                return
+            if not isinstance(payload, dict):
+                return
+            ts = payload.get("ts")
+            if not isinstance(ts, (int, float)):
+                logger.debug("Dotplot click payload missing numeric ts: %r", payload)
+                return
+            if self._last_dotplot_click_ts is not None and ts <= self._last_dotplot_click_ts:
+                logger.debug(
+                    "Dotplot click ts %s not newer than last seen %s - skipping",
+                    ts,
+                    self._last_dotplot_click_ts,
+                )
+                return
+            self._last_dotplot_click_ts = ts
+            logger.warning(
+                "Flexidot Go-to bridge: detected new click x_seq=%r y_seq=%r ts=%s - emitting signal",
+                payload.get("x_seq"),
+                payload.get("y_seq"),
+                ts,
+            )
+            self.dotplotRegionSelected.emit(payload)
+
+        self._view.page().runJavaScript(
+            # QWebEngine cannot reliably marshal plain JS objects back to Python
+            # via runJavaScript (comes through as an empty string) - stringify first.
+            "window.__flexidotLastClick ? JSON.stringify(window.__flexidotLastClick) : null",
             0,
             _on_payload,
         )

@@ -598,6 +598,7 @@ def run_flexidot(
     wordsize=3,
     mode='0',
     *,
+    filetype: str = "html",
     lcs_shading: bool = True,
     use_gff: bool = False,
     gff_source_fastas: list[str | os.PathLike] | None = None,
@@ -611,6 +612,8 @@ def run_flexidot(
     :param output_dir: str, directory where results will be saved
     :param wordsize: int, k-mer length (-k)
     :param mode: str, plotting mode ('0'=self, '1'=paired, '2'=poly)
+    :param filetype: str, Flexidot output format (-f): 'html' (interactive,
+        default), 'png', 'pdf', or 'svg'
     :param lcs_shading: bool, add -x (LCS shading) for multi-sequence plots
     :param use_gff: bool, pass companion GFF files to Flexidot (-g / -G)
     :param gff_source_fastas: FASTA paths used to locate companion GFF3 files
@@ -639,9 +642,15 @@ def run_flexidot(
         str(mode),
         "-k",
         str(wordsize),
+        "-f",
+        filetype,
         "--outdir",
         out_dir,
     ]
+    if filetype == "html":
+        # Show "Go to <seq> <start>-<end>" buttons in the dotplot that jump TEviewer's
+        # Annotation view; only meaningful when Flexidot is embedded in TEviewer.
+        flexidot_cmd.append("--teviewer-integration")
     if lcs_shading and str(mode) in {"1", "2"}:
         flexidot_cmd.append("-x")
 

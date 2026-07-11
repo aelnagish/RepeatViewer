@@ -234,8 +234,8 @@ _WRAP_LINE_RULER = 12
 _WRAP_LINE_GAP = 6
 _NO_COLOR_FG = QColor("#222222")
 _NO_COLOR_BG = QColor("#fafafa")
-_SELECTION_FILL = QColor(25, 95, 175, 175)
-_SELECTION_BORDER = QColor(15, 60, 120, 230)
+_SELECTION_FILL = QColor(10, 40, 120, 100)
+_SELECTION_BORDER = QColor(5, 20, 70, 255)
 _FEATURE_SELECTION_BORDER = QColor("#0b5cab")
 _FEATURE_SELECTION_OUTLINE = QColor("#ffffff")
 _FEATURE_SELECTION_OVERLAY = QColor(11, 92, 171, 120)
@@ -1582,6 +1582,12 @@ class SequenceMapCanvas(QWidget):
         bg, fg = self._base_style(base)
         if self._color_bases:
             painter.fillRect(cell, bg)
+            if show_letters:
+                # thin separator so adjacent cells read as a clean uniform grid
+                # (bright colors like green can otherwise look "off" next to
+                # duller neighbors even though the cells are the same width)
+                painter.setPen(QPen(QColor(0, 0, 0, 60), 1))
+                painter.drawLine(cell.topRight(), cell.bottomRight())
         if show_letters:
             painter.setPen(fg)
             painter.drawText(cell, Qt.AlignmentFlag.AlignCenter, base)
@@ -3497,6 +3503,10 @@ class SequenceMapPanel(QWidget):
         self.load_path(self._path)
         QTimer.singleShot(0, self._map.fit_window)
         QTimer.singleShot(50, self._map.refresh_layout)
+
+    def select_region(self, start: int, end: int) -> None:
+        """Select and zoom/scroll the map to a (1-based, inclusive) bp range."""
+        self._map.select_by_position(start, end)
 
     def fasta_path(self) -> Path:
         return self._path

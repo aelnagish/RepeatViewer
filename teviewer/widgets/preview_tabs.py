@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -21,10 +22,12 @@ from PySide6.QtWidgets import (
 )
 
 from teviewer.backends.bismark_cov import is_bismark_cov_file
+from teviewer.backends.gui_functions import sanitize_name
 from teviewer.backends.igv_viewer import IgvPreviewError, build_igv_view_url, is_alignment_preview_file
 from teviewer.backends.sequence_features import (
     format_multi_sequence_fasta_summary_text,
     format_single_sequence_summary_text,
+    load_single_sequence_fasta,
     summarize_single_sequence_fasta,
 )
 from teviewer.widgets.html_preview import _qobject_alive, create_html_preview_widget
@@ -130,6 +133,8 @@ _TEXT_PREVIEW_SUFFIXES = _FASTA_SUFFIXES | {
     ".xml",
     ".out",
 }
+logger = logging.getLogger(__name__)
+
 _TEXT_PREVIEW_MAX_CHARS = 500_000
 _DEFAULT_TEXT_MAX_CHARS = 200_000
 _IMAGE_PREVIEW_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}
@@ -479,6 +484,7 @@ class FilePreviewPage(QWidget):
     """Single-file preview page inside a tab."""
 
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
+    dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -526,6 +532,8 @@ class FilePreviewPage(QWidget):
         self.apply_text_font_size(self._base_text_font_pt)
         self._pdf = PdfPreviewWidget(self)
         self._html = create_html_preview_widget(self)
+        if hasattr(self._html, "dotplotRegionSelected"):
+            self._html.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
         self._image = ScaledImagePreview(self)
         self._fasta_tabs = QTabWidget(self)
         self._fasta_tabs.setDocumentMode(False)
@@ -890,6 +898,61 @@ class FilePreviewPage(QWidget):
         self._refresh_sequence_info_bar()
         panel.open_annotation_tab()
 
+    def contains_sequence_id(self, seq_id: str) -> bool:
+        """True if this tab's FASTA is a single-sequence file with the given record id.
+
+        Flexidot may have been run against a sanitized copy of this FASTA (special
+        characters like ``#``/``/`` replaced - see ``prepare_flexidot_input_fasta``/
+        ``run_flexidot_combined``), so ``seq_id`` from a dotplot click can be the
+        sanitized form rather than the id actually stored in this file.
+        """
+        try:
+            record_id, _ = load_single_sequence_fasta(self.path)
+        except (OSError, ValueError):
+            return False
+        return record_id == seq_id or sanitize_name(record_id) == seq_id
+
+    def show_annotation_region_if_matches(self, seq_id: str, start: int, end: int) -> bool:
+        """If this tab's sequence matches seq_id, jump its Annotation view to [start, end].
+
+        A freshly-opened FASTA tab runs its own independent load/fit sequence on
+        open (``_load_single_fasta_preview`` -> ``_activate_fasta_tab`` using the
+        user's "default FASTA tab" preference), which can race with - and reset -
+        the selection we're about to apply here. Re-applying at a few delays makes
+        our selection win regardless of how long that competing sequence takes.
+        """
+        if not self.contains_sequence_id(seq_id):
+            return False
+        had_panel_already = self._annotation_panel is not None
+        prev_tab_index = self._fasta_tabs.currentIndex()
+        logger.warning(
+            "Go-to: %s matches seq=%r - had_annotation_panel_already=%s, "
+            "fasta_tabs.currentIndex_before=%s",
+            self.path.name,
+            seq_id,
+            had_panel_already,
+            prev_tab_index,
+        )
+        self._activate_fasta_tab(DefaultFastaPreviewTab.ANNOTATION)
+
+        def _apply_selection(attempt: int) -> None:
+            panel = self._ensure_annotation_panel()
+            panel.select_region(start, end)
+            logger.warning(
+                "Go-to: %s applied select_region(%d, %d) attempt=%d -> selection_range()=%s, "
+                "fasta_tabs.currentIndex_after=%s",
+                self.path.name,
+                start,
+                end,
+                attempt,
+                panel._map.selection_range(),
+                self._fasta_tabs.currentIndex(),
+            )
+
+        for delay_ms, attempt in ((80, 1), (350, 2), (700, 3)):
+            QTimer.singleShot(delay_ms, lambda a=attempt: _apply_selection(a))
+        return True
+
     def refresh_nucleotide_colors(self) -> None:
         if self._annotation_panel is not None:
             self._annotation_panel.refresh_nucleotide_colors()
@@ -1009,6 +1072,7 @@ class PreviewTabWidget(QTabWidget):
     """Tab bar for open files; reuses tabs when the same path is opened again."""
 
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
+    dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
 
     def __init__(
         self,
@@ -1041,6 +1105,25 @@ class PreviewTabWidget(QTabWidget):
             "  max-height: 22px;"
             "  padding: 3px 10px;"
             "  margin-right: 1px;"
+            "  margin-top: 3px;"
+            "  border: 1px solid palette(mid);"
+            "  border-bottom: none;"
+            "  border-top-left-radius: 4px;"
+            "  border-top-right-radius: 4px;"
+            "  background: palette(button);"
+            "  color: palette(placeholder-text);"
+            "}"
+            "QTabBar::tab:selected {"
+            "  margin-top: 0px;"
+            "  padding-top: 6px;"
+            "  background: palette(base);"
+            "  color: palette(text);"
+            "  font-weight: 600;"
+            "  border-bottom: 2px solid palette(highlight);"
+            "}"
+            "QTabBar::tab:hover:!selected {"
+            "  background: palette(midlight);"
+            "  color: palette(text);"
             "}"
         )
         self.setStyleSheet(
@@ -1069,10 +1152,30 @@ class PreviewTabWidget(QTabWidget):
 
     def _wire_preview_page(self, page: FilePreviewPage) -> None:
         page.annotationsSaved.connect(self.annotationsSaved.emit)
+        page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
 
     def _add_preview_page(self, page: FilePreviewPage, *, name: str) -> int:
         self._wire_preview_page(page)
         return self.addTab(page, name)
+
+    def show_annotation_region_for_sequence(self, seq_id: str, start: int, end: int) -> bool:
+        """Jump the Annotation view of whichever open tab holds ``seq_id`` to [start, end]."""
+        matched = False
+        open_pages = [
+            self.widget(i).path.name
+            for i in range(self.count())
+            if isinstance(self.widget(i), FilePreviewPage)
+        ]
+        logger.warning(
+            "Go-to: checking seq=%r against %d open tab(s): %s", seq_id, len(open_pages), open_pages
+        )
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage) and widget.show_annotation_region_if_matches(
+                seq_id, start, end
+            ):
+                matched = True
+        return matched
 
     @property
     def zoom_bar(self):

@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -305,6 +305,8 @@ def _section_label(text: str, parent: QWidget) -> QLabel:
 
 
 class SettingsDialog(QDialog):
+    colorBlindToggled = Signal(bool)  # emitted immediately when the checkbox is clicked
+
     def __init__(
         self,
         project: TEviewerProject,
@@ -331,6 +333,7 @@ class SettingsDialog(QDialog):
             "Use an orange/blue/teal nucleotide palette in the Annotation sequence view "
             "(AliView-style green/blue/red when off)."
         )
+        self._color_blind_scheme.toggled.connect(self._on_color_blind_toggled)
         self._batch_workers = QSpinBox()
         self._batch_workers.setRange(1, 32)
         self._batch_workers.setValue(project.batch_workers)
@@ -436,6 +439,12 @@ class SettingsDialog(QDialog):
         layout.setSpacing(10)
         layout.addWidget(tabs)
         layout.addWidget(buttons)
+
+    def _on_color_blind_toggled(self, checked: bool) -> None:
+        """Persist and broadcast immediately so open Annotation views recolor live,
+        without waiting for OK - this is the kind of setting you want to preview."""
+        save_color_blind_nucleotide_scheme(checked)
+        self.colorBlindToggled.emit(checked)
 
     def accept(self) -> None:
         if not self._toolbar_panel.has_visible_tools():
