@@ -708,6 +708,202 @@ def dot_plot(df):
     return fig
 
 
+def _self_dotplot_axis_max(df: pd.DataFrame, *, fallback: int = 1) -> int:
+    if df.empty:
+        return max(1, int(fallback))
+    return int(
+        max(
+            df["V7"].max(),
+            df["V8"].max(),
+            df["V9"].max(),
+            df["V10"].max(),
+            1,
+        )
+    )
+
+
+def render_self_dotplot_png(
+    df: pd.DataFrame,
+    output_png: os.PathLike[str] | str,
+    *,
+    title: str = "Self dot plot",
+) -> str:
+    """Render TEAid self-BLAST hits to a static PNG (no WebEngine)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_path = os.path.abspath(os.path.expanduser(str(output_png)))
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    axis_max = _self_dotplot_axis_max(df)
+
+    fig, ax = plt.subplots(figsize=(6.4, 6.4), dpi=120)
+    if not df.empty:
+        for _index, segment in df.iterrows():
+            color = "#000000" if segment["V10"] > segment["V9"] else "#009E73"
+            ax.plot(
+                [segment["V7"], segment["V8"]],
+                [segment["V9"], segment["V10"]],
+                color=color,
+                linewidth=1.2,
+                solid_capstyle="round",
+            )
+    ax.set_xlim(1, axis_max)
+    ax.set_ylim(1, axis_max)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title(title)
+    ax.set_xlabel("TE consensus self dotplot (bp)")
+    ax.set_ylabel("TE consensus self dotplot (bp)")
+    ax.tick_params(direction="out")
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+    fig.tight_layout()
+    fig.savefig(output_path, facecolor="white")
+    plt.close(fig)
+    return output_path
+
+
+def _render_self_dotplot_message_png(
+    message: str,
+    seq_len: int,
+    output_png: os.PathLike[str] | str,
+) -> str:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_path = os.path.abspath(os.path.expanduser(str(output_png)))
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    seq_len = max(1, int(seq_len))
+    fig, ax = plt.subplots(figsize=(6.4, 6.4), dpi=120)
+    ax.set_xlim(1, seq_len)
+    ax.set_ylim(0, 10)
+    ax.axis("off")
+    ax.text(
+        seq_len / 2,
+        5,
+        message,
+        ha="center",
+        va="center",
+        fontsize=12,
+        wrap=True,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, facecolor="white")
+    plt.close(fig)
+    return output_path
+
+
+def _preview_self_dotplot_paths(
+    input_file: os.PathLike[str] | str,
+    output_png: os.PathLike[str] | str,
+    *,
+    word_size: int,
+    use_system_blast: bool,
+    work_dir: os.PathLike[str] | str | None,
+) -> tuple[str, int, str, str]:
+    input_path = os.path.abspath(os.path.expanduser(str(input_file)))
+    output_path = os.path.abspath(os.path.expanduser(str(output_png)))
+    if not os.path.isfile(input_path):
+        raise FileNotFoundError(f"FASTA not found: {input_path}")
+
+    records = list(SeqIO.parse(input_path, "fasta"))
+    if not records:
+        raise TeaidInputError(f"No sequences found in {os.path.basename(input_path)}.")
+    cons_len = len(str(records[0].seq).replace("-", ""))
+    if cons_len < 1:
+        raise TeaidInputError(f"No sequence in {os.path.basename(input_path)}.")
+
+    scratch_dir = (
+        os.path.abspath(os.path.expanduser(str(work_dir)))
+        if work_dir is not None
+        else os.path.dirname(output_path)
+    )
+    os.makedirs(scratch_dir, exist_ok=True)
+    return input_path, cons_len, output_path, scratch_dir
+
+
+def generate_preview_self_dotplot_png(
+    input_file: os.PathLike[str] | str,
+    output_png: os.PathLike[str] | str,
+    *,
+    word_size: int = 11,
+    use_system_blast: bool = False,
+    work_dir: os.PathLike[str] | str | None = None,
+) -> str:
+    """Build a TEAid self-BLAST dotplot PNG for the preview Dotplot tab."""
+    input_path, cons_len, output_path, scratch_dir = _preview_self_dotplot_paths(
+        input_file,
+        output_png,
+        word_size=word_size,
+        use_system_blast=use_system_blast,
+        work_dir=work_dir,
+    )
+    dotplot_blast, blast_work_dir = self_blast(
+        input_path,
+        scratch_dir,
+        use_system_blast=use_system_blast,
+        word_size=word_size,
+    )
+    try:
+        if dotplot_blast == "blast_n_zero":
+            return _render_self_dotplot_message_png(
+                "No self BLAST hits found for this sequence.",
+                cons_len,
+                output_path,
+            )
+        if dotplot_blast:
+            df_dotplot_blast = pd.read_csv(dotplot_blast)
+            return render_self_dotplot_png(df_dotplot_blast, output_path)
+        return _render_self_dotplot_message_png(
+            "An error occurred. Please check the terminal for details.",
+            cons_len,
+            output_path,
+        )
+    finally:
+        shutil.rmtree(blast_work_dir, ignore_errors=True)
+
+
+def generate_preview_self_dotplot_html(
+    input_file: os.PathLike[str] | str,
+    output_html: os.PathLike[str] | str,
+    *,
+    word_size: int = 11,
+    use_system_blast: bool = False,
+    work_dir: os.PathLike[str] | str | None = None,
+) -> str:
+    """
+    Build a TEAid self-BLAST dotplot HTML file for the preview Dotplot tab.
+
+    Returns the resolved output HTML path as a string.
+    """
+    input_path, cons_len, output_path, scratch_dir = _preview_self_dotplot_paths(
+        input_file,
+        output_html,
+        word_size=word_size,
+        use_system_blast=use_system_blast,
+        work_dir=work_dir,
+    )
+
+    fig = _build_self_dot_figure(
+        input_path,
+        scratch_dir,
+        cons_len,
+        use_system_blast=use_system_blast,
+        self_blast_word_size=word_size,
+    )
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    pio.write_html(
+        fig,
+        file=output_path,
+        auto_open=False,
+        config={"responsive": True},
+    )
+    return output_path
+
+
 #####################################################################################################
 # Code block: rpstblasn plot
 #####################################################################################################

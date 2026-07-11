@@ -300,7 +300,9 @@ def _path_browse_row(
 
 def _section_label(text: str, parent: QWidget) -> QLabel:
     label = QLabel(text, parent)
-    label.setStyleSheet("font-weight: 600; margin-top: 10px;")
+    font = label.font()
+    font.setBold(True)
+    label.setFont(font)
     return label
 
 
@@ -347,7 +349,7 @@ class SettingsDialog(QDialog):
         self._browser_panel_font.setValue(load_browser_panel_font_size())
         self._browser_panel_font.setSuffix(" pt")
         self._browser_panel_font.setToolTip(
-            "Font size for folder and file names in the Folders and Files panels."
+            "Font size for folder and file names in the Browser panel."
         )
         self._preview_zoom = QSpinBox()
         self._preview_zoom.setRange(MIN_PREVIEW_ZOOM_PERCENT, MAX_PREVIEW_ZOOM_PERCENT)

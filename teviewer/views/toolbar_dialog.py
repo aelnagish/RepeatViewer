@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -27,38 +28,90 @@ TOOLBAR_SETTINGS_GROUP = "toolbar"
 DEFAULT_TOOLBAR_FONT_SIZE = 13
 TOOLBAR_CUSTOMIZE_HIDDEN = frozenset({"te_divergence_plot"})
 
-DEFAULT_TOOLBAR_ORDER: list[str] = [
+# Sequence menu tools that can be added to the toolbar (menu order).
+SEQUENCE_TOOLBAR_IDS: tuple[str, ...] = (
     "aliview",
-    "_sep1",
-    "align",
     "blast",
+    "align",
     "extend",
+    "tsd_search",
     "teaid",
     "msa_clean",
     "consensus",
     "flexidot",
+    "te_annotation",
     "te_genome_map",
+    "te_divergence_plot",
+    "te_benchmark",
+)
+
+
+# Built-in tools known to the customize dialog.
+ALL_BUILTIN_TOOLBAR_IDS: tuple[str, ...] = (
+    "define_genome",
+    *SEQUENCE_TOOLBAR_IDS,
+    "_sep1",
+    "_sep_plugins",
+    "plugin:minimap2",
+)
+
+# Default visible toolbar (Settings → Toolbar → Reset to default).
+DEFAULT_TOOLBAR_ORDER: list[str] = [
+    "define_genome",
+    "blast",
+    "align",
+    "msa_clean",
+    "flexidot",
+    "teaid",
+    "te_genome_map",
+    "aliview",
+    "extend",
+    "consensus",
     "te_benchmark",
     "_sep_plugins",
     "plugin:minimap2",
+    "te_divergence_plot",
 ]
 
 TOOLBAR_LABELS: dict[str, str] = {
+    "define_genome": "Define genome",
     "aliview": "AliView",
     "_sep1": "— separator —",
     "align": "Align (MAFFT)",
-    "blast": "Blast",
+    "blast": "BLAST",
     "extend": "Extend",
     "teaid": "TEAid",
     "msa_clean": "MSA clean",
     "consensus": "Consensus",
     "flexidot": "Flexidot",
+    "te_annotation": "TE annotation",
     "te_genome_map": "TE visualization",
     "te_benchmark": "Benchmarking",
     "te_divergence_plot": "TE divergence",
+    "tsd_search": "TSD search",
     "_sep_plugins": "— plugins —",
     "plugin:minimap2": "Minimap2",
 }
+
+
+def is_toolbar_separator(tool_id: str) -> bool:
+    return tool_id.startswith("_sep")
+
+
+def toolbar_item_label(tool_id: str, labels: dict[str, str] | None = None) -> str:
+    lookup = labels or TOOLBAR_LABELS
+    if tool_id.startswith("_sep") and tool_id != "_sep_plugins":
+        return "— separator —"
+    return lookup.get(tool_id, tool_id)
+
+
+def next_separator_tool_id(existing_ids: set[str]) -> str:
+    if "_sep1" not in existing_ids:
+        return "_sep1"
+    index = 2
+    while f"_sep{index}" in existing_ids:
+        index += 1
+    return f"_sep{index}"
 
 
 def plugin_tool_id(plugin_id: str) -> str:
@@ -99,24 +152,17 @@ def build_toolbar_catalog(
     visible_order: list[str],
     registry: PluginRegistry | None = None,
 ) -> list[tuple[str, bool]]:
-    """Full toolbar catalog for the customize dialog: (tool_id, visible)."""
+    """Toolbar customize list: only tools already on / listed for the toolbar."""
     labels = toolbar_labels_for(registry)
-    default_order = default_toolbar_order_for(registry)
-    known = set(labels)
-    visible_set = set(visible_order)
-    catalog: list[tuple[str, bool]] = [
-        (tool_id, True)
-        for tool_id in visible_order
-        if tool_id in known and tool_id not in TOOLBAR_CUSTOMIZE_HIDDEN
-    ]
-    for tool_id in default_order:
-        if tool_id not in visible_set and tool_id not in TOOLBAR_CUSTOMIZE_HIDDEN:
-            catalog.append((tool_id, False))
-    for tool_id in labels:
-        if tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
+    catalog: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    for tool_id in visible_order:
+        if tool_id in seen:
             continue
-        if tool_id not in {entry[0] for entry in catalog}:
-            catalog.append((tool_id, False))
+        if tool_id not in labels and not is_toolbar_separator(tool_id):
+            continue
+        catalog.append((tool_id, True))
+        seen.add(tool_id)
     return catalog
 
 
@@ -139,8 +185,15 @@ def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
     visible = [
         tool_id
         for tool_id in ids
-        if tool_id in known and tool_id not in TOOLBAR_CUSTOMIZE_HIDDEN
+        if tool_id in known or is_toolbar_separator(tool_id)
     ]
+    while visible and visible[0].startswith("_sep"):
+        visible.pop(0)
+    if "define_genome" not in visible:
+        if "blast" in visible:
+            visible.insert(visible.index("blast"), "define_genome")
+        else:
+            visible.insert(0, "define_genome")
     for tool_id in default_order:
         if tool_id not in visible:
             visible.append(tool_id)
@@ -157,7 +210,7 @@ def save_toolbar_order(
     cleaned = [
         tool_id
         for tool_id in order
-        if tool_id in known and tool_id not in TOOLBAR_CUSTOMIZE_HIDDEN
+        if tool_id in known or is_toolbar_separator(tool_id)
     ]
     s = QSettings()
     s.beginGroup(TOOLBAR_SETTINGS_GROUP)
@@ -224,13 +277,22 @@ class ToolbarCustomizeWidget(QWidget):
         self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._populate(self._catalog)
 
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 4, 0, 0)
+        button_row.setSpacing(8)
+
+        self._add_btn = QPushButton("Add button…")
+        self._add_btn.setToolTip(
+            "Add Sequence menu tools, plugins, or a separator to this list"
+        )
+        self._add_menu = QMenu(self)
+        self._add_btn.clicked.connect(self._show_add_menu)
+        button_row.addWidget(self._add_btn)
+
         reset_btn = QPushButton("Reset to default")
         reset_btn.clicked.connect(self._reset_default)
-
-        reset_row = QHBoxLayout()
-        reset_row.setContentsMargins(0, 4, 0, 0)
-        reset_row.addStretch()
-        reset_row.addWidget(reset_btn)
+        button_row.addStretch()
+        button_row.addWidget(reset_btn)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 12)
@@ -239,25 +301,100 @@ class ToolbarCustomizeWidget(QWidget):
         layout.addLayout(font_row)
         layout.addWidget(self._list, stretch=1)
         layout.addSpacing(6)
-        layout.addLayout(reset_row)
+        layout.addLayout(button_row)
+
+    def _current_tool_ids(self) -> set[str]:
+        ids: set[str] = set()
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            if item is None:
+                continue
+            tool_id = item.data(Qt.ItemDataRole.UserRole)
+            if tool_id:
+                ids.add(str(tool_id))
+        return ids
+
+    def _append_list_item(self, tool_id: str, *, visible: bool = True) -> QListWidgetItem:
+        item = QListWidgetItem(toolbar_item_label(tool_id, self._labels))
+        item.setData(Qt.ItemDataRole.UserRole, tool_id)
+        item.setFlags(
+            item.flags()
+            | Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+        )
+        item.setCheckState(
+            Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked
+        )
+        self._list.addItem(item)
+        return item
+
+    def _show_add_menu(self) -> None:
+        self._populate_add_menu()
+        self._add_menu.exec(self._add_btn.mapToGlobal(self._add_btn.rect().bottomLeft()))
+
+    def _populate_add_menu(self) -> None:
+        self._add_menu.clear()
+        current_ids = self._current_tool_ids()
+
+        sequence_menu = self._add_menu.addMenu("Sequence")
+        sequence_added = 0
+        for tool_id in SEQUENCE_TOOLBAR_IDS:
+            if tool_id in current_ids:
+                continue
+            label = toolbar_item_label(tool_id, self._labels)
+            sequence_menu.addAction(
+                label,
+                lambda checked=False, tid=tool_id: self._add_tool(tid),
+            )
+            sequence_added += 1
+        if sequence_added == 0:
+            empty = sequence_menu.addAction("(all Sequence tools listed)")
+            empty.setEnabled(False)
+
+        plugins_menu = self._add_menu.addMenu("Plugins")
+        plugins_added = 0
+        if self._registry is not None:
+            for plugin in self._registry.all_plugins():
+                tool_id = plugin_tool_id(plugin.id)
+                if tool_id in current_ids:
+                    continue
+                plugins_menu.addAction(
+                    plugin.label,
+                    lambda checked=False, tid=tool_id: self._add_tool(tid),
+                )
+                plugins_added += 1
+        if plugins_added == 0:
+            empty = plugins_menu.addAction("(all plugins listed)")
+            empty.setEnabled(False)
+
+        if "_sep_plugins" not in current_ids:
+            self._add_menu.addAction(
+                toolbar_item_label("_sep_plugins", self._labels),
+                lambda: self._add_tool("_sep_plugins"),
+            )
+
+        self._add_menu.addSeparator()
+        self._add_menu.addAction(
+            "— separator —",
+            lambda: self._add_tool(next_separator_tool_id(current_ids)),
+        )
+
+    def _add_tool(self, tool_id: str) -> None:
+        if is_toolbar_separator(tool_id) and tool_id != "_sep_plugins":
+            tool_id = next_separator_tool_id(self._current_tool_ids())
+        if tool_id in self._current_tool_ids():
+            return
+        item = self._append_list_item(tool_id, visible=True)
+        self._list.setCurrentItem(item)
+        self._list.scrollToItem(item)
 
     def _populate(self, catalog: list[tuple[str, bool]]) -> None:
         self._list.clear()
         for tool_id, visible in catalog:
-            if tool_id not in self._labels or tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
+            if tool_id not in self._labels and not is_toolbar_separator(tool_id):
                 continue
-            item = QListWidgetItem(self._labels[tool_id])
-            item.setData(Qt.ItemDataRole.UserRole, tool_id)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-            )
-            item.setCheckState(
-                Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked
-            )
-            self._list.addItem(item)
+            self._append_list_item(tool_id, visible=visible)
 
     def _reset_default(self) -> None:
         self._font_size.setValue(DEFAULT_TOOLBAR_FONT_SIZE)
@@ -265,7 +402,6 @@ class ToolbarCustomizeWidget(QWidget):
             [
                 (tool_id, True)
                 for tool_id in self._default_order
-                if tool_id not in TOOLBAR_CUSTOMIZE_HIDDEN
             ]
         )
 
@@ -279,7 +415,7 @@ class ToolbarCustomizeWidget(QWidget):
             if item is None or item.checkState() != Qt.CheckState.Checked:
                 continue
             tool_id = item.data(Qt.ItemDataRole.UserRole)
-            if tool_id and str(tool_id) not in TOOLBAR_CUSTOMIZE_HIDDEN:
+            if tool_id and (str(tool_id) in self._labels or is_toolbar_separator(str(tool_id))):
                 order.append(str(tool_id))
         return order
 

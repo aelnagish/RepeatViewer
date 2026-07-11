@@ -88,6 +88,7 @@ from teviewer.job_options import (
     DEFAULT_TE_DIVERGENCE_BIN_WIDTH,
     DEFAULT_BLAST_EVALUE,
     DEFAULT_BLAST_MAX_MSA_LINES,
+    DEFAULT_BLAST_MINIMUM_BIT_SCORE,
     DEFAULT_BLAST_THREADS,
     DEFAULT_BLAST_TOP_MSA_LINES,
     DEFAULT_CONSENSUS_AMBIGUOUS,
@@ -291,12 +292,6 @@ class CommandPluginDesignerDialog(QDialog):
         add_layout.addStretch(1)
         form.addRow("", add_row)
 
-        hint = QLabel(
-            "Use ${variable_name} in the command. Define each variable below. "
-            "Mark one output as File or Folder. One command per line."
-        )
-        hint.setWordWrap(True)
-
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -304,7 +299,6 @@ class CommandPluginDesignerDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(hint)
         layout.addLayout(form)
         layout.addWidget(buttons)
 
@@ -460,12 +454,6 @@ class PluginManageDialog(QDialog):
         self._on_save = on_save
         self._on_delete = on_delete
 
-        hint = QLabel(
-            "Custom plugins can be edited or removed. Installed plugins (from pip packages) "
-            "are listed for reference and cannot be changed here."
-        )
-        hint.setWordWrap(True)
-
         self._list = QListWidget(self)
         self._list.currentItemChanged.connect(self._update_buttons)
 
@@ -490,7 +478,6 @@ class PluginManageDialog(QDialog):
             close_btn.clicked.connect(self.accept)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(hint)
         layout.addWidget(self._list, 1)
         layout.addLayout(btn_row)
         layout.addWidget(buttons)
@@ -589,6 +576,7 @@ class AlignParamsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
+        self.setMinimumWidth(400)
         opts = initial or AlignOptions()
 
         self._backend = QComboBox(self)
@@ -602,6 +590,10 @@ class AlignParamsDialog(QDialog):
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 64)
         self._threads.setValue(max(1, opts.num_threads))
+        self._threads.setToolTip(
+            "MAFFT uses all requested threads. Clustal Omega uses 1 thread "
+            "when the installed build lacks OpenMP (common on macOS)."
+        )
 
         form = QFormLayout()
         form.addRow("Aligner:", self._backend)
@@ -736,12 +728,6 @@ class TsdSearchParamsDialog(QDialog):
         form.addRow("Poly-N threshold:", self._nt_threshold)
         form.addRow("Cluster distance (eps):", self._cluster_eps)
 
-        hint = QLabel(
-            "Run on an aligned multi-sequence FASTA. Boundaries are column positions "
-            "in the MSA where TSDs are searched between left and right TE ends."
-        )
-        hint.setWordWrap(True)
-
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -749,7 +735,6 @@ class TsdSearchParamsDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(hint)
         layout.addLayout(form)
         layout.addWidget(buttons)
 
@@ -786,10 +771,18 @@ class BlastParamsDialog(QDialog):
         self._top_msa.setRange(10, 5000)
         self._top_msa.setValue(opts.top_msa_lines)
 
+        self._min_bit_score = QDoubleSpinBox()
+        self._min_bit_score.setRange(0.0, 1_000_000.0)
+        self._min_bit_score.setDecimals(1)
+        self._min_bit_score.setSingleStep(1.0)
+        self._min_bit_score.setValue(opts.minimum_bit_score)
+        self._min_bit_score.setToolTip("Minimum bit score for hits written to GFF.")
+
         form = QFormLayout()
-        form.addRow("E-value:", self._evalue)
-        form.addRow("Max MSA lines:", self._max_msa)
-        form.addRow("Top longest lines:", self._top_msa)
+        form.addRow("E-value", self._evalue)
+        form.addRow("Max MSA lines", self._max_msa)
+        form.addRow("Top longest lines", self._top_msa)
+        form.addRow("Minimum bit score (GFF)", self._min_bit_score)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -806,6 +799,8 @@ class BlastParamsDialog(QDialog):
             e_value=normalize_blast_evalue(self._evalue.value()),
             max_msa_lines=self._max_msa.value(),
             top_msa_lines=self._top_msa.value(),
+            write_gff=True,
+            minimum_bit_score=self._min_bit_score.value(),
         )
 
 
@@ -882,10 +877,7 @@ class FlexidotParamsDialog(QDialog):
         self._use_gff = QCheckBox("Show GFF features on dotplot (-g)")
         self._use_gff.setChecked(opts.use_gff)
         self._use_gff.setToolTip(
-            "When a companion GFF3 exists next to the FASTA (for example "
-            "{stem}.features.gff3 from the Annotation tab), Flexidot shades the "
-            "dotplot axes with those features. TEviewer writes a matching color "
-            "config automatically."
+            "Shade the dotplot with companion GFF features when available."
         )
 
         form = QFormLayout()
@@ -911,8 +903,15 @@ class FlexidotParamsDialog(QDialog):
         )
 
 
-_TE_ANNOTATION_SECTION_TITLE_STYLE = "font-size: 14px; font-weight: 600;"
 _TE_ANNOTATION_SIMILARITY_DBS_PER_ROW = 8
+
+
+def _section_title_label(text: str, parent: QWidget | None = None) -> QLabel:
+    label = QLabel(text, parent)
+    font = label.font()
+    font.setBold(True)
+    label.setFont(font)
+    return label
 
 
 class TeAnnotationDialog(QDialog):
@@ -927,7 +926,6 @@ class TeAnnotationDialog(QDialog):
 
         super().__init__(parent)
         self.setWindowTitle("TE annotation")
-        _prepare_option_dialog(self)
         self.setMinimumWidth(580)
 
         self._TeAnnotationOptions = TeAnnotationOptions
@@ -942,8 +940,7 @@ class TeAnnotationDialog(QDialog):
         auto_outer.setSpacing(6)
 
         auto_header = QHBoxLayout()
-        auto_title = QLabel("Auto annotation", auto_section)
-        auto_title.setStyleSheet(_TE_ANNOTATION_SECTION_TITLE_STYLE)
+        auto_title = _section_title_label("Auto annotation", auto_section)
         auto_header.addWidget(auto_title, 0, Qt.AlignmentFlag.AlignVCenter)
         auto_settings_btn = QPushButton("Setting", auto_section)
         auto_settings_btn.setToolTip("Configure LTR, TIR, tandem, and ORF detection")
@@ -987,8 +984,7 @@ class TeAnnotationDialog(QDialog):
         sim_outer.setSpacing(6)
 
         sim_header = QHBoxLayout()
-        sim_title = QLabel("Similarity annotation", sim_section)
-        sim_title.setStyleSheet(_TE_ANNOTATION_SECTION_TITLE_STYLE)
+        sim_title = _section_title_label("Similarity annotation", sim_section)
         sim_header.addWidget(sim_title, 0, Qt.AlignmentFlag.AlignVCenter)
         sim_settings_btn = QPushButton("Setting", sim_section)
         sim_settings_btn.setToolTip("Configure similarity search parameters")
@@ -1045,10 +1041,6 @@ class TeAnnotationDialog(QDialog):
                 row_layout.addStretch(1)
                 sim_checks_layout.addWidget(row_widget)
         sim_outer.addWidget(sim_checks_host)
-        sim_description = QLabel("Annotate all selected TE sequences", sim_section)
-        sim_description.setWordWrap(True)
-        sim_description.setStyleSheet("color: palette(placeholder-text);")
-        sim_outer.addWidget(sim_description)
         self._sync_similarity_all_check()
 
         buttons = QDialogButtonBox(
@@ -1189,12 +1181,6 @@ class TeaAidParamsDialog(QDialog):
         self.setWindowTitle("TEAid parameters")
         opts = initial or TeaAidOptions()
 
-        intro = QLabel(
-            "These E-value apply only to TEAid genome BLAST.",
-            self,
-        )
-        intro.setWordWrap(True)
-
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
         self._evalue.setValue(
@@ -1227,7 +1213,6 @@ class TeaAidParamsDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(intro)
         layout.addLayout(form)
         layout.addWidget(buttons)
 
@@ -1272,7 +1257,6 @@ class MsaCleanParamsDialog(QDialog):
         )
         self._method_help = QLabel()
         self._method_help.setWordWrap(True)
-        self._method_help.setStyleSheet("color: palette(mid);")
         self._default_method.currentIndexChanged.connect(self._update_method_help)
         self._update_method_help()
 
@@ -1349,12 +1333,13 @@ class MsaCleanParamsDialog(QDialog):
         layout.addWidget(gap_box)
         layout.addWidget(buttons)
 
+
     def _update_method_help(self, _index: int | None = None) -> None:
         method_id = self._default_method.currentData(Qt.ItemDataRole.UserRole)
         if method_id is None:
             method_id = self._default_method.currentData()
         text = msa_clean_method_description(str(method_id or ""))
-        self._method_help.setText(text)
+        self._default_method.setToolTip(text)
 
     def options(self) -> MsaCleanOptions:
         method_index = self._default_method.currentIndex()
@@ -1601,7 +1586,6 @@ class _TeInputFileRow(QWidget):
         self._path = QLineEdit(self)
         self._path.setPlaceholderText(placeholder)
         self._path.setMinimumWidth(280)
-        self._path.setFixedHeight(26)
         self._path.installEventFilter(self)
         if initial is not None:
             self._path.setText(str(initial.expanduser().resolve()))
@@ -1609,11 +1593,9 @@ class _TeInputFileRow(QWidget):
         self._path.editingFinished.connect(self._emit_path_changed)
 
         browse_btn = QPushButton("Browse", self)
-        browse_btn.setFixedHeight(26)
         browse_btn.clicked.connect(self._browse)
 
         remove_btn = QPushButton("Remove", self)
-        remove_btn.setFixedHeight(26)
         remove_btn.setVisible(removable)
         remove_btn.clicked.connect(self.remove_requested.emit)
         self._remove_btn = remove_btn
@@ -1693,7 +1675,6 @@ class TeMultiInputFilesWidget(QWidget):
         self._active_row: _TeInputFileRow | None = None
 
         self._add_btn = QPushButton(add_button_label, self)
-        self._add_btn.setFixedHeight(22)
         self._add_btn.setToolTip(add_button_tooltip)
         self._add_btn.clicked.connect(self._on_add_clicked)
 
@@ -1741,12 +1722,6 @@ class TeMultiInputFilesWidget(QWidget):
     def _on_row_activated(self, row: _TeInputFileRow) -> None:
         self._active_row = row
         self.field_activated.emit()
-        for item in self._rows:
-            item._path.setStyleSheet(
-                ""
-                if item is not row
-                else "background: palette(alternate-base);"
-            )
 
     def _remove_row(self, row: _TeInputFileRow) -> None:
         if row not in self._rows or len(self._rows) <= 1:
@@ -1812,11 +1787,9 @@ class GeneInputFileWidget(QWidget):
         self._path = QLineEdit(self)
         self._path.setPlaceholderText("Optional GFF/GTF/BED/VCF annotation")
         self._path.setMinimumWidth(280)
-        self._path.setFixedHeight(26)
         if initial is not None:
             self._path.setText(str(initial.expanduser().resolve()))
         browse_btn = QPushButton("Browse", self)
-        browse_btn.setFixedHeight(26)
         browse_btn.clicked.connect(self._browse)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1859,13 +1832,6 @@ def _form_section_separator() -> QWidget:
     line.setFrameShadow(QFrame.Shadow.Plain)
     layout.addWidget(line)
     return host
-
-
-def _uniform_field_width(widgets: list[QWidget], *, min_width: int = 300) -> None:
-    """Give option controls a shared minimum width so columns line up."""
-    for widget in widgets:
-        widget.setMinimumWidth(min_width)
-        widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
 
 class AnnotationFeatureTypesWidget(QWidget):
@@ -2072,7 +2038,6 @@ class TeDensityPlotDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        _prepare_option_dialog(self)
         self.setWindowTitle("TE visualization")
         self.setMinimumWidth(720)
         self._opts = initial or TeGenomeMapOptions()
@@ -2231,23 +2196,9 @@ class TeDensityPlotDialog(QDialog):
             self._chromosome_sort.blockSignals(False)
         self._chromosome_sort.currentIndexChanged.connect(self._on_chromosome_sort_changed)
 
-        _uniform_field_width(
-            [self._density, self._color_by, self._annotation_density, self._chromosome_sort],
-            min_width=300,
-        )
-        for spin in (self._bin_kb, self._methylation_coverage_min):
-            spin.setMinimumWidth(100)
-            spin.setMaximumWidth(120)
-
         form_host = QWidget(self)
-        form = QFormLayout(form_host)
-        form.setContentsMargins(12, 10, 12, 10)
-        form.setVerticalSpacing(8)
-        form.setHorizontalSpacing(12)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        form = QFormLayout()
+        form_host.setLayout(form)
 
         form.addRow("TE masking file:", self._masking_input)
         form.addRow("TE consensus file:", self._consensus_input)
@@ -2397,7 +2348,6 @@ class TeDivergencePlotDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        _prepare_option_dialog(self)
         self.setWindowTitle("TE divergence plot")
         self.setMinimumWidth(680)
         self._opts = initial or TeDivergencePlotOptions()
@@ -2509,7 +2459,6 @@ class ConfusionMatrixBenchmarkDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        _prepare_option_dialog(self)
         self.setWindowTitle("Confusion matrix benchmarker")
         self.setMinimumWidth(620)
         opts = initial or TeConfusionMatrixBenchmarkOptions()
@@ -2520,14 +2469,6 @@ class ConfusionMatrixBenchmarkDialog(QDialog):
         self._less_class.setChecked(opts.less_classification)
         self._debug = QCheckBox("Keep intermediate files (debug)")
         self._debug.setChecked(opts.debug)
-
-        hint = QLabel(
-            "Select one or more <b>query</b> RepeatMasker .out files in the Files panel. "
-            "The reference .out is the gold-standard library annotation on the same genome. "
-            "Genome FASTA comes from Project settings. Requires bedtools and TEtrimmer "
-            "<code>TE_anno_benchmarker.py</code>."
-        )
-        hint.setWordWrap(True)
 
         form = QFormLayout()
         form.addRow(
@@ -2550,7 +2491,6 @@ class ConfusionMatrixBenchmarkDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addWidget(hint)
         layout.addLayout(form)
         layout.addWidget(buttons)
 
@@ -2574,7 +2514,6 @@ class TeLibraryBenchmarkDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        _prepare_option_dialog(self)
         self.setWindowTitle("TE library benchmarker")
         self.setMinimumWidth(620)
         opts = initial or TeLibraryBenchmarkOptions()
@@ -2595,13 +2534,6 @@ class TeLibraryBenchmarkDialog(QDialog):
         self._threads = QSpinBox()
         self._threads.setRange(1, 64)
         self._threads.setValue(max(1, int(opts.threads)))
-
-        hint = QLabel(
-            "Mask the <b>query</b> TE consensus FASTA with RepeatMasker using the "
-            "<b>standard</b> curated library (<code>-lib</code>), then classify families "
-            "as Perfect, Good, Present, or Not found (RepeatModeler2-style)."
-        )
-        hint.setWordWrap(True)
 
         form = QFormLayout()
         form.addRow(
@@ -2638,7 +2570,6 @@ class TeLibraryBenchmarkDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addWidget(hint)
         layout.addLayout(form)
         layout.addWidget(buttons)
 

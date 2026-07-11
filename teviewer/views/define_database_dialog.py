@@ -38,14 +38,6 @@ from teviewer.project import (
     USER_DATABASE_TYPES,
     UserDatabase,
 )
-from teviewer.views.settings_dialog import _path_browse_row, _section_label, save_workspace
-from teviewer.widgets.database_index_runner import find_database_index_runner
-
-_MAX_USER_DATABASE_NAME_LENGTH = 10
-
-_BLAST_DNA_INDEX_SUFFIXES = frozenset(
-    {".nhr", ".nin", ".nsq", ".ndb", ".not", ".nto", ".ntf", ".nog", ".nos"}
-)
 _BLAST_PROT_INDEX_SUFFIXES = frozenset(
     {".phr", ".pin", ".psq", ".pog", ".pos", ".pod", ".pot", ".pdb", ".pto", ".ptf", ".pni"}
 )

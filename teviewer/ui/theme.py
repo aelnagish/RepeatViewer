@@ -31,11 +31,33 @@ def application_stylesheet(
     QTreeWidget::item, QListWidget::item {{
         padding: 0px 3px;
     }}
-    QTreeWidget::item:selected, QListWidget::item:selected {{
+    QTreeWidget#FolderTree {{
+        show-decoration-selected: 0;
+    }}
+    QTreeWidget#FolderTree::branch {{
+        background: transparent;
+        border: none;
+        width: 0px;
+        margin: 0px;
+        image: none;
+    }}
+    QTreeWidget#FolderTree::branch:has-children:!has-siblings,
+    QTreeWidget#FolderTree::branch:closed:has-children:has-siblings,
+    QTreeWidget#FolderTree::branch:open:has-children:has-siblings {{
+        image: none;
+        border: none;
+        background: transparent;
+    }}
+    QTreeWidget#FolderTree::item:selected,
+    QTreeWidget#FolderTree::item:hover {{
+        background: transparent;
+        color: palette(text);
+    }}
+    QListWidget::item:selected {{
         background: #3d6ea8;
         color: white;
     }}
-    QTreeWidget::item:hover:!selected, QListWidget::item:hover:!selected {{
+    QListWidget::item:hover:!selected {{
         background: palette(alternate-base);
     }}
     QLineEdit#FileFilter {{

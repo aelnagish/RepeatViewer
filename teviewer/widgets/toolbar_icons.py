@@ -1,30 +1,36 @@
-"""Toolbar icons: bundled assets with Qt fallback."""
+"""Toolbar icons: flat monochrome Tabler SVGs with Qt fallback."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QStyle, QWidget
 
-_DEFAULT_ICON_SIZE = 22
-_ALIVIEW_ICON_SIZE = 40
+from teviewer.widgets.svg_icons import themed_svg_icon
+
+_DEFAULT_ICON_SIZE = 20
+_ALIVIEW_ICON_SIZE = 22
 
 # teviewer/assets/icons (preferred) and legacy backends/inco overrides
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets" / "icons"
 _LEGACY_DIR = Path(__file__).resolve().parent.parent / "backends" / "inco"
 
 _NAME_FILES: dict[str, tuple[str, ...]] = {
-    "aliview": ("aliview.png", "aliview.svg"),
+    "aliview": ("aliview.svg", "aliview.png"),
     "align": ("align.svg",),
     "blast": ("blast.svg",),
-    "te_genome_map": ("blast.svg",),
+    "te_genome_map": ("te_genome_map.svg", "blast.svg"),
     "extend": ("extend.svg",),
     "teaid": ("teaid.svg", "TEAid.png"),
     "msa_clean": ("msa_clean.svg",),
     "consensus": ("consensus.svg",),
     "flexidot": ("flexidot.svg", "flexidot.png"),
+    "te_benchmark": ("te_benchmark.svg",),
+    "te_divergence_plot": ("te_divergence.svg",),
+    "minimap2": ("minimap2.svg",),
+    "te_annotation": ("browser/sequence.svg",),
+    "tsd_search": ("blast.svg",),
 }
 
 _FALLBACK_PIXMAP: dict[str, QStyle.StandardPixmap] = {
@@ -37,34 +43,35 @@ _FALLBACK_PIXMAP: dict[str, QStyle.StandardPixmap] = {
     "msa_clean": QStyle.StandardPixmap.SP_DialogResetButton,
     "consensus": QStyle.StandardPixmap.SP_DialogApplyButton,
     "flexidot": QStyle.StandardPixmap.SP_DesktopIcon,
+    "te_benchmark": QStyle.StandardPixmap.SP_FileDialogListView,
+    "te_divergence_plot": QStyle.StandardPixmap.SP_FileDialogListView,
+    "minimap2": QStyle.StandardPixmap.SP_BrowserReload,
+    "te_annotation": QStyle.StandardPixmap.SP_FileIcon,
+    "tsd_search": QStyle.StandardPixmap.SP_ArrowForward,
 }
 
 
-def _resolve_icon_path(name: str) -> Path | None:
-    for filename in _NAME_FILES.get(name, ()):
+def _resolve_icon_asset(name: str) -> tuple[str, str] | None:
+    """Return (svg_stem, subdir) for a toolbar function id."""
+    for filename in _NAME_FILES.get(name, (f"{name}.svg",)):
+        if "/" in filename:
+            path = _ASSETS_DIR / filename
+            if path.is_file():
+                parts = Path(filename).parts
+                subdir = parts[0] if len(parts) > 1 else ""
+                return parts[-1].removesuffix(".svg"), subdir
         for folder in (_ASSETS_DIR, _LEGACY_DIR):
             path = folder / filename
             if path.is_file():
-                return path
+                subdir = "browser" if path.parent.name == "browser" else ""
+                return path.stem, subdir
+        browser_path = _ASSETS_DIR / "browser" / filename
+        if browser_path.is_file():
+            return Path(filename).stem, "browser"
+    root_path = _ASSETS_DIR / f"{name}.svg"
+    if root_path.is_file():
+        return name, ""
     return None
-
-
-def _pixmap_on_canvas(source: QPixmap, size: int) -> QPixmap:
-    """Scale into a square canvas so wide icons (e.g. old TEAid PNG) fit the toolbar."""
-    canvas = QPixmap(size, size)
-    canvas.fill(Qt.GlobalColor.transparent)
-    scaled = source.scaled(
-        size,
-        size,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
-    x = (size - scaled.width()) // 2
-    y = (size - scaled.height()) // 2
-    painter = QPainter(canvas)
-    painter.drawPixmap(x, y, scaled)
-    painter.end()
-    return canvas
 
 
 def function_icon(
@@ -73,22 +80,19 @@ def function_icon(
     *,
     size: int | None = None,
 ) -> QIcon:
-    """Return toolbar icon for a function button."""
+    """Return a monochrome toolbar icon."""
     icon_size = size if size is not None else _DEFAULT_ICON_SIZE
-    path = _resolve_icon_path(name)
-    if path is not None:
-        icon = QIcon(str(path))
+    asset = _resolve_icon_asset(name)
+    if asset is not None:
+        stem, subdir = asset
+        icon = themed_svg_icon(stem, icon_size, widget=widget, subdir=subdir)
         if not icon.isNull():
-            pix = icon.pixmap(icon_size, icon_size)
-            if not pix.isNull():
-                return QIcon(_pixmap_on_canvas(pix, icon_size))
             return icon
-
     style = widget.style()
     pixmap = _FALLBACK_PIXMAP.get(name, QStyle.StandardPixmap.SP_FileIcon)
     return style.standardIcon(pixmap)
 
 
 def aliview_icon(widget: QWidget) -> QIcon:
-    """Larger AliView toolbar icon."""
+    """AliView toolbar icon."""
     return function_icon(widget, "aliview", size=_ALIVIEW_ICON_SIZE)

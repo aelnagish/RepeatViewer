@@ -5,11 +5,13 @@ from __future__ import annotations
 from enum import Enum
 
 from PySide6.QtCore import QSettings
+from PySide6.QtGui import QWheelEvent
 
 PREVIEW_SETTINGS_GROUP = "preview"
 DEFAULT_PREVIEW_ZOOM_PERCENT = 100
 MIN_PREVIEW_ZOOM_PERCENT = 25
 MAX_PREVIEW_ZOOM_PERCENT = 200
+PREVIEW_WHEEL_ZOOM_STEP_PERCENT = 5
 DEFAULT_PREVIEW_FONT_SIZE = 11
 MIN_PREVIEW_FONT_SIZE = 8
 MAX_PREVIEW_FONT_SIZE = 24
@@ -60,6 +62,19 @@ def load_preview_fit_mode() -> PreviewFitMode:
         return PreviewFitMode(raw)
     except ValueError:
         return PreviewFitMode.FIT_WINDOW
+
+
+def wheel_zoom_steps_from_event(event: QWheelEvent) -> int:
+    """Return signed zoom steps from a wheel event (positive = zoom in)."""
+    delta = event.angleDelta().y()
+    if delta == 0:
+        delta = event.pixelDelta().y()
+    if delta == 0:
+        return 0
+    steps = int(round(delta / 120.0))
+    if steps == 0:
+        steps = 1 if delta > 0 else -1
+    return steps
 
 
 def save_preview_fit_mode(mode: PreviewFitMode) -> None:

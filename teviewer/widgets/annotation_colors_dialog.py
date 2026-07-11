@@ -17,16 +17,6 @@ from PySide6.QtWidgets import (
     QColorDialog,
 )
 
-from teviewer.backends.annotation_colors import (
-    ANNOTATION_FEATURE_TYPE_LABELS,
-    default_feature_type_colors,
-    feature_type_color,
-    load_feature_type_colors,
-    save_feature_type_colors,
-    save_similarity_database_colors,
-    similarity_database_color,
-    snapshot_similarity_database_colors,
-)
 from teviewer.backends.similarity_annotation import SIMILARITY_DB_COLORS
 from teviewer.database_settings import load_similarity_annotation_databases
 from teviewer.widgets.preview_zoom import (
@@ -59,9 +49,7 @@ class _ColorPickerRow(QWidget):
 
     def _update_button(self) -> None:
         hex_color = self._color.name(QColor.NameFormat.HexRgb)
-        self._button.setStyleSheet(
-            f"QPushButton {{ background-color: {hex_color}; border: 1px solid palette(mid); }}"
-        )
+        self._button.setStyleSheet(f"background-color: {hex_color};")
 
     def _pick_color(self) -> None:
         chosen = QColorDialog.getColor(self._color, self, "Choose color")

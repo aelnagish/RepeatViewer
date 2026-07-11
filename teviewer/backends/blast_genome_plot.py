@@ -4648,23 +4648,31 @@ def blast_txt_path_for_query(query_fasta: Path) -> Path:
     return query_fasta.parent / f"{query_fasta.name}_blast.txt"
 
 
+def _legacy_repeatviewer_dir(query_fasta: Path) -> Path:
+    """Older runs wrote outputs under ``{stem}.repeatviewer/`` next to the FASTA."""
+    query_fasta = query_fasta.expanduser().resolve()
+    return query_fasta.parent / f"{query_fasta.stem}.repeatviewer"
+
+
 def blast_table_candidates_for_query(query_fasta: Path) -> list[Path]:
     """Possible BLAST table paths for a query FASTA (canonical name first)."""
     query_fasta = query_fasta.expanduser().resolve()
     parent = query_fasta.parent
+    legacy = _legacy_repeatviewer_dir(query_fasta)
     names = (
         f"{query_fasta.name}_blast.txt",
         f"{query_fasta.stem}_blast.txt",
     )
     seen: set[str] = set()
     candidates: list[Path] = []
-    for name in names:
-        path = parent / name
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        candidates.append(path)
+    for base in (parent, legacy):
+        for name in names:
+            path = base / name
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(path)
     return candidates
 
 

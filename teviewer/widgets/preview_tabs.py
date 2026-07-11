@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gzip
-import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -22,7 +21,6 @@ from PySide6.QtWidgets import (
 )
 
 from teviewer.backends.bismark_cov import is_bismark_cov_file
-from teviewer.backends.gui_functions import sanitize_name
 from teviewer.backends.igv_viewer import IgvPreviewError, build_igv_view_url, is_alignment_preview_file
 from teviewer.backends.sequence_features import (
     format_multi_sequence_fasta_summary_text,
@@ -31,6 +29,7 @@ from teviewer.backends.sequence_features import (
     summarize_single_sequence_fasta,
 )
 from teviewer.widgets.html_preview import _qobject_alive, create_html_preview_widget
+from teviewer.widgets.self_dotplot_panel import SelfDotplotPanel
 from teviewer.widgets.sequence_map_viewer import SequenceMapPanel, _is_delete_key
 from teviewer.widgets.preview_zoom import (
     MAX_PREVIEW_FONT_SIZE,
@@ -133,8 +132,6 @@ _TEXT_PREVIEW_SUFFIXES = _FASTA_SUFFIXES | {
     ".xml",
     ".out",
 }
-logger = logging.getLogger(__name__)
-
 _TEXT_PREVIEW_MAX_CHARS = 500_000
 _DEFAULT_TEXT_MAX_CHARS = 200_000
 _IMAGE_PREVIEW_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}
@@ -267,8 +264,10 @@ class ScaledImagePreview(QWidget):
         self._original: QPixmap | None = None
         self._zoom_percent = load_preview_zoom_percent()
         self._fit_mode = PreviewFitMode.FIT_WINDOW
+        self._scale_pending = False
 
         self._scroll = QScrollArea(self)
+        self._scroll.setObjectName("PreviewScrollArea")
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self._scroll.setWidgetResizable(False)
         self._scroll.setAlignment(
@@ -315,6 +314,11 @@ class ScaledImagePreview(QWidget):
         super().resizeEvent(event)
         self.refresh_scale()
 
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().showEvent(event)
+        if self._scale_pending:
+            QTimer.singleShot(0, self.refresh_scale)
+
     def set_zoom_percent(self, percent: int) -> None:
         self._zoom_percent = max(25, min(200, int(percent)))
         self.refresh_scale()
@@ -333,7 +337,9 @@ class ScaledImagePreview(QWidget):
             return
         viewport = self._scroll.viewport().size()
         if viewport.width() < 20 or viewport.height() < 20:
+            self._scale_pending = True
             return
+        self._scale_pending = False
 
         ow = self._original.width()
         oh = self._original.height()
@@ -492,6 +498,7 @@ class FilePreviewPage(QWidget):
         self.path = path.expanduser().resolve()
         self._single_fasta_mode = False
         self._annotation_panel: SequenceMapPanel | None = None
+        self._dotplot_panel: SelfDotplotPanel | None = None
         self._stack = QStackedWidget(self)
         self._stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._placeholder = QLabel("Loading…")
@@ -499,9 +506,6 @@ class FilePreviewPage(QWidget):
         self._base_text_font_pt = load_preview_font_size()
         self._text = QTextEdit()
         self._text.setReadOnly(True)
-        self._text.setStyleSheet(
-            "QTextEdit { background: palette(base); color: palette(text); }"
-        )
         self._text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self._text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -515,9 +519,6 @@ class FilePreviewPage(QWidget):
 
         self._fasta_text = QTextEdit()
         self._fasta_text.setReadOnly(True)
-        self._fasta_text.setStyleSheet(
-            "QTextEdit { background: palette(base); color: palette(text); }"
-        )
         self._fasta_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self._fasta_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._fasta_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -535,59 +536,18 @@ class FilePreviewPage(QWidget):
         if hasattr(self._html, "dotplotRegionSelected"):
             self._html.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
         self._image = ScaledImagePreview(self)
-        self._fasta_tabs = QTabWidget(self)
-        self._fasta_tabs.setDocumentMode(False)
-        self._fasta_tabs.setTabPosition(QTabWidget.TabPosition.North)
-        fasta_tab_bar = self._fasta_tabs.tabBar()
-        fasta_tab_bar.setExpanding(False)
-        fasta_tab_bar.setDrawBase(False)
-        fasta_tab_spacer = QWidget(self)
-        fasta_tab_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._fasta_tabs.setCornerWidget(fasta_tab_spacer, Qt.Corner.TopRightCorner)
-        fasta_tab_bar.setStyleSheet(
-            "QTabBar::tab {"
-            "  min-height: 18px;"
-            "  max-height: 18px;"
-            "  padding: 2px 12px;"
-            "  margin-right: 2px;"
-            "  border: 1px solid palette(mid);"
-            "  border-bottom: none;"
-            "  border-top-left-radius: 4px;"
-            "  border-top-right-radius: 4px;"
-            "  background: palette(button);"
-            "}"
-            "QTabBar::tab:selected {"
-            "  background: palette(base);"
-            "  font-weight: 600;"
-            "}"
-        )
-        self._fasta_tabs.setStyleSheet(
-            "QTabWidget::pane {"
-            "  border: 1px solid palette(mid);"
-            "  background: palette(base);"
-            "  top: -1px;"
-            "}"
-            "QTabWidget::tab-bar {"
-            "  alignment: left;"
-            "}"
-        )
-        self._fasta_tabs.addTab(self._fasta_text_scroll, "Text")
-        self._fasta_tabs.addTab(QWidget(self), "Annotation")
-        self._fasta_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._fasta_tabs.currentChanged.connect(self._on_fasta_tab_changed)
-        self._fasta_tabs.hide()
+        self._fasta_stack = QStackedWidget(self)
+        self._fasta_annotation_holder = QWidget(self)
+        self._fasta_dotplot_holder = QWidget(self)
+        self._fasta_stack.addWidget(self._fasta_text_scroll)
+        self._fasta_stack.addWidget(self._fasta_annotation_holder)
+        self._fasta_stack.addWidget(self._fasta_dotplot_holder)
+        self._fasta_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._fasta_stack.hide()
 
         self._sequence_info_bar = QLabel(self)
         self._sequence_info_bar.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self._sequence_info_bar.setStyleSheet(
-            "QLabel {"
-            "  padding: 4px 8px;"
-            "  border-top: 1px solid palette(mid);"
-            "  background: palette(alternate-base);"
-            "  color: palette(text);"
-            "}"
         )
         self._sequence_info_bar.hide()
 
@@ -604,7 +564,7 @@ class FilePreviewPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._fasta_tabs, stretch=1)
+        layout.addWidget(self._fasta_stack, stretch=1)
         layout.addWidget(self._stack, stretch=1)
         layout.addWidget(self._sequence_info_bar)
         self._load()
@@ -635,11 +595,32 @@ class FilePreviewPage(QWidget):
 
     def _apply_view_mode(self) -> None:
         if self._single_fasta_mode:
-            self._fasta_tabs.show()
+            self._fasta_stack.show()
             self._stack.hide()
         else:
-            self._fasta_tabs.hide()
+            self._fasta_stack.hide()
             self._stack.show()
+        self._notify_preview_host()
+
+    def _notify_preview_host(self) -> None:
+        tab_host = self.parent()
+        while tab_host is not None and not isinstance(tab_host, PreviewTabWidget):
+            tab_host = tab_host.parent()
+        if isinstance(tab_host, PreviewTabWidget):
+            tab_host._sync_header_from_current_page()
+
+    def current_fasta_tab_index(self) -> int:
+        if not self._single_fasta_mode:
+            return -1
+        return self._fasta_stack.currentIndex()
+
+    def set_fasta_tab_index(self, index: int) -> None:
+        if not self._single_fasta_mode or index < 0 or index >= self._fasta_stack.count():
+            return
+        if self._fasta_stack.currentIndex() == index:
+            return
+        self._fasta_stack.setCurrentIndex(index)
+        self._on_fasta_tab_changed(index)
 
     def load_path(self, path: Path) -> None:
         """Show a different file in this page (reuse one preview tab)."""
@@ -660,11 +641,14 @@ class FilePreviewPage(QWidget):
 
     def is_text_preview_active(self) -> bool:
         if self._single_fasta_mode:
-            return self._fasta_tabs.currentIndex() == 0
+            return self._fasta_stack.currentIndex() == 0
         return self._stack.currentWidget() is self._text_scroll
 
     def is_annotation_preview_active(self) -> bool:
-        return self._single_fasta_mode and self._fasta_tabs.currentIndex() == 1
+        return self._single_fasta_mode and self._fasta_stack.currentIndex() == 1
+
+    def is_dotplot_preview_active(self) -> bool:
+        return self._single_fasta_mode and self._fasta_stack.currentIndex() == 2
 
     def _on_fasta_tab_changed(self, index: int) -> None:
         if not self._single_fasta_mode:
@@ -674,18 +658,25 @@ class FilePreviewPage(QWidget):
             QTimer.singleShot(0, self._refresh_text_view)
         elif index == 1:
             QTimer.singleShot(0, self._open_annotation_tab)
+        elif index == 2:
+            QTimer.singleShot(0, self._open_dotplot_tab)
         tab_host = self.parent()
         while tab_host is not None and not isinstance(tab_host, PreviewTabWidget):
             tab_host = tab_host.parent()
         if isinstance(tab_host, PreviewTabWidget):
             tab_host._sync_zoom_bar_enabled()
+            tab_host._sync_header_from_current_page()
 
     def _after_load(self) -> None:
         if self._single_fasta_mode:
-            if self._fasta_tabs.currentIndex() == 0:
+            index = self._fasta_stack.currentIndex()
+            if index == 0:
                 self._refresh_text_view()
-            elif self._fasta_tabs.currentIndex() == 1:
+            elif index == 1:
                 self._open_annotation_tab()
+            elif index == 2:
+                self._open_dotplot_tab()
+            self._notify_preview_host()
             return
         current = self._stack.currentWidget()
         if current is self._text_scroll:
@@ -700,14 +691,17 @@ class FilePreviewPage(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
         super().showEvent(event)
         if self._single_fasta_mode:
-            if self._fasta_tabs.currentIndex() == 0:
+            index = self._fasta_stack.currentIndex()
+            if index == 0:
                 self.apply_preview_zoom(
                     load_preview_zoom_percent(),
                     load_preview_fit_mode(),
                 )
                 QTimer.singleShot(0, self._refresh_text_view)
-            elif self._fasta_tabs.currentIndex() == 1:
-                QTimer.singleShot(0, self._refresh_annotation_view)
+            elif index == 1:
+                QTimer.singleShot(0, self._open_annotation_tab)
+            elif index == 2:
+                QTimer.singleShot(0, self._open_dotplot_tab)
             return
         current = self._stack.currentWidget()
         if current in (self._html, self._image, self._text_scroll):
@@ -789,7 +783,7 @@ class FilePreviewPage(QWidget):
         fasta_mode = getattr(self, "_single_fasta_mode", False)
         if scroll is not None and (
             self._stack.currentWidget() is scroll
-            or (fasta_mode and self._fasta_tabs.currentIndex() == 0)
+            or (fasta_mode and self._fasta_stack.currentIndex() == 0)
         ):
             QTimer.singleShot(0, self._refresh_text_view)
 
@@ -802,6 +796,8 @@ class FilePreviewPage(QWidget):
             self._html.set_fit_mode(fit_mode)
         if self._uses_text_preview():
             self._apply_text_zoom(percent)
+        if self._dotplot_panel is not None and self.is_dotplot_preview_active():
+            self._dotplot_panel.apply_preview_zoom(percent, fit_mode)
 
     def reload_from_disk(self) -> None:
         """Refresh the current view after the file on disk changed."""
@@ -833,11 +829,14 @@ class FilePreviewPage(QWidget):
         path = self.path
         if (
             self._single_fasta_mode
-            and self.is_annotation_preview_active()
-            and self._annotation_panel is not None
+            and (
+                self.is_annotation_preview_active()
+                or self.is_dotplot_preview_active()
+            )
         ):
             self._sequence_info_bar.hide()
-            self._annotation_panel.refresh_sequence_summary()
+            if self.is_annotation_preview_active() and self._annotation_panel is not None:
+                self._annotation_panel.refresh_sequence_summary()
             return
 
         if not _is_fasta_file(path):
@@ -867,81 +866,91 @@ class FilePreviewPage(QWidget):
             )
         self._sequence_info_bar.show()
 
+    def _ensure_dotplot_panel(self) -> SelfDotplotPanel:
+        if self._dotplot_panel is None:
+            self._dotplot_panel = SelfDotplotPanel(self.path, self)
+            holder_layout = self._fasta_dotplot_holder.layout()
+            if holder_layout is None:
+                holder_layout = QVBoxLayout(self._fasta_dotplot_holder)
+                holder_layout.setContentsMargins(0, 0, 0, 0)
+            holder_layout.addWidget(self._dotplot_panel)
+        return self._dotplot_panel
+
+    def _open_dotplot_tab(self) -> None:
+        panel = self._ensure_dotplot_panel()
+        if self._fasta_stack.currentIndex() != 2:
+            self.set_fasta_tab_index(2)
+            return
+        self._refresh_sequence_info_bar()
+        panel.open_dotplot_tab()
+
     def _ensure_annotation_panel(self) -> SequenceMapPanel:
         if self._annotation_panel is None:
             self._annotation_panel = SequenceMapPanel(self.path, self, autoload=False)
             self._annotation_panel.annotationsSaved.connect(self.annotationsSaved.emit)
-            placeholder = self._fasta_tabs.widget(1)
-            self._fasta_tabs.removeTab(1)
-            if placeholder is not None:
-                placeholder.deleteLater()
-            self._fasta_tabs.insertTab(1, self._annotation_panel, "Annotation")
+            holder_layout = self._fasta_annotation_holder.layout()
+            if holder_layout is None:
+                holder_layout = QVBoxLayout(self._fasta_annotation_holder)
+                holder_layout.setContentsMargins(0, 0, 0, 0)
+            holder_layout.addWidget(self._annotation_panel)
         return self._annotation_panel
+
+    def bind_annotation_header_zoom(self, bar) -> None:
+        self._ensure_annotation_panel().bind_annotation_zoom_bar(bar)
+
+    def _preview_tab_host(self):
+        tab_host = self.parent()
+        while tab_host is not None:
+            from teviewer.widgets.preview_tabs import PreviewTabWidget
+
+            if isinstance(tab_host, PreviewTabWidget):
+                return tab_host
+            tab_host = tab_host.parent()
+        return None
 
     def _activate_fasta_tab(self, tab: DefaultFastaPreviewTab) -> None:
         if tab == DefaultFastaPreviewTab.ANNOTATION:
-            self._fasta_tabs.blockSignals(True)
             self._ensure_annotation_panel()
-            self._fasta_tabs.setCurrentIndex(1)
-            self._fasta_tabs.blockSignals(False)
+            self.set_fasta_tab_index(1)
             self._refresh_sequence_info_bar()
             QTimer.singleShot(0, self._open_annotation_tab)
             return
-        self._fasta_tabs.setCurrentIndex(0)
+        self.set_fasta_tab_index(0)
         self._refresh_sequence_info_bar()
         QTimer.singleShot(0, self._refresh_text_view)
 
     def _open_annotation_tab(self) -> None:
         panel = self._ensure_annotation_panel()
-        if self._fasta_tabs.currentIndex() != 1:
-            self._fasta_tabs.setCurrentIndex(1)
+        tab_host = self._preview_tab_host()
+        if tab_host is not None and tab_host._annotation_zoom_bar is not None:
+            panel.bind_annotation_zoom_bar(tab_host._annotation_zoom_bar)
+        if self._fasta_stack.currentIndex() != 1:
+            self.set_fasta_tab_index(1)
+            return
         self._refresh_sequence_info_bar()
-        panel.open_annotation_tab(reload=False)
-
-    def _refresh_annotation_view(self) -> None:
-        """Sync layout when the Annotation sub-tab is shown (preserve selection/zoom)."""
-        if self._annotation_panel is None:
-            self._open_annotation_tab()
-            return
-        if self._annotation_panel._map.data() is None:
-            self._open_annotation_tab()
-            return
-        self._annotation_panel._map.refresh_layout()
+        panel.open_annotation_tab()
 
     def contains_sequence_id(self, seq_id: str) -> bool:
-        """True if this tab's FASTA is a single-sequence file with the given record id.
-
-        Flexidot may have been run against a sanitized copy of this FASTA (special
-        characters like ``#``/``/`` replaced - see ``prepare_flexidot_input_fasta``/
-        ``run_flexidot_combined``), so ``seq_id`` from a dotplot click can be the
-        sanitized form rather than the id actually stored in this file.
-        """
+        if not self._single_fasta_mode:
+            return False
         try:
             record_id, _ = load_single_sequence_fasta(self.path)
         except (OSError, ValueError):
             return False
+        from teviewer.backends.gui_functions import sanitize_name
+
         return record_id == seq_id or sanitize_name(record_id) == seq_id
 
     def show_annotation_region_if_matches(self, seq_id: str, start: int, end: int) -> bool:
         """If this tab's sequence matches seq_id, jump its Annotation view to [start, end]."""
         if not self.contains_sequence_id(seq_id):
             return False
-        if not self._single_fasta_mode:
-            return False
-        self._ensure_annotation_panel()
-        if self._fasta_tabs.currentIndex() != 1:
-            self._fasta_tabs.blockSignals(True)
-            self._fasta_tabs.setCurrentIndex(1)
-            self._fasta_tabs.blockSignals(False)
-            self._refresh_sequence_info_bar()
         panel = self._ensure_annotation_panel()
-        logger.debug(
-            "Go-to: %s matches seq=%r -> jump_to_region(%d, %d)",
-            self.path.name,
-            seq_id,
-            start,
-            end,
-        )
+        tab_host = self._preview_tab_host()
+        if tab_host is not None and tab_host._annotation_zoom_bar is not None:
+            panel.bind_annotation_zoom_bar(tab_host._annotation_zoom_bar)
+        if self._fasta_stack.currentIndex() != 1:
+            self.set_fasta_tab_index(1)
         panel.jump_to_region(start, end)
         return True
 
@@ -970,6 +979,8 @@ class FilePreviewPage(QWidget):
         self._fasta_text.setTextCursor(cursor)
         if self._annotation_panel is not None:
             self._annotation_panel.load_path(path)
+        if self._dotplot_panel is not None:
+            self._dotplot_panel.load_path(path)
         self._activate_fasta_tab(load_default_fasta_preview_tab())
         self._refresh_sequence_info_bar()
 
@@ -1071,13 +1082,24 @@ class PreviewTabWidget(QTabWidget):
         parent: QWidget | None = None,
         *,
         zoom_bar: QWidget | None = None,
+        header_bar: QWidget | None = None,
+        annotation_zoom_bar: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        from teviewer.widgets.preview_controls import PreviewZoomBar
+        from teviewer.widgets.preview_controls import PreviewHeaderBar, PreviewZoomBar
 
         self._zoom_bar = zoom_bar if zoom_bar is not None else PreviewZoomBar(self)
+        self._header_bar = header_bar
+        self._annotation_zoom_bar = annotation_zoom_bar
+        if self._annotation_zoom_bar is None and isinstance(self._header_bar, PreviewHeaderBar):
+            self._annotation_zoom_bar = self._header_bar._annotation_zoom_bar
         self._zoom_bar.zoom_changed.connect(self._on_preview_zoom_changed)
         self._zoom_bar.fit_mode_changed.connect(self._on_preview_fit_changed)
+        from teviewer.widgets.preview_controls import PreviewWheelZoomFilter
+
+        self._wheel_zoom_filter = PreviewWheelZoomFilter(self, self._zoom_bar)
+        if self._header_bar is not None:
+            self._header_bar.fasta_tab_changed.connect(self._on_header_fasta_tab_changed)
 
         self.setTabsClosable(True)
         self.setMovable(True)
@@ -1090,37 +1112,6 @@ class PreviewTabWidget(QTabWidget):
         tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
         tab_bar.setExpanding(False)
         tab_bar.setDrawBase(False)
-        tab_bar.setMaximumHeight(28)
-        tab_bar.setStyleSheet(
-            "QTabBar::tab {"
-            "  min-height: 22px;"
-            "  max-height: 22px;"
-            "  padding: 3px 10px;"
-            "  margin-right: 1px;"
-            "  margin-top: 3px;"
-            "  border: 1px solid palette(mid);"
-            "  border-bottom: none;"
-            "  border-top-left-radius: 4px;"
-            "  border-top-right-radius: 4px;"
-            "  background: palette(button);"
-            "  color: palette(placeholder-text);"
-            "}"
-            "QTabBar::tab:selected {"
-            "  margin-top: 0px;"
-            "  padding-top: 6px;"
-            "  background: palette(base);"
-            "  color: palette(text);"
-            "  font-weight: 600;"
-            "  border-bottom: 2px solid palette(highlight);"
-            "}"
-            "QTabBar::tab:hover:!selected {"
-            "  background: palette(midlight);"
-            "  color: palette(text);"
-            "}"
-        )
-        self.setStyleSheet(
-            "QTabWidget::pane { border: 1px solid palette(mid); background: palette(base); }"
-        )
         self.setMinimumHeight(120)
 
         # Spacer on the right keeps tabs pinned to the left on macOS.
@@ -1130,6 +1121,28 @@ class PreviewTabWidget(QTabWidget):
         self.currentChanged.connect(self._sync_zoom_bar_enabled)
         self._apply_zoom_to_current_tab()
         self._install_annotation_delete_shortcuts()
+        self._sync_tab_bar_visible()
+
+    def _on_header_fasta_tab_changed(self, index: int) -> None:
+        widget = self.currentWidget()
+        if isinstance(widget, FilePreviewPage):
+            widget.set_fasta_tab_index(index)
+
+    def _sync_header_from_current_page(self) -> None:
+        if self._header_bar is None:
+            return
+        widget = self.currentWidget()
+        if isinstance(widget, FilePreviewPage) and widget.is_single_fasta_preview():
+            self._header_bar.set_fasta_tabs_visible(True)
+            self._header_bar.sync_fasta_tab(widget.current_fasta_tab_index())
+        else:
+            self._header_bar.set_fasta_tabs_visible(False)
+
+    def _sync_tab_bar_visible(self) -> None:
+        """Hide filename tabs when only one file is open (selection is in the file list)."""
+        multi = self.count() > 1
+        self.tabBar().setVisible(multi)
+        self.setTabsClosable(multi)
 
     def _install_annotation_delete_shortcuts(self) -> None:
         for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
@@ -1145,13 +1158,10 @@ class PreviewTabWidget(QTabWidget):
     def _wire_preview_page(self, page: FilePreviewPage) -> None:
         page.annotationsSaved.connect(self.annotationsSaved.emit)
         page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
-
-    def _add_preview_page(self, page: FilePreviewPage, *, name: str) -> int:
-        self._wire_preview_page(page)
-        return self.addTab(page, name)
+        self._wheel_zoom_filter.register_page(page)
 
     def show_annotation_region_for_sequence(self, seq_id: str, start: int, end: int) -> bool:
-        """Jump the Annotation view of whichever open tab holds ``seq_id`` to [start, end]."""
+        """Jump the Annotation view of whichever open tab holds seq_id to [start, end]."""
         matched = False
         for index in range(self.count()):
             widget = self.widget(index)
@@ -1164,9 +1174,11 @@ class PreviewTabWidget(QTabWidget):
             self.setCurrentWidget(widget)
             widget.show()
             widget.setFocus(Qt.FocusReason.OtherFocusReason)
-        if matched:
-            logger.debug("Go-to: jumped to seq=%r %d-%d", seq_id, start, end)
         return matched
+
+    def _add_preview_page(self, page: FilePreviewPage, *, name: str) -> int:
+        self._wire_preview_page(page)
+        return self.addTab(page, name)
 
     @property
     def zoom_bar(self):
@@ -1222,14 +1234,18 @@ class PreviewTabWidget(QTabWidget):
         self._sync_zoom_bar_enabled()
 
     def _sync_zoom_bar_enabled(self, _index: int | None = None) -> None:
+        from teviewer.widgets.preview_controls import PreviewHeaderBar
+
         widget = self.currentWidget()
         is_text = False
         is_media = False
         is_pdf = False
+        is_annotation = False
         if isinstance(widget, FilePreviewPage):
-            if widget.is_annotation_preview_active():
+            is_annotation = widget.is_annotation_preview_active()
+            if is_annotation or widget.is_dotplot_preview_active():
                 is_text = False
-                is_media = False
+                is_media = widget.is_dotplot_preview_active()
                 is_pdf = False
             elif widget.is_single_fasta_preview():
                 is_text = widget.is_text_preview_active()
@@ -1241,9 +1257,21 @@ class PreviewTabWidget(QTabWidget):
                 is_media = current in (widget._html, widget._image)
                 is_pdf = current is widget._pdf
         can_adjust = is_text or is_media
-        self._zoom_bar.setVisible(not is_pdf and not (
-            isinstance(widget, FilePreviewPage) and widget.is_annotation_preview_active()
-        ))
+        if isinstance(self._header_bar, PreviewHeaderBar):
+            if is_pdf:
+                self._header_bar.set_header_zoom_mode("hidden")
+            elif is_annotation:
+                self._header_bar.set_header_zoom_mode("annotation")
+                if (
+                    self._annotation_zoom_bar is not None
+                    and isinstance(widget, FilePreviewPage)
+                ):
+                    widget._ensure_annotation_panel()
+                    widget.bind_annotation_header_zoom(self._annotation_zoom_bar)
+            else:
+                self._header_bar.set_header_zoom_mode("preview")
+        else:
+            self._zoom_bar.setVisible(not is_pdf and not is_annotation)
         self._zoom_bar._fit_combo.setEnabled(can_adjust)
         for control in (
             self._zoom_bar._slider,
@@ -1251,6 +1279,9 @@ class PreviewTabWidget(QTabWidget):
             self._zoom_bar._reset_btn,
         ):
             control.setEnabled(can_adjust)
+        self._sync_header_from_current_page()
+        if isinstance(widget, FilePreviewPage):
+            self._wheel_zoom_filter.register_page(widget)
 
     def open_file(self, path: Path, *, replace: bool = False) -> None:
         """Open one file. replace=True uses a single reusable preview tab."""
@@ -1263,6 +1294,7 @@ class PreviewTabWidget(QTabWidget):
                 if isinstance(widget, FilePreviewPage):
                     if str(widget.path) == key:
                         widget.reload_from_disk()
+                        self._sync_tab_bar_visible()
                     elif _switching_html_preview(widget.path, resolved):
                         widget.deleteLater()
                         self.removeTab(0)
@@ -1273,6 +1305,7 @@ class PreviewTabWidget(QTabWidget):
                         self.setCurrentWidget(page)
                         page.show()
                         self._apply_zoom_to_current_tab()
+                        self._sync_tab_bar_visible()
                         return
                     else:
                         widget.load_path(resolved)
@@ -1280,6 +1313,7 @@ class PreviewTabWidget(QTabWidget):
                     self._path_to_index = {key: 0}
                     self.setCurrentIndex(0)
                     self._apply_zoom_to_current_tab()
+                    self._sync_tab_bar_visible()
                     return
             self.close_all_tabs()
             page = FilePreviewPage(resolved)
@@ -1289,6 +1323,7 @@ class PreviewTabWidget(QTabWidget):
             self.setCurrentWidget(page)
             page.show()
             self._apply_zoom_to_current_tab()
+            self._sync_tab_bar_visible()
             return
 
         if key in self._path_to_index:
@@ -1299,6 +1334,7 @@ class PreviewTabWidget(QTabWidget):
                     widget.reload_from_disk()
                 self.setCurrentIndex(index)
                 self._apply_zoom_to_current_tab()
+                self._sync_tab_bar_visible()
                 return
             del self._path_to_index[key]
 
@@ -1309,11 +1345,13 @@ class PreviewTabWidget(QTabWidget):
         self.setCurrentWidget(page)
         page.show()
         self._apply_zoom_to_current_tab()
+        self._sync_tab_bar_visible()
 
     def open_files_in_tabs(self, paths: list[Path]) -> None:
         """Open many files (e.g. right-click); keeps existing tabs and adds new ones."""
         for path in paths:
             self.open_file(path, replace=False)
+        self._sync_tab_bar_visible()
 
     def reload_paths(self, paths: list[Path]) -> None:
         """Reload open preview tabs whose paths match (e.g. after DPI change)."""
@@ -1332,6 +1370,7 @@ class PreviewTabWidget(QTabWidget):
             if widget is not None:
                 widget.deleteLater()
         self._path_to_index.clear()
+        self._sync_tab_bar_visible()
 
     def close_paths(self, paths: list[Path]) -> None:
         """Close preview tabs whose files were deleted."""
@@ -1361,6 +1400,7 @@ class PreviewTabWidget(QTabWidget):
             self._path_to_index.pop(key, None)
         self.removeTab(index)
         self._rebuild_path_index()
+        self._sync_tab_bar_visible()
 
     def _rebuild_path_index(self) -> None:
         self._path_to_index.clear()

@@ -8,6 +8,8 @@ import threading
 from ctypes import c_char_p, c_void_p, cdll
 from pathlib import Path
 
+from teviewer.branding import APP_DISPLAY_NAME
+
 _MACOS_STDERR_SKIP = (
     b"IMKCFRunLoopWakeUpReliable",
     b"IMKClient subclass",
@@ -40,7 +42,7 @@ def configure_qt_runtime() -> None:
 
 
 def _configure_macos_app_name() -> None:
-    """Show TEviewer in the macOS menu bar instead of Python when launched via interpreter."""
+    """Show RepeatViewer in the macOS menu bar instead of Python when launched via interpreter."""
     if sys.platform != "darwin":
         return
     apply_macos_app_name()
@@ -53,13 +55,13 @@ def apply_macos_app_name() -> None:
     try:
         libc = cdll.LoadLibrary("/usr/lib/libc.dylib")
         if hasattr(libc, "setprogname"):
-            libc.setprogname(c_char_p(b"TEviewer"))
+            libc.setprogname(c_char_p(APP_DISPLAY_NAME.encode("utf-8")))
     except Exception:
         pass
     try:
         import Foundation  # type: ignore[import-not-found]
 
-        Foundation.NSProcessInfo.processInfo().setProcessName_("TEviewer")
+        Foundation.NSProcessInfo.processInfo().setProcessName_(APP_DISPLAY_NAME)
     except Exception:
         pass
     try:
@@ -77,7 +79,7 @@ def apply_macos_app_name() -> None:
         app_name = objc.objc_msgSend(
             c_void_p(ns_string),
             c_void_p(objc.sel_registerName(b"stringWithUTF8String:")),
-            c_char_p(b"TEviewer"),
+            c_char_p(APP_DISPLAY_NAME.encode("utf-8")),
         )
         objc.objc_msgSend(
             c_void_p(process_info),

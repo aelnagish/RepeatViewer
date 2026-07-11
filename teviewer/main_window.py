@@ -8,10 +8,12 @@ import platform
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from PySide6.QtCore import (
+    QEvent,
     QFileSystemWatcher,
+    QItemSelectionModel,
     QMimeData,
     QObject,
     QSettings,
@@ -22,10 +24,21 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QFont, QFontMetrics, QKeySequence, QShortcut
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QDrag,
+    QFont,
+    QFontMetrics,
+    QKeySequence,
+    QMouseEvent,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -42,18 +55,27 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QStyle,
+    QStyleOptionViewItem,
     QToolBar,
     QToolButton,
     QStatusBar,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
+    QSplitter,
     QVBoxLayout,
     QWidget,
     QLabel,
     QColorDialog,
 )
+
+_BROWSER_DOCK_WIDTH = 480
+_BROWSER_FOLDER_TREE_WIDTH = 155
+_BROWSER_FILES_PREVIEW_SPLIT = (170, 210)
 from teviewer import __version__
+from teviewer.branding import APP_DISPLAY_NAME
+from teviewer.browser_file_filter import is_tool_output_file
 from teviewer.backends.genome_prepare import ensure_genome_artifacts
 from teviewer.backends.blast_genome_plot import (
     _map_chromosome_filter_to_genome,
@@ -92,8 +114,7 @@ from teviewer.backends.te_benchmark import (
 )
 from teviewer.backends.te_library_benchmark import run_te_library_benchmark
 from teviewer.backends.curation import effective_batch_workers, is_flexidot_extra_plot_file, run_batch
-from teviewer.backends.gui_functions import flexidot_executable
-from teviewer.backends.gui_functions import sanitize_name as flexidot_sanitize_name
+from teviewer.backends.gui_functions import flexidot_executable, sanitize_name as flexidot_sanitize_name
 from teviewer.backends.sequence_aligner import (
     alignment_backends,
     run_alignment,
@@ -196,8 +217,10 @@ from teviewer.views.toolbar_dialog import (
     load_toolbar_font_size,
     load_toolbar_order,
 )
+from teviewer.widgets.browser_icons import browser_file_icon, browser_folder_icon
 from teviewer.widgets.browser_panel_settings import load_browser_panel_font_size
 from teviewer.ui.platform import reveal_in_file_manager
+from teviewer.ui.text_editor import open_in_text_editor
 from teviewer.ui.theme import application_stylesheet
 from teviewer.widgets.hidden_folders import (
     hide_root_folder,
@@ -215,6 +238,8 @@ from teviewer.widgets.folder_colors import (
     replace_folder_color_paths,
     set_folder_color,
 )
+from teviewer.widgets.folder_navigation import FolderNavigationBar
+from teviewer.widgets.folder_tree_delegate import FolderTreeItemDelegate
 from teviewer.widgets.file_sort import (
     FileSortMode,
     file_sort_mode_labels,
@@ -222,12 +247,15 @@ from teviewer.widgets.file_sort import (
     save_file_sort_mode,
     sort_file_paths,
 )
+from teviewer.widgets.file_list_table import FileListRow, FileListTableWidget
 from teviewer.widgets.preview_tabs import PreviewTabWidget, is_previewable_file, preview_path_priority, set_genome_path_provider
 from teviewer.widgets.task_progress import TaskProgressPanel
 from teviewer.widgets.database_index_runner import DatabaseIndexRunner
 
 ROLE_PATH = Qt.ItemDataRole.UserRole
 ROLE_LAZY_PLACEHOLDER = Qt.ItemDataRole.UserRole + 1
+
+_BROWSER_ICON_SIZE = 16
 
 
 def _unique_duplicate_path(path: Path) -> Path:
@@ -244,14 +272,23 @@ def _unique_duplicate_path(path: Path) -> Path:
         n += 1
 
 
+@dataclass
+class _FileClipboard:
+    mode: Literal["copy", "cut"]
+    paths: list[Path]
+
+
 _NEW_OUTPUT_BG = QColor(214, 245, 214)
 _NEW_OUTPUT_FG = QColor(0, 100, 0)
+_TOOL_OUTPUT_BG = QColor(232, 248, 232)
+_TOOL_OUTPUT_FG = QColor(30, 90, 30)
 _SOURCE_BG = QColor(220, 235, 255)
 _SOURCE_FG = QColor(0, 70, 140)
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
 
 _TOOLBAR_TOOLTIPS = {
+    "define_genome": "Set or change the project reference genome FASTA",
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
@@ -263,6 +300,8 @@ _TOOLBAR_TOOLTIPS = {
     "msa_clean": "Trim or clean MSA using default parameters",
     "flexidot": "Dotplot comparison of selected sequences using default parameters",
     "consensus": "Build consensus from selected MSA using default parameters",
+    "tsd_search": "Search for target site duplications using default parameters",
+    "te_annotation": "Run TE annotation on selected single-sequence FASTA files",
     "plugin:minimap2": "Map selected FASTA to reference with minimap2",
 }
 
@@ -547,139 +586,6 @@ class FunctionWorker(QObject):
             self.failed.emit(str(exc))
 
 
-class FileListWidget(QListWidget):
-    """File list that supports dragging files as URLs."""
-
-    open_in_preview_requested = Signal(list)
-    delete_files_requested = Signal(list)
-    duplicate_files_requested = Signal(list)
-    rename_file_requested = Signal(Path)
-    separate_fasta_requested = Signal(Path)
-    separate_fasta_subfolders_requested = Signal(Path)
-    blast_genome_map_requested = Signal(Path)
-    blast_divergence_requested = Signal(Path)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.setSpacing(0)
-        self.setDragEnabled(True)
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.customContextMenuRequested.connect(self._show_context_menu)
-
-    def _show_context_menu(self, position) -> None:
-        paths = self._selected_paths()
-        if not paths:
-            return
-        menu = QMenu(self)
-        if len(paths) == 1:
-            path = paths[0]
-            menu.addAction("Open in preview", lambda: self.open_in_preview_requested.emit(paths))
-            menu.addAction("Rename", lambda: self.rename_file_requested.emit(path))
-            if path.suffix.lower() in _FASTA_SUFFIXES:
-                try:
-                    seq_n = count_fasta_sequences(path)
-                except Exception:  # noqa: BLE001
-                    seq_n = 0
-                if seq_n > 1:
-                    menu.addAction(
-                        f"Separate sequence into {seq_n} files",
-                        lambda: self.separate_fasta_requested.emit(path),
-                    )
-                    menu.addAction(
-                        f"Separate sequence into {seq_n} folders",
-                        lambda: self.separate_fasta_subfolders_requested.emit(path),
-                    )
-                blast_txt = find_blast_table_for_query(path)
-                if blast_txt is not None:
-                    menu.addAction(
-                        "TE density plot",
-                        lambda bt=blast_txt: self.blast_genome_map_requested.emit(bt),
-                    )
-            if is_te_hit_table_file(path):
-                menu.addAction(
-                    "TE density plot",
-                    lambda bt=path: self.blast_genome_map_requested.emit(bt),
-                )
-                menu.addAction(
-                    "TE divergence plot",
-                    lambda bt=path: self.blast_divergence_requested.emit(bt),
-                )
-        else:
-            menu.addAction(
-                f"Open {len(paths)} files in tabs",
-                lambda: self.open_in_preview_requested.emit(paths),
-            )
-        if len(paths) == 1:
-            menu.addAction(
-                "Duplicate",
-                lambda: self.duplicate_files_requested.emit(paths),
-            )
-        else:
-            menu.addAction(
-                f"Duplicate {len(paths)} files",
-                lambda: self.duplicate_files_requested.emit(paths),
-            )
-        menu.addSeparator()
-        menu.addAction("Open in AliView", self._context_open_aliview)
-        if len(paths) == 1:
-            label = (
-                "Reveal in Finder"
-                if platform.system() == "Darwin"
-                else "Show in file manager"
-            )
-            menu.addAction(label, lambda: self._reveal_paths(paths))
-        menu.addSeparator()
-        if len(paths) == 1:
-            menu.addAction("Delete", lambda: self.delete_files_requested.emit(paths))
-        else:
-            menu.addAction(
-                f"Delete {len(paths)} files",
-                lambda: self.delete_files_requested.emit(paths),
-            )
-        menu.exec(self.mapToGlobal(position))
-
-    def _context_open_aliview(self) -> None:
-        window = self.window()
-        if hasattr(window, "_open_selected_in_aliview"):
-            window._open_selected_in_aliview()
-
-    def _reveal_paths(self, paths: list[Path]) -> None:
-        window = self.window()
-        if hasattr(window, "_reveal_in_file_manager"):
-            window._reveal_in_file_manager(paths)
-
-    def _selected_paths(self) -> list[Path]:
-        paths = []
-        for item in self.selectedItems():
-            raw = item.data(ROLE_PATH)
-            if raw:
-                path = Path(str(raw))
-                if path.is_file():
-                    paths.append(path)
-        return paths
-
-    def mimeData(self, items: list[QListWidgetItem]) -> QMimeData:  # noqa: N802 (Qt API)
-        mime = QMimeData()
-        urls = []
-        for item in items:
-            raw = item.data(ROLE_PATH)
-            if raw:
-                urls.append(Path(str(raw)).as_uri())
-        if urls:
-            from PySide6.QtCore import QUrl
-            mime.setUrls([QUrl(u) for u in urls])
-        return mime
-
-    def startDrag(self, supportedActions):  # noqa: N802 (Qt API)
-        items = self.selectedItems()
-        if not items:
-            return
-        drag = QDrag(self)
-        drag.setMimeData(self.mimeData(items))
-        drag.exec(supportedActions)
-
-
 class FolderTreeWidget(QTreeWidget):
     """Folder-only navigator; accepts dropped folders/files."""
 
@@ -689,24 +595,96 @@ class FolderTreeWidget(QTreeWidget):
     rename_folder_requested = Signal(Path)
     delete_folders_requested = Signal(list)
     clear_root_folders_requested = Signal(list)
+    paste_to_folder_requested = Signal(Path)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setHeaderHidden(True)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.setUniformRowHeights(False)
         self.setAnimated(False)
+        self.setIconSize(QSize(_BROWSER_ICON_SIZE, _BROWSER_ICON_SIZE))
+        self.setIndentation(14)
+        self.setRootIsDecorated(False)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.setItemDelegate(FolderTreeItemDelegate(self))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         header = self.header()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.itemSelectionChanged.connect(self._emit_selected_folder)
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setMinimumSectionSize(100)
+        self.currentItemChanged.connect(self._on_folder_current_changed)
+        self._suppress_current_changed = False
+
+    def select_folder_item(self, item: QTreeWidgetItem) -> None:
+        """Select exactly one folder row and make it current."""
+        index = self.indexFromItem(item)
+        if not index.isValid():
+            return
+        self._suppress_current_changed = True
+        try:
+            self.selectionModel().select(
+                index,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+                | QItemSelectionModel.SelectionFlag.Current,
+            )
+            self.scrollToItem(item)
+        finally:
+            QTimer.singleShot(0, lambda: setattr(self, "_suppress_current_changed", False))
+
+    def _emit_folder_for_item(self, item: QTreeWidgetItem | None) -> None:
+        if item is None or bool(item.data(0, ROLE_LAZY_PLACEHOLDER)):
+            return
+        folder = self._folder_path_for_item(item)
+        if folder is not None:
+            self.folder_selected.emit(folder)
+
+    def _on_folder_current_changed(
+        self,
+        current: QTreeWidgetItem | None,
+        _previous: QTreeWidgetItem | None,
+    ) -> None:
+        if self._suppress_current_changed:
+            return
+        self._emit_folder_for_item(current)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            item = self.itemAt(pos)
+            if item is not None and not bool(item.data(0, ROLE_LAZY_PLACEHOLDER)):
+                index = self.indexFromItem(item)
+                opt = QStyleOptionViewItem()
+                opt.rect = self.visualRect(index)
+                delegate = self.itemDelegate()
+                if delegate is not None:
+                    delegate.initStyleOption(opt, index)
+                deco = self.style().subElementRect(
+                    QStyle.SubElement.SE_ItemViewItemDecoration,
+                    opt,
+                    self,
+                )
+                chevron_right = (
+                    deco.right()
+                    if deco.isValid() and deco.width() > 0
+                    else opt.rect.left() + self.iconSize().width()
+                )
+                if pos.x() <= chevron_right:
+                    has_branch = item.childCount() > 0 or (
+                        item.childIndicatorPolicy()
+                        == QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+                    )
+                    if has_branch:
+                        item.setExpanded(not item.isExpanded())
+        super().mousePressEvent(event)
 
     def _folder_path_for_item(self, item: QTreeWidgetItem | None) -> Path | None:
         if item is None:
@@ -745,13 +723,30 @@ class FolderTreeWidget(QTreeWidget):
         folder_items = self._selected_folder_items()
         if not folder_items:
             return
+        self._show_folder_context_menu(position, folder_items)
+
+    def _show_folder_context_menu(
+        self,
+        position,
+        folder_items: list[tuple[Path, QTreeWidgetItem]],
+    ) -> None:
         folders = [folder for folder, _item in folder_items]
         menu = QMenu(self)
 
         if len(folders) == 1:
             folder = folders[0]
             menu.addAction("Rename folder", lambda: self.rename_folder_requested.emit(folder))
-        root_pairs = [(folder, tree_item) for folder, tree_item in folder_items if self._is_top_level_item(tree_item)]
+            window = self.window()
+            if hasattr(window, "_clipboard_can_paste") and window._clipboard_can_paste():
+                menu.addAction(
+                    "Paste",
+                    lambda f=folder: self.paste_to_folder_requested.emit(f),
+                )
+        root_pairs = [
+            (folder, tree_item)
+            for folder, tree_item in folder_items
+            if self._is_top_level_item(tree_item)
+        ]
         if root_pairs:
             root_folders = [folder for folder, _tree_item in root_pairs]
             if len(root_folders) == 1:
@@ -855,6 +850,8 @@ class FolderTreeWidget(QTreeWidget):
             raw = target_item.data(0, ROLE_PATH)
             if raw:
                 target_dir = Path(str(raw))
+                if not target_dir.is_dir():
+                    target_dir = None
 
         folder_paths = [p for p in paths if p.is_dir()]
         file_paths = [p for p in paths if p.is_file()]
@@ -865,17 +862,6 @@ class FolderTreeWidget(QTreeWidget):
         if target_dir and file_paths:
             self.files_dropped_to_folder.emit(target_dir, file_paths)
         event.acceptProposedAction()
-
-    def _emit_selected_folder(self) -> None:
-        item = self.currentItem()
-        if not item:
-            return
-        raw = item.data(0, ROLE_PATH)
-        if not raw:
-            return
-        path = Path(str(raw))
-        if path.is_dir():
-            self.folder_selected.emit(path)
 
 
 @dataclass
@@ -890,11 +876,11 @@ class _PendingTeVizBuild:
 
 
 class MainWindow(QMainWindow):
-    """Dockable Folders, Files, and Preview panels (Geneious-style layout)."""
+    """Browser panel with folders, files, and preview."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"TEviewer {__version__}")
+        self.setWindowTitle(f"{APP_DISPLAY_NAME} {__version__}")
         self.resize(1680, 980)
         self.setMinimumSize(1100, 700)
         self._toolbar_font_size = load_toolbar_font_size()
@@ -940,6 +926,7 @@ class MainWindow(QMainWindow):
         self._plugin_registry = load_plugins()
         self._plugins_menu: QMenu | None = None
         self._toolbar_order = load_toolbar_order(self._plugin_registry)
+        self._browser_panel: QWidget | None = None
         self._dock_folders: QDockWidget | None = None
         self._dock_files: QDockWidget | None = None
         self._dock_preview: QDockWidget | None = None
@@ -979,17 +966,17 @@ class MainWindow(QMainWindow):
             lambda folder: self._add_root_folder(folder, unhide=True),
         )
 
-        self._file_list = FileListWidget()
+        self._file_list = FileListTableWidget()
         self._file_list.setObjectName("FileList")
-        # Open preview on single click/selection changes (unless a dialog is
-        # currently visible that should receive the panel click for path filling).
         self._file_list.currentItemChanged.connect(self._on_file_current_item_changed)
         self._file_list.itemClicked.connect(self._on_file_item_clicked)
-        # Only sync dialog inputs from an explicit Files-panel click.
-        # (itemSelectionChanged can also fire on non-click selection changes.)
         self._file_list.itemDoubleClicked.connect(self._on_file_double_clicked)
         self._file_list.open_in_preview_requested.connect(self._open_files_in_preview_tabs)
+        self._file_list.open_in_text_editor_requested.connect(self._open_selected_in_text_editor)
         self._file_list.delete_files_requested.connect(self._delete_selected_files)
+        self._file_list.cut_files_requested.connect(self._cut_files_to_clipboard)
+        self._file_list.copy_files_requested.connect(self._copy_files_to_clipboard)
+        self._file_list.paste_files_requested.connect(self._paste_files_shortcut)
         self._file_list.duplicate_files_requested.connect(self._duplicate_selected_files)
         self._file_list.rename_file_requested.connect(self._rename_file)
         self._file_list.separate_fasta_requested.connect(self._separate_fasta_file)
@@ -1005,8 +992,9 @@ class MainWindow(QMainWindow):
         self._folder_tree.rename_folder_requested.connect(self._rename_folder)
         self._folder_tree.delete_folders_requested.connect(self._delete_folders)
         self._folder_tree.clear_root_folders_requested.connect(self._clear_root_folders)
+        self._folder_tree.paste_to_folder_requested.connect(self._paste_files_to_folder)
         self._folder_tree.itemExpanded.connect(self._on_folder_tree_expanded)
-        self._folder_tree.itemCollapsed.connect(lambda _item: self._schedule_persist_workspace())
+        self._folder_tree.itemCollapsed.connect(self._on_folder_tree_collapsed)
         self._apply_browser_panel_font()
         self._fs_watcher = QFileSystemWatcher(self)
         self._fs_watcher.directoryChanged.connect(self._on_watched_directory_changed)
@@ -1016,11 +1004,19 @@ class MainWindow(QMainWindow):
         self._folder_persist_timer.timeout.connect(self._persist_workspace)
         self._folder_tree_restoring = False
         self._hidden_root_folders = load_hidden_root_folders()
+        self._file_clipboard: _FileClipboard | None = None
 
         self._build_dock_panels()
 
         status = QStatusBar()
         self.setStatusBar(status)
+        self._status_linked_file: Path | None = None
+        self._status_file_link = QLabel()
+        self._status_file_link.setTextFormat(Qt.TextFormat.RichText)
+        self._status_file_link.setOpenExternalLinks(False)
+        self._status_file_link.linkActivated.connect(self._on_status_file_link_activated)
+        self._status_file_link.hide()
+        status.addWidget(self._status_file_link)
         self._task_progress = TaskProgressPanel()
         status.addPermanentWidget(self._task_progress)
         self._stop_btn = QPushButton("Stop")
@@ -1038,8 +1034,18 @@ class MainWindow(QMainWindow):
         """Load workspace folders after the window is shown (avoids blocking startup)."""
         self._load_initial_roots()
         self._apply_startup_folder()
+        self._normalize_folder_tree_selection()
         self._update_directory_watchers()
         self._update_status()
+        QTimer.singleShot(0, self._apply_default_browser_layout)
+
+    def _normalize_folder_tree_selection(self) -> None:
+        """Clear any stale multi-selection left from older builds."""
+        item = self._folder_tree.currentItem()
+        if item is None and self._folder_tree.topLevelItemCount() > 0:
+            item = self._folder_tree.topLevelItem(0)
+        if item is not None:
+            self._folder_tree.select_folder_item(item)
 
     def _update_directory_watchers(self) -> None:
         watched: set[str] = set()
@@ -1075,23 +1081,53 @@ class MainWindow(QMainWindow):
         self._update_directory_watchers()
 
     def _restore_window_layout(self) -> None:
+        self._purge_legacy_docks()
         settings = QSettings()
         settings.beginGroup("mainwindow")
-        state = settings.value("dock_state_v2") or settings.value("toolbars_state")
+        toolbar_state = settings.value("toolbar_state_v3")
+        main_split = settings.value("browser_main_split")
+        files_preview_split = settings.value("browser_files_preview_split")
         settings.endGroup()
-        if state:
-            self.restoreState(state)
-        self._ensure_preview_dock_attached()
-        preview_ok = (
-            self._dock_preview is not None
-            and self._dock_preview.isVisible()
-            and self._dock_preview.widget() is self._preview_host
-            and self._preview_tabs is not None
-        )
-        if not preview_ok:
-            self._reset_dock_layout()
-        else:
-            self._ensure_preview_visible()
+        if toolbar_state:
+            self.restoreState(toolbar_state)
+        self._purge_legacy_docks()
+        if main_split and hasattr(self, "_browser_main_split"):
+            self._browser_main_split.restoreState(main_split)
+        if files_preview_split and hasattr(self, "_browser_files_preview_split"):
+            self._browser_files_preview_split.restoreState(files_preview_split)
+        self._apply_default_browser_layout()
+        self._ensure_preview_visible()
+        self._rebuild_top_toolbar()
+        self._repair_browser_chrome()
+
+    def _repair_browser_chrome(self) -> None:
+        """Fix file-table header glitches and toolbar overlap after modal dialogs."""
+        if hasattr(self, "_file_list"):
+            self._file_list.repair_chrome()
+        if self._functions_toolbar is not None:
+            self._compact_functions_toolbar(self._functions_toolbar)
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 (Qt API)
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.ActivationChange
+            and self.isActiveWindow()
+            and hasattr(self, "_file_list")
+        ):
+            QTimer.singleShot(0, self._repair_browser_chrome)
+
+    def _purge_legacy_docks(self) -> None:
+        """Drop old Preview/Folders docks restored from pre-v0.2 layouts."""
+        for dock in list(self.findChildren(QDockWidget)):
+            name = dock.objectName().lower()
+            if name in {"dock_browser", "dock_preview", "dock_folders", "dock_files"}:
+                self.removeDockWidget(dock)
+                dock.hide()
+                dock.setWidget(QWidget())
+                dock.deleteLater()
+        self._dock_folders = None
+        self._dock_preview = None
+        self._dock_files = None
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         if self._any_background_job_running():
@@ -1099,8 +1135,14 @@ class MainWindow(QMainWindow):
         self._persist_workspace()
         settings = QSettings()
         settings.beginGroup("mainwindow")
-        settings.setValue("dock_state_v2", self.saveState())
-        settings.setValue("toolbars_state", self.saveState())
+        settings.setValue("toolbar_state_v3", self.saveState())
+        if hasattr(self, "_browser_main_split"):
+            settings.setValue("browser_main_split", self._browser_main_split.saveState())
+        if hasattr(self, "_browser_files_preview_split"):
+            settings.setValue(
+                "browser_files_preview_split",
+                self._browser_files_preview_split.saveState(),
+            )
         settings.endGroup()
         super().closeEvent(event)
 
@@ -1184,51 +1226,77 @@ class MainWindow(QMainWindow):
         if self._stop_btn is not None and self._genome_map_thread is None and self._benchmark_thread is None:
             self._stop_btn.setEnabled(False)
 
+    def _set_status_file_link(self, path: Path | None) -> None:
+        if path is None:
+            self._status_linked_file = None
+            self._status_file_link.hide()
+            self._update_status()
+            return
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            self._status_linked_file = None
+            self._status_file_link.hide()
+            self._update_status()
+            return
+        self._status_linked_file = resolved
+        safe_name = resolved.name.replace("&", "&amp;").replace("<", "&lt;")
+        self._status_file_link.setText(f'<a href="reveal">{safe_name}</a>')
+        self._status_file_link.setToolTip(f"Show in file manager\n{resolved}")
+        self.statusBar().clearMessage()
+        self._status_file_link.show()
+
+    def _on_status_file_link_activated(self, _href: str) -> None:
+        if self._status_linked_file is not None:
+            reveal_in_file_manager(self._status_linked_file)
+
     def _set_status_message(self, message: str, timeout: int = 0) -> None:
         if self._job_running:
+            return
+        if self._status_linked_file is not None:
             return
         self.statusBar().showMessage(message, timeout)
 
     def _build_dock_panels(self) -> None:
-        folders_panel = QWidget()
-        folders_layout = QVBoxLayout(folders_panel)
-        folders_layout.setContentsMargins(6, 4, 6, 4)
-        folders_layout.setSpacing(2)
-        folders_layout.addWidget(self._folder_tree, stretch=1)
-        self._folder_tree.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
-        )
-        left_btns = QHBoxLayout()
-        left_btns.setContentsMargins(0, 0, 0, 0)
-        left_btns.setSpacing(4)
+        browser_panel = QWidget()
+        browser_panel.setObjectName("BrowserPanel")
+        browser_layout = QVBoxLayout(browser_panel)
+        browser_layout.setContentsMargins(6, 4, 6, 4)
+        browser_layout.setSpacing(4)
+
+        folder_btn_row = QHBoxLayout()
+        folder_btn_row.setContentsMargins(0, 0, 0, 0)
+        folder_btn_row.setSpacing(4)
         add_btn = QPushButton("Add Folder")
+        add_btn.setObjectName("BrowserPanelButton")
         add_btn.clicked.connect(self._pick_and_add_folder)
         create_btn = QPushButton("Create Folder")
+        create_btn.setObjectName("BrowserPanelButton")
         create_btn.clicked.connect(self._create_folder)
         folder_btn_h = 22
         add_btn.setMaximumHeight(folder_btn_h)
         create_btn.setMaximumHeight(folder_btn_h)
-        left_btns.addWidget(add_btn)
-        left_btns.addWidget(create_btn)
-        folders_layout.addLayout(left_btns)
-
-        files_panel = QWidget()
-        files_layout = QVBoxLayout(files_panel)
-        files_layout.setContentsMargins(6, 4, 6, 4)
-        files_layout.setSpacing(2)
+        folder_btn_row.addWidget(add_btn)
+        folder_btn_row.addWidget(create_btn)
+        folder_btn_row.addStretch(1)
+        browser_layout.addLayout(folder_btn_row)
 
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
         filter_row.setSpacing(4)
+
+        self._folder_nav = FolderNavigationBar(browser_panel)
+        self._folder_nav.set_roots_provider(self._workspace_root_folders)
+        self._folder_nav.navigate_requested.connect(self._on_folder_nav_requested)
+        filter_row.addWidget(self._folder_nav)
+
         self._file_filter = QLineEdit()
         self._file_filter.setObjectName("FileFilter")
         self._file_filter.setPlaceholderText("Filter by name…")
         self._file_filter.setClearButtonEnabled(True)
         self._file_filter.textChanged.connect(self._apply_file_filter)
         self._file_sort_combo = QComboBox()
-        self._file_sort_combo.setObjectName("FileSortCombo")
-        self._file_sort_combo.setToolTip("Sort order for files in the current folder")
+        self._file_sort_combo.setToolTip("Sort order for files in the selected folder")
         self._file_sort_combo.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToContents,
         )
@@ -1264,7 +1332,7 @@ class MainWindow(QMainWindow):
         if sort_view is not None:
             sort_view.setMinimumWidth(sort_min_w)
         refresh_btn = QPushButton("Refresh")
-        refresh_btn.setObjectName("FileRefreshButton")
+        refresh_btn.setObjectName("BrowserPanelButton")
         refresh_btn.setToolTip("Reload file list (F5)")
         refresh_btn.clicked.connect(self._refresh_current_folder)
         compact_h = 26
@@ -1275,99 +1343,124 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(self._file_filter, stretch=1)
         filter_row.addWidget(self._file_sort_combo)
         filter_row.addWidget(refresh_btn)
+        browser_layout.addLayout(filter_row)
 
-        files_layout.addLayout(filter_row)
-
-        from teviewer.widgets.preview_controls import PreviewZoomBar, attach_preview_zoom_to_dock_title
+        from teviewer.widgets.preview_controls import (
+            AnnotationZoomBar,
+            PreviewHeaderBar,
+            PreviewZoomBar,
+        )
 
         self._preview_host = QWidget()
+        self._preview_host.setObjectName("PreviewHost")
+        self._preview_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         preview_layout = QVBoxLayout(self._preview_host)
-        preview_layout.setContentsMargins(4, 2, 4, 2)
-        preview_layout.setSpacing(2)
-        self._preview_zoom_bar = PreviewZoomBar(show_heading=False)
-        self._preview_tabs = PreviewTabWidget(zoom_bar=self._preview_zoom_bar)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(0)
+        self._preview_zoom_bar = PreviewZoomBar(self._preview_host)
+        self._annotation_zoom_bar = AnnotationZoomBar(self._preview_host)
+        self._preview_header = PreviewHeaderBar(
+            self._preview_zoom_bar,
+            self._preview_host,
+            annotation_zoom_bar=self._annotation_zoom_bar,
+        )
+        preview_layout.addWidget(self._preview_header)
+        self._preview_tabs = PreviewTabWidget(
+            zoom_bar=self._preview_zoom_bar,
+            header_bar=self._preview_header,
+            annotation_zoom_bar=self._annotation_zoom_bar,
+        )
+        self._preview_tabs.setObjectName("PreviewTabs")
         set_genome_path_provider(self._genome_path_resolved)
         set_igv_extra_annotations_provider(self._igv_extra_annotations_for_alignment)
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         preview_layout.addWidget(self._preview_tabs, stretch=1)
         self._preview_zoom_bar.setVisible(True)
-        self._preview_host.setMinimumHeight(200)
+        self._preview_host.setMinimumHeight(120)
 
-        files_layout.addWidget(self._file_list, stretch=1)
+        self._browser_files_preview_split = QSplitter(Qt.Orientation.Vertical)
+        self._browser_files_preview_split.setObjectName("BrowserFilesPreviewSplit")
+        self._browser_files_preview_split.addWidget(self._file_list)
+        self._browser_files_preview_split.addWidget(self._preview_host)
+        self._browser_files_preview_split.setStretchFactor(0, 2)
+        self._browser_files_preview_split.setStretchFactor(1, 3)
+        self._browser_files_preview_split.setSizes(list(_BROWSER_FILES_PREVIEW_SPLIT))
+
+        self._browser_main_split = QSplitter(Qt.Orientation.Horizontal)
+        self._browser_main_split.setObjectName("BrowserMainSplit")
+
+        folder_side = QWidget()
+        folder_side_layout = QVBoxLayout(folder_side)
+        folder_side_layout.setContentsMargins(0, 0, 0, 0)
+        folder_side_layout.setSpacing(0)
+        folder_side_layout.addWidget(self._folder_tree, stretch=1)
+        folder_side.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Expanding,
+        )
+
+        self._browser_main_split.addWidget(folder_side)
+        self._browser_main_split.addWidget(self._browser_files_preview_split)
+        self._browser_main_split.setCollapsible(0, False)
+        self._browser_main_split.setCollapsible(1, False)
+        self._browser_files_preview_split.setCollapsible(0, False)
+        self._browser_files_preview_split.setCollapsible(1, False)
+        self._browser_main_split.setSizes(
+            [_BROWSER_FOLDER_TREE_WIDTH, _BROWSER_DOCK_WIDTH - _BROWSER_FOLDER_TREE_WIDTH]
+        )
+        for splitter in (self._browser_main_split, self._browser_files_preview_split):
+            splitter.setHandleWidth(1)
+
+        self._folder_tree.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Expanding,
+        )
         self._file_list.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
+        browser_layout.addWidget(self._browser_main_split, stretch=1)
 
-        central = QWidget()
-        central.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        central.setMaximumSize(0, 0)
-        self.setCentralWidget(central)
-
-        self._dock_folders = self._make_dock("Folders", folders_panel, fixed=False)
-        self._dock_files = self._make_dock("Files", files_panel, fixed=False)
-        self._dock_preview = self._make_dock("Preview", self._preview_host, fixed=False)
-        attach_preview_zoom_to_dock_title(self._dock_preview, self._preview_zoom_bar)
-        self._dock_files.setMinimumWidth(280)
-        self._dock_preview.setMinimumWidth(360)
-
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_folders)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_files)
-        self.splitDockWidget(self._dock_folders, self._dock_files, Qt.Orientation.Vertical)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock_preview)
-        self._apply_default_dock_sizes()
-
-    def _make_dock(self, title: str, widget: QWidget, *, fixed: bool) -> QDockWidget:
-        dock = QDockWidget(title, self)
-        dock.setObjectName(f"dock_{title.lower()}")
-        dock.setWidget(widget)
-        dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea
-            | Qt.DockWidgetArea.RightDockWidgetArea
-            | Qt.DockWidgetArea.TopDockWidgetArea
-            | Qt.DockWidgetArea.BottomDockWidgetArea
+        self._browser_panel = browser_panel
+        browser_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
         )
-        if fixed:
-            dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
-        else:
-            dock.setFeatures(
-                QDockWidget.DockWidgetFeature.DockWidgetMovable
-                | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-                | QDockWidget.DockWidgetFeature.DockWidgetClosable
-            )
-        return dock
+        self.setCentralWidget(browser_panel)
+        self._dock_folders = None
+        self._dock_preview = None
 
-    def _apply_default_dock_sizes(self) -> None:
-        if self._dock_folders and self._dock_files:
-            self.resizeDocks(
-                [self._dock_folders, self._dock_files],
-                [220, 320],
-                Qt.Orientation.Vertical,
-            )
-        if self._dock_files and self._dock_preview:
-            self.resizeDocks(
-                [self._dock_files, self._dock_preview],
-                [280, 1120],
-                Qt.Orientation.Horizontal,
-            )
+    def _apply_default_browser_layout(self, *, force: bool = False) -> None:
+        if not hasattr(self, "_browser_main_split"):
+            return
+        host = self._browser_panel or self.centralWidget()
+        width = host.width() if host is not None else self.width()
+        if width <= 0:
+            width = _BROWSER_DOCK_WIDTH
+        folder_w = min(
+            max(_BROWSER_FOLDER_TREE_WIDTH, width // 5),
+            max(_BROWSER_FOLDER_TREE_WIDTH + 40, width // 3),
+        )
+        main_sizes = self._browser_main_split.sizes()
+        if force or not main_sizes or sum(main_sizes) <= 1:
+            self._browser_main_split.setSizes([folder_w, max(200, width - folder_w)])
+        files_sizes = self._browser_files_preview_split.sizes()
+        if force or not files_sizes or sum(files_sizes) <= 1:
+            self._browser_files_preview_split.setSizes(list(_BROWSER_FILES_PREVIEW_SPLIT))
         self._ensure_preview_visible()
 
-    def _reset_dock_layout(self) -> None:
-        for dock in (self._dock_folders, self._dock_files, self._dock_preview):
-            if dock is None:
-                continue
-            dock.setFloating(False)
-            self.removeDockWidget(dock)
-        if self._dock_folders and self._dock_files and self._dock_preview:
-            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_folders)
-            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_files)
-            self.splitDockWidget(self._dock_folders, self._dock_files, Qt.Orientation.Vertical)
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock_preview)
-            self._dock_folders.show()
-            self._dock_files.show()
-            self._ensure_preview_visible()
-            self._apply_default_dock_sizes()
+    def _reset_browser_layout(self) -> None:
+        settings = QSettings()
+        settings.beginGroup("mainwindow")
+        settings.remove("browser_main_split")
+        settings.remove("browser_files_preview_split")
+        settings.endGroup()
+        self._purge_legacy_docks()
+        if self._browser_panel is not None:
+            self._browser_panel.show()
+        self._apply_default_browser_layout(force=True)
+        self._ensure_preview_visible()
 
     @staticmethod
     def _settings_menu_hint() -> str:
@@ -1379,49 +1472,69 @@ class MainWindow(QMainWindow):
     def _genome_menu_hint() -> str:
         return "File → Define genome"
 
-    def _populate_align_menu(self, menu: QMenu) -> None:
-        menu.addAction("Align with default parameters", self._run_align_default)
-        menu.addAction(
-            "Align all selected in one combined MSA",
-            self._align_selected_combined,
-        )
-        menu.addSeparator()
+    def _populate_align_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Align with default parameters", self._run_align_default)
+            menu.addAction(
+                "Align all selected in one combined MSA",
+                self._align_selected_combined,
+            )
+            menu.addSeparator()
+        else:
+            menu.addAction(
+                "Align all selected in one combined MSA",
+                self._align_selected_combined,
+            )
+            menu.addSeparator()
         menu.addAction("Change alignment parameters", self._modify_align_parameters)
 
-    def _populate_blast_menu(self, menu: QMenu) -> None:
-        menu.addAction("Blast with default parameters", self._run_blast)
-        menu.addSeparator()
+    def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Blast with default parameters", self._run_blast)
+            menu.addSeparator()
         menu.addAction("Change blast parameters", self._change_blast_parameters)
 
-    def _populate_te_visualization_menu(self, menu: QMenu) -> None:
-        menu.addAction("TE density plot", self._open_te_density_plot_dialog)
+    def _populate_te_visualization_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("TE density plot", self._open_te_density_plot_dialog)
         menu.addAction("TE divergence plot", self._open_te_divergence_plot_dialog)
 
-    def _populate_benchmarking_menu(self, menu: QMenu) -> None:
-        menu.addAction("Confusion matrix benchmarker", self._open_confusion_matrix_benchmark)
+    def _populate_benchmarking_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Confusion matrix benchmarker", self._open_confusion_matrix_benchmark)
         menu.addAction("TE library benchmarker", self._open_te_library_benchmark)
 
-    def _populate_extend_menu(self, menu: QMenu) -> None:
-        menu.addAction("Extend with default parameters", self._run_extend)
-        menu.addAction("Extend with different distances", self._extend_with_different_distances)
-        menu.addSeparator()
+    def _populate_extend_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Extend with default parameters", self._run_extend)
+            menu.addAction("Extend with different distances", self._extend_with_different_distances)
+            menu.addSeparator()
+        else:
+            menu.addAction("Extend with different distances", self._extend_with_different_distances)
+            menu.addSeparator()
         menu.addAction("Change extension parameters", self._modify_extend_parameters)
 
-    def _populate_tsd_search_menu(self, menu: QMenu) -> None:
-        menu.addAction("TSD search with default parameters", self._run_tsd_search)
-        menu.addSeparator()
+    def _populate_tsd_search_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("TSD search with default parameters", self._run_tsd_search)
+            menu.addSeparator()
         menu.addAction("Change TSD search parameters", self._modify_tsd_search_parameters)
 
-    def _populate_teaid_menu(self, menu: QMenu) -> None:
-        menu.addAction("TEAid with default parameters", self._run_teaid)
-        menu.addSeparator()
+    def _populate_teaid_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("TEAid with default parameters", self._run_teaid)
+            menu.addSeparator()
         menu.addAction("Change TEAid parameters", self._modify_teaid_parameters)
 
-    def _populate_msa_clean_menu(self, menu: QMenu) -> None:
-        menu.addAction("MSA clean with default parameters", self._run_default_msa_clean)
-        menu.addSeparator()
-        menu.addAction("Change MSA clean parameters", self._modify_msa_clean_parameters)
-        menu.addSeparator()
+    def _populate_msa_clean_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("MSA clean with default parameters", self._run_default_msa_clean)
+            menu.addSeparator()
+            menu.addAction("Change MSA clean parameters", self._modify_msa_clean_parameters)
+            menu.addSeparator()
+        else:
+            menu.addAction("Change MSA clean parameters", self._modify_msa_clean_parameters)
+            menu.addSeparator()
         menu.addAction(
             "Remove gappy columns",
             lambda: self._apply_msa_clean("msa_clean_gappy"),
@@ -1440,13 +1553,15 @@ class MainWindow(QMainWindow):
             "msa_clean_row_col",
         )
 
-    def _populate_consensus_menu(self, menu: QMenu) -> None:
-        menu.addAction("Consensus with default parameters", self._run_consensus)
-        menu.addSeparator()
+    def _populate_consensus_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Consensus with default parameters", self._run_consensus)
+            menu.addSeparator()
         menu.addAction("Change consensus parameters", self._modify_consensus_parameters)
 
-    def _populate_flexidot_menu(self, menu: QMenu) -> None:
-        menu.addAction("Flexidot with default parameters", self._run_flexidot_combined)
+    def _populate_flexidot_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Flexidot with default parameters", self._run_flexidot_combined)
         menu.addAction(
             "Run for each file separately",
             lambda: self._apply_function(
@@ -1503,14 +1618,10 @@ class MainWindow(QMainWindow):
         self._populate_plugins_menu_actions()
 
         view_menu = self.menuBar().addMenu("&View")
-        for dock in (self._dock_folders, self._dock_files, self._dock_preview):
-            if dock is not None:
-                view_menu.addAction(dock.toggleViewAction())
-        view_menu.addSeparator()
-        view_menu.addAction("Reset panel &layout", self._reset_dock_layout)
+        view_menu.addAction("Reset panel &layout", self._reset_browser_layout)
 
         help_menu = self.menuBar().addMenu("&Help")
-        help_menu.addAction("&About TEviewer", self._show_about)
+        help_menu.addAction(f"&About {APP_DISPLAY_NAME}", self._show_about)
         self._rebuild_top_toolbar()
 
     def _install_shortcuts(self) -> None:
@@ -1522,6 +1633,32 @@ class MainWindow(QMainWindow):
             shortcut = QShortcut(key, self._file_list)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(self._delete_selected_shortcut)
+        for key, handler in (
+            (QKeySequence.StandardKey.Copy, self._copy_files_shortcut),
+            (QKeySequence.StandardKey.Cut, self._cut_files_shortcut),
+            (QKeySequence.StandardKey.Paste, self._paste_files_shortcut),
+        ):
+            shortcut = QShortcut(key, self._file_list)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(handler)
+        paste_tree = QShortcut(QKeySequence.StandardKey.Paste, self._folder_tree)
+        paste_tree.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        paste_tree.activated.connect(self._paste_files_shortcut)
+
+    def _copy_files_shortcut(self) -> None:
+        paths = self._selected_files()
+        if paths:
+            self._copy_files_to_clipboard(paths)
+
+    def _cut_files_shortcut(self) -> None:
+        paths = self._selected_files()
+        if paths:
+            self._cut_files_to_clipboard(paths)
+
+    def _paste_files_shortcut(self) -> None:
+        if self._current_folder is None:
+            return
+        self._paste_files_to_folder(self._current_folder)
 
     def _delete_selected_shortcut(self) -> None:
         paths = self._selected_files()
@@ -1548,7 +1685,7 @@ class MainWindow(QMainWindow):
         self._browser_panel_font.setBold(False)
         if hasattr(self, "_folder_tree"):
             self._folder_tree.setFont(self._browser_panel_font)
-            self._folder_tree.resizeColumnToContents(0)
+            self._sync_folder_tree_placeholders()
         if hasattr(self, "_file_list"):
             self._file_list.setFont(self._browser_panel_font)
 
@@ -1604,6 +1741,36 @@ class MainWindow(QMainWindow):
             self._job_toolbar_actions.append(action)
         return action
 
+    def _add_toolbar_plain_button(
+        self,
+        bar,
+        text: str,
+        slot,
+        *,
+        job_action: bool = True,
+        tooltip: str = "",
+    ) -> QToolButton:
+        """Text-only toolbar button added as a widget (avoids macOS QAction separator dots)."""
+        btn = QToolButton(bar)
+        btn.setText(text)
+        if tooltip:
+            btn.setToolTip(tooltip)
+        self._style_toolbar_button(btn)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        btn.clicked.connect(slot)
+        bar.addWidget(btn)
+        if job_action:
+            self._job_toolbar_actions.append(btn)
+        return btn
+
+    def _add_toolbar_spacer(self, bar: QToolBar, width: int = 10) -> None:
+        """Invisible gap between toolbar groups (no dot or vertical rule)."""
+        spacer = QWidget(bar)
+        spacer.setFixedWidth(width)
+        spacer.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        spacer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        bar.addWidget(spacer)
+
     def _add_toolbar_text_menu_button(
         self,
         bar,
@@ -1612,9 +1779,9 @@ class MainWindow(QMainWindow):
         menu_builder,
         *,
         tooltip: str = "",
-        menu_popup: bool = False,
+        run_label: str | None = None,
     ) -> QToolButton:
-        """Text-only toolbar button; click or right-click opens a menu when configured."""
+        """Text-only toolbar button; click opens a menu with the default action first."""
         btn = QToolButton(bar)
         btn.setText(text)
         if tooltip:
@@ -1622,23 +1789,13 @@ class MainWindow(QMainWindow):
         self._style_toolbar_button(btn)
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
 
-        if menu_popup:
-            def _show_menu_on_click() -> None:
-                menu = QMenu(btn)
-                menu_builder(menu)
-                menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+        def _show_menu_on_click() -> None:
+            menu = QMenu(btn)
+            menu.addAction(run_label or text, default_slot)
+            menu_builder(menu, skip_default=True)
+            menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
-            btn.clicked.connect(_show_menu_on_click)
-        else:
-            btn.clicked.connect(default_slot)
-            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-
-            def _show_menu(position) -> None:
-                menu = QMenu(btn)
-                menu_builder(menu)
-                menu.exec(btn.mapToGlobal(position))
-
-            btn.customContextMenuRequested.connect(_show_menu)
+        btn.clicked.connect(_show_menu_on_click)
 
         bar.addWidget(btn)
         self._job_toolbar_actions.append(btn)
@@ -1656,6 +1813,8 @@ class MainWindow(QMainWindow):
             | Qt.ToolBarArea.RightToolBarArea
         )
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        bar.setMovable(False)
+        bar.setFloatable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
         self._functions_toolbar = bar
 
@@ -1665,8 +1824,16 @@ class MainWindow(QMainWindow):
 
     def _add_toolbar_tool(self, bar, tool_id: str) -> None:
         tip = _TOOLBAR_TOOLTIPS.get(tool_id, "")
-        if tool_id == "_sep1":
-            bar.addSeparator()
+        if tool_id.startswith("_sep"):
+            self._add_toolbar_spacer(bar, width=11 if tool_id == "_sep_plugins" else 7)
+        elif tool_id == "define_genome":
+            self._add_toolbar_plain_button(
+                bar,
+                "Define genome",
+                self._open_set_genome,
+                job_action=False,
+                tooltip=tip,
+            )
         elif tool_id == "aliview":
             self._add_toolbar_text_action(
                 bar,
@@ -1686,7 +1853,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "blast":
             self._add_toolbar_text_menu_button(
                 bar,
-                "Blast",
+                "BLAST",
                 self._run_blast,
                 self._populate_blast_menu,
                 tooltip=tip,
@@ -1698,7 +1865,7 @@ class MainWindow(QMainWindow):
                 self._open_te_density_plot_dialog,
                 self._populate_te_visualization_menu,
                 tooltip=tip,
-                menu_popup=True,
+                run_label="TE density plot",
             )
         elif tool_id == "te_benchmark":
             self._add_toolbar_text_menu_button(
@@ -1707,7 +1874,7 @@ class MainWindow(QMainWindow):
                 self._open_confusion_matrix_benchmark,
                 self._populate_benchmarking_menu,
                 tooltip=tip,
-                menu_popup=True,
+                run_label="Confusion matrix benchmark",
             )
         elif tool_id == "te_divergence_plot":
             self._add_toolbar_text_action(
@@ -1756,8 +1923,21 @@ class MainWindow(QMainWindow):
                 self._populate_flexidot_menu,
                 tooltip=tip,
             )
-        elif tool_id == "_sep_plugins":
-            bar.addSeparator()
+        elif tool_id == "tsd_search":
+            self._add_toolbar_text_menu_button(
+                bar,
+                "TSD search",
+                self._run_tsd_search,
+                self._populate_tsd_search_menu,
+                tooltip=tip,
+            )
+        elif tool_id == "te_annotation":
+            self._add_toolbar_text_action(
+                bar,
+                "TE annotation",
+                self._run_te_annotation,
+                tooltip=tip,
+            )
         elif tool_id.startswith("plugin:"):
             plugin_id = tool_id[len("plugin:") :]
             plugin = self._plugin_registry.get(plugin_id)
@@ -1782,7 +1962,7 @@ class MainWindow(QMainWindow):
                 continue
             path = Path(str(raw))
             if path.suffix.lower() in _FASTA_SUFFIXES:
-                item.setSelected(True)
+                item.setChecked(True)
                 selected += 1
         self._set_status_message(f"Selected {selected} FASTA file(s)", 4000)
 
@@ -1964,10 +2144,6 @@ class MainWindow(QMainWindow):
             plugin_registry=self._plugin_registry,
             toolbar_order=self._toolbar_order,
         )
-        if self._preview_tabs is not None:
-            dialog.colorBlindToggled.connect(
-                lambda _checked: self._preview_tabs.refresh_nucleotide_color_scheme()
-            )
         if dialog.exec():
             self._project = dialog.apply_to_project()
             self._persist_workspace()
@@ -2031,7 +2207,10 @@ class MainWindow(QMainWindow):
                             seen.add(key)
                             expanded.append(path)
             for index in range(item.childCount()):
-                walk(item.child(index))
+                child = item.child(index)
+                if self._is_lazy_folder_placeholder(child):
+                    continue
+                walk(child)
 
         for index in range(self._folder_tree.topLevelItemCount()):
             walk(self._folder_tree.topLevelItem(index))
@@ -2056,6 +2235,8 @@ class MainWindow(QMainWindow):
             def collapse_children(item: QTreeWidgetItem) -> None:
                 for child_index in range(item.childCount()):
                     child = item.child(child_index)
+                    if self._is_lazy_folder_placeholder(child):
+                        continue
                     child.setExpanded(False)
                     collapse_children(child)
 
@@ -2069,6 +2250,40 @@ class MainWindow(QMainWindow):
         finally:
             self._folder_tree_restoring = False
             self._folder_tree.blockSignals(False)
+        self._populate_expanded_folder_tree_items(ordered if folders else None)
+
+    def _populate_expanded_folder_tree_items(self, folders: list[Path] | None) -> None:
+        def needs_populate(item: QTreeWidgetItem) -> bool:
+            if item.childCount() == 0:
+                return True
+            return item.childCount() == 1 and self._is_lazy_folder_placeholder(item.child(0))
+
+        def populate_if_needed(item: QTreeWidgetItem) -> None:
+            if not item.isExpanded():
+                return
+            raw = item.data(0, ROLE_PATH)
+            if not raw:
+                return
+            folder = Path(str(raw)).expanduser().resolve()
+            if folder.is_dir() and self._folder_has_subfolders(folder) and needs_populate(item):
+                self._populate_folder_tree_children(item)
+
+        def walk(item: QTreeWidgetItem) -> None:
+            populate_if_needed(item)
+            for index in range(item.childCount()):
+                child = item.child(index)
+                if self._is_lazy_folder_placeholder(child):
+                    continue
+                walk(child)
+
+        if folders:
+            for folder in folders:
+                item = self._find_tree_item_for_path(folder)
+                if item is not None:
+                    walk(item)
+            return
+        for index in range(self._folder_tree.topLevelItemCount()):
+            walk(self._folder_tree.topLevelItem(index))
 
     def _persist_workspace(self) -> None:
         roots = self._collect_root_folders()
@@ -2097,8 +2312,8 @@ class MainWindow(QMainWindow):
                 select=False,
                 expand_root=False,
             )
-        self._strip_lazy_folder_placeholders()
         self._apply_expanded_folders(saved_expanded)
+        self._sync_folder_tree_placeholders()
         if saved_last is not None:
             self._saved_last_folder = saved_last
         elif roots:
@@ -2115,6 +2330,36 @@ class MainWindow(QMainWindow):
 
         for index in range(self._folder_tree.topLevelItemCount()):
             walk(self._folder_tree.topLevelItem(index))
+
+    def _add_lazy_folder_placeholder(self, item: QTreeWidgetItem) -> None:
+        if item.isExpanded():
+            return
+        if item.childCount() > 0:
+            if item.childCount() == 1 and self._is_lazy_folder_placeholder(item.child(0)):
+                return
+            return
+        placeholder = QTreeWidgetItem([""])
+        placeholder.setData(0, ROLE_LAZY_PLACEHOLDER, True)
+        placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.addChild(placeholder)
+
+    def _sync_folder_tree_placeholders(self) -> None:
+        def walk(item: QTreeWidgetItem) -> None:
+            raw = item.data(0, ROLE_PATH)
+            if raw:
+                folder = Path(str(raw)).expanduser().resolve()
+                if folder.is_dir():
+                    self._set_folder_expandable(item, folder)
+            for index in range(item.childCount()):
+                child = item.child(index)
+                if self._is_lazy_folder_placeholder(child):
+                    continue
+                walk(child)
+
+        for index in range(self._folder_tree.topLevelItemCount()):
+            walk(self._folder_tree.topLevelItem(index))
+        self._sync_folder_tree_icons()
+        self._sync_folder_tree_labels()
 
     def _apply_startup_folder(self) -> None:
         folder = self._saved_last_folder
@@ -2154,28 +2399,54 @@ class MainWindow(QMainWindow):
             item = self._folder_tree.topLevelItem(i)
             if Path(str(item.data(0, ROLE_PATH))) == folder:
                 if select:
-                    self._folder_tree.setCurrentItem(item)
+                    self._folder_tree.select_folder_item(item)
                     self._on_folder_selected(folder)
                 return
-        root = QTreeWidgetItem([folder.name])
+        root = QTreeWidgetItem([self._folder_tree_label(folder)])
         root.setData(0, ROLE_PATH, str(folder))
         root.setToolTip(0, str(folder))
+        root.setIcon(0, browser_folder_icon(self._folder_tree, open_=expand_root))
         apply_folder_item_color(root, folder)
         self._folder_tree.addTopLevelItem(root)
-        self._populate_subfolders(folder, root)
         self._set_folder_expandable(root, folder)
-        self._folder_tree.resizeColumnToContents(0)
-        root.setExpanded(expand_root)
+        if expand_root:
+            root.setExpanded(True)
+            self._populate_folder_tree_children(root)
         if select:
-            self._folder_tree.setCurrentItem(root)
+            self._folder_tree.select_folder_item(root)
             self._on_folder_selected(folder)
         if self._folder_tree.topLevelItemCount() == 1 and self._project.input_dir is None:
             self._project.input_dir = folder
         if persist:
             self._persist_workspace()
 
+    def _sync_folder_item_icon(self, item: QTreeWidgetItem) -> None:
+        if self._is_lazy_folder_placeholder(item):
+            return
+        item.setIcon(
+            0,
+            browser_folder_icon(self._folder_tree, open_=item.isExpanded()),
+        )
+
+    def _sync_folder_tree_icons(self) -> None:
+        def walk(item: QTreeWidgetItem) -> None:
+            self._sync_folder_item_icon(item)
+            for index in range(item.childCount()):
+                child = item.child(index)
+                if self._is_lazy_folder_placeholder(child):
+                    continue
+                walk(child)
+
+        for index in range(self._folder_tree.topLevelItemCount()):
+            walk(self._folder_tree.topLevelItem(index))
+
     def _on_folder_tree_expanded(self, item: QTreeWidgetItem) -> None:
+        self._sync_folder_item_icon(item)
         self._populate_folder_tree_children(item)
+        self._schedule_persist_workspace()
+
+    def _on_folder_tree_collapsed(self, item: QTreeWidgetItem) -> None:
+        self._sync_folder_item_icon(item)
         self._schedule_persist_workspace()
 
     @staticmethod
@@ -2215,6 +2486,42 @@ class MainWindow(QMainWindow):
             return False
         return False
 
+    def _files_for_folder(self, folder: Path) -> list[Path]:
+        try:
+            return [
+                p
+                for p in folder.iterdir()
+                if p.is_file()
+                and not p.name.startswith(".")
+                and not is_teviewer_hits_cache_file(p)
+                and not is_sequence_map_hidden_file(p)
+                and not is_flexidot_extra_plot_file(p)
+            ]
+        except OSError:
+            return []
+
+    def _folder_tree_label(self, folder: Path) -> str:
+        folder = folder.expanduser().resolve()
+        return f"{folder.name} ({len(self._files_for_folder(folder))})"
+
+    def _set_folder_tree_item_label(self, item: QTreeWidgetItem, folder: Path) -> None:
+        item.setText(0, self._folder_tree_label(folder))
+
+    def _sync_folder_tree_labels(self) -> None:
+        def walk(item: QTreeWidgetItem) -> None:
+            if self._is_lazy_folder_placeholder(item):
+                return
+            raw = item.data(0, ROLE_PATH)
+            if raw:
+                folder = Path(str(raw)).expanduser().resolve()
+                if folder.is_dir():
+                    self._set_folder_tree_item_label(item, folder)
+            for index in range(item.childCount()):
+                walk(item.child(index))
+
+        for index in range(self._folder_tree.topLevelItemCount()):
+            walk(self._folder_tree.topLevelItem(index))
+
     def _populate_folder_tree_children(self, item: QTreeWidgetItem) -> None:
         if item.childCount() > 0:
             if item.childCount() == 1 and self._is_lazy_folder_placeholder(item.child(0)):
@@ -2234,20 +2541,31 @@ class MainWindow(QMainWindow):
             item.setChildIndicatorPolicy(
                 QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
             )
+            if item.isExpanded():
+                if item.childCount() == 0 or (
+                    item.childCount() == 1
+                    and self._is_lazy_folder_placeholder(item.child(0))
+                ):
+                    self._populate_folder_tree_children(item)
+            else:
+                self._add_lazy_folder_placeholder(item)
         else:
+            if item.childCount() == 1 and self._is_lazy_folder_placeholder(item.child(0)):
+                item.removeChild(item.child(0))
             item.setChildIndicatorPolicy(
                 QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless
             )
 
     def _populate_subfolders(self, folder: Path, parent: QTreeWidgetItem) -> None:
         for child in self._list_subfolders(folder):
-            item = QTreeWidgetItem([child.name])
+            item = QTreeWidgetItem([self._folder_tree_label(child)])
             item.setData(0, ROLE_PATH, str(child))
             item.setToolTip(0, str(child))
+            item.setIcon(0, browser_folder_icon(self._folder_tree, open_=False))
             apply_folder_item_color(item, child)
             parent.addChild(item)
             self._set_folder_expandable(item, child)
-        self._folder_tree.resizeColumnToContents(0)
+        self._sync_folder_tree_placeholders()
 
     def _ensure_folder_tree_path(self, folder: Path) -> QTreeWidgetItem | None:
         folder = folder.expanduser().resolve()
@@ -2314,17 +2632,30 @@ class MainWindow(QMainWindow):
             item.removeChild(item.child(0))
         self._populate_subfolders(parent_folder, item)
         item.setExpanded(True)
-        self._folder_tree.resizeColumnToContents(0)
+        self._sync_folder_tree_placeholders()
         if keep_folder is not None:
             keep_item = self._find_tree_item_for_path(keep_folder)
             if keep_item is not None:
-                self._folder_tree.blockSignals(True)
-                self._folder_tree.setCurrentItem(keep_item)
-                self._folder_tree.blockSignals(False)
+                self._folder_tree.select_folder_item(keep_item)
         return item
 
     def _ensure_folder_visible_in_tree(self, folder: Path) -> QTreeWidgetItem | None:
         return self._ensure_folder_tree_path(folder)
+
+    def _workspace_root_folders(self) -> list[Path]:
+        roots: list[Path] = []
+        for index in range(self._folder_tree.topLevelItemCount()):
+            item = self._folder_tree.topLevelItem(index)
+            raw = item.data(0, ROLE_PATH)
+            if not raw:
+                continue
+            path = Path(str(raw)).expanduser().resolve()
+            if path.is_dir():
+                roots.append(path)
+        return roots
+
+    def _on_folder_nav_requested(self, folder: Path, record_history: bool) -> None:
+        self._navigate_to_folder(folder, record_history=record_history)
 
     def _navigate_to_folder(
         self,
@@ -2332,6 +2663,7 @@ class MainWindow(QMainWindow):
         *,
         new_outputs: list[Path] | None = None,
         source_files: list[Path] | None = None,
+        record_history: bool = True,
     ) -> None:
         folder = folder.expanduser().resolve()
         self._ensure_folder_visible_in_tree(folder)
@@ -2341,18 +2673,20 @@ class MainWindow(QMainWindow):
             while parent is not None:
                 parent.setExpanded(True)
                 parent = parent.parent()
-            self._folder_tree.blockSignals(True)
-            self._folder_tree.setCurrentItem(item)
+            self._folder_tree.select_folder_item(item)
             self._folder_tree.scrollToItem(item)
-            self._folder_tree.blockSignals(False)
-        self._populate_file_list(folder, new_outputs=new_outputs, source_files=source_files)
+        self._populate_file_list(
+            folder,
+            new_outputs=new_outputs,
+            source_files=source_files,
+            record_history=record_history,
+        )
 
     def _on_folder_selected(self, folder: Path) -> None:
-        self._populate_file_list(folder)
+        self._populate_file_list(folder, record_history=True)
         self._update_directory_watchers()
         self._persist_workspace()
-        # Do not auto-fill plugin inputs from the current selection when the
-        # folder changes; let explicit Files-panel clicks drive the sync.
+        self._folder_tree.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _refresh_current_folder(self) -> None:
         if self._current_folder and self._current_folder.is_dir():
@@ -2366,9 +2700,6 @@ class MainWindow(QMainWindow):
         resolved = path.expanduser().resolve()
         if resolved.parent != self._current_folder:
             return
-        # Saving annotations should not rebuild the whole folder tree.
-        # But the newly written GFF3 should appear in the Files list immediately,
-        # without the panel jumping to a different folder.
 
         selected_key = str(resolved)
         prev_key: str | None = None
@@ -2378,31 +2709,22 @@ class MainWindow(QMainWindow):
             if prev_path is not None:
                 prev_key = str(prev_path.expanduser().resolve())
 
-        def _find_item_for_key(key: str) -> QListWidgetItem | None:
+        def _find_item_for_key(key: str) -> FileListRow | None:
             for index in range(self._file_list.count()):
                 item = self._file_list.item(index)
                 raw = item.data(ROLE_PATH)
-                if not raw:
-                    continue
-                if str(Path(str(raw)).expanduser().resolve()) == key:
+                if raw and str(Path(str(raw)).expanduser().resolve()) == key:
                     return item
             return None
 
-        found_item = _find_item_for_key(selected_key)
-
         self._file_list.blockSignals(True)
         try:
-            reveal_item: QListWidgetItem | None = None
-            if found_item is not None:
-                reveal_item = found_item
-            else:
-                # Refresh only the current folder's file list so the saved GFF3 shows up.
-                # open_preview=False prevents any preview tab changes.
+            reveal_item = _find_item_for_key(selected_key)
+            if reveal_item is None:
                 self._populate_file_list(self._current_folder, open_preview=False)
                 reveal_item = _find_item_for_key(selected_key)
-                if reveal_item is None and prev_key is not None:
-                    reveal_item = _find_item_for_key(prev_key)
-
+            if reveal_item is None and prev_key is not None:
+                reveal_item = _find_item_for_key(prev_key)
             if reveal_item is not None:
                 self._style_new_output_item(reveal_item)
                 self._reveal_file_list_item(
@@ -2412,13 +2734,18 @@ class MainWindow(QMainWindow):
         finally:
             self._file_list.blockSignals(False)
 
-        # Ensure focus returns to the preview area after saving.
         if not self._file_list.hasFocus():
             QTimer.singleShot(0, self._focus_preview_widget)
 
+    def _focus_preview_widget(self) -> None:
+        if self._preview_tabs is None:
+            return
+        current = self._preview_tabs.currentWidget()
+        if current is not None:
+            current.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _on_dotplot_region_selected(self, payload: object) -> None:
-        """Open (if needed) and jump the Annotation view to the region clicked in a
-        Flexidot dotplot."""
+        """Open (if needed) and jump the Annotation view to the region clicked in a Flexidot dotplot."""
         logger.debug("Go-to: received dotplot region-selected payload: %r", payload)
         if not isinstance(payload, dict):
             return
@@ -2441,24 +2768,14 @@ class MainWindow(QMainWindow):
                 already_open = self._preview_tabs.show_annotation_region_for_sequence(
                     seq, start, end
                 )
-                logger.debug(
-                    "Go-to: seq=%r %d-%d - already-open-tab match: %s",
-                    seq,
-                    start,
-                    end,
-                    already_open,
-                )
                 if already_open:
                     matched.append(f"{seq}:{start}-{end}")
                     continue
                 fasta_path = self._find_fasta_for_sequence_id(seq)
-                logger.debug("Go-to: seq=%r - folder search found: %s", seq, fasta_path)
                 if fasta_path is None:
                     continue
                 self._open_preview_tab(fasta_path)
-                jumped = self._preview_tabs.show_annotation_region_for_sequence(seq, start, end)
-                logger.debug("Go-to: seq=%r - jump after opening tab: %s", seq, jumped)
-                if jumped:
+                if self._preview_tabs.show_annotation_region_for_sequence(seq, start, end):
                     matched.append(f"{seq}:{start}-{end}")
         except Exception:  # noqa: BLE001
             logger.exception("Failed to jump Annotation view for dotplot selection %r", payload)
@@ -2475,8 +2792,7 @@ class MainWindow(QMainWindow):
             )
 
     def _find_fasta_for_sequence_id(self, seq_id: str) -> Path | None:
-        """Find a single-sequence FASTA in the current folder whose record id matches
-        ``seq_id`` (allowing for the sanitization Flexidot applies to special characters)."""
+        """Find a single-sequence FASTA in the current folder whose record id matches seq_id."""
         if not self._current_folder:
             return None
         candidates = self._cached_folder_files or [
@@ -2492,13 +2808,6 @@ class MainWindow(QMainWindow):
             if record_id == seq_id or flexidot_sanitize_name(record_id) == seq_id:
                 return path
         return None
-
-    def _focus_preview_widget(self) -> None:
-        if self._preview_tabs is None:
-            return
-        current = self._preview_tabs.currentWidget()
-        if current is not None:
-            current.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _current_file_sort_mode(self) -> FileSortMode:
         index = self._file_sort_combo.currentIndex()
@@ -2520,7 +2829,7 @@ class MainWindow(QMainWindow):
         if not self._current_folder:
             return
         query = self._file_filter.text().strip().lower()
-        self._file_list.clear()
+        self._file_list.clear_rows()
         visible: list[Path] = []
         for file_path in self._cached_folder_files:
             if query and query not in file_path.name.lower():
@@ -2530,28 +2839,37 @@ class MainWindow(QMainWindow):
         visible = sort_file_paths(visible, self._current_file_sort_mode())
 
         for file_path in visible:
-            item = QListWidgetItem(file_path.name)
-            item.setData(ROLE_PATH, str(file_path))
+            row_item = self._file_list.add_file_row(file_path)
             key = str(file_path.resolve())
             if key in self._highlight_output_keys:
-                self._style_new_output_item(item)
+                self._style_new_output_item(row_item)
             elif key in self._highlight_source_keys:
-                self._style_source_file_item(item)
-            self._file_list.addItem(item)
+                self._style_source_file_item(row_item)
+            elif is_tool_output_file(file_path):
+                self._style_tool_output_item(row_item)
 
         if not visible and self._cached_folder_files:
-            placeholder = QListWidgetItem("(no files match filter)")
-            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
-            self._file_list.addItem(placeholder)
+            self._file_list.add_placeholder_row("(no files match filter)")
         elif not self._cached_folder_files:
-            placeholder = QListWidgetItem("(empty folder)")
-            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
-            self._file_list.addItem(placeholder)
+            self._file_list.add_placeholder_row("(empty folder)")
 
-        self._sync_files_status(len(visible), len(self._cached_folder_files))
+        self._file_list.apply_default_sort()
+        self._file_list.repair_chrome()
 
-    def _sync_files_status(self, visible_count: int, total_count: int) -> None:
+        self._sync_files_status(
+            len(visible),
+            len(self._cached_folder_files),
+        )
+
+    def _sync_files_status(
+        self,
+        visible_count: int,
+        total_count: int,
+    ) -> None:
         if self._job_running or not self._current_folder:
+            return
+        if self._status_linked_file is not None:
+            self.statusBar().clearMessage()
             return
         if visible_count == total_count:
             count = f"{total_count} files"
@@ -2574,6 +2892,7 @@ class MainWindow(QMainWindow):
         new_outputs: list[Path] | None = None,
         source_files: list[Path] | None = None,
         open_preview: bool = True,
+        record_history: bool = True,
     ) -> None:
         target_folder = folder.expanduser().resolve()
         prev_folder = self._current_folder
@@ -2585,18 +2904,10 @@ class MainWindow(QMainWindow):
                 same_folder = False
         self._current_folder = target_folder
         try:
-            self._cached_folder_files = [
-                p
-                for p in self._current_folder.iterdir()
-                if p.is_file()
-                and not p.name.startswith(".")
-                and not is_teviewer_hits_cache_file(p)
-                and not is_sequence_map_hidden_file(p)
-                and not is_flexidot_extra_plot_file(p)
-            ]
+            self._cached_folder_files = self._files_for_folder(self._current_folder)
         except OSError as exc:
             self._cached_folder_files = []
-            self._file_list.clear()
+            self._file_list.clear_rows()
             self._set_status_message(f"Cannot read folder: {exc}", 6000)
             return
 
@@ -2633,6 +2944,17 @@ class MainWindow(QMainWindow):
                     prev_key = str(prev_path.expanduser().resolve())
             prev_scroll = int(self._file_list.verticalScrollBar().value())
 
+        item = self._ensure_folder_visible_in_tree(target_folder)
+        if item is not None:
+            parent = item.parent()
+            while parent is not None:
+                if not parent.isExpanded():
+                    parent.setExpanded(True)
+                    self._populate_folder_tree_children(parent)
+                parent = parent.parent()
+            self._folder_tree.select_folder_item(item)
+            self._folder_tree.scrollToItem(item)
+
         self._file_list.blockSignals(True)
         self._apply_file_filter()
 
@@ -2653,16 +2975,13 @@ class MainWindow(QMainWindow):
                 len(self._cached_folder_files),
             )
 
-        # When refreshing the same folder without new outputs, keep scroll stable.
         if preserve_ui and not highlight_paths:
             if prev_key:
-                match: QListWidgetItem | None = None
+                match: FileListRow | None = None
                 for index in range(self._file_list.count()):
                     item = self._file_list.item(index)
                     raw = item.data(ROLE_PATH)
-                    if not raw:
-                        continue
-                    if str(Path(str(raw)).expanduser().resolve()) == prev_key:
+                    if raw and str(Path(str(raw)).expanduser().resolve()) == prev_key:
                         match = item
                         break
                 if match is not None:
@@ -2674,8 +2993,11 @@ class MainWindow(QMainWindow):
         self._file_list.blockSignals(False)
         if highlight_paths and open_preview:
             self._open_best_preview_path(highlight_paths)
+        if hasattr(self, "_folder_nav"):
+            self._folder_nav.set_folder(self._current_folder, record_history=record_history)
+        self._sync_folder_tree_labels()
 
-    def _style_new_output_item(self, item: QListWidgetItem) -> None:
+    def _style_new_output_item(self, item: FileListRow) -> None:
         item.setBackground(QBrush(_NEW_OUTPUT_BG))
         item.setForeground(QBrush(_NEW_OUTPUT_FG))
         font = item.font()
@@ -2683,7 +3005,7 @@ class MainWindow(QMainWindow):
         item.setFont(font)
         item.setToolTip("New output from the last job")
 
-    def _style_source_file_item(self, item: QListWidgetItem) -> None:
+    def _style_source_file_item(self, item: FileListRow) -> None:
         item.setBackground(QBrush(_SOURCE_BG))
         item.setForeground(QBrush(_SOURCE_FG))
         font = item.font()
@@ -2691,13 +3013,17 @@ class MainWindow(QMainWindow):
         item.setFont(font)
         item.setToolTip("Input file used for the last job")
 
+    def _style_tool_output_item(self, item: FileListRow) -> None:
+        item.setBackground(QBrush(_TOOL_OUTPUT_BG))
+        item.setForeground(QBrush(_TOOL_OUTPUT_FG))
+        item.setToolTip("Tool output file")
+
     def _reveal_file_list_item(
         self,
-        item: QListWidgetItem,
+        item: FileListRow,
         *,
         scroll_hint: QAbstractItemView.ScrollHint = QAbstractItemView.ScrollHint.EnsureVisible,
     ) -> None:
-        """Select a file in the list and scroll it into view (default: bottom)."""
         item.setSelected(True)
         self._file_list.setCurrentItem(item)
         self._file_list.scrollToItem(item, scroll_hint)
@@ -2709,8 +3035,8 @@ class MainWindow(QMainWindow):
         open_preview: bool = True,
     ) -> None:
         path_set = {str(p.expanduser().resolve()) for p in paths}
-        first_item: QListWidgetItem | None = None
-        preferred_item: QListWidgetItem | None = None
+        first_item: FileListRow | None = None
+        preferred_item: FileListRow | None = None
         preferred_rank = 99
         self._file_list.clearSelection()
         for index in range(self._file_list.count()):
@@ -2777,7 +3103,7 @@ class MainWindow(QMainWindow):
                 files.append(path)
         return files
 
-    def _preview_path_from_item(self, item: QListWidgetItem | None) -> Path | None:
+    def _preview_path_from_item(self, item: FileListRow | None) -> Path | None:
         if item is None:
             return None
         raw = item.data(ROLE_PATH)
@@ -2797,40 +3123,13 @@ class MainWindow(QMainWindow):
 
     def _open_file_in_preview(self, path: Path) -> None:
         self._open_preview_tab(path, replace=True)
-        if is_alignment_preview_file(path):
-            annotations = discover_igv_annotations(path)
-            if annotations:
-                names = ", ".join(item.name for item in annotations[:3])
-                extra = f" (+{len(annotations) - 3} more)" if len(annotations) > 3 else ""
-                self._set_status_message(
-                    f"Alignment: {path.name} — igv.js with {names}{extra}",
-                    8000,
-                )
-            else:
-                self._set_status_message(
-                    f"Alignment: {path.name} (igv.js — add .gff/.gff3/.gtf in the same folder)",
-                    8000,
-                )
-        elif is_genome_map_html_file(path):
-            self._set_status_message(
-                f"Genome map: {path.name} (TE density along chromosomes, Mbp axis)",
-                8000,
-            )
-        elif is_divergence_plot_html_file(path):
-            self._set_status_message(
-                f"Divergence plot: {path.name} (not a genome map — X = divergence)",
-                8000,
-            )
-        else:
-            self._set_status_message(path.name, 4000)
+        self._set_status_file_link(path)
 
     def _on_file_current_item_changed(
         self,
-        current: QListWidgetItem | None,
-        _previous: QListWidgetItem | None,
+        current: FileListRow | None,
+        _previous: FileListRow | None,
     ) -> None:
-        # If a non-modal dialog is currently open that expects panel clicks to
-        # fill its path fields, do not steal the click by opening preview.
         if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
             return
         if self._te_viz_input_dialog is not None and self._te_viz_input_dialog.isVisible():
@@ -2839,6 +3138,9 @@ class MainWindow(QMainWindow):
             return
 
         path = self._preview_path_from_item(current)
+        if path is None:
+            self._set_status_file_link(None)
+            return
         if path is not None and is_previewable_file(path):
             QTimer.singleShot(0, lambda p=path: self._open_file_in_preview(p))
 
@@ -2938,16 +3240,7 @@ class MainWindow(QMainWindow):
         self._sync_plugin_run_dialog_from_files()
 
     def _panel_path_for_plugin_sync(self) -> Path | None:
-        items = self._file_list.selectedItems()
-        if not items:
-            current = self._file_list.currentItem()
-            if current is not None:
-                items = [current]
-        for item in items:
-            raw = item.data(ROLE_PATH)
-            if not raw:
-                continue
-            path = Path(str(raw)).expanduser()
+        for path in self._selected_files():
             if path.exists():
                 return path.resolve()
         folder_item = self._folder_tree.currentItem()
@@ -3262,7 +3555,7 @@ class MainWindow(QMainWindow):
             return None
         return hit_path.expanduser().resolve()
 
-    def _on_file_item_clicked(self, item: QListWidgetItem) -> None:
+    def _on_file_item_clicked(self, item: FileListRow) -> None:
         raw = item.data(ROLE_PATH)
         panel_path: Path | None = None
         if raw:
@@ -3278,7 +3571,7 @@ class MainWindow(QMainWindow):
             self._sync_te_viz_dialog_input_from_files(panel_path)
             self._sync_define_database_dialog_from_files(panel_path)
 
-    def _on_file_double_clicked(self, item: QListWidgetItem) -> None:
+    def _on_file_double_clicked(self, item: FileListRow) -> None:
         raw = item.data(ROLE_PATH)
         if not raw:
             return
@@ -3300,6 +3593,34 @@ class MainWindow(QMainWindow):
             return
         for path in fasta:
             self._open_in_sequence_viewer(path)
+
+    def _open_selected_in_text_editor(self, paths: list[Path] | None = None) -> None:
+        selected = list(paths) if paths else self._selected_files()
+        files = [p.expanduser().resolve() for p in selected if p.is_file()]
+        if not files:
+            QMessageBox.information(
+                self,
+                "No file selected",
+                "Select one or more files to open in a text editor.",
+            )
+            return
+        opened = 0
+        failures: list[str] = []
+        for path in files:
+            try:
+                open_in_text_editor(path)
+                opened += 1
+            except (OSError, RuntimeError) as exc:
+                failures.append(f"{path.name}: {exc}")
+        if opened:
+            label = files[0].name if opened == 1 else f"{opened} files"
+            self._set_status_message(f"Opened in text editor: {label}", 5000)
+        if failures:
+            QMessageBox.warning(
+                self,
+                "Text editor",
+                "Some files could not be opened:\n\n" + "\n".join(failures[:6]),
+            )
 
     def _open_in_sequence_viewer(self, path: Path) -> None:
         try:
@@ -3347,7 +3668,12 @@ class MainWindow(QMainWindow):
             initial=self._align_options,
             parent=self,
         )
-        if dialog.exec():
+        accepted = False
+        try:
+            accepted = bool(dialog.exec())
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        if accepted:
             self._align_options = dialog.options()
             save_align_options(self._align_options)
             self._set_status_message(
@@ -3445,21 +3771,24 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_align_failed(self, error: str) -> None:
         backends = alignment_backends()
-        hint = (
-            "Install MAFFT and/or Clustal Omega on PATH.\n"
-            f"Detected: {', '.join(backends) if backends else 'none'}"
-        )
-        QMessageBox.critical(self, "Alignment failed", f"{error}\n\n{hint}")
+        body = error.strip()
+        if "conda install" not in body.lower():
+            detected = ", ".join(backends) if backends else "none"
+            body = f"{body}\n\nDetected on PATH: {detected}"
+        QMessageBox.critical(self, "Alignment failed", body)
 
     def _run_blast(self) -> None:
         self._apply_function("blast", blast_options=self._blast_options)
 
     def _change_blast_parameters(self) -> None:
         dialog = BlastParamsDialog(initial=self._blast_options, parent=self)
-        if dialog.exec():
-            self._blast_options = dialog.options()
-            save_blast_options(self._blast_options)
-            self._set_status_message("Blast parameters updated", 4000)
+        try:
+            if dialog.exec():
+                self._blast_options = dialog.options()
+                save_blast_options(self._blast_options)
+                self._set_status_message("Blast parameters updated", 4000)
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
 
     def _open_blast_genome_map_from_selection(
         self,
@@ -4597,43 +4926,13 @@ class MainWindow(QMainWindow):
         )
 
     def _ensure_preview_dock_attached(self) -> None:
-        dock = self._dock_preview
-        if dock is None:
-            return
-        host = self._preview_host
-        if host is not None and dock.widget() is not host:
-            dock.setWidget(host)
-        if self.dockWidgetArea(dock) == Qt.DockWidgetArea.NoDockWidgetArea:
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-            if self._dock_folders is not None and self._dock_files is not None:
-                self.splitDockWidget(self._dock_folders, self._dock_files, Qt.Orientation.Vertical)
+        if self._preview_host is not None:
+            self._preview_host.show()
 
     def _ensure_preview_visible(self) -> None:
         self._ensure_preview_dock_attached()
-        dock = self._dock_preview
-        if dock is not None:
-            dock.show()
-            dock.raise_()
-            for other in self.tabifiedDockWidgets(dock):
-                if other is not dock:
-                    other.show()
-            dock.raise_()
-        if self._preview_host is not None:
-            self._preview_host.show()
         if self._preview_tabs is not None:
             self._preview_tabs.show()
-        if (
-            self._dock_preview is not None
-            and self._dock_files is not None
-            and not self._dock_preview.isFloating()
-        ):
-            total = self._dock_files.width() + self._dock_preview.width()
-            if total > 200 and self._dock_preview.width() / total < 0.62:
-                self.resizeDocks(
-                    [self._dock_files, self._dock_preview],
-                    [280, 1120],
-                    Qt.Orientation.Horizontal,
-                )
 
     def _open_preview_tab(self, path: Path, *, replace: bool = False) -> None:
         if self._preview_tabs is None:
@@ -4845,7 +5144,7 @@ class MainWindow(QMainWindow):
         else:
             self._current_folder = None
             self._cached_folder_files = []
-            self._file_list.clear()
+            self._file_list.clear_rows()
 
     def _delete_folders(self, folders: list[Path]) -> None:
         targets = self._dedupe_folder_selection(folders)
@@ -4942,7 +5241,7 @@ class MainWindow(QMainWindow):
                     except ValueError:
                         updated = path
                     item.setData(0, ROLE_PATH, str(updated))
-                    item.setText(updated.name)
+                    self._set_folder_tree_item_label(item, updated)
                     item.setToolTip(0, str(updated))
             for index in range(item.childCount()):
                 walk(item.child(index))
@@ -5129,21 +5428,110 @@ class MainWindow(QMainWindow):
         self._on_folder_selected(self._current_folder)
 
     def _copy_files_to_folder(self, target_dir: Path, files: list[Path]) -> None:
+        self._transfer_files(files, target_dir, mode="copy")
+
+    def _clipboard_can_paste(self) -> bool:
+        if self._file_clipboard is None:
+            return False
+        return any(path.is_file() for path in self._file_clipboard.paths)
+
+    def _set_file_clipboard(self, paths: list[Path], *, cut: bool) -> None:
+        files = [p.expanduser().resolve() for p in paths if p.expanduser().resolve().is_file()]
+        if not files:
+            return
+        self._file_clipboard = _FileClipboard(
+            mode="cut" if cut else "copy",
+            paths=files,
+        )
+        verb = "Cut" if cut else "Copied"
+        self._set_status_message(f"{verb} {len(files)} file(s)", 4000)
+
+    def _copy_files_to_clipboard(self, paths: list[Path]) -> None:
+        self._set_file_clipboard(paths, cut=False)
+
+    def _cut_files_to_clipboard(self, paths: list[Path]) -> None:
+        self._set_file_clipboard(paths, cut=True)
+
+    @staticmethod
+    def _unique_path_in_folder(src: Path, dest_dir: Path) -> Path:
+        dest_dir = dest_dir.expanduser().resolve()
+        candidate = dest_dir / src.name
+        if not candidate.exists() or candidate.resolve() == src.resolve():
+            return candidate
+        return _unique_duplicate_path(candidate)
+
+    def _transfer_files(
+        self,
+        files: list[Path],
+        target_dir: Path,
+        *,
+        mode: Literal["copy", "cut"],
+    ) -> None:
+        target_dir = target_dir.expanduser().resolve()
         if not target_dir.is_dir():
             return
-        copied = 0
-        failed = []
-        for src in files:
+
+        created: list[Path] = []
+        sources: list[Path] = []
+        failed: list[str] = []
+
+        for raw in files:
+            src = raw.expanduser().resolve()
+            if not src.is_file():
+                continue
+            dest = self._unique_path_in_folder(src, target_dir)
+            if src.resolve() == dest.resolve():
+                continue
             try:
-                shutil.copy2(src, target_dir / src.name)
-                copied += 1
-            except Exception as exc:  # noqa: BLE001
+                if mode == "cut":
+                    shutil.move(src, dest)
+                else:
+                    shutil.copy2(src, dest)
+                created.append(dest)
+                sources.append(src)
+            except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
-        self._set_status_message(f"Copied {copied} file(s) to {target_dir}", 7000)
+
+        if mode == "cut" and self._file_clipboard is not None:
+            moved_sources = {str(p) for p in sources}
+            remaining = [
+                p for p in self._file_clipboard.paths if str(p.resolve()) not in moved_sources
+            ]
+            if remaining:
+                self._file_clipboard = _FileClipboard(mode="cut", paths=remaining)
+            else:
+                self._file_clipboard = None
+
+        if self._current_folder is not None:
+            current = self._current_folder.resolve()
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=[p for p in created if p.parent.resolve() == current],
+                source_files=[p for p in sources if p.parent.resolve() == current],
+                open_preview=False,
+            )
+
+        if created:
+            self._sync_folder_tree_labels()
+
+        verb = "Moved" if mode == "cut" else "Copied"
+        if created:
+            self._set_status_message(f"{verb} {len(created)} file(s) to {target_dir.name}", 7000)
         if failed:
-            QMessageBox.warning(self, "Copy partially failed", "\n".join(failed[:10]))
-        if self._current_folder == target_dir:
-            self._on_folder_selected(target_dir)
+            QMessageBox.warning(
+                self,
+                f"{'Move' if mode == 'cut' else 'Copy'} partially failed",
+                "\n".join(failed[:10]),
+            )
+
+    def _paste_files_to_folder(self, target_dir: Path) -> None:
+        if not self._clipboard_can_paste() or self._file_clipboard is None:
+            return
+        self._transfer_files(
+            self._file_clipboard.paths,
+            target_dir,
+            mode=self._file_clipboard.mode,
+        )
 
     def _refresh_tree(self) -> None:
         roots = []
@@ -5161,12 +5549,11 @@ class MainWindow(QMainWindow):
         for root in roots:
             if root.is_dir():
                 self._add_root_folder(root, select=False)
+        self._sync_folder_tree_placeholders()
         if keep_folder is not None:
             keep_item = self._find_tree_item_for_path(keep_folder)
             if keep_item is not None:
-                self._folder_tree.blockSignals(True)
-                self._folder_tree.setCurrentItem(keep_item)
-                self._folder_tree.blockSignals(False)
+                self._folder_tree.select_folder_item(keep_item)
         self._update_directory_watchers()
 
     def _apply_function(self, func_name: str, *, preselected: list[Path] | None = None, **job_kwargs) -> None:
@@ -5799,12 +6186,15 @@ class MainWindow(QMainWindow):
     def _update_status(self) -> None:
         if self._job_running:
             return
+        if self._status_linked_file is not None:
+            self.statusBar().clearMessage()
+            return
         if self._current_folder and self._cached_folder_files is not None:
-            visible = sum(
-                1
-                for i in range(self._file_list.count())
-                if self._file_list.item(i).data(ROLE_PATH)
-            )
+            visible = self._file_list.rowCount()
+            if visible == 1:
+                only = self._file_list.item(0)
+                if only is not None and only.data(ROLE_PATH) is None:
+                    visible = 0
             self._sync_files_status(visible, len(self._cached_folder_files))
             return
         parts = ["TEviewer"]
@@ -5819,8 +6209,8 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         QMessageBox.about(
             self,
-            "About TEviewer",
-            f"<b>TEviewer</b> {__version__}<br>"
+            f"About {APP_DISPLAY_NAME}",
+            f"<b>{APP_DISPLAY_NAME}</b> {__version__}<br>"
             "Folder-based TE analysis workspace (PySide6).<br>"
             "Dockable panels; double-click FASTA opens AliView (unless system viewer is enabled).<br>"
             "<a href='https://github.com/qjiangzhao/TEtrimmer'>TEtrimmer</a>",

@@ -6,6 +6,7 @@ import logging
 import platform
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from Bio import SeqIO
@@ -14,6 +15,8 @@ from teviewer.backends.gui_functions import align_sequences
 
 OS_TYPE = platform.system()
 logger = logging.getLogger(__name__)
+
+_clustalo_openmp: bool | None = None
 
 
 def alignment_backends() -> list[str]:
@@ -24,6 +27,54 @@ def alignment_backends() -> list[str]:
     if shutil.which("clustalo"):
         found.append("clustalo")
     return found
+
+
+def _fasta_sequence_count(path: Path) -> int:
+    count = 0
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith(">"):
+                count += 1
+    return count
+
+
+def clustalo_supports_openmp() -> bool:
+    """Whether the installed ``clustalo`` binary was built with OpenMP threading."""
+    global _clustalo_openmp
+    if _clustalo_openmp is not None:
+        return _clustalo_openmp
+    exe = shutil.which("clustalo")
+    if not exe:
+        _clustalo_openmp = False
+        return False
+    with tempfile.TemporaryDirectory(prefix="teviewer_clustalo_probe_") as tmp:
+        inp = Path(tmp) / "probe.fa"
+        out = Path(tmp) / "probe_out.fa"
+        inp.write_text(">a\nACGT\n>b\nACGT\n", encoding="utf-8")
+        try:
+            proc = subprocess.run(
+                [exe, "-i", str(inp), "-o", str(out), "--outfmt=fa", "--force", "--threads", "2"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            _clustalo_openmp = False
+            return False
+        if proc.returncode == 0 and out.is_file():
+            _clustalo_openmp = True
+            return True
+        _clustalo_openmp = False
+        return False
+
+
+def clustalo_effective_threads(requested: int) -> int:
+    """Clamp thread count when Clustal Omega lacks OpenMP (common on macOS conda builds)."""
+    requested = max(1, int(requested))
+    if clustalo_supports_openmp():
+        return requested
+    return 1
 
 
 def combined_alignment_output_stem(seq_files: list[Path]) -> str:
@@ -59,6 +110,11 @@ def run_alignment(
     input_fasta = input_fasta.expanduser().resolve()
     if input_fasta.suffix.lower() not in {".fa", ".fasta", ".fas"}:
         raise ValueError("Align only works on .fa / .fasta files.")
+    if _fasta_sequence_count(input_fasta) < 2:
+        raise ValueError(
+            f"{input_fasta.name} has fewer than 2 sequences. "
+            "Alignment needs at least two sequences."
+        )
 
     output_file = input_fasta.parent / f"{input_fasta.stem}_msa.fa"
     order = ["mafft", "clustalo"] if backend == "auto" else [backend]
@@ -85,7 +141,7 @@ def run_alignment(
                 _run_clustalo(input_fasta, output_file, num_threads=num_threads)
                 return output_file
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"Clustal Omega: {exc}")
+                errors.append(str(exc))
         else:
             raise ValueError(f"Unknown aligner: {tool}")
 
@@ -93,7 +149,48 @@ def run_alignment(
         "Install MAFFT (macOS/Linux: conda install -c bioconda mafft) "
         "or Clustal Omega (conda install -c bioconda clustalo)."
     )
-    raise RuntimeError("No aligner available.\n" + "\n".join(errors) + f"\n\n{hint}")
+    detail = "\n".join(errors)
+    if not detail:
+        detail = "No aligner could run."
+    raise RuntimeError(f"{detail}\n\n{hint}")
+
+
+def _format_subprocess_error(tool: str, exc: subprocess.CalledProcessError) -> str:
+    detail = (exc.stderr or exc.stdout or "").strip()
+    if detail:
+        first_line = detail.splitlines()[0].strip()
+        return f"{tool}: {first_line}"
+    return f"{tool} failed (exit {exc.returncode})."
+
+
+def _run_clustalo(input_fasta: Path, output_file: Path, *, num_threads: int) -> None:
+    threads = clustalo_effective_threads(num_threads)
+    cmd = [
+        "clustalo",
+        "-i",
+        str(input_fasta),
+        "-o",
+        str(output_file),
+        "--outfmt=fa",
+        "--force",
+        "--threads",
+        str(threads),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        if threads > 1 and "openmp" in f"{exc.stderr or ''}{exc.stdout or ''}".lower():
+            cmd[-1] = "1"
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        else:
+            raise RuntimeError(_format_subprocess_error("Clustal Omega", exc)) from exc
+    if not output_file.is_file():
+        raise RuntimeError("Clustal Omega did not produce an output file.")
+    if threads < num_threads:
+        logger.info(
+            "Clustal Omega ran with 1 thread (installed build lacks OpenMP support)."
+        )
+    logger.info("Clustal Omega alignment finished: %s", output_file.name)
 
 
 def run_alignment_combined(
@@ -143,21 +240,3 @@ def run_alignment_combined(
             combined.unlink(missing_ok=True)
         except OSError:
             pass
-
-
-def _run_clustalo(input_fasta: Path, output_file: Path, *, num_threads: int) -> None:
-    cmd = [
-        "clustalo",
-        "-i",
-        str(input_fasta),
-        "-o",
-        str(output_file),
-        "--outfmt=fa",
-        "--force",
-        "--threads",
-        str(num_threads),
-    ]
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
-    if not output_file.is_file():
-        raise RuntimeError("Clustal Omega did not produce an output file.")
-    logger.info("Clustal Omega alignment finished: %s", output_file.name)

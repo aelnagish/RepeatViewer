@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+import platform
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QThread, Signal, QTimer
 from PySide6.QtGui import (
     QColor,
+    QContextMenuEvent,
     QFont,
     QFontMetrics,
     QKeyEvent,
@@ -16,6 +18,7 @@ from PySide6.QtGui import (
     QNativeGestureEvent,
     QPainter,
     QImage,
+    QPalette,
     QPen,
     QPolygonF,
     QShortcut,
@@ -26,6 +29,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -39,6 +43,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -73,7 +78,6 @@ from teviewer.backends.job_cancel import JobCancellation
 from teviewer.backends.annotation_colors import feature_type_color, similarity_database_color
 from teviewer.backends.database_prepare import database_search_readiness
 from teviewer.backends.sequence_features import (
-    DEFAULT_FEATURE_TYPES,
     SequenceFeature,
     SequenceMapData,
     SingleSequenceSummary,
@@ -104,65 +108,24 @@ from teviewer.backends.similarity_annotation import (
 from teviewer.project import UserDatabase
 from teviewer.workers.base import Worker
 from teviewer.widgets.annotation_colors_dialog import AnnotationElementColorsDialog
-from teviewer.widgets.preview_controls import ZOOM_SLIDER_HEIGHT, zoom_slider_stylesheet
+from teviewer.widgets.preview_controls import ZOOM_SLIDER_HEIGHT
 from teviewer.widgets.preview_zoom import nucleotide_base_color_map
 
-_ANNOTATION_CONTROLS_STYLE = (
-    "QWidget#annotationControlsPanel {"
-    " background: palette(alternate-base);"
-    " border-top: 1px solid palette(mid);"
-    "}"
-    " QWidget#annotationControlBand {"
-    " border-bottom: 1px solid palette(mid);"
-    " background: transparent;"
-    "}"
-    " QWidget#annotationActionBand {"
-    " border-top: 1px solid palette(mid);"
-    " background: transparent;"
-    "}"
-    " QWidget#annotationControlBand QLabel {"
-    " background: transparent;"
-    " border: none;"
-    "}"
-    " QWidget#annotationControlsPanel QPushButton {"
-    " padding: 2px 0px;"
-    " border: none;"
-    " border-radius: 4px;"
-    " background: transparent;"
-    " min-height: 0px;"
-    "}"
-    " QWidget#annotationActionBand QPushButton {"
-    " padding: 2px 12px;"
-    " }"
-    " QWidget#annotationRunSettingsBox QPushButton {"
-    " padding: 2px 4px;"
-    " }"
-    " QWidget#annotationControlsPanel QPushButton:hover {"
-    " background: palette(window);"
-    "}"
-    " QWidget#annotationControlsPanel QPushButton:pressed {"
-    " background: palette(midlight);"
-    "}"
-    " QWidget#annotationControlsPanel QCheckBox {"
-    " spacing: 4px;"
-    " background: transparent;"
-    " border: none;"
-    " min-height: 22px;"
-    "}"
-    " QWidget#annotationControlsPanel QCheckBox::indicator {"
-    " width: 14px;"
-    " height: 14px;"
-    "}"
-    " QWidget#annotationFeatureColumnCell {"
-    " background: transparent;"
-    " min-height: 22px;"
-    "}"
-    " QLabel#annotationJobStatus {"
-    " color: palette(placeholder-text);"
-    " padding: 0 4px;"
-    " min-height: 22px;"
-    "}"
-)
+def _annotation_panel_separator(parent: QWidget | None = None) -> QFrame:
+    line = QFrame(parent)
+    line.setFrameShape(QFrame.Shape.HLine)
+    line.setFrameShadow(QFrame.Shadow.Plain)
+    line.setLineWidth(1)
+    line.setFixedHeight(1)
+    return line
+
+
+def _configure_annotation_controls_panel(panel: QWidget) -> None:
+    """Tag annotation controls panel for layout hooks."""
+    panel.setObjectName("annotationControlsPanel")
+    panel.setAutoFillBackground(True)
+
+
 _ADD_FEATURE_BUTTONS: tuple[tuple[str, str], ...] = (
     ("LTR", "LTR"),
     ("TIR", "TIR"),
@@ -244,6 +207,7 @@ _MAX_NUC_FONT_PT = 36
 _DEFAULT_NUC_FONT_PT = 13
 _ZOOM_BTN_SIZE = 28
 _ZOOM_BTN_HEIGHT = 24
+_ANNOTATION_SIDE_PANEL_WIDTH = 108
 
 
 def _zoom_ppb_max() -> float:
@@ -273,7 +237,6 @@ def _annotation_row_label(text: str, parent: QWidget) -> QLabel:
 def _toolbar_stat_separator(parent: QWidget) -> QLabel:
     label = QLabel("|", parent)
     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    label.setStyleSheet("color: palette(mid); padding: 0 4px;")
     return label
 
 
@@ -312,7 +275,8 @@ class _ColumnCell(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("annotationFeatureColumnCell")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -346,6 +310,7 @@ class _FeatureColumnRow(QWidget):
         column_count: int = _ANNOTATION_FEATURE_COLUMN_COUNT,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("annotationFeatureColumnRow")
         self._column_count = column_count
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._grid = QGridLayout(self)
@@ -404,11 +369,16 @@ class _AddFeatureControl(QWidget):
 
     def __init__(self, label: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("addFeatureControl")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self._offset = QWidget(self)
+        self._offset.setAutoFillBackground(False)
+        self._offset.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._offset.setFixedWidth(0)
         layout.addWidget(self._offset)
         self._btn = QPushButton(label, self)
@@ -492,11 +462,18 @@ def _settings_separator() -> QFrame:
     return line
 
 
-def _letter_cell_width_for_pt(point_size: int) -> int:
-    font = QFont("Menlo, Monaco, Courier New, monospace")
-    font.setPointSize(point_size)
+def _monospace_font(*, point_size: int | None = None) -> QFont:
+    font = QFont()
+    font.setFamilies(["Menlo", "Monaco", "Courier New", "monospace"])
     font.setStyleHint(QFont.StyleHint.Monospace)
     font.setFixedPitch(True)
+    if point_size is not None:
+        font.setPointSize(point_size)
+    return font
+
+
+def _letter_cell_width_for_pt(point_size: int) -> int:
+    font = _monospace_font(point_size=point_size)
     fm = QFontMetrics(font)
     return max(1, max(fm.horizontalAdvance(base) for base in "ACGTUN"))
 
@@ -807,8 +784,7 @@ class ViewportRulerWidget(QWidget):
         ppb = self._ppb
         scroll = self._scroll_px
         vw = self._viewport_w
-        ruler_font = QFont("Menlo, Monaco, Courier New, monospace")
-        ruler_font.setPointSize(7)
+        ruler_font = _monospace_font(point_size=7)
         painter.setFont(ruler_font)
         fm = QFontMetrics(ruler_font)
         painter.setPen(QColor("#666666"))
@@ -851,7 +827,6 @@ class AnnotationTrackWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
-        self.setStyleSheet("background: #f5f5f5; border: none; margin: 0px; padding: 0px;")
         self._features: list[SequenceFeature] = []
         self._feature_rows: list[int] = []
         self._scroll_px = 0.0
@@ -1159,6 +1134,7 @@ class SequenceMapCanvas(QWidget):
 
     selectionChanged = Signal(int, int)  # 1-based inclusive
     featureClicked = Signal(int)  # index in features list
+    addFeatureRequested = Signal(str, str)  # feature_type, label
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1333,10 +1309,7 @@ class SequenceMapCanvas(QWidget):
         return a, b
 
     def _sequence_font(self) -> QFont:
-        font = QFont("Menlo, Monaco, Courier New, monospace")
-        font.setPointSize(self._font_point_size)
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setFixedPitch(True)
+        font = _monospace_font(point_size=self._font_point_size)
         return font
 
     def _font_letter_cell_size(self) -> tuple[int, int]:
@@ -1594,8 +1567,7 @@ class SequenceMapCanvas(QWidget):
 
     def _draw_ruler(self, painter: QPainter, seq_len: int, ppb: float) -> None:
         painter.setPen(QColor("#666666"))
-        ruler_font = QFont("Menlo, Monaco, Courier New, monospace")
-        ruler_font.setPointSize(7)
+        ruler_font = _monospace_font(point_size=7)
         painter.setFont(ruler_font)
         fm = QFontMetrics(ruler_font)
         if self.uses_wrap():
@@ -1911,6 +1883,34 @@ class SequenceMapCanvas(QWidget):
             return
         super().mouseReleaseEvent(event)
 
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
+        if self.selection_range() is None:
+            pos = event.position()
+            bp = self._bp_at_pos(pos.x(), pos.y())
+            if bp is None:
+                return
+            self._selected_indices.clear()
+            self._select_start_bp = bp
+            self._select_end_bp = bp
+            self.selectionChanged.emit(bp, bp)
+            self.update()
+
+        menu = QMenu(self)
+        menu.setObjectName("SequenceMapMenu")
+        menu.setToolTipsVisible(False)
+        heading = menu.addAction("Add feature")
+        heading.setEnabled(False)
+        menu.addSeparator()
+        for label, feature_type in _ADD_FEATURE_BUTTONS:
+            action = menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, ft=feature_type, bl=label: self.addFeatureRequested.emit(
+                    ft, bl
+                )
+            )
+        menu.exec(event.globalPos())
+        event.accept()
+
 class SequenceMapWidget(QWidget):
     """Scrollable sequence map with overview and zoom controls."""
 
@@ -1932,89 +1932,112 @@ class SequenceMapWidget(QWidget):
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        zoom_row = QHBoxLayout()
-        zoom_row.setContentsMargins(6, 4, 6, 4)
-        zoom_row.setSpacing(6)
-        zoom_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._zoom_slider: QSlider | None = None
+        self._annotation_header_zoom_bar = None
+        zoom_row: QHBoxLayout | None = None
+        if not embedded:
+            zoom_row = QHBoxLayout()
+            zoom_row.setContentsMargins(6, 4, 6, 4)
+            zoom_row.setSpacing(6)
+            zoom_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        zoom_strip = QWidget(self)
-        zoom_strip.setFixedHeight(_ZOOM_BTN_HEIGHT)
-        zoom_strip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        zoom_strip_layout = QHBoxLayout(zoom_strip)
-        zoom_strip_layout.setContentsMargins(0, 0, 0, 0)
-        zoom_strip_layout.setSpacing(4)
-        zoom_strip_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+            zoom_strip = QWidget(self)
+            zoom_strip.setFixedHeight(_ZOOM_BTN_HEIGHT)
+            zoom_strip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            zoom_strip_layout = QHBoxLayout(zoom_strip)
+            zoom_strip_layout.setContentsMargins(0, 0, 0, 0)
+            zoom_strip_layout.setSpacing(4)
+            zoom_strip_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        zoom_out_btn = QPushButton("−", zoom_strip)
-        zoom_out_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
-        zoom_out_btn.setToolTip("Zoom out")
-        zoom_out_btn.clicked.connect(self.zoom_out)
-        zoom_in_btn = QPushButton("+", zoom_strip)
-        zoom_in_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
-        zoom_in_btn.setToolTip("Zoom in")
-        zoom_in_btn.clicked.connect(self.zoom_in)
-        self._zoom_slider = QSlider(Qt.Orientation.Horizontal, zoom_strip)
-        self._zoom_slider.setObjectName("annotationZoomSlider")
-        self._zoom_slider.setRange(0, 100)
-        self._zoom_slider.setValue(0)
-        self._zoom_slider.setMinimumWidth(72)
-        self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
-        self._zoom_slider.setToolTip(
-            "Left: fit full sequence in window. Right: maximum zoom-in."
-        )
-        self._zoom_slider.setStyleSheet(zoom_slider_stylesheet("annotationZoomSlider"))
-        self._zoom_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
+            zoom_out_btn = QPushButton("−", zoom_strip)
+            zoom_out_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
+            zoom_out_btn.setToolTip("Zoom out")
+            zoom_out_btn.clicked.connect(self.zoom_out)
+            zoom_in_btn = QPushButton("+", zoom_strip)
+            zoom_in_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
+            zoom_in_btn.setToolTip("Zoom in")
+            zoom_in_btn.clicked.connect(self.zoom_in)
+            self._zoom_slider = QSlider(Qt.Orientation.Horizontal, zoom_strip)
+            self._zoom_slider.setObjectName("annotationZoomSlider")
+            self._zoom_slider.setRange(0, 100)
+            self._zoom_slider.setValue(0)
+            self._zoom_slider.setMinimumWidth(72)
+            self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
+            self._zoom_slider.setToolTip(
+                "Left: fit full sequence in window. Right: maximum zoom-in."
+            )
+            self._zoom_slider.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
+            self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
 
-        zoom_strip_layout.addWidget(zoom_out_btn)
-        zoom_strip_layout.addWidget(zoom_in_btn)
-        zoom_strip_layout.addWidget(self._zoom_slider, 1)
+            zoom_strip_layout.addWidget(zoom_out_btn)
+            zoom_strip_layout.addWidget(zoom_in_btn)
+            zoom_strip_layout.addWidget(self._zoom_slider, 1)
+            zoom_row.addWidget(zoom_strip, 1, Qt.AlignmentFlag.AlignVCenter)
 
-        self._sequence_stats_label = QLabel("", self)
-        self._sequence_stats_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
+        annotation_controls = QWidget(self)
+        annotation_controls.setObjectName("AnnotationControls")
+        annotation_controls.setFixedWidth(_ANNOTATION_SIDE_PANEL_WIDTH)
+        controls_layout = QVBoxLayout(annotation_controls)
+        controls_layout.setContentsMargins(8, 8, 8, 8)
+        controls_layout.setSpacing(6)
+
+        self._sequence_stats_label = QLabel("", annotation_controls)
         self._sequence_stats_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        self._sequence_stats_label.setStyleSheet(
-            "QLabel { color: palette(text); padding: 0 2px; }"
-        )
-        self._font_size = QSpinBox()
+
+        self._font_size = QSpinBox(annotation_controls)
         self._font_size.setRange(_MIN_NUC_FONT_PT, _MAX_NUC_FONT_PT)
         self._font_size.setValue(_DEFAULT_NUC_FONT_PT)
         self._font_size.setSuffix(" pt")
-        self._font_size.setFixedWidth(58)
+        self._font_size.setFixedWidth(72)
         self._font_size.setToolTip("Nucleotide letter size (independent of zoom scale)")
         self._font_size.valueChanged.connect(self._on_font_size_changed)
 
-        self._pos_start = QSpinBox()
+        self._pos_start = QSpinBox(annotation_controls)
         self._pos_start.setMinimum(1)
         self._pos_start.setMaximum(1)
-        self._pos_start.setFixedWidth(64)
-        self._pos_end = QSpinBox()
+        self._pos_start.setFixedWidth(72)
+        self._pos_end = QSpinBox(annotation_controls)
         self._pos_end.setMinimum(1)
         self._pos_end.setMaximum(1)
-        self._pos_end.setFixedWidth(64)
+        self._pos_end.setFixedWidth(72)
         self._pos_start.valueChanged.connect(self._on_position_spin_changed)
         self._pos_end.valueChanged.connect(self._on_position_spin_changed)
-        select_btn = QPushButton("Select")
+        select_btn = QPushButton("Select", annotation_controls)
         select_btn.setToolTip(
             "Zoom to the selected range and center its midpoint in the window"
         )
         select_btn.clicked.connect(self._select_by_position)
 
-        zoom_row.addWidget(zoom_strip, 1, Qt.AlignmentFlag.AlignVCenter)
-        zoom_row.addWidget(QLabel("Position:"))
-        zoom_row.addWidget(self._pos_start)
-        zoom_row.addWidget(QLabel("to"))
-        zoom_row.addWidget(self._pos_end)
-        zoom_row.addWidget(select_btn)
-        zoom_row.addWidget(_toolbar_stat_separator(self))
-        zoom_row.addWidget(QLabel("Font:"))
-        zoom_row.addWidget(self._font_size)
-        zoom_row.addWidget(_toolbar_stat_separator(self))
-        zoom_row.addWidget(self._sequence_stats_label)
+        position_label = QLabel("Position", annotation_controls)
+        position_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        controls_layout.addWidget(position_label)
+        controls_layout.addWidget(self._pos_start)
+        to_label = QLabel("to", annotation_controls)
+        to_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        controls_layout.addWidget(to_label)
+        controls_layout.addWidget(self._pos_end)
+        select_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        controls_layout.addWidget(select_btn)
+
+        font_label = QLabel("Font", annotation_controls)
+        font_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        controls_layout.addWidget(font_label)
+        controls_layout.addWidget(self._font_size)
+
+        self._sequence_stats_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self._sequence_stats_label.setWordWrap(True)
+        controls_layout.addWidget(self._sequence_stats_label)
+        controls_layout.addStretch()
 
         self._canvas = SequenceMapCanvas(self)
         self._canvas.set_color_bases(True)
@@ -2082,12 +2105,24 @@ class SequenceMapWidget(QWidget):
         block_layout.addWidget(self._canvas_row, 0, Qt.AlignmentFlag.AlignTop)
         block_layout.addWidget(self._annot_scroll, 1)
 
-        layout = QVBoxLayout(self)
+        main_column = QWidget(self)
+        main_column.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        main_layout = QVBoxLayout(main_column)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        if zoom_row is not None:
+            main_layout.addLayout(zoom_row)
+        main_layout.addWidget(self._header)
+        main_layout.addWidget(self._sequence_block, stretch=1)
+
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addLayout(zoom_row)
-        layout.addWidget(self._header)
-        layout.addWidget(self._sequence_block, stretch=1)
+        layout.addWidget(main_column, stretch=1)
+        layout.addWidget(annotation_controls)
 
         self._canvas.installEventFilter(self)
         self._canvas_row.installEventFilter(self)
@@ -2359,13 +2394,52 @@ class SequenceMapWidget(QWidget):
         self.featuresChanged.emit()
         self._sync_overview()
 
+    def bind_annotation_zoom_bar(self, bar) -> None:
+        """Attach header zoom controls when embedded in the preview panel."""
+        from teviewer.widgets.preview_controls import AnnotationZoomBar
+
+        if not isinstance(bar, AnnotationZoomBar):
+            return
+        old = self._annotation_header_zoom_bar
+        if old is not None and old is not bar:
+            try:
+                old.slider.valueChanged.disconnect(self._on_zoom_changed)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                old.fit_mode_changed.disconnect(self._on_annotation_header_fit_mode)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                old.reset_requested.disconnect(self.fit_window)
+            except (RuntimeError, TypeError):
+                pass
+        self._annotation_header_zoom_bar = bar
+        self._zoom_slider = bar.slider
+        self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
+        bar.fit_mode_changed.connect(self._on_annotation_header_fit_mode)
+        bar.reset_requested.connect(self.fit_window)
+
+    def _on_annotation_header_fit_mode(self, mode: str) -> None:
+        from teviewer.widgets.preview_zoom import PreviewFitMode
+
+        if mode in (PreviewFitMode.FIT_WINDOW.value, PreviewFitMode.FIT_WIDTH.value):
+            self.fit_window()
+            return
+        if mode == PreviewFitMode.ORIGINAL.value:
+            self._apply_zoom_ppb(1.0, sync_slider=True)
+
     def mark_clean(self) -> None:
         self._dirty = False
 
     def zoom_in(self) -> None:
+        if self._zoom_slider is None:
+            return
         self._zoom_slider.setValue(min(100, self._zoom_slider.value() + 8))
 
     def zoom_out(self) -> None:
+        if self._zoom_slider is None:
+            return
         self._zoom_slider.setValue(max(0, self._zoom_slider.value() - 8))
 
     def _slider_ppb_bounds(self) -> tuple[float, float]:
@@ -2433,9 +2507,14 @@ class SequenceMapWidget(QWidget):
             anchor_viewport_x = self._range_center_viewport_x(sel[0], sel[1])
 
         if sync_slider:
-            self._zoom_slider.blockSignals(True)
-            self._zoom_slider.setValue(self._ppb_to_slider_value(ppb))
-            self._zoom_slider.blockSignals(False)
+            if self._zoom_slider is not None:
+                slider_value = self._ppb_to_slider_value(ppb)
+                self._zoom_slider.blockSignals(True)
+                self._zoom_slider.setValue(slider_value)
+                self._zoom_slider.blockSignals(False)
+                header_bar = getattr(self, "_annotation_header_zoom_bar", None)
+                if header_bar is not None:
+                    header_bar.sync_display(slider_value)
 
         self._canvas.set_pixels_per_bp(ppb)
         if reset_scroll:
@@ -2535,7 +2614,7 @@ class SequenceMapWidget(QWidget):
         if gc_part:
             gc_part = gc_part.strip()
             if gc_part:
-                text = f"{length_part} {gc_part}"
+                text = f"{length_part}\n{gc_part}"
         self._sequence_stats_label.setText(text)
         self._sequence_stats_label.show()
 
@@ -2653,7 +2732,50 @@ class SequenceMapWidget(QWidget):
         self._sync_overview_now()
 
 
+class _AddFeatureColorField(QWidget):
+    """Color swatch matching native combo row size."""
+
+    def __init__(self, initial_color: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._color = QColor(initial_color)
+        self._button = QPushButton(self)
+        self._button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._button.setToolTip("Choose feature color")
+        self._button.clicked.connect(self._pick_color)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._button)
+        self._refresh_button()
+
+    def _refresh_button(self) -> None:
+        hex_color = self._color.name(QColor.NameFormat.HexRgb)
+        self._button.setFlat(False)
+        self._button.setStyleSheet(f"background-color: {hex_color};")
+
+    def _pick_color(self) -> None:
+        chosen = QColorDialog.getColor(self._color, self, "Feature color")
+        if not chosen.isValid():
+            return
+        self._color = chosen
+        self._refresh_button()
+
+    def set_field_size(self, width: int, height: int) -> None:
+        self.setFixedSize(width, height)
+        self._button.setFixedSize(width, height)
+
+    def color_hex(self) -> str:
+        return self._color.name(QColor.NameFormat.HexRgb)
+
+    def set_color_hex(self, color: str) -> None:
+        self._color = QColor(color)
+        self._refresh_button()
+
+
 class AddFeatureDialog(QDialog):
+    """Add a sequence feature with uniform native macOS form fields."""
+
+    _POSITION_GAP = 8
+
     def __init__(
         self,
         *,
@@ -2667,34 +2789,55 @@ class AddFeatureDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Add feature")
-        a, b = sorted((start, end))
-        self._name = QLineEdit(self)
-        self._name.setPlaceholderText("e.g. LTR5")
-        if default_name:
-            self._name.setText(default_name)
+
+        start_pos, end_pos = sorted((int(start), int(end)))
+
         self._type = QComboBox(self)
+        for label, ftype in _ADD_FEATURE_BUTTONS:
+            self._type.addItem(label, ftype)
         if feature_type is not None:
-            self._type.addItem(feature_label or feature_type, feature_type)
-            self._type.setEnabled(False)
-        else:
-            for t in DEFAULT_FEATURE_TYPES:
-                self._type.addItem(t)
-        self._start = QSpinBox(self)
-        self._start.setRange(1, seq_length)
-        self._start.setValue(a)
-        self._end = QSpinBox(self)
-        self._end.setRange(1, seq_length)
-        self._end.setValue(b)
+            index = self._type.findData(feature_type)
+            if index < 0 and feature_label:
+                index = self._type.findText(feature_label)
+            if index >= 0:
+                self._type.setCurrentIndex(index)
+
         self._strand = QComboBox(self)
         self._strand.addItem("Forward (+)", "+")
         self._strand.addItem("Reverse (−)", "-")
 
+        self._start = QSpinBox(self)
+        self._start.setRange(1, seq_length)
+        self._start.setValue(start_pos)
+
+        self._end = QSpinBox(self)
+        self._end.setRange(1, seq_length)
+        self._end.setValue(end_pos)
+
+        initial_type = str(self._type.currentData() or self._type.currentText())
+        self._color = _AddFeatureColorField(feature_type_color(initial_type), self)
+
+        self._name = QLineEdit(self)
+        self._name.setPlaceholderText("e.g. LTR5")
+        if default_name:
+            self._name.setText(default_name)
+
+        self._position_row = QWidget(self)
+        position_layout = QHBoxLayout(self._position_row)
+        position_layout.setContentsMargins(0, 0, 0, 0)
+        position_layout.setSpacing(6)
+        position_layout.addWidget(self._start)
+        self._end_label = QLabel("End:", self._position_row)
+        self._end_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        position_layout.addWidget(self._end_label)
+        position_layout.addWidget(self._end)
+
         form = QFormLayout()
-        form.addRow("Name:", self._name)
         form.addRow("Type:", self._type)
         form.addRow("Direction:", self._strand)
-        form.addRow("Start (bp):", self._start)
-        form.addRow("End (bp):", self._end)
+        form.addRow("Start:", self._position_row)
+        form.addRow("Color:", self._color)
+        form.addRow("Name:", self._name)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -2706,15 +2849,24 @@ class AddFeatureDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
+        self._type.currentIndexChanged.connect(self._on_type_changed)
+
+    def _on_type_changed(self) -> None:
+        ftype = str(self._type.currentData() or self._type.currentText())
+        self._color.set_color_hex(feature_type_color(ftype))
+
     def feature(self) -> SequenceFeature | None:
         name = self._name.text().strip()
         if not name:
             return None
-        start = self._start.value()
-        end = self._end.value()
-        ftype = str(self._type.currentData() or self._type.currentText())
-        strand = str(self._strand.currentData())
-        return SequenceFeature(start=start, end=end, name=name, feature_type=ftype, strand=strand)
+        return SequenceFeature(
+            start=self._start.value(),
+            end=self._end.value(),
+            name=name,
+            feature_type=str(self._type.currentData() or self._type.currentText()),
+            color=self._color.color_hex(),
+            strand=str(self._strand.currentData()),
+        )
 
 
 class AutoAnnotationSettingsDialog(QDialog):
@@ -2771,7 +2923,9 @@ class AutoAnnotationSettingsDialog(QDialog):
 
     def _section_title(self, text: str) -> QLabel:
         title = QLabel(text)
-        title.setStyleSheet("font-weight: 600;")
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
         return title
 
     def _bp_spin_row(self, spin: QSpinBox) -> QWidget:
@@ -3040,6 +3194,9 @@ class SequenceMapPanel(QWidget):
         self._path = fasta_path.expanduser().resolve()
         self._map = SequenceMapWidget(self, embedded=True)
         self._map.statusMessage.connect(self.statusMessage.emit)
+        self._map._canvas.addFeatureRequested.connect(
+            lambda ft, bl: self._add_feature_of_type(ft, feature_label=bl)
+        )
         self._map.deleteFeaturesRequested.connect(
             lambda: self._delete_feature(confirm_empty=False)
         )
@@ -3058,14 +3215,13 @@ class SequenceMapPanel(QWidget):
         self._app_event_filter_installed = False
 
         controls = QWidget(self)
-        controls.setObjectName("annotationControlsPanel")
         self._controls_panel = controls
+        _configure_annotation_controls_panel(controls)
         controls.setMinimumWidth(0)
         controls.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Minimum,
         )
-        controls.setStyleSheet(_ANNOTATION_CONTROLS_STYLE)
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(0)
@@ -3233,6 +3389,7 @@ class SequenceMapPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._map, stretch=1)
+        layout.addWidget(_annotation_panel_separator(self))
         layout.addWidget(controls)
         controls.installEventFilter(self)
 
@@ -3245,9 +3402,21 @@ class SequenceMapPanel(QWidget):
         self._install_annotation_shortcuts()
         QTimer.singleShot(0, self._sync_annotation_control_rows)
 
+    def bind_annotation_zoom_bar(self, bar) -> None:
+        self._map.bind_annotation_zoom_bar(bar)
+
     def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
         super().showEvent(event)
         QTimer.singleShot(0, self._sync_annotation_control_rows)
+        QTimer.singleShot(0, self._refresh_annotation_button_styles)
+        QTimer.singleShot(0, self._refresh_similarity_database_rows)
+        app = QApplication.instance()
+        if app is not None and not self._app_event_filter_installed:
+            app.installEventFilter(self)
+            self._app_event_filter_installed = True
+
+    def _refresh_annotation_button_styles(self) -> None:
+        return
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
         if watched is getattr(self, "_controls_panel", None) and event.type() in (
@@ -3257,6 +3426,7 @@ class SequenceMapPanel(QWidget):
             QEvent.Type.Resize,
         ):
             QTimer.singleShot(0, self._sync_annotation_control_rows)
+            QTimer.singleShot(0, self._refresh_annotation_button_styles)
         return super().eventFilter(watched, event)
 
     def _install_annotation_shortcuts(self) -> None:
@@ -3273,15 +3443,6 @@ class SequenceMapPanel(QWidget):
                 event.accept()
                 return
         super().keyPressEvent(event)
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        QTimer.singleShot(0, self._sync_annotation_control_rows)
-        QTimer.singleShot(0, self._refresh_similarity_database_rows)
-        app = QApplication.instance()
-        if app is not None and not self._app_event_filter_installed:
-            app.installEventFilter(self)
-            self._app_event_filter_installed = True
 
     def hideEvent(self, event) -> None:  # noqa: N802
         if self._app_event_filter_installed:
