@@ -922,12 +922,18 @@ class FilePreviewPage(QWidget):
             return False
         return record_id == seq_id or sanitize_name(record_id) == seq_id
 
-    def show_annotation_region_if_matches(self, seq_id: str, start: int, end: int) -> bool:
-        """If this tab's sequence matches seq_id, jump its Annotation view to [start, end]."""
-        if not self.contains_sequence_id(seq_id):
-            return False
-        if not self._single_fasta_mode:
-            return False
+    def matches_sequence_id_for_go_to(self, seq_id: str) -> bool:
+        """True if a Go-to click on ``seq_id`` should jump this tab's Annotation view."""
+        return self._single_fasta_mode and self.contains_sequence_id(seq_id)
+
+    def jump_annotation_to_region(self, seq_id: str, start: int, end: int) -> None:
+        """Switch to the Annotation sub-tab and jump to [start, end].
+
+        Call only after this tab has been made the outer-current tab (see
+        ``PreviewTabWidget.show_annotation_region_for_sequence``) - the sequence map
+        widget needs to be visible for its zoom/scroll math to run immediately instead
+        of falling back to its own visibility-polling retry loop.
+        """
         self._ensure_annotation_panel()
         if self._fasta_tabs.currentIndex() != 1:
             self._fasta_tabs.blockSignals(True)
@@ -943,7 +949,6 @@ class FilePreviewPage(QWidget):
             end,
         )
         panel.jump_to_region(start, end)
-        return True
 
     def refresh_nucleotide_colors(self) -> None:
         if self._annotation_panel is not None:
@@ -1049,6 +1054,29 @@ class FilePreviewPage(QWidget):
     def _active_text_editor(self) -> QTextEdit:
         return self._fasta_text if self._single_fasta_mode else self._text
 
+    def is_html_preview_active(self) -> bool:
+        if self._single_fasta_mode:
+            return False
+        return (
+            self._stack.currentWidget() is self._html
+            and self.path.suffix.lower() in {".html", ".htm"}
+        )
+
+    def suspend_html_preview(self) -> None:
+        if hasattr(self._html, "suspend"):
+            self._html.suspend()
+
+    def resume_html_preview(self) -> None:
+        if not self.is_html_preview_active():
+            return
+        if hasattr(self._html, "resume"):
+            self._html.resume()
+        self._reload_html_if_needed()
+
+    def teardown_html_preview(self) -> None:
+        if hasattr(self._html, "teardown"):
+            self._html.teardown()
+
     def _show_text(self, text: str) -> None:
         self._text.setPlainText(text)
         cursor = self._text.textCursor()
@@ -1127,7 +1155,7 @@ class PreviewTabWidget(QTabWidget):
         tab_spacer = QWidget()
         tab_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setCornerWidget(tab_spacer, Qt.Corner.TopRightCorner)
-        self.currentChanged.connect(self._sync_zoom_bar_enabled)
+        self.currentChanged.connect(self._on_preview_tab_changed)
         self._apply_zoom_to_current_tab()
         self._install_annotation_delete_shortcuts()
 
@@ -1142,6 +1170,23 @@ class PreviewTabWidget(QTabWidget):
         if isinstance(widget, FilePreviewPage):
             widget._delete_annotation_features_if_active()
 
+    def _on_preview_tab_changed(self, index: int) -> None:
+        for tab_index in range(self.count()):
+            widget = self.widget(tab_index)
+            if not isinstance(widget, FilePreviewPage):
+                continue
+            if tab_index == index:
+                widget.resume_html_preview()
+            else:
+                widget.suspend_html_preview()
+        self._sync_zoom_bar_enabled(index)
+
+    def teardown_all_html_previews(self) -> None:
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage):
+                widget.teardown_html_preview()
+
     def _wire_preview_page(self, page: FilePreviewPage) -> None:
         page.annotationsSaved.connect(self.annotationsSaved.emit)
         page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
@@ -1151,19 +1196,25 @@ class PreviewTabWidget(QTabWidget):
         return self.addTab(page, name)
 
     def show_annotation_region_for_sequence(self, seq_id: str, start: int, end: int) -> bool:
-        """Jump the Annotation view of whichever open tab holds ``seq_id`` to [start, end]."""
+        """Jump the Annotation view of whichever open tab holds ``seq_id`` to [start, end].
+
+        Makes the matching tab current *before* jumping so its sequence map widget is
+        already visible (zoom/scroll math needs real widget geometry, not the geometry
+        of a still-hidden tab).
+        """
         matched = False
         for index in range(self.count()):
             widget = self.widget(index)
             if not isinstance(widget, FilePreviewPage):
                 continue
-            if not widget.show_annotation_region_if_matches(seq_id, start, end):
+            if not widget.matches_sequence_id_for_go_to(seq_id):
                 continue
             matched = True
             self.setCurrentIndex(index)
             self.setCurrentWidget(widget)
             widget.show()
             widget.setFocus(Qt.FocusReason.OtherFocusReason)
+            widget.jump_annotation_to_region(seq_id, start, end)
         if matched:
             logger.debug("Go-to: jumped to seq=%r %d-%d", seq_id, start, end)
         return matched
@@ -1264,6 +1315,7 @@ class PreviewTabWidget(QTabWidget):
                     if str(widget.path) == key:
                         widget.reload_from_disk()
                     elif _switching_html_preview(widget.path, resolved):
+                        widget.teardown_html_preview()
                         widget.deleteLater()
                         self.removeTab(0)
                         page = FilePreviewPage(resolved)
@@ -1328,6 +1380,8 @@ class PreviewTabWidget(QTabWidget):
     def close_all_tabs(self) -> None:
         while self.count():
             widget = self.widget(0)
+            if isinstance(widget, FilePreviewPage):
+                widget.teardown_html_preview()
             self.removeTab(0)
             if widget is not None:
                 widget.deleteLater()
@@ -1359,7 +1413,10 @@ class PreviewTabWidget(QTabWidget):
         if isinstance(widget, FilePreviewPage):
             key = str(widget.path)
             self._path_to_index.pop(key, None)
+            widget.teardown_html_preview()
         self.removeTab(index)
+        if widget is not None:
+            widget.deleteLater()
         self._rebuild_path_index()
 
     def _rebuild_path_index(self) -> None:

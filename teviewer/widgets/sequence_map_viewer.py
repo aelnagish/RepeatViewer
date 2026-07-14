@@ -1925,6 +1925,7 @@ class SequenceMapWidget(QWidget):
         self._dirty = False
         self._selected_feature_indices: set[int] = set()
         self._fit_retries = 0
+        self._layout_intent_generation = 0
         self._show_similarity_database_name = True
         if embedded:
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -2275,6 +2276,11 @@ class SequenceMapWidget(QWidget):
     def select_by_position(self, start: int, end: int, *, _attempt: int = 0) -> None:
         if self._data is None:
             return
+        # Marks this as the most recent explicit positioning request so a still-pending
+        # fit_window() from the initial Annotation-tab auto-load (see load()/
+        # _schedule_fit_window()) knows to back off instead of resetting a Go-to jump
+        # back to whole-sequence view.
+        self._layout_intent_generation += 1
         viewport_w = self._scroll_viewport_width()
         if (not self.isVisible() or viewport_w <= 20) and _attempt < 40:
             QTimer.singleShot(
@@ -2341,7 +2347,19 @@ class SequenceMapWidget(QWidget):
                 f"Long sequence ({seq_len:,} bp): letter mode disabled for performance."
             )
         if fit_after_load:
-            QTimer.singleShot(0, self.fit_window)
+            self._schedule_fit_window()
+
+    def _schedule_fit_window(self, delay_ms: int = 0) -> None:
+        """Defer a fit_window() call, skipping it if select_by_position() sets a more
+        specific view in the meantime (e.g. a Flexidot Go-to request racing the
+        Annotation tab's own initial auto-load-and-fit)."""
+        generation = self._layout_intent_generation
+
+        def _maybe_fit() -> None:
+            if self._layout_intent_generation == generation:
+                self.fit_window()
+
+        QTimer.singleShot(delay_ms, _maybe_fit)
 
     def features(self) -> list[SequenceFeature]:
         if self._data is None:
@@ -3511,8 +3529,10 @@ class SequenceMapPanel(QWidget):
     def open_annotation_tab(self, *, reload: bool = False) -> None:
         """Load annotations and fit the sequence to the visible window width."""
         if reload or self._map.data() is None:
+            # load_path(fit_after_load=True) already schedules the fit_window() call
+            # (see SequenceMapWidget.load()); do not schedule a second, redundant one
+            # here - it used to race a Go-to jump landing on this same tab.
             self.load_path(self._path, fit_after_load=True)
-            QTimer.singleShot(0, self._map.fit_window)
             QTimer.singleShot(50, self._map.refresh_layout)
         else:
             QTimer.singleShot(0, self._map.refresh_layout)

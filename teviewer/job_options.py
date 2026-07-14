@@ -20,9 +20,10 @@ TE_GENOME_MAP_DENSITY_HIT_COUNT = "hit_count"
 TE_GENOME_MAP_DENSITY_TE_LENGTH = "te_length"
 DEFAULT_TE_GENOME_MAP_DENSITY = TE_GENOME_MAP_DENSITY_TE_LENGTH
 TE_GENOME_MAP_COLOR_IDENTITY = "identity"
+TE_GENOME_MAP_COLOR_ORDER = "order"
 TE_GENOME_MAP_COLOR_SUPERFAMILY = "superfamily"
 TE_GENOME_MAP_COLOR_FAMILY = "family"
-DEFAULT_TE_GENOME_MAP_COLOR_BY = TE_GENOME_MAP_COLOR_SUPERFAMILY
+DEFAULT_TE_GENOME_MAP_COLOR_BY = TE_GENOME_MAP_COLOR_ORDER
 DEFAULT_TE_GENOME_MAP_SPLIT_STRAND = False
 DEFAULT_TE_GENOME_MAP_COLLAPSE_OVERLAPS = False
 DEFAULT_TE_GENOME_MAP_SHOW_DIFF_TRACK = False
@@ -156,17 +157,28 @@ class ConsensusOptions:
 DEFAULT_FLEXIDOT_WORDSIZE = 3
 DEFAULT_FLEXIDOT_LCS_SHADING = True
 DEFAULT_FLEXIDOT_USE_GFF = False
+DEFAULT_FLEXIDOT_OUTPUT_FORMAT = "html"
+FLEXIDOT_OUTPUT_HTML = "html"
+FLEXIDOT_OUTPUT_PNG = "png"
 MIN_FLEXIDOT_WORDSIZE = 3
 MAX_FLEXIDOT_WORDSIZE = 100
 
 
+def normalize_flexidot_output_format(value: str) -> str:
+    """Return ``html`` or ``png`` for Flexidot ``-f``."""
+    if str(value).strip().lower() == FLEXIDOT_OUTPUT_PNG:
+        return FLEXIDOT_OUTPUT_PNG
+    return FLEXIDOT_OUTPUT_HTML
+
+
 @dataclass
 class FlexidotOptions:
-    """Flexidot -k (word size), -x (LCS shading), and optional -g/-G GFF shading."""
+    """Flexidot -k (word size), -x (LCS shading), optional -g/-G GFF, and output format."""
 
     wordsize: int = DEFAULT_FLEXIDOT_WORDSIZE
     lcs_shading: bool = DEFAULT_FLEXIDOT_LCS_SHADING
     use_gff: bool = DEFAULT_FLEXIDOT_USE_GFF
+    output_format: str = DEFAULT_FLEXIDOT_OUTPUT_FORMAT
 
 
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
@@ -552,6 +564,7 @@ def load_te_genome_map_options() -> TeGenomeMapOptions:
     color_by = str(v.get("color_by", DEFAULT_TE_GENOME_MAP_COLOR_BY))
     if color_by not in (
         TE_GENOME_MAP_COLOR_IDENTITY,
+        TE_GENOME_MAP_COLOR_ORDER,
         TE_GENOME_MAP_COLOR_SUPERFAMILY,
         TE_GENOME_MAP_COLOR_FAMILY,
     ):
@@ -685,6 +698,9 @@ def load_flexidot_options() -> FlexidotOptions:
         wordsize=wordsize,
         lcs_shading=str(v.get("lcs_shading", "true")).lower() in {"1", "true", "yes"},
         use_gff=str(v.get("use_gff", "false")).lower() in {"1", "true", "yes"},
+        output_format=normalize_flexidot_output_format(
+            str(v.get("output_format", DEFAULT_FLEXIDOT_OUTPUT_FORMAT))
+        ),
     )
 
 
@@ -695,6 +711,7 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
             "wordsize": opts.wordsize,
             "lcs_shading": opts.lcs_shading,
             "use_gff": opts.use_gff,
+            "output_format": normalize_flexidot_output_format(opts.output_format),
         },
     )
 

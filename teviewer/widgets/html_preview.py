@@ -23,6 +23,15 @@ from PySide6.QtWidgets import (
 
 from teviewer.backends.blast_genome_plot import is_genome_map_html_file
 from teviewer.backends.curation import is_flexidot_html_file
+from teviewer.backends.flexidot_go_to import (
+    FLEXIDOT_GO_TO_BRIDGE_JS,
+    payload_from_console_message,
+)
+from teviewer.backends.html_preview_policy import (
+    flexidot_browser_fallback_reason,
+    should_use_webengine_for_html,
+    use_embedded_html_preview,
+)
 from teviewer.backends.igv_viewer import (
     IgvPreviewError,
     add_track_to_igv_session,
@@ -82,16 +91,9 @@ def _local_file_url(path: Path) -> QUrl:
     return QUrl.fromLocalFile(str(path.expanduser().resolve()))
 
 
-def use_embedded_html_preview() -> bool:
-    """
-    Return True when Plotly HTML should load inside Qt WebEngine.
-
-    Set ``TEVIEWER_EMBED_HTML=0`` to open HTML only in the system browser.
-    """
-    flag = os.environ.get("TEVIEWER_EMBED_HTML", "").strip().lower()
-    if flag in {"0", "false", "no", "off"}:
-        return False
-    return True
+def open_html_in_browser(path: Path) -> None:
+    """Open an HTML report in the system browser."""
+    QDesktopServices.openUrl(_local_file_url(path.expanduser().resolve()))
 
 
 def create_html_preview_widget(parent: QWidget | None = None) -> QWidget:
@@ -137,11 +139,10 @@ def _configure_web_settings(settings) -> None:
         QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls,
         QWebEngineSettings.WebAttribute.JavascriptEnabled,
         QWebEngineSettings.WebAttribute.LocalStorageEnabled,
+        QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled,
     ]
-    if sys.platform != "darwin":
-        attrs.append(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled)
-        if hasattr(QWebEngineSettings.WebAttribute, "WebGLEnabled"):
-            attrs.append(QWebEngineSettings.WebAttribute.WebGLEnabled)
+    if hasattr(QWebEngineSettings.WebAttribute, "WebGLEnabled"):
+        attrs.append(QWebEngineSettings.WebAttribute.WebGLEnabled)
     for attribute in attrs:
         settings.setAttribute(attribute, True)
 
@@ -183,15 +184,15 @@ class LazyHtmlPreview(QWidget):
             self._inner.set_fit_mode(mode)
 
     def load_html_file(self, path: Path, *, force: bool = False) -> None:
+        resolved = path.expanduser().resolve()
+        if not should_use_webengine_for_html(resolved):
+            self._load_browser_fallback(resolved, auto_open=is_flexidot_html_file(resolved))
+            return
         if not use_embedded_html_preview():
-            if self._inner is None:
-                self._inner = HtmlFallbackPreview(
-                    self,
-                    reason="Embedded HTML preview disabled (TEVIEWER_EMBED_HTML=0).",
-                )
-                self._status.hide()
-                self._layout.addWidget(self._inner, stretch=1)
-            self._inner.load_html_file(path)
+            self._load_browser_fallback(
+                resolved,
+                reason="Embedded HTML preview disabled (TEVIEWER_EMBED_HTML=0).",
+            )
             return
         if self._inner is None:
             self._inner = self._create_inner_viewer()
@@ -206,6 +207,28 @@ class LazyHtmlPreview(QWidget):
             self._inner.set_zoom_percent(self._zoom_percent)
         if hasattr(self._inner, "set_fit_mode"):
             self._inner.set_fit_mode(self._fit_mode)
+
+    def _load_browser_fallback(
+        self,
+        path: Path,
+        *,
+        reason: str = "",
+        auto_open: bool = False,
+    ) -> None:
+        if reason == "" and is_flexidot_html_file(path):
+            reason = flexidot_browser_fallback_reason(path)
+        if self._inner is not None:
+            if hasattr(self._inner, "teardown"):
+                self._inner.teardown()
+            self._layout.removeWidget(self._inner)
+            self._inner.deleteLater()
+            self._inner = None
+        self._inner = HtmlFallbackPreview(self, reason=reason or "HTML preview unavailable.")
+        self._status.hide()
+        self._layout.addWidget(self._inner, stretch=1)
+        self._inner.load_html_file(path)
+        if auto_open:
+            QTimer.singleShot(150, lambda p=path: open_html_in_browser(p))
 
     def load_url(self, url: str) -> None:
         """Load an http(s) page (for example igv.js served on localhost)."""
@@ -231,6 +254,16 @@ class LazyHtmlPreview(QWidget):
         if hasattr(self._inner, "set_fit_mode"):
             self._inner.set_fit_mode(self._fit_mode)
 
+    def suspend(self) -> None:
+        """Stop WebEngine work when this preview is hidden behind another tab."""
+        if self._inner is not None and hasattr(self._inner, "suspend"):
+            self._inner.suspend()
+
+    def resume(self) -> None:
+        """Restart JS polling stopped by :meth:`suspend` (no-op if never suspended)."""
+        if self._inner is not None and hasattr(self._inner, "resume"):
+            self._inner.resume()
+
     def teardown(self) -> None:
         """Release WebEngine before showing a non-HTML preview in the same tab."""
         if self._inner is None:
@@ -238,6 +271,7 @@ class LazyHtmlPreview(QWidget):
         if hasattr(self._inner, "teardown"):
             self._inner.teardown()
         self._layout.removeWidget(self._inner)
+        self._inner.setParent(None)
         self._inner.deleteLater()
         self._inner = None
         self._status.show()
@@ -307,6 +341,9 @@ class HtmlWebEnginePreview(QWidget):
 
         _configure_web_settings(self._view.settings())
         self._view.loadFinished.connect(self._on_load_finished)
+        self._view.page().printRequested.connect(self._save_print_as_pdf)
+        self._view.page().profile().downloadRequested.connect(self._handle_download)
+        self._connect_js_console_bridge()
         self._view.installEventFilter(self)
         self._current_path: Path | None = None
         self._current_mtime_ns: int | None = None
@@ -320,7 +357,66 @@ class HtmlWebEnginePreview(QWidget):
         self._prefs_save_timer: QTimer | None = None
         self._dotplot_click_timer: QTimer | None = None
         self._last_dotplot_click_ts: float | None = None
+        self._load_debounce_timer: QTimer | None = None
+        self._pending_load_path: Path | None = None
+        self._pending_load_force = False
+        self._teardown_scheduled = False
         self._work_generation = 0
+
+    def _export_start_path(self, suffix: str) -> str:
+        """Suggested native export path based on the HTML currently being viewed."""
+        if self._current_path is not None:
+            return str(self._current_path.with_suffix(suffix))
+        return str(Path.home() / f"teviewer_plot{suffix}")
+
+    def _handle_download(self, download) -> None:
+        """Route Plotly's in-page SVG download through a native Qt save dialog."""
+        try:
+            if download.page() is not self._view.page():
+                return
+        except RuntimeError:
+            return
+        suggested = download.downloadFileName() or "teviewer_plot.svg"
+        start = Path(self._export_start_path(".svg")).with_name(suggested)
+        destination, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save plot as SVG",
+            str(start),
+            "SVG image (*.svg);;All files (*)",
+        )
+        if not destination:
+            download.cancel()
+            return
+        output = Path(destination).expanduser()
+        if output.suffix.lower() != ".svg":
+            output = output.with_suffix(".svg")
+        download.setDownloadDirectory(str(output.parent))
+        download.setDownloadFileName(output.name)
+        download.accept()
+
+    def _save_print_as_pdf(self) -> None:
+        """Handle window.print() from plot HTML using Qt WebEngine's PDF writer."""
+        destination, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save plot as PDF",
+            self._export_start_path(".pdf"),
+            "PDF document (*.pdf)",
+        )
+        if not destination or not self._view_active():
+            return
+        output = Path(destination).expanduser()
+        if output.suffix.lower() != ".pdf":
+            output = output.with_suffix(".pdf")
+        self._view.page().printToPdf(str(output))
+
+    def _connect_js_console_bridge(self) -> None:
+        """Optional faster Go-to pickup when this Qt build exposes the page console signal."""
+        if not self._view_active():
+            return
+        page = self._view.page()
+        signal = getattr(page, "javaScriptConsoleMessage", None)
+        if signal is not None and hasattr(signal, "connect"):
+            signal.connect(self._on_js_console_message)
 
     def is_view_active(self) -> bool:
         return _qobject_alive(self._view)
@@ -335,6 +431,33 @@ class HtmlWebEnginePreview(QWidget):
         # left it in a stale render state that would make clicks miss their target.
         if self._view_active():
             self._view.update()
+        if (
+            self._view_active()
+            and self._current_path is not None
+            and is_flexidot_html_file(self._current_path)
+            and self._last_load_ok
+        ):
+            self._install_dotplot_click_bridge()
+
+    def _on_js_console_message(self, _level, message, _line, _source) -> None:
+        payload = payload_from_console_message(str(message))
+        if payload is not None:
+            self._emit_dotplot_payload(payload)
+
+    def _emit_dotplot_payload(self, payload: dict) -> None:
+        ts = payload.get("ts")
+        if not isinstance(ts, (int, float)):
+            return
+        if self._last_dotplot_click_ts is not None and ts <= self._last_dotplot_click_ts:
+            return
+        self._last_dotplot_click_ts = ts
+        logger.debug(
+            "Flexidot Go-to bridge: payload x_seq=%r y_seq=%r ts=%s",
+            payload.get("x_seq"),
+            payload.get("y_seq"),
+            ts,
+        )
+        self.dotplotRegionSelected.emit(payload)
 
     def _defer(self, delay_ms: int, callback) -> None:
         generation = self._work_generation
@@ -431,6 +554,25 @@ class HtmlWebEnginePreview(QWidget):
         if not self._view_active():
             return
         resolved = path.expanduser().resolve()
+        self._pending_load_path = resolved
+        self._pending_load_force = force
+        if self._load_debounce_timer is None:
+            self._load_debounce_timer = QTimer(self)
+            self._load_debounce_timer.setSingleShot(True)
+            self._load_debounce_timer.setInterval(120)
+            self._load_debounce_timer.timeout.connect(self._flush_pending_html_load)
+        self._load_debounce_timer.start()
+
+    def _flush_pending_html_load(self) -> None:
+        if not self._view_active() or self._pending_load_path is None:
+            return
+        self._load_html_file_now(self._pending_load_path, force=self._pending_load_force)
+        self._pending_load_path = None
+
+    def _load_html_file_now(self, path: Path, *, force: bool = False) -> None:
+        if not self._view_active():
+            return
+        resolved = path.expanduser().resolve()
         try:
             mtime_ns = resolved.stat().st_mtime_ns if resolved.is_file() else None
         except OSError:
@@ -470,6 +612,28 @@ class HtmlWebEnginePreview(QWidget):
         except RuntimeError:
             return
         self._sync_igv_toolbar()
+
+    def suspend(self) -> None:
+        """Pause JS polling while hidden behind another tab.
+
+        Deliberately does not navigate the page away (e.g. to about:blank): doing so
+        used to blank the Flexidot dotplot whenever Go-to opened/focused the Annotation
+        tab, and forced a full reload (re-parsing the whole inline Plotly JSON) on every
+        switch back. Chromium already throttles hidden-tab rendering on its own.
+        """
+        self._invalidate_pending_work()
+        if self._load_debounce_timer is not None:
+            self._load_debounce_timer.stop()
+        self._pending_load_path = None
+
+    def resume(self) -> None:
+        """Restart JS polling stopped by :meth:`suspend` without reloading the page."""
+        if not self._view_active() or not self._last_load_ok or self._current_path is None:
+            return
+        if is_flexidot_html_file(self._current_path):
+            self._install_dotplot_click_bridge()
+        if is_genome_map_html_file(self._current_path):
+            self._install_plot_prefs_bridge()
 
     def load_url(self, url: str) -> None:
         if not self._view_active():
@@ -620,9 +784,10 @@ class HtmlWebEnginePreview(QWidget):
         if self._current_path is None or not is_flexidot_html_file(self._current_path):
             return
         logger.debug("Flexidot Go-to bridge: starting poll timer for %s", self._current_path)
+        self._view.page().runJavaScript(FLEXIDOT_GO_TO_BRIDGE_JS)
         if self._dotplot_click_timer is None:
             self._dotplot_click_timer = QTimer(self)
-            self._dotplot_click_timer.setInterval(400)
+            self._dotplot_click_timer.setInterval(200)
             self._dotplot_click_timer.timeout.connect(self._poll_dotplot_click)
         self._dotplot_click_timer.start()
 
@@ -640,32 +805,20 @@ class HtmlWebEnginePreview(QWidget):
             except (TypeError, ValueError):
                 logger.debug("Dotplot click payload was not valid JSON: %r", raw)
                 return
-            if not isinstance(payload, dict):
-                return
-            ts = payload.get("ts")
-            if not isinstance(ts, (int, float)):
-                logger.debug("Dotplot click payload missing numeric ts: %r", payload)
-                return
-            if self._last_dotplot_click_ts is not None and ts <= self._last_dotplot_click_ts:
-                logger.debug(
-                    "Dotplot click ts %s not newer than last seen %s - skipping",
-                    ts,
-                    self._last_dotplot_click_ts,
-                )
-                return
-            self._last_dotplot_click_ts = ts
-            logger.debug(
-                "Flexidot Go-to bridge: detected new click x_seq=%r y_seq=%r ts=%s - emitting signal",
-                payload.get("x_seq"),
-                payload.get("y_seq"),
-                ts,
-            )
-            self.dotplotRegionSelected.emit(payload)
+            if isinstance(payload, dict):
+                self._emit_dotplot_payload(payload)
 
         self._view.page().runJavaScript(
-            # QWebEngine cannot reliably marshal plain JS objects back to Python
-            # via runJavaScript (comes through as an empty string) - stringify first.
-            "window.__flexidotLastClick ? JSON.stringify(window.__flexidotLastClick) : null",
+            """
+(() => {
+  var pending = window.__teviewerFlexidotNotifyJson;
+  if (pending) {
+    window.__teviewerFlexidotNotifyJson = null;
+    return pending;
+  }
+  return window.__flexidotLastClick ? JSON.stringify(window.__flexidotLastClick) : null;
+})()
+""",
             0,
             _on_payload,
         )
@@ -678,21 +831,41 @@ class HtmlWebEnginePreview(QWidget):
             QDesktopServices.openUrl(_local_file_url(self._current_path))
 
     def teardown(self) -> None:
+        if self._teardown_scheduled:
+            return
+        self._teardown_scheduled = True
         self._invalidate_pending_work()
+        if self._load_debounce_timer is not None:
+            self._load_debounce_timer.stop()
+        self._pending_load_path = None
         try:
             self._view.loadFinished.disconnect(self._on_load_finished)
         except (RuntimeError, TypeError):
             pass
         try:
-            self._view.stop()
-            self._view.setUrl(QUrl("about:blank"))
-        except RuntimeError:
-            logger.debug("WebEngine teardown stop failed", exc_info=True)
-        except Exception:
-            logger.debug("WebEngine teardown stop failed", exc_info=True)
-        self._current_path = None
-        self._current_mtime_ns = None
-        self._last_load_ok = False
+            self._view.page().printRequested.disconnect(self._save_print_as_pdf)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self._view.page().profile().downloadRequested.disconnect(self._handle_download)
+        except (RuntimeError, TypeError):
+            pass
+
+        def _finish_teardown() -> None:
+            if not _qobject_alive(self):
+                return
+            try:
+                if self._view_active():
+                    self._view.stop()
+                    self._view.setUrl(QUrl("about:blank"))
+            except RuntimeError:
+                logger.debug("WebEngine teardown stop failed", exc_info=True)
+            self._current_path = None
+            self._current_mtime_ns = None
+            self._last_load_ok = False
+            self._teardown_scheduled = False
+
+        QTimer.singleShot(0, _finish_teardown)
 
 
 class HtmlFallbackPreview(QWidget):

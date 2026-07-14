@@ -91,7 +91,16 @@ from teviewer.backends.te_benchmark import (
     run_confusion_matrix_benchmark,
 )
 from teviewer.backends.te_library_benchmark import run_te_library_benchmark
-from teviewer.backends.curation import effective_batch_workers, is_flexidot_extra_plot_file, run_batch
+from teviewer.backends.flexidot_go_to import (
+    fasta_for_flexidot_html,
+    parse_dotplot_go_to_targets,
+)
+from teviewer.backends.curation import (
+    effective_batch_workers,
+    is_flexidot_extra_plot_file,
+    is_flexidot_html_file,
+    run_batch,
+)
 from teviewer.backends.gui_functions import flexidot_executable
 from teviewer.backends.gui_functions import sanitize_name as flexidot_sanitize_name
 from teviewer.backends.sequence_aligner import (
@@ -1096,6 +1105,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         if self._any_background_job_running():
             self._shutdown_background_threads()
+        if self._preview_tabs is not None:
+            self._preview_tabs.teardown_all_html_previews()
         self._persist_workspace()
         settings = QSettings()
         settings.beginGroup("mainwindow")
@@ -2416,62 +2427,91 @@ class MainWindow(QMainWindow):
         if not self._file_list.hasFocus():
             QTimer.singleShot(0, self._focus_preview_widget)
 
+    def _find_fasta_for_dotplot_go_to(self, seq_id: str) -> Path | None:
+        found = self._find_fasta_for_sequence_id(seq_id)
+        if found is not None:
+            return found
+        if self._preview_tabs is None:
+            return None
+        from teviewer.widgets.preview_tabs import FilePreviewPage
+
+        current = self._preview_tabs.currentWidget()
+        if isinstance(current, FilePreviewPage) and is_flexidot_html_file(current.path):
+            return fasta_for_flexidot_html(current.path)
+        return None
+
     def _on_dotplot_region_selected(self, payload: object) -> None:
         """Open (if needed) and jump the Annotation view to the region clicked in a
         Flexidot dotplot."""
         logger.debug("Go-to: received dotplot region-selected payload: %r", payload)
         if not isinstance(payload, dict):
             return
-        x_seq = payload.get("x_seq")
-        y_seq = payload.get("y_seq")
-        try:
-            x_start, x_end = int(payload["x_start"]), int(payload["x_end"])
-            y_start, y_end = int(payload["y_start"]), int(payload["y_end"])
-        except (KeyError, TypeError, ValueError):
-            logger.warning("Dotplot region-selected payload missing coordinates: %r", payload)
+
+        targets = parse_dotplot_go_to_targets(payload)
+        if not targets:
+            logger.warning("Dotplot Go-to payload has no usable axis: %r", payload)
             return
 
-        matched: list[str] = []
-        seen: set[str] = set()
         try:
-            for seq, start, end in ((x_seq, x_start, x_end), (y_seq, y_start, y_end)):
-                if not seq or seq in seen:
+            for seq, start, end in targets:
+                if self._preview_tabs is None:
                     continue
-                seen.add(seq)
-                already_open = self._preview_tabs.show_annotation_region_for_sequence(
-                    seq, start, end
-                )
-                logger.debug(
-                    "Go-to: seq=%r %d-%d - already-open-tab match: %s",
-                    seq,
-                    start,
-                    end,
-                    already_open,
-                )
-                if already_open:
-                    matched.append(f"{seq}:{start}-{end}")
+                if self._preview_tabs.show_annotation_region_for_sequence(seq, start, end):
+                    logger.debug("Go-to: jumped on open tab seq=%r %d-%d", seq, start, end)
+                    self._ensure_preview_visible()
+                    self._set_status_message(f"Jumped Annotation view to {seq}:{start}-{end}", 4000)
                     continue
-                fasta_path = self._find_fasta_for_sequence_id(seq)
+
+                fasta_path = self._find_fasta_for_dotplot_go_to(seq)
                 logger.debug("Go-to: seq=%r - folder search found: %s", seq, fasta_path)
                 if fasta_path is None:
+                    self._set_status_message(
+                        f"Could not find a FASTA file for {seq} in this folder", 4000
+                    )
                     continue
+
                 self._open_preview_tab(fasta_path)
-                jumped = self._preview_tabs.show_annotation_region_for_sequence(seq, start, end)
-                logger.debug("Go-to: seq=%r - jump after opening tab: %s", seq, jumped)
-                if jumped:
-                    matched.append(f"{seq}:{start}-{end}")
+
+                def _jump_after_open(
+                    *,
+                    seq_id: str = seq,
+                    region_start: int = start,
+                    region_end: int = end,
+                    fasta: Path = fasta_path,
+                    attempt: int = 0,
+                ) -> None:
+                    if self._preview_tabs is None:
+                        return
+                    jumped = self._preview_tabs.show_annotation_region_for_sequence(
+                        seq_id, region_start, region_end
+                    )
+                    if jumped:
+                        logger.debug(
+                            "Go-to: jump after opening %s seq=%r %d-%d",
+                            fasta.name,
+                            seq_id,
+                            region_start,
+                            region_end,
+                        )
+                        self._ensure_preview_visible()
+                        self._set_status_message(
+                            f"Jumped Annotation view to {seq_id}:{region_start}-{region_end}",
+                            4000,
+                        )
+                        return
+                    if attempt < 10:
+                        QTimer.singleShot(50, lambda: _jump_after_open(attempt=attempt + 1))
+                        return
+                    self._set_status_message(
+                        f"Opened {fasta.name} but could not jump to {seq_id}:{region_start}-{region_end}",
+                        6000,
+                    )
+
+                QTimer.singleShot(0, _jump_after_open)
         except Exception:  # noqa: BLE001
             logger.exception("Failed to jump Annotation view for dotplot selection %r", payload)
             self._set_status_message(
                 "Go-to-region failed - see terminal/log output for details", 6000
-            )
-            return
-
-        if matched:
-            self._set_status_message(f"Jumped Annotation view to {', '.join(matched)}", 4000)
-        elif x_seq or y_seq:
-            self._set_status_message(
-                f"Could not find a FASTA file for {x_seq or y_seq} in this folder", 4000
             )
 
     def _find_fasta_for_sequence_id(self, seq_id: str) -> Path | None:
@@ -4556,7 +4596,8 @@ class MainWindow(QMainWindow):
             save_flexidot_options(self._flexidot_options)
             self._set_status_message(
                 f"Flexidot parameters updated "
-                f"(k={self._flexidot_options.wordsize}"
+                f"(k={self._flexidot_options.wordsize}, "
+                f"output={self._flexidot_options.output_format}"
                 f"{', GFF on' if self._flexidot_options.use_gff else ''})",
                 5000,
             )

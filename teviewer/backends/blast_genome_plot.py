@@ -27,6 +27,7 @@ from teviewer.job_options import (
     DEFAULT_CHROMOSOME_SORT,
     TE_GENOME_MAP_COLOR_FAMILY,
     TE_GENOME_MAP_COLOR_IDENTITY,
+    TE_GENOME_MAP_COLOR_ORDER,
     TE_GENOME_MAP_COLOR_SUPERFAMILY,
     TE_GENOME_MAP_DENSITY_HIT_COUNT,
     TE_GENOME_MAP_DENSITY_TE_LENGTH,
@@ -1003,7 +1004,7 @@ def _plotly_interactive_controls_html(
 .te-sf-panel{{position:fixed;right:14px;top:14px;z-index:100000;background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:8px;max-height:70vh;overflow:auto;min-width:230px;font-family:Arial,sans-serif;font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,.15)}}
 .te-sf-title{{font-weight:600;margin-bottom:6px;cursor:move;user-select:none}}
 .te-sf-actions{{display:flex;gap:6px;margin-bottom:6px}}
-.te-sf-actions button{{font-size:11px;padding:2px 6px}}
+.te-sf-actions button{{font-size:11px;padding:3px 8px;cursor:pointer}}
 .te-sf-item{{display:flex;align-items:center;gap:6px;margin:2px 0;padding:2px 4px;border-radius:4px}}
 .te-sf-item.te-sf-track-group{{flex-direction:column;align-items:stretch;gap:2px}}
 .te-sf-track-head{{display:flex;align-items:center;gap:6px;min-width:0}}
@@ -1028,6 +1029,10 @@ def _plotly_interactive_controls_html(
 .te-sf-ymax-actions{{margin:4px 0 6px;padding-left:2px}}
 .te-sf-ymax-actions button{{font-size:11px;padding:3px 10px;cursor:pointer}}
 .te-sf-ymax-status{{font-size:10px;color:#1a7f37;margin-left:6px}}
+@media print{{
+  .te-sf-panel,.modebar{{display:none !important}}
+  html,body{{margin:0 !important;padding:0 !important}}
+}}
 </style>
 <script>
 (function(){{
@@ -1384,6 +1389,10 @@ def _plotly_interactive_controls_html(
     panel.className = 'te-sf-panel';
     const filterBlock = '<div class="te-sf-title" title="Drag to move">'
       + (hasCategoryFilters ? '{filter_title}' : 'Track display')
+      + '</div>'
+      + '<div class="te-sf-actions">'
+      + '<button type="button" id="te-sf-save-svg" title="Download the current chart view as SVG">Save SVG</button>'
+      + '<button type="button" id="te-sf-save-pdf" title="Open the print dialog to save the current chart view as PDF">Save PDF</button>'
       + '</div>';
     panel.innerHTML = filterBlock
       + '<div id="te-sf-tracks-wrap" class="te-sf-hidden">'
@@ -3629,6 +3638,15 @@ def _plotly_interactive_controls_html(
     window.addEventListener('mouseup', () => {{ dragging = false; }});
     document.body.appendChild(panel);
     panel.style.zIndex = '100000';
+    const exportName = (document.title || (GENOME_MODE ? 'te-genome-map' : 'te-divergence-plot'))
+      .replace(/[^a-z0-9._-]+/gi, '_')
+      .replace(/^_+|_+$/g, '') || 'te-plot';
+    panel.querySelector('#te-sf-save-svg').addEventListener('click', () => {{
+      Plotly.downloadImage(gd, {{format: 'svg', filename: exportName}});
+    }});
+    panel.querySelector('#te-sf-save-pdf').addEventListener('click', () => {{
+      window.print();
+    }});
     gd.on('plotly_relayout', (ev) => {{
       if(gd._teRelayoutSync || (gd._teApplyDepth || 0) > 0){{ return; }}
       if(GENOME_MODE){{
@@ -4950,12 +4968,18 @@ def read_repeatmasker_out(path: Path) -> pd.DataFrame:
     repeat_class = rm["repeat_class"].astype(str).str.strip()
     repeat_class = repeat_class.replace({"": "Unclassified", "nan": "Unclassified"})
     class_parts = repeat_class.str.split("/", n=1, expand=True)
-    superfamily = class_parts[0].fillna("Unclassified").replace("", "Unclassified")
+    order = class_parts[0].fillna("Unclassified").replace("", "Unclassified")
     if 1 in class_parts.columns:
-        family = class_parts[1].where(class_parts[1].notna(), superfamily)
+        raw_superfamily = class_parts[1]
+        superfamily = raw_superfamily.where(
+            raw_superfamily.notna() & raw_superfamily.ne(""),
+            order,
+        )
     else:
-        family = superfamily.copy()
-    family = family.fillna("Unclassified").replace("", "Unclassified")
+        superfamily = order.copy()
+    family = repeat_name.fillna("Unclassified").replace(
+        {"": "Unclassified", "nan": "Unclassified"}
+    )
     qseqid = repeat_name + "#" + repeat_class
     pident = 100.0 - pd.to_numeric(rm["perc_div"], errors="coerce").fillna(0.0)
 
@@ -4978,6 +5002,7 @@ def read_repeatmasker_out(path: Path) -> pd.DataFrame:
             "chrom": rm["query_name"].astype(str).str.strip(),
             "start": starts,
             "end": ends,
+            "order": order,
             "superfamily": superfamily,
             "family": family,
             "hit_bp": hit_bp,
@@ -5111,6 +5136,7 @@ def _ensure_te_bp(hits: pd.DataFrame) -> pd.DataFrame:
 
 
 TEVIEWER_HITS_CACHE_SUFFIX = ".teviewer_hits.pkl"
+TEVIEWER_HITS_CLASSIFICATION_SCHEMA = 2
 
 
 def is_teviewer_hits_cache_file(path: Path) -> bool:
@@ -5227,6 +5253,7 @@ def gene_hits_from_gff(
                 "start": int(feat.start),
                 "end": int(feat.end),
                 "pident": 100.0,
+                "order": ft,
                 "superfamily": ft,
                 "family": ft,
                 "te_bp": int(feat.length),
@@ -5246,10 +5273,18 @@ def load_prepared_te_hits(path: Path) -> pd.DataFrame:
     try:
         src_mtime = path.stat().st_mtime
         if cache.is_file() and cache.stat().st_mtime >= src_mtime:
-            return pd.read_pickle(cache)
+            cached = pd.read_pickle(cache)
+            # Rebuild caches created under older classification rules.
+            if (
+                {"order", "superfamily", "family"}.issubset(cached.columns)
+                and cached.attrs.get("teviewer_classification_schema")
+                == TEVIEWER_HITS_CLASSIFICATION_SCHEMA
+            ):
+                return cached
     except OSError:
         pass
     hits = prepare_hits(read_te_hit_table(path))
+    hits.attrs["teviewer_classification_schema"] = TEVIEWER_HITS_CLASSIFICATION_SCHEMA
     try:
         hits.to_pickle(cache)
     except OSError as exc:
@@ -5260,7 +5295,7 @@ def load_prepared_te_hits(path: Path) -> pd.DataFrame:
 def prepare_hits(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-    if {"start", "end", "chrom", "pident", "superfamily", "family"}.issubset(df.columns):
+    if {"start", "end", "chrom", "pident", "order", "superfamily", "family"}.issubset(df.columns):
         return _ensure_te_bp(df)
     hits = df.copy()
     sstart = pd.to_numeric(hits["sstart"], errors="coerce").fillna(0).to_numpy(dtype=np.int64)
@@ -5271,11 +5306,17 @@ def prepare_hits(df: pd.DataFrame) -> pd.DataFrame:
     hits["chrom"] = hits["sseqid"].astype(str)
     hits["hit_bp"] = (hits["end"] - hits["start"] + 1).clip(lower=1)
     qnames = hits["qseqid"].astype(str)
-    after_hash = qnames.str.split("#", n=1).str[-1]
+    name_parts = qnames.str.split("#", n=1, expand=True)
+    family = name_parts[0].fillna("Unclassified").replace("", "Unclassified")
+    after_hash = name_parts[1] if 1 in name_parts.columns else pd.Series("", index=hits.index)
     has_hash = qnames.str.contains("#", regex=False)
-    superfamily = after_hash.where(has_hash, "Unclassified").str.split("/", n=1).str[0]
-    family = after_hash.where(has_hash, "Unclassified")
-    family = family.where(~family.str.contains("/", regex=False), family.str.split("/", n=1).str[1])
+    class_parts = after_hash.where(has_hash, "").str.split("/", n=1, expand=True)
+    order = class_parts[0].fillna("Unclassified").replace("", "Unclassified")
+    if 1 in class_parts.columns:
+        superfamily = class_parts[1].fillna("Unclassified").replace("", "Unclassified")
+    else:
+        superfamily = pd.Series("Unclassified", index=hits.index, dtype=str)
+    hits["order"] = order
     hits["superfamily"] = superfamily.fillna("Unclassified").replace("", "Unclassified")
     hits["family"] = family.fillna("Unclassified").replace("", "Unclassified")
     return _ensure_te_bp(hits)
@@ -6447,7 +6488,7 @@ def genome_chrom_sizes_from_fasta(genome_fasta: Path | None) -> dict[str, int]:
 
 
 def superfamily_names_from_blast(blast_txt: Path) -> list[str]:
-    """Unique TE superfamily names parsed from qseqid format: after '#', before '/'."""
+    """Unique TE superfamilies parsed from qseqid format: after the class '/'."""
     blast_txt = blast_txt.expanduser().resolve()
     if not blast_txt.is_file():
         return []
@@ -7171,6 +7212,8 @@ def _filter_bins_to_mbp_window(
 
 
 def _category_series(hits: pd.DataFrame, color_by: str) -> pd.Series:
+    if color_by == TE_GENOME_MAP_COLOR_ORDER and "order" in hits.columns:
+        return hits["order"].astype(str)
     if color_by == TE_GENOME_MAP_COLOR_FAMILY and "family" in hits.columns:
         return hits["family"].astype(str)
     if color_by == TE_GENOME_MAP_COLOR_SUPERFAMILY and "superfamily" in hits.columns:
@@ -7279,7 +7322,13 @@ def _legend_categories(hits: pd.DataFrame, color_by: str) -> list[str]:
         return []
     if color_by == TE_GENOME_MAP_COLOR_FAMILY and "family" in hits.columns:
         return _ordered_te_families(hits)
-    cat_col = "superfamily" if color_by == TE_GENOME_MAP_COLOR_SUPERFAMILY else "family"
+    cat_col = (
+        "order"
+        if color_by == TE_GENOME_MAP_COLOR_ORDER
+        else "superfamily"
+        if color_by == TE_GENOME_MAP_COLOR_SUPERFAMILY
+        else "family"
+    )
     if cat_col not in hits.columns:
         return []
     return _ordered_te_types({str(v) for v in hits[cat_col].astype(str) if str(v)})
@@ -7743,17 +7792,28 @@ def build_blast_genome_map_figure(
     shared_diff_norm = float(te_diff_peak) if show_te_diff else 1.0
     diff_bar_half = max(0.28, max_bar_height * DIFF_TRACK_BAR_HALF_FRAC) if show_te_diff else 0.06
 
-    use_category_density = color_by in {TE_GENOME_MAP_COLOR_SUPERFAMILY, TE_GENOME_MAP_COLOR_FAMILY}
+    use_category_density = color_by in {
+        TE_GENOME_MAP_COLOR_ORDER,
+        TE_GENOME_MAP_COLOR_SUPERFAMILY,
+        TE_GENOME_MAP_COLOR_FAMILY,
+    }
     categories_for_legend: list[str] = []
     if use_category_density and not hits.empty:
         categories_for_legend = _legend_categories(hits, color_by)
     cat_col = (
-        "superfamily"
+        "order"
+        if color_by == TE_GENOME_MAP_COLOR_ORDER
+        else "superfamily"
         if color_by == TE_GENOME_MAP_COLOR_SUPERFAMILY
         else "family"
         if use_category_density
         else None
     )
+    category_label = {
+        TE_GENOME_MAP_COLOR_ORDER: "Order",
+        TE_GENOME_MAP_COLOR_SUPERFAMILY: "Superfamily",
+        TE_GENOME_MAP_COLOR_FAMILY: "Family",
+    }.get(color_by, "TE category")
     region_window = (x_range[0], x_range[1]) if region is not None and x_range is not None else None
     methylation_cg_by_chrom: dict[str, np.ndarray] = {}
     if include_methylation_tracks or show_meth_diff:
@@ -8194,7 +8254,7 @@ def build_blast_genome_map_figure(
                         f"<b>{track.label}</b><br>"
                         f"{lo_m:.2f}–{hi_m:.2f} Mbp ({window_kb} kb window)"
                         + (f"<br>Strand: {strand_note}" if strand_note else "")
-                        + f"<br>Superfamily/Family: {cat}<br>"
+                        + f"<br>{category_label}: {cat}<br>"
                         f"Hits: {int(hits_n)}<br>"
                         f"Total TE length: {int(te_len):,} bp ({te_len / 1000:.1f} kb)"
                     )
@@ -8414,7 +8474,9 @@ def build_blast_genome_map_figure(
     if not gene_only:
         if use_category_density:
             colour_caption = (
-                "colour = TE superfamily"
+                "colour = TE order"
+                if color_by == TE_GENOME_MAP_COLOR_ORDER
+                else "colour = TE superfamily"
                 if color_by == TE_GENOME_MAP_COLOR_SUPERFAMILY
                 else "colour = TE family"
             )
