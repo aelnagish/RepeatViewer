@@ -99,6 +99,7 @@ from teviewer.backends.blast_genome_plot import (
     TE_INPUT_KIND_CONSENSUS,
     TE_INPUT_KIND_MASKING,
 )
+from teviewer.backends.te_abundance_plot import write_te_abundance_plot_html
 from teviewer.backends.igv_viewer import (
     discover_igv_annotations,
     is_alignment_preview_file,
@@ -113,8 +114,18 @@ from teviewer.backends.te_benchmark import (
     run_confusion_matrix_benchmark,
 )
 from teviewer.backends.te_library_benchmark import run_te_library_benchmark
-from teviewer.backends.curation import effective_batch_workers, is_flexidot_extra_plot_file, run_batch
-from teviewer.backends.gui_functions import flexidot_executable, sanitize_name as flexidot_sanitize_name
+from teviewer.backends.flexidot_go_to import (
+    fasta_for_flexidot_html,
+    parse_dotplot_go_to_targets,
+)
+from teviewer.backends.curation import (
+    effective_batch_workers,
+    is_flexidot_extra_plot_file,
+    is_flexidot_html_file,
+    run_batch,
+)
+from teviewer.backends.gui_functions import flexidot_executable
+from teviewer.backends.gui_functions import sanitize_name as flexidot_sanitize_name
 from teviewer.backends.sequence_aligner import (
     alignment_backends,
     run_alignment,
@@ -189,6 +200,7 @@ from teviewer.views.tool_dialogs import (
     TsdSearchParamsDialog,
     TeDensityPlotDialog,
     TeDivergencePlotDialog,
+    TeAbundancePlotDialog,
     ConfusionMatrixBenchmarkDialog,
     TeLibraryBenchmarkDialog,
     CommandPluginDesignerDialog,
@@ -935,7 +947,9 @@ class MainWindow(QMainWindow):
         self._pending_te_genome_map: TeGenomeMapOptions | None = None
         self._pending_te_genome_map_fastas: list[Path] = []
         self._pending_te_viz: _PendingTeVizBuild | None = None
-        self._te_viz_input_dialog: TeDensityPlotDialog | TeDivergencePlotDialog | None = None
+        self._te_viz_input_dialog: (
+            TeDensityPlotDialog | TeDivergencePlotDialog | TeAbundancePlotDialog | None
+        ) = None
         self._genome_chrom_names_cache: list[str] = []
         self._genome_chrom_sizes_cache: dict[str, int] = {}
         self._genome_chrom_cache_path: Path | None = None
@@ -1132,6 +1146,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         if self._any_background_job_running():
             self._shutdown_background_threads()
+        if self._preview_tabs is not None:
+            self._preview_tabs.teardown_all_html_previews()
         self._persist_workspace()
         settings = QSettings()
         settings.beginGroup("mainwindow")
@@ -1498,6 +1514,7 @@ class MainWindow(QMainWindow):
         if not skip_default:
             menu.addAction("TE density plot", self._open_te_density_plot_dialog)
         menu.addAction("TE divergence plot", self._open_te_divergence_plot_dialog)
+        menu.addAction("TE abundance plot", self._open_te_abundance_plot_dialog)
 
     def _populate_benchmarking_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -2737,58 +2754,90 @@ class MainWindow(QMainWindow):
         if not self._file_list.hasFocus():
             QTimer.singleShot(0, self._focus_preview_widget)
 
-    def _focus_preview_widget(self) -> None:
+    def _find_fasta_for_dotplot_go_to(self, seq_id: str) -> Path | None:
+        found = self._find_fasta_for_sequence_id(seq_id)
+        if found is not None:
+            return found
         if self._preview_tabs is None:
-            return
+            return None
+        from teviewer.widgets.preview_tabs import FilePreviewPage
+
         current = self._preview_tabs.currentWidget()
-        if current is not None:
-            current.setFocus(Qt.FocusReason.OtherFocusReason)
+        if isinstance(current, FilePreviewPage) and is_flexidot_html_file(current.path):
+            return fasta_for_flexidot_html(current.path)
+        return None
 
     def _on_dotplot_region_selected(self, payload: object) -> None:
         """Open (if needed) and jump the Annotation view to the region clicked in a Flexidot dotplot."""
         logger.debug("Go-to: received dotplot region-selected payload: %r", payload)
         if not isinstance(payload, dict):
             return
-        x_seq = payload.get("x_seq")
-        y_seq = payload.get("y_seq")
-        try:
-            x_start, x_end = int(payload["x_start"]), int(payload["x_end"])
-            y_start, y_end = int(payload["y_start"]), int(payload["y_end"])
-        except (KeyError, TypeError, ValueError):
-            logger.warning("Dotplot region-selected payload missing coordinates: %r", payload)
+
+        targets = parse_dotplot_go_to_targets(payload)
+        if not targets:
+            logger.warning("Dotplot Go-to payload has no usable axis: %r", payload)
             return
 
-        matched: list[str] = []
-        seen: set[str] = set()
         try:
-            for seq, start, end in ((x_seq, x_start, x_end), (y_seq, y_start, y_end)):
-                if not seq or seq in seen:
+            for seq, start, end in targets:
+                if self._preview_tabs is None:
                     continue
-                seen.add(seq)
-                already_open = self._preview_tabs.show_annotation_region_for_sequence(
-                    seq, start, end
-                )
-                if already_open:
-                    matched.append(f"{seq}:{start}-{end}")
-                    continue
-                fasta_path = self._find_fasta_for_sequence_id(seq)
-                if fasta_path is None:
-                    continue
-                self._open_preview_tab(fasta_path)
                 if self._preview_tabs.show_annotation_region_for_sequence(seq, start, end):
-                    matched.append(f"{seq}:{start}-{end}")
+                    logger.debug("Go-to: jumped on open tab seq=%r %d-%d", seq, start, end)
+                    self._ensure_preview_visible()
+                    self._set_status_message(f"Jumped Annotation view to {seq}:{start}-{end}", 4000)
+                    continue
+
+                fasta_path = self._find_fasta_for_dotplot_go_to(seq)
+                logger.debug("Go-to: seq=%r - folder search found: %s", seq, fasta_path)
+                if fasta_path is None:
+                    self._set_status_message(
+                        f"Could not find a FASTA file for {seq} in this folder", 4000
+                    )
+                    continue
+
+                self._open_preview_tab(fasta_path)
+
+                def _jump_after_open(
+                    *,
+                    seq_id: str = seq,
+                    region_start: int = start,
+                    region_end: int = end,
+                    fasta: Path = fasta_path,
+                    attempt: int = 0,
+                ) -> None:
+                    if self._preview_tabs is None:
+                        return
+                    jumped = self._preview_tabs.show_annotation_region_for_sequence(
+                        seq_id, region_start, region_end
+                    )
+                    if jumped:
+                        logger.debug(
+                            "Go-to: jump after opening %s seq=%r %d-%d",
+                            fasta.name,
+                            seq_id,
+                            region_start,
+                            region_end,
+                        )
+                        self._ensure_preview_visible()
+                        self._set_status_message(
+                            f"Jumped Annotation view to {seq_id}:{region_start}-{region_end}",
+                            4000,
+                        )
+                        return
+                    if attempt < 10:
+                        QTimer.singleShot(50, lambda: _jump_after_open(attempt=attempt + 1))
+                        return
+                    self._set_status_message(
+                        f"Opened {fasta.name} but could not jump to {seq_id}:{region_start}-{region_end}",
+                        6000,
+                    )
+
+                QTimer.singleShot(0, _jump_after_open)
         except Exception:  # noqa: BLE001
             logger.exception("Failed to jump Annotation view for dotplot selection %r", payload)
             self._set_status_message(
                 "Go-to-region failed - see terminal/log output for details", 6000
-            )
-            return
-
-        if matched:
-            self._set_status_message(f"Jumped Annotation view to {', '.join(matched)}", 4000)
-        elif x_seq or y_seq:
-            self._set_status_message(
-                f"Could not find a FASTA file for {x_seq or y_seq} in this folder", 4000
             )
 
     def _find_fasta_for_sequence_id(self, seq_id: str) -> Path | None:
@@ -4283,6 +4332,48 @@ class MainWindow(QMainWindow):
         )
         self._present_te_viz_dialog(dialog, _on_accept)
 
+    def _open_te_abundance_plot_dialog(self, *, input_file: Path | None = None) -> None:
+        selected = [p for p in self._selected_files() if is_repeatmasker_out_file(p)]
+        initial_files = [input_file] if input_file is not None else selected
+
+        def _on_accept(dialog: TeAbundancePlotDialog) -> None:
+            sources = dialog.input_files()
+            if not sources:
+                QMessageBox.warning(self, "TE abundance plot", "Select a RepeatMasker .out file.")
+                return
+            for source in sources:
+                if not source.is_file() or not is_repeatmasker_out_file(source):
+                    QMessageBox.warning(
+                        self,
+                        "TE abundance plot",
+                        f"Select only valid RepeatMasker .out files.\n\nInvalid: {source}",
+                    )
+                    return
+            self._set_status_message("Building TE abundance plot…", 0)
+            try:
+                html_path = write_te_abundance_plot_html(
+                    sources,
+                    metric=dialog.y_axis_metric(),
+                    top_n=dialog.top_n(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(self, "TE abundance plot failed", str(exc))
+                return
+            self._open_divergence_in_preview(html_path)
+            outputs = [html_path.resolve()]
+            if self._current_folder and self._current_folder.resolve() == html_path.parent.resolve():
+                self._populate_file_list(
+                    html_path.parent.resolve(), new_outputs=outputs, source_files=sources
+                )
+            else:
+                self._navigate_to_folder(
+                    html_path.parent.resolve(), new_outputs=outputs, source_files=sources
+                )
+            self._set_status_message(f"TE abundance plot: {html_path.name}", 8000)
+
+        dialog = TeAbundancePlotDialog(input_files=initial_files or None, parent=self)
+        self._present_te_viz_dialog(dialog, _on_accept)
+
     def _warm_genome_chromosome_cache(self) -> None:
         """Pre-read genome FASTA metadata so TE genome map dialogs open quickly."""
         if self._project.genome_file and self._project.genome_file.is_file():
@@ -4885,7 +4976,8 @@ class MainWindow(QMainWindow):
             save_flexidot_options(self._flexidot_options)
             self._set_status_message(
                 f"Flexidot parameters updated "
-                f"(k={self._flexidot_options.wordsize}"
+                f"(k={self._flexidot_options.wordsize}, "
+                f"output={self._flexidot_options.output_format}"
                 f"{', GFF on' if self._flexidot_options.use_gff else ''})",
                 5000,
             )

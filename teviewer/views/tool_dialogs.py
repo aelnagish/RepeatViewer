@@ -72,6 +72,7 @@ from teviewer.backends.blast_genome_plot import format_genome_length_bp
 from teviewer.job_options import (
     TE_GENOME_MAP_COLOR_FAMILY,
     TE_GENOME_MAP_COLOR_IDENTITY,
+    TE_GENOME_MAP_COLOR_ORDER,
     TE_GENOME_MAP_COLOR_SUPERFAMILY,
     TE_GENOME_MAP_DENSITY_HIT_COUNT,
     TE_GENOME_MAP_DENSITY_TE_LENGTH,
@@ -96,7 +97,10 @@ from teviewer.job_options import (
     DEFAULT_EXTEND_LEFT,
     DEFAULT_EXTEND_RIGHT,
     DEFAULT_FLEXIDOT_LCS_SHADING,
+    DEFAULT_FLEXIDOT_OUTPUT_FORMAT,
     DEFAULT_FLEXIDOT_WORDSIZE,
+    FLEXIDOT_OUTPUT_HTML,
+    FLEXIDOT_OUTPUT_PNG,
     DEFAULT_DIV_THRESHOLD,
     DEFAULT_DIV_WINDOW_SIZE,
     DEFAULT_GAP_COL_GAP_THRESHOLD,
@@ -130,6 +134,7 @@ from teviewer.job_options import (
     TsdSearchOptions,
     msa_clean_method_description,
     normalize_blast_evalue,
+    normalize_flexidot_output_format,
 )
 from teviewer.plugins.custom_command import (
     CommandVarDef,
@@ -880,8 +885,25 @@ class FlexidotParamsDialog(QDialog):
             "Shade the dotplot with companion GFF features when available."
         )
 
+        self._output_format = QComboBox()
+        self._output_format.addItem(
+            "HTML (interactive; Go-to in TEviewer)",
+            FLEXIDOT_OUTPUT_HTML,
+        )
+        self._output_format.addItem("PNG (static image)", FLEXIDOT_OUTPUT_PNG)
+        fmt_index = self._output_format.findData(
+            normalize_flexidot_output_format(opts.output_format)
+        )
+        if fmt_index >= 0:
+            self._output_format.setCurrentIndex(fmt_index)
+        self._output_format.setToolTip(
+            "Flexidot output format (-f). HTML enables interactive dotplots with "
+            "Go-to → Annotation inside TEviewer; PNG writes a static image only."
+        )
+
         form = QFormLayout()
         form.addRow("Word size (k-mer):", self._wordsize)
+        form.addRow("Output format:", self._output_format)
         form.addRow(self._lcs)
         form.addRow(self._use_gff)
 
@@ -896,10 +918,14 @@ class FlexidotParamsDialog(QDialog):
         layout.addWidget(buttons)
 
     def options(self) -> FlexidotOptions:
+        fmt = self._output_format.currentData()
         return FlexidotOptions(
             wordsize=self._wordsize.value(),
             lcs_shading=self._lcs.isChecked(),
             use_gff=self._use_gff.isChecked(),
+            output_format=normalize_flexidot_output_format(
+                str(fmt or FLEXIDOT_OUTPUT_HTML)
+            ),
         )
 
 
@@ -2113,6 +2139,7 @@ class TeDensityPlotDialog(QDialog):
             self._density.setCurrentIndex(idx)
         self._color_by = QComboBox(self)
         self._color_by.addItem("% identity", TE_GENOME_MAP_COLOR_IDENTITY)
+        self._color_by.addItem("TE order", TE_GENOME_MAP_COLOR_ORDER)
         self._color_by.addItem("TE superfamily", TE_GENOME_MAP_COLOR_SUPERFAMILY)
         self._color_by.addItem("TE family", TE_GENOME_MAP_COLOR_FAMILY)
         idx_color = self._color_by.findData(self._opts.color_by)
@@ -2135,7 +2162,7 @@ class TeDensityPlotDialog(QDialog):
         self._collapse_overlaps.setChecked(bool(self._opts.collapse_overlaps))
         self._collapse_overlaps.setToolTip(
             "For total TE length per window, count each base pair at most once when TEs "
-            "overlap. When color is by superfamily or family, overlaps are collapsed "
+            "overlap. When color is by order, superfamily, or family, overlaps are collapsed "
             "separately within each TE type; with % identity coloring, all TEs in a window "
             "are collapsed together. With separate forward/reverse tracks, collapse applies "
             "within each strand track only."
@@ -2398,6 +2425,63 @@ class TeDivergencePlotDialog(QDialog):
 
     def options(self) -> TeDivergencePlotOptions:
         return TeDivergencePlotOptions(bin_width=float(self._bin_width.value()))
+
+
+class TeAbundancePlotDialog(QDialog):
+    """RepeatMasker family rank-abundance plot settings."""
+
+    def __init__(
+        self,
+        *,
+        input_files: list[Path] | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        from teviewer.backends.te_abundance_plot import TE_ABUNDANCE_BP, TE_ABUNDANCE_PERCENT
+
+        _prepare_option_dialog(self)
+        self.setWindowTitle("TE abundance plot")
+        self.setMinimumWidth(680)
+
+        self._input = TeMultiInputFilesWidget(
+            self,
+            initial=input_files,
+            placeholder="RepeatMasker .out file",
+            browse_title="Select RepeatMasker output",
+            file_filter="RepeatMasker output (*.out);;All files (*)",
+            add_button_label="Add another RepeatMasker file",
+            add_button_tooltip="Add another RepeatMasker output as a separately coloured curve.",
+        )
+        self._metric = QComboBox(self)
+        self._metric.addItem("Percentage occupied in genome", TE_ABUNDANCE_PERCENT)
+        self._metric.addItem("Occupied nucleotides (bp)", TE_ABUNDANCE_BP)
+        self._top_n = QSpinBox(self)
+        self._top_n.setRange(1, 100_000)
+        self._top_n.setValue(100)
+        self._top_n.setToolTip("Show the most abundant TE families, ranked by occupied bp.")
+
+        form = QFormLayout()
+        form.addRow("RepeatMasker .out files:", self._input)
+        form.addRow("Y axis:", self._metric)
+        form.addRow("Top families:", self._top_n)
+        buttons = _run_cancel_button_box(self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def input_files(self) -> list[Path]:
+        return self._input.paths()
+
+    def y_axis_metric(self) -> str:
+        return str(self._metric.currentData())
+
+    def top_n(self) -> int:
+        return int(self._top_n.value())
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        return self._input.set_path_at_focus(path)
 
 
 def _browse_file_line(
