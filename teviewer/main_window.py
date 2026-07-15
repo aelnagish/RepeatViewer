@@ -77,6 +77,7 @@ from teviewer.backends.blast_genome_plot import (
     TE_INPUT_KIND_CONSENSUS,
     TE_INPUT_KIND_MASKING,
 )
+from teviewer.backends.te_abundance_plot import write_te_abundance_plot_html
 from teviewer.backends.igv_viewer import (
     discover_igv_annotations,
     is_alignment_preview_file,
@@ -177,6 +178,7 @@ from teviewer.views.tool_dialogs import (
     TsdSearchParamsDialog,
     TeDensityPlotDialog,
     TeDivergencePlotDialog,
+    TeAbundancePlotDialog,
     ConfusionMatrixBenchmarkDialog,
     TeLibraryBenchmarkDialog,
     CommandPluginDesignerDialog,
@@ -957,7 +959,9 @@ class MainWindow(QMainWindow):
         self._pending_te_genome_map: TeGenomeMapOptions | None = None
         self._pending_te_genome_map_fastas: list[Path] = []
         self._pending_te_viz: _PendingTeVizBuild | None = None
-        self._te_viz_input_dialog: TeDensityPlotDialog | TeDivergencePlotDialog | None = None
+        self._te_viz_input_dialog: (
+            TeDensityPlotDialog | TeDivergencePlotDialog | TeAbundancePlotDialog | None
+        ) = None
         self._genome_chrom_names_cache: list[str] = []
         self._genome_chrom_sizes_cache: dict[str, int] = {}
         self._genome_chrom_cache_path: Path | None = None
@@ -1407,6 +1411,7 @@ class MainWindow(QMainWindow):
     def _populate_te_visualization_menu(self, menu: QMenu) -> None:
         menu.addAction("TE density plot", self._open_te_density_plot_dialog)
         menu.addAction("TE divergence plot", self._open_te_divergence_plot_dialog)
+        menu.addAction("TE abundance plot", self._open_te_abundance_plot_dialog)
 
     def _populate_benchmarking_menu(self, menu: QMenu) -> None:
         menu.addAction("Confusion matrix benchmarker", self._open_confusion_matrix_benchmark)
@@ -3992,6 +3997,48 @@ class MainWindow(QMainWindow):
             input_file=input_file,
             parent=self,
         )
+        self._present_te_viz_dialog(dialog, _on_accept)
+
+    def _open_te_abundance_plot_dialog(self, *, input_file: Path | None = None) -> None:
+        selected = [p for p in self._selected_files() if is_repeatmasker_out_file(p)]
+        initial_files = [input_file] if input_file is not None else selected
+
+        def _on_accept(dialog: TeAbundancePlotDialog) -> None:
+            sources = dialog.input_files()
+            if not sources:
+                QMessageBox.warning(self, "TE abundance plot", "Select a RepeatMasker .out file.")
+                return
+            for source in sources:
+                if not source.is_file() or not is_repeatmasker_out_file(source):
+                    QMessageBox.warning(
+                        self,
+                        "TE abundance plot",
+                        f"Select only valid RepeatMasker .out files.\n\nInvalid: {source}",
+                    )
+                    return
+            self._set_status_message("Building TE abundance plot…", 0)
+            try:
+                html_path = write_te_abundance_plot_html(
+                    sources,
+                    metric=dialog.y_axis_metric(),
+                    top_n=dialog.top_n(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(self, "TE abundance plot failed", str(exc))
+                return
+            self._open_divergence_in_preview(html_path)
+            outputs = [html_path.resolve()]
+            if self._current_folder and self._current_folder.resolve() == html_path.parent.resolve():
+                self._populate_file_list(
+                    html_path.parent.resolve(), new_outputs=outputs, source_files=sources
+                )
+            else:
+                self._navigate_to_folder(
+                    html_path.parent.resolve(), new_outputs=outputs, source_files=sources
+                )
+            self._set_status_message(f"TE abundance plot: {html_path.name}", 8000)
+
+        dialog = TeAbundancePlotDialog(input_files=initial_files or None, parent=self)
         self._present_te_viz_dialog(dialog, _on_accept)
 
     def _warm_genome_chromosome_cache(self) -> None:

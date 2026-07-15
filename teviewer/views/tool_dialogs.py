@@ -2477,6 +2477,63 @@ class TeDivergencePlotDialog(QDialog):
         return TeDivergencePlotOptions(bin_width=float(self._bin_width.value()))
 
 
+class TeAbundancePlotDialog(QDialog):
+    """RepeatMasker family rank-abundance plot settings."""
+
+    def __init__(
+        self,
+        *,
+        input_files: list[Path] | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        from teviewer.backends.te_abundance_plot import TE_ABUNDANCE_BP, TE_ABUNDANCE_PERCENT
+
+        _prepare_option_dialog(self)
+        self.setWindowTitle("TE abundance plot")
+        self.setMinimumWidth(680)
+
+        self._input = TeMultiInputFilesWidget(
+            self,
+            initial=input_files,
+            placeholder="RepeatMasker .out file",
+            browse_title="Select RepeatMasker output",
+            file_filter="RepeatMasker output (*.out);;All files (*)",
+            add_button_label="Add another RepeatMasker file",
+            add_button_tooltip="Add another RepeatMasker output as a separately coloured curve.",
+        )
+        self._metric = QComboBox(self)
+        self._metric.addItem("Percentage occupied in genome", TE_ABUNDANCE_PERCENT)
+        self._metric.addItem("Occupied nucleotides (bp)", TE_ABUNDANCE_BP)
+        self._top_n = QSpinBox(self)
+        self._top_n.setRange(1, 100_000)
+        self._top_n.setValue(100)
+        self._top_n.setToolTip("Show the most abundant TE families, ranked by occupied bp.")
+
+        form = QFormLayout()
+        form.addRow("RepeatMasker .out files:", self._input)
+        form.addRow("Y axis:", self._metric)
+        form.addRow("Top families:", self._top_n)
+        buttons = _run_cancel_button_box(self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def input_files(self) -> list[Path]:
+        return self._input.paths()
+
+    def y_axis_metric(self) -> str:
+        return str(self._metric.currentData())
+
+    def top_n(self) -> int:
+        return int(self._top_n.value())
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        return self._input.set_path_at_focus(path)
+
+
 def _browse_file_line(
     parent: QWidget,
     line: QLineEdit,

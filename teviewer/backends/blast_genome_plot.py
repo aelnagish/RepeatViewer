@@ -4964,7 +4964,12 @@ def read_repeatmasker_out(path: Path) -> pd.DataFrame:
     te_bp = (np.abs(query_end - query_start) + 1).astype(np.int64)
     te_bp = np.clip(te_bp, 1, None)
     hit_bp = np.maximum(ends - starts + 1, 1)
-    repeat_name = rm["repeat_name"].astype(str).str.strip()
+    query_left = pd.to_numeric(
+        rm["query_left"].astype(str).str.strip("()"), errors="coerce"
+    ).fillna(0).to_numpy(dtype=np.int64)
+    query_size = np.maximum(query_start, query_end) + np.maximum(query_left, 0)
+    # Zero-based field index 9: RepeatMasker's ``matching repeat`` name.
+    repeat_name = rm.iloc[:, 9].astype(str).str.strip()
     repeat_class = rm["repeat_class"].astype(str).str.strip()
     repeat_class = repeat_class.replace({"": "Unclassified", "nan": "Unclassified"})
     class_parts = repeat_class.str.split("/", n=1, expand=True)
@@ -5002,11 +5007,14 @@ def read_repeatmasker_out(path: Path) -> pd.DataFrame:
             "chrom": rm["query_name"].astype(str).str.strip(),
             "start": starts,
             "end": ends,
+            # Original RepeatMasker column 10 (matching repeat name).
+            "repeat_name": repeat_name,
             "order": order,
             "superfamily": superfamily,
             "family": family,
             "hit_bp": hit_bp,
             "te_bp": te_bp,
+            "query_size": query_size,
         }
     )
 
