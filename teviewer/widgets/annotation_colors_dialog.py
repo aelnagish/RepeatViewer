@@ -17,6 +17,16 @@ from PySide6.QtWidgets import (
     QColorDialog,
 )
 
+from teviewer.backends.annotation_colors import (
+    ANNOTATION_FEATURE_TYPE_LABELS,
+    default_feature_type_colors,
+    feature_type_color,
+    load_feature_type_colors,
+    save_feature_type_colors,
+    save_similarity_database_colors,
+    similarity_database_color,
+    snapshot_similarity_database_colors,
+)
 from teviewer.backends.similarity_annotation import SIMILARITY_DB_COLORS
 from teviewer.database_settings import load_similarity_annotation_databases
 from teviewer.widgets.preview_zoom import (

@@ -5,7 +5,7 @@ from __future__ import annotations
 import platform
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QSize, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QMimeData, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QDrag, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -360,13 +360,13 @@ class FileListTableWidget(QTableWidget):
             return
         index = self.model().index(row, 0)
         flags = (
-            QAbstractItemView.SelectionFlag.Select
-            | QAbstractItemView.SelectionFlag.Rows
+            QItemSelectionModel.SelectionFlag.Select
+            | QItemSelectionModel.SelectionFlag.Rows
         )
         if selected:
             self.selectionModel().select(index, flags)
         else:
-            self.selectionModel().select(index, QAbstractItemView.SelectionFlag.Deselect)
+            self.selectionModel().select(index, QItemSelectionModel.SelectionFlag.Deselect)
 
     def _set_row_checked(self, row: int, checked: bool) -> None:
         cell = self.item(row, _COL_CHECK)

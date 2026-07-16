@@ -25,7 +25,9 @@ if TYPE_CHECKING:
     from teviewer.plugins.registry import PluginRegistry
 
 TOOLBAR_SETTINGS_GROUP = "toolbar"
-DEFAULT_TOOLBAR_FONT_SIZE = 13
+DEFAULT_TOOLBAR_FONT_SIZE = 12
+MAX_TOOLBAR_FONT_SIZE = 20
+MIN_TOOLBAR_FONT_SIZE = 8
 TOOLBAR_CUSTOMIZE_HIDDEN = frozenset({"te_divergence_plot"})
 
 # Sequence menu tools that can be added to the toolbar (menu order).
@@ -225,7 +227,7 @@ def load_toolbar_font_size() -> int:
     s.beginGroup(TOOLBAR_SETTINGS_GROUP)
     size = int(s.value("font_size", DEFAULT_TOOLBAR_FONT_SIZE))
     s.endGroup()
-    return max(8, min(16, size))
+    return max(MIN_TOOLBAR_FONT_SIZE, min(MAX_TOOLBAR_FONT_SIZE, size))
 
 
 def save_toolbar_font_size(size: int) -> None:
@@ -233,7 +235,7 @@ def save_toolbar_font_size(size: int) -> None:
 
     s = QSettings()
     s.beginGroup(TOOLBAR_SETTINGS_GROUP)
-    s.setValue("font_size", max(8, min(16, int(size))))
+    s.setValue("font_size", max(MIN_TOOLBAR_FONT_SIZE, min(MAX_TOOLBAR_FONT_SIZE, int(size))))
     s.endGroup()
 
 
@@ -257,7 +259,7 @@ class ToolbarCustomizeWidget(QWidget):
         hint.setWordWrap(True)
 
         self._font_size = QSpinBox()
-        self._font_size.setRange(8, 16)
+        self._font_size.setRange(MIN_TOOLBAR_FONT_SIZE, MAX_TOOLBAR_FONT_SIZE)
         self._font_size.setValue(load_toolbar_font_size())
         self._font_size.setSuffix(" pt")
         self._font_size.setFixedWidth(88)

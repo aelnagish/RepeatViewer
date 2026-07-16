@@ -164,14 +164,23 @@ DEFAULT_FLEXIDOT_USE_GFF = False
 DEFAULT_FLEXIDOT_OUTPUT_FORMAT = "html"
 FLEXIDOT_OUTPUT_HTML = "html"
 FLEXIDOT_OUTPUT_PNG = "png"
+FLEXIDOT_OUTPUT_PDF = "pdf"
+FLEXIDOT_OUTPUT_SVG = "svg"
+FLEXIDOT_OUTPUT_FORMATS = (
+    FLEXIDOT_OUTPUT_HTML,
+    FLEXIDOT_OUTPUT_PNG,
+    FLEXIDOT_OUTPUT_PDF,
+    FLEXIDOT_OUTPUT_SVG,
+)
 MIN_FLEXIDOT_WORDSIZE = 3
 MAX_FLEXIDOT_WORDSIZE = 100
 
 
 def normalize_flexidot_output_format(value: str) -> str:
-    """Return ``html`` or ``png`` for Flexidot ``-f``."""
-    if str(value).strip().lower() == FLEXIDOT_OUTPUT_PNG:
-        return FLEXIDOT_OUTPUT_PNG
+    """Return one of html / png / pdf / svg for Flexidot ``-f`` (default html)."""
+    v = str(value).strip().lower()
+    if v in FLEXIDOT_OUTPUT_FORMATS:
+        return v
     return FLEXIDOT_OUTPUT_HTML
 
 

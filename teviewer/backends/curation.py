@@ -31,6 +31,7 @@ from teviewer.backends.gui_functions import (
     sanitize_name,
     blast as run_blast,
     check_database,
+    effective_flexidot_filetype,
     extend_bed_regions,
     extract_fasta_from_bed,
     fasta_header_to_bed,
@@ -485,7 +486,7 @@ def run_flexidot_combined(
     if len(seq_files) < 2:
         raise ValueError("Combined Flexidot requires at least two sequences.")
     flex_opts = flexidot_options or FlexidotOptions()
-    filetype = flex_opts.output_format
+    filetype = effective_flexidot_filetype(flex_opts.output_format)
     mode = "1" if len(seq_files) == 2 else "2"
     out_dir = seq_files[0].parent.resolve()
     combined = out_dir / f"_flexidot_{len(seq_files)}seq.fa"
@@ -784,7 +785,7 @@ def run_on_sequence(
         if seq_count < 1:
             raise RuntimeError(f"No sequences in {seq_path.name} (Flexidot needs at least one).")
         out_path = Path(out_dir).resolve()
-        flexidot_filetype = flex_opts.output_format
+        flexidot_filetype = effective_flexidot_filetype(flex_opts.output_format)
         with _flexidot_dir_lock(out_path):
             before = _output_paths_in_dir(out_path, flexidot_filetype)
             run_flexidot(

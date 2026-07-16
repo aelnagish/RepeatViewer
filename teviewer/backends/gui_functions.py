@@ -592,6 +592,60 @@ def flexidot_executable() -> str | None:
     return None
 
 
+_flexidot_help_cache: dict[str, str] = {}
+
+
+def _flexidot_help_text(exe: str) -> str:
+    if exe in _flexidot_help_cache:
+        return _flexidot_help_cache[exe]
+    text = ""
+    try:
+        result = subprocess.run([exe, "-h"], capture_output=True, text=True, timeout=20)
+        text = ((result.stdout or "") + (result.stderr or "")).lower()
+    except Exception:  # noqa: BLE001
+        text = ""
+    _flexidot_help_cache[exe] = text
+    return text
+
+
+def flexidot_supports_html(exe: str | None = None) -> bool:
+    """True if the installed Flexidot lists ``html`` among the ``-f`` choices.
+
+    The stock PyPI Flexidot only offers png/pdf/svg; the forked build adds html
+    (interactive dotplot with Go-to). We look for html as a filetype choice (in
+    the ``{...}`` list) rather than anywhere in the text, to avoid false matches.
+    """
+    if exe is None:
+        exe = flexidot_executable()
+    if not exe:
+        return False
+    help_text = _flexidot_help_text(exe)
+    return any(tok in help_text for tok in ("{html", "html}", ",html", "html,"))
+
+
+def flexidot_supports_teviewer_integration(exe: str | None = None) -> bool:
+    """True if the forked Flexidot exposes the ``--teviewer-integration`` flag."""
+    if exe is None:
+        exe = flexidot_executable()
+    if not exe:
+        return False
+    return "teviewer-integration" in _flexidot_help_text(exe)
+
+
+def effective_flexidot_filetype(requested: str) -> str:
+    """Map a requested Flexidot output format to one the installed build supports.
+
+    ``html`` requires the fork; if it is unavailable, fall back to ``png`` so the
+    dotplot still renders (and output-file discovery uses the right extension).
+    """
+    ft = str(requested).strip().lower()
+    if ft not in {"html", "png", "pdf", "svg"}:
+        ft = "html"
+    if ft == "html" and not flexidot_supports_html():
+        return "png"
+    return ft
+
+
 def run_flexidot(
     input_file,
     output_dir,
@@ -647,9 +701,9 @@ def run_flexidot(
         "--outdir",
         out_dir,
     ]
-    if filetype == "html":
-        # Show "Go to <seq> <start>-<end>" buttons in the dotplot that jump TEviewer's
-        # Annotation view; only meaningful when Flexidot is embedded in TEviewer.
+    if filetype == "html" and flexidot_supports_teviewer_integration(exe):
+        # Show "Go to <seq> <start>-<end>" buttons in the dotplot that jump the
+        # Annotation view; only available in the forked Flexidot build.
         flexidot_cmd.append("--teviewer-integration")
     if lcs_shading and str(mode) in {"1", "2"}:
         flexidot_cmd.append("-x")

@@ -9,6 +9,10 @@ plotly>=5.0
 requests>=2.28
 orfipy>=0.0.4
 pyhmmer>=0.12.0
+pyqtdarktheme-fork>=2.3.2  # auto light/dark theming (layered over Fusion); fork supports Python 3.12-3.14
+# Forked Flexidot (Jiangzhao branch) with html output + --teviewer-integration
+# (interactive Go-to dotplots). Stock PyPI flexidot only supports png/pdf/svg.
+flexidot @ git+https://github.com/qjiangzhao/flexidot.git@Jiangzhao
 
 # pyhmmer 0.12+ ships experimental Windows AMD64 wheels (64-bit Python required).
 # blast+ / mafft / clustalo — optional if using system tools instead of bundled binaries

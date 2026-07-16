@@ -16,6 +16,15 @@ def load_batch_workers() -> int:
 
 def reserved_app_threads() -> int:
     cpus = os.cpu_count() or 4
+    # User override from Preferences (0 == auto).
+    try:
+        from teviewer.app_preferences import load_ui_thread_reserve
+
+        override = load_ui_thread_reserve()
+    except Exception:
+        override = 0
+    if override > 0:
+        return max(1, min(override, cpus - 1))
     if cpus <= 2:
         return 1
     return min(_APP_THREAD_RESERVE, cpus - 1)
