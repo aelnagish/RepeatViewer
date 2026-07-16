@@ -1,14 +1,15 @@
 """Automatic, app-wide polish for the tool parameter dialogs.
 
-An application event filter catches the first show of any dialog defined in
-``teviewer.views.tool_dialogs`` and gives every combo/spin box one uniform
-width and every QFormLayout label a uniform right-aligned column, so the
-parameter dialogs stay symmetric without per-dialog code.
+When a dialog from ``teviewer.views.tool_dialogs`` is first shown, give every
+combo/spin box one uniform width and every QFormLayout label a uniform
+right-aligned column, so the parameter dialogs stay symmetric without
+per-dialog code.
 
-IMPORTANT: the event filter must not mutate widgets (or call setProperty)
-during event delivery — that re-enters the application event filters and can
-crash PySide. So we only *schedule* the polish with a zero-delay timer and
-track already-seen dialogs in a WeakSet (never setProperty).
+IMPORTANT: never install a Python event filter on QApplication. On macOS,
+PySide6 can segfault when an application-level filter runs during
+``QObject::setProperty`` (nested ``getWrapperForQObject``). Polish uses a
+per-dialog object filter instead, and only *schedules* work with a
+zero-delay timer (never mutate widgets during event delivery).
 """
 
 from __future__ import annotations
@@ -26,6 +27,10 @@ from PySide6.QtWidgets import (
 
 _MIN_FIELD_WIDTH = 130
 _MAX_FIELD_WIDTH = 300
+
+_original_qdialog_init = None
+_seen: WeakSet = WeakSet()
+_installed = False
 
 
 def polish_form_dialog(dialog: QDialog) -> None:
@@ -54,18 +59,15 @@ def polish_form_dialog(dialog: QDialog) -> None:
     dialog.adjustSize()
 
 
-class _DialogPolisher(QObject):
-    def __init__(self, parent: QObject | None = None) -> None:
-        super().__init__(parent)
-        self._seen: WeakSet = WeakSet()
+class _DialogShowWatcher(QObject):
+    """Object-level filter: only receives events targeted at its dialog."""
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802
-        # Keep this trivial: never mutate widgets or call setProperty here.
-        if event.type() == QEvent.Type.Show and isinstance(obj, QDialog):
-            module = type(obj).__module__ or ""
-            if module.startswith("teviewer.views.tool_dialogs") and obj not in self._seen:
-                self._seen.add(obj)
-                QTimer.singleShot(0, lambda o=obj: _deferred_polish(o))
+        if obj is self.parent() and event.type() == QEvent.Type.Show:
+            dialog = obj
+            if isinstance(dialog, QDialog) and dialog not in _seen:
+                _seen.add(dialog)
+                QTimer.singleShot(0, lambda d=dialog: _deferred_polish(d))
         return False
 
 
@@ -76,12 +78,28 @@ def _deferred_polish(dialog: QDialog) -> None:
         pass
 
 
-_polisher: _DialogPolisher | None = None
+def _should_polish_dialog(dialog: QDialog) -> bool:
+    module = type(dialog).__module__ or ""
+    return module.startswith("teviewer.views.tool_dialogs")
+
+
+def _patched_qdialog_init(self, *args, **kwargs) -> None:
+    _original_qdialog_init(self, *args, **kwargs)
+    if not _should_polish_dialog(self):
+        return
+    if getattr(self, "_teviewer_dialog_show_watcher", None) is not None:
+        return
+    watcher = _DialogShowWatcher(self)
+    self.installEventFilter(watcher)
+    self._teviewer_dialog_show_watcher = watcher
 
 
 def install_dialog_polisher(app) -> None:
-    """Install the polisher once on the QApplication."""
-    global _polisher
-    if _polisher is None:
-        _polisher = _DialogPolisher(app)
-        app.installEventFilter(_polisher)
+    """Install dialog polish once (per-dialog filters; never on QApplication)."""
+    global _installed, _original_qdialog_init
+    del app  # kept for call-site compatibility
+    if _installed:
+        return
+    _original_qdialog_init = QDialog.__init__
+    QDialog.__init__ = _patched_qdialog_init  # type: ignore[method-assign]
+    _installed = True

@@ -45,5 +45,5 @@ include = ["teviewer*", "teviewer_minimap2*"]
 minimap2 = "teviewer_minimap2.plugin:Minimap2Plugin"
 
 [tool.setuptools.package-data]
-teviewer = ["backends/blast/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*", "assets/igv/*", "backends/inco/*"]
+teviewer = ["backends/blast/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*", "assets/igv/*"]
 teviewer_minimap2 = ["binaries/**/*"]

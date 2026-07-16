@@ -27,7 +27,6 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -3231,7 +3230,6 @@ class SequenceMapPanel(QWidget):
         self._auto_ann_settings = load_auto_annotation_settings()
         self._similarity_ann_settings = load_similarity_annotation_settings()
         self._feature_undo_stack: list[list[SequenceFeature]] = []
-        self._app_event_filter_installed = False
 
         controls = QWidget(self)
         self._controls_panel = controls
@@ -3429,26 +3427,13 @@ class SequenceMapPanel(QWidget):
         QTimer.singleShot(0, self._sync_annotation_control_rows)
         QTimer.singleShot(0, self._refresh_annotation_button_styles)
         QTimer.singleShot(0, self._refresh_similarity_database_rows)
-        app = QApplication.instance()
-        if app is not None and not self._app_event_filter_installed:
-            app.installEventFilter(self)
-            self._app_event_filter_installed = True
 
     def _refresh_annotation_button_styles(self) -> None:
         return
 
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
-        if watched is getattr(self, "_controls_panel", None) and event.type() in (
-            QEvent.Type.FocusIn,
-            QEvent.Type.FocusOut,
-            QEvent.Type.Show,
-            QEvent.Type.Resize,
-        ):
-            QTimer.singleShot(0, self._sync_annotation_control_rows)
-            QTimer.singleShot(0, self._refresh_annotation_button_styles)
-        return super().eventFilter(watched, event)
-
     def _install_annotation_shortcuts(self) -> None:
+        # Widget-scoped shortcuts only — never install a Python filter on
+        # QApplication (PySide6 can segfault on macOS during setProperty).
         for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
             shortcut = QShortcut(key, self)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -3464,30 +3449,18 @@ class SequenceMapPanel(QWidget):
         super().keyPressEvent(event)
 
     def hideEvent(self, event) -> None:  # noqa: N802
-        if self._app_event_filter_installed:
-            app = QApplication.instance()
-            if app is not None:
-                app.removeEventFilter(self)
-            self._app_event_filter_installed = False
         super().hideEvent(event)
 
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        if not self.isVisible():
-            return False
-        if event.type() != QEvent.Type.KeyPress or not isinstance(event, QKeyEvent):
-            return False
-        if not _is_delete_key(event.key()):
-            return False
-        focus = QApplication.focusWidget()
-        if focus is None or not self.isAncestorOf(focus):
-            return False
-        if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit)):
-            return False
-        self._map._sync_feature_selection_from_annot_track()
-        if not self._map.selected_feature_indices():
-            return False
-        self._delete_feature(confirm_empty=False)
-        return True
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        if watched is getattr(self, "_controls_panel", None) and event.type() in (
+            QEvent.Type.FocusIn,
+            QEvent.Type.FocusOut,
+            QEvent.Type.Show,
+            QEvent.Type.Resize,
+        ):
+            QTimer.singleShot(0, self._sync_annotation_control_rows)
+            QTimer.singleShot(0, self._refresh_annotation_button_styles)
+        return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)

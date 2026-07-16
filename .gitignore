@@ -13,3 +13,5 @@ build/
 *.log
 .env
 .claude/
+.icon_test/
+tmp_icons/

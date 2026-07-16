@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import platform
 import tempfile
@@ -229,7 +230,11 @@ from teviewer.views.toolbar_dialog import (
     load_toolbar_font_size,
     load_toolbar_order,
 )
-from teviewer.widgets.browser_icons import browser_file_icon, browser_folder_icon
+from teviewer.widgets.browser_icons import (
+    browser_file_icon,
+    browser_folder_icon,
+    browser_folder_spacer_icon,
+)
 from teviewer.widgets.browser_panel_settings import load_browser_panel_font_size
 from teviewer.ui.platform import reveal_in_file_manager
 from teviewer.ui.text_editor import open_in_text_editor
@@ -608,6 +613,8 @@ class FolderTreeWidget(QTreeWidget):
     delete_folders_requested = Signal(list)
     clear_root_folders_requested = Signal(list)
     paste_to_folder_requested = Signal(Path)
+    add_folder_requested = Signal()
+    create_folder_requested = Signal(Path)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -726,15 +733,11 @@ class FolderTreeWidget(QTreeWidget):
 
     def _show_context_menu(self, position) -> None:
         item = self.itemAt(position)
-        if item is None:
-            return
-        if item not in self.selectedItems():
+        if item is not None and item not in self.selectedItems():
             self.clearSelection()
             item.setSelected(True)
 
-        folder_items = self._selected_folder_items()
-        if not folder_items:
-            return
+        folder_items = self._selected_folder_items() if item is not None else []
         self._show_folder_context_menu(position, folder_items)
 
     def _show_folder_context_menu(
@@ -745,64 +748,81 @@ class FolderTreeWidget(QTreeWidget):
         folders = [folder for folder, _item in folder_items]
         menu = QMenu(self)
 
+        menu.addAction("Add Folder…", self.add_folder_requested.emit)
         if len(folders) == 1:
-            folder = folders[0]
-            menu.addAction("Rename folder", lambda: self.rename_folder_requested.emit(folder))
+            parent = folders[0]
+            menu.addAction(
+                "Create Folder…",
+                lambda f=parent: self.create_folder_requested.emit(f),
+            )
+        elif not folders:
             window = self.window()
-            if hasattr(window, "_clipboard_can_paste") and window._clipboard_can_paste():
+            current = getattr(window, "_current_folder", None)
+            if isinstance(current, Path) and current.is_dir():
                 menu.addAction(
-                    "Paste",
-                    lambda f=folder: self.paste_to_folder_requested.emit(f),
+                    "Create Folder…",
+                    lambda f=current: self.create_folder_requested.emit(f),
                 )
-        root_pairs = [
-            (folder, tree_item)
-            for folder, tree_item in folder_items
-            if self._is_top_level_item(tree_item)
-        ]
-        if root_pairs:
-            root_folders = [folder for folder, _tree_item in root_pairs]
-            if len(root_folders) == 1:
-                remove_action = menu.addAction(
-                    "Remove from list",
-                    lambda: self.clear_root_folders_requested.emit(root_folders),
+
+        if folders:
+            menu.addSeparator()
+            if len(folders) == 1:
+                folder = folders[0]
+                menu.addAction("Rename folder", lambda: self.rename_folder_requested.emit(folder))
+                window = self.window()
+                if hasattr(window, "_clipboard_can_paste") and window._clipboard_can_paste():
+                    menu.addAction(
+                        "Paste",
+                        lambda f=folder: self.paste_to_folder_requested.emit(f),
+                    )
+            root_pairs = [
+                (folder, tree_item)
+                for folder, tree_item in folder_items
+                if self._is_top_level_item(tree_item)
+            ]
+            if root_pairs:
+                root_folders = [folder for folder, _tree_item in root_pairs]
+                if len(root_folders) == 1:
+                    remove_action = menu.addAction(
+                        "Remove from list",
+                        lambda: self.clear_root_folders_requested.emit(root_folders),
+                    )
+                else:
+                    remove_action = menu.addAction(
+                        f"Remove {len(root_folders)} from list",
+                        lambda: self.clear_root_folders_requested.emit(root_folders),
+                    )
+                remove_action.setToolTip(
+                    "Hide selected top-level folder(s) from TEviewer. Files on disk are not deleted."
+                )
+            menu.addSeparator()
+            color_menu = menu.addMenu("Folder color")
+            color_menu.addAction(
+                "Choose color…",
+                lambda: self._choose_folders_color(folder_items),
+            )
+            for label, hex_color in FOLDER_COLOR_PRESETS:
+                color_menu.addAction(
+                    label,
+                    lambda checked=False, c=hex_color, pairs=folder_items: self._set_folders_color(pairs, c),
+                )
+            color_menu.addSeparator()
+            color_menu.addAction(
+                "Clear color",
+                lambda: self._clear_folders_color(folder_items),
+            )
+            menu.addSeparator()
+            if len(folders) == 1:
+                menu.addAction(
+                    "Delete folder",
+                    lambda: self.delete_folders_requested.emit(folders),
                 )
             else:
-                remove_action = menu.addAction(
-                    f"Remove {len(root_folders)} from list",
-                    lambda: self.clear_root_folders_requested.emit(root_folders),
+                menu.addAction(
+                    f"Delete {len(folders)} folders",
+                    lambda: self.delete_folders_requested.emit(folders),
                 )
-            remove_action.setToolTip(
-                "Hide selected top-level folder(s) from TEviewer. Files on disk are not deleted."
-            )
-        menu.addSeparator()
-        color_menu = menu.addMenu("Folder color")
-        color_menu.addAction(
-            "Choose color…",
-            lambda: self._choose_folders_color(folder_items),
-        )
-        for label, hex_color in FOLDER_COLOR_PRESETS:
-            color_menu.addAction(
-                label,
-                lambda checked=False, c=hex_color, pairs=folder_items: self._set_folders_color(pairs, c),
-            )
-        color_menu.addSeparator()
-        color_menu.addAction(
-            "Clear color",
-            lambda: self._clear_folders_color(folder_items),
-        )
-        menu.addSeparator()
-        if len(folders) == 1:
-            menu.addAction(
-                "Delete folder",
-                lambda: self.delete_folders_requested.emit(folders),
-            )
-        else:
-            menu.addAction(
-                f"Delete {len(folders)} folders",
-                lambda: self.delete_folders_requested.emit(folders),
-            )
         menu.exec(self.mapToGlobal(position))
-
     def _set_folders_color(
         self,
         folder_items: list[tuple[Path, QTreeWidgetItem]],
@@ -887,6 +907,43 @@ class _PendingTeVizBuild:
     map_options: TeGenomeMapOptions
 
 
+class _MetadataEnrichWorker(QObject):
+    """Compute FASTA table metadata off the UI thread."""
+
+    batch_ready = Signal(list)  # list[tuple[str, BrowserFileMetadata]]
+    finished = Signal()
+
+    def __init__(self, paths: list[Path], generation: int) -> None:
+        super().__init__()
+        self._paths = paths
+        self._generation = generation
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @Slot()
+    def run(self) -> None:
+        from teviewer.browser_file_metadata import enrich_fasta_metadata
+
+        batch: list[tuple[str, object]] = []
+        batch_size = 24
+        for path in self._paths:
+            if self._cancelled:
+                break
+            try:
+                meta = enrich_fasta_metadata(path)
+                batch.append((str(path), meta))
+            except Exception:  # noqa: BLE001
+                continue
+            if len(batch) >= batch_size:
+                self.batch_ready.emit(list(batch))
+                batch.clear()
+        if batch and not self._cancelled:
+            self.batch_ready.emit(batch)
+        self.finished.emit()
+
+
 class MainWindow(QMainWindow):
     """Browser panel with folders, files, and preview."""
 
@@ -922,6 +979,9 @@ class MainWindow(QMainWindow):
         self._worker_thread: QThread | None = None
         self._worker: FunctionWorker | AlignWorker | None = None
         self._task_progress: TaskProgressPanel | None = None
+        self._metadata_enrich_thread: QThread | None = None
+        self._metadata_enrich_worker: _MetadataEnrichWorker | None = None
+        self._metadata_enrich_generation = 0
         self._job_running = False
         self._last_job_source_files: list[Path] = []
         self._job_toolbar_actions: list[QAction | QToolButton] = []
@@ -1019,6 +1079,8 @@ class MainWindow(QMainWindow):
         self._folder_tree.delete_folders_requested.connect(self._delete_folders)
         self._folder_tree.clear_root_folders_requested.connect(self._clear_root_folders)
         self._folder_tree.paste_to_folder_requested.connect(self._paste_files_to_folder)
+        self._folder_tree.add_folder_requested.connect(self._pick_and_add_folder)
+        self._folder_tree.create_folder_requested.connect(self._create_folder)
         self._folder_tree.itemExpanded.connect(self._on_folder_tree_expanded)
         self._folder_tree.itemCollapsed.connect(self._on_folder_tree_collapsed)
         self._apply_browser_panel_font()
@@ -1161,6 +1223,7 @@ class MainWindow(QMainWindow):
         self._dock_files = None
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        self._stop_metadata_enrichment()
         if self._any_background_job_running():
             self._shutdown_background_threads()
         if self._preview_tabs is not None:
@@ -1297,23 +1360,6 @@ class MainWindow(QMainWindow):
         browser_layout = QVBoxLayout(browser_panel)
         browser_layout.setContentsMargins(6, 4, 6, 4)
         browser_layout.setSpacing(4)
-
-        folder_btn_row = QHBoxLayout()
-        folder_btn_row.setContentsMargins(0, 0, 0, 0)
-        folder_btn_row.setSpacing(4)
-        add_btn = QPushButton("Add Folder")
-        add_btn.setObjectName("BrowserPanelButton")
-        add_btn.clicked.connect(self._pick_and_add_folder)
-        create_btn = QPushButton("Create Folder")
-        create_btn.setObjectName("BrowserPanelButton")
-        create_btn.clicked.connect(self._create_folder)
-        folder_btn_h = 22
-        add_btn.setMaximumHeight(folder_btn_h)
-        create_btn.setMaximumHeight(folder_btn_h)
-        folder_btn_row.addWidget(add_btn)
-        folder_btn_row.addWidget(create_btn)
-        folder_btn_row.addStretch(1)
-        browser_layout.addLayout(folder_btn_row)
 
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
@@ -2590,16 +2636,18 @@ class MainWindow(QMainWindow):
                     self._folder_tree.select_folder_item(item)
                     self._on_folder_selected(folder)
                 return
-        root = QTreeWidgetItem([self._folder_tree_label(folder)])
+        counts = self._folder_panel_counts(folder)
+        root = QTreeWidgetItem([self._folder_tree_label(folder, counts=counts)])
         root.setData(0, ROLE_PATH, str(folder))
-        root.setToolTip(0, str(folder))
-        root.setIcon(0, browser_folder_icon(self._folder_tree, open_=expand_root))
+        n_dirs, n_files = counts
+        root.setToolTip(0, f"{folder}\n{n_dirs} folders · {n_files} files")
         apply_folder_item_color(root, folder)
         self._folder_tree.addTopLevelItem(root)
-        self._set_folder_expandable(root, folder)
-        if expand_root:
+        self._set_folder_expandable(root, folder, counts=counts)
+        if expand_root and n_dirs > 0:
             root.setExpanded(True)
             self._populate_folder_tree_children(root)
+        self._sync_folder_item_icon(root)
         if select:
             self._folder_tree.select_folder_item(root)
             self._on_folder_selected(folder)
@@ -2611,10 +2659,18 @@ class MainWindow(QMainWindow):
     def _sync_folder_item_icon(self, item: QTreeWidgetItem) -> None:
         if self._is_lazy_folder_placeholder(item):
             return
-        item.setIcon(
-            0,
-            browser_folder_icon(self._folder_tree, open_=item.isExpanded()),
-        )
+        # Always set a same-size icon so folder names align by tree level,
+        # not by whether an expand arrow is present.
+        if (
+            item.childIndicatorPolicy()
+            == QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+        ):
+            item.setIcon(
+                0,
+                browser_folder_icon(self._folder_tree, open_=item.isExpanded()),
+            )
+        else:
+            item.setIcon(0, browser_folder_spacer_icon(self._folder_tree))
 
     def _sync_folder_tree_icons(self) -> None:
         def walk(item: QTreeWidgetItem) -> None:
@@ -2647,54 +2703,104 @@ class MainWindow(QMainWindow):
 
     def _list_subfolders(self, folder: Path) -> list[Path]:
         try:
-            return sorted(
-                [
-                    p
-                    for p in folder.iterdir()
-                    if p.is_dir()
-                    and not p.name.startswith(".")
-                    and not self._is_intermediate_teaid_folder(p.name)
-                ],
-                key=lambda p: p.name.lower(),
-            )
+            with os.scandir(folder) as entries:
+                children = [
+                    Path(entry.path)
+                    for entry in entries
+                    if not entry.name.startswith(".")
+                    and not self._is_intermediate_teaid_folder(entry.name)
+                    and entry.is_dir(follow_symlinks=False)
+                ]
+            return sorted(children, key=lambda p: p.name.lower())
         except OSError:
             return []
 
     @staticmethod
     def _folder_has_subfolders(folder: Path) -> bool:
         try:
-            for entry in folder.iterdir():
-                if (
-                    entry.is_dir()
-                    and not entry.name.startswith(".")
-                    and not MainWindow._is_intermediate_teaid_folder(entry.name)
-                ):
-                    return True
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if (
+                        not entry.name.startswith(".")
+                        and not MainWindow._is_intermediate_teaid_folder(entry.name)
+                        and entry.is_dir(follow_symlinks=False)
+                    ):
+                        return True
         except OSError:
             return False
         return False
 
     def _files_for_folder(self, folder: Path) -> list[Path]:
+        files: list[Path] = []
         try:
-            return [
-                p
-                for p in folder.iterdir()
-                if p.is_file()
-                and not p.name.startswith(".")
-                and not is_teviewer_hits_cache_file(p)
-                and not is_sequence_map_hidden_file(p)
-                and not is_flexidot_extra_plot_file(p)
-            ]
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.name.startswith("."):
+                        continue
+                    try:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    path = Path(entry.path)
+                    if (
+                        is_teviewer_hits_cache_file(path)
+                        or is_sequence_map_hidden_file(path)
+                        or is_flexidot_extra_plot_file(path)
+                    ):
+                        continue
+                    files.append(path)
         except OSError:
             return []
+        return files
 
-    def _folder_tree_label(self, folder: Path) -> str:
+    def _folder_panel_counts(self, folder: Path) -> tuple[int, int]:
+        """Return ``(subdir_count, file_count)`` with one directory scan."""
+        n_dirs = 0
+        n_files = 0
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if name.startswith("."):
+                        continue
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if is_dir:
+                        if not self._is_intermediate_teaid_folder(name):
+                            n_dirs += 1
+                        continue
+                    try:
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    path = Path(entry.path)
+                    if (
+                        is_teviewer_hits_cache_file(path)
+                        or is_sequence_map_hidden_file(path)
+                        or is_flexidot_extra_plot_file(path)
+                    ):
+                        continue
+                    n_files += 1
+        except OSError:
+            return 0, 0
+        return n_dirs, n_files
+
+    def _folder_tree_label(self, folder: Path, *, counts: tuple[int, int] | None = None) -> str:
         folder = folder.expanduser().resolve()
-        return f"{folder.name} ({len(self._files_for_folder(folder))})"
+        n_dirs, n_files = counts if counts is not None else self._folder_panel_counts(folder)
+        return f"{folder.name} ({n_dirs}/{n_files})"
 
     def _set_folder_tree_item_label(self, item: QTreeWidgetItem, folder: Path) -> None:
-        item.setText(0, self._folder_tree_label(folder))
-
+        folder = folder.expanduser().resolve()
+        counts = self._folder_panel_counts(folder)
+        item.setText(0, self._folder_tree_label(folder, counts=counts))
+        n_dirs, n_files = counts
+        item.setToolTip(0, f"{folder}\n{n_dirs} folders · {n_files} files")
+        self._set_folder_expandable(item, folder, counts=counts)
     def _sync_folder_tree_labels(self) -> None:
         def walk(item: QTreeWidgetItem) -> None:
             if self._is_lazy_folder_placeholder(item):
@@ -2724,8 +2830,18 @@ class MainWindow(QMainWindow):
             return
         self._populate_subfolders(folder, item)
 
-    def _set_folder_expandable(self, item: QTreeWidgetItem, folder: Path) -> None:
-        if self._folder_has_subfolders(folder):
+    def _set_folder_expandable(
+        self,
+        item: QTreeWidgetItem,
+        folder: Path,
+        *,
+        counts: tuple[int, int] | None = None,
+    ) -> None:
+        n_dirs = counts[0] if counts is not None else None
+        has_subfolders = (
+            n_dirs > 0 if n_dirs is not None else self._folder_has_subfolders(folder)
+        )
+        if has_subfolders:
             item.setChildIndicatorPolicy(
                 QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
             )
@@ -2743,16 +2859,18 @@ class MainWindow(QMainWindow):
             item.setChildIndicatorPolicy(
                 QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless
             )
+        self._sync_folder_item_icon(item)
 
     def _populate_subfolders(self, folder: Path, parent: QTreeWidgetItem) -> None:
         for child in self._list_subfolders(folder):
-            item = QTreeWidgetItem([self._folder_tree_label(child)])
+            counts = self._folder_panel_counts(child)
+            item = QTreeWidgetItem([self._folder_tree_label(child, counts=counts)])
             item.setData(0, ROLE_PATH, str(child))
-            item.setToolTip(0, str(child))
-            item.setIcon(0, browser_folder_icon(self._folder_tree, open_=False))
+            n_dirs, n_files = counts
+            item.setToolTip(0, f"{child}\n{n_dirs} folders · {n_files} files")
             apply_folder_item_color(item, child)
             parent.addChild(item)
-            self._set_folder_expandable(item, child)
+            self._set_folder_expandable(item, child, counts=counts)
         self._sync_folder_tree_placeholders()
 
     def _ensure_folder_tree_path(self, folder: Path) -> QTreeWidgetItem | None:
@@ -3058,6 +3176,9 @@ class MainWindow(QMainWindow):
 
         visible = sort_file_paths(visible, self._current_file_sort_mode())
 
+        # Fast path: name/size/type from stat only — no FASTA reads on the UI thread.
+        was_sorting = self._file_list.isSortingEnabled()
+        self._file_list.setSortingEnabled(False)
         for file_path in visible:
             row_item = self._file_list.add_file_row(file_path)
             key = str(file_path.resolve())
@@ -3067,6 +3188,7 @@ class MainWindow(QMainWindow):
                 self._style_source_file_item(row_item)
             elif is_tool_output_file(file_path):
                 self._style_tool_output_item(row_item)
+        self._file_list.setSortingEnabled(was_sorting)
 
         if not visible and self._cached_folder_files:
             self._file_list.add_placeholder_row("(no files match filter)")
@@ -3080,6 +3202,54 @@ class MainWindow(QMainWindow):
             len(visible),
             len(self._cached_folder_files),
         )
+        self._start_metadata_enrichment(visible)
+
+    def _stop_metadata_enrichment(self) -> None:
+        worker = self._metadata_enrich_worker
+        thread = self._metadata_enrich_thread
+        self._metadata_enrich_worker = None
+        self._metadata_enrich_thread = None
+        if worker is not None:
+            worker.cancel()
+        if thread is not None:
+            thread.quit()
+            thread.wait(1000)
+
+    def _start_metadata_enrichment(self, paths: list[Path]) -> None:
+        from teviewer.browser_file_metadata import is_fasta_path
+
+        self._stop_metadata_enrichment()
+        fasta_paths = [p.expanduser().resolve() for p in paths if is_fasta_path(p)]
+        if not fasta_paths:
+            return
+        self._metadata_enrich_generation += 1
+        generation = self._metadata_enrich_generation
+        thread = QThread(self)
+        worker = _MetadataEnrichWorker(fasta_paths, generation)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.batch_ready.connect(
+            lambda batch, gen=generation: self._on_metadata_enrich_batch(batch, gen)
+        )
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_metadata_enrich_thread_finished)
+        self._metadata_enrich_thread = thread
+        self._metadata_enrich_worker = worker
+        thread.start()
+
+    def _on_metadata_enrich_thread_finished(self) -> None:
+        self._metadata_enrich_thread = None
+        self._metadata_enrich_worker = None
+
+    def _on_metadata_enrich_batch(self, batch: list, generation: int) -> None:
+        if generation != self._metadata_enrich_generation:
+            return
+        if self._file_list is None:
+            return
+        updates = [(Path(str(path_text)), meta) for path_text, meta in batch]
+        self._file_list.update_rows_metadata(updates)
 
     def _sync_files_status(
         self,
@@ -5674,21 +5844,28 @@ class MainWindow(QMainWindow):
         self._ensure_preview_visible()
         self._set_status_message(f"Opened {len(paths)} file(s) in tabs", 5000)
 
-    def _create_folder(self) -> None:
-        if not self._current_folder or not self._current_folder.is_dir():
-            QMessageBox.warning(self, "Select folder", "Select a parent folder in the Folders panel first.")
+    def _create_folder(self, parent: Path | None = None) -> None:
+        parent_dir = parent.expanduser().resolve() if parent is not None else None
+        if parent_dir is None or not parent_dir.is_dir():
+            parent_dir = self._current_folder
+        if parent_dir is None or not parent_dir.is_dir():
+            QMessageBox.warning(
+                self,
+                "Select folder",
+                "Right-click a parent folder in the Folders panel first.",
+            )
             return
         name, ok = QInputDialog.getText(self, "Create folder", "Folder name:")
         if not ok or not name.strip():
             return
-        new_dir = self._current_folder / name.strip()
+        new_dir = parent_dir / name.strip()
         try:
             new_dir.mkdir(parents=False, exist_ok=False)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Create folder failed", str(exc))
             return
         self._refresh_tree()
-        self._on_folder_selected(self._current_folder)
+        self._on_folder_selected(parent_dir)
 
     def _copy_files_to_folder(self, target_dir: Path, files: list[Path]) -> None:
         self._transfer_files(files, target_dir, mode="copy")

@@ -265,11 +265,6 @@ class PreviewWheelZoomFilter(QObject):
     def _allows_plain_wheel(self, page, obj: QWidget) -> bool:
         if self._is_descendant_of(obj, page._image):
             return True
-        dotplot = getattr(page, "_dotplot_panel", None)
-        if dotplot is not None and page.is_dotplot_preview_active():
-            image_preview = getattr(dotplot, "_image_preview", None)
-            if image_preview is not None and self._is_descendant_of(obj, image_preview):
-                return True
         return False
 
     def _can_zoom(self, page, obj: QWidget, wheel: QWheelEvent) -> bool:
@@ -309,7 +304,7 @@ class PreviewWheelZoomFilter(QObject):
 
 
 class FastaTabStrip(QWidget):
-    """Text / Annotation / Dotplot switcher for the preview header."""
+    """Text / Annotation switcher for the preview header."""
 
     tab_changed = Signal(int)
 
@@ -323,7 +318,7 @@ class FastaTabStrip(QWidget):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons: list[QPushButton] = []
-        for index, label in enumerate(("Text", "Annotation", "Dotplot")):
+        for index, label in enumerate(("Text", "Annotation")):
             btn = QPushButton(label)
             btn.setObjectName("FastaPreviewTab")
             btn.setCheckable(True)

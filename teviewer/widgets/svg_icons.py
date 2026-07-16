@@ -5,15 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, Qt, QRectF
-from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget
 
 # Tabler Icons (https://tabler.io/icons) — MIT license
 _ASSETS_ROOT = Path(__file__).resolve().parent.parent / "assets" / "icons"
-_LEGACY_DIR = Path(__file__).resolve().parent.parent / "backends" / "inco"
-
-_DEFAULT_COLOR = QColor("#5f6368")
 
 
 def _resolve_svg_path(name: str, *, subdir: str = "") -> Path | None:
@@ -24,15 +21,7 @@ def _resolve_svg_path(name: str, *, subdir: str = "") -> Path | None:
     for path in candidates:
         if path.is_file():
             return path
-    legacy = _LEGACY_DIR / f"{name}.svg"
-    return legacy if legacy.is_file() else None
-
-
-def _widget_text_color(widget: QWidget | None) -> QColor:
-    if widget is None:
-        return _DEFAULT_COLOR
-    color = widget.palette().color(QPalette.ColorRole.WindowText)
-    return color if color.isValid() else _DEFAULT_COLOR
+    return None
 
 
 def _device_pixel_ratio(widget: QWidget | None) -> float:
@@ -79,28 +68,6 @@ def _render_themed_pixmap(
     renderer.render(painter, QRectF(0, 0, size, size))
     painter.end()
     return pixmap
-
-
-def themed_svg_icon(
-    name: str,
-    size: int,
-    *,
-    color: QColor | None = None,
-    widget: QWidget | None = None,
-    subdir: str = "",
-) -> QIcon:
-    """Render a bundled SVG at logical ``size`` with Retina-aware sharpness."""
-    stroke_color = color if color is not None else _widget_text_color(widget)
-    pixmap = _render_themed_pixmap(
-        name,
-        size,
-        color=stroke_color,
-        widget=widget,
-        subdir=subdir,
-    )
-    if pixmap is None:
-        return QIcon()
-    return QIcon(pixmap)
 
 
 def themed_svg_icon_modes(

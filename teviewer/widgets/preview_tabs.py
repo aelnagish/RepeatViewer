@@ -30,7 +30,6 @@ from teviewer.backends.sequence_features import (
     summarize_single_sequence_fasta,
 )
 from teviewer.widgets.html_preview import _qobject_alive, create_html_preview_widget
-from teviewer.widgets.self_dotplot_panel import SelfDotplotPanel
 from teviewer.widgets.sequence_map_viewer import SequenceMapPanel, _is_delete_key
 from teviewer.widgets.preview_zoom import (
     MAX_PREVIEW_FONT_SIZE,
@@ -501,7 +500,6 @@ class FilePreviewPage(QWidget):
         self.path = path.expanduser().resolve()
         self._single_fasta_mode = False
         self._annotation_panel: SequenceMapPanel | None = None
-        self._dotplot_panel: SelfDotplotPanel | None = None
         self._stack = QStackedWidget(self)
         self._stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._placeholder = QLabel("Loading…")
@@ -541,10 +539,8 @@ class FilePreviewPage(QWidget):
         self._image = ScaledImagePreview(self)
         self._fasta_stack = QStackedWidget(self)
         self._fasta_annotation_holder = QWidget(self)
-        self._fasta_dotplot_holder = QWidget(self)
         self._fasta_stack.addWidget(self._fasta_text_scroll)
         self._fasta_stack.addWidget(self._fasta_annotation_holder)
-        self._fasta_stack.addWidget(self._fasta_dotplot_holder)
         self._fasta_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._fasta_stack.hide()
 
@@ -650,9 +646,6 @@ class FilePreviewPage(QWidget):
     def is_annotation_preview_active(self) -> bool:
         return self._single_fasta_mode and self._fasta_stack.currentIndex() == 1
 
-    def is_dotplot_preview_active(self) -> bool:
-        return self._single_fasta_mode and self._fasta_stack.currentIndex() == 2
-
     def _on_fasta_tab_changed(self, index: int) -> None:
         if not self._single_fasta_mode:
             return
@@ -661,8 +654,6 @@ class FilePreviewPage(QWidget):
             QTimer.singleShot(0, self._refresh_text_view)
         elif index == 1:
             QTimer.singleShot(0, self._open_annotation_tab)
-        elif index == 2:
-            QTimer.singleShot(0, self._open_dotplot_tab)
         tab_host = self.parent()
         while tab_host is not None and not isinstance(tab_host, PreviewTabWidget):
             tab_host = tab_host.parent()
@@ -677,8 +668,6 @@ class FilePreviewPage(QWidget):
                 self._refresh_text_view()
             elif index == 1:
                 self._open_annotation_tab()
-            elif index == 2:
-                self._open_dotplot_tab()
             self._notify_preview_host()
             return
         current = self._stack.currentWidget()
@@ -703,8 +692,6 @@ class FilePreviewPage(QWidget):
                 QTimer.singleShot(0, self._refresh_text_view)
             elif index == 1:
                 QTimer.singleShot(0, self._open_annotation_tab)
-            elif index == 2:
-                QTimer.singleShot(0, self._open_dotplot_tab)
             return
         current = self._stack.currentWidget()
         if current in (self._html, self._image, self._text_scroll):
@@ -799,8 +786,6 @@ class FilePreviewPage(QWidget):
             self._html.set_fit_mode(fit_mode)
         if self._uses_text_preview():
             self._apply_text_zoom(percent)
-        if self._dotplot_panel is not None and self.is_dotplot_preview_active():
-            self._dotplot_panel.apply_preview_zoom(percent, fit_mode)
 
     def reload_from_disk(self) -> None:
         """Refresh the current view after the file on disk changed."""
@@ -832,13 +817,10 @@ class FilePreviewPage(QWidget):
         path = self.path
         if (
             self._single_fasta_mode
-            and (
-                self.is_annotation_preview_active()
-                or self.is_dotplot_preview_active()
-            )
+            and self.is_annotation_preview_active()
         ):
             self._sequence_info_bar.hide()
-            if self.is_annotation_preview_active() and self._annotation_panel is not None:
+            if self._annotation_panel is not None:
                 self._annotation_panel.refresh_sequence_summary()
             return
 
@@ -868,24 +850,6 @@ class FilePreviewPage(QWidget):
                 format_multi_sequence_fasta_summary_text(sequence_count)
             )
         self._sequence_info_bar.show()
-
-    def _ensure_dotplot_panel(self) -> SelfDotplotPanel:
-        if self._dotplot_panel is None:
-            self._dotplot_panel = SelfDotplotPanel(self.path, self)
-            holder_layout = self._fasta_dotplot_holder.layout()
-            if holder_layout is None:
-                holder_layout = QVBoxLayout(self._fasta_dotplot_holder)
-                holder_layout.setContentsMargins(0, 0, 0, 0)
-            holder_layout.addWidget(self._dotplot_panel)
-        return self._dotplot_panel
-
-    def _open_dotplot_tab(self) -> None:
-        panel = self._ensure_dotplot_panel()
-        if self._fasta_stack.currentIndex() != 2:
-            self.set_fasta_tab_index(2)
-            return
-        self._refresh_sequence_info_bar()
-        panel.open_dotplot_tab()
 
     def _ensure_annotation_panel(self) -> SequenceMapPanel:
         if self._annotation_panel is None:
@@ -995,8 +959,6 @@ class FilePreviewPage(QWidget):
         self._fasta_text.setTextCursor(cursor)
         if self._annotation_panel is not None:
             self._annotation_panel.load_path(path)
-        if self._dotplot_panel is not None:
-            self._dotplot_panel.load_path(path)
         self._activate_fasta_tab(load_default_fasta_preview_tab())
         self._refresh_sequence_info_bar()
 
@@ -1307,9 +1269,9 @@ class PreviewTabWidget(QTabWidget):
         is_annotation = False
         if isinstance(widget, FilePreviewPage):
             is_annotation = widget.is_annotation_preview_active()
-            if is_annotation or widget.is_dotplot_preview_active():
+            if is_annotation:
                 is_text = False
-                is_media = widget.is_dotplot_preview_active()
+                is_media = False
                 is_pdf = False
             elif widget.is_single_fasta_preview():
                 is_text = widget.is_text_preview_active()

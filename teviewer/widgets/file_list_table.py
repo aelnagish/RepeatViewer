@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from teviewer.backends.blast_genome_plot import find_blast_table_for_query, is_te_hit_table_file
 from teviewer.backends.separate_fasta import count_fasta_sequences
-from teviewer.browser_file_metadata import BrowserFileMetadata, metadata_for_file
+from teviewer.browser_file_metadata import BrowserFileMetadata, quick_metadata_for_file
 from teviewer.widgets.browser_icons import browser_file_icon
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
@@ -297,13 +297,18 @@ class FileListTableWidget(QTableWidget):
         if cell is not None:
             super().scrollToItem(cell, hint)
 
-    def add_file_row(self, path: Path) -> FileListRow:
+    def add_file_row(
+        self,
+        path: Path,
+        *,
+        metadata: BrowserFileMetadata | None = None,
+    ) -> FileListRow:
         path = path.expanduser().resolve()
         was_sorting = self.isSortingEnabled()
         self.setSortingEnabled(False)
         row = self.rowCount()
         self.insertRow(row)
-        meta = metadata_for_file(path)
+        meta = metadata if metadata is not None else quick_metadata_for_file(path)
         path_text = str(path)
 
         check_item = QTableWidgetItem()
@@ -323,6 +328,16 @@ class FileListTableWidget(QTableWidget):
         name_item.setTextAlignment(_LEFT_ALIGN)
         self.setItem(row, _COL_NAME, name_item)
 
+        self._apply_metadata_cells(row, path_text, meta)
+        self.setSortingEnabled(was_sorting)
+        return FileListRow(self, row)
+
+    def _apply_metadata_cells(
+        self,
+        row: int,
+        path_text: str,
+        meta: BrowserFileMetadata,
+    ) -> None:
         for column, text, sort_key in (
             (_COL_LENGTH, meta.length_text, meta.sort_length),
             (_COL_SEQUENCES, meta.sequence_count_text, meta.sort_sequence_count),
@@ -337,8 +352,28 @@ class FileListTableWidget(QTableWidget):
             cell.setTextAlignment(_LEFT_ALIGN)
             self.setItem(row, column, cell)
 
+    def update_row_metadata(self, path: Path, meta: BrowserFileMetadata) -> bool:
+        """Refresh metadata columns for an existing row. Returns True if found."""
+        key = str(path.expanduser().resolve())
+        for row in range(self.rowCount()):
+            if self._path_for_row(row) != key:
+                continue
+            self._apply_metadata_cells(row, key, meta)
+            return True
+        return False
+
+    def update_rows_metadata(
+        self,
+        items: list[tuple[Path, BrowserFileMetadata]],
+    ) -> None:
+        """Apply several metadata updates without re-sorting between rows."""
+        if not items:
+            return
+        was_sorting = self.isSortingEnabled()
+        self.setSortingEnabled(False)
+        for path, meta in items:
+            self.update_row_metadata(path, meta)
         self.setSortingEnabled(was_sorting)
-        return FileListRow(self, row)
 
     def apply_default_sort(self) -> None:
         order = Qt.SortOrder.AscendingOrder if self._sort_ascending else Qt.SortOrder.DescendingOrder

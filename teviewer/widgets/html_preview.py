@@ -66,8 +66,6 @@ def _qobject_alive(obj) -> bool:
 TEAID_NOMINAL_WIDTH = 1600
 TEAID_NOMINAL_HEIGHT = 900
 
-_warmup_widget: QWidget | None = None
-
 _CONTENT_SIZE_JS = """
 (() => {
   const plot = document.querySelector('.plotly-graph-div');
@@ -99,32 +97,6 @@ def open_html_in_browser(path: Path) -> None:
 def create_html_preview_widget(parent: QWidget | None = None) -> QWidget:
     """Lightweight placeholder; real WebEngine loads only when opening HTML."""
     return LazyHtmlPreview(parent)
-
-
-def warm_html_webengine(parent: QWidget | None = None) -> bool:
-    """
-    Start Chromium during idle time so the first HTML preview does not freeze the UI.
-
-    Safe to call repeatedly; only the first call does work.
-    """
-    global _warmup_widget
-    if _warmup_widget is not None:
-        return True
-    try:
-        from PySide6.QtWebEngineWidgets import QWebEngineView
-
-        holder = QWidget(parent)
-        holder.setFixedSize(0, 0)
-        holder.hide()
-        view = QWebEngineView(holder)
-        _configure_web_settings(view.settings())
-        view.setHtml("<!DOCTYPE html><html><body></body></html>")
-        _warmup_widget = holder
-        logger.debug("WebEngine warmup complete")
-        return True
-    except Exception:
-        logger.debug("WebEngine warmup skipped", exc_info=True)
-        return False
 
 
 def _configure_web_settings(settings) -> None:
