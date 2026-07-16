@@ -68,6 +68,7 @@ def _run_cancel_button_box(parent: QWidget) -> QDialogButtonBox:
     return buttons
 
 
+from teviewer.branding import APP_DISPLAY_NAME
 from teviewer.backends.blast_genome_plot import format_genome_length_bp
 from teviewer.job_options import (
     TE_GENOME_MAP_COLOR_FAMILY,
@@ -101,6 +102,8 @@ from teviewer.job_options import (
     DEFAULT_FLEXIDOT_WORDSIZE,
     FLEXIDOT_OUTPUT_HTML,
     FLEXIDOT_OUTPUT_PNG,
+    FLEXIDOT_OUTPUT_PDF,
+    FLEXIDOT_OUTPUT_SVG,
     DEFAULT_DIV_THRESHOLD,
     DEFAULT_DIV_WINDOW_SIZE,
     DEFAULT_GAP_COL_GAP_THRESHOLD,
@@ -581,7 +584,6 @@ class AlignParamsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumWidth(400)
         opts = initial or AlignOptions()
 
         self._backend = QComboBox(self)
@@ -600,7 +602,14 @@ class AlignParamsDialog(QDialog):
             "when the installed build lacks OpenMP (common on macOS)."
         )
 
+        for field in (self._backend, self._threads):
+            field.setFixedWidth(200)
+
         form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
         form.addRow("Aligner:", self._backend)
         form.addRow("Threads:", self._threads)
 
@@ -611,6 +620,8 @@ class AlignParamsDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(14)
         layout.addLayout(form)
         layout.addWidget(buttons)
 
@@ -783,7 +794,16 @@ class BlastParamsDialog(QDialog):
         self._min_bit_score.setValue(opts.minimum_bit_score)
         self._min_bit_score.setToolTip("Minimum bit score for hits written to GFF.")
 
+        # Uniform field size so the inputs line up symmetrically.
+        for field in (self._evalue, self._max_msa, self._top_msa, self._min_bit_score):
+            field.setFixedWidth(150)
+            field.setAlignment(Qt.AlignmentFlag.AlignRight)
+
         form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
         form.addRow("E-value", self._evalue)
         form.addRow("Max MSA lines", self._max_msa)
         form.addRow("Top longest lines", self._top_msa)
@@ -886,19 +906,25 @@ class FlexidotParamsDialog(QDialog):
         )
 
         self._output_format = QComboBox()
+        # HTML (interactive Go-to) is the default and needs the forked Flexidot.
+        # If the stock build is installed it automatically falls back to PNG at
+        # run time, so it is always safe to offer/select here.
         self._output_format.addItem(
-            "HTML (interactive; Go-to in TEviewer)",
+            f"HTML (interactive; Go-to in {APP_DISPLAY_NAME})",
             FLEXIDOT_OUTPUT_HTML,
         )
         self._output_format.addItem("PNG (static image)", FLEXIDOT_OUTPUT_PNG)
+        self._output_format.addItem("SVG (vector)", FLEXIDOT_OUTPUT_SVG)
+        self._output_format.addItem("PDF (vector)", FLEXIDOT_OUTPUT_PDF)
         fmt_index = self._output_format.findData(
             normalize_flexidot_output_format(opts.output_format)
         )
-        if fmt_index >= 0:
-            self._output_format.setCurrentIndex(fmt_index)
+        self._output_format.setCurrentIndex(fmt_index if fmt_index >= 0 else 0)
         self._output_format.setToolTip(
-            "Flexidot output format (-f). HTML enables interactive dotplots with "
-            "Go-to → Annotation inside TEviewer; PNG writes a static image only."
+            f"Flexidot output format (-f). HTML gives interactive dotplots with "
+            f"Go-to → Annotation inside {APP_DISPLAY_NAME} (forked Flexidot); it "
+            "falls back to PNG automatically if that build isn't installed. "
+            "PNG/SVG/PDF write a static image."
         )
 
         form = QFormLayout()
@@ -2376,7 +2402,7 @@ class TeDivergencePlotDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("TE divergence plot")
-        self.setMinimumWidth(680)
+        self.setMinimumWidth(560)
         self._opts = initial or TeDivergencePlotOptions()
 
         self._input = TeMultiInputFilesWidget(
@@ -2396,6 +2422,7 @@ class TeDivergencePlotDialog(QDialog):
         )
 
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.addRow("TE input files:", self._input)
         form.addRow("Bin size:", self._bin_width)
 
@@ -2403,6 +2430,8 @@ class TeDivergencePlotDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
         layout.addLayout(form)
         layout.addWidget(buttons)
         self.setLayout(layout)
@@ -2441,7 +2470,7 @@ class TeAbundancePlotDialog(QDialog):
 
         _prepare_option_dialog(self)
         self.setWindowTitle("TE abundance plot")
-        self.setMinimumWidth(680)
+        self.setMinimumWidth(560)
 
         self._input = TeMultiInputFilesWidget(
             self,
@@ -2461,6 +2490,7 @@ class TeAbundancePlotDialog(QDialog):
         self._top_n.setToolTip("Show the most abundant TE families, ranked by occupied bp.")
 
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.addRow("RepeatMasker .out files:", self._input)
         form.addRow("Y axis:", self._metric)
         form.addRow("Top families:", self._top_n)
@@ -2468,6 +2498,8 @@ class TeAbundancePlotDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
         layout.addLayout(form)
         layout.addWidget(buttons)
 

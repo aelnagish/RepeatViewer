@@ -32,11 +32,33 @@ def run_app(argv: list[str] | None = None) -> int:
         )
 
         app = QApplication(argv)
+
+        # Organisation / application identity must be set before any QSettings
+        # read, so preferences resolve to the same store the dialog writes to.
         app.setApplicationName(APP_DISPLAY_NAME)
         app.setApplicationDisplayName(APP_DISPLAY_NAME)
         QGuiApplication.setDesktopFileName(APP_DISPLAY_NAME)
         app.setOrganizationName("TEtrimmer")
         app.setOrganizationDomain("github.com/qjiangzhao/TEtrimmer")
+
+        # Consistent cross-platform look: Fusion + pyqtdarktheme (auto light/dark),
+        # with the accents in teviewer.ui.theme layered on top per-window.
+        from teviewer.app_preferences import apply_log_level, setup_file_logging
+        from teviewer.ui.theme_mode import apply_theme
+
+        apply_theme()
+        setup_file_logging()
+        apply_log_level()
+
+        from teviewer.views.dialog_polish import install_dialog_polisher
+
+        install_dialog_polisher(app)
+
+        import logging
+
+        from teviewer import __version__
+
+        logging.getLogger(__name__).info("%s %s starting", APP_DISPLAY_NAME, __version__)
         icon = app_icon()
         if not icon.isNull():
             app.setWindowIcon(icon)

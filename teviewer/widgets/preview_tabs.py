@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -41,6 +42,8 @@ from teviewer.widgets.preview_zoom import (
     load_preview_font_size,
     load_preview_zoom_percent,
 )
+
+logger = logging.getLogger(__name__)
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
 _ALIGNMENT_PREVIEW_SUFFIXES = {".bam", ".sam"}

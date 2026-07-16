@@ -892,17 +892,29 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"{APP_DISPLAY_NAME} {__version__}")
+        self.setWindowTitle(APP_DISPLAY_NAME)
         self.resize(1680, 980)
-        self.setMinimumSize(1100, 700)
+        self.setMinimumSize(900, 700)
         self._toolbar_font_size = load_toolbar_font_size()
         self._browser_panel_font_size = load_browser_panel_font_size()
         self._functions_toolbar = None
+        self._toolbar_container: QWidget | None = None
+        self._toolbar_hbox = None
+        self._toolbar_items: list[tuple] = []  # (widget, overflow_handler|None), ordered
+        self._overflow_hidden: list[tuple] = []
+        self._overflow_btn: QToolButton | None = None
         self._toolbar_font = QFont(self.font())
         self._browser_panel_font = QFont(self.font())
         self._apply_toolbar_theme()
 
         self._project = SettingsDialog.load_project_from_settings()
+        from teviewer.app_preferences import load_reopen_last_folder
+
+        if not load_reopen_last_folder():
+            # Keep global tool preferences, but start with no folder/genome open.
+            self._project.input_dir = None
+            self._project.genome_file = None
+            self._project.pan_genomes = []
         if self._project.genome_file and self._project.genome_file.is_file():
             add_genome_to_history(self._project.genome_file)
         self._current_folder: Path | None = None
@@ -1101,7 +1113,12 @@ class MainWindow(QMainWindow):
         toolbar_state = settings.value("toolbar_state_v3")
         main_split = settings.value("browser_main_split")
         files_preview_split = settings.value("browser_files_preview_split")
+        window_geometry = settings.value("geometry")
         settings.endGroup()
+        from teviewer.app_preferences import load_restore_geometry
+
+        if window_geometry and load_restore_geometry():
+            self.restoreGeometry(window_geometry)
         if toolbar_state:
             self.restoreState(toolbar_state)
         self._purge_legacy_docks()
@@ -1152,6 +1169,7 @@ class MainWindow(QMainWindow):
         settings = QSettings()
         settings.beginGroup("mainwindow")
         settings.setValue("toolbar_state_v3", self.saveState())
+        settings.setValue("geometry", self.saveGeometry())
         if hasattr(self, "_browser_main_split"):
             settings.setValue("browser_main_split", self._browser_main_split.saveState())
         if hasattr(self, "_browser_files_preview_split"):
@@ -1481,8 +1499,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _settings_menu_hint() -> str:
         if platform.system() == "Darwin":
-            return "TEviewer → Setting"
-        return "File → Setting"
+            return f"{APP_DISPLAY_NAME} → Settings"
+        return "File → Settings"
 
     @staticmethod
     def _genome_menu_hint() -> str:
@@ -1687,10 +1705,13 @@ class MainWindow(QMainWindow):
         self._toolbar_font = QFont(self.font())
         self._toolbar_font.setPointSize(size)
         self._toolbar_font.setBold(False)
+        from teviewer.ui.theme_mode import load_accent_color
+
         self.setStyleSheet(
             application_stylesheet(
                 toolbar_font_pt=size,
                 browser_panel_font_pt=self._browser_panel_font_size,
+                accent=load_accent_color(),
             )
         )
         if self._functions_toolbar is not None:
@@ -1708,33 +1729,48 @@ class MainWindow(QMainWindow):
 
     def _rebuild_top_toolbar(self) -> None:
         if self._functions_toolbar is not None:
+            self._functions_toolbar.removeEventFilter(self)
             self.removeToolBar(self._functions_toolbar)
             self._functions_toolbar.deleteLater()
             self._functions_toolbar = None
         self._job_toolbar_actions = []
+        self._toolbar_items = []
+        self._overflow_hidden = []
+        self._overflow_btn = None
+        self._toolbar_container = None
+        self._toolbar_hbox = None
         self._build_top_toolbar()
 
     def _toolbar_button_height(self) -> int:
-        return QFontMetrics(self._toolbar_font).height() + 4
+        # Compact single-row height with a little vertical padding so labels are
+        # comfortably centred.
+        return QFontMetrics(self._toolbar_font).height() + 12
 
     def _compact_functions_toolbar(self, bar: QToolBar) -> None:
         bar.setContentsMargins(0, 0, 0, 0)
         btn_h = self._toolbar_button_height()
-        bar.setFixedHeight(btn_h + 2)
+        bar.setFixedHeight(btn_h + 8)  # padding above/below the single row
         for widget in bar.findChildren(QToolButton):
-            widget.setFixedHeight(btn_h)
+            # The overflow arrow gets the full row height so its glyph can be big.
+            widget.setFixedHeight(btn_h + 8 if widget is self._overflow_btn else btn_h)
             widget.setSizePolicy(
-                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Fixed,
                 QSizePolicy.Policy.Fixed,
             )
 
     def _style_toolbar_button(self, widget) -> None:
         widget.setFont(self._toolbar_font)
         widget.setFixedHeight(self._toolbar_button_height())
+        # Fixed size: keeps a stable width so the custom overflow logic can
+        # measure which buttons fit (the native » chevron does not render with
+        # the current theme, so we manage overflow ourselves).
         widget.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
         )
+
+    def _register_toolbar_item(self, widget, overflow_handler) -> None:
+        self._toolbar_items.append((widget, overflow_handler))
 
     def _add_toolbar_text_action(
         self,
@@ -1744,19 +1780,24 @@ class MainWindow(QMainWindow):
         *,
         job_action: bool = True,
         tooltip: str = "",
-    ) -> QAction:
-        action = QAction(text, self)
-        action.setFont(self._toolbar_font)
+    ) -> QToolButton:
+        btn = QToolButton(self._toolbar_container)
+        btn.setText(text)
         if tooltip:
-            action.setToolTip(tooltip)
-        action.triggered.connect(slot)
-        bar.addAction(action)
-        widget = bar.widgetForAction(action)
-        if widget is not None:
-            self._style_toolbar_button(widget)
+            btn.setToolTip(tooltip)
+        self._style_toolbar_button(btn)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        btn.clicked.connect(slot)
+        self._toolbar_hbox.addWidget(btn)
         if job_action:
-            self._job_toolbar_actions.append(action)
-        return action
+            self._job_toolbar_actions.append(btn)
+
+        def _overflow(menu: QMenu) -> None:
+            act = menu.addAction(text, slot)
+            act.setEnabled(btn.isEnabled())
+
+        self._register_toolbar_item(btn, _overflow)
+        return btn
 
     def _add_toolbar_plain_button(
         self,
@@ -1768,25 +1809,32 @@ class MainWindow(QMainWindow):
         tooltip: str = "",
     ) -> QToolButton:
         """Text-only toolbar button added as a widget (avoids macOS QAction separator dots)."""
-        btn = QToolButton(bar)
+        btn = QToolButton(self._toolbar_container)
         btn.setText(text)
         if tooltip:
             btn.setToolTip(tooltip)
         self._style_toolbar_button(btn)
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         btn.clicked.connect(slot)
-        bar.addWidget(btn)
+        self._toolbar_hbox.addWidget(btn)
         if job_action:
             self._job_toolbar_actions.append(btn)
+
+        def _overflow(menu: QMenu) -> None:
+            act = menu.addAction(text, slot)
+            act.setEnabled(btn.isEnabled())
+
+        self._register_toolbar_item(btn, _overflow)
         return btn
 
     def _add_toolbar_spacer(self, bar: QToolBar, width: int = 10) -> None:
         """Invisible gap between toolbar groups (no dot or vertical rule)."""
-        spacer = QWidget(bar)
+        spacer = QWidget(self._toolbar_container)
         spacer.setFixedWidth(width)
         spacer.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         spacer.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        bar.addWidget(spacer)
+        self._toolbar_hbox.addWidget(spacer)
+        self._register_toolbar_item(spacer, None)  # no menu entry for spacers
 
     def _add_toolbar_text_menu_button(
         self,
@@ -1799,7 +1847,7 @@ class MainWindow(QMainWindow):
         run_label: str | None = None,
     ) -> QToolButton:
         """Text-only toolbar button; click opens a menu with the default action first."""
-        btn = QToolButton(bar)
+        btn = QToolButton(self._toolbar_container)
         btn.setText(text)
         if tooltip:
             btn.setToolTip(tooltip)
@@ -1814,8 +1862,16 @@ class MainWindow(QMainWindow):
 
         btn.clicked.connect(_show_menu_on_click)
 
-        bar.addWidget(btn)
+        self._toolbar_hbox.addWidget(btn)
         self._job_toolbar_actions.append(btn)
+
+        def _overflow(menu: QMenu) -> None:
+            sub = menu.addMenu(text)
+            sub.setEnabled(btn.isEnabled())
+            sub.addAction(run_label or text, default_slot)
+            menu_builder(sub, skip_default=True)
+
+        self._register_toolbar_item(btn, _overflow)
         return btn
 
     def _build_top_toolbar(self) -> None:
@@ -1832,12 +1888,108 @@ class MainWindow(QMainWindow):
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         bar.setMovable(False)
         bar.setFloatable(False)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
         self._functions_toolbar = bar
+
+        # All buttons live in ONE container widget with our own horizontal layout.
+        # Because the toolbar holds a single (expanding) widget, its native »
+        # extension never triggers — we manage overflow entirely ourselves.
+        container = QWidget(bar)
+        container.setObjectName("FunctionsToolBarInner")
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        hbox = QHBoxLayout(container)
+        hbox.setContentsMargins(6, 0, 6, 0)
+        hbox.setSpacing(1)
+        self._toolbar_container = container
+        self._toolbar_hbox = hbox
 
         for tool_id in self._toolbar_order:
             self._add_toolbar_tool(bar, tool_id)
+
+        # Stretch keeps buttons left and pushes the overflow arrow to the right,
+        # leaving empty space on the right for future buttons.
+        hbox.addStretch(1)
+
+        # Custom overflow button — a plain text triangle so it never depends on
+        # the theme's (broken) icon engine.
+        self._overflow_btn = QToolButton(container)
+        self._overflow_btn.setObjectName("ToolbarOverflowButton")
+        self._overflow_btn.setText("▼")  # filled triangle reads much larger than ▾
+        self._overflow_btn.setToolTip("More tools")
+        self._overflow_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._overflow_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._overflow_btn.setFixedHeight(self._toolbar_button_height())
+        overflow_menu = QMenu(self._overflow_btn)
+        overflow_menu.aboutToShow.connect(self._rebuild_overflow_menu)
+        self._overflow_btn.setMenu(overflow_menu)
+        self._overflow_btn.hide()
+        hbox.addWidget(self._overflow_btn)
+
+        bar.addWidget(container)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
+
         self._compact_functions_toolbar(bar)
+        container.installEventFilter(self)
+        QTimer.singleShot(0, self._relayout_toolbar_overflow)
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt API)
+        if obj is self._toolbar_container and event.type() == QEvent.Type.Resize:
+            self._relayout_toolbar_overflow()
+        return super().eventFilter(obj, event)
+
+    def _relayout_toolbar_overflow(self) -> None:
+        if getattr(self, "_in_overflow_relayout", False):
+            return  # guard against reentrancy from show/hide during event delivery
+        container = self._toolbar_container
+        if container is None or self._overflow_btn is None or not self._toolbar_items:
+            return
+        self._in_overflow_relayout = True
+        try:
+            self._do_relayout_toolbar_overflow(container)
+        finally:
+            self._in_overflow_relayout = False
+
+    def _do_relayout_toolbar_overflow(self, container) -> None:
+        layout = self._toolbar_hbox
+        spacing = max(0, layout.spacing()) if layout is not None else 0
+        left, _t, right, _b = layout.getContentsMargins() if layout is not None else (0, 0, 0, 0)
+        available = container.width() - left - right
+        if available <= 0:
+            return  # not laid out yet; a later resize will re-run this
+
+        widths = [w.sizeHint().width() for (w, _) in self._toolbar_items]
+        total = sum(widths) + spacing * (len(self._toolbar_items) - 1)
+
+        if total <= available:
+            for widget, _ in self._toolbar_items:
+                widget.setVisible(True)
+            self._overflow_btn.setVisible(False)
+            self._overflow_hidden = []
+            return
+
+        self._overflow_btn.setVisible(True)
+        budget = available - self._overflow_btn.sizeHint().width() - spacing
+        used = 0
+        hidden: list[tuple] = []
+        for index, (widget, handler) in enumerate(self._toolbar_items):
+            need = widths[index] + (spacing if index > 0 else 0)
+            if used + need <= budget:
+                widget.setVisible(True)
+                used += need
+            else:
+                widget.setVisible(False)
+                hidden.append((widget, handler))
+        self._overflow_hidden = hidden
+
+    def _rebuild_overflow_menu(self) -> None:
+        if self._overflow_btn is None:
+            return
+        menu = self._overflow_btn.menu()
+        if menu is None:
+            return
+        menu.clear()
+        for _widget, handler in self._overflow_hidden:
+            if handler is not None:
+                handler(menu)
 
     def _add_toolbar_tool(self, bar, tool_id: str) -> None:
         tip = _TOOLBAR_TOOLTIPS.get(tool_id, "")
@@ -2162,8 +2314,27 @@ class MainWindow(QMainWindow):
             toolbar_order=self._toolbar_order,
         )
         if dialog.exec():
+            from teviewer.ui.theme_mode import (
+                apply_theme,
+                load_accent_color,
+                load_corner_shape,
+                load_theme_mode,
+            )
+
+            old_appearance = (
+                load_theme_mode(),
+                load_accent_color(),
+                load_corner_shape(),
+            )
             self._project = dialog.apply_to_project()
             self._persist_workspace()
+            if dialog.appearance_signature() != old_appearance:
+                apply_theme(dialog.selected_theme_mode())
+                # Re-layer the window's own accents on top of the new palette.
+                self._apply_toolbar_theme()
+            from teviewer.app_preferences import apply_log_level
+
+            apply_log_level()
             old_font_size = self._toolbar_font_size
             old_browser_size = self._browser_panel_font_size
             self._toolbar_order, new_font_size = dialog.apply_toolbar_settings()
@@ -6289,7 +6460,7 @@ class MainWindow(QMainWindow):
                     visible = 0
             self._sync_files_status(visible, len(self._cached_folder_files))
             return
-        parts = ["TEviewer"]
+        parts = [APP_DISPLAY_NAME]
         if self._project.input_dir:
             parts.append(self._project.input_dir.name)
         if self._project.is_pan_genome_mode:
@@ -6303,7 +6474,9 @@ class MainWindow(QMainWindow):
             self,
             f"About {APP_DISPLAY_NAME}",
             f"<b>{APP_DISPLAY_NAME}</b> {__version__}<br>"
-            "Folder-based TE analysis workspace (PySide6).<br>"
-            "Dockable panels; double-click FASTA opens AliView (unless system viewer is enabled).<br>"
+            "Free, TE-focused sequence workspace — a folder-based desktop app for "
+            "annotating, aligning and curating transposable elements.<br>"
+            "BLAST · extend · align · MSA clean · consensus · TEAid · dotplots<br>"
+            "PySide6 · built on "
             "<a href='https://github.com/qjiangzhao/TEtrimmer'>TEtrimmer</a>",
         )

@@ -89,6 +89,65 @@ def apply_macos_app_name() -> None:
     except Exception:
         pass
 
+    # The bold application-menu title on macOS comes from CFBundleName, not the
+    # process name. For an interpreter launch (no .app bundle) it defaults to
+    # "python3.x"; override the main bundle's info dictionary so it reads as the
+    # app name instead. Must run before the Cocoa menu bar is built.
+    _set_macos_bundle_name()
+
+
+def _set_macos_bundle_name() -> None:
+    """Rewrite CFBundleName in the running process's main bundle (best effort)."""
+    if sys.platform != "darwin":
+        return
+    try:
+        objc = cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+        objc.objc_getClass.restype = c_void_p
+        objc.objc_getClass.argtypes = [c_char_p]
+        objc.sel_registerName.restype = c_void_p
+        objc.sel_registerName.argtypes = [c_char_p]
+        objc.objc_msgSend.restype = c_void_p
+
+        def msg(receiver, selector, *args, argtypes=()):
+            objc.objc_msgSend.argtypes = [c_void_p, c_void_p, *argtypes]
+            return objc.objc_msgSend(
+                c_void_p(receiver),
+                c_void_p(objc.sel_registerName(selector)),
+                *args,
+            )
+
+        ns_bundle = objc.objc_getClass(b"NSBundle")
+        ns_string = objc.objc_getClass(b"NSString")
+        if not ns_bundle or not ns_string:
+            return
+        main_bundle = msg(ns_bundle, b"mainBundle")
+        if not main_bundle:
+            return
+        info = msg(main_bundle, b"infoDictionary")
+        if not info:
+            return
+
+        def ns_str(text: str):
+            return msg(
+                ns_string,
+                b"stringWithUTF8String:",
+                c_char_p(text.encode("utf-8")),
+                argtypes=(c_char_p,),
+            )
+
+        value = ns_str(APP_DISPLAY_NAME)
+        key = ns_str("CFBundleName")
+        if value and key:
+            msg(
+                info,
+                b"setObject:forKey:",
+                c_void_p(value),
+                c_void_p(key),
+                argtypes=(c_void_p, c_void_p),
+            )
+    except Exception:
+        pass
+
 
 def _configure_qt_logging() -> None:
     rules = os.environ.get("QT_LOGGING_RULES", "").strip()

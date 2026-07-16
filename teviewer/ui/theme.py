@@ -7,8 +7,10 @@ def application_stylesheet(
     *,
     toolbar_font_pt: int,
     browser_panel_font_pt: int = 12,
+    accent: str = "#3d6ea8",
 ) -> str:
     size = toolbar_font_pt
+    size_lg = toolbar_font_pt + 14
     panel_size = browser_panel_font_pt
     return f"""
     QMainWindow {{
@@ -54,7 +56,7 @@ def application_stylesheet(
         color: palette(text);
     }}
     QListWidget::item:selected {{
-        background: #3d6ea8;
+        background: {accent};
         color: white;
     }}
     QListWidget::item:hover:!selected {{
@@ -68,7 +70,7 @@ def application_stylesheet(
         max-height: 26px;
     }}
     QLineEdit#FileFilter:focus {{
-        border-color: #3d6ea8;
+        border-color: {accent};
     }}
     QComboBox#FileSortCombo {{
         border: 1px solid palette(mid);
@@ -84,7 +86,7 @@ def application_stylesheet(
     }}
     QComboBox#FileSortCombo QAbstractItemView {{
         border: 1px solid palette(mid);
-        selection-background-color: #3d6ea8;
+        selection-background-color: {accent};
         selection-color: white;
         outline: none;
         min-width: 118px;
@@ -102,9 +104,6 @@ def application_stylesheet(
         padding: 4px 10px;
         border-radius: 4px;
     }}
-    QPushButton:hover {{
-        background: palette(alternate-base);
-    }}
     QTabWidget::pane {{
         border: 1px solid palette(mid);
         top: -1px;
@@ -114,20 +113,32 @@ def application_stylesheet(
     }}
     QTabBar::tab:selected {{
         font-weight: 600;
-        border-bottom: 2px solid #3d6ea8;
+        border-bottom: 2px solid {accent};
     }}
     QToolBar#FunctionsToolBar {{
-        spacing: 2px;
-        padding: 0px 6px;
+        spacing: 1px;
+        padding: 2px 6px;
         border-bottom: 1px solid palette(mid);
         background: palette(base);
     }}
     QToolBar#FunctionsToolBar QToolButton {{
         font-size: {size}pt;
         font-weight: 600;
-        padding: 0px 8px;
+        padding: 2px 8px;
         margin: 0px;
-        border-radius: 3px;
+        border-radius: 4px;
+        text-align: center;
+    }}
+    QToolButton#ToolbarOverflowButton {{
+        font-size: {size_lg}pt;
+        font-weight: 700;
+        min-width: 22px;
+        padding: 0px 8px;
+        margin-left: 2px;
+    }}
+    QToolButton#ToolbarOverflowButton::menu-indicator {{
+        image: none;
+        width: 0px;
     }}
     QToolBar#FunctionsToolBar QToolButton:hover {{
         background: palette(alternate-base);

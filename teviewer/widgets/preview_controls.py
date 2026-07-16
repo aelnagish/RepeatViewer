@@ -27,6 +27,7 @@ from teviewer.widgets.preview_zoom import (
     load_preview_zoom_percent,
     save_preview_fit_mode,
     save_preview_zoom_percent,
+    wheel_zoom_steps_from_event,
 )
 
 

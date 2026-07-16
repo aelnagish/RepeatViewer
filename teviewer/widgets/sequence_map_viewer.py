@@ -74,6 +74,7 @@ from teviewer.backends.auto_annotation_settings import (
     load_auto_annotation_settings,
     save_auto_annotation_settings,
 )
+from teviewer.branding import APP_DISPLAY_NAME
 from teviewer.backends.job_cancel import JobCancellation
 from teviewer.backends.annotation_colors import feature_type_color, similarity_database_color
 from teviewer.backends.database_prepare import database_search_readiness
@@ -3150,7 +3151,7 @@ class SimilarityAnnotationSettingsDialog(QDialog):
         self._max_hits.setValue(settings.max_hits_per_database)
         self._max_hits.setToolTip(
             "Maximum total hits shown per database. When more hits pass filtering, "
-            "TEviewer first removes shorter fully nested overlaps when their E-value "
+            f"{APP_DISPLAY_NAME} first removes shorter fully nested overlaps when their E-value "
             "is not better than the covering hit (including equal E=0), then merges "
             "partially overlapping groups (keeping the highest score in each group), "
             "then keeps the top hits by score. Protein and DNA searches use the same rule."
@@ -3168,7 +3169,7 @@ class SimilarityAnnotationSettingsDialog(QDialog):
         self._show_info_dialog = QCheckBox(self)
         self._show_info_dialog.setChecked(settings.show_info_window_after_run)
         self._show_info_dialog.setToolTip(
-            "When checked, TEviewer shows an information dialog with the similarity search summary "
+            f"When checked, {APP_DISPLAY_NAME} shows an information dialog with the similarity search summary "
             "(e.g. hits/no hits or database-readiness problems)."
         )
         form.addRow("Show info window after run:", self._show_info_dialog)

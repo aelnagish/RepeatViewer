@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QRect, QModelIndex
-from PySide6.QtGui import QColor, QPainter, QPalette
+from PySide6.QtGui import QPainter, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -12,8 +12,6 @@ from PySide6.QtWidgets import (
     QTreeWidget,
 )
 
-_FOLDER_SELECTED = QColor("#3d6ea8")
-_FOLDER_HOVER = QColor("#ececee")
 
 
 class FolderTreeItemDelegate(QStyledItemDelegate):
@@ -69,12 +67,15 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
             bg_rect = self._highlight_rect(opt, widget)
             painter.setPen(Qt.PenStyle.NoPen)
             if is_current:
-                painter.setBrush(_FOLDER_SELECTED)
+                # Selection colour follows the Preferences accent (qdarktheme maps
+                # the accent onto the palette Highlight role).
+                painter.setBrush(opt.palette.color(QPalette.ColorRole.Highlight))
                 painter.drawRoundedRect(bg_rect, 4, 4)
-                opt.palette.setBrush(QPalette.ColorRole.Text, QColor("#ffffff"))
-                opt.palette.setBrush(QPalette.ColorRole.WindowText, QColor("#ffffff"))
+                sel_text = opt.palette.color(QPalette.ColorRole.HighlightedText)
+                opt.palette.setBrush(QPalette.ColorRole.Text, sel_text)
+                opt.palette.setBrush(QPalette.ColorRole.WindowText, sel_text)
             else:
-                painter.setBrush(_FOLDER_HOVER)
+                painter.setBrush(opt.palette.color(QPalette.ColorRole.AlternateBase))
                 painter.drawRoundedRect(bg_rect, 4, 4)
                 text = self._readable_text_brush(opt)
                 opt.palette.setBrush(QPalette.ColorRole.Text, text)
