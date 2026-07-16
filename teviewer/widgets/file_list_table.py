@@ -48,7 +48,7 @@ _HEADERS = (
     "Modified",
     "Size",
 )
-_CHECKBOX_COLUMN_WIDTH = 30
+_CHECKBOX_COLUMN_WIDTH = 22
 _DEFAULT_COLUMN_WIDTHS = {
     _COL_NAME: 200,
     _COL_LENGTH: 80,
@@ -165,10 +165,13 @@ class FileListTableWidget(QTableWidget):
         header.setSectionsMovable(True)
         header.setSectionsClickable(True)
         header.setHighlightSections(True)
-        header.setMinimumSectionSize(48)
+        header.setMinimumSectionSize(22)
+        header.setFixedHeight(18)
         header.setDefaultAlignment(_LEFT_ALIGN)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(_COL_CHECK, QHeaderView.ResizeMode.Fixed)
+        # Allow a narrow checkbox column; other columns keep readable widths below.
+        header.setMinimumSectionSize(22)
         header.resizeSection(_COL_CHECK, _CHECKBOX_COLUMN_WIDTH)
         for column, width in _DEFAULT_COLUMN_WIDTHS.items():
             header.resizeSection(column, width)

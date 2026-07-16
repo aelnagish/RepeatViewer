@@ -5,19 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QIcon, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QColor, QIcon, QPalette, QPixmap
+from PySide6.QtWidgets import QApplication, QWidget
 
 from teviewer.widgets.svg_icons import themed_svg_icon_modes
 
 _BROWSER_ICON_SIZE = 16
-_BROWSER_GRAY = QColor("#5f6368")
-_BROWSER_WHITE = QColor("#ffffff")
-_BROWSER_MODES = [
-    (QIcon.Mode.Normal, _BROWSER_GRAY),
-    (QIcon.Mode.Selected, _BROWSER_WHITE),
-    (QIcon.Mode.Active, _BROWSER_WHITE),
-]
 _BROWSER_SUBDIR = "browser"
 
 _IMAGE_SUFFIXES = {
@@ -37,8 +30,35 @@ _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".fna", ".ffn", ".faa"}
 _ICON_CACHE: dict[str, QIcon] = {}
 
 
+def clear_browser_icon_cache() -> None:
+    _ICON_CACHE.clear()
+
+
+def _is_dark_palette() -> bool:
+    app = QApplication.instance()
+    if app is None:
+        return False
+    return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+
+def _browser_modes() -> list[tuple[QIcon.Mode, QColor]]:
+    if _is_dark_palette():
+        normal = QColor("#c4c7c5")
+        selected = QColor("#ffffff")
+    else:
+        normal = QColor("#5f6368")
+        selected = QColor("#ffffff")
+    return [
+        (QIcon.Mode.Normal, normal),
+        (QIcon.Mode.Selected, selected),
+        (QIcon.Mode.Active, selected),
+    ]
+
+
 def _browser_icon(name: str, widget: QWidget | None) -> QIcon:
-    cached = _ICON_CACHE.get(name)
+    theme_key = "dark" if _is_dark_palette() else "light"
+    cache_key = f"{theme_key}:{name}"
+    cached = _ICON_CACHE.get(cache_key)
     if cached is not None and not cached.isNull():
         return cached
     icon = themed_svg_icon_modes(
@@ -46,10 +66,10 @@ def _browser_icon(name: str, widget: QWidget | None) -> QIcon:
         _BROWSER_ICON_SIZE,
         widget=widget,
         subdir=_BROWSER_SUBDIR,
-        mode_colors=_BROWSER_MODES,
+        mode_colors=_browser_modes(),
     )
     if not icon.isNull():
-        _ICON_CACHE[name] = icon
+        _ICON_CACHE[cache_key] = icon
     return icon
 
 

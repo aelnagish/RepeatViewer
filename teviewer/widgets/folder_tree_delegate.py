@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QRect, QModelIndex
-from PySide6.QtGui import QPainter, QPalette
+from PySide6.QtGui import QColor, QPainter, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -12,6 +12,18 @@ from PySide6.QtWidgets import (
     QTreeWidget,
 )
 
+
+def _contrasting_on(background: QColor) -> QColor:
+    """White or near-black text, whichever reads on ``background``."""
+    if not background.isValid():
+        return QColor(Qt.GlobalColor.white)
+    # Rec. 709 relative luminance.
+    lum = (
+        0.2126 * background.redF()
+        + 0.7152 * background.greenF()
+        + 0.0722 * background.blueF()
+    )
+    return QColor(Qt.GlobalColor.white) if lum < 0.62 else QColor(20, 20, 20)
 
 
 class FolderTreeItemDelegate(QStyledItemDelegate):
@@ -69,11 +81,20 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
             if is_current:
                 # Selection colour follows the Preferences accent (qdarktheme maps
                 # the accent onto the palette Highlight role).
-                painter.setBrush(opt.palette.color(QPalette.ColorRole.Highlight))
+                highlight = opt.palette.color(QPalette.ColorRole.Highlight)
+                painter.setBrush(highlight)
                 painter.drawRoundedRect(bg_rect, 4, 4)
+                # Prefer HighlightedText when it contrasts; otherwise force white/black.
+                # (Custom accent + qdarktheme often leaves HighlightedText dark.)
                 sel_text = opt.palette.color(QPalette.ColorRole.HighlightedText)
+                if abs(sel_text.lightness() - highlight.lightness()) < 80:
+                    sel_text = _contrasting_on(highlight)
                 opt.palette.setBrush(QPalette.ColorRole.Text, sel_text)
                 opt.palette.setBrush(QPalette.ColorRole.WindowText, sel_text)
+                opt.palette.setBrush(QPalette.ColorRole.HighlightedText, sel_text)
+                # Re-enable Selected so folder chevrons use the white Selected
+                # icon pixmap (Normal is dark grey and disappears on blue).
+                opt.state |= QStyle.StateFlag.State_Selected
             else:
                 painter.setBrush(opt.palette.color(QPalette.ColorRole.AlternateBase))
                 painter.drawRoundedRect(bg_rect, 4, 4)

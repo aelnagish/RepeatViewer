@@ -1,19 +1,19 @@
-"""Application theme (light/dark) built on Fusion + pyqtdarktheme.
+"""Application theme (light/dark) built on Fusion + optional pyqtdarktheme.
 
 The look is layered:
   1. Qt "Fusion" style  -> consistent chrome on macOS / Windows / Linux
-  2. pyqtdarktheme       -> modern flat palette + base stylesheet, auto light/dark
-  3. MainWindow QSS      -> the accents in ``teviewer.ui.theme`` on top of that
+  2. pyqtdarktheme       -> modern flat palette + base stylesheet (when installed)
+  3. Fusion QPalette     -> dark/light fallback when pyqtdarktheme is missing
+  4. MainWindow QSS      -> accents in ``teviewer.ui.theme`` on top of that
 
-``pyqtdarktheme`` is an optional dependency: if it is missing we still fall
-back to plain Fusion so the app always launches.
+Corners are always rounded (no sharp option).
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QSettings
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QGuiApplication, QPalette
+from PySide6.QtWidgets import QApplication, QStyleFactory
 
 THEME_SETTINGS_GROUP = "appearance"
 DEFAULT_THEME_MODE = "dark"
@@ -71,20 +71,16 @@ def save_accent_color(value: str) -> None:
 
 
 def load_corner_shape() -> str:
-    s = QSettings()
-    s.beginGroup(THEME_SETTINGS_GROUP)
-    value = str(s.value("corner_shape", DEFAULT_CORNER_SHAPE))
-    s.endGroup()
-    return value if value in CORNER_SHAPES else DEFAULT_CORNER_SHAPE
+    """Always rounded — sharp corners are no longer offered."""
+    return DEFAULT_CORNER_SHAPE
 
 
 def save_corner_shape(value: str) -> None:
-    if value not in CORNER_SHAPES:
-        value = DEFAULT_CORNER_SHAPE
     s = QSettings()
     s.beginGroup(THEME_SETTINGS_GROUP)
-    s.setValue("corner_shape", value)
+    s.setValue("corner_shape", DEFAULT_CORNER_SHAPE)
     s.endGroup()
+    del value
 
 
 def apply_theme(mode: str | None = None) -> None:
@@ -101,35 +97,78 @@ def apply_theme(mode: str | None = None) -> None:
     if app is None:
         return
 
-    # 1) Set the platform colour-scheme FIRST (macOS title bar / native frames).
-    #    Doing this before qdarktheme paints means qdarktheme's palette is applied
-    #    last and always wins for the widget area, while the native chrome still
-    #    follows light/dark correctly.
+    fusion = QStyleFactory.create("Fusion")
+    if fusion is not None:
+        app.setStyle(fusion)
+
     _apply_color_scheme(mode)
+    concrete = _resolve_os_theme() if mode == "auto" else mode
 
     try:
         import qdarktheme
     except ImportError:
-        # pyqtdarktheme not installed: still give consistent cross-platform chrome.
-        app.setStyle("Fusion")
+        _apply_fusion_palette(app, concrete)
+        _repolish(app)
         return
 
     _patch_qdarktheme_icon_engine()
-
-    # 2) setup_theme() sets the palette + base stylesheet (Fusion-based proxy
-    #    style). We resolve "auto" to a concrete dark/light ourselves so
-    #    qdarktheme never installs its macOS palette-change listener, which
-    #    re-enters the app event filters and crashes on some Qt/macOS builds.
-    concrete = _resolve_os_theme() if mode == "auto" else mode
     qdarktheme.setup_theme(
         concrete,
-        corner_shape=load_corner_shape(),
+        corner_shape="rounded",
         custom_colors={"primary": load_accent_color()},
     )
-
-    # 3) Force already-shown widgets to re-read the new palette immediately so a
-    #    live switch repaints without needing a restart.
     _repolish(app)
+
+
+def _apply_fusion_palette(app: QApplication, concrete: str) -> None:
+    """Dark/light Fusion palette when pyqtdarktheme is not installed."""
+    palette = QPalette()
+    accent = QColor(load_accent_color())
+    if concrete == "dark":
+        window = QColor(45, 45, 45)
+        base = QColor(35, 35, 35)
+        alt = QColor(53, 53, 53)
+        text = QColor(220, 220, 220)
+        disabled = QColor(127, 127, 127)
+        mid = QColor(66, 66, 66)
+        highlight = accent
+        highlighted_text = QColor(255, 255, 255)
+        button = QColor(53, 53, 53)
+        link = accent.lighter(120)
+    else:
+        window = QColor(240, 240, 240)
+        base = QColor(255, 255, 255)
+        alt = QColor(247, 247, 247)
+        text = QColor(33, 33, 33)
+        disabled = QColor(160, 160, 160)
+        mid = QColor(200, 200, 200)
+        highlight = accent
+        highlighted_text = QColor(255, 255, 255)
+        button = QColor(240, 240, 240)
+        link = accent.darker(110)
+
+    palette.setColor(QPalette.ColorRole.Window, window)
+    palette.setColor(QPalette.ColorRole.WindowText, text)
+    palette.setColor(QPalette.ColorRole.Base, base)
+    palette.setColor(QPalette.ColorRole.AlternateBase, alt)
+    palette.setColor(QPalette.ColorRole.ToolTipBase, base)
+    palette.setColor(QPalette.ColorRole.ToolTipText, text)
+    palette.setColor(QPalette.ColorRole.Text, text)
+    palette.setColor(QPalette.ColorRole.Button, button)
+    palette.setColor(QPalette.ColorRole.ButtonText, text)
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.Link, link)
+    palette.setColor(QPalette.ColorRole.Highlight, highlight)
+    palette.setColor(QPalette.ColorRole.HighlightedText, highlighted_text)
+    palette.setColor(QPalette.ColorRole.Mid, mid)
+    palette.setColor(QPalette.ColorRole.Midlight, alt)
+    palette.setColor(QPalette.ColorRole.Dark, mid)
+    palette.setColor(QPalette.ColorRole.Light, window.lighter(110))
+    palette.setColor(QPalette.ColorRole.Shadow, QColor(20, 20, 20))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled)
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, disabled)
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled)
+    app.setPalette(palette)
 
 
 def _patch_qdarktheme_icon_engine() -> None:

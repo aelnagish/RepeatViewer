@@ -89,6 +89,47 @@ def _local_file_url(path: Path) -> QUrl:
     return QUrl.fromLocalFile(str(path.expanduser().resolve()))
 
 
+def _webengine_safe_html_path(path: Path) -> Path:
+    """Return a load path without ``#`` when needed (WebEngine + large TEAid HTML).
+
+    ``QUrl.fromLocalFile`` encodes ``#`` as ``%23``, but some macOS WebEngine builds
+    still fail to render large Plotly reports from those URLs. Copying/linking to a
+    temp name without ``#`` keeps ``file://`` loading (needed for multi‑MB TEAid
+    HTML) instead of stuffing the whole file into ``setHtml``.
+    """
+    resolved = path.expanduser().resolve()
+    if "#" not in resolved.name or not resolved.is_file():
+        return resolved
+    import hashlib
+    import shutil
+    import tempfile
+
+    digest = hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:12]
+    safe_name = resolved.name.replace("#", "__")
+    dest = Path(tempfile.gettempdir()) / f"teviewer_html_{digest}_{safe_name}"
+    try:
+        src_mtime = resolved.stat().st_mtime_ns
+        if dest.is_file() and dest.stat().st_mtime_ns == src_mtime:
+            return dest
+        if dest.exists():
+            dest.unlink()
+        try:
+            dest.hardlink_to(resolved)
+        except OSError:
+            try:
+                dest.symlink_to(resolved)
+            except OSError:
+                shutil.copy2(resolved, dest)
+        try:
+            os.utime(dest, ns=(resolved.stat().st_atime_ns, src_mtime))
+        except OSError:
+            pass
+        return dest
+    except OSError:
+        logger.debug("Could not create hash-safe HTML path for %s", resolved, exc_info=True)
+        return resolved
+
+
 def open_html_in_browser(path: Path) -> None:
     """Open an HTML report in the system browser."""
     QDesktopServices.openUrl(_local_file_url(path.expanduser().resolve()))
@@ -403,6 +444,8 @@ class HtmlWebEnginePreview(QWidget):
         # left it in a stale render state that would make clicks miss their target.
         if self._view_active():
             self._view.update()
+            self._defer(0, self._apply_zoom)
+            self._defer(100, self._apply_zoom)
         if (
             self._view_active()
             and self._current_path is not None
@@ -483,8 +526,13 @@ class HtmlWebEnginePreview(QWidget):
             vp = self._view.size()
         except RuntimeError:
             return
-        vw = max(1, vp.width())
-        vh = max(1, vp.height())
+        vw = int(vp.width())
+        vh = int(vp.height())
+        # Dock/tab layout often reports 0×0 before the first real resize. Fitting
+        # against that zooms Plotly to ~5% and leaves a blank-looking preview.
+        if vw < 40 or vh < 40:
+            self._defer(50, self._apply_zoom)
+            return
         cw = max(1, self._content_w)
         ch = max(1, self._content_h)
 
@@ -496,7 +544,7 @@ class HtmlWebEnginePreview(QWidget):
             base = min(vw / cw, vh / ch)
 
         factor = base * (self._zoom_percent / 100.0)
-        factor = max(0.05, min(5.0, factor))
+        factor = max(0.15, min(5.0, factor))
         try:
             self._view.setZoomFactor(factor)
         except RuntimeError:
@@ -579,11 +627,50 @@ class HtmlWebEnginePreview(QWidget):
                 return
             return
 
+        # Prefer file:// (works for multi‑MB TEAid Plotly). For names with ``#``,
+        # load via a temp path without ``#`` so WebEngine does not blank the page.
+        load_path = _webengine_safe_html_path(resolved)
         try:
-            self._view.load(_local_file_url(resolved))
+            self._view.load(_local_file_url(load_path))
         except RuntimeError:
             return
         self._sync_igv_toolbar()
+
+    def _load_html_via_set_html(self, resolved: Path) -> None:
+        # Only for small files — large TEAid reports must use file:// loading.
+        try:
+            size = resolved.stat().st_size
+        except OSError:
+            size = 0
+        if size > 4_000_000:
+            load_path = _webengine_safe_html_path(resolved)
+            try:
+                self._view.load(_local_file_url(load_path))
+            except RuntimeError:
+                return
+            self._sync_igv_toolbar()
+            return
+        try:
+            html = resolved.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            try:
+                self._view.setHtml(f"<p>Could not read HTML file: {exc}</p>")
+            except RuntimeError:
+                return
+            return
+        base_url = _local_file_url(resolved.parent)
+        try:
+            self._view.setHtml(html, base_url)
+        except RuntimeError:
+            return
+        self._sync_igv_toolbar()
+        # setHtml() sometimes does not emit a reliable loadFinished on macOS.
+        # Mark as OK and apply zoom now so the plot does not stay blank.
+        self._last_load_ok = True
+        self._apply_zoom()
+        self._defer(50, self._query_content_size)
+        self._defer(250, self._query_content_size)
+        self._defer(600, self._query_content_size)
 
     def suspend(self) -> None:
         """Pause JS polling while hidden behind another tab.
@@ -686,27 +773,7 @@ class HtmlWebEnginePreview(QWidget):
             "HTML preview failed to load %s via file URL; falling back to setHtml()",
             resolved,
         )
-        try:
-            html = resolved.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            self._view.setHtml(f"<p>Could not read HTML file: {exc}</p>")
-            return
-        base_url = _local_file_url(resolved.parent)
-
-        def _load_fallback() -> None:
-            if not self._view_active():
-                return
-            try:
-                self._view.setHtml(html, base_url)
-            except RuntimeError:
-                return
-            self._last_load_ok = True
-            self._apply_zoom()
-            self._defer(50, self._query_content_size)
-            self._defer(250, self._query_content_size)
-            self._defer(600, self._query_content_size)
-
-        self._defer(0, _load_fallback)
+        self._defer(0, lambda p=resolved: self._load_html_via_set_html(p) if self._view_active() else None)
 
     def _install_plot_prefs_bridge(self) -> None:
         if not self._view_active():

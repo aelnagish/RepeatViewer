@@ -108,7 +108,11 @@ from teviewer.backends.similarity_annotation import (
 from teviewer.project import UserDatabase
 from teviewer.workers.base import Worker
 from teviewer.widgets.annotation_colors_dialog import AnnotationElementColorsDialog
-from teviewer.widgets.preview_controls import ZOOM_SLIDER_HEIGHT
+from teviewer.widgets.preview_controls import (
+    ANNOTATION_ZOOM_SLIDER_WIDTH,
+    ZOOM_SLIDER_HEIGHT,
+    apply_annotation_zoom_slider_style,
+)
 from teviewer.widgets.preview_zoom import nucleotide_base_color_map
 
 def _annotation_panel_separator(parent: QWidget | None = None) -> QFrame:
@@ -176,7 +180,7 @@ _ANNOT_TRACK_VPAD = 8
 _ANNOT_FEATURE_HEIGHT = 18
 _ANNOT_MIN_VIEWPORT_HEIGHT = 56
 _OVERVIEW_SYNC_MS = 16
-_RULER_HEIGHT = 16
+_RULER_HEIGHT = 20
 _OVERVIEW_HEIGHT = 16
 _SEQUENCE_ROW = 14
 _TRACK_HEIGHT = 12
@@ -664,6 +668,7 @@ class OverviewWidget(QWidget):
         painter.fillRect(self.rect(), QColor("#ececec"))
         w = self.width()
         h = self.height()
+        # Rectangular track (not pill-shaped) — keep annotation overview crisp.
         inner = QRectF(0, 2, max(1.0, float(w)), h - 4)
         painter.setPen(QPen(QColor("#999999")))
         painter.drawRect(inner)
@@ -803,11 +808,12 @@ class ViewportRulerWidget(QWidget):
             if x < _LEFT_MARGIN or x > vw - 4:
                 continue
             if bp != seq_len:
-                painter.drawLine(int(x), 0, int(x), _RULER_HEIGHT - 3)
+                # Keep ticks above the sequence row (leave a small gap at the bottom).
+                painter.drawLine(int(x), 1, int(x), _RULER_HEIGHT - 8)
             text = str(bp)
             if x - last_label_x < min_label_w and bp != start_bp:
                 continue
-            painter.drawText(int(x + 2), _RULER_HEIGHT - 3, text)
+            painter.drawText(int(x + 2), _RULER_HEIGHT - 6, text)
             last_label_x = x
         painter.end()
 
@@ -987,20 +993,21 @@ class AnnotationTrackWidget(QWidget):
             h = int(self._row_count * self._row_height()) + 2 * _ANNOT_TRACK_VPAD
             h = max(h, _ANNOT_FEATURE_HEIGHT + 2 * _ANNOT_TRACK_VPAD)
             self.setFixedSize(track_w, h)
-            self.show()
         else:
-            self.setFixedSize(0, 0)
-            self.hide()
+            # Keep a visible empty track so the annotation panel is not blank.
+            self.setFixedSize(track_w, max(_ANNOT_MIN_VIEWPORT_HEIGHT, _ANNOT_FEATURE_HEIGHT + 2 * _ANNOT_TRACK_VPAD))
+        self.show()
         self.update()
 
     def has_content(self) -> bool:
         return self._row_count > 0
 
     def paintEvent(self, event) -> None:  # noqa: N802
-        if not self._features:
-            return
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#f5f5f5"))
+        if not self._features:
+            painter.end()
+            return
         ppb = self._ppb
         scroll = self._scroll_px
         vw = self._viewport_w
@@ -1603,9 +1610,9 @@ class SequenceMapCanvas(QWidget):
             if bp == seq_len:
                 continue
             if is_major:
-                painter.drawLine(int(x), 0, int(x), _RULER_HEIGHT - 3)
+                painter.drawLine(int(x), 0, int(x), _RULER_HEIGHT - 8)
             else:
-                painter.drawLine(int(x), _RULER_HEIGHT - 6, int(x), _RULER_HEIGHT - 3)
+                painter.drawLine(int(x), _RULER_HEIGHT - 10, int(x), _RULER_HEIGHT - 8)
 
         label_positions = list(range(1, seq_len + 1, major_step))
         if label_positions[-1] != seq_len:
@@ -1614,7 +1621,7 @@ class SequenceMapCanvas(QWidget):
             x = _LEFT_MARGIN + (bp - 1) * ppb
             if x - last_label_x < min_label_w and bp != 1:
                 continue
-            painter.drawText(int(x) + 2, _RULER_HEIGHT - 3, str(bp))
+            painter.drawText(int(x) + 2, _RULER_HEIGHT - 6, str(bp))
             last_label_x = x
 
     def _sequence_viewport_x_extent(self) -> tuple[float, float]:
@@ -1933,10 +1940,105 @@ class SequenceMapWidget(QWidget):
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        self._zoom_slider: QSlider | None = None
+        self._zoom_slider: QSlider | QSpinBox | None = None
         self._annotation_header_zoom_bar = None
+        self._annotation_side_panel: QWidget | None = None
+        self._toolbar: QWidget | None = None
         zoom_row: QHBoxLayout | None = None
-        if not embedded:
+
+        # Shared position / font / stats controls (parented into toolbar or side panel).
+        controls_parent = self
+        self._sequence_stats_label = QLabel("", controls_parent)
+        self._sequence_stats_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+
+        self._font_size = QSpinBox(controls_parent)
+        self._font_size.setRange(_MIN_NUC_FONT_PT, _MAX_NUC_FONT_PT)
+        self._font_size.setValue(_DEFAULT_NUC_FONT_PT)
+        self._font_size.setSuffix(" pt")
+        self._font_size.setFixedWidth(72)
+        self._font_size.setToolTip("Nucleotide letter size (independent of zoom scale)")
+        self._font_size.valueChanged.connect(self._on_font_size_changed)
+
+        self._pos_start = QSpinBox(controls_parent)
+        self._pos_start.setMinimum(1)
+        self._pos_start.setMaximum(1)
+        self._pos_start.setFixedWidth(72)
+        self._pos_end = QSpinBox(controls_parent)
+        self._pos_end.setMinimum(1)
+        self._pos_end.setMaximum(1)
+        self._pos_end.setFixedWidth(72)
+        self._pos_start.valueChanged.connect(self._on_position_spin_changed)
+        self._pos_end.valueChanged.connect(self._on_position_spin_changed)
+        select_btn = QPushButton("Select", controls_parent)
+        select_btn.setToolTip(
+            "Zoom to the selected range and center its midpoint in the window"
+        )
+        select_btn.clicked.connect(self._select_by_position)
+
+        if embedded:
+            # Horizontal toolbar matching the standalone annotation window layout:
+            # Zoom | Position | Select | Font | … | Length / GC
+            toolbar = QWidget(self)
+            toolbar.setObjectName("AnnotationMapToolbar")
+            toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            toolbar.setFixedHeight(28)
+            tb = QHBoxLayout(toolbar)
+            tb.setContentsMargins(6, 2, 8, 2)
+            tb.setSpacing(6)
+            tb.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+            zoom_out_btn = QPushButton("−", toolbar)
+            zoom_out_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
+            zoom_out_btn.setToolTip("Zoom out")
+            zoom_out_btn.clicked.connect(self.zoom_out)
+            zoom_in_btn = QPushButton("+", toolbar)
+            zoom_in_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
+            zoom_in_btn.setToolTip("Zoom in")
+            zoom_in_btn.clicked.connect(self.zoom_in)
+            self._zoom_slider = QSlider(Qt.Orientation.Horizontal, toolbar)
+            self._zoom_slider.setObjectName("annotationZoomSlider")
+            self._zoom_slider.setRange(0, 100)
+            self._zoom_slider.setValue(0)
+            self._zoom_slider.setFixedWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
+            self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
+            self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
+            self._zoom_slider.setToolTip(
+                "Left: fit full sequence in window. Right: maximum zoom-in."
+            )
+            apply_annotation_zoom_slider_style(self._zoom_slider)
+            self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
+
+            for w in (self._pos_start, self._pos_end, self._font_size, select_btn):
+                w.setParent(toolbar)
+            self._sequence_stats_label.setParent(toolbar)
+            self._pos_start.setFixedWidth(64)
+            self._pos_end.setFixedWidth(64)
+            self._font_size.setFixedWidth(70)
+            for spin in (self._pos_start, self._pos_end, self._font_size):
+                spin.setFixedHeight(18)
+            select_btn.setFixedHeight(20)
+            select_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+            tb.addWidget(zoom_out_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(zoom_in_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(self._zoom_slider, 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(QLabel("Position:", toolbar), 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(self._pos_start, 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(QLabel("to", toolbar), 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(self._pos_end, 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(select_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(QLabel("Font:", toolbar), 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(self._font_size, 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addStretch(1)
+            self._sequence_stats_label.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            self._sequence_stats_label.setWordWrap(False)
+            tb.addWidget(self._sequence_stats_label, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._toolbar = toolbar
+        else:
             zoom_row = QHBoxLayout()
             zoom_row.setContentsMargins(6, 4, 6, 4)
             zoom_row.setSpacing(6)
@@ -1962,7 +2064,7 @@ class SequenceMapWidget(QWidget):
             self._zoom_slider.setObjectName("annotationZoomSlider")
             self._zoom_slider.setRange(0, 100)
             self._zoom_slider.setValue(0)
-            self._zoom_slider.setMinimumWidth(72)
+            self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
             self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
             self._zoom_slider.setToolTip(
                 "Left: fit full sequence in window. Right: maximum zoom-in."
@@ -1971,6 +2073,7 @@ class SequenceMapWidget(QWidget):
                 QSizePolicy.Policy.Expanding,
                 QSizePolicy.Policy.Fixed,
             )
+            apply_annotation_zoom_slider_style(self._zoom_slider)
             self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
 
             zoom_strip_layout.addWidget(zoom_out_btn)
@@ -1978,68 +2081,48 @@ class SequenceMapWidget(QWidget):
             zoom_strip_layout.addWidget(self._zoom_slider, 1)
             zoom_row.addWidget(zoom_strip, 1, Qt.AlignmentFlag.AlignVCenter)
 
-        annotation_controls = QWidget(self)
-        annotation_controls.setObjectName("AnnotationControls")
-        annotation_controls.setFixedWidth(_ANNOTATION_SIDE_PANEL_WIDTH)
-        controls_layout = QVBoxLayout(annotation_controls)
-        controls_layout.setContentsMargins(8, 8, 8, 8)
-        controls_layout.setSpacing(6)
+            annotation_controls = QWidget(self)
+            annotation_controls.setObjectName("AnnotationControls")
+            annotation_controls.setFixedWidth(_ANNOTATION_SIDE_PANEL_WIDTH)
+            controls_layout = QVBoxLayout(annotation_controls)
+            controls_layout.setContentsMargins(8, 8, 8, 8)
+            controls_layout.setSpacing(6)
 
-        self._sequence_stats_label = QLabel("", annotation_controls)
-        self._sequence_stats_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
+            for w in (
+                self._sequence_stats_label,
+                self._font_size,
+                self._pos_start,
+                self._pos_end,
+                select_btn,
+            ):
+                w.setParent(annotation_controls)
 
-        self._font_size = QSpinBox(annotation_controls)
-        self._font_size.setRange(_MIN_NUC_FONT_PT, _MAX_NUC_FONT_PT)
-        self._font_size.setValue(_DEFAULT_NUC_FONT_PT)
-        self._font_size.setSuffix(" pt")
-        self._font_size.setFixedWidth(72)
-        self._font_size.setToolTip("Nucleotide letter size (independent of zoom scale)")
-        self._font_size.valueChanged.connect(self._on_font_size_changed)
+            position_label = QLabel("Position", annotation_controls)
+            position_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            controls_layout.addWidget(position_label)
+            controls_layout.addWidget(self._pos_start)
+            to_label = QLabel("to", annotation_controls)
+            to_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            controls_layout.addWidget(to_label)
+            controls_layout.addWidget(self._pos_end)
+            select_btn.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
+            controls_layout.addWidget(select_btn)
 
-        self._pos_start = QSpinBox(annotation_controls)
-        self._pos_start.setMinimum(1)
-        self._pos_start.setMaximum(1)
-        self._pos_start.setFixedWidth(72)
-        self._pos_end = QSpinBox(annotation_controls)
-        self._pos_end.setMinimum(1)
-        self._pos_end.setMaximum(1)
-        self._pos_end.setFixedWidth(72)
-        self._pos_start.valueChanged.connect(self._on_position_spin_changed)
-        self._pos_end.valueChanged.connect(self._on_position_spin_changed)
-        select_btn = QPushButton("Select", annotation_controls)
-        select_btn.setToolTip(
-            "Zoom to the selected range and center its midpoint in the window"
-        )
-        select_btn.clicked.connect(self._select_by_position)
+            font_label = QLabel("Font", annotation_controls)
+            font_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            controls_layout.addWidget(font_label)
+            controls_layout.addWidget(self._font_size)
 
-        position_label = QLabel("Position", annotation_controls)
-        position_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        controls_layout.addWidget(position_label)
-        controls_layout.addWidget(self._pos_start)
-        to_label = QLabel("to", annotation_controls)
-        to_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        controls_layout.addWidget(to_label)
-        controls_layout.addWidget(self._pos_end)
-        select_btn.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        controls_layout.addWidget(select_btn)
-
-        font_label = QLabel("Font", annotation_controls)
-        font_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        controls_layout.addWidget(font_label)
-        controls_layout.addWidget(self._font_size)
-
-        self._sequence_stats_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-        )
-        self._sequence_stats_label.setWordWrap(True)
-        controls_layout.addWidget(self._sequence_stats_label)
-        controls_layout.addStretch()
-
+            self._sequence_stats_label.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+            )
+            self._sequence_stats_label.setWordWrap(True)
+            controls_layout.addWidget(self._sequence_stats_label)
+            controls_layout.addStretch()
+            self._annotation_side_panel = annotation_controls
         self._canvas = SequenceMapCanvas(self)
         self._canvas.set_color_bases(True)
         self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -2088,6 +2171,7 @@ class SequenceMapWidget(QWidget):
             QSizePolicy.Policy.Expanding,
         )
         self._annot_scroll = QScrollArea(self._sequence_block)
+        self._annot_scroll.setObjectName("AnnotationTrackScroll")
         self._annot_scroll.setWidget(self._annot_track)
         self._annot_scroll.setWidgetResizable(False)
         self._annot_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -2098,6 +2182,10 @@ class SequenceMapWidget(QWidget):
             QSizePolicy.Policy.Expanding,
         )
         self._annot_scroll.setFocusProxy(self._annot_track)
+        # Keep a visible feature-track region even before annotations exist
+        # (otherwise the expanding map looks like a blank/broken panel).
+        self._annot_scroll.setMinimumHeight(_ANNOT_MIN_VIEWPORT_HEIGHT)
+        self._annot_scroll.viewport().setAutoFillBackground(True)
 
         block_layout = QVBoxLayout(self._sequence_block)
         block_layout.setContentsMargins(0, 0, 0, 0)
@@ -2114,6 +2202,8 @@ class SequenceMapWidget(QWidget):
         main_layout = QVBoxLayout(main_column)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
+        if self._toolbar is not None:
+            main_layout.addWidget(self._toolbar)
         if zoom_row is not None:
             main_layout.addLayout(zoom_row)
         main_layout.addWidget(self._header)
@@ -2123,7 +2213,8 @@ class SequenceMapWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(main_column, stretch=1)
-        layout.addWidget(annotation_controls)
+        if self._annotation_side_panel is not None:
+            layout.addWidget(self._annotation_side_panel)
 
         self._canvas.installEventFilter(self)
         self._canvas_row.installEventFilter(self)
@@ -2260,18 +2351,17 @@ class SequenceMapWidget(QWidget):
 
     def _sync_annot_scroll_area(self) -> None:
         """Let annotation tracks fill space below the sequence; scroll when rows overflow."""
-        if not self._annot_track.has_content() or self._annot_track.height() <= 0:
-            self._annot_scroll.hide()
-            self._annot_scroll.setMinimumHeight(0)
-            self._annot_scroll.setMaximumHeight(0)
-            return
-
         self._annot_scroll.show()
-        vw = max(1, self._scroll_viewport_width())
-        track_h = self._annot_track.height()
-        self._annot_track.setFixedSize(vw, track_h)
         self._annot_scroll.setMinimumHeight(_ANNOT_MIN_VIEWPORT_HEIGHT)
         self._annot_scroll.setMaximumHeight(16777215)
+        vw = max(1, self._scroll_viewport_width())
+        track_h = max(1, self._annot_track.height())
+        if self._annot_track.has_content():
+            self._annot_track.setFixedSize(vw, track_h)
+        else:
+            # Empty placeholder sized to the viewport so the panel is not a void.
+            vp_h = max(_ANNOT_MIN_VIEWPORT_HEIGHT, self._annot_scroll.viewport().height())
+            self._annot_track.setFixedSize(vw, max(1, vp_h))
 
     def _set_position_spin_limits(self, seq_len: int) -> None:
         seq_len = max(1, int(seq_len))
@@ -2413,7 +2503,13 @@ class SequenceMapWidget(QWidget):
         self._sync_overview()
 
     def bind_annotation_zoom_bar(self, bar) -> None:
-        """Attach header zoom controls when embedded in the preview panel."""
+        """Attach header zoom controls when embedded in the preview panel.
+
+        Embedded maps own a horizontal toolbar with zoom; ignore the header bar
+        so it cannot steal the slider connection and leave the map unzoomable.
+        """
+        if self._embedded:
+            return
         from teviewer.widgets.preview_controls import AnnotationZoomBar
 
         if not isinstance(bar, AnnotationZoomBar):
@@ -2632,7 +2728,9 @@ class SequenceMapWidget(QWidget):
         if gc_part:
             gc_part = gc_part.strip()
             if gc_part:
-                text = f"{length_part}\n{gc_part}"
+                # Embedded toolbar is a single horizontal row (match reference UI).
+                sep = "  " if self._embedded else "\n"
+                text = f"{length_part}{sep}{gc_part}"
         self._sequence_stats_label.setText(text)
         self._sequence_stats_label.show()
 
@@ -2742,11 +2840,22 @@ class SequenceMapWidget(QWidget):
         super().keyPressEvent(event)
 
     def _scroll_to_fraction(self, fraction: float) -> None:
+        """Scroll so the overview viewport starts at ``fraction`` of the sequence.
+
+        ``OverviewWidget`` emits the start of the visible window as a fraction of
+        sequence length in ``[0, 1 - view_fraction]``. That must be stretched onto
+        the full horizontal scrollbar range ``[0, max_scroll]``; multiplying by
+        ``max_scroll`` alone left the rightmost bases unreachable.
+        """
         if self._data is None:
             return
         max_scroll = self._hbar.maximum()
-        target = int(round(fraction * max_scroll))
-        self._hbar.setValue(max(0, min(max_scroll, target)))
+        if max_scroll <= 0:
+            return
+        view_frac = max(0.0, min(1.0, float(self._overview._view_fraction)))
+        usable = max(1e-9, 1.0 - view_frac)
+        t = max(0.0, min(1.0, float(fraction) / usable))
+        self._hbar.setValue(int(round(t * max_scroll)))
         self._sync_overview_now()
 
 

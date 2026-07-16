@@ -61,11 +61,9 @@ from teviewer.app_preferences import (
     save_verbose_logging,
 )
 from teviewer.ui.theme_mode import (
-    CORNER_LABELS,
     DEFAULT_ACCENT_COLOR,
     THEME_LABELS,
     load_accent_color,
-    load_corner_shape,
     load_theme_mode,
     save_accent_color,
     save_corner_shape,
@@ -444,14 +442,6 @@ class SettingsDialog(QDialog):
         self._accent_reset.clicked.connect(self._reset_accent_color)
         self._update_accent_swatch()
 
-        self._corner_shape = QComboBox()
-        for label, value in CORNER_LABELS:
-            self._corner_shape.addItem(label, value)
-        corner_index = self._corner_shape.findData(load_corner_shape())
-        if corner_index >= 0:
-            self._corner_shape.setCurrentIndex(corner_index)
-        self._corner_shape.setToolTip("Rounded or sharp corners for buttons, fields and tabs.")
-
         # Performance
         self._ui_thread_reserve = QSpinBox()
         self._ui_thread_reserve.setRange(0, 8)
@@ -497,7 +487,6 @@ class SettingsDialog(QDialog):
             self._preview_fit,
             self._fasta_default_tab,
             self._theme_mode,
-            self._corner_shape,
         ):
             widget.setFixedWidth(_FIELD_WIDTH)
 
@@ -552,7 +541,6 @@ class SettingsDialog(QDialog):
         appearance = _group("Appearance", [
             ("Theme:", self._theme_mode),
             ("Accent colour:", accent_field),
-            ("Corner style:", self._corner_shape),
         ])
         seq_tools = _group("Sequence tools", [
             ("Use system BLAST:", self._system_blast),
@@ -684,7 +672,7 @@ class SettingsDialog(QDialog):
         save_color_blind_nucleotide_scheme(self._color_blind_scheme.isChecked())
         save_theme_mode(str(self._theme_mode.currentData()))
         save_accent_color(self._accent_color)
-        save_corner_shape(str(self._corner_shape.currentData()))
+        save_corner_shape("rounded")
         save_ui_thread_reserve(self._ui_thread_reserve.value())
         save_reopen_last_folder(self._reopen_last.isChecked())
         save_restore_geometry(self._restore_geometry.isChecked())
@@ -698,15 +686,11 @@ class SettingsDialog(QDialog):
     def selected_accent_color(self) -> str:
         return self._accent_color
 
-    def selected_corner_shape(self) -> str:
-        return str(self._corner_shape.currentData())
-
-    def appearance_signature(self) -> tuple[str, str, str]:
+    def appearance_signature(self) -> tuple[str, str]:
         """Values that require re-applying the theme when any of them changes."""
         return (
             self.selected_theme_mode(),
             self.selected_accent_color(),
-            self.selected_corner_shape(),
         )
 
     # --- Appearance handlers ---------------------------------------------

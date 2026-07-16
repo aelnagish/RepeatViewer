@@ -6,13 +6,12 @@ from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
-    QComboBox,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QPushButton,
-    QSlider,
     QSizePolicy,
+    QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -25,57 +24,104 @@ from teviewer.widgets.preview_zoom import (
     PreviewFitMode,
     load_preview_fit_mode,
     load_preview_zoom_percent,
-    save_preview_fit_mode,
     save_preview_zoom_percent,
     wheel_zoom_steps_from_event,
 )
 
 
-ZOOM_BAR_HEIGHT = 24
-ZOOM_CONTROL_HEIGHT = 20
-ZOOM_SLIDER_HEIGHT = 18
-ZOOM_SLIDER_MAX_WIDTH = 140
+ZOOM_BAR_HEIGHT = 20
+ZOOM_CONTROL_HEIGHT = 18
+ZOOM_SPIN_WIDTH = 68
+# Kept for sequence_map_viewer imports (embedded map toolbar height).
+ZOOM_SLIDER_HEIGHT = 22
+ANNOTATION_ZOOM_SLIDER_WIDTH = 240
+
+
+def apply_annotation_zoom_slider_style(slider: QSlider) -> None:
+    """Accent groove + small circular thumb for the annotation map zoom slider."""
+    from teviewer.ui.theme_mode import load_accent_color
+
+    accent = load_accent_color()
+    slider.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    slider.setStyleSheet(
+        f"""
+        QSlider#annotationZoomSlider::groove:horizontal {{
+            border: 1px solid palette(mid);
+            background: palette(base);
+            height: 4px;
+            border-radius: 2px;
+        }}
+        QSlider#annotationZoomSlider::sub-page:horizontal {{
+            background: {accent};
+            border: 1px solid {accent};
+            height: 4px;
+            border-radius: 2px;
+        }}
+        QSlider#annotationZoomSlider::add-page:horizontal {{
+            background: palette(mid);
+            border: 1px solid palette(mid);
+            height: 4px;
+            border-radius: 2px;
+        }}
+        QSlider#annotationZoomSlider::handle:horizontal {{
+            background: {accent};
+            border: 1px solid palette(text);
+            width: 10px;
+            height: 10px;
+            margin: -4px 0;
+            border-radius: 5px;
+        }}
+        QSlider#annotationZoomSlider::handle:horizontal:hover {{
+            background: {accent};
+            border: 1px solid palette(highlight);
+        }}
+        """
+    )
+
+
+def _make_zoom_percent_spin(
+    *,
+    minimum: int,
+    maximum: int,
+    tooltip: str,
+) -> QSpinBox:
+    """Rounded percent spinbox (figure-2 style); value shows with a ``%`` suffix."""
+    spin = QSpinBox()
+    spin.setObjectName("previewZoomSpin")
+    spin.setRange(minimum, maximum)
+    spin.setSuffix("%")
+    spin.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+    spin.setFixedWidth(ZOOM_SPIN_WIDTH)
+    spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    spin.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+    spin.setToolTip(tooltip)
+    spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    spin.setSingleStep(PREVIEW_WHEEL_ZOOM_STEP_PERCENT)
+    spin.setKeyboardTracking(False)
+    return spin
 
 
 class PreviewZoomBar(QWidget):
-    """Compact preview scale controls (embedded on the right of the header bar)."""
+    """Compact preview scale controls (% spin / Reset) for the Preview title bar."""
 
     zoom_changed = Signal(int)
     fit_mode_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setFixedHeight(ZOOM_BAR_HEIGHT)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        preview_lbl = QLabel("Preview:")
-        layout.addWidget(preview_lbl)
-
-        self._fit_combo = QComboBox()
-        self._fit_combo.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        for label, mode in (
-            ("Fit window", PreviewFitMode.FIT_WINDOW),
-            ("Fit width", PreviewFitMode.FIT_WIDTH),
-            ("Original size", PreviewFitMode.ORIGINAL),
-        ):
-            index = self._fit_combo.count()
-            self._fit_combo.addItem(label)
-            self._fit_combo.setItemData(index, mode.value, Qt.ItemDataRole.UserRole)
-        layout.addWidget(self._fit_combo)
-
-        self._slider = QSlider(Qt.Orientation.Horizontal)
-        self._slider.setObjectName("previewZoomSlider")
-        self._slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
-        self._slider.setMaximumWidth(ZOOM_SLIDER_MAX_WIDTH)
-        self._slider.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._slider.setRange(MIN_PREVIEW_ZOOM_PERCENT, MAX_PREVIEW_ZOOM_PERCENT)
-        self._slider.valueChanged.connect(self._on_slider)
-        layout.addWidget(self._slider)
-
-        self._pct_label = QLabel()
-        self._pct_label.setMinimumWidth(34)
-        layout.addWidget(self._pct_label)
+        self._spin = _make_zoom_percent_spin(
+            minimum=MIN_PREVIEW_ZOOM_PERCENT,
+            maximum=MAX_PREVIEW_ZOOM_PERCENT,
+            tooltip="Preview zoom",
+        )
+        self._spin.valueChanged.connect(self._on_spin)
+        layout.addWidget(self._spin)
 
         self._reset_btn = QPushButton("Reset")
         self._reset_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
@@ -84,102 +130,63 @@ class PreviewZoomBar(QWidget):
         layout.addWidget(self._reset_btn)
 
         self._block = False
-        self._fit_combo.activated.connect(self._on_fit_activated)
-        self.set_values(load_preview_zoom_percent(), load_preview_fit_mode())
+        self._fit_mode = load_preview_fit_mode()
+        self.set_values(load_preview_zoom_percent(), self._fit_mode)
 
     def set_values(self, percent: int, fit_mode: PreviewFitMode) -> None:
         self._block = True
-        self._slider.setValue(percent)
-        self._update_label(percent)
-        index = self._fit_combo.findData(fit_mode.value, Qt.ItemDataRole.UserRole)
-        if index >= 0:
-            self._fit_combo.setCurrentIndex(index)
+        self._spin.setValue(percent)
+        self._fit_mode = fit_mode
         self._block = False
 
     def current_zoom_percent(self) -> int:
-        return self._slider.value()
+        return self._spin.value()
 
     def current_fit_mode(self) -> PreviewFitMode:
-        index = self._fit_combo.currentIndex()
-        raw = self._fit_combo.itemData(index, Qt.ItemDataRole.UserRole)
-        if raw is None:
-            raw = self._fit_combo.itemData(index)
-        try:
-            return PreviewFitMode(str(raw))
-        except ValueError:
-            return PreviewFitMode.FIT_WINDOW
+        return self._fit_mode
 
-    def _update_label(self, percent: int) -> None:
-        self._pct_label.setText(f"{percent}%")
-
-    def _on_slider(self, value: int) -> None:
-        self._update_label(value)
+    def _on_spin(self, value: int) -> None:
         if self._block:
             return
         save_preview_zoom_percent(value)
         self.zoom_changed.emit(value)
 
-    def _on_fit_activated(self, _index: int) -> None:
-        if self._block:
-            return
-        mode = self.current_fit_mode()
-        save_preview_fit_mode(mode)
-        self.fit_mode_changed.emit(mode.value)
-
     def _reset_zoom(self) -> None:
-        self._slider.setValue(DEFAULT_PREVIEW_ZOOM_PERCENT)
+        self._spin.setValue(DEFAULT_PREVIEW_ZOOM_PERCENT)
 
     def step_zoom(self, steps: int) -> None:
         if steps == 0:
             return
-        value = self._slider.value() + steps * PREVIEW_WHEEL_ZOOM_STEP_PERCENT
+        value = self._spin.value() + steps * PREVIEW_WHEEL_ZOOM_STEP_PERCENT
         value = max(MIN_PREVIEW_ZOOM_PERCENT, min(MAX_PREVIEW_ZOOM_PERCENT, value))
-        self._slider.setValue(value)
+        self._spin.setValue(value)
+
+    def refresh_slider_style(self) -> None:
+        """Kept for theme-reload callers; spinbox uses the global stylesheet."""
 
 
 class AnnotationZoomBar(QWidget):
-    """Sequence-map zoom controls for the preview header (Annotation tab)."""
+    """Sequence-map zoom controls for the Preview title bar (Annotation tab)."""
 
     fit_mode_changed = Signal(str)
     reset_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setFixedHeight(ZOOM_BAR_HEIGHT)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        preview_lbl = QLabel("Preview:")
-        layout.addWidget(preview_lbl)
-
-        self._fit_combo = QComboBox()
-        self._fit_combo.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        for label, mode in (
-            ("Fit window", PreviewFitMode.FIT_WINDOW),
-            ("Fit width", PreviewFitMode.FIT_WIDTH),
-            ("Original size", PreviewFitMode.ORIGINAL),
-        ):
-            index = self._fit_combo.count()
-            self._fit_combo.addItem(label)
-            self._fit_combo.setItemData(index, mode.value, Qt.ItemDataRole.UserRole)
-        layout.addWidget(self._fit_combo)
-
-        self._slider = QSlider(Qt.Orientation.Horizontal)
-        self._slider.setObjectName("previewZoomSlider")
-        self._slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
-        self._slider.setMaximumWidth(ZOOM_SLIDER_MAX_WIDTH)
-        self._slider.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._slider.setRange(0, 100)
-        self._slider.setValue(0)
-        self._slider.setToolTip(
-            "Left: fit full sequence in window. Right: maximum zoom-in."
+        self._spin = _make_zoom_percent_spin(
+            minimum=0,
+            maximum=100,
+            tooltip="0%: fit full sequence in window. 100%: maximum zoom-in.",
         )
-        self._slider.valueChanged.connect(self._on_slider)
-        layout.addWidget(self._slider)
-
-        self._pct_label = QLabel()
-        self._pct_label.setMinimumWidth(34)
-        layout.addWidget(self._pct_label)
+        self._spin.setSingleStep(5)
+        self._spin.setValue(0)
+        self._spin.valueChanged.connect(self._on_spin)
+        layout.addWidget(self._spin)
 
         self._reset_btn = QPushButton("Reset")
         self._reset_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
@@ -188,38 +195,26 @@ class AnnotationZoomBar(QWidget):
         layout.addWidget(self._reset_btn)
 
         self._block = False
-        self._fit_combo.activated.connect(self._on_fit_activated)
-        self._update_label(0)
 
     @property
-    def slider(self) -> QSlider:
-        return self._slider
+    def slider(self) -> QSpinBox:
+        """Zoom percent control (name kept for sequence-map binding)."""
+        return self._spin
 
     def sync_display(self, value: int) -> None:
-        """Update slider and percent label without emitting map zoom."""
+        """Update percent spin without emitting map zoom."""
         self._block = True
-        self._slider.blockSignals(True)
-        self._slider.setValue(value)
-        self._slider.blockSignals(False)
-        self._update_label(value)
+        self._spin.blockSignals(True)
+        self._spin.setValue(value)
+        self._spin.blockSignals(False)
         self._block = False
 
-    def _update_label(self, percent: int) -> None:
-        self._pct_label.setText(f"{percent}%")
+    def refresh_slider_style(self) -> None:
+        """Kept for theme-reload callers; spinbox uses the global stylesheet."""
 
-    def _on_slider(self, value: int) -> None:
-        self._update_label(value)
+    def _on_spin(self, _value: int) -> None:
         if self._block:
             return
-
-    def _on_fit_activated(self, _index: int) -> None:
-        if self._block:
-            return
-        index = self._fit_combo.currentIndex()
-        raw = self._fit_combo.itemData(index, Qt.ItemDataRole.UserRole)
-        if raw is None:
-            raw = self._fit_combo.itemData(index)
-        self.fit_mode_changed.emit(str(raw))
 
 
 class PreviewWheelZoomFilter(QObject):
@@ -268,9 +263,7 @@ class PreviewWheelZoomFilter(QObject):
         return False
 
     def _can_zoom(self, page, obj: QWidget, wheel: QWheelEvent) -> bool:
-        from PySide6.QtWidgets import QSpinBox
-
-        if not self._zoom_bar.isVisible() or not self._zoom_bar._slider.isEnabled():
+        if not self._zoom_bar.isVisible() or not self._zoom_bar._spin.isEnabled():
             return False
         if page.is_annotation_preview_active():
             return False
@@ -303,6 +296,10 @@ class PreviewWheelZoomFilter(QObject):
         return True
 
 
+FASTA_TAB_STRIP_HEIGHT = 22
+PREVIEW_HEADER_HEIGHT = 24
+
+
 class FastaTabStrip(QWidget):
     """Text / Annotation switcher for the preview header."""
 
@@ -311,6 +308,7 @@ class FastaTabStrip(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("FastaTabStrip")
+        self.setFixedHeight(FASTA_TAB_STRIP_HEIGHT)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -323,6 +321,8 @@ class FastaTabStrip(QWidget):
             btn.setObjectName("FastaPreviewTab")
             btn.setCheckable(True)
             btn.setFlat(True)
+            btn.setFixedHeight(FASTA_TAB_STRIP_HEIGHT)
+            btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self._group.addButton(btn, index)
             layout.addWidget(btn)
@@ -339,7 +339,7 @@ class FastaTabStrip(QWidget):
 
 
 class PreviewHeaderBar(QWidget):
-    """Grey header: FASTA tabs left, zoom right, hairline divider below."""
+    """FASTA Text/Annotation switcher. Zoom controls live on the Preview dock title."""
 
     fasta_tab_changed = Signal(int)
 
@@ -353,27 +353,27 @@ class PreviewHeaderBar(QWidget):
         super().__init__(parent)
         self.setObjectName("PreviewHeaderBar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedHeight(PREVIEW_HEADER_HEIGHT)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         row = QHBoxLayout()
-        row.setContentsMargins(8, 4, 8, 4)
-        row.setSpacing(8)
+        row.setContentsMargins(6, 0, 6, 0)
+        row.setSpacing(4)
 
         self._fasta_tabs = FastaTabStrip(self)
         self._fasta_tabs.hide()
         self._fasta_tabs.tab_changed.connect(self.fasta_tab_changed.emit)
         row.addWidget(self._fasta_tabs)
-
         row.addStretch(1)
+
+        # Zoom bars are mounted on the Preview dock title bar (same row as
+        # "Preview"); keep refs so set_header_zoom_mode() can show/hide them.
         self._preview_zoom_bar = preview_zoom_bar
         self._annotation_zoom_bar = annotation_zoom_bar
-        row.addWidget(preview_zoom_bar)
-        if annotation_zoom_bar is not None:
-            row.addWidget(annotation_zoom_bar)
-            annotation_zoom_bar.hide()
+
         outer.addLayout(row)
 
         divider = QFrame(self)
@@ -381,17 +381,24 @@ class PreviewHeaderBar(QWidget):
         divider.setFrameShape(QFrame.Shape.HLine)
         divider.setFixedHeight(1)
         outer.addWidget(divider)
+        self.hide()
+
+    def _update_bar_visibility(self) -> None:
+        # Header only shows for Text/Annotation tabs; zoom lives on the title bar.
+        self.setVisible(not self._fasta_tabs.isHidden())
 
     def set_header_zoom_mode(self, mode: str) -> None:
-        """Show preview zoom, annotation zoom, or hide both."""
+        """Show preview zoom, annotation zoom, or hide both (on the dock title)."""
         show_preview = mode == "preview"
         show_annotation = mode == "annotation"
         self._preview_zoom_bar.setVisible(show_preview)
         if self._annotation_zoom_bar is not None:
             self._annotation_zoom_bar.setVisible(show_annotation)
+        self._update_bar_visibility()
 
     def set_fasta_tabs_visible(self, visible: bool) -> None:
         self._fasta_tabs.setVisible(visible)
+        self._update_bar_visibility()
 
     def sync_fasta_tab(self, index: int) -> None:
         self._fasta_tabs.set_current_index(index)

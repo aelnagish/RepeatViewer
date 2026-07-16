@@ -64,7 +64,6 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
-    QSplitter,
     QVBoxLayout,
     QWidget,
     QLabel,
@@ -76,7 +75,6 @@ _BROWSER_FOLDER_TREE_WIDTH = 155
 _BROWSER_FILES_PREVIEW_SPLIT = (170, 210)
 from teviewer import __version__
 from teviewer.branding import APP_DISPLAY_NAME
-from teviewer.browser_file_filter import is_tool_output_file
 from teviewer.backends.genome_prepare import ensure_genome_artifacts
 from teviewer.backends.blast_genome_plot import (
     _map_chromosome_filter_to_genome,
@@ -259,9 +257,7 @@ from teviewer.widgets.folder_navigation import FolderNavigationBar
 from teviewer.widgets.folder_tree_delegate import FolderTreeItemDelegate
 from teviewer.widgets.file_sort import (
     FileSortMode,
-    file_sort_mode_labels,
     load_file_sort_mode,
-    save_file_sort_mode,
     sort_file_paths,
 )
 from teviewer.widgets.file_list_table import FileListRow, FileListTableWidget
@@ -295,12 +291,14 @@ class _FileClipboard:
     paths: list[Path]
 
 
-_NEW_OUTPUT_BG = QColor(214, 245, 214)
-_NEW_OUTPUT_FG = QColor(0, 100, 0)
-_TOOL_OUTPUT_BG = QColor(232, 248, 232)
-_TOOL_OUTPUT_FG = QColor(30, 90, 30)
-_SOURCE_BG = QColor(220, 235, 255)
-_SOURCE_FG = QColor(0, 70, 140)
+_NEW_OUTPUT_BG_LIGHT = QColor(214, 245, 214)
+_NEW_OUTPUT_FG_LIGHT = QColor(0, 100, 0)
+_NEW_OUTPUT_BG_DARK = QColor(36, 78, 48)
+_NEW_OUTPUT_FG_DARK = QColor(180, 235, 190)
+_SOURCE_BG_LIGHT = QColor(220, 235, 255)
+_SOURCE_FG_LIGHT = QColor(0, 70, 140)
+_SOURCE_BG_DARK = QColor(35, 55, 90)
+_SOURCE_FG_DARK = QColor(170, 205, 255)
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
 
@@ -695,6 +693,13 @@ class FolderTreeWidget(QTreeWidget):
                     deco.right()
                     if deco.isValid() and deco.width() > 0
                     else opt.rect.left() + self.iconSize().width()
+                )
+                # When the row is selected Qt's view-item decoration metrics can
+                # shrink, making the chevron area feel "dead". Expand the hit
+                # region by a few pixels to keep expand/collapse responsive.
+                chevron_right = max(
+                    chevron_right,
+                    opt.rect.left() + self.iconSize().width() + 8,
                 )
                 if pos.x() <= chevron_right:
                     has_branch = item.childCount() > 0 or (
@@ -1172,9 +1177,8 @@ class MainWindow(QMainWindow):
         self._purge_legacy_docks()
         settings = QSettings()
         settings.beginGroup("mainwindow")
-        toolbar_state = settings.value("toolbar_state_v3")
-        main_split = settings.value("browser_main_split")
-        files_preview_split = settings.value("browser_files_preview_split")
+        # v5 = all browser docks share one area (no Left/Right central gutter).
+        toolbar_state = settings.value("toolbar_state_v5")
         window_geometry = settings.value("geometry")
         settings.endGroup()
         from teviewer.app_preferences import load_restore_geometry
@@ -1184,11 +1188,15 @@ class MainWindow(QMainWindow):
         if toolbar_state:
             self.restoreState(toolbar_state)
         self._purge_legacy_docks()
-        if main_split and hasattr(self, "_browser_main_split"):
-            self._browser_main_split.restoreState(main_split)
-        if files_preview_split and hasattr(self, "_browser_files_preview_split"):
-            self._browser_files_preview_split.restoreState(files_preview_split)
-        self._apply_default_browser_layout()
+        # If an older layout put Files/Preview on the Right (leaving a center gap),
+        # snap back to the single-area split layout.
+        if (
+            self._dock_files is not None
+            and self.dockWidgetArea(self._dock_files) == Qt.DockWidgetArea.RightDockWidgetArea
+        ):
+            self._apply_default_browser_layout(force=True)
+        else:
+            self._apply_default_browser_layout()
         self._ensure_preview_visible()
         self._rebuild_top_toolbar()
         self._repair_browser_chrome()
@@ -1210,17 +1218,21 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._repair_browser_chrome)
 
     def _purge_legacy_docks(self) -> None:
-        """Drop old Preview/Folders docks restored from pre-v0.2 layouts."""
+        """Drop stale dock widgets from older layouts; keep the current three panels."""
+        keep = {
+            id(dock)
+            for dock in (self._dock_folders, self._dock_files, self._dock_preview)
+            if dock is not None
+        }
         for dock in list(self.findChildren(QDockWidget)):
+            if id(dock) in keep:
+                continue
             name = dock.objectName().lower()
             if name in {"dock_browser", "dock_preview", "dock_folders", "dock_files"}:
                 self.removeDockWidget(dock)
                 dock.hide()
                 dock.setWidget(QWidget())
                 dock.deleteLater()
-        self._dock_folders = None
-        self._dock_preview = None
-        self._dock_files = None
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         self._stop_metadata_enrichment()
@@ -1231,15 +1243,8 @@ class MainWindow(QMainWindow):
         self._persist_workspace()
         settings = QSettings()
         settings.beginGroup("mainwindow")
-        settings.setValue("toolbar_state_v3", self.saveState())
+        settings.setValue("toolbar_state_v5", self.saveState())
         settings.setValue("geometry", self.saveGeometry())
-        if hasattr(self, "_browser_main_split"):
-            settings.setValue("browser_main_split", self._browser_main_split.saveState())
-        if hasattr(self, "_browser_files_preview_split"):
-            settings.setValue(
-                "browser_files_preview_split",
-                self._browser_files_preview_split.saveState(),
-            )
         settings.endGroup()
         super().closeEvent(event)
 
@@ -1354,77 +1359,68 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(message, timeout)
 
+    def _make_browser_dock(self, title: str, object_name: str, widget: QWidget) -> QDockWidget:
+        dock = QDockWidget(title, self)
+        dock.setObjectName(object_name)
+        dock.setWidget(widget)
+        dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        return dock
+
     def _build_dock_panels(self) -> None:
-        browser_panel = QWidget()
-        browser_panel.setObjectName("BrowserPanel")
-        browser_layout = QVBoxLayout(browser_panel)
-        browser_layout.setContentsMargins(6, 4, 6, 4)
-        browser_layout.setSpacing(4)
+        # --- Folders ---
+        folder_side = QWidget()
+        folder_side.setObjectName("FoldersPanel")
+        folder_side_layout = QVBoxLayout(folder_side)
+        folder_side_layout.setContentsMargins(4, 6, 4, 4)
+        folder_side_layout.setSpacing(0)
+        folder_side_layout.addWidget(self._folder_tree, stretch=1)
+        self._folder_tree.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
 
-        filter_row = QHBoxLayout()
-        filter_row.setContentsMargins(0, 0, 0, 0)
-        filter_row.setSpacing(4)
+        # --- Files (list only; nav + filter live on the dock title bar) ---
+        files_panel = QWidget()
+        files_panel.setObjectName("FilesPanel")
+        files_layout = QVBoxLayout(files_panel)
+        files_layout.setContentsMargins(4, 6, 4, 4)
+        files_layout.setSpacing(0)
 
-        self._folder_nav = FolderNavigationBar(browser_panel)
+        self._folder_nav = FolderNavigationBar()
         self._folder_nav.set_roots_provider(self._workspace_root_folders)
         self._folder_nav.navigate_requested.connect(self._on_folder_nav_requested)
-        filter_row.addWidget(self._folder_nav)
 
+        files_trailing = QWidget()
+        files_trailing_layout = QHBoxLayout(files_trailing)
+        files_trailing_layout.setContentsMargins(0, 0, 0, 0)
+        files_trailing_layout.setSpacing(6)
+        files_trailing_layout.addWidget(self._folder_nav)
         self._file_filter = QLineEdit()
         self._file_filter.setObjectName("FileFilter")
         self._file_filter.setPlaceholderText("Filter by name…")
         self._file_filter.setClearButtonEnabled(True)
+        self._file_filter.setFixedHeight(18)
+        self._file_filter.setMinimumWidth(140)
+        self._file_filter.setMaximumWidth(280)
+        self._file_filter.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         self._file_filter.textChanged.connect(self._apply_file_filter)
-        self._file_sort_combo = QComboBox()
-        self._file_sort_combo.setToolTip("Sort order for files in the selected folder")
-        self._file_sort_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToContents,
-        )
-        self._file_sort_combo.blockSignals(True)
-        for mode, label in file_sort_mode_labels():
-            self._file_sort_combo.addItem(label)
-            row = self._file_sort_combo.count() - 1
-            self._file_sort_combo.setItemData(
-                row,
-                mode.value,
-                Qt.ItemDataRole.UserRole,
-            )
-        saved_sort = load_file_sort_mode()
-        sort_index = self._file_sort_combo.findData(
-            saved_sort.value,
-            Qt.ItemDataRole.UserRole,
-        )
-        if sort_index >= 0:
-            self._file_sort_combo.setCurrentIndex(sort_index)
-        self._file_sort_combo.blockSignals(False)
-        self._file_sort_combo.currentIndexChanged.connect(self._on_file_sort_changed)
-        sort_labels = [label for _, label in file_sort_mode_labels()]
-        longest_label = max(sort_labels, key=len)
-        self._file_sort_combo.setMinimumContentsLength(len(longest_label))
-        fm = QFontMetrics(self._file_sort_combo.font())
-        sort_min_w = max(
-            118,
-            fm.horizontalAdvance(longest_label) + 36,
-            fm.boundingRect(longest_label).width() + 36,
-        )
-        self._file_sort_combo.setMinimumWidth(sort_min_w)
-        sort_view = self._file_sort_combo.view()
-        if sort_view is not None:
-            sort_view.setMinimumWidth(sort_min_w)
-        refresh_btn = QPushButton("Refresh")
-        refresh_btn.setObjectName("BrowserPanelButton")
-        refresh_btn.setToolTip("Reload file list (F5)")
-        refresh_btn.clicked.connect(self._refresh_current_folder)
-        compact_h = 26
-        compact_policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        for widget in (self._file_filter, self._file_sort_combo, refresh_btn):
-            widget.setFixedHeight(compact_h)
-            widget.setSizePolicy(compact_policy)
-        filter_row.addWidget(self._file_filter, stretch=1)
-        filter_row.addWidget(self._file_sort_combo)
-        filter_row.addWidget(refresh_btn)
-        browser_layout.addLayout(filter_row)
+        files_trailing_layout.addWidget(self._file_filter)
 
+        self._file_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        files_layout.addWidget(self._file_list, stretch=1)
+
+        # --- Preview ---
         from teviewer.widgets.preview_controls import (
             AnnotationZoomBar,
             PreviewHeaderBar,
@@ -1437,8 +1433,9 @@ class MainWindow(QMainWindow):
         preview_layout = QVBoxLayout(self._preview_host)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
-        self._preview_zoom_bar = PreviewZoomBar(self._preview_host)
-        self._annotation_zoom_bar = AnnotationZoomBar(self._preview_host)
+        self._preview_zoom_bar = PreviewZoomBar()
+        self._annotation_zoom_bar = AnnotationZoomBar()
+        self._annotation_zoom_bar.hide()
         self._preview_header = PreviewHeaderBar(
             self._preview_zoom_bar,
             self._preview_host,
@@ -1456,92 +1453,140 @@ class MainWindow(QMainWindow):
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         preview_layout.addWidget(self._preview_tabs, stretch=1)
-        self._preview_zoom_bar.setVisible(True)
         self._preview_host.setMinimumHeight(120)
+        self._preview_host.setMinimumWidth(200)
 
-        self._browser_files_preview_split = QSplitter(Qt.Orientation.Vertical)
-        self._browser_files_preview_split.setObjectName("BrowserFilesPreviewSplit")
-        self._browser_files_preview_split.addWidget(self._file_list)
-        self._browser_files_preview_split.addWidget(self._preview_host)
-        self._browser_files_preview_split.setStretchFactor(0, 2)
-        self._browser_files_preview_split.setStretchFactor(1, 3)
-        self._browser_files_preview_split.setSizes(list(_BROWSER_FILES_PREVIEW_SPLIT))
+        from teviewer.widgets.dock_title_bar import BrowserDockTitleBar
 
-        self._browser_main_split = QSplitter(Qt.Orientation.Horizontal)
-        self._browser_main_split.setObjectName("BrowserMainSplit")
+        self._dock_folders = self._make_browser_dock("Folders", "dock_folders", folder_side)
+        self._dock_files = self._make_browser_dock("Files", "dock_files", files_panel)
+        self._dock_preview = self._make_browser_dock("Preview", "dock_preview", self._preview_host)
 
-        folder_side = QWidget()
-        folder_side_layout = QVBoxLayout(folder_side)
-        folder_side_layout.setContentsMargins(0, 0, 0, 0)
-        folder_side_layout.setSpacing(0)
-        folder_side_layout.addWidget(self._folder_tree, stretch=1)
-        folder_side.setSizePolicy(
+        self._dock_files.setTitleBarWidget(
+            BrowserDockTitleBar(self._dock_files, "Files", trailing=files_trailing)
+        )
+        # Open-file tabs beside "Preview"; Fit / zoom / Reset on the same title row.
+        preview_file_tabs_host = QWidget()
+        preview_file_tabs_host.setObjectName("PreviewDockFileTabs")
+        preview_file_tabs_layout = QHBoxLayout(preview_file_tabs_host)
+        preview_file_tabs_layout.setContentsMargins(0, 0, 0, 0)
+        preview_file_tabs_layout.setSpacing(0)
+        preview_file_tabs_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Expanding,
         )
-
-        self._browser_main_split.addWidget(folder_side)
-        self._browser_main_split.addWidget(self._browser_files_preview_split)
-        self._browser_main_split.setCollapsible(0, False)
-        self._browser_main_split.setCollapsible(1, False)
-        self._browser_files_preview_split.setCollapsible(0, False)
-        self._browser_files_preview_split.setCollapsible(1, False)
-        self._browser_main_split.setSizes(
-            [_BROWSER_FOLDER_TREE_WIDTH, _BROWSER_DOCK_WIDTH - _BROWSER_FOLDER_TREE_WIDTH]
-        )
-        for splitter in (self._browser_main_split, self._browser_files_preview_split):
-            splitter.setHandleWidth(1)
-
-        self._folder_tree.setSizePolicy(
+        preview_file_tabs_host.setMinimumWidth(0)
+        preview_zoom_host = QWidget()
+        preview_zoom_host.setObjectName("PreviewDockZoomHost")
+        preview_zoom_host.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Expanding,
         )
-        self._file_list.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
+        preview_zoom_layout = QHBoxLayout(preview_zoom_host)
+        preview_zoom_layout.setContentsMargins(0, 0, 0, 0)
+        preview_zoom_layout.setSpacing(6)
+        preview_zoom_layout.addWidget(self._preview_zoom_bar)
+        preview_zoom_layout.addWidget(self._annotation_zoom_bar)
+        self._dock_preview.setTitleBarWidget(
+            BrowserDockTitleBar(
+                self._dock_preview,
+                "Preview",
+                leading=preview_file_tabs_host,
+                leading_stretch=1,
+                trailing=preview_zoom_host,
+            )
         )
-        browser_layout.addWidget(self._browser_main_split, stretch=1)
+        self._preview_tabs.mount_file_tab_bar(preview_file_tabs_host)
+        self._dock_folders.setTitleBarWidget(
+            BrowserDockTitleBar(self._dock_folders, "Folders")
+        )
 
-        self._browser_panel = browser_panel
-        browser_panel.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
+        # Zero-size central widget: put ALL docks in one area and split them so
+        # Qt does not leave a blank gutter between Left and Right dock areas.
+        central = QWidget(self)
+        central.setObjectName("BrowserCentral")
+        central.setFixedSize(0, 0)
+        self.setCentralWidget(central)
+        self._browser_panel = central
+
+        for dock in (self._dock_folders, self._dock_files, self._dock_preview):
+            dock.setContentsMargins(0, 0, 0, 0)
+            # Do not zero the panel widget's contents margins — that pulls the
+            # first folder/file row up under the custom title bar.
+            title = dock.titleBarWidget()
+            if title is not None:
+                title.raise_()
+
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_folders)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_files)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_preview)
+        self.splitDockWidget(
+            self._dock_folders,
+            self._dock_files,
+            Qt.Orientation.Horizontal,
         )
-        self.setCentralWidget(browser_panel)
-        self._dock_folders = None
-        self._dock_preview = None
+        self.splitDockWidget(
+            self._dock_files,
+            self._dock_preview,
+            Qt.Orientation.Vertical,
+        )
+        self._dock_folders.setMinimumWidth(120)
+        self._dock_files.setMinimumWidth(200)
+        self._dock_preview.setMinimumWidth(200)
+        self._apply_default_browser_layout(force=True)
 
     def _apply_default_browser_layout(self, *, force: bool = False) -> None:
-        if not hasattr(self, "_browser_main_split"):
+        if self._dock_folders is None or self._dock_files is None or self._dock_preview is None:
             return
-        host = self._browser_panel or self.centralWidget()
-        width = host.width() if host is not None else self.width()
-        if width <= 0:
-            width = _BROWSER_DOCK_WIDTH
+        width = max(self.width(), _BROWSER_DOCK_WIDTH)
         folder_w = min(
             max(_BROWSER_FOLDER_TREE_WIDTH, width // 5),
             max(_BROWSER_FOLDER_TREE_WIDTH + 40, width // 3),
         )
-        main_sizes = self._browser_main_split.sizes()
-        if force or not main_sizes or sum(main_sizes) <= 1:
-            self._browser_main_split.setSizes([folder_w, max(200, width - folder_w)])
-        files_sizes = self._browser_files_preview_split.sizes()
-        if force or not files_sizes or sum(files_sizes) <= 1:
-            self._browser_files_preview_split.setSizes(list(_BROWSER_FILES_PREVIEW_SPLIT))
+        if force:
+            for dock in (self._dock_folders, self._dock_files, self._dock_preview):
+                dock.setFloating(False)
+                dock.show()
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_folders)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_files)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._dock_preview)
+            self.splitDockWidget(
+                self._dock_folders,
+                self._dock_files,
+                Qt.Orientation.Horizontal,
+            )
+            self.splitDockWidget(
+                self._dock_files,
+                self._dock_preview,
+                Qt.Orientation.Vertical,
+            )
+            self.resizeDocks([self._dock_folders], [folder_w], Qt.Orientation.Horizontal)
+            height = max(self.height(), 600)
+            files_h = max(160, height // 3)
+            preview_h = max(220, height - files_h - 100)
+            self.resizeDocks(
+                [self._dock_files, self._dock_preview],
+                [files_h, preview_h],
+                Qt.Orientation.Vertical,
+            )
+        else:
+            # Ensure panels remain visible after restore; do not override sizes.
+            for dock in (self._dock_folders, self._dock_files, self._dock_preview):
+                if not dock.isVisible() and not dock.isFloating():
+                    dock.show()
         self._ensure_preview_visible()
 
     def _reset_browser_layout(self) -> None:
         settings = QSettings()
         settings.beginGroup("mainwindow")
+        settings.remove("toolbar_state_v5")
+        settings.remove("toolbar_state_v4")
         settings.remove("browser_main_split")
         settings.remove("browser_files_preview_split")
         settings.endGroup()
         self._purge_legacy_docks()
-        if self._browser_panel is not None:
-            self._browser_panel.show()
         self._apply_default_browser_layout(force=True)
         self._ensure_preview_visible()
-
     @staticmethod
     def _settings_menu_hint() -> str:
         if platform.system() == "Darwin":
@@ -1699,6 +1744,13 @@ class MainWindow(QMainWindow):
         self._populate_plugins_menu_actions()
 
         view_menu = self.menuBar().addMenu("&View")
+        if self._dock_folders is not None:
+            view_menu.addAction(self._dock_folders.toggleViewAction())
+        if self._dock_files is not None:
+            view_menu.addAction(self._dock_files.toggleViewAction())
+        if self._dock_preview is not None:
+            view_menu.addAction(self._dock_preview.toggleViewAction())
+        view_menu.addSeparator()
         view_menu.addAction("Reset panel &layout", self._reset_browser_layout)
 
         help_menu = self.menuBar().addMenu("&Help")
@@ -1760,6 +1812,10 @@ class MainWindow(QMainWindow):
                 accent=load_accent_color(),
             )
         )
+        if hasattr(self, "_preview_zoom_bar"):
+            self._preview_zoom_bar.refresh_slider_style()
+        if hasattr(self, "_annotation_zoom_bar"):
+            self._annotation_zoom_bar.refresh_slider_style()
         if self._functions_toolbar is not None:
             self._compact_functions_toolbar(self._functions_toolbar)
 
@@ -2363,21 +2419,26 @@ class MainWindow(QMainWindow):
             from teviewer.ui.theme_mode import (
                 apply_theme,
                 load_accent_color,
-                load_corner_shape,
                 load_theme_mode,
             )
 
             old_appearance = (
                 load_theme_mode(),
                 load_accent_color(),
-                load_corner_shape(),
             )
             self._project = dialog.apply_to_project()
             self._persist_workspace()
             if dialog.appearance_signature() != old_appearance:
+                from teviewer.widgets.browser_icons import clear_browser_icon_cache
+
                 apply_theme(dialog.selected_theme_mode())
+                clear_browser_icon_cache()
                 # Re-layer the window's own accents on top of the new palette.
                 self._apply_toolbar_theme()
+                # Re-tint file-list highlights for the new light/dark palette.
+                if self._current_folder is not None:
+                    self._apply_file_filter()
+                self._sync_folder_tree_placeholders()
             from teviewer.app_preferences import apply_log_level
 
             apply_log_level()
@@ -3148,20 +3209,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _current_file_sort_mode(self) -> FileSortMode:
-        index = self._file_sort_combo.currentIndex()
-        if index < 0:
-            return FileSortMode.NAME
-        raw = self._file_sort_combo.itemData(index, Qt.ItemDataRole.UserRole)
-        if raw is None:
-            return FileSortMode.NAME
-        try:
-            return FileSortMode(str(raw))
-        except ValueError:
-            return FileSortMode.NAME
-
-    def _on_file_sort_changed(self, _index: int) -> None:
-        save_file_sort_mode(self._current_file_sort_mode())
-        self._apply_file_filter()
+        return load_file_sort_mode()
 
     def _apply_file_filter(self) -> None:
         if not self._current_folder:
@@ -3186,8 +3234,6 @@ class MainWindow(QMainWindow):
                 self._style_new_output_item(row_item)
             elif key in self._highlight_source_keys:
                 self._style_source_file_item(row_item)
-            elif is_tool_output_file(file_path):
-                self._style_tool_output_item(row_item)
         self._file_list.setSortingEnabled(was_sorting)
 
         if not visible and self._cached_folder_files:
@@ -3387,26 +3433,34 @@ class MainWindow(QMainWindow):
             self._folder_nav.set_folder(self._current_folder, record_history=record_history)
         self._sync_folder_tree_labels()
 
+    def _palette_is_dark(self) -> bool:
+        from PySide6.QtGui import QPalette
+
+        return self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
     def _style_new_output_item(self, item: FileListRow) -> None:
-        item.setBackground(QBrush(_NEW_OUTPUT_BG))
-        item.setForeground(QBrush(_NEW_OUTPUT_FG))
+        if self._palette_is_dark():
+            bg, fg = _NEW_OUTPUT_BG_DARK, _NEW_OUTPUT_FG_DARK
+        else:
+            bg, fg = _NEW_OUTPUT_BG_LIGHT, _NEW_OUTPUT_FG_LIGHT
+        item.setBackground(QBrush(bg))
+        item.setForeground(QBrush(fg))
         font = item.font()
         font.setBold(True)
         item.setFont(font)
-        item.setToolTip("New output from the last job")
+        item.setToolTip("Newly generated file from the last job")
 
     def _style_source_file_item(self, item: FileListRow) -> None:
-        item.setBackground(QBrush(_SOURCE_BG))
-        item.setForeground(QBrush(_SOURCE_FG))
+        if self._palette_is_dark():
+            bg, fg = _SOURCE_BG_DARK, _SOURCE_FG_DARK
+        else:
+            bg, fg = _SOURCE_BG_LIGHT, _SOURCE_FG_LIGHT
+        item.setBackground(QBrush(bg))
+        item.setForeground(QBrush(fg))
         font = item.font()
         font.setBold(True)
         item.setFont(font)
         item.setToolTip("Input file used for the last job")
-
-    def _style_tool_output_item(self, item: FileListRow) -> None:
-        item.setBackground(QBrush(_TOOL_OUTPUT_BG))
-        item.setForeground(QBrush(_TOOL_OUTPUT_FG))
-        item.setToolTip("Tool output file")
 
     def _reveal_file_list_item(
         self,
@@ -5359,11 +5413,17 @@ class MainWindow(QMainWindow):
         )
 
     def _ensure_preview_dock_attached(self) -> None:
-        if self._preview_host is not None:
-            self._preview_host.show()
+        if self._dock_preview is None or self._preview_host is None:
+            return
+        if self._dock_preview.widget() is not self._preview_host:
+            self._dock_preview.setWidget(self._preview_host)
+        self._dock_preview.show()
+        self._preview_host.show()
 
     def _ensure_preview_visible(self) -> None:
         self._ensure_preview_dock_attached()
+        if self._dock_preview is not None:
+            self._dock_preview.raise_()
         if self._preview_tabs is not None:
             self._preview_tabs.show()
 

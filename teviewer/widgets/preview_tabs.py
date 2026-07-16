@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QTabBar,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -180,6 +181,8 @@ def _switching_html_preview(old_path: Path, new_path: Path) -> bool:
     old_kind = _preview_kind(old_path)
     new_kind = _preview_kind(new_path)
     html_like = {"html", "igv"}
+    # Recreate the page when crossing HTML ↔ non-HTML so FASTA Text/Annotation
+    # chrome and WebEngine hosts do not leave a blank leftover panel.
     return (old_kind in html_like) != (new_kind in html_like)
 
 
@@ -539,10 +542,13 @@ class FilePreviewPage(QWidget):
         self._image = ScaledImagePreview(self)
         self._fasta_stack = QStackedWidget(self)
         self._fasta_annotation_holder = QWidget(self)
+        self._fasta_annotation_holder.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         self._fasta_stack.addWidget(self._fasta_text_scroll)
         self._fasta_stack.addWidget(self._fasta_annotation_holder)
         self._fasta_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._fasta_stack.hide()
 
         self._sequence_info_bar = QLabel(self)
         self._sequence_info_bar.setTextInteractionFlags(
@@ -560,11 +566,20 @@ class FilePreviewPage(QWidget):
             widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self._stack.addWidget(widget)
 
+        # One expanding host for FASTA vs other previews. Two stretch=1 siblings
+        # used to leave a large blank region when mode switches left both claiming space.
+        self._mode_stack = QStackedWidget(self)
+        self._mode_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self._mode_stack.addWidget(self._stack)
+        self._mode_stack.addWidget(self._fasta_stack)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._fasta_stack, stretch=1)
-        layout.addWidget(self._stack, stretch=1)
+        layout.addWidget(self._mode_stack, stretch=1)
         layout.addWidget(self._sequence_info_bar)
         self._load()
         self._apply_view_mode()
@@ -593,12 +608,8 @@ class FilePreviewPage(QWidget):
         super().keyPressEvent(event)
 
     def _apply_view_mode(self) -> None:
-        if self._single_fasta_mode:
-            self._fasta_stack.show()
-            self._stack.hide()
-        else:
-            self._fasta_stack.hide()
-            self._stack.show()
+        # Index 0 = general preview stack; index 1 = single-FASTA Text/Annotation.
+        self._mode_stack.setCurrentIndex(1 if self._single_fasta_mode else 0)
         self._notify_preview_host()
 
     def _notify_preview_host(self) -> None:
@@ -607,6 +618,7 @@ class FilePreviewPage(QWidget):
             tab_host = tab_host.parent()
         if isinstance(tab_host, PreviewTabWidget):
             tab_host._sync_header_from_current_page()
+            tab_host._sync_zoom_bar_enabled()
 
     def current_fasta_tab_index(self) -> int:
         if not self._single_fasta_mode:
@@ -784,7 +796,7 @@ class FilePreviewPage(QWidget):
             self._html.set_zoom_percent(percent)
         if hasattr(self._html, "set_fit_mode"):
             self._html.set_fit_mode(fit_mode)
-        if self._uses_text_preview():
+        if self._uses_text_preview() or self.is_text_preview_active():
             self._apply_text_zoom(percent)
 
     def reload_from_disk(self) -> None:
@@ -859,7 +871,8 @@ class FilePreviewPage(QWidget):
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_annotation_holder)
                 holder_layout.setContentsMargins(0, 0, 0, 0)
-            holder_layout.addWidget(self._annotation_panel)
+                holder_layout.setSpacing(0)
+            holder_layout.addWidget(self._annotation_panel, stretch=1)
         return self._annotation_panel
 
     def bind_annotation_header_zoom(self, bar) -> None:
@@ -920,12 +933,6 @@ class FilePreviewPage(QWidget):
         widget needs to be visible for its zoom/scroll math to run immediately instead
         of falling back to its own visibility-polling retry loop.
         """
-        self._ensure_annotation_panel()
-        if self._fasta_tabs.currentIndex() != 1:
-            self._fasta_tabs.blockSignals(True)
-            self._fasta_tabs.setCurrentIndex(1)
-            self._fasta_tabs.blockSignals(False)
-            self._refresh_sequence_info_bar()
         panel = self._ensure_annotation_panel()
         tab_host = self._preview_tab_host()
         if tab_host is not None and tab_host._annotation_zoom_bar is not None:
@@ -1032,7 +1039,12 @@ class FilePreviewPage(QWidget):
 
     def _refresh_text_view(self) -> None:
         editor = self._fasta_text if self._single_fasta_mode else self._text
-        editor.document().setTextWidth(editor.viewport().width())
+        # NoWrap previews should not force a document text width — that can leave
+        # a tiny painted strip at the top of an otherwise blank preview panel.
+        if editor.lineWrapMode() == QTextEdit.LineWrapMode.NoWrap:
+            editor.document().setTextWidth(-1)
+        else:
+            editor.document().setTextWidth(max(1, editor.viewport().width()))
         editor.updateGeometry()
 
     def _active_text_editor(self) -> QTextEdit:
@@ -1072,6 +1084,36 @@ class FilePreviewPage(QWidget):
         QTimer.singleShot(0, self._refresh_text_view)
 
 
+# Cap per-file tab width so a few long names do not stretch across the title bar.
+MAX_PREVIEW_FILE_TAB_WIDTH = 200
+
+
+class PreviewFileTabBar(QTabBar):
+    """Title-bar file tabs: content-sized with a max width; scroll when too many."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("PreviewFileTabBar")
+        self.setElideMode(Qt.TextElideMode.ElideRight)
+        self.setExpanding(False)
+        self.setDrawBase(False)
+        self.setUsesScrollButtons(True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(0)
+
+    def tabSizeHint(self, index: int) -> QSize:  # noqa: N802
+        size = super().tabSizeHint(index)
+        if size.width() > MAX_PREVIEW_FILE_TAB_WIDTH:
+            size.setWidth(MAX_PREVIEW_FILE_TAB_WIDTH)
+        return size
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        # Allow the title-bar layout to shrink this strip; otherwise tabs force
+        # themselves under the zoom controls when many files are open.
+        return QSize(48, super().minimumSizeHint().height())
+
+
 class PreviewTabWidget(QTabWidget):
     """Tab bar for open files; reuses tabs when the same path is opened again."""
 
@@ -1102,27 +1144,53 @@ class PreviewTabWidget(QTabWidget):
         if self._header_bar is not None:
             self._header_bar.fasta_tab_changed.connect(self._on_header_fasta_tab_changed)
 
+        self.setTabBar(PreviewFileTabBar(self))
         self.setTabsClosable(True)
         self.setMovable(True)
         self.setDocumentMode(True)
         self.setUsesScrollButtons(True)
         self.tabCloseRequested.connect(self._close_tab)
         self._path_to_index: dict[str, int] = {}
-
-        tab_bar = self.tabBar()
-        tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
-        tab_bar.setExpanding(False)
-        tab_bar.setDrawBase(False)
+        self._external_tab_bar_host: QWidget | None = None
         self.setMinimumHeight(120)
 
-        # Spacer on the right keeps tabs pinned to the left on macOS.
-        tab_spacer = QWidget()
-        tab_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.setCornerWidget(tab_spacer, Qt.Corner.TopRightCorner)
         self.currentChanged.connect(self._on_preview_tab_changed)
         self._apply_zoom_to_current_tab()
         self._install_annotation_delete_shortcuts()
         self._sync_tab_bar_visible()
+
+    def mount_file_tab_bar(self, host: QWidget) -> None:
+        """Show open-file tabs in an external host (Preview dock title bar)."""
+        self._external_tab_bar_host = host
+        host.setMinimumWidth(0)
+        host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # Drop the in-widget corner spacer; tabs no longer live inside this pane.
+        self.setCornerWidget(None, Qt.Corner.TopRightCorner)
+        tab_bar = self.tabBar()
+        tab_bar.setParent(host)
+        host_layout = host.layout()
+        if host_layout is not None:
+            host_layout.addWidget(tab_bar)
+        tab_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tab_bar.setMinimumWidth(0)
+        tab_bar.setExpanding(False)
+        tab_bar.setUsesScrollButtons(True)
+        self._sync_tab_bar_visible()
+        self._relayout_file_tabs()
+
+    def _relayout_file_tabs(self) -> None:
+        """Refresh title-bar tab sizing after open/close (capped width, no stretch)."""
+        tab_bar = self.tabBar()
+        tab_bar.setExpanding(False)
+        tab_bar.setUsesScrollButtons(True)
+        tab_bar.setMinimumWidth(0)
+        tab_bar.updateGeometry()
+        host = self._external_tab_bar_host
+        if host is not None:
+            host.setMinimumWidth(0)
+            host.updateGeometry()
+            if host.layout() is not None:
+                host.layout().activate()
 
     def _on_header_fasta_tab_changed(self, index: int) -> None:
         widget = self.currentWidget()
@@ -1140,10 +1208,18 @@ class PreviewTabWidget(QTabWidget):
             self._header_bar.set_fasta_tabs_visible(False)
 
     def _sync_tab_bar_visible(self) -> None:
-        """Hide filename tabs when only one file is open (selection is in the file list)."""
+        """Show filename tabs only when more than one file is open."""
         multi = self.count() > 1
-        self.tabBar().setVisible(multi)
+        tab_bar = self.tabBar()
+        tab_bar.setVisible(multi)
         self.setTabsClosable(multi)
+        host = self._external_tab_bar_host
+        if host is not None:
+            # Keep the host visible so layout stays stable; only the tab bar hides.
+            host.setVisible(True)
+            if not host.isHidden() and multi:
+                tab_bar.raise_()
+        self._relayout_file_tabs()
 
     def _install_annotation_delete_shortcuts(self) -> None:
         for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
@@ -1282,29 +1358,19 @@ class PreviewTabWidget(QTabWidget):
                 is_text = current is widget._text_scroll
                 is_media = current in (widget._html, widget._image)
                 is_pdf = current is widget._pdf
-        can_adjust = is_text or is_media
+        show_controls = not is_pdf and not is_annotation
         if isinstance(self._header_bar, PreviewHeaderBar):
-            if is_pdf:
-                self._header_bar.set_header_zoom_mode("hidden")
-            elif is_annotation:
-                self._header_bar.set_header_zoom_mode("annotation")
-                if (
-                    self._annotation_zoom_bar is not None
-                    and isinstance(widget, FilePreviewPage)
-                ):
-                    widget._ensure_annotation_panel()
-                    widget.bind_annotation_header_zoom(self._annotation_zoom_bar)
-            else:
-                self._header_bar.set_header_zoom_mode("preview")
+            # Zoom controls live in the Preview header for Text/HTML/images.
+            # For Annotation mode, zoom/position/font live on the embedded map toolbar.
+            self._header_bar.set_header_zoom_mode("preview" if show_controls else "hidden")
         else:
-            self._zoom_bar.setVisible(not is_pdf and not is_annotation)
-        self._zoom_bar._fit_combo.setEnabled(can_adjust)
+            self._zoom_bar.setVisible(show_controls)
+        # Fit mode is configured in Preferences; title bar only has % / Reset.
         for control in (
-            self._zoom_bar._slider,
-            self._zoom_bar._pct_label,
+            self._zoom_bar._spin,
             self._zoom_bar._reset_btn,
         ):
-            control.setEnabled(can_adjust)
+            control.setEnabled(show_controls)
         self._sync_header_from_current_page()
         if isinstance(widget, FilePreviewPage):
             self._wheel_zoom_filter.register_page(widget)
