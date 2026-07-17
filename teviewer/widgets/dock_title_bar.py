@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
-    QStyle,
     QTabBar,
     QToolButton,
     QWidget,
@@ -25,7 +24,7 @@ BROWSER_DOCK_TITLE_HEIGHT = 24
 
 
 class BrowserDockTitleBar(QWidget):
-    """Title row: label · leading · stretch · trailing · float · close.
+    """Title row: label · leading · stretch · trailing · close.
 
     Empty regions ignore mouse presses so QDockWidget can still drag the panel.
     Interactive children (line edits, sliders, buttons, tab bars) keep their own events.
@@ -42,7 +41,6 @@ class BrowserDockTitleBar(QWidget):
         leading_stretch: int = 0,
     ) -> None:
         super().__init__(parent)
-        self._dock = dock
         self.setObjectName("BrowserDockTitleBar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -78,13 +76,6 @@ class BrowserDockTitleBar(QWidget):
             trailing.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
             layout.addWidget(trailing, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self._float_btn = self._make_chrome_button(
-            tip="Float / dock panel",
-            icon=self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton),
-        )
-        self._float_btn.clicked.connect(self._toggle_floating)
-        layout.addWidget(self._float_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-
         self._close_btn = self._make_chrome_button(
             tip="Hide panel",
             text="×",
@@ -93,14 +84,10 @@ class BrowserDockTitleBar(QWidget):
         layout.addWidget(self._close_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Keep zoom / chrome above overflowing file tabs so the 6th tab cannot
-        # paint on top of Reset / float / close.
+        # paint on top of Reset / close.
         if trailing is not None:
             trailing.raise_()
-        self._float_btn.raise_()
         self._close_btn.raise_()
-
-        dock.topLevelChanged.connect(self._sync_float_button)
-        self._sync_float_button(dock.isFloating())
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(max(super().sizeHint().width(), 80), BROWSER_DOCK_TITLE_HEIGHT)
@@ -108,40 +95,15 @@ class BrowserDockTitleBar(QWidget):
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         return QSize(0, BROWSER_DOCK_TITLE_HEIGHT)
 
-    def _make_chrome_button(
-        self,
-        *,
-        tip: str,
-        text: str = "",
-        icon=None,
-    ) -> QToolButton:
+    def _make_chrome_button(self, *, tip: str, text: str = "") -> QToolButton:
         btn = QToolButton(self)
         btn.setObjectName("BrowserDockChromeButton")
         btn.setAutoRaise(True)
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.setToolTip(tip)
-        if icon is not None and not icon.isNull():
-            btn.setIcon(icon)
-            btn.setText("")
-        else:
-            btn.setText(text)
-        btn.setFixedSize(QSize(18, 18))
+        btn.setText(text)
+        btn.setFixedSize(QSize(20, 20))
         return btn
-
-    def _toggle_floating(self) -> None:
-        self._dock.setFloating(not self._dock.isFloating())
-
-    def _sync_float_button(self, floating: bool) -> None:
-        if floating:
-            self._float_btn.setIcon(
-                self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMinButton)
-            )
-            self._float_btn.setToolTip("Dock panel")
-        else:
-            self._float_btn.setIcon(
-                self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton)
-            )
-            self._float_btn.setToolTip("Float panel")
 
     @staticmethod
     def _is_interactive(widget: QWidget | None) -> bool:
@@ -179,8 +141,5 @@ class BrowserDockTitleBar(QWidget):
         if self._is_interactive(self.childAt(pos)):
             event.accept()
             return
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._toggle_floating()
-            event.accept()
-            return
+        # Ignore empty-title double-clicks so panels stay docked (no float toggle).
         event.ignore()

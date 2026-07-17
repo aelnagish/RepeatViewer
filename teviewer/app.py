@@ -50,8 +50,8 @@ def run_app(argv: list[str] | None = None) -> int:
         app.setOrganizationName("TEtrimmer")
         app.setOrganizationDomain("github.com/qjiangzhao/TEtrimmer")
 
-        # Consistent cross-platform look: Fusion + pyqtdarktheme (auto light/dark),
-        # with the accents in teviewer.ui.theme layered on top per-window.
+        # Consistent cross-platform look: Fusion + light/dark QPalette
+        # (teviewer.ui.theme accents layered on top per-window).
         from teviewer.app_preferences import (
             apply_log_level,
             crash_reports_dir,

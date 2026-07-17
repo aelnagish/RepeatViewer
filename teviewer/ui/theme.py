@@ -88,10 +88,12 @@ def application_stylesheet(
         background: transparent;
         color: palette(text);
         border-radius: {radius_sm}px;
-        min-width: 18px;
-        max-width: 18px;
-        min-height: 18px;
-        max-height: 18px;
+        min-width: 20px;
+        max-width: 20px;
+        min-height: 20px;
+        max-height: 20px;
+        font-size: 14px;
+        font-weight: 600;
     }}
     QToolButton#BrowserDockChromeButton:hover {{
         background: palette(alternate-base);

@@ -1,15 +1,19 @@
-"""Application theme (light/dark) built on Fusion + optional pyqtdarktheme.
+"""Application theme (light/dark) built on Fusion + QPalette.
 
-The look is layered:
+Default look (what forks should see):
   1. Qt "Fusion" style  -> consistent chrome on macOS / Windows / Linux
-  2. pyqtdarktheme       -> modern flat palette + base stylesheet (when installed)
-  3. Fusion QPalette     -> dark/light fallback when pyqtdarktheme is missing
-  4. MainWindow QSS      -> accents in ``teviewer.ui.theme`` on top of that
+  2. Fusion QPalette    -> light/dark colours
+  3. MainWindow QSS     -> accents in ``teviewer.ui.theme`` on top of that
+
+Optional flat theme: set env ``TEVIEWER_USE_QDARKTHEME=1`` and install
+``pyqtdarktheme-fork`` — not used by default so installs match across machines.
 
 Corners are always rounded (no sharp option).
 """
 
 from __future__ import annotations
+
+import os
 
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QColor, QGuiApplication, QPalette
@@ -104,19 +108,30 @@ def apply_theme(mode: str | None = None) -> None:
     _apply_color_scheme(mode)
     concrete = _resolve_os_theme() if mode == "auto" else mode
 
-    try:
-        import qdarktheme
-    except ImportError:
-        _apply_fusion_palette(app, concrete)
-        _repolish(app)
-        return
+    # Default: Fusion palette (stable look for all platforms / forks).
+    # Opt-in flat theme only when explicitly requested.
+    use_qdark = os.environ.get("TEVIEWER_USE_QDARKTHEME", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if use_qdark:
+        try:
+            import qdarktheme
+        except ImportError:
+            use_qdark = False
+        else:
+            _patch_qdarktheme_icon_engine()
+            qdarktheme.setup_theme(
+                concrete,
+                corner_shape="rounded",
+                custom_colors={"primary": load_accent_color()},
+            )
+            _repolish(app)
+            return
 
-    _patch_qdarktheme_icon_engine()
-    qdarktheme.setup_theme(
-        concrete,
-        corner_shape="rounded",
-        custom_colors={"primary": load_accent_color()},
-    )
+    _apply_fusion_palette(app, concrete)
     _repolish(app)
 
 
