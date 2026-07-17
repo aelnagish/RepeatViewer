@@ -1092,6 +1092,7 @@ class MainWindow(QMainWindow):
         self._file_list.blast_divergence_requested.connect(
             lambda p: self._open_te_divergence_plot_dialog(input_file=p),
         )
+        self._file_list.add_blast_database_requested.connect(self._add_fasta_as_blast_database)
         self._folder_tree.rename_folder_requested.connect(self._rename_folder)
         self._folder_tree.delete_folders_requested.connect(self._delete_folders)
         self._folder_tree.clear_root_folders_requested.connect(self._clear_root_folders)
@@ -2457,6 +2458,9 @@ class MainWindow(QMainWindow):
         job_kwargs: dict[str, Any],
     ) -> int:
         n = len(seq_files)
+        blast_opts = job_kwargs.get("blast_options")
+        if func_name == "blast" and blast_opts is not None and blast_opts.blast_database_name:
+            return n
         if not self._project.is_pan_genome_mode:
             if func_name == "flexidot" and n > 1 and job_kwargs.get("flexidot_combined", True):
                 return 1
@@ -4562,7 +4566,7 @@ class MainWindow(QMainWindow):
         self._apply_function("blast", blast_options=self._blast_options)
 
     def _change_blast_parameters(self) -> None:
-        dialog = BlastParamsDialog(initial=self._blast_options, parent=self)
+        dialog = BlastParamsDialog(project=self._project, initial=self._blast_options, parent=self)
         try:
             if dialog.exec():
                 self._blast_options = dialog.options()
@@ -4570,6 +4574,27 @@ class MainWindow(QMainWindow):
                 self._set_status_message("Blast parameters updated", 4000)
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
+
+    def _add_fasta_as_blast_database(self, path: Path) -> None:
+        from teviewer.database_settings import save_blast_databases_to_settings
+        from teviewer.views.blast_database_dialog import AddBlastDatabaseDialog
+
+        existing_names = {db.name for db in self._project.blast_databases}
+        dialog = AddBlastDatabaseDialog(
+            existing_names=existing_names,
+            use_system_blast=self._project.use_system_blast,
+            initial_fasta=path,
+            allow_molecule_type=False,
+            parent=self,
+        )
+        if not exec_modal_dialog(dialog):
+            return
+        db = dialog.result_database()
+        if db is None:
+            return
+        self._project.blast_databases.append(db)
+        save_blast_databases_to_settings(self._project.blast_databases)
+        self._set_status_message(f"Added BLAST database “{db.name}”", 4000)
 
     def _open_blast_genome_map_from_selection(
         self,
@@ -6402,7 +6427,17 @@ class MainWindow(QMainWindow):
         if not seq_files:
             QMessageBox.warning(self, "Invalid selection", "Selected files do not include FASTA sequence files.")
             return
-        if func_name in {"blast", "extend", "teaid", "flexidot"} and not self._project.has_genome_configured():
+        blast_opts_for_gate = job_kwargs.get("blast_options")
+        uses_saved_blast_database = (
+            func_name == "blast"
+            and blast_opts_for_gate is not None
+            and blast_opts_for_gate.blast_database_name
+        )
+        if (
+            func_name in {"blast", "extend", "teaid", "flexidot"}
+            and not uses_saved_blast_database
+            and not self._project.has_genome_configured()
+        ):
             QMessageBox.warning(
                 self,
                 "Genome required",

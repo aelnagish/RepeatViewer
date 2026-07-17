@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -70,6 +71,8 @@ def _run_cancel_button_box(parent: QWidget) -> QDialogButtonBox:
 
 from teviewer.branding import APP_DISPLAY_NAME
 from teviewer.backends.blast_genome_plot import format_genome_length_bp
+from teviewer.backends.database_prepare import blast_database_is_ready
+from teviewer.project import BLAST_MOLECULE_NUCL, TEviewerProject
 from teviewer.job_options import (
     TE_GENOME_MAP_COLOR_FAMILY,
     TE_GENOME_MAP_COLOR_IDENTITY,
@@ -765,16 +768,34 @@ class TsdSearchParamsDialog(QDialog):
         )
 
 
+_KEEP_CURRENT = object()
+
+
 class BlastParamsDialog(QDialog):
     def __init__(
         self,
         *,
+        project: TEviewerProject,
         initial: BlastOptions | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Blast parameters")
+        self._project = project
         opts = initial or BlastOptions()
+
+        self._database = QComboBox()
+        self._database.setMinimumWidth(220)
+        manage_btn = QPushButton("Add/Manage databases…")
+        manage_btn.clicked.connect(self._manage_databases)
+        database_row = QWidget()
+        database_h = QHBoxLayout(database_row)
+        database_h.setContentsMargins(0, 0, 0, 0)
+        database_h.setSpacing(8)
+        database_h.addWidget(self._database, 1)
+        database_h.addWidget(manage_btn)
+        self._populate_database_combo(selected_name=opts.blast_database_name)
+
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
         self._evalue.setValue(normalize_blast_evalue(opts.e_value))
@@ -804,6 +825,7 @@ class BlastParamsDialog(QDialog):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
+        form.addRow("Database", database_row)
         form.addRow("E-value", self._evalue)
         form.addRow("Max MSA lines", self._max_msa)
         form.addRow("Top longest lines", self._top_msa)
@@ -819,6 +841,32 @@ class BlastParamsDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
+    def _populate_database_combo(self, *, selected_name=_KEEP_CURRENT) -> None:
+        target = self._database.currentData() if selected_name is _KEEP_CURRENT else selected_name
+        self._database.clear()
+        if self._project.has_genome_configured() and self._project.genome_file is not None:
+            self._database.addItem(f"Current genome ({self._project.genome_file.name})", None)
+        model = self._database.model()
+        for db in self._project.blast_databases:
+            if db.molecule_type != BLAST_MOLECULE_NUCL:
+                continue
+            ready = blast_database_is_ready(db)
+            label = db.name if ready else f"{db.name} (unavailable — index files missing)"
+            self._database.addItem(label, db.name)
+            if not ready and isinstance(model, QStandardItemModel):
+                item = model.item(self._database.count() - 1)
+                if item is not None:
+                    item.setEnabled(False)
+        index = self._database.findData(target) if target is not None else 0
+        self._database.setCurrentIndex(index if index >= 0 else 0)
+
+    def _manage_databases(self) -> None:
+        from teviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
+
+        dialog = BlastDatabaseManagerDialog(self._project, parent=self)
+        exec_modal_dialog(dialog)
+        self._populate_database_combo()
+
     def options(self) -> BlastOptions:
         return BlastOptions(
             e_value=normalize_blast_evalue(self._evalue.value()),
@@ -826,6 +874,7 @@ class BlastParamsDialog(QDialog):
             top_msa_lines=self._top_msa.value(),
             write_gff=True,
             minimum_bit_score=self._min_bit_score.value(),
+            blast_database_name=self._database.currentData(),
         )
 
 

@@ -51,12 +51,14 @@ from teviewer.app_preferences import (
     clear_cache,
     config_dir,
     human_size,
+    load_blast_db_base_dir,
     load_reopen_last_folder,
     load_restore_geometry,
     load_ui_thread_reserve,
     load_verbose_logging,
     log_file_path,
     reset_all_preferences,
+    save_blast_db_base_dir,
     save_reopen_last_folder,
     save_restore_geometry,
     save_ui_thread_reserve,
@@ -92,8 +94,10 @@ from teviewer.widgets.preview_zoom import (
 
 from teviewer.database_settings import (
     SETTINGS_GROUP,
+    load_blast_databases_from_settings,
     load_cdd_dirs_from_settings,
     load_user_databases_from_settings,
+    save_blast_databases_to_settings,
     save_database_settings,
 )
 
@@ -138,6 +142,7 @@ def save_workspace(
         user_databases=project.user_databases,
         s=s,
     )
+    save_blast_databases_to_settings(project.blast_databases, s=s)
     s.setValue("use_system_blast", project.use_system_blast)
     s.setValue("use_system_sequence_viewer", project.use_system_sequence_viewer)
     s.setValue("batch_workers", project.batch_workers)
@@ -463,6 +468,11 @@ class SettingsDialog(QDialog):
         self._restore_geometry.setChecked(load_restore_geometry())
         self._restore_geometry.setToolTip("Restore the window size and position from the last session.")
 
+        # BLAST databases
+        self._blast_db_base_dir = QLineEdit(str(load_blast_db_base_dir()))
+        self._open_blast_db_btn = QPushButton("Open BLAST databases folder")
+        self._open_blast_db_btn.clicked.connect(self._open_blast_db_folder)
+
         # Diagnostics
         self._verbose_logging = QCheckBox()
         self._verbose_logging.setChecked(load_verbose_logging())
@@ -563,6 +573,15 @@ class SettingsDialog(QDialog):
             ("Reopen last folder:", self._reopen_last),
             ("Restore window size:", self._restore_geometry),
         ])
+        blast_databases = _group("BLAST databases", [
+            ("Base folder:", _path_browse_row(
+                self._blast_db_base_dir,
+                parent=self,
+                is_dir=True,
+                browse_title="Choose BLAST databases folder",
+            )),
+            (None, _center_row(self._open_blast_db_btn)),
+        ])
         # 2x2 grid keeps the four buttons compact so the dialog stays narrow.
         for _btn in (
             self._clear_cache_btn,
@@ -581,7 +600,7 @@ class SettingsDialog(QDialog):
         content_v = QVBoxLayout(content)
         content_v.setContentsMargins(10, 10, 10, 10)
         content_v.setSpacing(10)
-        for box in (appearance, seq_tools, files_preview, performance, startup, diagnostics):
+        for box in (appearance, seq_tools, files_preview, performance, startup, blast_databases, diagnostics):
             content_v.addWidget(box)
         content_v.addStretch()
 
@@ -679,6 +698,9 @@ class SettingsDialog(QDialog):
         save_reopen_last_folder(self._reopen_last.isChecked())
         save_restore_geometry(self._restore_geometry.isChecked())
         save_verbose_logging(self._verbose_logging.isChecked())
+        base_dir_text = self._blast_db_base_dir.text().strip()
+        if base_dir_text:
+            save_blast_db_base_dir(Path(base_dir_text))
         self._save_settings()
         return self._project
 
@@ -738,6 +760,12 @@ class SettingsDialog(QDialog):
 
     def _open_config_folder(self) -> None:
         folder = config_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _open_blast_db_folder(self) -> None:
+        text = self._blast_db_base_dir.text().strip()
+        folder = Path(text).expanduser() if text else load_blast_db_base_dir()
         folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
@@ -819,6 +847,7 @@ class SettingsDialog(QDialog):
             pan_genomes=parse_pan_genomes_json(s.value("pan_genomes_json")),
             cdd_dirs=load_cdd_dirs_from_settings(s),
             user_databases=load_user_databases_from_settings(),
+            blast_databases=load_blast_databases_from_settings(),
             use_system_blast=bool(s.value("use_system_blast", False)),
             use_system_sequence_viewer=bool(s.value("use_system_sequence_viewer", False)),
             batch_workers=int(s.value("batch_workers", 4)),

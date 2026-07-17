@@ -61,7 +61,8 @@ from teviewer.job_options import (
 )
 from teviewer.pan_genome import genome_output_suffix
 from teviewer.backends.te_annotation_batch import TeAnnotationOptions, run_te_annotation_on_fasta
-from teviewer.project import TEviewerProject
+from teviewer.project import BlastDatabase, TEviewerProject
+from teviewer.backends.database_prepare import blast_database_is_ready
 
 ProgressCallback = Callable[[int, str], None]
 
@@ -229,6 +230,19 @@ def _genome_work_items(
         (entry.name, entry.path.expanduser().resolve())
         for entry in project.pan_genomes
     ]
+
+
+def _find_blast_database(project: TEviewerProject, name: str) -> BlastDatabase:
+    for db in project.blast_databases:
+        if db.name == name:
+            if not blast_database_is_ready(db):
+                raise RuntimeError(
+                    f"BLAST database '{name}' is missing its index files "
+                    f"(expected at {db.db_prefix_path}). Rebuild it in "
+                    "Add/Manage databases…."
+                )
+            return db
+    raise RuntimeError(f"BLAST database '{name}' is no longer registered.")
 
 
 def _prepare_genome_resources(
@@ -877,7 +891,12 @@ def run_batch(
     db_cache: dict[Path, str] = {}
     chrom_cache: dict[Path, dict[str, int]] = {}
 
-    if genome_dependent:
+    selected_blast_db_name = blast_options.blast_database_name if blast_options else None
+    if func_name == "blast" and selected_blast_db_name:
+        db = _find_blast_database(project, selected_blast_db_name)
+        genome_items = [(db.name, db.source_fasta)]
+        db_cache = {db.source_fasta: str(db.db_prefix_path)}
+    elif genome_dependent:
         if not project.has_genome_configured():
             raise RuntimeError("Genome FASTA is required for this tool.")
         genome_items = _genome_work_items(project, func_name, extend)

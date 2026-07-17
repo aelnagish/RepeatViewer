@@ -93,6 +93,19 @@ def config_dir() -> Path:
     return Path(base) / "TEviewer"
 
 
+def load_blast_db_base_dir() -> Path:
+    s = QSettings()
+    s.beginGroup(APP_SETTINGS_GROUP)
+    value = s.value("blast_db_base_dir")
+    s.endGroup()
+    text = str(value).strip() if value else ""
+    return Path(text).expanduser() if text else config_dir() / "blast_databases"
+
+
+def save_blast_db_base_dir(path: Path) -> None:
+    _set_value("blast_db_base_dir", str(path.expanduser()))
+
+
 def diagnostics_dir() -> Path:
     """User-visible location for logs and crash reports."""
     if sys.platform == "darwin":

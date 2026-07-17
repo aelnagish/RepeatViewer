@@ -7,11 +7,19 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
-from teviewer.project import DATABASE_TYPE_CDD, DATABASE_TYPE_HMM, DATABASE_TYPE_PROTEIN, UserDatabase
+from teviewer.project import (
+    BLAST_MOLECULE_NUCL,
+    DATABASE_TYPE_CDD,
+    DATABASE_TYPE_HMM,
+    DATABASE_TYPE_PROTEIN,
+    BlastDatabase,
+    UserDatabase,
+)
 
 SETTINGS_GROUP = "project"
 CDD_DIRS_KEY = "cdd_dirs_json"
 USER_DATABASES_KEY = "user_databases_json"
+BLAST_DATABASES_KEY = "blast_databases_json"
 
 
 def _path_from_settings(value) -> Path | None:
@@ -98,6 +106,69 @@ def load_similarity_annotation_databases() -> list[UserDatabase]:
         *databases,
         UserDatabase(name="CDD", path=cdd_dir, db_type=DATABASE_TYPE_CDD),
     ]
+
+
+def load_blast_databases_from_settings() -> list[BlastDatabase]:
+    s = QSettings()
+    s.beginGroup(SETTINGS_GROUP)
+    raw = s.value(BLAST_DATABASES_KEY)
+    s.endGroup()
+    if not raw:
+        return []
+    try:
+        decoded = json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(decoded, list):
+        return []
+    databases: list[BlastDatabase] = []
+    for item in decoded:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        source_fasta = _path_from_settings(item.get("source_fasta"))
+        db_prefix_path = _path_from_settings(item.get("db_prefix_path"))
+        if not name or source_fasta is None or db_prefix_path is None:
+            continue
+        databases.append(
+            BlastDatabase(
+                name=name,
+                source_fasta=source_fasta,
+                db_prefix_path=db_prefix_path,
+                molecule_type=str(item.get("molecule_type", BLAST_MOLECULE_NUCL)),
+                created_at=str(item.get("created_at", "")),
+            )
+        )
+    return databases
+
+
+def save_blast_databases_to_settings(
+    blast_databases: list[BlastDatabase],
+    *,
+    s: QSettings | None = None,
+) -> None:
+    owns_settings = s is None
+    if owns_settings:
+        s = QSettings()
+        s.beginGroup(SETTINGS_GROUP)
+    s.setValue(
+        BLAST_DATABASES_KEY,
+        json.dumps(
+            [
+                {
+                    "name": db.name,
+                    "source_fasta": str(db.source_fasta),
+                    "db_prefix_path": str(db.db_prefix_path),
+                    "molecule_type": db.molecule_type,
+                    "created_at": db.created_at,
+                }
+                for db in blast_databases
+            ],
+            indent=2,
+        ),
+    )
+    if owns_settings:
+        s.endGroup()
 
 
 def save_database_settings(

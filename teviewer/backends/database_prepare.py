@@ -15,8 +15,9 @@ from teviewer.backends.gui_functions import (
     check_cdd_index_files,
     check_cmd_in_path,
     get_original_file_path,
+    sanitize_name,
 )
-from teviewer.project import DATABASE_TYPE_DNA, UserDatabase
+from teviewer.project import DATABASE_TYPE_DNA, BlastDatabase, UserDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +305,77 @@ def build_blast_index(
     if not index_is_ready(kind, seq_path):
         raise RuntimeError(f"BLAST index generation failed for {seq_path.name}.")
     return seq_path
+
+
+def _named_blast_index_marker(db_prefix: Path, *, protein: bool) -> Path:
+    suffix = ".pin" if protein else ".nin"
+    return Path(f"{db_prefix}{suffix}")
+
+
+def named_blast_index_exists(db_prefix: Path, *, protein: bool) -> bool:
+    return _named_blast_index_marker(db_prefix, protein=protein).is_file()
+
+
+def _named_blast_index_is_current(db_prefix: Path, source_fasta: Path, *, protein: bool) -> bool:
+    marker = _named_blast_index_marker(db_prefix, protein=protein)
+    if not marker.is_file():
+        return False
+    try:
+        return marker.stat().st_mtime >= source_fasta.stat().st_mtime
+    except OSError:
+        return False
+
+
+def blast_database_is_ready(db: BlastDatabase) -> bool:
+    """Whether a saved BLAST database's index files are still present on disk."""
+    return named_blast_index_exists(db.db_prefix_path, protein=db.molecule_type == "prot")
+
+
+def build_named_blast_database(
+    source_fasta: Path,
+    base_dir: Path,
+    name: str,
+    *,
+    molecule_type: str,
+    use_system_blast: bool,
+) -> Path:
+    """Run makeblastdb for a saved, named BLAST database. Returns the db prefix path.
+
+    Index files are written under ``base_dir / sanitize_name(name)`` — kept
+    separate from the source FASTA (which is not copied) so the same folder
+    can be safely deleted when the database is removed.
+    """
+    source_fasta = source_fasta.expanduser().resolve()
+    if not source_fasta.is_file():
+        raise FileNotFoundError(f"FASTA not found: {source_fasta}")
+    protein = molecule_type == "prot"
+    safe_name = sanitize_name(name.strip()) or "database"
+    dest_dir = base_dir.expanduser().resolve() / safe_name
+    db_prefix = dest_dir / safe_name
+
+    if _named_blast_index_is_current(db_prefix, source_fasta, protein=protein):
+        return db_prefix
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    makeblastdb = _bundled_or_system("makeblastdb", use_system_blast=use_system_blast)
+    dbtype = "prot" if protein else "nucl"
+    cmd = [
+        makeblastdb,
+        "-in",
+        str(source_fasta),
+        "-dbtype",
+        dbtype,
+        "-out",
+        str(db_prefix),
+    ]
+    logger.info("Building named BLAST database: %s", " ".join(cmd))
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(format_prepare_error(exc)) from exc
+    if not named_blast_index_exists(db_prefix, protein=protein):
+        raise RuntimeError(f"BLAST database creation failed for {source_fasta.name}.")
+    return db_prefix
 
 
 def build_hmm_index(hmm_path: Path) -> Path:

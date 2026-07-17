@@ -153,6 +153,7 @@ class FileListTableWidget(QTableWidget):
     separate_fasta_subfolders_requested = Signal(Path)
     blast_genome_map_requested = Signal(Path)
     blast_divergence_requested = Signal(Path)
+    add_blast_database_requested = Signal(Path)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -613,6 +614,10 @@ class FileListTableWidget(QTableWidget):
                 )
                 menu.addAction("Rename", lambda: self.rename_file_requested.emit(path))
                 if path.suffix.lower() in _FASTA_SUFFIXES:
+                    menu.addAction(
+                        "Add as BLAST database…",
+                        lambda p=path: self.add_blast_database_requested.emit(p),
+                    )
                     try:
                         seq_n = count_fasta_sequences(path)
                     except Exception:  # noqa: BLE001
