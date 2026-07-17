@@ -1152,6 +1152,8 @@ class PreviewTabWidget(QTabWidget):
         self.tabCloseRequested.connect(self._close_tab)
         self._path_to_index: dict[str, int] = {}
         self._external_tab_bar_host: QWidget | None = None
+        self._title_tab_bar: PreviewFileTabBar | None = None
+        self._tab_bar_sync_guard = False
         self.setMinimumHeight(120)
 
         self.currentChanged.connect(self._on_preview_tab_changed)
@@ -1160,27 +1162,86 @@ class PreviewTabWidget(QTabWidget):
         self._sync_tab_bar_visible()
 
     def mount_file_tab_bar(self, host: QWidget) -> None:
-        """Show open-file tabs in an external host (Preview dock title bar)."""
+        """Show open-file tabs in an external host (Preview dock title bar).
+
+        Qt requires QTabWidget's tab bar to stay a child of the tab widget; reparenting
+        it into the dock title bar leaves a dangling layout item and segfaults on show().
+        Use a mirrored tab bar in the host and keep the real tab bar hidden.
+        """
         self._external_tab_bar_host = host
         host.setMinimumWidth(0)
         host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        # Drop the in-widget corner spacer; tabs no longer live inside this pane.
         self.setCornerWidget(None, Qt.Corner.TopRightCorner)
-        tab_bar = self.tabBar()
-        tab_bar.setParent(host)
-        host_layout = host.layout()
-        if host_layout is not None:
-            host_layout.addWidget(tab_bar)
-        tab_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        tab_bar.setMinimumWidth(0)
-        tab_bar.setExpanding(False)
-        tab_bar.setUsesScrollButtons(True)
+
+        internal = self.tabBar()
+        internal.hide()
+
+        if self._title_tab_bar is None:
+            self._title_tab_bar = PreviewFileTabBar(host)
+            host_layout = host.layout()
+            if host_layout is not None:
+                host_layout.addWidget(self._title_tab_bar)
+            self._title_tab_bar.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Preferred,
+            )
+            self._title_tab_bar.setMinimumWidth(0)
+            self._title_tab_bar.setExpanding(False)
+            self._title_tab_bar.setUsesScrollButtons(True)
+            self._title_tab_bar.setMovable(True)
+            self._title_tab_bar.tabCloseRequested.connect(self._close_tab)
+            self._title_tab_bar.currentChanged.connect(self._on_title_tab_current_changed)
+            self._title_tab_bar.tabMoved.connect(self._on_title_tab_moved)
+
         self._sync_tab_bar_visible()
-        self._relayout_file_tabs()
+
+    def _on_title_tab_current_changed(self, index: int) -> None:
+        if self._tab_bar_sync_guard or self._title_tab_bar is None:
+            return
+        if 0 <= index < self.count() and index != self.currentIndex():
+            self.setCurrentIndex(index)
+
+    def _on_title_tab_moved(self, from_index: int, to_index: int) -> None:
+        if self._tab_bar_sync_guard or self._title_tab_bar is None:
+            return
+        if not (0 <= from_index < self.count() and 0 <= to_index < self.count()):
+            return
+        widget = self.widget(from_index)
+        if widget is None:
+            return
+        text = self.tabText(from_index)
+        self._tab_bar_sync_guard = True
+        try:
+            self.removeTab(from_index)
+            self.insertTab(to_index, widget, text)
+            self.setCurrentIndex(to_index)
+            self._rebuild_path_index()
+        finally:
+            self._tab_bar_sync_guard = False
+        self._sync_title_tab_bar()
+
+    def _sync_title_tab_bar(self) -> None:
+        title = self._title_tab_bar
+        if title is None:
+            return
+        self._tab_bar_sync_guard = True
+        try:
+            while title.count() > self.count():
+                title.removeTab(title.count() - 1)
+            for index in range(title.count(), self.count()):
+                title.insertTab(index, self.tabText(index))
+            for index in range(self.count()):
+                if title.tabText(index) != self.tabText(index):
+                    title.setTabText(index, self.tabText(index))
+            if title.currentIndex() != self.currentIndex():
+                title.setCurrentIndex(self.currentIndex())
+            title.setTabsClosable(self.tabsClosable())
+        finally:
+            self._tab_bar_sync_guard = False
 
     def _relayout_file_tabs(self) -> None:
         """Refresh title-bar tab sizing after open/close (capped width, no stretch)."""
-        tab_bar = self.tabBar()
+        tab_bar = self._title_tab_bar if self._title_tab_bar is not None else self.tabBar()
         tab_bar.setExpanding(False)
         tab_bar.setUsesScrollButtons(True)
         tab_bar.setMinimumWidth(0)
@@ -1189,8 +1250,6 @@ class PreviewTabWidget(QTabWidget):
         if host is not None:
             host.setMinimumWidth(0)
             host.updateGeometry()
-            if host.layout() is not None:
-                host.layout().activate()
 
     def _on_header_fasta_tab_changed(self, index: int) -> None:
         widget = self.currentWidget()
@@ -1210,15 +1269,19 @@ class PreviewTabWidget(QTabWidget):
     def _sync_tab_bar_visible(self) -> None:
         """Show filename tabs only when more than one file is open."""
         multi = self.count() > 1
-        tab_bar = self.tabBar()
-        tab_bar.setVisible(multi)
-        self.setTabsClosable(multi)
-        host = self._external_tab_bar_host
-        if host is not None:
-            # Keep the host visible so layout stays stable; only the tab bar hides.
-            host.setVisible(True)
-            if not host.isHidden() and multi:
-                tab_bar.raise_()
+        if self._title_tab_bar is not None:
+            self.tabBar().hide()
+            self.setTabsClosable(multi)
+            self._sync_title_tab_bar()
+            self._title_tab_bar.setVisible(multi)
+            self._title_tab_bar.setTabsClosable(multi)
+            host = self._external_tab_bar_host
+            if host is not None:
+                host.setVisible(True)
+        else:
+            tab_bar = self.tabBar()
+            tab_bar.setVisible(multi)
+            self.setTabsClosable(multi)
         self._relayout_file_tabs()
 
     def _install_annotation_delete_shortcuts(self) -> None:
@@ -1241,6 +1304,13 @@ class PreviewTabWidget(QTabWidget):
                 widget.resume_html_preview()
             else:
                 widget.suspend_html_preview()
+        if self._title_tab_bar is not None and not self._tab_bar_sync_guard:
+            self._tab_bar_sync_guard = True
+            try:
+                if self._title_tab_bar.currentIndex() != index:
+                    self._title_tab_bar.setCurrentIndex(index)
+            finally:
+                self._tab_bar_sync_guard = False
         self._sync_zoom_bar_enabled(index)
 
     def teardown_all_html_previews(self) -> None:

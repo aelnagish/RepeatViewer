@@ -37,6 +37,17 @@ _COL_DESCRIPTION = 6
 _COL_MODIFIED = 7
 _COL_SIZE = 8
 
+# Public aliases for column visibility settings.
+COL_CHECK = _COL_CHECK
+COL_NAME = _COL_NAME
+COL_LENGTH = _COL_LENGTH
+COL_SEQUENCES = _COL_SEQUENCES
+COL_GC = _COL_GC
+COL_TYPE = _COL_TYPE
+COL_DESCRIPTION = _COL_DESCRIPTION
+COL_MODIFIED = _COL_MODIFIED
+COL_SIZE = _COL_SIZE
+
 _HEADERS = (
     "",
     "Name",
@@ -153,7 +164,7 @@ class FileListTableWidget(QTableWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setShowGrid(False)
-        self.setAlternatingRowColors(True)
+        self.setAlternatingRowColors(False)
         self.setWordWrap(False)
         self.setSortingEnabled(True)
         self.setDragEnabled(True)
@@ -183,6 +194,22 @@ class FileListTableWidget(QTableWidget):
         self.cellClicked.connect(self._on_cell_clicked)
         self.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.currentCellChanged.connect(self._on_current_cell_changed)
+
+        from teviewer.widgets.file_list_columns import load_visible_file_columns
+
+        self.apply_visible_columns(load_visible_file_columns())
+
+    def apply_visible_columns(self, visible: set[int]) -> None:
+        """Show/hide optional columns (checkbox + name always stay visible)."""
+        from teviewer.widgets.file_list_columns import (
+            ALWAYS_VISIBLE_COLUMNS,
+            TOGGLEABLE_COLUMNS,
+        )
+
+        allowed = ALWAYS_VISIBLE_COLUMNS | set(TOGGLEABLE_COLUMNS.keys())
+        show = ALWAYS_VISIBLE_COLUMNS | {column for column in visible if column in allowed}
+        for column in range(self.columnCount()):
+            self.setColumnHidden(column, column not in show)
 
     def _ensure_headers(self, *, force: bool = False) -> None:
         expected = len(_HEADERS)
@@ -335,12 +362,30 @@ class FileListTableWidget(QTableWidget):
         self.setSortingEnabled(was_sorting)
         return FileListRow(self, row)
 
+    def _row_decoration(self, row: int) -> tuple[QBrush | None, QBrush | None, QFont | None]:
+        """Background/foreground/font already applied to this row (if any)."""
+        for column in (_COL_NAME, _COL_CHECK, *_DEFAULT_COLUMN_WIDTHS.keys()):
+            cell = super().item(row, column)
+            if cell is None:
+                continue
+            bg = cell.background()
+            fg = cell.foreground()
+            font = cell.font()
+            if (
+                (bg.style() != Qt.BrushStyle.NoBrush and bg.color().alpha() > 0)
+                or (fg.style() != Qt.BrushStyle.NoBrush and fg.color().alpha() > 0)
+                or font.bold()
+            ):
+                return bg, fg, font
+        return None, None, None
+
     def _apply_metadata_cells(
         self,
         row: int,
         path_text: str,
         meta: BrowserFileMetadata,
     ) -> None:
+        bg, fg, font = self._row_decoration(row)
         for column, text, sort_key in (
             (_COL_LENGTH, meta.length_text, meta.sort_length),
             (_COL_SEQUENCES, meta.sequence_count_text, meta.sort_sequence_count),
@@ -353,6 +398,12 @@ class FileListTableWidget(QTableWidget):
             cell = _SortableTableItem(text, sort_key=sort_key)
             cell.setData(_ROLE_PATH, path_text)
             cell.setTextAlignment(_LEFT_ALIGN)
+            if bg is not None:
+                cell.setBackground(bg)
+            if fg is not None:
+                cell.setForeground(fg)
+            if font is not None:
+                cell.setFont(font)
             self.setItem(row, column, cell)
 
     def update_row_metadata(self, path: Path, meta: BrowserFileMetadata) -> bool:

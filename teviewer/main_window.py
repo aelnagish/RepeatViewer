@@ -7,6 +7,7 @@ import os
 import shutil
 import platform
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -1020,6 +1021,7 @@ class MainWindow(QMainWindow):
         self._dock_files: QDockWidget | None = None
         self._dock_preview: QDockWidget | None = None
         self._preview_host: QWidget | None = None
+        self._preview_file_tabs_host: QWidget | None = None
         self._preview_tabs: PreviewTabWidget | None = None
         self._pending_te_genome_map: TeGenomeMapOptions | None = None
         self._pending_te_genome_map_fastas: list[Path] = []
@@ -1091,6 +1093,12 @@ class MainWindow(QMainWindow):
         self._apply_browser_panel_font()
         self._fs_watcher = QFileSystemWatcher(self)
         self._fs_watcher.directoryChanged.connect(self._on_watched_directory_changed)
+        self._fs_refresh_timer = QTimer(self)
+        self._fs_refresh_timer.setSingleShot(True)
+        self._fs_refresh_timer.setInterval(400)
+        self._fs_refresh_timer.timeout.connect(self._deferred_fs_folder_refresh)
+        self._pending_fs_refresh_dir: str | None = None
+        self._watcher_refresh_suppressed_until = 0.0
         self._folder_persist_timer = QTimer(self)
         self._folder_persist_timer.setSingleShot(True)
         self._folder_persist_timer.setInterval(250)
@@ -1120,8 +1128,13 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self._stop_btn)
         self._build_menu()
         self._install_shortcuts()
+        QTimer.singleShot(0, self._deferred_window_startup)
+
+    def _deferred_window_startup(self) -> None:
+        """Restore layout and title-bar tabs after the main window is shown."""
         self._restore_window_layout()
-        QTimer.singleShot(0, self._complete_deferred_startup)
+        self._mount_preview_title_file_tabs()
+        self._complete_deferred_startup()
 
     def _complete_deferred_startup(self) -> None:
         """Load workspace folders after the window is shown (avoids blocking startup)."""
@@ -1157,13 +1170,20 @@ class MainWindow(QMainWindow):
             self._fs_watcher.addPaths(to_add)
 
     def _on_watched_directory_changed(self, directory: str) -> None:
+        if time.monotonic() < self._watcher_refresh_suppressed_until:
+            return
+        self._pending_fs_refresh_dir = directory
+        self._fs_refresh_timer.start()
+
+    def _deferred_fs_folder_refresh(self) -> None:
+        directory = self._pending_fs_refresh_dir
+        self._pending_fs_refresh_dir = None
+        if directory is None:
+            return
         changed = Path(directory).expanduser().resolve()
         refreshed = False
 
         if changed.is_dir():
-            # Refresh only the changed directory. Rebuilding the parent folder's
-            # children (e.g. after saving a GFF in a subfolder) destroys the
-            # selected tree item and Qt jumps to the next folder below.
             refreshed = self._refresh_subfolders_under(changed) is not None
 
         if not refreshed:
@@ -1173,10 +1193,78 @@ class MainWindow(QMainWindow):
             self._populate_file_list(self._current_folder, open_preview=False)
         self._update_directory_watchers()
 
+    def _build_file_columns_menu(self) -> None:
+        from teviewer.widgets.file_list_columns import (
+            TOGGLEABLE_COLUMNS,
+            load_visible_file_columns,
+        )
+
+        self._file_columns_menu.clear()
+        self._file_column_actions.clear()
+        visible = load_visible_file_columns()
+        for column, label in TOGGLEABLE_COLUMNS.items():
+            action = self._file_columns_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(column in visible)
+            action.toggled.connect(
+                lambda checked, col=column: self._on_file_column_toggled(col, checked)
+            )
+            self._file_column_actions[column] = action
+
+    def _on_file_column_toggled(self, column: int, checked: bool) -> None:
+        from teviewer.widgets.file_list_columns import (
+            load_visible_file_columns,
+            save_visible_file_columns,
+        )
+
+        visible = load_visible_file_columns()
+        if checked:
+            visible.add(column)
+        else:
+            visible.discard(column)
+        save_visible_file_columns(visible)
+        self._file_list.apply_visible_columns(visible)
+
+    def _sync_folder_tree_label_for_folder(self, folder: Path) -> None:
+        item = self._find_tree_item_for_path(folder.expanduser().resolve())
+        if item is not None:
+            self._set_folder_tree_item_label(item, folder)
+
+    def _incremental_add_files_to_list(self, paths: list[Path]) -> None:
+        """Append new rows without rebuilding the whole table."""
+        if not paths:
+            return
+        query = self._file_filter.text().strip().lower()
+        visible_paths: list[Path] = []
+        for path in paths:
+            if query and query not in path.name.lower():
+                continue
+            visible_paths.append(path)
+        if not visible_paths:
+            return
+
+        was_sorting = self._file_list.isSortingEnabled()
+        self._file_list.setSortingEnabled(False)
+        for path in visible_paths:
+            row_item = self._file_list.add_file_row(path)
+            key = str(path.expanduser().resolve())
+            if key in self._highlight_output_keys:
+                self._style_new_output_item(row_item)
+            elif key in self._highlight_source_keys:
+                self._style_source_file_item(row_item)
+        self._file_list.setSortingEnabled(was_sorting)
+        self._file_list.apply_default_sort()
+        self._start_metadata_enrichment(visible_paths)
+
     def _restore_window_layout(self) -> None:
+        import os
+
         self._purge_legacy_docks()
         settings = QSettings()
         settings.beginGroup("mainwindow")
+        if os.environ.get("TEVIEWER_RESET_LAYOUT", "0").lower() in {"1", "true", "yes"}:
+            settings.remove("geometry")
+            settings.remove("toolbar_state_v5")
         # v5 = all browser docks share one area (no Left/Right central gutter).
         toolbar_state = settings.value("toolbar_state_v5")
         window_geometry = settings.value("geometry")
@@ -1184,9 +1272,25 @@ class MainWindow(QMainWindow):
         from teviewer.app_preferences import load_restore_geometry
 
         if window_geometry and load_restore_geometry():
-            self.restoreGeometry(window_geometry)
+            try:
+                if not self.restoreGeometry(window_geometry):
+                    settings.beginGroup("mainwindow")
+                    settings.remove("geometry")
+                    settings.endGroup()
+            except Exception:
+                settings.beginGroup("mainwindow")
+                settings.remove("geometry")
+                settings.endGroup()
         if toolbar_state:
-            self.restoreState(toolbar_state)
+            try:
+                if not self.restoreState(toolbar_state):
+                    settings.beginGroup("mainwindow")
+                    settings.remove("toolbar_state_v5")
+                    settings.endGroup()
+            except Exception:
+                settings.beginGroup("mainwindow")
+                settings.remove("toolbar_state_v5")
+                settings.endGroup()
         self._purge_legacy_docks()
         # If an older layout put Files/Preview on the Right (leaving a center gap),
         # snap back to the single-area split layout.
@@ -1414,6 +1518,18 @@ class MainWindow(QMainWindow):
         self._file_filter.textChanged.connect(self._apply_file_filter)
         files_trailing_layout.addWidget(self._file_filter)
 
+        self._file_columns_btn = QToolButton()
+        self._file_columns_btn.setObjectName("FileColumnsButton")
+        self._file_columns_btn.setText("Columns")
+        self._file_columns_btn.setToolTip("Choose which file-table columns are visible")
+        self._file_columns_btn.setFixedHeight(18)
+        self._file_columns_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._file_columns_menu = QMenu(self._file_columns_btn)
+        self._file_column_actions: dict[int, QAction] = {}
+        self._build_file_columns_menu()
+        self._file_columns_btn.setMenu(self._file_columns_menu)
+        files_trailing_layout.addWidget(self._file_columns_btn)
+
         self._file_list.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
@@ -1476,6 +1592,7 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Preferred,
         )
         preview_file_tabs_host.setMinimumWidth(0)
+        self._preview_file_tabs_host = preview_file_tabs_host
         preview_zoom_host = QWidget()
         preview_zoom_host.setObjectName("PreviewDockZoomHost")
         preview_zoom_host.setSizePolicy(
@@ -1496,7 +1613,6 @@ class MainWindow(QMainWindow):
                 trailing=preview_zoom_host,
             )
         )
-        self._preview_tabs.mount_file_tab_bar(preview_file_tabs_host)
         self._dock_folders.setTitleBarWidget(
             BrowserDockTitleBar(self._dock_folders, "Folders")
         )
@@ -1533,7 +1649,16 @@ class MainWindow(QMainWindow):
         self._dock_folders.setMinimumWidth(120)
         self._dock_files.setMinimumWidth(200)
         self._dock_preview.setMinimumWidth(200)
-        self._apply_default_browser_layout(force=True)
+
+    def _mount_preview_title_file_tabs(self) -> None:
+        """Attach mirrored file tabs to the Preview dock title (after the window exists)."""
+        import os
+
+        if os.environ.get("TEVIEWER_TITLE_FILE_TABS", "1").lower() in {"0", "false", "no"}:
+            return
+        host = getattr(self, "_preview_file_tabs_host", None)
+        if host is not None and self._preview_tabs is not None:
+            self._preview_tabs.mount_file_tab_bar(host)
 
     def _apply_default_browser_layout(self, *, force: bool = False) -> None:
         if self._dock_folders is None or self._dock_files is None or self._dock_preview is None:
@@ -3296,6 +3421,7 @@ class MainWindow(QMainWindow):
             return
         updates = [(Path(str(path_text)), meta) for path_text, meta in batch]
         self._file_list.update_rows_metadata(updates)
+        self._refresh_file_list_highlights()
 
     def _sync_files_status(
         self,
@@ -3338,6 +3464,11 @@ class MainWindow(QMainWindow):
                 same_folder = prev_folder.expanduser().resolve() == target_folder
             except OSError:
                 same_folder = False
+        prev_cached_keys = (
+            {str(path.expanduser().resolve()) for path in self._cached_folder_files}
+            if same_folder
+            else set()
+        )
         self._current_folder = target_folder
         try:
             self._cached_folder_files = self._files_for_folder(self._current_folder)
@@ -3347,8 +3478,15 @@ class MainWindow(QMainWindow):
             self._set_status_message(f"Cannot read folder: {exc}", 6000)
             return
 
-        self._highlight_output_keys = set()
-        self._highlight_source_keys = set()
+        # Keep highlight tint when the folder watcher refreshes the same directory
+        # shortly after a job finishes; only reset when navigating away or when
+        # new highlight targets are supplied explicitly.
+        if new_outputs or source_files:
+            self._highlight_output_keys = set()
+            self._highlight_source_keys = set()
+        elif not same_folder:
+            self._highlight_output_keys = set()
+            self._highlight_source_keys = set()
         highlight_paths: list[Path] = []
 
         def _track(path: Path, *, as_output: bool) -> None:
@@ -3369,6 +3507,43 @@ class MainWindow(QMainWindow):
             for path in source_files:
                 _track(path, as_output=False)
 
+        new_cache_keys = {str(path.expanduser().resolve()) for path in self._cached_folder_files}
+        added_keys = new_cache_keys - prev_cached_keys
+        removed_keys = prev_cached_keys - new_cache_keys
+        if (
+            same_folder
+            and highlight_paths
+            and added_keys
+            and not removed_keys
+        ):
+            added_paths = [
+                path
+                for path in self._cached_folder_files
+                if str(path.expanduser().resolve()) in added_keys
+            ]
+            self._file_list.blockSignals(True)
+            self._incremental_add_files_to_list(added_paths)
+            self._select_and_scroll_outputs(highlight_paths, open_preview=False)
+            n_out = len(self._highlight_output_keys)
+            n_src = len(self._highlight_source_keys)
+            names = ", ".join(
+                Path(k).name for k in list(self._highlight_output_keys)[:3]
+            )
+            msg = f"Highlighted {n_out} new output(s) and {n_src} input(s)"
+            if names:
+                msg += f" (e.g. {names})"
+            self._set_status_message(msg, 12000)
+            self._file_list.blockSignals(False)
+            if open_preview:
+                self._open_best_preview_path(highlight_paths)
+            if hasattr(self, "_folder_nav"):
+                self._folder_nav.set_folder(
+                    self._current_folder,
+                    record_history=record_history,
+                )
+            self._sync_folder_tree_label_for_folder(self._current_folder)
+            return
+
         preserve_ui = same_folder
         prev_key: str | None = None
         prev_scroll: int | None = None
@@ -3381,7 +3556,7 @@ class MainWindow(QMainWindow):
             prev_scroll = int(self._file_list.verticalScrollBar().value())
 
         item = self._ensure_folder_visible_in_tree(target_folder)
-        if item is not None:
+        if item is not None and not same_folder:
             parent = item.parent()
             while parent is not None:
                 if not parent.isExpanded():
@@ -3390,6 +3565,8 @@ class MainWindow(QMainWindow):
                 parent = parent.parent()
             self._folder_tree.select_folder_item(item)
             self._folder_tree.scrollToItem(item)
+        elif item is not None and same_folder:
+            self._folder_tree.select_folder_item(item)
 
         self._file_list.blockSignals(True)
         self._apply_file_filter()
@@ -3431,7 +3608,23 @@ class MainWindow(QMainWindow):
             self._open_best_preview_path(highlight_paths)
         if hasattr(self, "_folder_nav"):
             self._folder_nav.set_folder(self._current_folder, record_history=record_history)
-        self._sync_folder_tree_labels()
+        if same_folder:
+            self._sync_folder_tree_label_for_folder(self._current_folder)
+        else:
+            self._sync_folder_tree_labels()
+
+    def _refresh_file_list_highlights(self) -> None:
+        """Re-apply new-output / source tint after metadata or sort updates."""
+        for index in range(self._file_list.count()):
+            item = self._file_list.item(index)
+            raw = item.data(ROLE_PATH)
+            if not raw:
+                continue
+            key = str(Path(str(raw)).expanduser().resolve())
+            if key in self._highlight_output_keys:
+                self._style_new_output_item(item)
+            elif key in self._highlight_source_keys:
+                self._style_source_file_item(item)
 
     def _palette_is_dark(self) -> bool:
         from PySide6.QtGui import QPalette
@@ -6430,6 +6623,7 @@ class MainWindow(QMainWindow):
         extra_folders: set[Path] | None = None,
     ) -> None:
         """Refresh file list; show outputs in each input file's folder."""
+        self._watcher_refresh_suppressed_until = time.monotonic() + 3.0
         touched = {p.parent.resolve() for p in created_paths} | {
             p.parent.resolve() for p in source_paths
         }

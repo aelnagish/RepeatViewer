@@ -34,11 +34,15 @@ def configure_qt_runtime() -> None:
     _configure_qt_logging()
     _configure_macos_pointer()
     _configure_webengine()
-    if sys.platform == "darwin":
-        os.environ.setdefault("TEVIEWER_FILTER_STDERR_FD", "1")
-    if os.environ.get("TEVIEWER_FILTER_STDERR_FD", "0").lower() in {"1", "true", "yes"}:
-        _install_macos_stderr_fd_filter()
     _install_stderr_filter()
+
+
+def install_macos_stderr_fd_filter() -> None:
+    """Filter TSM/IMK noise written directly to stderr FD (call after QApplication exists)."""
+    if sys.platform != "darwin":
+        return
+    if os.environ.get("TEVIEWER_FILTER_STDERR_FD", "1").lower() in {"1", "true", "yes"}:
+        _install_macos_stderr_fd_filter()
 
 
 def _configure_macos_app_name() -> None:

@@ -10,7 +10,11 @@ import logging
 import logging.handlers
 import os
 import shutil
+import sys
 import tempfile
+import threading
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSettings
@@ -23,6 +27,7 @@ DEFAULT_VERBOSE_LOGGING = False
 # 0 means "auto" (let thread_budget pick its default reserve).
 DEFAULT_UI_THREAD_RESERVE = 0
 MAX_UI_THREAD_RESERVE = 8
+_EXCEPTION_HOOKS_INSTALLED = False
 
 
 def _get_bool(key: str, default: bool) -> bool:
@@ -88,6 +93,13 @@ def config_dir() -> Path:
     return Path(base) / "TEviewer"
 
 
+def diagnostics_dir() -> Path:
+    """User-visible location for logs and crash reports."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs" / "TEviewer"
+    return config_dir() / "logs"
+
+
 def cache_dir() -> Path:
     return Path(tempfile.gettempdir()) / "teviewer"
 
@@ -99,7 +111,38 @@ def cache_dirs() -> list[Path]:
 
 
 def log_file_path() -> Path:
-    return config_dir() / "repeatviewer.log"
+    return diagnostics_dir() / "repeatviewer.log"
+
+
+def crash_reports_dir() -> Path:
+    return diagnostics_dir() / "crash-reports"
+
+
+def write_exception_report(
+    *,
+    title: str,
+    exc_type,
+    exc_value,
+    exc_traceback,
+    context: str = "",
+) -> Path | None:
+    """Write a human-readable exception report; best effort."""
+    try:
+        out_dir = crash_reports_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = out_dir / f"{stamp}-{title}.log"
+        with path.open("w", encoding="utf-8") as fh:
+            fh.write(f"title: {title}\n")
+            fh.write(f"time: {datetime.now().isoformat(timespec='seconds')}\n")
+            fh.write(f"python: {sys.version}\n")
+            if context:
+                fh.write(f"context: {context}\n")
+            fh.write("\n")
+            traceback.print_exception(exc_type, exc_value, exc_traceback, file=fh)
+        return path
+    except OSError:
+        return None
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -173,3 +216,55 @@ def setup_file_logging() -> None:
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
     root.addHandler(handler)
+
+
+def install_exception_logging_hooks() -> None:
+    """Log uncaught exceptions and write crash reports automatically."""
+    global _EXCEPTION_HOOKS_INSTALLED
+    if _EXCEPTION_HOOKS_INSTALLED:
+        return
+    _EXCEPTION_HOOKS_INSTALLED = True
+
+    prev_excepthook = sys.excepthook
+
+    def _log_uncaught(exc_type, exc_value, exc_traceback) -> None:
+        logger = logging.getLogger(__name__)
+        logger.exception(
+            "Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback)
+        )
+        report = write_exception_report(
+            title="uncaught-exception",
+            exc_type=exc_type,
+            exc_value=exc_value,
+            exc_traceback=exc_traceback,
+            context="main-thread",
+        )
+        if report is not None:
+            logger.error("Exception report written to %s", report)
+        prev_excepthook(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = _log_uncaught
+
+    if hasattr(threading, "excepthook"):
+        prev_threading_hook = threading.excepthook
+
+        def _thread_excepthook(args) -> None:
+            logger = logging.getLogger(__name__)
+            thread_name = getattr(args.thread, "name", "unknown")
+            logger.exception(
+                "Uncaught thread exception (%s)",
+                thread_name,
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+            report = write_exception_report(
+                title="thread-exception",
+                exc_type=args.exc_type,
+                exc_value=args.exc_value,
+                exc_traceback=args.exc_traceback,
+                context=f"thread:{thread_name}",
+            )
+            if report is not None:
+                logger.error("Thread exception report written to %s", report)
+            prev_threading_hook(args)
+
+        threading.excepthook = _thread_excepthook

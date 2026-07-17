@@ -46,6 +46,7 @@ from teviewer.views.toolbar_dialog import (
 from teviewer.branding import APP_DISPLAY_NAME
 from teviewer.app_preferences import (
     cache_size_bytes,
+    crash_reports_dir,
     clear_cache,
     config_dir,
     human_size,
@@ -768,6 +769,7 @@ class SettingsDialog(QDialog):
             f"Config:   {config_dir()}",
             f"Cache:    {cache_dir()}",
             f"Log:      {log_file_path()}",
+            f"Crashes:  {crash_reports_dir()}",
             f"Flexidot: {flex_exe} (html: {flex_html})",
         ])
         QApplication.clipboard().setText(info)
