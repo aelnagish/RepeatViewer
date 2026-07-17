@@ -41,6 +41,9 @@ def application_stylesheet(
     QMainWindow::separator:hover {{
         background: {accent};
     }}
+    QWidget#BrowserCentral {{
+        background: palette(window);
+    }}
     QDockWidget {{
         font-weight: 600;
         border: 1px solid palette(mid);
@@ -81,16 +84,18 @@ def application_stylesheet(
     QToolButton#BrowserDockChromeButton {{
         padding: 0px;
         margin: 0px;
-        border: none;
+        border: 1px solid transparent;
         background: transparent;
         color: palette(text);
-        font-size: 10px;
         border-radius: {radius_sm}px;
-        max-width: 16px;
-        max-height: 16px;
+        min-width: 18px;
+        max-width: 18px;
+        min-height: 18px;
+        max-height: 18px;
     }}
     QToolButton#BrowserDockChromeButton:hover {{
         background: palette(alternate-base);
+        border-color: palette(mid);
     }}
     QLineEdit#FileFilter {{
         border: 1px solid palette(mid);
@@ -314,7 +319,24 @@ def application_stylesheet(
         background: transparent;
     }}
     QWidget#PreviewDockZoomHost {{
-        background: palette(midlight);
+        background: transparent;
+    }}
+    QWidget#PreviewZoomBar {{
+        background: transparent;
+    }}
+    QPushButton#PreviewZoomReset {{
+        border: 1px solid palette(mid);
+        background: palette(base);
+        padding: 0px 8px;
+        min-height: 18px;
+        max-height: 18px;
+        border-radius: {radius_sm}px;
+    }}
+    QPushButton#PreviewZoomReset:hover {{
+        background: palette(alternate-base);
+    }}
+    QPushButton#PreviewZoomReset:pressed {{
+        background: palette(mid);
     }}
     QTabBar#PreviewFileTabBar::tab:selected {{
         background: palette(highlight);
@@ -354,6 +376,10 @@ def application_stylesheet(
         border-radius: {radius_sm}px;
     }}
     QToolButton#ToolbarOverflowButton::menu-indicator {{
+        image: none;
+        width: 0px;
+    }}
+    QToolButton#FileColumnsButton::menu-indicator {{
         image: none;
         width: 0px;
     }}

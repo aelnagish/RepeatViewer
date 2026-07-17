@@ -365,8 +365,13 @@ class DefineDatabaseDialog(QDialog):
         layout.addWidget(self._user_databases)
         layout.addWidget(buttons)
 
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().showEvent(event)
+        self._focused_path_edit = self._cdd_path
+        self._cdd_path.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
-        if event.type() == QEvent.Type.FocusIn:
+        if event.type() in {QEvent.Type.FocusIn, QEvent.Type.MouseButtonPress}:
             if watched is self._cdd_path:
                 self._focused_path_edit = self._cdd_path
             else:
@@ -376,6 +381,18 @@ class DefineDatabaseDialog(QDialog):
                         self._user_databases._active_row = row
                         break
         return super().eventFilter(watched, event)
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        """Fill the focused CDD directory field from a Folders-panel click."""
+        if self._focused_path_edit is not self._cdd_path:
+            return False
+        if self.focusWidget() is not self._cdd_path:
+            return False
+        resolved = folder.expanduser().resolve()
+        if not resolved.is_dir():
+            return False
+        self._cdd_path.setText(str(resolved))
+        return True
 
     def apply_file_from_panel(self, path: Path) -> bool:
         """Fill the focused CDD or user-database path field from a Files panel click."""

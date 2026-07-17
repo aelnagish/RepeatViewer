@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from teviewer.backends.blast_genome_plot import find_blast_table_for_query, is_te_hit_table_file
 from teviewer.backends.separate_fasta import count_fasta_sequences
-from teviewer.browser_file_metadata import BrowserFileMetadata, quick_metadata_for_file
+from teviewer.browser_file_metadata import BrowserFileMetadata
 from teviewer.widgets.browser_icons import browser_file_icon
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
@@ -332,13 +332,28 @@ class FileListTableWidget(QTableWidget):
         path: Path,
         *,
         metadata: BrowserFileMetadata | None = None,
+        fill_metadata_columns: bool | None = None,
     ) -> FileListRow:
         path = path.expanduser().resolve()
         was_sorting = self.isSortingEnabled()
         self.setSortingEnabled(False)
         row = self.rowCount()
         self.insertRow(row)
-        meta = metadata if metadata is not None else quick_metadata_for_file(path)
+        if fill_metadata_columns is None:
+            from teviewer.widgets.file_list_columns import metadata_columns_visible
+
+            fill_metadata_columns = metadata_columns_visible()
+        if metadata is None:
+            if fill_metadata_columns:
+                from teviewer.browser_file_metadata import quick_metadata_for_file
+
+                meta = quick_metadata_for_file(path)
+            else:
+                from teviewer.browser_file_metadata import minimal_name_metadata
+
+                meta = minimal_name_metadata(path)
+        else:
+            meta = metadata
         path_text = str(path)
 
         check_item = QTableWidgetItem()
@@ -358,7 +373,8 @@ class FileListTableWidget(QTableWidget):
         name_item.setTextAlignment(_LEFT_ALIGN)
         self.setItem(row, _COL_NAME, name_item)
 
-        self._apply_metadata_cells(row, path_text, meta)
+        if fill_metadata_columns:
+            self._apply_metadata_cells(row, path_text, meta)
         self.setSortingEnabled(was_sorting)
         return FileListRow(self, row)
 
@@ -423,11 +439,28 @@ class FileListTableWidget(QTableWidget):
         """Apply several metadata updates without re-sorting between rows."""
         if not items:
             return
+        row_index = self._path_row_index()
         was_sorting = self.isSortingEnabled()
         self.setSortingEnabled(False)
-        for path, meta in items:
-            self.update_row_metadata(path, meta)
-        self.setSortingEnabled(was_sorting)
+        self.setUpdatesEnabled(False)
+        try:
+            for path, meta in items:
+                key = str(path.expanduser().resolve())
+                row = row_index.get(key)
+                if row is None:
+                    continue
+                self._apply_metadata_cells(row, key, meta)
+        finally:
+            self.setUpdatesEnabled(True)
+            self.setSortingEnabled(was_sorting)
+
+    def _path_row_index(self) -> dict[str, int]:
+        index: dict[str, int] = {}
+        for row in range(self.rowCount()):
+            key = self._path_for_row(row)
+            if key:
+                index[key] = row
+        return index
 
     def apply_default_sort(self) -> None:
         order = Qt.SortOrder.AscendingOrder if self._sort_ascending else Qt.SortOrder.DescendingOrder
@@ -481,6 +514,14 @@ class FileListTableWidget(QTableWidget):
             return None
         raw = item.data(_ROLE_PATH)
         return str(raw) if raw else None
+
+    def listed_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        for row in range(self.rowCount()):
+            raw = self._path_for_row(row)
+            if raw:
+                paths.append(Path(raw))
+        return paths
 
     def _style_row(
         self,

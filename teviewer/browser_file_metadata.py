@@ -78,6 +78,32 @@ def _molecule_type(path: Path) -> str:
     return "File"
 
 
+def minimal_name_metadata(path: Path) -> BrowserFileMetadata:
+    """Cheapest row metadata: filename only (no stat or file reads)."""
+    resolved = path.expanduser()
+    try:
+        resolved = resolved.resolve()
+    except OSError:
+        pass
+    name = resolved.name
+    return BrowserFileMetadata(
+        modified_text="—",
+        description_text="—",
+        length_text="—",
+        size_text="—",
+        molecule_type="—",
+        sequence_count_text="—",
+        gc_text="—",
+        sort_name=name.lower(),
+        sort_description="",
+        sort_modified=0.0,
+        sort_length=-1.0,
+        sort_size=0.0,
+        sort_sequence_count=-1,
+        sort_gc=-1.0,
+    )
+
+
 def quick_metadata_for_file(path: Path) -> BrowserFileMetadata:
     """Cheap metadata from ``stat`` + suffix only (no file reads).
 

@@ -25,11 +25,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+
+from teviewer.widgets.spin_boxes import NoWheelSpinBox
 
 if TYPE_CHECKING:
     from teviewer.plugins.registry import PluginRegistry
@@ -373,7 +374,7 @@ class SettingsDialog(QDialog):
             "(AliView-style green/blue/red when off)."
         )
         self._color_blind_scheme.toggled.connect(self._on_color_blind_toggled)
-        self._batch_workers = QSpinBox()
+        self._batch_workers = NoWheelSpinBox()
         self._batch_workers.setRange(1, 32)
         self._batch_workers.setValue(project.batch_workers)
         self._batch_workers.setToolTip(
@@ -381,14 +382,14 @@ class SettingsDialog(QDialog):
             "BLAST and TEAid thread counts are derived from CPU cores minus a small "
             f"reserve for {APP_DISPLAY_NAME}, divided by this worker count."
         )
-        self._browser_panel_font = QSpinBox()
+        self._browser_panel_font = NoWheelSpinBox()
         self._browser_panel_font.setRange(8, 16)
         self._browser_panel_font.setValue(load_browser_panel_font_size())
         self._browser_panel_font.setSuffix(" pt")
         self._browser_panel_font.setToolTip(
             "Font size for folder and file names in the Browser panel."
         )
-        self._preview_zoom = QSpinBox()
+        self._preview_zoom = NoWheelSpinBox()
         self._preview_zoom.setRange(MIN_PREVIEW_ZOOM_PERCENT, MAX_PREVIEW_ZOOM_PERCENT)
         self._preview_zoom.setValue(load_preview_zoom_percent())
         self._preview_zoom.setSuffix(" %")
@@ -444,7 +445,7 @@ class SettingsDialog(QDialog):
         self._update_accent_swatch()
 
         # Performance
-        self._ui_thread_reserve = QSpinBox()
+        self._ui_thread_reserve = NoWheelSpinBox()
         self._ui_thread_reserve.setRange(0, 8)
         self._ui_thread_reserve.setValue(load_ui_thread_reserve())
         self._ui_thread_reserve.setSpecialValueText("Auto")

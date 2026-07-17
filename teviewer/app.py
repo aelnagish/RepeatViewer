@@ -12,7 +12,7 @@ from teviewer.qt_runtime import apply_macos_app_name, configure_qt_runtime
 configure_qt_runtime()
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtGui import QGuiApplication, QPalette, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
 from teviewer.widgets.app_icon import app_icon
@@ -90,11 +90,13 @@ def run_app(argv: list[str] | None = None) -> int:
         if not icon.isNull():
             app.setWindowIcon(icon)
 
-        splash = QSplashScreen(QPixmap(480, 120))
+        splash_pix = QPixmap(480, 120)
+        splash_pix.fill(app.palette().color(QPalette.ColorRole.Window))
+        splash = QSplashScreen(splash_pix)
         splash.showMessage(
             f"Starting {APP_DISPLAY_NAME}…",
             Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
-            Qt.GlobalColor.white,
+            app.palette().color(QPalette.ColorRole.WindowText),
         )
         splash.show()
         app.processEvents()

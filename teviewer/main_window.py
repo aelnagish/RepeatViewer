@@ -35,6 +35,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QKeySequence,
     QMouseEvent,
+    QPalette,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -913,6 +914,10 @@ class _PendingTeVizBuild:
     map_options: TeGenomeMapOptions
 
 
+_METADATA_UI_CHUNK = 8
+_METADATA_STAT_CHUNK = 24
+
+
 class _MetadataEnrichWorker(QObject):
     """Compute FASTA table metadata off the UI thread."""
 
@@ -988,6 +993,11 @@ class MainWindow(QMainWindow):
         self._metadata_enrich_thread: QThread | None = None
         self._metadata_enrich_worker: _MetadataEnrichWorker | None = None
         self._metadata_enrich_generation = 0
+        self._pending_metadata_ui: list[tuple[Path, object]] = []
+        self._metadata_stat_queue: list[Path] = []
+        self._metadata_ui_timer = QTimer(self)
+        self._metadata_ui_timer.setSingleShot(True)
+        self._metadata_ui_timer.timeout.connect(self._drain_metadata_ui_queue)
         self._job_running = False
         self._last_job_source_files: list[Path] = []
         self._job_toolbar_actions: list[QAction | QToolButton] = []
@@ -1049,7 +1059,7 @@ class MainWindow(QMainWindow):
             | QMainWindow.DockOption.AllowTabbedDocks
             | QMainWindow.DockOption.AnimatedDocks
         )
-        self.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.TabPosition.North)
+        self.setTabPosition(Qt.DockWidgetArea.LeftDockWidgetArea, QTabWidget.TabPosition.North)
 
         self._folder_tree = FolderTreeWidget()
         self._folder_tree.setObjectName("FolderTree")
@@ -1143,7 +1153,15 @@ class MainWindow(QMainWindow):
         self._normalize_folder_tree_selection()
         self._update_directory_watchers()
         self._update_status()
-        QTimer.singleShot(0, self._apply_default_browser_layout)
+        QTimer.singleShot(0, self._finalize_browser_layout)
+
+    def _finalize_browser_layout(self) -> None:
+        """Re-check dock tiling after the first paint (restoreState can lag)."""
+        if self._browser_layout_needs_repair():
+            self._apply_default_browser_layout(force=True)
+        else:
+            self._apply_default_browser_layout()
+        self._repair_browser_chrome()
 
     def _normalize_folder_tree_selection(self) -> None:
         """Clear any stale multi-selection left from older builds."""
@@ -1214,6 +1232,7 @@ class MainWindow(QMainWindow):
     def _on_file_column_toggled(self, column: int, checked: bool) -> None:
         from teviewer.widgets.file_list_columns import (
             load_visible_file_columns,
+            metadata_columns_visible,
             save_visible_file_columns,
         )
 
@@ -1224,6 +1243,33 @@ class MainWindow(QMainWindow):
             visible.discard(column)
         save_visible_file_columns(visible)
         self._file_list.apply_visible_columns(visible)
+        if checked and metadata_columns_visible(visible):
+            QTimer.singleShot(0, self._fill_visible_file_metadata)
+
+    def _fill_visible_file_metadata(self) -> None:
+        """Populate metadata columns after they are turned on or for stale rows."""
+        from teviewer.browser_file_metadata import is_fasta_path
+
+        paths = self._file_list.listed_paths()
+        if not paths:
+            return
+        self._metadata_stat_queue = [path for path in paths if not is_fasta_path(path)]
+        fasta_paths = [path for path in paths if is_fasta_path(path)]
+        if fasta_paths:
+            self._start_metadata_enrichment(fasta_paths)
+        if self._metadata_stat_queue:
+            self._schedule_metadata_ui_drain()
+
+    def _schedule_metadata_ui_drain(self) -> None:
+        if not self._metadata_ui_timer.isActive():
+            self._metadata_ui_timer.start(0)
+
+    def _collect_metadata_stat_chunk(self) -> list[tuple[Path, object]]:
+        from teviewer.browser_file_metadata import quick_metadata_for_file
+
+        chunk = self._metadata_stat_queue[:_METADATA_STAT_CHUNK]
+        del self._metadata_stat_queue[:_METADATA_STAT_CHUNK]
+        return [(path, quick_metadata_for_file(path)) for path in chunk]
 
     def _sync_folder_tree_label_for_folder(self, folder: Path) -> None:
         item = self._find_tree_item_for_path(folder.expanduser().resolve())
@@ -1246,7 +1292,10 @@ class MainWindow(QMainWindow):
         was_sorting = self._file_list.isSortingEnabled()
         self._file_list.setSortingEnabled(False)
         for path in visible_paths:
-            row_item = self._file_list.add_file_row(path)
+            row_item = self._file_list.add_file_row(
+                path,
+                fill_metadata_columns=False,
+            )
             key = str(path.expanduser().resolve())
             if key in self._highlight_output_keys:
                 self._style_new_output_item(row_item)
@@ -1254,7 +1303,6 @@ class MainWindow(QMainWindow):
                 self._style_source_file_item(row_item)
         self._file_list.setSortingEnabled(was_sorting)
         self._file_list.apply_default_sort()
-        self._start_metadata_enrichment(visible_paths)
 
     def _restore_window_layout(self) -> None:
         import os
@@ -1292,18 +1340,30 @@ class MainWindow(QMainWindow):
                 settings.remove("toolbar_state_v5")
                 settings.endGroup()
         self._purge_legacy_docks()
-        # If an older layout put Files/Preview on the Right (leaving a center gap),
-        # snap back to the single-area split layout.
-        if (
-            self._dock_files is not None
-            and self.dockWidgetArea(self._dock_files) == Qt.DockWidgetArea.RightDockWidgetArea
-        ):
+        if self._browser_layout_needs_repair():
             self._apply_default_browser_layout(force=True)
         else:
             self._apply_default_browser_layout()
         self._ensure_preview_visible()
         self._rebuild_top_toolbar()
         self._repair_browser_chrome()
+
+    def _browser_layout_needs_repair(self) -> bool:
+        """True when dock geometry leaves a visible central gutter or wrong areas."""
+        if self._central_gap_width() > 12:
+            return True
+        for dock in (self._dock_folders, self._dock_files, self._dock_preview):
+            if dock is None:
+                continue
+            if self.dockWidgetArea(dock) != Qt.DockWidgetArea.LeftDockWidgetArea:
+                return True
+        return False
+
+    def _central_gap_width(self) -> int:
+        central = self.centralWidget()
+        if central is None:
+            return 0
+        return max(0, central.width())
 
     def _repair_browser_chrome(self) -> None:
         """Fix file-table header glitches and toolbar overlap after modal dialogs."""
@@ -1617,11 +1677,21 @@ class MainWindow(QMainWindow):
             BrowserDockTitleBar(self._dock_folders, "Folders")
         )
 
-        # Zero-size central widget: put ALL docks in one area and split them so
-        # Qt does not leave a blank gutter between Left and Right dock areas.
+        # Central filler: when a saved layout leaves a dock gap, paint it with the
+        # window color instead of showing uninitialized GPU memory (static/snow).
         central = QWidget(self)
         central.setObjectName("BrowserCentral")
-        central.setFixedSize(0, 0)
+        central.setAutoFillBackground(True)
+        window_bg = self.palette().color(QPalette.ColorRole.Window)
+        central_palette = central.palette()
+        central_palette.setColor(QPalette.ColorRole.Window, window_bg)
+        central.setPalette(central_palette)
+        central.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Expanding,
+        )
+        central.setMinimumWidth(0)
+        central.setMaximumWidth(0)
         self.setCentralWidget(central)
         self._browser_panel = central
 
@@ -2474,8 +2544,12 @@ class MainWindow(QMainWindow):
             selected_paths=self._selected_genome_fastas(),
         )
         self._genome_dialog = dialog
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
         dialog.finished.connect(self._on_genome_dialog_finished)
         dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _selected_genome_fastas(self) -> list[Path]:
         return [
@@ -3175,6 +3249,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_folder_selected(self, folder: Path) -> None:
+        self._sync_define_database_dialog_from_folder(folder)
         self._populate_file_list(folder, record_history=True)
         self._update_directory_watchers()
         self._persist_workspace()
@@ -3339,6 +3414,8 @@ class MainWindow(QMainWindow):
     def _apply_file_filter(self) -> None:
         if not self._current_folder:
             return
+        from teviewer.widgets.file_list_columns import metadata_columns_visible
+
         query = self._file_filter.text().strip().lower()
         self._file_list.clear_rows()
         visible: list[Path] = []
@@ -3349,11 +3426,15 @@ class MainWindow(QMainWindow):
 
         visible = sort_file_paths(visible, self._current_file_sort_mode())
 
+        fill_metadata = metadata_columns_visible()
         # Fast path: name/size/type from stat only — no FASTA reads on the UI thread.
         was_sorting = self._file_list.isSortingEnabled()
         self._file_list.setSortingEnabled(False)
         for file_path in visible:
-            row_item = self._file_list.add_file_row(file_path)
+            row_item = self._file_list.add_file_row(
+                file_path,
+                fill_metadata_columns=fill_metadata,
+            )
             key = str(file_path.resolve())
             if key in self._highlight_output_keys:
                 self._style_new_output_item(row_item)
@@ -3373,9 +3454,13 @@ class MainWindow(QMainWindow):
             len(visible),
             len(self._cached_folder_files),
         )
-        self._start_metadata_enrichment(visible)
+        if fill_metadata:
+            self._start_metadata_enrichment(visible)
 
     def _stop_metadata_enrichment(self) -> None:
+        self._pending_metadata_ui.clear()
+        self._metadata_stat_queue.clear()
+        self._metadata_ui_timer.stop()
         worker = self._metadata_enrich_worker
         thread = self._metadata_enrich_thread
         self._metadata_enrich_worker = None
@@ -3388,7 +3473,10 @@ class MainWindow(QMainWindow):
 
     def _start_metadata_enrichment(self, paths: list[Path]) -> None:
         from teviewer.browser_file_metadata import is_fasta_path
+        from teviewer.widgets.file_list_columns import metadata_columns_visible
 
+        if not metadata_columns_visible():
+            return
         self._stop_metadata_enrichment()
         fasta_paths = [p.expanduser().resolve() for p in paths if is_fasta_path(p)]
         if not fasta_paths:
@@ -3420,8 +3508,54 @@ class MainWindow(QMainWindow):
         if self._file_list is None:
             return
         updates = [(Path(str(path_text)), meta) for path_text, meta in batch]
-        self._file_list.update_rows_metadata(updates)
-        self._refresh_file_list_highlights()
+        self._enqueue_metadata_ui_updates(updates)
+
+    def _enqueue_metadata_ui_updates(
+        self,
+        updates: list[tuple[Path, object]],
+    ) -> None:
+        if not updates or self._file_list is None:
+            return
+        self._pending_metadata_ui.extend(updates)
+        self._schedule_metadata_ui_drain()
+
+    def _drain_metadata_ui_queue(self) -> None:
+        if self._file_list is None:
+            self._pending_metadata_ui.clear()
+            self._metadata_stat_queue.clear()
+            return
+        if self._metadata_stat_queue:
+            self._pending_metadata_ui.extend(self._collect_metadata_stat_chunk())
+        chunk = self._pending_metadata_ui[:_METADATA_UI_CHUNK]
+        del self._pending_metadata_ui[:_METADATA_UI_CHUNK]
+        if chunk:
+            self._file_list.update_rows_metadata(chunk)
+            self._refresh_metadata_row_highlights(chunk)
+        if self._metadata_stat_queue or self._pending_metadata_ui:
+            self._metadata_ui_timer.start(0)
+        else:
+            self._refresh_file_list_highlights()
+
+    def _refresh_metadata_row_highlights(
+        self,
+        updates: list[tuple[Path, object]],
+    ) -> None:
+        """Re-tint only rows touched by a metadata chunk (cheap during scroll)."""
+        if self._file_list is None or not updates:
+            return
+        row_index = self._file_list._path_row_index()
+        for path, _meta in updates:
+            key = str(path.expanduser().resolve())
+            row = row_index.get(key)
+            if row is None:
+                continue
+            item = self._file_list.item(row)
+            if item is None:
+                continue
+            if key in self._highlight_output_keys:
+                self._style_new_output_item(item)
+            elif key in self._highlight_source_keys:
+                self._style_source_file_item(item)
 
     def _sync_files_status(
         self,
@@ -3917,11 +4051,24 @@ class MainWindow(QMainWindow):
                 return path.expanduser().resolve()
         return None
 
+    def _sync_genome_dialog_from_files(self, clicked_path: Path | None = None) -> None:
+        dialog = self._genome_dialog
+        if dialog is None or not dialog.isVisible() or clicked_path is None:
+            return
+        dialog.apply_file_from_panel(clicked_path)
+
     def _sync_define_database_dialog_from_files(self, clicked_path: Path | None = None) -> None:
         dialog = self._define_database_dialog
         if dialog is None or not dialog.isVisible() or clicked_path is None:
             return
         if dialog.apply_file_from_panel(clicked_path):
+            self._schedule_raise_define_database_dialog()
+
+    def _sync_define_database_dialog_from_folder(self, folder: Path) -> None:
+        dialog = self._define_database_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        if dialog.apply_folder_from_panel(folder):
             self._schedule_raise_define_database_dialog()
 
     def _schedule_raise_define_database_dialog(self) -> None:
@@ -4199,11 +4346,8 @@ class MainWindow(QMainWindow):
             candidate = Path(str(raw)).expanduser()
             if candidate.exists():
                 panel_path = candidate.resolve()
-            preview_path = self._preview_path_from_item(item)
-            if preview_path is not None:
-                if self._genome_dialog is not None and is_genome_fasta(preview_path):
-                    self._genome_dialog.apply_file_from_panel(preview_path)
         if panel_path is not None:
+            self._sync_genome_dialog_from_files(panel_path)
             self._sync_plugin_run_dialog_from_files(panel_path)
             self._sync_te_viz_dialog_input_from_files(panel_path)
             self._sync_define_database_dialog_from_files(panel_path)

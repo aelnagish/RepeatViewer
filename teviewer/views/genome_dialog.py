@@ -259,7 +259,7 @@ class PanGenomeListWidget(QWidget):
         return row
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        if event.type() == QEvent.Type.FocusIn:
+        if event.type() in {QEvent.Type.FocusIn, QEvent.Type.MouseButtonPress}:
             for row in self._rows:
                 if watched is row.path:
                     self._focused_row = row
@@ -337,6 +337,16 @@ class PanGenomeListWidget(QWidget):
         for path in paths:
             self.apply_path(path)
 
+    def activate_panel_path_pick(self) -> None:
+        """Focus the active pan-genome path field for Files-panel selection."""
+        self._path_field_focused = True
+        row = self._focused_row
+        if row is None and self._rows:
+            row = self._rows[0]
+            self._focused_row = row
+        if row is not None:
+            row.path.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def entries(self) -> list[PanGenomeEntry]:
         out: list[PanGenomeEntry] = []
         seen: set[str] = set()
@@ -392,6 +402,7 @@ class GenomeDialog(QDialog):
             line.installEventFilter(self)
         self._populate_genome_history(project.genome_file)
         self._genome.activated.connect(self._on_genome_history_selected)
+        self._genome.installEventFilter(self)
 
         self._pan_list = PanGenomeListWidget()
         self._pan_list.size_changed.connect(self._adjust_dialog_size)
@@ -472,6 +483,17 @@ class GenomeDialog(QDialog):
         self.raise_()
         self.activateWindow()
         self._adjust_dialog_size()
+        self._activate_panel_path_pick()
+
+    def _activate_panel_path_pick(self) -> None:
+        """Focus the active path field so the next Files-panel click can fill it."""
+        if self._mode_pan.isChecked():
+            self._pan_list.activate_panel_path_pick()
+        else:
+            self._single_genome_path_focused = True
+            line = self._genome.lineEdit()
+            if line is not None:
+                line.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _adjust_dialog_size(self) -> None:
         if self._mode_pan.isChecked():
@@ -529,6 +551,8 @@ class GenomeDialog(QDialog):
                 self._genome.lineEdit().setText(self._single_genome_snapshot)
         self._update_hint()
         self._adjust_dialog_size()
+        if self.isVisible():
+            self._activate_panel_path_pick()
 
     def _update_hint(self) -> None:
         if self._mode_pan.isChecked():
@@ -571,30 +595,30 @@ class GenomeDialog(QDialog):
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         line = self._genome.lineEdit()
-        if line is not None and watched is line:
-            if event.type() == QEvent.Type.DragEnter:
-                if _paths_from_mime(event.mimeData()):
-                    event.acceptProposedAction()
-                    return True
-                event.ignore()
-                return True
-            if event.type() == QEvent.Type.DragMove:
-                if _paths_from_mime(event.mimeData()):
-                    event.acceptProposedAction()
-                    return True
-                event.ignore()
-                return True
-            if event.type() == QEvent.Type.Drop:
-                paths = _paths_from_mime(event.mimeData())
-                if paths:
-                    line.setText(str(paths[0]))
-                    event.acceptProposedAction()
-                    return True
-                event.ignore()
-                return True
-            if event.type() == QEvent.Type.FocusIn:
+        if watched is self._genome or (line is not None and watched is line):
+            if event.type() in {QEvent.Type.FocusIn, QEvent.Type.MouseButtonPress}:
                 self._single_genome_path_focused = True
-                return False
+            if line is not None and watched is line:
+                if event.type() == QEvent.Type.DragEnter:
+                    if _paths_from_mime(event.mimeData()):
+                        event.acceptProposedAction()
+                        return True
+                    event.ignore()
+                    return True
+                if event.type() == QEvent.Type.DragMove:
+                    if _paths_from_mime(event.mimeData()):
+                        event.acceptProposedAction()
+                        return True
+                    event.ignore()
+                    return True
+                if event.type() == QEvent.Type.Drop:
+                    paths = _paths_from_mime(event.mimeData())
+                    if paths:
+                        line.setText(str(paths[0]))
+                        event.acceptProposedAction()
+                        return True
+                    event.ignore()
+                    return True
         return super().eventFilter(watched, event)
 
     def _path_str(self, path: Path | None) -> str:

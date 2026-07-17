@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from teviewer.widgets.dock_title_bar import BROWSER_DOCK_TITLE_HEIGHT
 from teviewer.widgets.preview_zoom import (
     DEFAULT_PREVIEW_ZOOM_PERCENT,
     MAX_PREVIEW_ZOOM_PERCENT,
@@ -27,7 +28,7 @@ from teviewer.widgets.preview_zoom import (
     save_preview_zoom_percent,
     wheel_zoom_steps_from_event,
 )
-
+from teviewer.widgets.spin_boxes import NoWheelSpinBox
 
 ZOOM_BAR_HEIGHT = 20
 ZOOM_CONTROL_HEIGHT = 18
@@ -84,9 +85,9 @@ def _make_zoom_percent_spin(
     minimum: int,
     maximum: int,
     tooltip: str,
-) -> QSpinBox:
+) -> NoWheelSpinBox:
     """Rounded percent spinbox (figure-2 style); value shows with a ``%`` suffix."""
-    spin = QSpinBox()
+    spin = NoWheelSpinBox()
     spin.setObjectName("previewZoomSpin")
     spin.setRange(minimum, maximum)
     spin.setSuffix("%")
@@ -102,6 +103,19 @@ def _make_zoom_percent_spin(
     return spin
 
 
+def _make_preview_reset_button(*, tooltip: str) -> QPushButton:
+    """Bordered reset control matching the preview zoom spinbox (figure-2 style)."""
+    btn = QPushButton("Reset")
+    btn.setObjectName("PreviewZoomReset")
+    btn.setFlat(False)
+    btn.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+    btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    btn.setToolTip(tooltip)
+    btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    return btn
+
+
 class PreviewZoomBar(QWidget):
     """Compact preview scale controls (% spin / Reset) for the Preview title bar."""
 
@@ -110,7 +124,8 @@ class PreviewZoomBar(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(ZOOM_BAR_HEIGHT)
+        self.setObjectName("PreviewZoomBar")
+        self.setFixedHeight(BROWSER_DOCK_TITLE_HEIGHT - 4)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -123,9 +138,9 @@ class PreviewZoomBar(QWidget):
         self._spin.valueChanged.connect(self._on_spin)
         layout.addWidget(self._spin)
 
-        self._reset_btn = QPushButton("Reset")
-        self._reset_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._reset_btn.setToolTip("Restore default preview zoom (100%)")
+        self._reset_btn = _make_preview_reset_button(
+            tooltip="Restore default preview zoom (100%)",
+        )
         self._reset_btn.clicked.connect(self._reset_zoom)
         layout.addWidget(self._reset_btn)
 
@@ -173,7 +188,8 @@ class AnnotationZoomBar(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(ZOOM_BAR_HEIGHT)
+        self.setObjectName("PreviewZoomBar")
+        self.setFixedHeight(BROWSER_DOCK_TITLE_HEIGHT - 4)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -188,9 +204,9 @@ class AnnotationZoomBar(QWidget):
         self._spin.valueChanged.connect(self._on_spin)
         layout.addWidget(self._spin)
 
-        self._reset_btn = QPushButton("Reset")
-        self._reset_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._reset_btn.setToolTip("Fit the full sequence in the window")
+        self._reset_btn = _make_preview_reset_button(
+            tooltip="Fit the full sequence in the window",
+        )
         self._reset_btn.clicked.connect(self.reset_requested.emit)
         layout.addWidget(self._reset_btn)
 

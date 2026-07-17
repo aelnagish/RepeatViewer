@@ -36,6 +36,13 @@ DEFAULT_VISIBLE_COLUMNS = frozenset(
 )
 
 
+def metadata_columns_visible(visible: set[int] | None = None) -> bool:
+    """True when any optional metadata column is shown."""
+    if visible is None:
+        visible = load_visible_file_columns()
+    return bool(set(visible) & set(TOGGLEABLE_COLUMNS.keys()))
+
+
 def load_visible_file_columns() -> set[int]:
     s = QSettings()
     s.beginGroup(FILES_SETTINGS_GROUP)

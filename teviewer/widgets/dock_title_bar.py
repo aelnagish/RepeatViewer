@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QStyle,
     QTabBar,
     QToolButton,
     QWidget,
@@ -77,11 +78,17 @@ class BrowserDockTitleBar(QWidget):
             trailing.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
             layout.addWidget(trailing, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self._float_btn = self._make_chrome_button("⧉", "Float / dock panel")
+        self._float_btn = self._make_chrome_button(
+            tip="Float / dock panel",
+            icon=self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton),
+        )
         self._float_btn.clicked.connect(self._toggle_floating)
         layout.addWidget(self._float_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self._close_btn = self._make_chrome_button("✕", "Hide panel")
+        self._close_btn = self._make_chrome_button(
+            tip="Hide panel",
+            text="×",
+        )
         self._close_btn.clicked.connect(dock.close)
         layout.addWidget(self._close_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -101,14 +108,24 @@ class BrowserDockTitleBar(QWidget):
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         return QSize(0, BROWSER_DOCK_TITLE_HEIGHT)
 
-    def _make_chrome_button(self, glyph: str, tip: str) -> QToolButton:
+    def _make_chrome_button(
+        self,
+        *,
+        tip: str,
+        text: str = "",
+        icon=None,
+    ) -> QToolButton:
         btn = QToolButton(self)
         btn.setObjectName("BrowserDockChromeButton")
         btn.setAutoRaise(True)
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.setToolTip(tip)
-        btn.setText(glyph)
-        btn.setFixedSize(QSize(16, 16))
+        if icon is not None and not icon.isNull():
+            btn.setIcon(icon)
+            btn.setText("")
+        else:
+            btn.setText(text)
+        btn.setFixedSize(QSize(18, 18))
         return btn
 
     def _toggle_floating(self) -> None:
@@ -116,10 +133,14 @@ class BrowserDockTitleBar(QWidget):
 
     def _sync_float_button(self, floating: bool) -> None:
         if floating:
-            self._float_btn.setText("◼")
+            self._float_btn.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMinButton)
+            )
             self._float_btn.setToolTip("Dock panel")
         else:
-            self._float_btn.setText("⧉")
+            self._float_btn.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton)
+            )
             self._float_btn.setToolTip("Float panel")
 
     @staticmethod
