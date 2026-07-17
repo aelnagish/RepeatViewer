@@ -66,6 +66,33 @@ class UserDatabase:
         return "protein"
 
 
+BLAST_MOLECULE_NUCL = "nucl"
+BLAST_MOLECULE_PROT = "prot"
+BLAST_MOLECULE_TYPES = (BLAST_MOLECULE_NUCL, BLAST_MOLECULE_PROT)
+
+
+@dataclass
+class BlastDatabase:
+    """Saved, named BLAST database (Geneious-style database manager)."""
+
+    name: str
+    source_fasta: Path
+    db_prefix_path: Path
+    molecule_type: str = BLAST_MOLECULE_NUCL
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        self.name = str(self.name).strip()
+        self.molecule_type = (
+            self.molecule_type if self.molecule_type in BLAST_MOLECULE_TYPES else BLAST_MOLECULE_NUCL
+        )
+        self.created_at = str(self.created_at or "")
+        resolved_fasta = _to_path(self.source_fasta)
+        self.source_fasta = resolved_fasta if resolved_fasta is not None else Path(str(self.source_fasta))
+        resolved_prefix = _to_path(self.db_prefix_path)
+        self.db_prefix_path = resolved_prefix if resolved_prefix is not None else Path(str(self.db_prefix_path))
+
+
 @dataclass
 class TEviewerProject:
     """Paths the user configures once per analysis session."""
@@ -76,6 +103,7 @@ class TEviewerProject:
     pan_genomes: list[PanGenomeEntry] = field(default_factory=list)
     cdd_dirs: list[Path] = field(default_factory=list)
     user_databases: list[UserDatabase] = field(default_factory=list)
+    blast_databases: list[BlastDatabase] = field(default_factory=list)
 
     # Optional tool flags (mirror TEtrimmerGUI CLI)
     use_system_blast: bool = False
@@ -130,6 +158,27 @@ class TEviewerProject:
                     )
                 )
         self.user_databases = normalized_dbs
+        normalized_blast_dbs: list[BlastDatabase] = []
+        for entry in self.blast_databases:
+            if isinstance(entry, BlastDatabase):
+                if entry.name and entry.source_fasta and entry.db_prefix_path:
+                    normalized_blast_dbs.append(entry)
+            elif isinstance(entry, dict):
+                name = str(entry.get("name", "")).strip()
+                raw_fasta = entry.get("source_fasta")
+                raw_prefix = entry.get("db_prefix_path")
+                if not name or not raw_fasta or not raw_prefix:
+                    continue
+                normalized_blast_dbs.append(
+                    BlastDatabase(
+                        name=name,
+                        source_fasta=Path(str(raw_fasta)),
+                        db_prefix_path=Path(str(raw_prefix)),
+                        molecule_type=str(entry.get("molecule_type", BLAST_MOLECULE_NUCL)),
+                        created_at=str(entry.get("created_at", "")),
+                    )
+                )
+        self.blast_databases = normalized_blast_dbs
 
     @property
     def cdd_dir(self) -> Optional[Path]:

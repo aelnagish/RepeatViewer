@@ -146,6 +146,7 @@ class BlastOptions:
     top_msa_lines: int = DEFAULT_BLAST_TOP_MSA_LINES
     write_gff: bool = DEFAULT_BLAST_WRITE_GFF
     minimum_bit_score: float = DEFAULT_BLAST_MINIMUM_BIT_SCORE
+    blast_database_name: str | None = None
 
 
 DEFAULT_CONSENSUS_THRESHOLD = 0.8
@@ -389,6 +390,7 @@ def load_blast_options() -> BlastOptions:
         minimum_bit_score=float(
             v.get("minimum_bit_score", DEFAULT_BLAST_MINIMUM_BIT_SCORE)
         ),
+        blast_database_name=(str(v["blast_database_name"]) if v.get("blast_database_name") else None),
     )
 
 
@@ -401,6 +403,7 @@ def save_blast_options(opts: BlastOptions) -> None:
             "top_msa_lines": opts.top_msa_lines,
             "write_gff": opts.write_gff,
             "minimum_bit_score": opts.minimum_bit_score,
+            "blast_database_name": opts.blast_database_name or "",
         },
     )
 
