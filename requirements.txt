@@ -1,0 +1,17 @@
+PySide6>=6.6
+PySide6-Addons>=6.6
+click>=8.0
+biopython>=1.80
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+plotly>=5.0
+requests>=2.28
+orfipy>=0.0.4
+pyhmmer>=0.12.0
+# Forked Flexidot (Jiangzhao branch) with html output + --teviewer-integration
+# (interactive Go-to dotplots). Stock PyPI flexidot only supports png/pdf/svg.
+flexidot @ git+https://github.com/qjiangzhao/flexidot.git@Jiangzhao
+
+# pyhmmer 0.12+ ships experimental Windows AMD64 wheels (64-bit Python required).
+# blast+ / mafft / clustalo — optional if using system tools instead of bundled binaries

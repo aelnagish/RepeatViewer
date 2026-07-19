@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teviewer-benchmark"
+version = "0.1.0"
+description = "TEviewer plugin — TE annotation benchmarking (TEtrimmer TE_anno_benchmarker)"
+requires-python = ">=3.10"
+dependencies = [
+  "teviewer>=0.2.0",
+  "PySide6>=6.6",
+  "click>=8.0",
+  "pandas>=2.0",
+  "matplotlib>=3.7",
+  "plotly>=5.0",
+  "seaborn>=0.12",
+]
+
+[project.entry-points."teviewer.plugins"]
+te_benchmark = "teviewer_benchmark.plugin:TEBenchmarkPlugin"
+
+[tool.setuptools.packages.find]
+where = ["src"]

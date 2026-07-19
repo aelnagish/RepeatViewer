@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teviewer"
+version = "0.2.0"
+description = "PySide6 GUI for TE consensus curation and visualization"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.10"
+authors = [
+  { name = "TEtrimmer / TEviewer contributors" },
+]
+dependencies = [
+  "PySide6>=6.6",
+  "PySide6-Addons>=6.6",
+  "click>=8.0",
+  "biopython>=1.80",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "matplotlib>=3.7",
+  "plotly>=5.0",
+  "requests>=2.28",
+  # Forked Flexidot (Jiangzhao branch) with html output + --teviewer-integration
+  # (interactive Go-to dotplots). Stock PyPI flexidot only supports png/pdf/svg.
+  "flexidot @ git+https://github.com/qjiangzhao/flexidot.git@Jiangzhao",
+  "pytrf>=1.4",
+  "pysam>=0.22",
+  "scikit-learn>=1.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+# Flat Fusion theme (not default). Enable with: TEVIEWER_USE_QDARKTHEME=1
+theme-flat = ["pyqtdarktheme-fork>=2.3.2"]
+
+[project.scripts]
+teviewer = "teviewer.cli:main"
+
+[tool.setuptools.packages.find]
+where = [".", "examples/teviewer_minimap2_plugin/src"]
+include = ["teviewer*", "teviewer_minimap2*"]
+
+[project.entry-points."teviewer.plugins"]
+minimap2 = "teviewer_minimap2.plugin:Minimap2Plugin"
+
+[tool.setuptools.package-data]
+teviewer = ["backends/blast/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*", "assets/igv/*"]
+teviewer_minimap2 = ["binaries/**/*"]
