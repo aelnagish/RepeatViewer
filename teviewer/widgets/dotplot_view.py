@@ -18,10 +18,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDoubleSpinBox,
     QGraphicsItem,
     QGraphicsScene,
     QGraphicsView,
@@ -44,6 +45,65 @@ from teviewer.backends.dotplot import (
     compute_self_dotplot_for_fasta,
     suggest_word_size,
 )
+from teviewer.backends.fastga_dotplot import (
+    DEFAULT_MIN_IDENTITY,
+    DEFAULT_MIN_LENGTH,
+    FASTGA_PREFERRED_ABOVE_BYTES,
+    FastgaError,
+    fastga_available,
+    install_hint,
+    run_fastga_self_dotplot,
+)
+
+
+class _FastgaWorker(QObject):
+    """Runs a FastGA self-comparison off the UI thread.
+
+    Indexing a large genome takes minutes, so this must never run inline. The
+    worker polls a cancel flag between output lines and terminates the
+    subprocess when asked.
+    """
+
+    progress = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        threads: int,
+        min_identity: float,
+        min_length: int,
+    ) -> None:
+        super().__init__()
+        self._path = path
+        self._threads = threads
+        self._min_identity = min_identity
+        self._min_length = min_length
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = run_fastga_self_dotplot(
+                self._path,
+                threads=self._threads,
+                min_identity=self._min_identity,
+                min_length=self._min_length,
+                progress=self.progress.emit,
+                is_cancelled=lambda: self._cancelled,
+            )
+        except FastgaError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"FastGA failed: {exc}")
+            return
+        self.finished.emit(result)
 
 _FORWARD_COLOR = QColor(40, 90, 180)
 _REVERSE_COLOR = QColor(200, 60, 40)
@@ -573,9 +633,52 @@ class DotplotPanel(QWidget):
             "anti-diagonal lines."
         )
 
+        # FastGA controls: only meaningful for the large-sequence engine.
+        self._identity = QDoubleSpinBox(self)
+        self._identity.setRange(0.5, 1.0)
+        self._identity.setSingleStep(0.05)
+        self._identity.setDecimals(2)
+        self._identity.setValue(DEFAULT_MIN_IDENTITY)
+        self._identity.setFixedWidth(70)
+        self._identity.setToolTip("Minimum alignment identity reported by FastGA.")
+
+        self._min_len = QSpinBox(self)
+        # FastGA rejects values below its seed/chain thresholds: alignments must
+        # contain a 40 bp seed and chains must cover at least 85 bases, so a
+        # very small -l simply fails. 100 is FastGA's own default.
+        self._min_len.setRange(100, 100_000)
+        self._min_len.setSingleStep(50)
+        self._min_len.setValue(DEFAULT_MIN_LENGTH)
+        self._min_len.setFixedWidth(90)
+        self._min_len.setToolTip(
+            "Shortest alignment FastGA will report, in bp.\n"
+            "Cannot go below 100: alignments must contain a seed, and FastGA "
+            "rejects shorter limits.\n"
+            "Raise it on satellite arrays, where short matches swamp the plot."
+        )
+
+        self._identity_label = QLabel("Min identity:", self)
+        self._min_len_label = QLabel("Min length:", self)
+
         self._reset_btn = QToolButton(self)
         self._reset_btn.setText("Reset zoom")
         self._reset_btn.setAutoRaise(True)
+
+        self._cancel_btn = QToolButton(self)
+        self._cancel_btn.setText("Cancel")
+        self._cancel_btn.setAutoRaise(True)
+        self._cancel_btn.hide()
+
+        # FastGA on a large genome takes minutes (measured ~13 min on a 648 Mb
+        # scaffold), so it is never started just because the tab was opened.
+        self._compute_btn = QToolButton(self)
+        self._compute_btn.setText("Compute dotplot")
+        self._compute_btn.setAutoRaise(True)
+        self._compute_btn.hide()
+
+        self._thread: QThread | None = None
+        self._worker: _FastgaWorker | None = None
+        self._pending_key = None
 
         self._status = QLabel("", self)
         self._status.setStyleSheet("color: palette(mid);")
@@ -583,10 +686,17 @@ class DotplotPanel(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(6, 4, 6, 4)
         bar.setSpacing(8)
-        bar.addWidget(QLabel("Word size:", self))
+        self._word_label = QLabel("Word size:", self)
+        bar.addWidget(self._word_label)
         bar.addWidget(self._word)
         bar.addWidget(self._reverse)
+        bar.addWidget(self._identity_label)
+        bar.addWidget(self._identity)
+        bar.addWidget(self._min_len_label)
+        bar.addWidget(self._min_len)
         bar.addWidget(self._reset_btn)
+        bar.addWidget(self._compute_btn)
+        bar.addWidget(self._cancel_btn)
         bar.addStretch(1)
         bar.addWidget(self._status)
 
@@ -609,7 +719,12 @@ class DotplotPanel(QWidget):
 
         self._word.valueChanged.connect(self._recompute)
         self._reverse.toggled.connect(self._recompute)
+        self._identity.valueChanged.connect(self._recompute)
+        self._min_len.valueChanged.connect(self._recompute)
         self._reset_btn.clicked.connect(self._canvas.reset_zoom)
+        self._cancel_btn.clicked.connect(self._cancel_running)
+        self._compute_btn.clicked.connect(self._start_requested_compute)
+        self._sync_engine_controls()
         self._canvas.positionChanged.connect(self._on_position)
         self._canvas.rectSelected.connect(self._on_rect_selected)
 
@@ -617,6 +732,8 @@ class DotplotPanel(QWidget):
         resolved = path.expanduser().resolve()
         if resolved == self._path:
             return
+        # Abandon any FastGA run for the previous file.
+        self._cancel_running()
         self._path = resolved
         self._loaded_for = None
         self._sequence_id = ""
@@ -625,20 +742,92 @@ class DotplotPanel(QWidget):
         self._title.clear()
         self._title.hide()
         self._status.clear()
+        self._compute_btn.hide()
+
+    def _use_fastga(self) -> bool:
+        """Large sequences go to FastGA; small ones stay on the instant engine."""
+        try:
+            size = self._path.stat().st_size
+        except OSError:
+            return False
+        return size > FASTGA_PREFERRED_ABOVE_BYTES and fastga_available()
+
+    def _sync_engine_controls(self) -> None:
+        fastga = self._use_fastga()
+        for widget in (self._word_label, self._word, self._reverse):
+            widget.setVisible(not fastga)
+        for widget in (
+            self._identity_label,
+            self._identity,
+            self._min_len_label,
+            self._min_len,
+        ):
+            widget.setVisible(fastga)
+
+    def _current_key(self):
+        if self._use_fastga():
+            return (
+                self._path,
+                "fastga",
+                round(float(self._identity.value()), 3),
+                int(self._min_len.value()),
+            )
+        return (
+            self._path,
+            "kmer",
+            int(self._word.value()),
+            self._reverse.isChecked(),
+        )
 
     def ensure_loaded(self) -> None:
-        """Compute on first view only, never when a file is merely selected."""
-        key = (self._path, int(self._word.value()), self._reverse.isChecked())
-        if self._loaded_for == key:
+        """Compute on first view only, never when a file is merely selected.
+
+        The small-sequence engine runs immediately (milliseconds). FastGA is
+        offered behind a button instead: on a large genome it runs for minutes,
+        which must never start merely because a tab was clicked.
+        """
+        self._sync_engine_controls()
+        key = self._current_key()
+        if self._loaded_for == key or self._thread is not None:
             return
-        self._compute(key)
+        if self._use_fastga():
+            self._offer_fastga(key)
+        else:
+            self._compute_kmer(key)
+
+    def _offer_fastga(self, key) -> None:
+        """Show what it will cost and wait for the user to ask for it."""
+        self._pending_key = key
+        self._canvas.clear_plot()
+        try:
+            mb = self._path.stat().st_size / 1024 / 1024
+        except OSError:
+            mb = 0
+        self._compute_btn.show()
+        self._status.setText(
+            f"{mb:,.0f} MB — too large for the instant engine. "
+            "FastGA can plot it, but takes minutes on a genome this size."
+        )
+
+    def _start_requested_compute(self) -> None:
+        self._compute_btn.hide()
+        key = self._current_key()
+        if self._thread is None:
+            self._compute_fastga(key)
 
     def _recompute(self) -> None:
         if self._loaded_for is None:
             return
+        # Changing a FastGA setting must not silently relaunch a long run.
+        if self._use_fastga():
+            self._loaded_for = None
+            self._offer_fastga(self._current_key())
+            return
         self.ensure_loaded()
 
-    def _compute(self, key) -> None:
+    # -- built-in k-mer engine (fast, synchronous) -------------------------
+
+    def _compute_kmer(self, key) -> None:
         self._status.setText("Computing…")
         try:
             result = compute_self_dotplot_for_fasta(
@@ -647,17 +836,95 @@ class DotplotPanel(QWidget):
                 include_reverse=self._reverse.isChecked(),
             )
         except DotplotError as exc:
-            self._canvas.clear_plot()
-            self._loaded_for = None
-            self._status.setText(str(exc).splitlines()[0])
-            self.statusMessage.emit(str(exc))
+            message = str(exc)
+            # The built-in engine refuses very large sequences. If FastGA is not
+            # installed, say so here -- that is exactly the case it solves.
+            if not fastga_available() and "limited to" in message:
+                message += f"\n\n{install_hint()}"
+            self._fail(message)
             return
         except Exception as exc:  # noqa: BLE001
-            self._canvas.clear_plot()
-            self._loaded_for = None
-            self._status.setText(f"Could not build dotplot: {exc}")
+            self._fail(f"Could not build dotplot: {exc}")
             return
+        self._apply_result(key, result)
 
+    # -- FastGA engine (slow, threaded) ------------------------------------
+
+    def _compute_fastga(self, key) -> None:
+        self._pending_key = key
+        self._status.setText("Starting FastGA…")
+        self._cancel_btn.show()
+
+        thread = QThread(self)
+        worker = _FastgaWorker(
+            self._path,
+            threads=8,
+            min_identity=float(self._identity.value()),
+            min_length=int(self._min_len.value()),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._status.setText)
+        worker.finished.connect(self._on_fastga_finished)
+        worker.failed.connect(self._on_fastga_failed)
+        # Tear the thread down from either outcome, and only delete the worker
+        # once its thread has actually stopped.
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_thread_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _cancel_running(self) -> None:
+        if self._worker is not None:
+            self._worker.cancel()
+            self._status.setText("Cancelling…")
+
+    @Slot()
+    def _on_thread_finished(self) -> None:
+        thread, self._thread = self._thread, None
+        self._worker = None
+        self._cancel_btn.hide()
+        if thread is not None:
+            thread.deleteLater()
+
+    @Slot(object)
+    def _on_fastga_finished(self, result) -> None:
+        self._apply_result(getattr(self, "_pending_key", None), result)
+
+    @Slot(str)
+    def _on_fastga_failed(self, message: str) -> None:
+        self._fail(message)
+
+    # -- shared -----------------------------------------------------------
+
+    @staticmethod
+    def _condense_error(message: str) -> str:
+        """One informative line from a multi-line tool error.
+
+        The first line is often just "FastGA failed (exit 1)."; the actual
+        reason is on a later line. Prefer whichever line names the tool or
+        explains the problem, so the status bar is not merely "it failed".
+        """
+        lines = [ln.strip() for ln in message.splitlines() if ln.strip()]
+        if not lines:
+            return "Failed."
+        for line in lines[1:]:
+            if ":" in line or line.lower().startswith(("cannot", "could", "no ")):
+                return line
+        return lines[0]
+
+    def _fail(self, message: str) -> None:
+        self._canvas.clear_plot()
+        self._loaded_for = None
+        self._status.setText(self._condense_error(message))
+        # Full text on hover: the condensed line cannot carry everything.
+        self._status.setToolTip(message)
+        self.statusMessage.emit(message)
+
+    def _apply_result(self, key, result: DotplotResult) -> None:
         self._loaded_for = key
         self._sequence_id = result.sequence_id
         self._sequence_length = result.sequence_length
@@ -666,9 +933,12 @@ class DotplotPanel(QWidget):
         self._title.setVisible(bool(name))
         self._canvas.set_title(name)
         self._canvas.show_result(result)
+        engine = (
+            f"word {result.word_size}" if result.word_size else "FastGA"
+        )
         suffix = f" — {result.note}" if result.note else ""
         self._status.setText(
-            f"{result.sequence_length:,} bp · word {result.word_size} · "
+            f"{result.sequence_length:,} bp · {engine} · "
             f"{result.segment_count:,} segments{suffix}"
         )
 

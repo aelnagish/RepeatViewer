@@ -156,6 +156,22 @@ class TreeOptions:
 
 
 @dataclass
+class FastGaOptions:
+    """FastGA whole-genome alignment.
+
+    One selected file is compared against itself (finds repetitive regions);
+    two files are compared against each other.
+    """
+
+    output_format: str = "paf"
+    threads: int = 8
+    min_identity: float = 0.7
+    min_length: int = 100
+    symmetric: bool = True
+    keep_index: bool = True
+
+
+@dataclass
 class BlastOptions:
     e_value: float = DEFAULT_BLAST_EVALUE
     num_threads: int = DEFAULT_BLAST_THREADS

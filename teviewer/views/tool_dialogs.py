@@ -783,6 +783,123 @@ class TreeParamsDialog(QDialog):
         )
 
 
+class FastGaParamsDialog(QDialog):
+    """FastGA whole-genome alignment parameters."""
+
+    def __init__(
+        self,
+        *,
+        initial=None,
+        file_count: int = 1,
+        title: str = "FastGA",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        from teviewer.backends.fastga_dotplot import FORMAT_LABELS
+        from teviewer.job_options import FastGaOptions
+
+        self.setWindowTitle(title)
+        opts = initial or FastGaOptions()
+
+        self._format = QComboBox(self)
+        for label, value in FORMAT_LABELS:
+            self._format.addItem(label, value)
+        idx = self._format.findData(opts.output_format)
+        if idx >= 0:
+            self._format.setCurrentIndex(idx)
+
+        self._threads = QSpinBox(self)
+        self._threads.setRange(1, 128)
+        self._threads.setValue(max(1, opts.threads))
+
+        self._identity = QDoubleSpinBox(self)
+        self._identity.setRange(0.5, 1.0)
+        self._identity.setSingleStep(0.05)
+        self._identity.setDecimals(2)
+        self._identity.setValue(opts.min_identity)
+
+        self._min_length = QSpinBox(self)
+        # Below ~100 FastGA fails: an alignment must contain a 40 bp seed and
+        # chains must cover at least 85 bases.
+        self._min_length.setRange(100, 1_000_000)
+        self._min_length.setSingleStep(50)
+        self._min_length.setValue(max(100, opts.min_length))
+        self._min_length.setToolTip(
+            "Shortest alignment to report, in bp. Cannot go below 100 -- "
+            "FastGA rejects limits shorter than its seed length.\n"
+            "Raise this on satellite arrays, where short matches can swamp "
+            "the output."
+        )
+
+        self._symmetric = QCheckBox("Symmetric seeding (-S)", self)
+        self._symmetric.setChecked(opts.symmetric)
+        self._symmetric.setToolTip(
+            "Uses the seeds of both genomes so the result does not depend on "
+            "argument order. Recommended when the repeat structure is the "
+            "point; slower, and not needed when looking for synteny."
+        )
+
+        self._keep_index = QCheckBox("Keep genome index for reuse (-k)", self)
+        self._keep_index.setChecked(opts.keep_index)
+        self._keep_index.setToolTip(
+            "Keeps the .1gdb / .gidx files beside the FASTA so later runs skip "
+            "the index build, which is the slow part of a first run."
+        )
+
+        for field in (self._format, self._threads, self._identity, self._min_length):
+            field.setFixedWidth(240)
+
+        mode = QLabel(self)
+        mode.setWordWrap(True)
+        mode.setStyleSheet("color: palette(mid);")
+        if file_count >= 2:
+            mode.setText(
+                "Two files selected: they will be compared against each other."
+            )
+        else:
+            mode.setText(
+                "One file selected: it will be compared against itself, which "
+                "finds repetitive regions. Self matches are excluded."
+            )
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        form.addRow("Output format:", self._format)
+        form.addRow("Min identity:", self._identity)
+        form.addRow("Min alignment length:", self._min_length)
+        form.addRow("Threads:", self._threads)
+        form.addRow("", self._symmetric)
+        form.addRow("", self._keep_index)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(14)
+        layout.addWidget(mode)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def options(self):
+        from teviewer.job_options import FastGaOptions
+
+        return FastGaOptions(
+            output_format=str(self._format.currentData()),
+            threads=int(self._threads.value()),
+            min_identity=float(self._identity.value()),
+            min_length=int(self._min_length.value()),
+            symmetric=self._symmetric.isChecked(),
+            keep_index=self._keep_index.isChecked(),
+        )
+
+
 class ExtendParamsDialog(QDialog):
     def __init__(
         self,

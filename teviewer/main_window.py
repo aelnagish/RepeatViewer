@@ -309,6 +309,7 @@ _TOOLBAR_TOOLTIPS = {
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
     "tree": "Build a phylogenetic tree from an alignment (needs 3+ sequences)",
+    "fastga": "FastGA whole-genome alignment (one genome vs itself, or two genomes)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_benchmark": "TE benchmarking (confusion matrix and library comparison)",
@@ -521,6 +522,70 @@ class TreeWorker(QObject):
                 self._seq_files, backend="auto", num_threads=self._num_threads
             )
         )
+
+
+class FastGaWorker(QObject):
+    """Run a FastGA alignment off the UI thread.
+
+    One file is compared against itself (repetitive regions); two files are
+    compared against each other. Indexing a large genome takes minutes, so
+    progress is reported and cancellation is polled throughout.
+    """
+
+    progress = Signal(int, str)
+    finished = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, seq_files: list[Path], options, *, cancel=None) -> None:
+        super().__init__()
+        self._seq_files = list(seq_files)
+        self._options = options
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from teviewer.backends.fastga_dotplot import (
+            FORMAT_ALN,
+            FORMAT_PSL,
+            run_fastga_alignment,
+        )
+
+        try:
+            source1 = self._seq_files[0]
+            source2 = self._seq_files[1] if len(self._seq_files) > 1 else None
+            suffix = {
+                FORMAT_ALN: ".1aln",
+                FORMAT_PSL: ".psl",
+            }.get(self._options.output_format, ".paf")
+            if source2 is None:
+                stem = f"{source1.stem}_self"
+            else:
+                stem = f"{source1.stem}_vs_{source2.stem}"
+            out_path = source1.parent / f"{stem}{suffix}"
+
+            def _progress(message: str) -> None:
+                self.progress.emit(1, message)
+
+            def _cancelled() -> bool:
+                # JobCancellation.requested is a @property, not a method.
+                return bool(self._cancel is not None and self._cancel.requested)
+
+            written = run_fastga_alignment(
+                source1,
+                source2,
+                out_path,
+                fmt=self._options.output_format,
+                threads=self._options.threads,
+                min_identity=self._options.min_identity,
+                min_length=self._options.min_length,
+                symmetric=self._options.symmetric,
+                keep_index=self._options.keep_index,
+                progress=_progress,
+                is_cancelled=_cancelled,
+            )
+            self.finished.emit([str(written)])
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(str(exc))
 
 
 class GenomeMapWorker(QObject):
@@ -1015,7 +1080,11 @@ _METADATA_STAT_CHUNK = 24
 class _MetadataEnrichWorker(QObject):
     """Compute FASTA table metadata off the UI thread."""
 
-    batch_ready = Signal(list)  # list[tuple[str, BrowserFileMetadata]]
+    # The generation travels with the batch so this can connect straight to a
+    # bound method on MainWindow. Connecting via a lambda gave Qt no receiver
+    # QObject, so it used a direct connection and ran the slot on this worker
+    # thread -- which then started a GUI-thread QTimer and crashed the app.
+    batch_ready = Signal(list, int)  # list[tuple[str, BrowserFileMetadata]], generation
     finished = Signal()
 
     def __init__(self, paths: list[Path], generation: int) -> None:
@@ -1042,10 +1111,10 @@ class _MetadataEnrichWorker(QObject):
             except Exception:  # noqa: BLE001
                 continue
             if len(batch) >= batch_size:
-                self.batch_ready.emit(list(batch))
+                self.batch_ready.emit(list(batch), self._generation)
                 batch.clear()
         if batch and not self._cancelled:
-            self.batch_ready.emit(batch)
+            self.batch_ready.emit(batch, self._generation)
         self.finished.emit()
 
 
@@ -1991,6 +2060,99 @@ class MainWindow(QMainWindow):
             )
         QMessageBox.warning(self, "Tree failed", body)
 
+    def _populate_fastga_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Run FastGA with default parameters", self._run_fastga_default)
+            menu.addSeparator()
+        menu.addAction("Change FastGA parameters…", self._open_fastga_dialog)
+
+    def _selected_files_for_fastga(self) -> list[Path]:
+        from teviewer.backends.fastga_dotplot import fastga_available, install_hint
+
+        if not fastga_available():
+            QMessageBox.warning(
+                self,
+                "FastGA not found",
+                f"FastGA is not installed or not on PATH.\n\n{install_hint()}",
+            )
+            return []
+        selected = self._selected_files()
+        files = [
+            p for p in selected
+            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        if not files:
+            QMessageBox.information(
+                self,
+                "FastGA",
+                "Select one FASTA to compare against itself, or two FASTA files "
+                "to compare against each other.",
+            )
+            return []
+        if len(files) > 2:
+            QMessageBox.information(
+                self,
+                "FastGA",
+                f"{len(files)} files selected. FastGA compares one genome "
+                "against itself, or exactly two against each other.",
+            )
+            return []
+        return files
+
+    def _run_fastga_default(self) -> None:
+        from teviewer.job_options import FastGaOptions
+
+        files = self._selected_files_for_fastga()
+        if files:
+            self._start_fastga_job(files, FastGaOptions())
+
+    def _open_fastga_dialog(self) -> None:
+        from teviewer.views.tool_dialogs import FastGaParamsDialog
+
+        files = self._selected_files_for_fastga()
+        if not files:
+            return
+        dialog = FastGaParamsDialog(file_count=len(files), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._start_fastga_job(files, dialog.options())
+
+    def _start_fastga_job(self, files: list[Path], options) -> None:
+        title = (
+            f"FastGA ({files[0].name} self)"
+            if len(files) == 1
+            else f"FastGA ({files[0].name} vs {files[1].name})"
+        )
+        self._start_background_job(
+            FastGaWorker(files, options, cancel=self._job_cancel),
+            job_title=title,
+            total_steps=1,
+            source_files=files,
+            on_finished=self._on_fastga_finished,
+            on_failed=self._on_fastga_failed,
+        )
+
+    @Slot(list)
+    def _on_fastga_finished(self, created: list) -> None:
+        created_paths = [Path(p) for p in created if Path(p).is_file()]
+        if self._current_folder:
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created_paths,
+                source_files=getattr(self, "_last_job_source_files", []),
+            )
+        names = ", ".join(p.name for p in created_paths)
+        self._set_status_message(f"FastGA completed — {names}", 12000)
+
+    @Slot(str)
+    def _on_fastga_failed(self, error: str) -> None:
+        from teviewer.backends.fastga_dotplot import install_hint
+
+        body = error.strip()
+        if "not installed" in body.lower() and "conda" not in body.lower():
+            body += f"\n\n{install_hint()}"
+        QMessageBox.warning(self, "FastGA failed", body)
+
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Blast with default parameters", self._run_blast)
@@ -2105,6 +2267,7 @@ class MainWindow(QMainWindow):
         self._populate_blast_menu(seq_menu.addMenu("&Blast"))
         self._populate_align_menu(seq_menu.addMenu("&Align"))
         self._populate_tree_menu(seq_menu.addMenu("&Tree"))
+        self._populate_fastga_menu(seq_menu.addMenu("Fast&GA"))
         self._populate_extend_menu(seq_menu.addMenu("&Extend"))
         self._populate_tsd_search_menu(seq_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(seq_menu.addMenu("&TEAid"))
@@ -2506,6 +2669,14 @@ class MainWindow(QMainWindow):
                 "Tree",
                 self._run_tree_default,
                 self._populate_tree_menu,
+                tooltip=tip,
+            )
+        elif tool_id == "fastga":
+            self._add_toolbar_text_menu_button(
+                bar,
+                "FastGA",
+                self._run_fastga_default,
+                self._populate_fastga_menu,
                 tooltip=tip,
             )
         elif tool_id == "blast":
@@ -3682,8 +3853,12 @@ class MainWindow(QMainWindow):
         worker = _MetadataEnrichWorker(fasta_paths, generation)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        # Connect to the bound method, never a lambda: Qt needs a receiver
+        # QObject to see that this crosses threads and queue the call. The
+        # QueuedConnection is stated explicitly so this cannot regress.
         worker.batch_ready.connect(
-            lambda batch, gen=generation: self._on_metadata_enrich_batch(batch, gen)
+            self._on_metadata_enrich_batch,
+            Qt.ConnectionType.QueuedConnection,
         )
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -3697,7 +3872,9 @@ class MainWindow(QMainWindow):
         self._metadata_enrich_thread = None
         self._metadata_enrich_worker = None
 
+    @Slot(list, int)
     def _on_metadata_enrich_batch(self, batch: list, generation: int) -> None:
+        """Runs on the GUI thread: the connection is explicitly queued."""
         if generation != self._metadata_enrich_generation:
             return
         if self._file_list is None:
