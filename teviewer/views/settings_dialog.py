@@ -407,6 +407,7 @@ class SettingsDialog(QDialog):
         for label, tab in (
             ("Text", DefaultFastaPreviewTab.TEXT),
             ("Annotation", DefaultFastaPreviewTab.ANNOTATION),
+            ("Dotplot (Self)", DefaultFastaPreviewTab.DOTPLOT),
         ):
             self._fasta_default_tab.addItem(label, tab.value)
         fasta_tab_index = self._fasta_default_tab.findData(

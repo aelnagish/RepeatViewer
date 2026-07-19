@@ -539,8 +539,19 @@ class FilePreviewPage(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
+        self._fasta_dotplot_holder = QWidget(self)
+        self._fasta_dotplot_holder.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self._dotplot_panel = None  # built lazily on first view
+        # Selection dragged on the dotplot, waiting to be applied to the
+        # Annotation view. select_by_position() only retries for ~2 s while the
+        # tab is hidden, so hold it here until Annotation is actually opened.
+        self._pending_annotation_selection: tuple[int, int] | None = None
         self._fasta_stack.addWidget(self._fasta_text_scroll)
         self._fasta_stack.addWidget(self._fasta_annotation_holder)
+        self._fasta_stack.addWidget(self._fasta_dotplot_holder)
         self._fasta_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self._sequence_info_bar = QLabel(self)
@@ -659,6 +670,8 @@ class FilePreviewPage(QWidget):
             QTimer.singleShot(0, self._refresh_text_view)
         elif index == 1:
             QTimer.singleShot(0, self._open_annotation_tab)
+        elif index == 2:
+            QTimer.singleShot(0, self._open_dotplot_tab)
         tab_host = self.parent()
         while tab_host is not None and not isinstance(tab_host, PreviewTabWidget):
             tab_host = tab_host.parent()
@@ -673,6 +686,8 @@ class FilePreviewPage(QWidget):
                 self._refresh_text_view()
             elif index == 1:
                 self._open_annotation_tab()
+            elif index == 2:
+                self._open_dotplot_tab()
             self._notify_preview_host()
             return
         current = self._stack.currentWidget()
@@ -868,6 +883,85 @@ class FilePreviewPage(QWidget):
             holder_layout.addWidget(self._annotation_panel, stretch=1)
         return self._annotation_panel
 
+    def _ensure_dotplot_panel(self):
+        """Create the dotplot panel on first use.
+
+        Nothing is computed here -- DotplotPanel.ensure_loaded() does that when
+        the tab is actually shown, so selecting a file never pays the cost.
+        """
+        if self._dotplot_panel is None:
+            from teviewer.widgets.dotplot_view import DotplotPanel
+
+            self._dotplot_panel = DotplotPanel(self.path, self)
+            self._dotplot_panel.suggest_default_word_size()
+            # Reuse the Flexidot Go-to chain: clicking a dot jumps the
+            # Annotation tab to that region.
+            # Selection is shared with the Annotation tab, but switching tabs
+            # is left to the user -- clicking the plot never navigates.
+            self._dotplot_panel.rangeSelected.connect(self._on_dotplot_range_selected)
+            holder_layout = self._fasta_dotplot_holder.layout()
+            if holder_layout is None:
+                holder_layout = QVBoxLayout(self._fasta_dotplot_holder)
+                holder_layout.setContentsMargins(0, 0, 0, 0)
+                holder_layout.setSpacing(0)
+            holder_layout.addWidget(self._dotplot_panel, stretch=1)
+        else:
+            self._dotplot_panel.set_path(self.path)
+        return self._dotplot_panel
+
+    def _open_dotplot_tab(self) -> None:
+        panel = self._ensure_dotplot_panel()
+        panel.ensure_loaded()
+        # Carry the current Annotation selection across to the plot. A pending
+        # selection that originated on the plot takes priority, so switching
+        # back and forth does not overwrite what you just dragged.
+        if self._pending_annotation_selection is not None:
+            start, end = self._pending_annotation_selection
+            panel.show_selection(int(start), int(end))
+            return
+        if self._annotation_panel is not None:
+            try:
+                current = self._annotation_panel.selection_range()
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not read Annotation selection")
+                current = None
+            if current:
+                panel.show_selection(int(current[0]), int(current[1]))
+
+    def _on_dotplot_range_selected(
+        self, x_start: int, x_end: int, y_start: int, y_end: int
+    ) -> None:
+        """Mirror a dotplot rectangle onto the Annotation view's selection.
+
+        The x range is used: it is the region under the cursor horizontally,
+        which is what "select this part of the sequence" means. The tab is not
+        switched -- you stay on the plot and move across when you choose to.
+        """
+        del y_start, y_end
+        self._pending_annotation_selection = (int(x_start), int(x_end))
+        # If Annotation happens to be the visible tab already, apply it now;
+        # otherwise it is applied when that tab is opened.
+        if self._fasta_stack.currentIndex() == 1:
+            self._apply_pending_annotation_selection()
+
+    def _apply_pending_annotation_selection(self) -> None:
+        pending = self._pending_annotation_selection
+        if pending is None:
+            return
+        try:
+            panel = self._ensure_annotation_panel()
+            # Load only if this panel has no sequence yet: load_path() re-parses
+            # the whole FASTA, so calling it per selection would be very slow.
+            if getattr(panel, "_loaded_data", None) is None:
+                panel.load_path(self.path)
+            panel.select_by_position(int(pending[0]), int(pending[1]))
+        except Exception:  # noqa: BLE001
+            # Do not swallow silently: a missing method here previously made
+            # the whole dotplot/annotation sync a no-op with no visible error.
+            logger.exception("Could not apply dotplot selection to Annotation")
+            return
+        self._pending_annotation_selection = None
+
     def bind_annotation_header_zoom(self, bar) -> None:
         self._ensure_annotation_panel().bind_annotation_zoom_bar(bar)
 
@@ -882,6 +976,11 @@ class FilePreviewPage(QWidget):
         return None
 
     def _activate_fasta_tab(self, tab: DefaultFastaPreviewTab) -> None:
+        if tab == DefaultFastaPreviewTab.DOTPLOT:
+            self.set_fasta_tab_index(2)
+            self._refresh_sequence_info_bar()
+            QTimer.singleShot(0, self._open_dotplot_tab)
+            return
         if tab == DefaultFastaPreviewTab.ANNOTATION:
             self._ensure_annotation_panel()
             self.set_fasta_tab_index(1)
@@ -902,6 +1001,10 @@ class FilePreviewPage(QWidget):
             return
         self._refresh_sequence_info_bar()
         panel.open_annotation_tab()
+        # Apply after open_annotation_tab()'s own deferred layout work has run,
+        # otherwise its pending fit can land on top of the selection.
+        if self._pending_annotation_selection is not None:
+            QTimer.singleShot(0, self._apply_pending_annotation_selection)
 
     def contains_sequence_id(self, seq_id: str) -> bool:
         if not self._single_fasta_mode:

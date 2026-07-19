@@ -332,7 +332,7 @@ class FastaTabStrip(QWidget):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons: list[QPushButton] = []
-        for index, label in enumerate(("Text", "Annotation")):
+        for index, label in enumerate(("Text", "Annotation", "Dotplot (Self)")):
             btn = QPushButton(label)
             btn.setObjectName("FastaPreviewTab")
             btn.setCheckable(True)

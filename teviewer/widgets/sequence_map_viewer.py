@@ -3817,6 +3817,14 @@ class SequenceMapPanel(QWidget):
         self._feature_undo_stack.clear()
         self.refresh_sequence_summary()
 
+    def select_by_position(self, start: int, end: int) -> None:
+        """Select a 1-based inclusive range (delegates to the map widget)."""
+        self._map.select_by_position(int(start), int(end))
+
+    def selection_range(self) -> tuple[int, int] | None:
+        """Current selection as a 1-based inclusive range, or None."""
+        return self._map.selection_range()
+
     def refresh_sequence_summary(self) -> None:
         if not load_show_sequence_summary():
             self._map.set_sequence_summary_text("")

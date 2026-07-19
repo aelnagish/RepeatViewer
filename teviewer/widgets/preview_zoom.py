@@ -30,6 +30,7 @@ class DefaultFastaPreviewTab(str, Enum):
 
     TEXT = "text"
     ANNOTATION = "annotation"
+    DOTPLOT = "dotplot"
 
 
 DEFAULT_FASTA_PREVIEW_TAB = DefaultFastaPreviewTab.TEXT
