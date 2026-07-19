@@ -308,6 +308,7 @@ _TOOLBAR_TOOLTIPS = {
     "define_genome": "Set or change the project reference genome FASTA",
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
+    "tree": "Build a phylogenetic tree from an alignment (needs 3+ sequences)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_benchmark": "TE benchmarking (confusion matrix and library comparison)",
@@ -427,6 +428,99 @@ class AlignWorker(QObject):
             self.finished.emit(created)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
+
+
+class TreeWorker(QObject):
+    """Build a phylogenetic tree off the UI thread.
+
+    Aligns first when the input is not already an alignment, then builds the
+    tree and (optionally) renders it. Emits the created files so the browser
+    can refresh and preview them, exactly like AlignWorker.
+    """
+
+    progress = Signal(int, str)
+    finished = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, seq_files: list[Path], options, *, num_threads: int = 4) -> None:
+        super().__init__()
+        self._seq_files = list(seq_files)
+        self._options = options
+        self._num_threads = num_threads
+
+    @Slot()
+    def run(self) -> None:
+        from teviewer.backends import tree_builder as tb
+        from teviewer.backends.sequence_aligner import (
+            combined_alignment_output_stem,
+            run_alignment_combined,
+        )
+
+        try:
+            alignment_path = self._resolve_alignment(tb, run_alignment_combined,
+                                                     combined_alignment_output_stem)
+            created: list[str] = []
+            if alignment_path not in self._seq_files:
+                created.append(str(alignment_path))
+
+            self.progress.emit(1, "Building tree…")
+            newick_path = alignment_path.with_suffix(".newick")
+            result = tb.build_tree(
+                alignment_path,
+                newick_path,
+                engine=self._options.engine,
+                model=self._options.model,
+                method=self._options.method,
+                outgroup=self._options.outgroup,
+            )
+            created.append(str(result.newick_path))
+
+            if self._options.render_image:
+                self.progress.emit(2, "Drawing tree…")
+                image_path = alignment_path.with_name(f"{alignment_path.stem}_tree.png")
+                tb.render_tree_image(
+                    result.newick_path,
+                    image_path,
+                    title=f"{alignment_path.stem}  ({tb.engine_display_name(result.engine_used)})",
+                )
+                created.append(str(image_path))
+
+            if result.notes:
+                self.progress.emit(3, result.notes)
+            self.finished.emit(created)
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(str(exc))
+
+    def _resolve_alignment(self, tb, run_alignment_combined, combined_stem) -> Path:
+        """Return a path to an aligned FASTA, aligning first when needed."""
+        if len(self._seq_files) == 1:
+            single = self._seq_files[0]
+            records = tb.read_alignment(single)
+            if tb.is_aligned(records):
+                tb.check_tree_input(records)
+                return single
+            if not self._options.align_first:
+                tb.check_tree_input(records)  # raises the "not aligned" message
+            self.progress.emit(0, "Aligning sequences…")
+            return Path(
+                run_alignment_combined(
+                    self._seq_files, backend="auto", num_threads=self._num_threads
+                )
+            )
+
+        # Several files: they must be combined into one alignment first.
+        if not self._options.align_first:
+            raise tb.TreeBuildError(
+                "Several files were selected. Enable \"Align sequences first\" "
+                "or align them into a single MSA before building a tree."
+            )
+        self.progress.emit(0, "Aligning sequences…")
+        del combined_stem
+        return Path(
+            run_alignment_combined(
+                self._seq_files, backend="auto", num_threads=self._num_threads
+            )
+        )
 
 
 class GenomeMapWorker(QObject):
@@ -1808,6 +1902,95 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
         menu.addAction("Change alignment parameters", self._modify_align_parameters)
 
+    def _populate_tree_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Build tree with default parameters", self._run_tree_default)
+            menu.addSeparator()
+        menu.addAction("Change tree parameters…", self._open_tree_dialog)
+
+    def _selected_sequence_files_for_tree(self) -> list[Path]:
+        selected = self._selected_files()
+        files = [
+            p for p in selected
+            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        if not files:
+            QMessageBox.information(
+                self,
+                "Tree",
+                "Select a FASTA alignment, or several FASTA files, to build a tree.\n\n"
+                "A tree needs at least three sequences in total.",
+            )
+            return []
+        if self._count_sequences_in_fastas(files) < 3:
+            QMessageBox.information(
+                self,
+                "Tree",
+                "A tree needs at least three sequences.\n\n"
+                "Select an alignment containing three or more sequences, "
+                "or three or more sequence files.",
+            )
+            return []
+        return files
+
+    def _run_tree_default(self) -> None:
+        from teviewer.job_options import TreeOptions
+
+        files = self._selected_sequence_files_for_tree()
+        if files:
+            self._start_tree_job(files, TreeOptions())
+
+    def _open_tree_dialog(self) -> None:
+        from teviewer.backends import tree_builder as tb
+        from teviewer.views.tool_dialogs import TreeParamsDialog
+
+        files = self._selected_sequence_files_for_tree()
+        if not files:
+            return
+        # Offer outgroup choices only when a single alignment is selected.
+        taxa = tb.taxon_names(files[0]) if len(files) == 1 else []
+        dialog = TreeParamsDialog(taxa=taxa, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._start_tree_job(files, dialog.options())
+
+    def _start_tree_job(self, files: list[Path], options) -> None:
+        self._start_background_job(
+            TreeWorker(files, options, num_threads=self._project.batch_workers),
+            job_title="Tree",
+            total_steps=3,
+            source_files=files,
+            on_finished=self._on_tree_finished,
+            on_failed=self._on_tree_failed,
+        )
+
+    @Slot(list)
+    def _on_tree_finished(self, created: list) -> None:
+        created_paths = [Path(p) for p in created if Path(p).is_file()]
+        source_paths = getattr(self, "_last_job_source_files", [])
+        if self._current_folder:
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created_paths,
+                source_files=source_paths,
+            )
+        self._auto_open_outputs(created_paths)
+        names = ", ".join(p.name for p in created_paths[:6])
+        self._set_status_message(
+            f"Tree completed — {len(created_paths)} file(s): {names}",
+            12000,
+        )
+
+    @Slot(str)
+    def _on_tree_failed(self, error: str) -> None:
+        body = error.strip()
+        if "conda install" not in body.lower() and "not installed" in body.lower():
+            body += (
+                "\n\nFor maximum-likelihood trees install:\n"
+                "conda install -c bioconda iqtree fasttree"
+            )
+        QMessageBox.warning(self, "Tree failed", body)
+
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Blast with default parameters", self._run_blast)
@@ -1921,6 +2104,7 @@ class MainWindow(QMainWindow):
         seq_menu.addSeparator()
         self._populate_blast_menu(seq_menu.addMenu("&Blast"))
         self._populate_align_menu(seq_menu.addMenu("&Align"))
+        self._populate_tree_menu(seq_menu.addMenu("&Tree"))
         self._populate_extend_menu(seq_menu.addMenu("&Extend"))
         self._populate_tsd_search_menu(seq_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(seq_menu.addMenu("&TEAid"))
@@ -2314,6 +2498,14 @@ class MainWindow(QMainWindow):
                 "Align",
                 self._run_align_default,
                 self._populate_align_menu,
+                tooltip=tip,
+            )
+        elif tool_id == "tree":
+            self._add_toolbar_text_menu_button(
+                bar,
+                "Tree",
+                self._run_tree_default,
+                self._populate_tree_menu,
                 tooltip=tip,
             )
         elif tool_id == "blast":

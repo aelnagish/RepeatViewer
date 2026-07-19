@@ -15,3 +15,10 @@ flexidot @ git+https://github.com/qjiangzhao/flexidot.git@Jiangzhao
 
 # pyhmmer 0.12+ ships experimental Windows AMD64 wheels (64-bit Python required).
 # blast+ / mafft / clustalo — optional if using system tools instead of bundled binaries
+#
+# Tree building (optional, detected on PATH at runtime):
+#   conda install -c bioconda iqtree fasttree
+# IQ-TREE gives maximum-likelihood trees with bootstrap support; FastTree is a
+# faster approximate alternative. Neither is required — without them the app
+# falls back to Biopython distance trees (Neighbor-Joining / UPGMA), which need
+# no installation. Not pip-installable, hence not listed as a dependency above.

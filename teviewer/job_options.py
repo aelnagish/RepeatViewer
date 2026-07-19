@@ -139,6 +139,23 @@ class AlignOptions:
 
 
 @dataclass
+class TreeOptions:
+    """Phylogenetic tree building.
+
+    ``engine`` "auto" prefers IQ-TREE/FastTree when installed and falls back to
+    the built-in Biopython distance method. ``model`` applies only to the
+    distance method; the maximum-likelihood engines choose their own model.
+    """
+
+    engine: str = "auto"
+    model: str = "jc69"
+    method: str = "nj"
+    outgroup: str = ""
+    align_first: bool = True
+    render_image: bool = True
+
+
+@dataclass
 class BlastOptions:
     e_value: float = DEFAULT_BLAST_EVALUE
     num_threads: int = DEFAULT_BLAST_THREADS
