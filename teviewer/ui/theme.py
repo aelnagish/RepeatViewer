@@ -190,18 +190,13 @@ def application_stylesheet(
         background: palette(alternate-base);
         border-radius: {radius_sm}px;
     }}
+    /* Buttons and combo boxes are deliberately left to the native Fusion style.
+       Setting border-radius here makes Qt draw the widget from the stylesheet
+       instead of the style; anything left unspecified (frame, drop-down arrow)
+       then isn't painted at all -- that produced frameless "text only" buttons
+       and arrow-less combo boxes. Padding is safe; border-radius is not. */
     QPushButton {{
         padding: 4px 10px;
-        border-radius: {radius_sm}px;
-    }}
-    QComboBox {{
-        border-radius: {radius_sm}px;
-        padding: 2px 6px;
-    }}
-    QComboBox::drop-down {{
-        border: none;
-        border-top-right-radius: {radius_sm}px;
-        border-bottom-right-radius: {radius_sm}px;
     }}
     QLineEdit, QSpinBox, QDoubleSpinBox {{
         border-radius: {radius_sm}px;
