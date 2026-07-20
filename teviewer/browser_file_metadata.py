@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import gzip
-from dataclasses import dataclass
+import json
+import threading
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from teviewer.app_preferences import config_dir
 from teviewer.backends.sequence_features import summarize_single_sequence_fasta
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".fna"}
@@ -17,6 +20,106 @@ _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".fna"}
 MAX_FASTA_SUMMARY_BYTES = 50 * 1024 * 1024
 _MAX_FASTA_SUMMARY_BYTES = MAX_FASTA_SUMMARY_BYTES  # backwards-compatible alias
 _FASTA_SCAN_BLOCK_BYTES = 1 << 20  # 1 MiB
+
+_METADATA_CACHE: dict[str, tuple[float, int, "BrowserFileMetadata"]] = {}
+_METADATA_CACHE_LOCK = threading.Lock()
+_METADATA_CACHE_DIRTY = False
+_METADATA_CACHE_SAVE_TIMER: threading.Timer | None = None
+
+
+def _metadata_cache_path() -> Path:
+    return config_dir() / "browser_file_metadata_cache.json"
+
+
+def _load_metadata_cache_from_disk() -> None:
+    path = _metadata_cache_path()
+    if not path.is_file():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(raw, dict):
+        return
+    loaded: dict[str, tuple[float, int, BrowserFileMetadata]] = {}
+    for key, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            mtime = float(entry["mtime"])
+            size = int(entry["size"])
+            meta = BrowserFileMetadata(**entry["meta"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        loaded[str(key)] = (mtime, size, meta)
+    with _METADATA_CACHE_LOCK:
+        _METADATA_CACHE.update(loaded)
+
+
+def _schedule_metadata_cache_save() -> None:
+    global _METADATA_CACHE_SAVE_TIMER
+    with _METADATA_CACHE_LOCK:
+        if _METADATA_CACHE_SAVE_TIMER is not None:
+            _METADATA_CACHE_SAVE_TIMER.cancel()
+
+        def _flush() -> None:
+            global _METADATA_CACHE_SAVE_TIMER, _METADATA_CACHE_DIRTY
+            with _METADATA_CACHE_LOCK:
+                if not _METADATA_CACHE_DIRTY:
+                    _METADATA_CACHE_SAVE_TIMER = None
+                    return
+                snapshot = dict(_METADATA_CACHE)
+                _METADATA_CACHE_DIRTY = False
+                _METADATA_CACHE_SAVE_TIMER = None
+            path = _metadata_cache_path()
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    key: {
+                        "mtime": mtime,
+                        "size": size,
+                        "meta": asdict(meta),
+                    }
+                    for key, (mtime, size, meta) in snapshot.items()
+                }
+                path.write_text(json.dumps(payload), encoding="utf-8")
+            except OSError:
+                pass
+
+        _METADATA_CACHE_SAVE_TIMER = threading.Timer(2.0, _flush)
+        _METADATA_CACHE_SAVE_TIMER.daemon = True
+        _METADATA_CACHE_SAVE_TIMER.start()
+
+
+def _cache_get(path: Path) -> BrowserFileMetadata | None:
+    key = str(path.expanduser().resolve())
+    with _METADATA_CACHE_LOCK:
+        entry = _METADATA_CACHE.get(key)
+    if entry is None:
+        return None
+    mtime, size, meta = entry
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if float(st.st_mtime) != mtime or int(st.st_size) != size:
+        return None
+    return meta
+
+
+def _cache_put(path: Path, meta: BrowserFileMetadata) -> None:
+    global _METADATA_CACHE_DIRTY
+    key = str(path.expanduser().resolve())
+    try:
+        st = path.stat()
+        mtime = float(st.st_mtime)
+        size = int(st.st_size)
+    except OSError:
+        return
+    with _METADATA_CACHE_LOCK:
+        _METADATA_CACHE[key] = (mtime, size, meta)
+        _METADATA_CACHE_DIRTY = True
+    _schedule_metadata_cache_save()
 
 
 def _iter_fasta_blocks(path: Path, block_size: int = _FASTA_SCAN_BLOCK_BYTES):
@@ -236,6 +339,10 @@ def _fasta_scan(path: Path, *, max_desc_len: int = 120) -> tuple[int, str]:
 def enrich_fasta_metadata(path: Path) -> BrowserFileMetadata:
     """Full FASTA metadata (reads the file). Safe to call off the UI thread."""
     path = path.expanduser().resolve()
+    cached = _cache_get(path)
+    if cached is not None:
+        return cached
+
     try:
         st = path.stat()
         size = int(st.st_size)
@@ -261,7 +368,7 @@ def enrich_fasta_metadata(path: Path) -> BrowserFileMetadata:
         except (OSError, ValueError):
             pass
 
-    return BrowserFileMetadata(
+    meta = BrowserFileMetadata(
         modified_text=_format_modified(mtime),
         description_text=description,
         length_text=length_text,
@@ -277,6 +384,8 @@ def enrich_fasta_metadata(path: Path) -> BrowserFileMetadata:
         sort_sequence_count=seq_count,
         sort_gc=gc_key,
     )
+    _cache_put(path, meta)
+    return meta
 
 
 def metadata_for_file(path: Path) -> BrowserFileMetadata:
@@ -285,3 +394,6 @@ def metadata_for_file(path: Path) -> BrowserFileMetadata:
     if is_fasta_path(path):
         return enrich_fasta_metadata(path)
     return quick_metadata_for_file(path)
+
+
+_load_metadata_cache_from_disk()

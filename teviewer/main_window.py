@@ -1073,8 +1073,8 @@ class _PendingTeVizBuild:
     map_options: TeGenomeMapOptions
 
 
-_METADATA_UI_CHUNK = 8
-_METADATA_STAT_CHUNK = 24
+_METADATA_UI_CHUNK = 24
+_METADATA_STAT_CHUNK = 48
 
 
 class _MetadataEnrichWorker(QObject):
@@ -1101,7 +1101,7 @@ class _MetadataEnrichWorker(QObject):
         from teviewer.browser_file_metadata import enrich_fasta_metadata
 
         batch: list[tuple[str, object]] = []
-        batch_size = 24
+        batch_size = 48
         for path in self._paths:
             if self._cancelled:
                 break
@@ -3796,17 +3796,21 @@ class MainWindow(QMainWindow):
         # Fast path: name/size/type from stat only — no FASTA reads on the UI thread.
         was_sorting = self._file_list.isSortingEnabled()
         self._file_list.setSortingEnabled(False)
-        for file_path in visible:
-            row_item = self._file_list.add_file_row(
-                file_path,
-                fill_metadata_columns=fill_metadata,
-            )
-            key = str(file_path.resolve())
-            if key in self._highlight_output_keys:
-                self._style_new_output_item(row_item)
-            elif key in self._highlight_source_keys:
-                self._style_source_file_item(row_item)
-        self._file_list.setSortingEnabled(was_sorting)
+        self._file_list.setUpdatesEnabled(False)
+        try:
+            for file_path in visible:
+                row_item = self._file_list.add_file_row(
+                    file_path,
+                    fill_metadata_columns=fill_metadata,
+                )
+                key = str(file_path.resolve())
+                if key in self._highlight_output_keys:
+                    self._style_new_output_item(row_item)
+                elif key in self._highlight_source_keys:
+                    self._style_source_file_item(row_item)
+        finally:
+            self._file_list.setUpdatesEnabled(True)
+            self._file_list.setSortingEnabled(was_sorting)
 
         if not visible and self._cached_folder_files:
             self._file_list.add_placeholder_row("(no files match filter)")

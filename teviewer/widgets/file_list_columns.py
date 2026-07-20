@@ -73,3 +73,60 @@ def save_visible_file_columns(columns: set[int]) -> None:
     s.beginGroup(FILES_SETTINGS_GROUP)
     s.setValue("visible_columns", ",".join(str(column) for column in visible))
     s.endGroup()
+
+
+def load_column_widths() -> dict[int, int]:
+    """Persisted section widths keyed by logical column index."""
+    s = QSettings()
+    s.beginGroup(FILES_SETTINGS_GROUP)
+    raw = s.value("column_widths")
+    s.endGroup()
+    if not raw:
+        return {}
+    widths: dict[int, int] = {}
+    try:
+        text = str(raw)
+        for part in text.split(","):
+            part = part.strip()
+            if not part or ":" not in part:
+                continue
+            col_text, width_text = part.split(":", 1)
+            column = int(col_text)
+            width = int(width_text)
+            if width >= 22:
+                widths[column] = width
+    except (TypeError, ValueError):
+        return {}
+    return widths
+
+
+def save_column_widths(widths: dict[int, int]) -> None:
+    s = QSettings()
+    s.beginGroup(FILES_SETTINGS_GROUP)
+    payload = ",".join(f"{column}:{width}" for column, width in sorted(widths.items()))
+    s.setValue("column_widths", payload)
+    s.endGroup()
+
+
+def load_column_order() -> list[int] | None:
+    """Logical column indices in left-to-right visual order."""
+    s = QSettings()
+    s.beginGroup(FILES_SETTINGS_GROUP)
+    raw = s.value("column_order")
+    s.endGroup()
+    if not raw:
+        return None
+    try:
+        order = [int(part) for part in str(raw).split(",") if part.strip()]
+    except (TypeError, ValueError):
+        return None
+    if not order:
+        return None
+    return order
+
+
+def save_column_order(order: list[int]) -> None:
+    s = QSettings()
+    s.beginGroup(FILES_SETTINGS_GROUP)
+    s.setValue("column_order", ",".join(str(column) for column in order))
+    s.endGroup()

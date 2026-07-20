@@ -5,7 +5,7 @@ from __future__ import annotations
 import platform
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QMimeData, QSize, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QMimeData, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QDrag, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -188,6 +188,14 @@ class FileListTableWidget(QTableWidget):
         for column, width in _DEFAULT_COLUMN_WIDTHS.items():
             header.resizeSection(column, width)
         header.sectionClicked.connect(self._on_header_clicked)
+        header.sectionMoved.connect(self._schedule_save_column_layout)
+        header.sectionResized.connect(self._schedule_save_column_layout)
+
+        self._column_layout_save_timer = QTimer(self)
+        self._column_layout_save_timer.setSingleShot(True)
+        self._column_layout_save_timer.setInterval(400)
+        self._column_layout_save_timer.timeout.connect(self._save_column_layout)
+        self._restoring_column_layout = False
 
         self.setIconSize(QSize(18, 18))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -199,6 +207,55 @@ class FileListTableWidget(QTableWidget):
         from teviewer.widgets.file_list_columns import load_visible_file_columns
 
         self.apply_visible_columns(load_visible_file_columns())
+        self._restore_column_layout()
+
+    def _schedule_save_column_layout(self, *_args) -> None:
+        if self._restoring_column_layout:
+            return
+        self._column_layout_save_timer.start()
+
+    def _save_column_layout(self) -> None:
+        from teviewer.widgets.file_list_columns import save_column_order, save_column_widths
+
+        header = self.horizontalHeader()
+        order: list[int] = []
+        widths: dict[int, int] = {}
+        for visual in range(header.count()):
+            logical = header.logicalIndex(visual)
+            order.append(logical)
+            widths[logical] = header.sectionSize(logical)
+        save_column_order(order)
+        save_column_widths(widths)
+
+    def _restore_column_layout(self) -> None:
+        from teviewer.widgets.file_list_columns import (
+            load_column_order,
+            load_column_widths,
+        )
+
+        header = self.horizontalHeader()
+        order = load_column_order()
+        widths = load_column_widths()
+        if not order and not widths:
+            return
+
+        self._restoring_column_layout = True
+        try:
+            header.blockSignals(True)
+            if order:
+                for target_visual, logical in enumerate(order):
+                    if logical < 0 or logical >= header.count():
+                        continue
+                    current_visual = header.visualIndex(logical)
+                    if current_visual >= 0 and current_visual != target_visual:
+                        header.moveSection(current_visual, target_visual)
+            for logical, width in widths.items():
+                if 0 <= logical < header.count() and logical != _COL_CHECK:
+                    header.resizeSection(logical, width)
+            header.resizeSection(_COL_CHECK, _CHECKBOX_COLUMN_WIDTH)
+        finally:
+            header.blockSignals(False)
+            self._restoring_column_layout = False
 
     def apply_visible_columns(self, visible: set[int]) -> None:
         """Show/hide optional columns (checkbox + name always stay visible)."""
