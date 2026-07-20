@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, QRect, QModelIndex
 from PySide6.QtGui import QColor, QPainter, QPalette
 from PySide6.QtWidgets import (
@@ -51,10 +53,22 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
             tree = widget.parent() if widget is not None else None
         if not isinstance(tree, QTreeWidget):
             return False
+
         current = tree.currentItem()
-        if current is None:
+        if current is not None and index == tree.indexFromItem(current):
+            return True
+
+        active_key = getattr(tree, "_active_folder_key", None)
+        if not active_key:
             return False
-        return index == tree.indexFromItem(current)
+        raw = index.data(Qt.ItemDataRole.UserRole)
+        if not raw:
+            return False
+        try:
+            item_key = str(Path(str(raw)).expanduser().resolve())
+        except OSError:
+            item_key = str(raw)
+        return item_key == active_key
 
     def _readable_text_brush(self, opt: QStyleOptionViewItem):
         text = opt.palette.color(QPalette.ColorRole.Text)

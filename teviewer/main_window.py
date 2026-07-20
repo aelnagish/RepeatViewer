@@ -801,6 +801,49 @@ class FolderTreeWidget(QTreeWidget):
         header.setMinimumSectionSize(100)
         self.currentItemChanged.connect(self._on_folder_current_changed)
         self._suppress_current_changed = False
+        self._active_folder_key: str | None = None
+
+    def set_active_folder(self, folder: Path | None) -> None:
+        """Keep the folder that owns the Files panel visually highlighted."""
+        if folder is None:
+            self._active_folder_key = None
+            self.viewport().update()
+            return
+        try:
+            self._active_folder_key = str(folder.expanduser().resolve())
+        except OSError:
+            self._active_folder_key = str(folder.expanduser())
+        item = self.find_item_for_folder(folder)
+        if item is not None:
+            self.select_folder_item(item)
+        self.viewport().update()
+
+    def find_item_for_folder(self, folder: Path) -> QTreeWidgetItem | None:
+        try:
+            key = str(folder.expanduser().resolve())
+        except OSError:
+            key = str(folder.expanduser())
+
+        def walk(item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+            raw = item.data(0, ROLE_PATH)
+            if raw:
+                try:
+                    item_key = str(Path(str(raw)).expanduser().resolve())
+                except OSError:
+                    item_key = str(raw)
+                if item_key == key:
+                    return item
+            for index in range(item.childCount()):
+                found = walk(item.child(index))
+                if found is not None:
+                    return found
+            return None
+
+        for index in range(self.topLevelItemCount()):
+            found = walk(self.topLevelItem(index))
+            if found is not None:
+                return found
+        return None
 
     def select_folder_item(self, item: QTreeWidgetItem) -> None:
         """Select exactly one folder row and make it current."""
@@ -3980,6 +4023,7 @@ class MainWindow(QMainWindow):
             else set()
         )
         self._current_folder = target_folder
+        self._folder_tree.set_active_folder(target_folder)
         try:
             self._cached_folder_files = self._files_for_folder(self._current_folder)
         except OSError as exc:
@@ -4122,6 +4166,7 @@ class MainWindow(QMainWindow):
             self._sync_folder_tree_label_for_folder(self._current_folder)
         else:
             self._sync_folder_tree_labels()
+        self._folder_tree.set_active_folder(self._current_folder)
 
     def _refresh_file_list_highlights(self) -> None:
         """Re-apply new-output / source tint after metadata or sort updates."""
@@ -6369,6 +6414,7 @@ class MainWindow(QMainWindow):
                 self._navigate_to_folder(Path(str(raw)))
         else:
             self._current_folder = None
+            self._folder_tree.set_active_folder(None)
             self._cached_folder_files = []
             self._file_list.clear_rows()
 
