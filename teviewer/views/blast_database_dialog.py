@@ -121,23 +121,26 @@ class AddBlastDatabaseDialog(QDialog):
         fasta_h.addWidget(self._fasta, 1)
         fasta_h.addWidget(browse_btn)
 
-        # The BLASTN pipeline can't search protein databases yet (see
-        # BlastParamsDialog's dropdown filter), so the quick "Add as BLAST
-        # database…" entry point from a FASTA's right-click menu skips the
-        # type picker entirely and always builds nucleotide.
-        self._molecule_type = QComboBox(self)
-        for value, label in _MOLECULE_LABELS.items():
-            self._molecule_type.addItem(label, value)
+        # BLASTN in TEviewer searches nucleotide databases only; protein entries
+        # can still be indexed here for future tools / external BLAST use.
+        self._molecule_type: QComboBox | None = None
+        if allow_molecule_type:
+            combo = QComboBox(self)
+            for value, label in _MOLECULE_LABELS.items():
+                combo.addItem(label, value)
+            self._molecule_type = combo
 
         if initial_fasta is not None:
             self._fasta.setText(str(initial_fasta))
             self._name.setText(initial_fasta.stem)
 
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setSpacing(8)
+        if self._molecule_type is not None:
+            form.addRow("Type:", self._molecule_type)
         form.addRow("Name:", self._name)
         form.addRow("FASTA:", fasta_row)
-        if allow_molecule_type:
-            form.addRow("Type:", self._molecule_type)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -146,6 +149,8 @@ class AddBlastDatabaseDialog(QDialog):
         self._buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
         layout.addLayout(form)
         layout.addWidget(self._buttons)
 
@@ -183,7 +188,11 @@ class AddBlastDatabaseDialog(QDialog):
             QMessageBox.warning(self, "Add BLAST database", f"FASTA not found:\n{fasta_path}")
             return
 
-        molecule_type = str(self._molecule_type.currentData())
+        molecule_type = (
+            str(self._molecule_type.currentData())
+            if self._molecule_type is not None
+            else BLAST_MOLECULE_NUCL
+        )
         base_dir = load_blast_db_base_dir()
         safe_name = sanitize_name(name) or "database"
         target_dir = base_dir.expanduser().resolve() / safe_name

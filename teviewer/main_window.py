@@ -4952,7 +4952,6 @@ class MainWindow(QMainWindow):
             existing_names=existing_names,
             use_system_blast=self._project.use_system_blast,
             initial_fasta=path,
-            allow_molecule_type=False,
             parent=self,
         )
         if not exec_modal_dialog(dialog):
