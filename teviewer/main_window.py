@@ -1357,6 +1357,10 @@ class MainWindow(QMainWindow):
         self._file_list.paste_files_requested.connect(self._paste_files_shortcut)
         self._file_list.duplicate_files_requested.connect(self._duplicate_selected_files)
         self._file_list.rename_file_requested.connect(self._rename_file)
+        self._file_list.extract_sequences_requested.connect(
+            self._extract_sequences_from_list
+        )
+        self._file_list.group_sequences_requested.connect(self._group_sequences)
         self._file_list.separate_fasta_requested.connect(self._separate_fasta_file)
         self._file_list.separate_fasta_subfolders_requested.connect(
             self._separate_fasta_to_subfolders_file,
@@ -2241,6 +2245,140 @@ class MainWindow(QMainWindow):
             )
         QMessageBox.warning(self, "Tree failed", body)
 
+    def _new_sequence(self) -> None:
+        """Type or paste a sequence and save it into the current folder."""
+        from teviewer.backends.sequence_compose import (
+            SequenceComposeError,
+            write_new_sequence,
+        )
+        from teviewer.views.tool_dialogs import NewSequenceDialog
+
+        folder = self._current_folder
+        if folder is None:
+            QMessageBox.information(
+                self, "New sequence", "Open a folder first, so the file has somewhere to go."
+            )
+            return
+        dialog = NewSequenceDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            path = write_new_sequence(folder, **dialog.values())
+        except SequenceComposeError as exc:
+            QMessageBox.warning(self, "New sequence", str(exc))
+            return
+        self._refresh_after_compose([path], f"Created {path.name}")
+
+    def _group_sequences(self, files: list | None = None) -> None:
+        """Combine FASTA files into one multi-record file.
+
+        ``files`` comes from the right-click menu; without it the current
+        selection is used, which is how the Sequence menu calls it.
+        """
+        from teviewer.backends.sequence_compose import (
+            SequenceComposeError,
+            default_group_name,
+            group_sequences,
+            safe_file_stem,
+        )
+
+        candidates = [Path(p) for p in files] if files else self._selected_files()
+        files = [
+            p for p in candidates
+            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        if len(files) < 2:
+            QMessageBox.information(
+                self,
+                "Group sequences",
+                "Select two or more FASTA files to group into one list.",
+            )
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "Group sequences into a list",
+            f"Combine {len(files)} files into one FASTA.\n\nName for the new file:",
+            text=default_group_name(files),
+        )
+        if not ok or not name.strip():
+            return
+        out_path = files[0].parent / f"{safe_file_stem(name)}.fasta"
+        try:
+            written, count = group_sequences(files, out_path)
+        except SequenceComposeError as exc:
+            QMessageBox.warning(self, "Group sequences", str(exc))
+            return
+        self._refresh_after_compose(
+            [written], f"Grouped {count} sequences into {written.name}"
+        )
+
+    def _extract_sequences_from_list(self, source_path: object = None) -> None:
+        """Pull chosen records out of a multi-FASTA, leaving the original alone.
+
+        ``source_path`` comes from the right-click menu; without it the current
+        selection is used.
+        """
+        from teviewer.backends.sequence_compose import (
+            SequenceComposeError,
+            extract_records,
+            list_records,
+        )
+        from teviewer.views.tool_dialogs import ExtractSequencesDialog
+
+        if isinstance(source_path, (str, Path)):
+            files = [Path(source_path)]
+        else:
+            files = [
+                p for p in self._selected_files()
+                if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+            ]
+        if len(files) != 1:
+            QMessageBox.information(
+                self,
+                "Extract sequences",
+                "Select one FASTA file containing several sequences.",
+            )
+            return
+        source = files[0]
+        try:
+            records = list_records(source)
+        except SequenceComposeError as exc:
+            QMessageBox.warning(self, "Extract sequences", str(exc))
+            return
+        if len(records) < 2:
+            QMessageBox.information(
+                self,
+                "Extract sequences",
+                f"{source.name} contains a single sequence; there is nothing to extract.",
+            )
+            return
+
+        dialog = ExtractSequencesDialog(
+            records=records, source_name=source.name, parent=self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            written = extract_records(
+                source,
+                dialog.selected_ids(),
+                source.parent,
+                single_file=dialog.single_file(),
+                combined_name=f"{source.stem}_extracted",
+            )
+        except SequenceComposeError as exc:
+            QMessageBox.warning(self, "Extract sequences", str(exc))
+            return
+        names = ", ".join(p.name for p in written[:4])
+        if len(written) > 4:
+            names += ", …"
+        self._refresh_after_compose(written, f"Extracted {len(written)} file(s): {names}")
+
+    def _refresh_after_compose(self, created: list[Path], message: str) -> None:
+        if self._current_folder:
+            self._populate_file_list(self._current_folder, new_outputs=created)
+        self._set_status_message(message, 8000)
+
     def _populate_fastga_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Run FastGA with default parameters", self._run_fastga_default)
@@ -2447,6 +2585,10 @@ class MainWindow(QMainWindow):
         seq_menu.addSeparator()
         self._populate_blast_menu(seq_menu.addMenu("&Blast"))
         self._populate_align_menu(seq_menu.addMenu("&Align"))
+        seq_menu.addAction("New Sequence…", self._new_sequence)
+        seq_menu.addAction("Group Sequences into a List…", self._group_sequences)
+        seq_menu.addAction("Extract Sequences from List…", self._extract_sequences_from_list)
+        seq_menu.addSeparator()
         self._populate_tree_menu(seq_menu.addMenu("&Tree"))
         self._populate_fastga_menu(seq_menu.addMenu("Fast&GA"))
         self._populate_extend_menu(seq_menu.addMenu("&Extend"))
