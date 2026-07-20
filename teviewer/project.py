@@ -10,7 +10,7 @@ from teviewer.pan_genome import (
     GENOME_MODE_PAN,
     GENOME_MODE_SINGLE,
     PanGenomeEntry,
-    normalize_pan_genome_name,
+    normalize_pan_genome_name_loose,
 )
 
 DATABASE_TYPE_HMM = "HMM"  # legacy persisted value; migrated to Protein/DNA + is_hmm
@@ -214,10 +214,9 @@ class TEviewerProject:
         return []
 
     def pan_genome_by_name(self, name: str) -> PanGenomeEntry | None:
-        try:
-            key = normalize_pan_genome_name(name)
-        except ValueError:
-            return None
+        # Runtime should not hard-fail on older/auto-filled longer names.
+        # The strict 10-char rule lives in the Define genome dialog.
+        key = normalize_pan_genome_name_loose(name)
         for entry in self.pan_genomes:
             if entry.name == key:
                 return entry

@@ -20,11 +20,14 @@ class PanGenomeEntry:
     path: Path
 
     def __post_init__(self) -> None:
-        self.name = normalize_pan_genome_name(self.name)
+        # Runtime should be forgiving: the 10-char restriction is enforced in
+        # the UI definition dialog; loading/parsing older workspaces should not
+        # crash BLAST/TE workflows.
+        self.name = normalize_pan_genome_name_loose(self.name)
         self.path = Path(self.path).expanduser()
 
 
-def normalize_pan_genome_name(name: str) -> str:
+def normalize_pan_genome_name_strict(name: str) -> str:
     text = str(name).strip()
     if not text:
         raise ValueError("Genome name is required.")
@@ -39,11 +42,31 @@ def normalize_pan_genome_name(name: str) -> str:
     return text
 
 
+def normalize_pan_genome_name_loose(name: str) -> str:
+    """Best-effort pan-genome key normalization (never raises for length)."""
+    text = str(name).strip()
+    if not text:
+        raise ValueError("Genome name is required.")
+
+    # Truncate first, then replace any invalid characters.
+    text = text[:MAX_PAN_GENOME_NAME_LEN]
+    safe = re.sub(r"[^A-Za-z0-9_\-]+", "_", text)
+    safe = safe.strip("_")
+    if not safe:
+        return "genome"
+    if not _PAN_GENOME_NAME_RE.match(safe):
+        # Extremely defensive fallback.
+        safe = re.sub(r"[^A-Za-z0-9_\-]+", "", safe).strip("_")
+        return safe or "genome"
+    return safe
+
+
 def genome_output_suffix(label: str) -> str:
     """Filename suffix for pan-genome outputs, e.g. ``_Ref``."""
     if not label:
         return ""
-    safe = normalize_pan_genome_name(label)
+    # Never raise during output generation.
+    safe = normalize_pan_genome_name_loose(label)
     return f"_{safe}"
 
 

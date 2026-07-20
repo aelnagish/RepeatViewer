@@ -29,7 +29,7 @@ from teviewer.pan_genome import (
     GENOME_MODE_SINGLE,
     MAX_PAN_GENOME_NAME_LEN,
     PanGenomeEntry,
-    normalize_pan_genome_name,
+    normalize_pan_genome_name_strict,
 )
 from teviewer.project import TEviewerProject
 from teviewer.views.settings_dialog import (
@@ -675,7 +675,8 @@ class GenomeDialog(QDialog):
                 if len(entries) < MIN_PAN_GENOMES:
                     raise ValueError(f"Pan-genome mode requires at least {MIN_PAN_GENOMES} genomes.")
                 for entry in entries:
-                    normalize_pan_genome_name(entry.name)
+                    # Strict validation only for the definition dialog.
+                    normalize_pan_genome_name_strict(entry.name)
             else:
                 genome = self._current_genome_path()
                 if genome is None or not genome.is_file():
