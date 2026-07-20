@@ -22,6 +22,7 @@ from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QGraphicsItem,
     QGraphicsScene,
@@ -43,11 +44,21 @@ from teviewer.backends.dotplot import (
     DotplotError,
     DotplotResult,
     compute_self_dotplot_for_fasta,
+    compute_self_dotplot_for_region,
+    sequence_length_of_fasta,
     suggest_word_size,
+)
+from teviewer.backends.paf_dotplot import (
+    PafError,
+    load_alignment_file,
+    result_for_all,
+    result_for_pair,
 )
 from teviewer.backends.fastga_dotplot import (
     DEFAULT_MIN_IDENTITY,
     DEFAULT_MIN_LENGTH,
+    DEFAULT_SEED_FREQ,
+    MAX_SEED_FREQ,
     FASTGA_PREFERRED_ABOVE_BYTES,
     FastgaError,
     fastga_available,
@@ -75,12 +86,14 @@ class _FastgaWorker(QObject):
         threads: int,
         min_identity: float,
         min_length: int,
+        seed_freq: int = DEFAULT_SEED_FREQ,
     ) -> None:
         super().__init__()
         self._path = path
         self._threads = threads
         self._min_identity = min_identity
         self._min_length = min_length
+        self._seed_freq = seed_freq
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -94,6 +107,7 @@ class _FastgaWorker(QObject):
                 threads=self._threads,
                 min_identity=self._min_identity,
                 min_length=self._min_length,
+                seed_freq=self._seed_freq,
                 progress=self.progress.emit,
                 is_cancelled=lambda: self._cancelled,
             )
@@ -109,8 +123,11 @@ _FORWARD_COLOR = QColor(40, 90, 180)
 _REVERSE_COLOR = QColor(200, 60, 40)
 _DIAGONAL_COLOR = QColor(230, 120, 40)
 
-_MIN_SCALE = 0.02
-_MAX_SCALE = 400.0
+# Zoom limits are relative to the scale that fits the whole plot, not absolute.
+# A 190 kb window fits at ~0.004 px/base, so an absolute lower bound of 0.02
+# silently blocked every zoom attempt.
+_ZOOM_OUT_LIMIT = 0.9    # never zoom out much past "whole plot visible"
+_MAX_PIXELS_PER_BASE = 40.0
 
 _RULER_TOP = 18
 # Wide enough for the tick labels plus the rotated sequence name beside them.
@@ -237,6 +254,32 @@ class _Ruler(QWidget):
         font.setPointSize(8)
         painter.setFont(font)
 
+        entries = view.axis_entries(self._horizontal)
+        if entries:
+            painter.setPen(QPen(_RULER_FG))
+            for entry in entries:
+                centre = entry.offset + entry.length / 2.0
+                pos = view.scene_to_ruler(centre, self._horizontal)
+                text = entry.name
+                if self._horizontal:
+                    if 0 <= pos <= self.width():
+                        w = painter.fontMetrics().horizontalAdvance(text)
+                        painter.drawText(int(pos - w / 2), self.height() - 5, text)
+                else:
+                    if 0 <= pos <= self.height():
+                        painter.save()
+                        painter.translate(self.width() - 4, pos)
+                        painter.rotate(-90)
+                        w = painter.fontMetrics().horizontalAdvance(text)
+                        painter.drawText(int(-w / 2), 0, text)
+                        painter.restore()
+            painter.setPen(QPen(_RULER_LINE))
+            if self._horizontal:
+                painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+            else:
+                painter.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+            return
+
         visible = view.visible_scene_rect()
         length = view.plot_length()
         span = visible.width() if self._horizontal else visible.height()
@@ -252,11 +295,19 @@ class _Ruler(QWidget):
                 if self._horizontal:
                     if 0 <= pos <= self.width():
                         painter.drawLine(int(pos), self.height() - 4, int(pos), self.height())
-                        painter.drawText(int(pos) + 2, self.height() - 6, _format_bp(int(tick)))
+                        painter.drawText(
+                            int(pos) + 2,
+                            self.height() - 6,
+                            _format_bp(int(tick) + view.coordinate_offset()),
+                        )
                 else:
                     if 0 <= pos <= self.height():
                         painter.drawLine(self.width() - 4, int(pos), self.width(), int(pos))
-                        painter.drawText(_Y_LABEL_STRIP, int(pos) - 2, _format_bp(int(tick)))
+                        painter.drawText(
+                            _Y_LABEL_STRIP,
+                            int(pos) - 2,
+                            _format_bp(int(tick) + view.coordinate_offset()),
+                        )
             tick += step
 
         cursor = view.cursor_scene_pos()
@@ -264,10 +315,11 @@ class _Ruler(QWidget):
             painter.setPen(QPen(QColor(40, 90, 180)))
             value = cursor.x() if self._horizontal else cursor.y()
             pos = view.scene_to_ruler(value, self._horizontal)
+            real = int(value) + view.coordinate_offset()
             if self._horizontal and 0 <= pos <= self.width():
-                painter.drawText(int(pos) + 2, self.height() - 6, f"{int(value):,}")
+                painter.drawText(int(pos) + 2, self.height() - 6, f"{real:,}")
             elif not self._horizontal and 0 <= pos <= self.height():
-                painter.drawText(_Y_LABEL_STRIP, int(pos) - 2, f"{int(value):,}")
+                painter.drawText(_Y_LABEL_STRIP, int(pos) - 2, f"{real:,}")
 
         # Sequence name down the y axis, as Geneious labels its dotplot.
         if not self._horizontal and view.plot_title():
@@ -318,6 +370,13 @@ class DotplotCanvas(QGraphicsView):
         self.setBackgroundBrush(QColor(255, 255, 255))
         self._item: _SegmentsItem | None = None
         self._length = 0
+        # Plot coordinates are 0..length; add this to show real positions when
+        # only a window of a large sequence is plotted.
+        self._offset = 0
+        self._fit_scale = 0.0
+        # Sequence boundaries for the concatenated (all sequences) layout.
+        self._axis_x: list = []
+        self._axis_y: list = []
         self._press_pos: QPoint | None = None
         self._panning = False
         self._pan_origin: QPoint | None = None
@@ -346,6 +405,19 @@ class DotplotCanvas(QGraphicsView):
 
     def plot_length(self) -> int:
         return self._length
+
+    def coordinate_offset(self) -> int:
+        return self._offset
+
+    def set_axes(self, x_entries: list, y_entries: list) -> None:
+        """Sequence layout for the concatenated view (empty for a single pair)."""
+        self._axis_x = list(x_entries or [])
+        self._axis_y = list(y_entries or [])
+        self.viewport().update()
+        self._refresh_rulers()
+
+    def axis_entries(self, horizontal: bool) -> list:
+        return self._axis_x if horizontal else self._axis_y
 
     def plot_title(self) -> str:
         return self._title
@@ -383,6 +455,7 @@ class DotplotCanvas(QGraphicsView):
         scene.clear()
         self._item = _SegmentsItem(result)
         self._length = result.sequence_length
+        self._offset = int(getattr(result, "coordinate_offset", 0) or 0)
         self._selection = None
         scene.addItem(self._item)
         scene.setSceneRect(0, 0, result.sequence_length, result.sequence_length)
@@ -420,6 +493,7 @@ class DotplotCanvas(QGraphicsView):
         # into it directly -- no padding tricks.
         n = float(self._length)
         self.fitInView(QRectF(0, 0, n, n), Qt.AspectRatioMode.KeepAspectRatio)
+        self._fit_scale = self.transform().m11() or 0.0
         self.viewport().update()
         self._refresh_rulers()
 
@@ -449,8 +523,8 @@ class DotplotCanvas(QGraphicsView):
         if not self._length:
             return
         lo, hi = (start, end) if start <= end else (end, start)
-        lo = max(0, lo - 1)
-        hi = min(self._length, hi)
+        lo = max(0, lo - 1 - self._offset)
+        hi = min(self._length, hi - self._offset)
         if hi <= lo:
             return
         self._selection = QRectF(lo, lo, hi - lo, hi - lo)
@@ -486,6 +560,19 @@ class DotplotCanvas(QGraphicsView):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(active)
 
+        if self._axis_x or self._axis_y:
+            sep = QPen(QColor(150, 150, 150))
+            sep.setCosmetic(True)
+            painter.setPen(sep)
+            for entry in self._axis_x[1:]:
+                painter.drawLine(
+                    QPointF(entry.offset, 0), QPointF(entry.offset, self._length)
+                )
+            for entry in self._axis_y[1:]:
+                painter.drawLine(
+                    QPointF(0, entry.offset), QPointF(self._length, entry.offset)
+                )
+
         border = QPen(QColor(120, 120, 120))
         border.setCosmetic(True)
         painter.setPen(border)
@@ -501,12 +588,153 @@ class DotplotCanvas(QGraphicsView):
             painter.drawLine(QPointF(cx, 0), QPointF(cx, self._length))
             painter.drawLine(QPointF(0, cy), QPointF(self._length, cy))
 
+    def _zoom_allowed(self, target: float) -> bool:
+        floor = (self._fit_scale or target) * _ZOOM_OUT_LIMIT
+        return floor <= target <= _MAX_PIXELS_PER_BASE
+
+    def zoom_by(self, factor: float) -> None:
+        """Zoom about the centre of the view (used by the +/- buttons)."""
+        if self._item is None:
+            return
+        target = self.transform().m11() * factor
+        if not self._zoom_allowed(target):
+            return
+        anchor = self.transformationAnchor()
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.scale(factor, factor)
+        self.setTransformationAnchor(anchor)
+        self.viewport().update()
+        self._refresh_rulers()
+
+    def render_to_pdf(self, path: Path, *, title: str = "", subtitle: str = "") -> None:
+        """Write the plot to a PDF with axes, labels and a legend.
+
+        The on-screen rulers are child widgets in the view margins, so they are
+        not part of the scene and cannot simply be rendered. The axes here are
+        drawn directly, using the same tick spacing and coordinate offset as the
+        interactive rulers so the two agree.
+        """
+        from PySide6.QtGui import QPageSize, QPdfWriter
+
+        writer = QPdfWriter(str(path))
+        writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        writer.setResolution(300)
+        writer.setTitle(title or "Dotplot")
+
+        painter = QPainter(writer)
+        try:
+            page = painter.viewport()
+            unit = page.width() / 210.0          # device units per mm (A4 width)
+            margin = int(12 * unit)
+            gutter = int(16 * unit)              # room for tick labels
+            head = int(26 * unit)                # title block + top tick labels
+            foot = int(10 * unit)                # legend
+
+            side = min(
+                page.width() - margin * 2 - gutter,
+                page.height() - margin * 2 - head - foot - gutter,
+            )
+            plot = QRectF(margin + gutter, margin + head, side, side)
+
+            # The app may be in a dark theme; a figure should not be. Paint the
+            # page and the plot area white and draw everything in dark ink.
+            painter.fillRect(page, QColor(255, 255, 255))
+
+            base_font = QFont(painter.font())
+
+            if title:
+                f = QFont(base_font); f.setPointSizeF(11); f.setBold(True)
+                painter.setFont(f)
+                painter.setPen(QPen(QColor(20, 20, 20)))
+                painter.drawText(int(margin), int(margin + 6 * unit), title)
+            if subtitle:
+                f = QFont(base_font); f.setPointSizeF(8)
+                painter.setFont(f)
+                painter.setPen(QPen(QColor(90, 90, 90)))
+                painter.drawText(int(margin), int(margin + 12 * unit), subtitle)
+
+            # --- the plot itself ---
+            painter.fillRect(plot, QColor(255, 255, 255))
+            painter.save()
+            painter.setClipRect(plot)
+            self.scene().render(painter, plot, self.sceneRect())
+            painter.restore()
+
+            painter.setPen(QPen(QColor(80, 80, 80)))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(plot)
+
+            # --- axes, matching the on-screen rulers ---
+            length = max(self._length, 1)
+            offset = self._offset
+            step = _nice_tick_step(float(length))
+            tick_len = 3 * unit
+            f = QFont(base_font); f.setPointSizeF(7)
+            painter.setFont(f)
+            painter.setPen(QPen(QColor(70, 70, 70)))
+            metrics = painter.fontMetrics()
+
+            tick = 0
+            while tick <= length:
+                frac = tick / length
+                label = _format_bp(int(tick) + offset)
+
+                x = plot.left() + frac * plot.width()
+                painter.drawLine(int(x), int(plot.top() - tick_len), int(x), int(plot.top()))
+                painter.drawText(
+                    int(x - metrics.horizontalAdvance(label) / 2),
+                    int(plot.top() - tick_len - 2 * unit),
+                    label,
+                )
+
+                y = plot.top() + frac * plot.height()
+                painter.drawLine(int(plot.left() - tick_len), int(y), int(plot.left()), int(y))
+                painter.drawText(
+                    int(plot.left() - tick_len - 2 * unit - metrics.horizontalAdvance(label)),
+                    int(y + metrics.ascent() / 2),
+                    label,
+                )
+                tick += step
+
+            # sequence name down the y axis
+            if title:
+                painter.save()
+                painter.translate(margin + 4 * unit, plot.center().y())
+                painter.rotate(-90)
+                painter.drawText(
+                    int(-metrics.horizontalAdvance(title) / 2), 0, title
+                )
+                painter.restore()
+
+            # --- legend ---
+            legend_y = plot.bottom() + 8 * unit
+            swatch = 6 * unit
+            entries = (
+                (_DIAGONAL_COLOR, "self"),
+                (_FORWARD_COLOR, "direct repeat"),
+                (_REVERSE_COLOR, "inverted repeat"),
+            )
+            x = plot.left()
+            for colour, label in entries:
+                pen = QPen(colour); pen.setWidth(max(1, int(0.4 * unit)))
+                painter.setPen(pen)
+                painter.drawLine(int(x), int(legend_y), int(x + swatch), int(legend_y))
+                painter.setPen(QPen(QColor(70, 70, 70)))
+                painter.drawText(
+                    int(x + swatch + 2 * unit),
+                    int(legend_y + metrics.ascent() / 2),
+                    label,
+                )
+                x += swatch + 4 * unit + metrics.horizontalAdvance(label)
+        finally:
+            painter.end()
+
     def wheelEvent(self, event) -> None:  # noqa: N802
         if self._item is None:
             return
         factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
         target = self.transform().m11() * factor
-        if target < _MIN_SCALE or target > _MAX_SCALE:
+        if not self._zoom_allowed(target):
             return
         self.scale(factor, factor)
         self.viewport().update()
@@ -556,7 +784,7 @@ class DotplotCanvas(QGraphicsView):
         self._refresh_rulers()
         x, y = int(point.x()), int(point.y())
         if 0 <= x <= self._length and 0 <= y <= self._length:
-            self.positionChanged.emit(x, y)
+            self.positionChanged.emit(x + self._offset, y + self._offset)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if self._panning:
@@ -589,10 +817,10 @@ class DotplotCanvas(QGraphicsView):
                 self._selection = rect
                 self.viewport().update()
                 self.rectSelected.emit(
-                    int(rect.left()) + 1,
-                    int(rect.right()),
-                    int(rect.top()) + 1,
-                    int(rect.bottom()),
+                    int(rect.left()) + 1 + self._offset,
+                    int(rect.right()) + self._offset,
+                    int(rect.top()) + 1 + self._offset,
+                    int(rect.bottom()) + self._offset,
                 )
 
     def leaveEvent(self, event) -> None:  # noqa: N802
@@ -616,6 +844,12 @@ class DotplotPanel(QWidget):
         self._loaded_for: tuple[Path, int, bool] | None = None
         self._sequence_id = ""
         self._sequence_length = 0
+        self._full_length = 0
+        # FastGA is opt-in for large files; the region window is the default.
+        self._engine_choice = "region"
+        # "fasta" computes a dotplot; "alignment" displays a PAF/.1aln file.
+        self._mode = "fasta"
+        self._alignments = None
 
         self._word = QSpinBox(self)
         self._word.setRange(MIN_WORD_SIZE, MAX_WORD_SIZE)
@@ -657,12 +891,87 @@ class DotplotPanel(QWidget):
             "Raise it on satellite arrays, where short matches swamp the plot."
         )
 
+        self._seed_freq = QSpinBox(self)
+        self._seed_freq.setRange(1, MAX_SEED_FREQ)
+        self._seed_freq.setValue(DEFAULT_SEED_FREQ)
+        self._seed_freq.setSingleStep(50)
+        self._seed_freq.setFixedWidth(90)
+        self._seed_freq.setToolTip(
+            "FastGA's -f: seeds occurring more often than this are discarded as "
+            "'repetitive' before alignment.\n"
+            "FastGA's own default is 10, which removes satellite arrays entirely "
+            "-- every monomer k-mer occurs far more than 10 times.\n"
+            "Raise it to see repeat structure; higher values are slower."
+        )
+
+        self._region_start = QSpinBox(self)
+        self._region_start.setRange(1, 2_000_000_000)
+        self._region_start.setValue(1)
+        self._region_start.setGroupSeparatorShown(True)
+        self._region_start.setFixedWidth(120)
+        self._region_start.setToolTip("First base of the window to plot.")
+
+        self._region_size = QSpinBox(self)
+        self._region_size.setRange(1_000, 5_000_000)
+        self._region_size.setValue(200_000)
+        self._region_size.setSingleStep(50_000)
+        self._region_size.setGroupSeparatorShown(True)
+        self._region_size.setFixedWidth(120)
+        self._region_size.setToolTip(
+            "How many bases to plot from the start position.\n"
+            "A whole scaffold cannot be plotted at small word sizes -- the "
+            "match count grows with the square of the repeat copy number -- "
+            "but a window of a few hundred kb is instant."
+        )
+
+        self._region_start_label = QLabel("From:", self)
+        self._region_size_label = QLabel("Window:", self)
+
+        self._pair_combo = QComboBox(self)
+        self._pair_combo.setMinimumWidth(260)
+        self._pair_combo.setToolTip(
+            "Which sequence pair to plot. 'All sequences' lays every query and "
+            "target end to end, with separators between them."
+        )
+        self._pair_label = QLabel("Compare:", self)
+
+        # For an alignment file there is no k-mer step to tune, so the
+        # equivalent of word size is which alignments are drawn at all.
+        self._filter_len = QSpinBox(self)
+        self._filter_len.setRange(0, 10_000_000)
+        self._filter_len.setValue(0)
+        self._filter_len.setSingleStep(100)
+        self._filter_len.setGroupSeparatorShown(True)
+        self._filter_len.setFixedWidth(110)
+        self._filter_len.setToolTip(
+            "Hide alignments shorter than this, in bp.\n"
+            "0 shows everything. Raise it to strip short, noisy matches the "
+            "way a larger word size would when computing a dotplot."
+        )
+        self._filter_len_label = QLabel("Min length:", self)
+
         self._identity_label = QLabel("Min identity:", self)
         self._min_len_label = QLabel("Min length:", self)
+        self._seed_freq_label = QLabel("Repeat cutoff:", self)
+
+        self._zoom_out_btn = QToolButton(self)
+        self._zoom_out_btn.setText("−")
+        self._zoom_out_btn.setAutoRaise(True)
+        self._zoom_out_btn.setToolTip("Zoom out (or scroll the wheel)")
+
+        self._zoom_in_btn = QToolButton(self)
+        self._zoom_in_btn.setText("+")
+        self._zoom_in_btn.setAutoRaise(True)
+        self._zoom_in_btn.setToolTip("Zoom in (or scroll the wheel)")
 
         self._reset_btn = QToolButton(self)
         self._reset_btn.setText("Reset zoom")
         self._reset_btn.setAutoRaise(True)
+
+        self._pdf_btn = QToolButton(self)
+        self._pdf_btn.setText("Save PDF")
+        self._pdf_btn.setAutoRaise(True)
+        self._pdf_btn.setToolTip("Save the current plot as a PDF")
 
         self._cancel_btn = QToolButton(self)
         self._cancel_btn.setText("Cancel")
@@ -687,6 +996,14 @@ class DotplotPanel(QWidget):
         bar.setContentsMargins(6, 4, 6, 4)
         bar.setSpacing(8)
         self._word_label = QLabel("Word size:", self)
+        bar.addWidget(self._pair_label)
+        bar.addWidget(self._pair_combo)
+        bar.addWidget(self._filter_len_label)
+        bar.addWidget(self._filter_len)
+        bar.addWidget(self._region_start_label)
+        bar.addWidget(self._region_start)
+        bar.addWidget(self._region_size_label)
+        bar.addWidget(self._region_size)
         bar.addWidget(self._word_label)
         bar.addWidget(self._word)
         bar.addWidget(self._reverse)
@@ -694,11 +1011,15 @@ class DotplotPanel(QWidget):
         bar.addWidget(self._identity)
         bar.addWidget(self._min_len_label)
         bar.addWidget(self._min_len)
+        bar.addWidget(self._seed_freq_label)
+        bar.addWidget(self._seed_freq)
+        bar.addWidget(self._zoom_out_btn)
+        bar.addWidget(self._zoom_in_btn)
         bar.addWidget(self._reset_btn)
+        bar.addWidget(self._pdf_btn)
         bar.addWidget(self._compute_btn)
         bar.addWidget(self._cancel_btn)
         bar.addStretch(1)
-        bar.addWidget(self._status)
 
         self._title = QLabel("", self)
         self._title.setContentsMargins(_RULER_LEFT, 2, 6, 2)
@@ -713,15 +1034,30 @@ class DotplotPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 8, 0)
+        title_row.setSpacing(12)
+        title_row.addWidget(self._title)
+        title_row.addStretch(1)
+        title_row.addWidget(self._status)
+
         layout.addLayout(bar)
-        layout.addWidget(self._title)
+        layout.addLayout(title_row)
         layout.addWidget(self._canvas, stretch=1)
 
         self._word.valueChanged.connect(self._recompute)
         self._reverse.toggled.connect(self._recompute)
         self._identity.valueChanged.connect(self._recompute)
         self._min_len.valueChanged.connect(self._recompute)
+        self._seed_freq.valueChanged.connect(self._recompute)
+        self._region_start.valueChanged.connect(self._recompute)
+        self._region_size.valueChanged.connect(self._recompute)
+        self._pair_combo.currentIndexChanged.connect(self._show_selected_pair)
+        self._filter_len.valueChanged.connect(self._recompute)
         self._reset_btn.clicked.connect(self._canvas.reset_zoom)
+        self._zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_by(1.25))
+        self._zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_by(1 / 1.25))
+        self._pdf_btn.clicked.connect(self._save_pdf)
         self._cancel_btn.clicked.connect(self._cancel_running)
         self._compute_btn.clicked.connect(self._start_requested_compute)
         self._sync_engine_controls()
@@ -736,6 +1072,9 @@ class DotplotPanel(QWidget):
         self._cancel_running()
         self._path = resolved
         self._loaded_for = None
+        self._mode = "fasta"
+        self._alignments = None
+        self._canvas.set_axes([], [])
         self._sequence_id = ""
         self._canvas.clear_plot()
         self._canvas.set_title("")
@@ -744,33 +1083,180 @@ class DotplotPanel(QWidget):
         self._status.clear()
         self._compute_btn.hide()
 
-    def _use_fastga(self) -> bool:
-        """Large sequences go to FastGA; small ones stay on the instant engine."""
+    def _is_large(self) -> bool:
         try:
-            size = self._path.stat().st_size
+            return self._path.stat().st_size > FASTGA_PREFERRED_ABOVE_BYTES
         except OSError:
             return False
-        return size > FASTGA_PREFERRED_ABOVE_BYTES and fastga_available()
+
+    def load_alignment(self, path: Path) -> None:
+        """Display a PAF (or .1aln, converted) instead of computing anything."""
+        self._mode = "alignment"
+        self._path = path.expanduser().resolve()
+        self._loaded_for = None
+        self._status.setText("Reading alignments…")
+        try:
+            alignments, source = load_alignment_file(self._path)
+        except PafError as exc:
+            self._alignments = None
+            self._sync_engine_controls()
+            self._fail(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._alignments = None
+            self._sync_engine_controls()
+            self._fail(f"Could not read {self._path.name}: {exc}")
+            return
+
+        self._alignments = alignments
+        pairs = alignments.pairs()
+        self._pair_combo.blockSignals(True)
+        self._pair_combo.clear()
+        if len(pairs) > 1:
+            self._pair_combo.addItem("All sequences", ("__all__", "__all__"))
+        for query, target in pairs:
+            label = query if query == target else f"{query}  vs  {target}"
+            self._pair_combo.addItem(label, (query, target))
+        self._pair_combo.setCurrentIndex(0)
+        self._pair_combo.blockSignals(False)
+        longest = max(
+            list(alignments.query_lengths.values())
+            + list(alignments.target_lengths.values())
+            + [1]
+        )
+        for box in (self._region_start, self._region_size):
+            box.blockSignals(True)
+        self._region_start.setMaximum(max(1, longest))
+        self._region_start.setValue(1)
+        self._region_size.setMaximum(max(1_000, longest))
+        self._region_size.setValue(max(1_000, longest))  # whole sequence first
+        for box in (self._region_start, self._region_size):
+            box.blockSignals(False)
+
+        self._sync_engine_controls()
+        if source != self._path:
+            self.statusMessage.emit(f"Converted {self._path.name} to {source.name}")
+        self._show_selected_pair()
+
+    def _show_selected_pair(self) -> None:
+        if self._alignments is None:
+            return
+        data = self._pair_combo.currentData()
+        try:
+            min_len = int(self._filter_len.value())
+            if data is None or data[0] == "__all__":
+                result, x_entries, y_entries = result_for_all(
+                    self._alignments, min_length=min_len
+                )
+            else:
+                full = max(
+                    self._alignments.query_lengths.get(data[0], 0),
+                    self._alignments.target_lengths.get(data[1], 0),
+                    1,
+                )
+                start = int(self._region_start.value())
+                size = int(self._region_size.value())
+                window = None
+                if start > 1 or size < full:
+                    window = (start, min(start + size - 1, full))
+                result = result_for_pair(
+                    self._alignments,
+                    data[0],
+                    data[1],
+                    window=window,
+                    min_length=min_len,
+                )
+                x_entries, y_entries = [], []
+        except Exception as exc:  # noqa: BLE001
+            self._fail(f"Could not build the plot: {exc}")
+            return
+        self._canvas.set_axes(x_entries, y_entries)
+        self._sync_engine_controls()
+        self._apply_result(("alignment", self._path, str(data)), result)
+
+    def _use_fastga(self) -> bool:
+        """FastGA only when explicitly chosen; the region window is the default.
+
+        FastGA cannot report matches shorter than ~100 bp (its seeds are 40 bp),
+        so it is the wrong tool for looking inside a satellite array. Plotting a
+        window with the instant k-mer engine allows any word size.
+        """
+        return self._is_large() and self._engine_choice == "fastga" and fastga_available()
+
+    def _use_region(self) -> bool:
+        return self._is_large() and not self._use_fastga()
 
     def _sync_engine_controls(self) -> None:
+        if self._mode == "alignment":
+            # Nothing is computed from an alignment file, so the compute
+            # controls have nothing to act on.
+            for widget in (
+                self._word_label, self._word, self._reverse,
+                self._identity_label, self._identity,
+                self._min_len_label, self._min_len,
+                self._seed_freq_label, self._seed_freq,
+            ):
+                widget.setVisible(False)
+            multi = self._alignments is not None and not self._alignments.is_single_pair()
+            self._pair_label.setVisible(multi)
+            self._pair_combo.setVisible(multi)
+            self._filter_len_label.setVisible(True)
+            self._filter_len.setVisible(True)
+            # A window only makes sense on one pair: with sequences laid end to
+            # end there is no single coordinate space to window into.
+            showing_all = (
+                self._pair_combo.currentData() is None
+                or self._pair_combo.currentData()[0] == "__all__"
+            )
+            for widget in (
+                self._region_start_label, self._region_start,
+                self._region_size_label, self._region_size,
+            ):
+                widget.setVisible(not showing_all)
+            return
+
+        self._pair_label.setVisible(False)
+        self._pair_combo.setVisible(False)
+        self._filter_len_label.setVisible(False)
+        self._filter_len.setVisible(False)
         fastga = self._use_fastga()
+        region = self._use_region()
         for widget in (self._word_label, self._word, self._reverse):
             widget.setVisible(not fastga)
+        for widget in (
+            self._region_start_label,
+            self._region_start,
+            self._region_size_label,
+            self._region_size,
+        ):
+            widget.setVisible(region)
         for widget in (
             self._identity_label,
             self._identity,
             self._min_len_label,
             self._min_len,
+            self._seed_freq_label,
+            self._seed_freq,
         ):
             widget.setVisible(fastga)
 
     def _current_key(self):
+        if self._use_region():
+            return (
+                self._path,
+                "region",
+                int(self._region_start.value()),
+                int(self._region_size.value()),
+                int(self._word.value()),
+                self._reverse.isChecked(),
+            )
         if self._use_fastga():
             return (
                 self._path,
                 "fastga",
                 round(float(self._identity.value()), 3),
                 int(self._min_len.value()),
+                int(self._seed_freq.value()),
             )
         return (
             self._path,
@@ -786,12 +1272,16 @@ class DotplotPanel(QWidget):
         offered behind a button instead: on a large genome it runs for minutes,
         which must never start merely because a tab was clicked.
         """
+        if self._mode == "alignment":
+            return  # already loaded from file; nothing to compute
         self._sync_engine_controls()
         key = self._current_key()
         if self._loaded_for == key or self._thread is not None:
             return
         if self._use_fastga():
             self._offer_fastga(key)
+        elif self._use_region():
+            self._compute_region(key)
         else:
             self._compute_kmer(key)
 
@@ -816,6 +1306,10 @@ class DotplotPanel(QWidget):
             self._compute_fastga(key)
 
     def _recompute(self) -> None:
+        if self._mode == "alignment":
+            if self._alignments is not None:
+                self._show_selected_pair()
+            return
         if self._loaded_for is None:
             return
         # Changing a FastGA setting must not silently relaunch a long run.
@@ -824,6 +1318,32 @@ class DotplotPanel(QWidget):
             self._offer_fastga(self._current_key())
             return
         self.ensure_loaded()
+
+    def _compute_region(self, key) -> None:
+        """Plot one window of a large sequence with the instant engine."""
+        self._status.setText("Reading region…")
+        start = int(self._region_start.value())
+        size = int(self._region_size.value())
+        try:
+            if self._full_length <= 0:
+                _name, self._full_length = sequence_length_of_fasta(self._path)
+                self._region_start.setMaximum(max(1, self._full_length))
+            end = min(start + size - 1, self._full_length or (start + size - 1))
+            result = compute_self_dotplot_for_region(
+                self._path,
+                start,
+                end,
+                word_size=int(self._word.value()),
+                include_reverse=self._reverse.isChecked(),
+                full_length=self._full_length,
+            )
+        except DotplotError as exc:
+            self._fail(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._fail(f"Could not plot region: {exc}")
+            return
+        self._apply_result(key, result)
 
     # -- built-in k-mer engine (fast, synchronous) -------------------------
 
@@ -861,6 +1381,7 @@ class DotplotPanel(QWidget):
             threads=8,
             min_identity=float(self._identity.value()),
             min_length=int(self._min_len.value()),
+            seed_freq=int(self._seed_freq.value()),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -933,13 +1454,27 @@ class DotplotPanel(QWidget):
         self._title.setVisible(bool(name))
         self._canvas.set_title(name)
         self._canvas.show_result(result)
-        engine = (
-            f"word {result.word_size}" if result.word_size else "FastGA"
-        )
+        if result.word_size:
+            engine = f"word {result.word_size}"
+        elif self._mode == "alignment":
+            # The file may come from FastGA, minimap2 or anything else -- do
+            # not claim to know which.
+            engine = self._path.suffix.lstrip(".").upper() or "alignments"
+        else:
+            engine = "FastGA"
+        offset = int(getattr(result, "coordinate_offset", 0) or 0)
+        full = int(getattr(result, "full_sequence_length", 0) or 0)
+        if offset or (full and full > result.sequence_length):
+            where = (
+                f"{offset + 1:,}-{offset + result.sequence_length:,}"
+                f" of {full:,} bp" if full else
+                f"{offset + 1:,}-{offset + result.sequence_length:,}"
+            )
+        else:
+            where = f"{result.sequence_length:,} bp"
         suffix = f" — {result.note}" if result.note else ""
         self._status.setText(
-            f"{result.sequence_length:,} bp · {engine} · "
-            f"{result.segment_count:,} segments{suffix}"
+            f"{where} · {engine} · {result.segment_count:,} segments{suffix}"
         )
 
     def suggest_default_word_size(self) -> None:
@@ -960,6 +1495,34 @@ class DotplotPanel(QWidget):
 
     def clear_selection(self) -> None:
         self._canvas.clear_selection()
+
+    def _save_pdf(self) -> None:
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        if self._sequence_length <= 0:
+            QMessageBox.information(self, "Save PDF", "There is no plot to save yet.")
+            return
+        default = self._path.parent / f"{self._path.stem}_dotplot.pdf"
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "Save dotplot as PDF", str(default), "PDF (*.pdf)"
+        )
+        if not chosen:
+            return
+        out = Path(chosen)
+        if out.suffix.lower() != ".pdf":
+            out = out.with_suffix(".pdf")
+        try:
+            self._canvas.render_to_pdf(
+                out,
+                title=self._title.text() or self._path.stem,
+                # The status line already says range, word size and segment
+                # count -- exactly what a figure caption needs.
+                subtitle=self._status.text(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Save PDF", f"Could not write {out.name}:\n{exc}")
+            return
+        self.statusMessage.emit(f"Saved {out.name}")
 
     def sequence_id(self) -> str:
         return self._sequence_id

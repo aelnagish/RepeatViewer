@@ -151,6 +151,8 @@ class FileListTableWidget(QTableWidget):
     rename_file_requested = Signal(Path)
     separate_fasta_requested = Signal(Path)
     separate_fasta_subfolders_requested = Signal(Path)
+    extract_sequences_requested = Signal(Path)      # pick records out of one file
+    group_sequences_requested = Signal(list)        # combine several files
     blast_genome_map_requested = Signal(Path)
     blast_divergence_requested = Signal(Path)
     add_blast_database_requested = Signal(Path)
@@ -688,6 +690,10 @@ class FileListTableWidget(QTableWidget):
                             f"Separate sequence into {seq_n} folders",
                             lambda: self.separate_fasta_subfolders_requested.emit(path),
                         )
+                        menu.addAction(
+                            "Extract sequences from list…",
+                            lambda p=path: self.extract_sequences_requested.emit(p),
+                        )
                     blast_txt = find_blast_table_for_query(path)
                     if blast_txt is not None:
                         menu.addAction(
@@ -747,6 +753,15 @@ class FileListTableWidget(QTableWidget):
                 )
         elif can_paste:
             menu.addAction("Paste", lambda: self.paste_files_requested.emit())
+
+        # Grouping needs several FASTA files, so it belongs on a multi-selection.
+        fasta_paths = [p for p in paths if p.suffix.lower() in _FASTA_SUFFIXES]
+        if len(fasta_paths) > 1:
+            menu.addSeparator()
+            menu.addAction(
+                f"Group {len(fasta_paths)} sequences into a list…",
+                lambda ps=list(fasta_paths): self.group_sequences_requested.emit(ps),
+            )
         menu.exec(self.mapToGlobal(position))
 
     def _context_open_aliview(self) -> None:

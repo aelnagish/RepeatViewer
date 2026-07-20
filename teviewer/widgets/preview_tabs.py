@@ -159,6 +159,8 @@ _UNSUPPORTED_PREVIEW_SUFFIXES = {
 
 def _preview_kind(path: Path) -> str:
     suffix = path.suffix.lower()
+    if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
+        return "dotplot"
     if suffix in _ALIGNMENT_PREVIEW_SUFFIXES:
         return "igv"
     if suffix in _HTML_PREVIEW_SUFFIXES:
@@ -214,11 +216,17 @@ def _write_text_file(path: Path, text: str) -> None:
     resolved.write_text(text, encoding="utf-8")
 
 
+# Alignment files shown as a dotplot rather than a table of numbers.
+_DOTPLOT_PREVIEW_SUFFIXES = frozenset({".paf", ".1aln"})
+
+
 def is_previewable_file(path: Path) -> bool:
     """Return True when TEviewer can show the file in the Preview panel."""
     resolved = path.expanduser()
     suffix = resolved.suffix.lower()
     name = resolved.name.lower()
+    if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
+        return True
     if is_bismark_cov_file(resolved):
         return True
     if suffix in _UNSUPPORTED_PREVIEW_SUFFIXES:
@@ -500,6 +508,7 @@ class FilePreviewPage(QWidget):
     """Single-file preview page inside a tab."""
 
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
+    sequenceExtracted = Signal(object)  # Path to a FASTA extracted from a selection
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
@@ -562,6 +571,7 @@ class FilePreviewPage(QWidget):
             QSizePolicy.Policy.Expanding,
         )
         self._dotplot_panel = None  # built lazily on first view
+        self._alignment_dotplot = None  # PAF/.1aln viewer, built on first use
         # Selection dragged on the dotplot, waiting to be applied to the
         # Annotation view. select_by_position() only retries for ~2 s while the
         # tab is hidden, so hold it here until Annotation is actually opened.
@@ -892,6 +902,7 @@ class FilePreviewPage(QWidget):
         if self._annotation_panel is None:
             self._annotation_panel = SequenceMapPanel(self.path, self, autoload=False)
             self._annotation_panel.annotationsSaved.connect(self.annotationsSaved.emit)
+            self._annotation_panel.sequenceExtracted.connect(self.sequenceExtracted.emit)
             holder_layout = self._fasta_annotation_holder.layout()
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_annotation_holder)
@@ -899,6 +910,19 @@ class FilePreviewPage(QWidget):
                 holder_layout.setSpacing(0)
             holder_layout.addWidget(self._annotation_panel, stretch=1)
         return self._annotation_panel
+
+    def _show_alignment_dotplot(self, path: Path) -> None:
+        """Plot a PAF/.1aln alignment file instead of dumping it as text."""
+        from teviewer.widgets.dotplot_view import DotplotPanel
+
+        if self._alignment_dotplot is None:
+            self._alignment_dotplot = DotplotPanel(path, self)
+            self._alignment_dotplot.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            self._stack.addWidget(self._alignment_dotplot)
+        self._stack.setCurrentWidget(self._alignment_dotplot)
+        self._alignment_dotplot.load_alignment(path)
 
     def _ensure_dotplot_panel(self):
         """Create the dotplot panel on first use.
@@ -1102,6 +1126,9 @@ class FilePreviewPage(QWidget):
                 f"{path}\n\n"
                 "Open it with an external application (for example Word or Excel)."
             )
+            return
+        if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
+            self._show_alignment_dotplot(path)
             return
         if suffix == ".pdf":
             status = self._pdf.load_file(path)
@@ -1344,6 +1371,7 @@ class PreviewTabWidget(QTabWidget):
     """Tab bar for open files; reuses tabs when the same path is opened again."""
 
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
+    sequenceExtracted = Signal(object)  # Path to a FASTA extracted from a selection
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
 
     def __init__(
@@ -1553,6 +1581,7 @@ class PreviewTabWidget(QTabWidget):
 
     def _wire_preview_page(self, page: FilePreviewPage) -> None:
         page.annotationsSaved.connect(self.annotationsSaved.emit)
+        page.sequenceExtracted.connect(self.sequenceExtracted.emit)
         page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
         self._wheel_zoom_filter.register_page(page)
 

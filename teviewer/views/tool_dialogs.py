@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -783,6 +784,188 @@ class TreeParamsDialog(QDialog):
         )
 
 
+class NewSequenceDialog(QDialog):
+    """Type or paste a sequence and save it as a FASTA."""
+
+    def __init__(self, *, parent=None) -> None:
+        super().__init__(parent)
+        from teviewer.backends.sequence_compose import MOLECULE_LABELS
+
+        self.setWindowTitle("New Sequence")
+        self.resize(720, 520)
+
+        self._text = QPlainTextEdit(self)
+        self._text.setPlaceholderText("Type or paste in sequence…")
+        self._text.setTabChangesFocus(True)
+
+        self._name = QLineEdit(self)
+        self._name.setPlaceholderText("Required")
+        self._description = QLineEdit(self)
+        self._description.setPlaceholderText("Optional")
+        self._organism = QLineEdit(self)
+        self._organism.setPlaceholderText("Optional")
+
+        self._molecule = QComboBox(self)
+        for label, value in MOLECULE_LABELS:
+            self._molecule.addItem(label, value)
+
+        for field in (self._name, self._description, self._organism, self._molecule):
+            field.setFixedWidth(320)
+
+        self._summary = QLabel(self)
+        self._summary.setStyleSheet("color: palette(mid);")
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        form.addRow("Name:", self._name)
+        form.addRow("Description:", self._description)
+        form.addRow("Organism:", self._organism)
+        form.addRow("Type:", self._molecule)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel("Type or paste in sequence:", self))
+        layout.addWidget(self._text, stretch=1)
+        layout.addLayout(form)
+        layout.addWidget(self._summary)
+        layout.addWidget(self._buttons)
+
+        # Track whether the user has typed a name themselves: a pasted FASTA
+        # header fills these in, but must never overwrite a typed value.
+        self._name_touched = False
+        self._description_touched = False
+        self._name.textEdited.connect(self._on_name_edited)
+        self._description.textEdited.connect(self._on_description_edited)
+
+        self._text.textChanged.connect(self._on_text_changed)
+        self._name.textChanged.connect(self._sync)
+        self._molecule.currentIndexChanged.connect(self._sync)
+        self._sync()
+
+    def _on_name_edited(self, text: str) -> None:
+        self._name_touched = bool(text.strip())
+
+    def _on_description_edited(self, text: str) -> None:
+        self._description_touched = bool(text.strip())
+
+    def _on_text_changed(self) -> None:
+        """Offer the name from a pasted FASTA header."""
+        from teviewer.backends.sequence_compose import parse_pasted_header
+
+        name, description = parse_pasted_header(self._text.toPlainText())
+        if name and not self._name_touched:
+            self._name.setText(name)
+        if description and not self._description_touched:
+            self._description.setText(description)
+        self._sync()
+
+    def _sync(self) -> None:
+        from teviewer.backends.sequence_compose import check_sequence
+
+        check = check_sequence(self._text.toPlainText(), str(self._molecule.currentData()))
+        parts = [f"{check.length:,} bp" if check.length else "empty"]
+        if check.invalid:
+            parts.append(f"unexpected characters: {check.invalid}")
+        self._summary.setText("  ·  ".join(parts))
+        ok = bool(check.length) and bool(self._name.text().strip())
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(ok)
+
+    def values(self) -> dict:
+        return {
+            "name": self._name.text().strip(),
+            "sequence": self._text.toPlainText(),
+            "description": self._description.text().strip(),
+            "organism": self._organism.text().strip(),
+            "molecule": str(self._molecule.currentData()),
+        }
+
+
+class ExtractSequencesDialog(QDialog):
+    """Pick records out of a multi-FASTA."""
+
+    def __init__(self, *, records: list[tuple[str, str, int]], source_name: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Extract sequences")
+        self.resize(560, 460)
+
+        self._list = QListWidget(self)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for rec_id, description, length in records:
+            label = f"{rec_id}    ({length:,} bp)"
+            if description:
+                label += f"   {description}"
+            item = QListWidgetItem(label, self._list)
+            item.setData(Qt.ItemDataRole.UserRole, rec_id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+
+        self._single_file = QCheckBox("Write all selected into one file", self)
+
+        select_all = QPushButton("Select all", self)
+        select_none = QPushButton("Select none", self)
+        select_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Checked))
+        select_none.clicked.connect(lambda: self._set_all(Qt.CheckState.Unchecked))
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel(f"Sequences in {source_name}:", self))
+        top.addStretch(1)
+        top.addWidget(select_all)
+        top.addWidget(select_none)
+
+        self._summary = QLabel(self)
+        self._summary.setStyleSheet("color: palette(mid);")
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(10)
+        layout.addLayout(top)
+        layout.addWidget(self._list, stretch=1)
+        layout.addWidget(self._single_file)
+        layout.addWidget(self._summary)
+        layout.addWidget(self._buttons)
+
+        self._list.itemChanged.connect(self._sync)
+        self._sync()
+
+    def _set_all(self, state) -> None:
+        for index in range(self._list.count()):
+            self._list.item(index).setCheckState(state)
+
+    def _sync(self) -> None:
+        chosen = self.selected_ids()
+        self._summary.setText(
+            f"{len(chosen)} of {self._list.count()} selected"
+            if chosen else "Nothing selected"
+        )
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(chosen))
+
+    def selected_ids(self) -> set[str]:
+        return {
+            self._list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._list.count())
+            if self._list.item(i).checkState() == Qt.CheckState.Checked
+        }
+
+    def single_file(self) -> bool:
+        return self._single_file.isChecked()
+
+
 class FastGaParamsDialog(QDialog):
     """FastGA whole-genome alignment parameters."""
 
@@ -831,6 +1014,18 @@ class FastGaParamsDialog(QDialog):
             "the output."
         )
 
+        self._seed_freq = QSpinBox(self)
+        self._seed_freq.setRange(1, 100_000)
+        self._seed_freq.setSingleStep(50)
+        self._seed_freq.setValue(getattr(opts, "seed_freq", 200))
+        self._seed_freq.setToolTip(
+            "FastGA's -f: seeds occurring more often than this are discarded as "
+            "'repetitive' before alignment.\n"
+            "FastGA's own default is 10, which removes satellite arrays "
+            "entirely, since every monomer k-mer occurs far more than 10 times.\n"
+            "Raise it to see repeat structure; higher values are slower."
+        )
+
         self._symmetric = QCheckBox("Symmetric seeding (-S)", self)
         self._symmetric.setChecked(opts.symmetric)
         self._symmetric.setToolTip(
@@ -846,7 +1041,13 @@ class FastGaParamsDialog(QDialog):
             "the index build, which is the slow part of a first run."
         )
 
-        for field in (self._format, self._threads, self._identity, self._min_length):
+        for field in (
+            self._format,
+            self._threads,
+            self._identity,
+            self._min_length,
+            self._seed_freq,
+        ):
             field.setFixedWidth(240)
 
         mode = QLabel(self)
@@ -870,6 +1071,7 @@ class FastGaParamsDialog(QDialog):
         form.addRow("Output format:", self._format)
         form.addRow("Min identity:", self._identity)
         form.addRow("Min alignment length:", self._min_length)
+        form.addRow("Repeat cutoff (-f):", self._seed_freq)
         form.addRow("Threads:", self._threads)
         form.addRow("", self._symmetric)
         form.addRow("", self._keep_index)
@@ -895,6 +1097,7 @@ class FastGaParamsDialog(QDialog):
             threads=int(self._threads.value()),
             min_identity=float(self._identity.value()),
             min_length=int(self._min_length.value()),
+            seed_freq=int(self._seed_freq.value()),
             symmetric=self._symmetric.isChecked(),
             keep_index=self._keep_index.isChecked(),
         )
