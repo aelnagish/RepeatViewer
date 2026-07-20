@@ -578,6 +578,7 @@ class FastGaWorker(QObject):
                 threads=self._options.threads,
                 min_identity=self._options.min_identity,
                 min_length=self._options.min_length,
+                seed_freq=getattr(self._options, "seed_freq", 200),
                 symmetric=self._options.symmetric,
                 keep_index=self._options.keep_index,
                 progress=_progress,

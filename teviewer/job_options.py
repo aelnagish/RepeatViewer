@@ -167,6 +167,7 @@ class FastGaOptions:
     threads: int = 8
     min_identity: float = 0.7
     min_length: int = 100
+    seed_freq: int = 200
     symmetric: bool = True
     keep_index: bool = True
 

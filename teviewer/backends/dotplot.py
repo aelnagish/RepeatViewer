@@ -82,6 +82,11 @@ class DotplotResult:
     raw_match_count: int = 0
     truncated: bool = False
     note: str = ""
+    # Position of the plotted window within the full sequence (0-based). Plot
+    # coordinates stay 0..sequence_length; the rulers add this so they read as
+    # real scaffold positions.
+    coordinate_offset: int = 0
+    full_sequence_length: int = 0
 
     @property
     def segment_count(self) -> int:
@@ -255,6 +260,115 @@ def compute_self_dotplot(
                 )
 
     result.raw_match_count = raw
+    return result
+
+
+def sequence_length_of_fasta(path: Path) -> tuple[str, int]:
+    """(id, base count) of a single-record FASTA, without holding the sequence.
+
+    Counts in binary blocks so a 648 Mb scaffold costs one streaming pass and
+    almost no memory.
+    """
+    resolved = path.expanduser().resolve()
+    name = ""
+    total = 0
+    opener = (
+        gzip.open(resolved, "rb")
+        if resolved.name.lower().endswith(".gz")
+        else resolved.open("rb")
+    )
+    with opener as handle:
+        first = True
+        for raw in handle:
+            if first:
+                first = False
+                if raw.startswith(b">"):
+                    name = raw[1:].decode("utf-8", "replace").strip().split()[0] \
+                        if raw[1:].strip() else ""
+                    continue
+            if raw.startswith(b">"):
+                break  # only the first record
+            total += len(raw.strip())
+    return name, total
+
+
+def read_fasta_region(path: Path, start: int, end: int) -> tuple[str, str]:
+    """Read bases ``start``..``end`` (1-based inclusive) of a single-record FASTA.
+
+    Streams the file and keeps only the requested window, so a small region of
+    a very large scaffold costs one pass and holds only the slice in memory.
+    """
+    resolved = path.expanduser().resolve()
+    lo = max(1, int(start))
+    hi = max(lo, int(end))
+
+    name = ""
+    pieces: list[bytes] = []
+    consumed = 0  # bases seen so far
+    opener = (
+        gzip.open(resolved, "rb")
+        if resolved.name.lower().endswith(".gz")
+        else resolved.open("rb")
+    )
+    with opener as handle:
+        first = True
+        for raw in handle:
+            if first:
+                first = False
+                if raw.startswith(b">"):
+                    header = raw[1:].decode("utf-8", "replace").strip()
+                    name = header.split()[0] if header else ""
+                    continue
+            if raw.startswith(b">"):
+                break
+            line = raw.strip()
+            if not line:
+                continue
+            line_start = consumed + 1          # 1-based position of first base
+            line_end = consumed + len(line)    # 1-based position of last base
+            consumed = line_end
+            if line_end < lo:
+                continue
+            if line_start > hi:
+                break
+            take_from = max(lo, line_start) - line_start
+            take_to = min(hi, line_end) - line_start + 1
+            pieces.append(line[take_from:take_to])
+
+    return name, b"".join(pieces).decode("utf-8", "replace").upper()
+
+
+def compute_self_dotplot_for_region(
+    path: Path,
+    start: int,
+    end: int,
+    *,
+    word_size: int | None = None,
+    include_reverse: bool = True,
+    max_matches: int = DEFAULT_MAX_MATCHES,
+    full_length: int = 0,
+) -> DotplotResult:
+    """Self dotplot of one window of a large sequence.
+
+    This is how short word sizes stay usable on a big scaffold: the window is
+    small enough that the match count is manageable, while the rulers still
+    report real scaffold coordinates.
+    """
+    sequence_id, sequence = read_fasta_region(path, start, end)
+    if not sequence:
+        raise DotplotError(
+            f"No sequence in {path.name} between {start:,} and {end:,}."
+        )
+    resolved_word = word_size or suggest_word_size(len(sequence))
+    result = compute_self_dotplot(
+        sequence,
+        sequence_id=sequence_id,
+        word_size=resolved_word,
+        include_reverse=include_reverse,
+        max_matches=max_matches,
+    )
+    result.coordinate_offset = max(0, int(start) - 1)
+    result.full_sequence_length = int(full_length or 0)
     return result
 
 

@@ -43,6 +43,16 @@ DEFAULT_THREADS = 8
 DEFAULT_MIN_IDENTITY = 0.7
 DEFAULT_MIN_LENGTH = 100
 
+# FastGA's -f: a seed occurring more than this many times is deemed
+# "repetitive" and discarded before alignment. FastGA's own default is 10,
+# which is tuned for synteny between genomes -- and which silently removes the
+# entire repeat structure of a satellite array, where every monomer k-mer
+# occurs hundreds of times. For self-comparison of repeats we default much
+# higher; the cost is many more seed hits, so it is slower.
+FASTGA_DEFAULT_SEED_FREQ = 10
+DEFAULT_SEED_FREQ = 200
+MAX_SEED_FREQ = 100_000
+
 # Above this the built-in k-mer engine is impractical and FastGA takes over.
 FASTGA_PREFERRED_ABOVE_BYTES = 2_000_000
 
@@ -160,6 +170,7 @@ def build_fastga_command(
     threads: int = DEFAULT_THREADS,
     min_identity: float = DEFAULT_MIN_IDENTITY,
     min_length: int = DEFAULT_MIN_LENGTH,
+    seed_freq: int = DEFAULT_SEED_FREQ,
     symmetric: bool = True,
     keep_index: bool = True,
     temp_dir: Path | None = None,
@@ -184,6 +195,7 @@ def build_fastga_command(
         cmd.append(f"-P{temp_dir}")
     cmd.append(f"-i{float(min_identity):.3f}")
     cmd.append(f"-l{max(1, int(min_length))}")
+    cmd.append(f"-f{max(1, int(seed_freq))}")
     cmd.append(str(fasta))
     return cmd
 
@@ -208,6 +220,7 @@ def run_fastga_alignment(
     threads: int = DEFAULT_THREADS,
     min_identity: float = DEFAULT_MIN_IDENTITY,
     min_length: int = DEFAULT_MIN_LENGTH,
+    seed_freq: int = DEFAULT_SEED_FREQ,
     symmetric: bool = True,
     keep_index: bool = True,
     temp_dir: Path | None = None,
@@ -242,6 +255,7 @@ def run_fastga_alignment(
             cmd.append("-k")
         cmd.append(f"-i{float(min_identity):.3f}")
         cmd.append(f"-l{max(1, int(min_length))}")
+        cmd.append(f"-f{max(1, int(seed_freq))}")
 
         if fmt == FORMAT_ALN:
             cmd.append(f"-1:{out_path}")
@@ -320,6 +334,7 @@ def run_fastga_self_dotplot(
     threads: int = DEFAULT_THREADS,
     min_identity: float = DEFAULT_MIN_IDENTITY,
     min_length: int = DEFAULT_MIN_LENGTH,
+    seed_freq: int = DEFAULT_SEED_FREQ,
     symmetric: bool = True,
     keep_index: bool = True,
     temp_dir: Path | None = None,
@@ -343,6 +358,7 @@ def run_fastga_self_dotplot(
             threads=threads,
             min_identity=min_identity,
             min_length=min_length,
+            seed_freq=seed_freq,
             symmetric=symmetric,
             keep_index=keep_index,
             temp_dir=scratch,

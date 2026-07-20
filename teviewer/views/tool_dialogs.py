@@ -831,6 +831,18 @@ class FastGaParamsDialog(QDialog):
             "the output."
         )
 
+        self._seed_freq = QSpinBox(self)
+        self._seed_freq.setRange(1, 100_000)
+        self._seed_freq.setSingleStep(50)
+        self._seed_freq.setValue(getattr(opts, "seed_freq", 200))
+        self._seed_freq.setToolTip(
+            "FastGA's -f: seeds occurring more often than this are discarded as "
+            "'repetitive' before alignment.\n"
+            "FastGA's own default is 10, which removes satellite arrays "
+            "entirely, since every monomer k-mer occurs far more than 10 times.\n"
+            "Raise it to see repeat structure; higher values are slower."
+        )
+
         self._symmetric = QCheckBox("Symmetric seeding (-S)", self)
         self._symmetric.setChecked(opts.symmetric)
         self._symmetric.setToolTip(
@@ -846,7 +858,13 @@ class FastGaParamsDialog(QDialog):
             "the index build, which is the slow part of a first run."
         )
 
-        for field in (self._format, self._threads, self._identity, self._min_length):
+        for field in (
+            self._format,
+            self._threads,
+            self._identity,
+            self._min_length,
+            self._seed_freq,
+        ):
             field.setFixedWidth(240)
 
         mode = QLabel(self)
@@ -870,6 +888,7 @@ class FastGaParamsDialog(QDialog):
         form.addRow("Output format:", self._format)
         form.addRow("Min identity:", self._identity)
         form.addRow("Min alignment length:", self._min_length)
+        form.addRow("Repeat cutoff (-f):", self._seed_freq)
         form.addRow("Threads:", self._threads)
         form.addRow("", self._symmetric)
         form.addRow("", self._keep_index)
@@ -895,6 +914,7 @@ class FastGaParamsDialog(QDialog):
             threads=int(self._threads.value()),
             min_identity=float(self._identity.value()),
             min_length=int(self._min_length.value()),
+            seed_freq=int(self._seed_freq.value()),
             symmetric=self._symmetric.isChecked(),
             keep_index=self._keep_index.isChecked(),
         )
