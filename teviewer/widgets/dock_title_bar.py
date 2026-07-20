@@ -120,6 +120,9 @@ class BrowserDockTitleBar(QWidget):
                 "PreviewDockFileTabs",
                 "FilesDockFilterHost",
                 "FilesDockNavHost",
+                "FilesDockTrailing",
+                "FoldersDockNavHost",
+                "FoldersDockTrailing",
             }:
                 return True
             current = current.parentWidget()

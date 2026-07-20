@@ -845,6 +845,57 @@ class FolderTreeWidget(QTreeWidget):
                 return found
         return None
 
+    @staticmethod
+    def _is_lazy_placeholder(item: QTreeWidgetItem) -> bool:
+        return bool(item.data(0, ROLE_LAZY_PLACEHOLDER))
+
+    @staticmethod
+    def _folder_name_for_item(item: QTreeWidgetItem) -> str:
+        raw = item.data(0, ROLE_PATH)
+        if raw:
+            return Path(str(raw)).name.lower()
+        label = item.text(0)
+        if " (" in label:
+            label = label.rsplit(" (", 1)[0]
+        return label.lower()
+
+    def apply_name_filter(self, query: str) -> None:
+        """Show folder rows whose name matches ``query`` (case-insensitive substring)."""
+        needle = query.strip().lower()
+
+        if not needle:
+
+            def reset(item: QTreeWidgetItem) -> None:
+                item.setHidden(False)
+                for index in range(item.childCount()):
+                    child = item.child(index)
+                    if self._is_lazy_placeholder(child):
+                        child.setHidden(True)
+                        continue
+                    reset(child)
+
+            for index in range(self.topLevelItemCount()):
+                reset(self.topLevelItem(index))
+            return
+
+        def filter_item(item: QTreeWidgetItem) -> bool:
+            if self._is_lazy_placeholder(item):
+                item.setHidden(True)
+                return False
+            self_match = needle in self._folder_name_for_item(item)
+            child_match = False
+            for index in range(item.childCount()):
+                if filter_item(item.child(index)):
+                    child_match = True
+            visible = self_match or child_match
+            item.setHidden(not visible)
+            if child_match:
+                self.expandItem(item)
+            return visible
+
+        for index in range(self.topLevelItemCount()):
+            filter_item(self.topLevelItem(index))
+
     def select_folder_item(self, item: QTreeWidgetItem) -> None:
         """Select exactly one folder row and make it current."""
         index = self.indexFromItem(item)
@@ -1742,7 +1793,7 @@ class MainWindow(QMainWindow):
         return dock
 
     def _build_dock_panels(self) -> None:
-        # --- Folders ---
+        # --- Folders (nav + filter live on the dock title bar) ---
         folder_side = QWidget()
         folder_side.setObjectName("FoldersPanel")
         folder_side_layout = QVBoxLayout(folder_side)
@@ -1754,22 +1805,43 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding,
         )
 
-        # --- Files (list only; nav + filter live on the dock title bar) ---
+        self._folder_nav = FolderNavigationBar()
+        self._folder_nav.setObjectName("FoldersDockNavHost")
+        self._folder_nav.set_roots_provider(self._workspace_root_folders)
+        self._folder_nav.navigate_requested.connect(self._on_folder_nav_requested)
+
+        folders_trailing = QWidget()
+        folders_trailing.setObjectName("FoldersDockTrailing")
+        folders_trailing_layout = QHBoxLayout(folders_trailing)
+        folders_trailing_layout.setContentsMargins(0, 0, 0, 0)
+        folders_trailing_layout.setSpacing(6)
+        folders_trailing_layout.addWidget(self._folder_nav)
+        self._folder_filter = QLineEdit()
+        self._folder_filter.setObjectName("FolderFilter")
+        self._folder_filter.setPlaceholderText("Filter by name…")
+        self._folder_filter.setClearButtonEnabled(True)
+        self._folder_filter.setFixedHeight(18)
+        self._folder_filter.setMinimumWidth(140)
+        self._folder_filter.setMaximumWidth(280)
+        self._folder_filter.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._folder_filter.textChanged.connect(self._apply_folder_filter)
+        folders_trailing_layout.addWidget(self._folder_filter)
+
+        # --- Files (list only; filter lives on the dock title bar) ---
         files_panel = QWidget()
         files_panel.setObjectName("FilesPanel")
         files_layout = QVBoxLayout(files_panel)
         files_layout.setContentsMargins(4, 6, 4, 4)
         files_layout.setSpacing(0)
 
-        self._folder_nav = FolderNavigationBar()
-        self._folder_nav.set_roots_provider(self._workspace_root_folders)
-        self._folder_nav.navigate_requested.connect(self._on_folder_nav_requested)
-
         files_trailing = QWidget()
+        files_trailing.setObjectName("FilesDockTrailing")
         files_trailing_layout = QHBoxLayout(files_trailing)
         files_trailing_layout.setContentsMargins(0, 0, 0, 0)
         files_trailing_layout.setSpacing(6)
-        files_trailing_layout.addWidget(self._folder_nav)
         self._file_filter = QLineEdit()
         self._file_filter.setObjectName("FileFilter")
         self._file_filter.setPlaceholderText("Filter by name…")
@@ -1880,7 +1952,7 @@ class MainWindow(QMainWindow):
             )
         )
         self._dock_folders.setTitleBarWidget(
-            BrowserDockTitleBar(self._dock_folders, "Folders")
+            BrowserDockTitleBar(self._dock_folders, "Folders", trailing=folders_trailing)
         )
 
         # Central filler: when a saved layout leaves a dock gap, paint it with the
@@ -2346,7 +2418,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+G"), self, self._open_set_genome)
         QShortcut(QKeySequence.StandardKey.Refresh, self, self._refresh_current_folder)
         QShortcut(QKeySequence(Qt.Key.Key_F5), self, self._refresh_current_folder)
-        QShortcut(QKeySequence.StandardKey.Find, self, lambda: self._file_filter.setFocus())
+        QShortcut(QKeySequence.StandardKey.Find, self, self._focus_browser_filter)
         for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
             shortcut = QShortcut(key, self._file_list)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -2362,6 +2434,29 @@ class MainWindow(QMainWindow):
         paste_tree = QShortcut(QKeySequence.StandardKey.Paste, self._folder_tree)
         paste_tree.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         paste_tree.activated.connect(self._paste_files_shortcut)
+        find_tree = QShortcut(QKeySequence.StandardKey.Find, self._folder_tree)
+        find_tree.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_tree.activated.connect(lambda: self._folder_filter.setFocus())
+
+    def _focus_browser_filter(self) -> None:
+        focus = QApplication.focusWidget()
+        if focus is not None and (
+            focus is self._folder_tree
+            or focus is self._folder_filter
+            or self._folder_tree.isAncestorOf(focus)
+            or self._folder_filter.isAncestorOf(focus)
+            or self._dock_folders.isAncestorOf(focus)
+        ):
+            self._folder_filter.setFocus()
+            self._folder_filter.selectAll()
+            return
+        self._file_filter.setFocus()
+        self._file_filter.selectAll()
+
+    def _apply_folder_filter(self) -> None:
+        if not hasattr(self, "_folder_filter"):
+            return
+        self._folder_tree.apply_name_filter(self._folder_filter.text())
 
     def _copy_files_shortcut(self) -> None:
         paths = self._selected_files()
@@ -3324,6 +3419,7 @@ class MainWindow(QMainWindow):
             self._project.input_dir = folder
         if persist:
             self._persist_workspace()
+        self._apply_folder_filter()
 
     def _sync_folder_item_icon(self, item: QTreeWidgetItem) -> None:
         if self._is_lazy_folder_placeholder(item):
@@ -3356,6 +3452,7 @@ class MainWindow(QMainWindow):
     def _on_folder_tree_expanded(self, item: QTreeWidgetItem) -> None:
         self._sync_folder_item_icon(item)
         self._populate_folder_tree_children(item)
+        self._apply_folder_filter()
         self._schedule_persist_workspace()
 
     def _on_folder_tree_collapsed(self, item: QTreeWidgetItem) -> None:
@@ -3484,6 +3581,7 @@ class MainWindow(QMainWindow):
 
         for index in range(self._folder_tree.topLevelItemCount()):
             walk(self._folder_tree.topLevelItem(index))
+        self._apply_folder_filter()
 
     def _populate_folder_tree_children(self, item: QTreeWidgetItem) -> None:
         if item.childCount() > 0:

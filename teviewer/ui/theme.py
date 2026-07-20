@@ -99,7 +99,7 @@ def application_stylesheet(
         background: palette(alternate-base);
         border-color: palette(mid);
     }}
-    QLineEdit#FileFilter {{
+    QLineEdit#FileFilter, QLineEdit#FolderFilter {{
         border: 1px solid palette(mid);
         padding: 0px 6px;
         min-height: 16px;
@@ -107,7 +107,7 @@ def application_stylesheet(
         border-radius: {radius_sm}px;
         background: palette(base);
     }}
-    QLineEdit#FileFilter:focus {{
+    QLineEdit#FileFilter:focus, QLineEdit#FolderFilter:focus {{
         border-color: {accent};
     }}
     QWidget#FolderNavigationBar QToolButton {{
