@@ -73,7 +73,7 @@ from PySide6.QtWidgets import (
 )
 
 _BROWSER_DOCK_WIDTH = 480
-_BROWSER_FOLDER_TREE_WIDTH = 155
+_BROWSER_FOLDER_TREE_WIDTH = 120
 _BROWSER_FILES_PREVIEW_SPLIT = (170, 210)
 from teviewer import __version__
 from teviewer.branding import APP_DISPLAY_NAME
@@ -1415,7 +1415,11 @@ class MainWindow(QMainWindow):
 
     def _finalize_browser_layout(self) -> None:
         """Re-check dock tiling after the first paint (restoreState can lag)."""
-        if self._browser_layout_needs_repair():
+        settings = QSettings()
+        settings.beginGroup("mainwindow")
+        has_saved_layout = bool(settings.value("toolbar_state_v5"))
+        settings.endGroup()
+        if self._browser_layout_needs_repair() or not has_saved_layout:
             self._apply_default_browser_layout(force=True)
         else:
             self._apply_default_browser_layout()
@@ -1813,15 +1817,18 @@ class MainWindow(QMainWindow):
 
         folders_trailing = QWidget()
         folders_trailing.setObjectName("FoldersDockTrailing")
+        folders_trailing.setFixedHeight(18)
         folders_trailing_layout = QHBoxLayout(folders_trailing)
         folders_trailing_layout.setContentsMargins(0, 0, 0, 0)
         folders_trailing_layout.setSpacing(6)
-        folders_trailing_layout.addWidget(self._folder_nav)
+        folders_trailing_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        folders_trailing_layout.addWidget(self._folder_nav, 0, Qt.AlignmentFlag.AlignVCenter)
         self._folder_filter = QLineEdit()
         self._folder_filter.setObjectName("FolderFilter")
         self._folder_filter.setPlaceholderText("Filter by name…")
         self._folder_filter.setClearButtonEnabled(True)
         self._folder_filter.setFixedHeight(18)
+        self._folder_filter.setMaximumHeight(18)
         self._folder_filter.setMinimumWidth(140)
         self._folder_filter.setMaximumWidth(280)
         self._folder_filter.setSizePolicy(
@@ -1829,7 +1836,11 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Fixed,
         )
         self._folder_filter.textChanged.connect(self._apply_folder_filter)
-        folders_trailing_layout.addWidget(self._folder_filter)
+        folders_trailing_layout.addWidget(
+            self._folder_filter,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
 
         # --- Files (list only; filter lives on the dock title bar) ---
         files_panel = QWidget()
@@ -1840,14 +1851,17 @@ class MainWindow(QMainWindow):
 
         files_trailing = QWidget()
         files_trailing.setObjectName("FilesDockTrailing")
+        files_trailing.setFixedHeight(18)
         files_trailing_layout = QHBoxLayout(files_trailing)
         files_trailing_layout.setContentsMargins(0, 0, 0, 0)
         files_trailing_layout.setSpacing(6)
+        files_trailing_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self._file_filter = QLineEdit()
         self._file_filter.setObjectName("FileFilter")
         self._file_filter.setPlaceholderText("Filter by name…")
         self._file_filter.setClearButtonEnabled(True)
         self._file_filter.setFixedHeight(18)
+        self._file_filter.setMaximumHeight(18)
         self._file_filter.setMinimumWidth(140)
         self._file_filter.setMaximumWidth(280)
         self._file_filter.setSizePolicy(
@@ -1855,7 +1869,11 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Fixed,
         )
         self._file_filter.textChanged.connect(self._apply_file_filter)
-        files_trailing_layout.addWidget(self._file_filter)
+        files_trailing_layout.addWidget(
+            self._file_filter,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
 
         self._file_columns_btn = QToolButton()
         self._file_columns_btn.setObjectName("FileColumnsButton")
@@ -1867,7 +1885,11 @@ class MainWindow(QMainWindow):
         self._file_column_actions: dict[int, QAction] = {}
         self._build_file_columns_menu()
         self._file_columns_btn.setMenu(self._file_columns_menu)
-        files_trailing_layout.addWidget(self._file_columns_btn)
+        files_trailing_layout.addWidget(
+            self._file_columns_btn,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
 
         self._file_list.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -1995,7 +2017,7 @@ class MainWindow(QMainWindow):
             self._dock_preview,
             Qt.Orientation.Vertical,
         )
-        self._dock_folders.setMinimumWidth(120)
+        self._dock_folders.setMinimumWidth(100)
         self._dock_files.setMinimumWidth(200)
         self._dock_preview.setMinimumWidth(200)
 
@@ -2013,10 +2035,13 @@ class MainWindow(QMainWindow):
         if self._dock_folders is None or self._dock_files is None or self._dock_preview is None:
             return
         width = max(self.width(), _BROWSER_DOCK_WIDTH)
-        folder_w = min(
-            max(_BROWSER_FOLDER_TREE_WIDTH, width // 5),
-            max(_BROWSER_FOLDER_TREE_WIDTH + 40, width // 3),
-        )
+        if force:
+            folder_w = _BROWSER_FOLDER_TREE_WIDTH
+        else:
+            folder_w = min(
+                max(_BROWSER_FOLDER_TREE_WIDTH, width // 6),
+                _BROWSER_FOLDER_TREE_WIDTH + 40,
+            )
         if force:
             for dock in (self._dock_folders, self._dock_files, self._dock_preview):
                 dock.setFloating(False)
@@ -2036,8 +2061,10 @@ class MainWindow(QMainWindow):
             )
             self.resizeDocks([self._dock_folders], [folder_w], Qt.Orientation.Horizontal)
             height = max(self.height(), 600)
-            files_h = max(160, height // 3)
-            preview_h = max(220, height - files_h - 100)
+            files_h, preview_h = _BROWSER_FILES_PREVIEW_SPLIT
+            total_h = max(files_h + preview_h, height - 120)
+            files_h = max(140, int(total_h * 0.32))
+            preview_h = max(200, total_h - files_h)
             self.resizeDocks(
                 [self._dock_files, self._dock_preview],
                 [files_h, preview_h],
@@ -2061,6 +2088,7 @@ class MainWindow(QMainWindow):
         self._purge_legacy_docks()
         self._apply_default_browser_layout(force=True)
         self._ensure_preview_visible()
+
     @staticmethod
     def _settings_menu_hint() -> str:
         if platform.system() == "Darwin":
@@ -2409,7 +2437,10 @@ class MainWindow(QMainWindow):
         if self._dock_preview is not None:
             view_menu.addAction(self._dock_preview.toggleViewAction())
         view_menu.addSeparator()
-        view_menu.addAction("Reset panel &layout", self._reset_browser_layout)
+        view_menu.addAction(
+            "Reset &layout",
+            self._reset_browser_layout,
+        )
 
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.addAction(f"&About {APP_DISPLAY_NAME}", self._show_about)

@@ -99,11 +99,15 @@ def application_stylesheet(
         background: palette(alternate-base);
         border-color: palette(mid);
     }}
+    QWidget#FoldersDockTrailing, QWidget#FilesDockTrailing {{
+        max-height: 18px;
+    }}
     QLineEdit#FileFilter, QLineEdit#FolderFilter {{
         border: 1px solid palette(mid);
         padding: 0px 6px;
         min-height: 16px;
         max-height: 18px;
+        height: 18px;
         border-radius: {radius_sm}px;
         background: palette(base);
     }}
@@ -115,7 +119,12 @@ def application_stylesheet(
         background: transparent;
         border-radius: {radius_sm}px;
         color: palette(text);
-        font-size: 11px;
+        font-size: 10px;
+        min-width: 18px;
+        max-width: 18px;
+        min-height: 18px;
+        max-height: 18px;
+        padding: 0px;
     }}
     QWidget#FolderNavigationBar QToolButton:hover {{
         background: palette(alternate-base);

@@ -43,9 +43,10 @@ class FolderNavigationBar(QWidget):
         self._up_btn.clicked.connect(self._on_up)
 
         for button in (self._back_btn, self._forward_btn, self._up_btn):
-            button.setFixedSize(24, 24)
+            button.setFixedSize(18, 18)
             layout.addWidget(button)
 
+        self.setFixedHeight(18)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         self._history: list[Path] = []
