@@ -779,7 +779,8 @@ class FolderTreeWidget(QTreeWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setHeaderHidden(True)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Cmd/Ctrl+click and Shift+click select multiple folders (delete, color, …).
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
         self.setAcceptDrops(True)
@@ -805,7 +806,11 @@ class FolderTreeWidget(QTreeWidget):
         self._active_folder_key: str | None = None
 
     def set_active_folder(self, folder: Path | None) -> None:
-        """Keep the folder that owns the Files panel visually highlighted."""
+        """Mark which folder owns the Files panel without wiping multi-selection.
+
+        Called after every Files refresh. Must not ``ClearAndSelect``, or
+        Cmd/Ctrl+click multi-select is immediately reduced to one row.
+        """
         if folder is None:
             self._active_folder_key = None
             self.viewport().update()
@@ -816,7 +821,19 @@ class FolderTreeWidget(QTreeWidget):
             self._active_folder_key = str(folder.expanduser())
         item = self.find_item_for_folder(folder)
         if item is not None:
-            self.select_folder_item(item)
+            index = self.indexFromItem(item)
+            if index.isValid():
+                self._suppress_current_changed = True
+                try:
+                    flags = QItemSelectionModel.SelectionFlag.Current
+                    if not item.isSelected():
+                        flags |= QItemSelectionModel.SelectionFlag.Select
+                    self.selectionModel().setCurrentIndex(index, flags)
+                finally:
+                    QTimer.singleShot(
+                        0,
+                        lambda: setattr(self, "_suppress_current_changed", False),
+                    )
         self.viewport().update()
 
     def find_item_for_folder(self, folder: Path) -> QTreeWidgetItem | None:
@@ -1430,12 +1447,15 @@ class MainWindow(QMainWindow):
         self._repair_browser_chrome()
 
     def _normalize_folder_tree_selection(self) -> None:
-        """Clear any stale multi-selection left from older builds."""
-        item = self._folder_tree.currentItem()
-        if item is None and self._folder_tree.topLevelItemCount() > 0:
-            item = self._folder_tree.topLevelItem(0)
-        if item is not None:
-            self._folder_tree.select_folder_item(item)
+        """Ensure a current folder exists after restore; do not clear multi-select."""
+        if self._folder_tree.currentItem() is not None:
+            return
+        if self._folder_tree.topLevelItemCount() <= 0:
+            return
+        item = self._folder_tree.topLevelItem(0)
+        if item is None:
+            return
+        self._folder_tree.select_folder_item(item)
 
     def _update_directory_watchers(self) -> None:
         watched: set[str] = set()
@@ -1838,6 +1858,8 @@ class MainWindow(QMainWindow):
         self._folder_filter.setObjectName("FolderFilter")
         self._folder_filter.setPlaceholderText("Filter by name…")
         self._folder_filter.setClearButtonEnabled(True)
+        self._folder_filter.setFrame(False)
+        self._folder_filter.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self._folder_filter.setFixedHeight(18)
         self._folder_filter.setMaximumHeight(18)
         self._folder_filter.setMinimumWidth(140)
@@ -1871,6 +1893,8 @@ class MainWindow(QMainWindow):
         self._file_filter.setObjectName("FileFilter")
         self._file_filter.setPlaceholderText("Filter by name…")
         self._file_filter.setClearButtonEnabled(True)
+        self._file_filter.setFrame(False)
+        self._file_filter.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self._file_filter.setFixedHeight(18)
         self._file_filter.setMaximumHeight(18)
         self._file_filter.setMinimumWidth(140)
@@ -1968,9 +1992,10 @@ class MainWindow(QMainWindow):
         self._preview_file_tabs_host = preview_file_tabs_host
         preview_zoom_host = QWidget()
         preview_zoom_host.setObjectName("PreviewDockZoomHost")
+        preview_zoom_host.setFixedHeight(18)
         preview_zoom_host.setSizePolicy(
             QSizePolicy.Policy.Fixed,
-            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
         )
         preview_zoom_layout = QHBoxLayout(preview_zoom_host)
         preview_zoom_layout.setContentsMargins(0, 0, 0, 0)

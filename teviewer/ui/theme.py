@@ -82,16 +82,16 @@ def application_stylesheet(
         font-size: {panel_size}pt;
     }}
     QToolButton#BrowserDockChromeButton {{
-        padding: 0px;
+        padding: 1px 0px 0px 0px;
         margin: 0px;
         border: 1px solid transparent;
         background: transparent;
         color: palette(text);
         border-radius: {radius_sm}px;
-        min-width: 20px;
-        max-width: 20px;
-        min-height: 20px;
-        max-height: 20px;
+        min-width: 18px;
+        max-width: 18px;
+        min-height: 18px;
+        max-height: 18px;
         font-size: 14px;
         font-weight: 600;
     }}
@@ -102,12 +102,16 @@ def application_stylesheet(
     QWidget#FoldersDockTrailing, QWidget#FilesDockTrailing {{
         max-height: 18px;
     }}
+    /* Do not set height here — it fights setFixedHeight and clips the bottom border. */
     QLineEdit#FileFilter, QLineEdit#FolderFilter {{
         border: 1px solid palette(mid);
         padding: 0px 6px;
-        min-height: 16px;
-        max-height: 18px;
-        height: 18px;
+        border-radius: {radius_sm}px;
+        background: palette(base);
+    }}
+    QToolButton#FileColumnsButton {{
+        border: 1px solid palette(mid);
+        padding: 0px 6px;
         border-radius: {radius_sm}px;
         background: palette(base);
     }}
@@ -330,19 +334,21 @@ def application_stylesheet(
     QWidget#PreviewZoomBar {{
         background: transparent;
     }}
-    QPushButton#PreviewZoomReset {{
+    QToolButton#PreviewToolsButton {{
         border: 1px solid palette(mid);
         background: palette(base);
         padding: 0px 8px;
-        min-height: 18px;
-        max-height: 18px;
         border-radius: {radius_sm}px;
     }}
-    QPushButton#PreviewZoomReset:hover {{
+    QToolButton#PreviewToolsButton:hover {{
         background: palette(alternate-base);
     }}
-    QPushButton#PreviewZoomReset:pressed {{
+    QToolButton#PreviewToolsButton:pressed {{
         background: palette(mid);
+    }}
+    QToolButton#PreviewToolsButton::menu-indicator {{
+        image: none;
+        width: 0px;
     }}
     QTabBar#PreviewFileTabBar::tab:selected {{
         background: palette(highlight);
@@ -454,7 +460,10 @@ def application_stylesheet(
     QSpinBox#previewZoomSpin {{
         min-width: 64px;
         max-width: 80px;
-        padding-right: 2px;
+        padding: 0px 2px 0px 0px;
+        /* Override global QSpinBox min/max-height so the bottom border is not clipped. */
+        min-height: 0px;
+        max-height: 18px;
     }}
     QSlider::groove:horizontal {{
         border: 1px solid palette(mid);

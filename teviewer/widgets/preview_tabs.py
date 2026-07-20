@@ -12,6 +12,7 @@ from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QPixmap, QShortcut, QT
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
     QLabel,
+    QMessageBox,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
@@ -130,6 +131,9 @@ _TEXT_PREVIEW_SUFFIXES = _FASTA_SUFFIXES | {
 }
 _TEXT_PREVIEW_MAX_CHARS = 500_000
 _DEFAULT_TEXT_MAX_CHARS = 200_000
+_EDITABLE_TEXT_MAX_CHARS = 2_000_000
+_TRUNCATION_MARKER = "\n\n... (truncated preview)"
+_EMPTY_FILE_PREFIX = "(empty file)\n"
 _IMAGE_PREVIEW_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}
 _HTML_PREVIEW_SUFFIXES = {".html", ".htm"}
 _UNSUPPORTED_PREVIEW_SUFFIXES = {
@@ -189,7 +193,8 @@ def _is_text_like_preview(path: Path) -> bool:
     return suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith("blast.txt")
 
 
-def _read_text_preview(path: Path, max_chars: int) -> str:
+def _read_text_preview(path: Path, max_chars: int) -> tuple[str, bool]:
+    """Return ``(text, truncated)`` for preview display."""
     resolved = path.expanduser().resolve()
     if resolved.name.lower().endswith(".gz"):
         with gzip.open(resolved, "rt", encoding="utf-8", errors="replace") as handle:
@@ -198,10 +203,17 @@ def _read_text_preview(path: Path, max_chars: int) -> str:
         with resolved.open(encoding="utf-8", errors="replace") as handle:
             text = handle.read(max_chars + 1)
     if not text.strip():
-        return f"(empty file)\n\n{resolved}"
+        return f"(empty file)\n\n{resolved}", False
     if len(text) > max_chars:
-        return text[:max_chars] + "\n\n... (truncated preview)"
-    return text
+        return text[:max_chars] + "\n\n... (truncated preview)", True
+    return text, False
+
+
+def _write_text_file(path: Path, text: str) -> None:
+    resolved = path.expanduser().resolve()
+    if resolved.name.lower().endswith(".gz"):
+        raise OSError("Saving compressed (.gz) text previews is not supported.")
+    resolved.write_text(text, encoding="utf-8")
 
 
 # Alignment files shown as a dotplot rather than a table of numbers.
@@ -510,12 +522,16 @@ class FilePreviewPage(QWidget):
         self._placeholder = QLabel("Loading…")
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._base_text_font_pt = load_preview_font_size()
+        self._text_truncated = False
+        self._text_edit_mode = False
+        self._text_dirty = False
         self._text = QTextEdit()
         self._text.setReadOnly(True)
         self._text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self._text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._text.setMinimumSize(200, 120)
+        self._text.textChanged.connect(self._on_text_editor_changed)
         self._text_scroll = QScrollArea(self)
         self._text_scroll.setWidgetResizable(True)
         self._text_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -529,6 +545,7 @@ class FilePreviewPage(QWidget):
         self._fasta_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._fasta_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._fasta_text.setMinimumSize(200, 120)
+        self._fasta_text.textChanged.connect(self._on_text_editor_changed)
         self._fasta_text_scroll = QScrollArea(self)
         self._fasta_text_scroll.setWidgetResizable(True)
         self._fasta_text_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -1077,9 +1094,12 @@ class FilePreviewPage(QWidget):
         self._set_single_fasta_mode(True)
         try:
             max_chars = _TEXT_PREVIEW_MAX_CHARS
-            text = _read_text_preview(path, max_chars)
+            text, truncated = _read_text_preview(path, max_chars)
         except OSError as exc:
             text = f"Could not read file:\n{path}\n{exc}"
+            truncated = False
+        self._text_truncated = truncated
+        self._exit_text_edit_mode(clear_dirty=True)
         self._fasta_text.setPlainText(text)
         cursor = self._fasta_text.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
@@ -1145,20 +1165,23 @@ class FilePreviewPage(QWidget):
                     if _is_text_like_preview(path)
                     else _DEFAULT_TEXT_MAX_CHARS
                 )
-                self._show_text(_read_text_preview(path, max_chars))
+                text, truncated = _read_text_preview(path, max_chars)
+                self._show_text(text, truncated=truncated)
             except OSError as exc:
-                self._show_text(f"Could not read file:\n{path}\n{exc}")
+                self._show_text(f"Could not read file:\n{path}\n{exc}", truncated=False)
             return
         if _looks_like_binary_file(path):
             self._show_text(
                 f"Preview is not available for this binary file.\n\n{path}\n\n"
-                "Open it with an external application."
+                "Open it with an external application.",
+                truncated=False,
             )
             return
         try:
-            self._show_text(_read_text_preview(path, _DEFAULT_TEXT_MAX_CHARS))
+            text, truncated = _read_text_preview(path, _DEFAULT_TEXT_MAX_CHARS)
+            self._show_text(text, truncated=truncated)
         except OSError as exc:
-            self._show_text(f"Could not read file:\n{path}\n{exc}")
+            self._show_text(f"Could not read file:\n{path}\n{exc}", truncated=False)
 
     def _refresh_text_view(self) -> None:
         editor = self._fasta_text if self._single_fasta_mode else self._text
@@ -1196,7 +1219,114 @@ class FilePreviewPage(QWidget):
         if hasattr(self._html, "teardown"):
             self._html.teardown()
 
-    def _show_text(self, text: str) -> None:
+    def _active_text_editor(self) -> QTextEdit:
+        return self._fasta_text if self._single_fasta_mode else self._text
+
+    def can_edit_text(self) -> bool:
+        if not self.is_text_preview_active():
+            return False
+        if self.path.name.lower().endswith(".gz"):
+            return False
+        if not self.path.is_file():
+            return False
+        current = self._active_text_editor().toPlainText()
+        if current.startswith("Could not read file:") or current.startswith(
+            "Preview is not available"
+        ):
+            return False
+        if current == _FASTA_TOO_LARGE_MESSAGE:
+            return False
+        return True
+
+    def can_save_text(self) -> bool:
+        return (
+            self.can_edit_text()
+            and self._text_edit_mode
+            and self._text_dirty
+            and not self._text_truncated
+        )
+
+    def begin_edit_text(self) -> bool:
+        if not self.can_edit_text():
+            return False
+        editor = self._active_text_editor()
+        if self._text_truncated or _TRUNCATION_MARKER in editor.toPlainText():
+            try:
+                text, truncated = _read_text_preview(self.path, _EDITABLE_TEXT_MAX_CHARS)
+            except OSError as exc:
+                QMessageBox.warning(
+                    self,
+                    "Edit text",
+                    f"Could not load the full file for editing:\n{exc}",
+                )
+                return False
+            if truncated:
+                QMessageBox.warning(
+                    self,
+                    "Edit text",
+                    "This file is too large to edit safely in Preview.\n"
+                    "Open it in an external editor instead.",
+                )
+                return False
+            self._text_truncated = False
+            editor.blockSignals(True)
+            editor.setPlainText(text)
+            editor.blockSignals(False)
+        elif editor.toPlainText().startswith(_EMPTY_FILE_PREFIX):
+            editor.blockSignals(True)
+            editor.setPlainText("")
+            editor.blockSignals(False)
+        editor.setReadOnly(False)
+        editor.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._text_edit_mode = True
+        self._text_dirty = False
+        return True
+
+    def save_text(self) -> bool:
+        if not self._text_edit_mode:
+            if not self.begin_edit_text():
+                return False
+        if self._text_truncated:
+            QMessageBox.warning(
+                self,
+                "Save text",
+                "Cannot save a truncated preview. Use Edit text to load the full file first.",
+            )
+            return False
+        editor = self._active_text_editor()
+        try:
+            _write_text_file(self.path, editor.toPlainText())
+        except OSError as exc:
+            QMessageBox.warning(self, "Save text", f"Could not save file:\n{exc}")
+            return False
+        self._text_dirty = False
+        self._text_truncated = False
+        if self._single_fasta_mode:
+            self._refresh_sequence_info_bar()
+            if self._annotation_panel is not None:
+                self._annotation_panel.load_path(self.path)
+        return True
+
+    def _exit_text_edit_mode(self, *, clear_dirty: bool = False) -> None:
+        self._text.setReadOnly(True)
+        self._fasta_text.setReadOnly(True)
+        self._text_edit_mode = False
+        if clear_dirty:
+            self._text_dirty = False
+
+    def _on_text_editor_changed(self) -> None:
+        if not self._text_edit_mode:
+            return
+        self._text_dirty = True
+        tab_host = self.parent()
+        while tab_host is not None and not isinstance(tab_host, PreviewTabWidget):
+            tab_host = tab_host.parent()
+        if isinstance(tab_host, PreviewTabWidget):
+            tab_host._sync_text_tool_actions()
+
+    def _show_text(self, text: str, *, truncated: bool = False) -> None:
+        self._text_truncated = truncated
+        self._exit_text_edit_mode(clear_dirty=True)
         self._text.setPlainText(text)
         cursor = self._text.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
@@ -1262,6 +1392,12 @@ class PreviewTabWidget(QTabWidget):
             self._annotation_zoom_bar = self._header_bar._annotation_zoom_bar
         self._zoom_bar.zoom_changed.connect(self._on_preview_zoom_changed)
         self._zoom_bar.fit_mode_changed.connect(self._on_preview_fit_changed)
+        if hasattr(self._zoom_bar, "edit_text_requested"):
+            self._zoom_bar.edit_text_requested.connect(self._on_edit_text_requested)
+        if hasattr(self._zoom_bar, "save_text_requested"):
+            self._zoom_bar.save_text_requested.connect(self._on_save_text_requested)
+        self._save_text_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        self._save_text_shortcut.activated.connect(self._on_save_text_requested)
         from teviewer.widgets.preview_controls import PreviewWheelZoomFilter
 
         self._wheel_zoom_filter = PreviewWheelZoomFilter(self, self._zoom_bar)
@@ -1560,15 +1696,45 @@ class PreviewTabWidget(QTabWidget):
             self._header_bar.set_header_zoom_mode("preview" if show_controls else "hidden")
         else:
             self._zoom_bar.setVisible(show_controls)
-        # Fit mode is configured in Preferences; title bar only has % / Reset.
+        # Fit mode is configured in Preferences; title bar has % / Tools.
         for control in (
             self._zoom_bar._spin,
-            self._zoom_bar._reset_btn,
+            self._zoom_bar._tools_btn,
         ):
             control.setEnabled(show_controls)
+        self._sync_text_tool_actions()
         self._sync_header_from_current_page()
         if isinstance(widget, FilePreviewPage):
             self._wheel_zoom_filter.register_page(widget)
+
+    def _sync_text_tool_actions(self) -> None:
+        if not hasattr(self._zoom_bar, "set_text_actions_enabled"):
+            return
+        widget = self.currentWidget()
+        can_edit = False
+        can_save = False
+        if isinstance(widget, FilePreviewPage):
+            can_edit = widget.can_edit_text()
+            can_save = widget.can_save_text()
+        self._zoom_bar.set_text_actions_enabled(can_edit=can_edit, can_save=can_save)
+
+    def _on_edit_text_requested(self) -> None:
+        widget = self.currentWidget()
+        if not isinstance(widget, FilePreviewPage):
+            return
+        if widget.begin_edit_text():
+            self._sync_text_tool_actions()
+
+    def _on_save_text_requested(self) -> None:
+        widget = self.currentWidget()
+        if not isinstance(widget, FilePreviewPage):
+            return
+        if widget.save_text():
+            self._sync_text_tool_actions()
+            parent = self.window()
+            refresh = getattr(parent, "_refresh_current_folder", None)
+            if callable(refresh):
+                refresh()
 
     def open_file(self, path: Path, *, replace: bool = False) -> None:
         """Open one file. replace=True uses a single reusable preview tab."""

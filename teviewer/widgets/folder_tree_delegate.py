@@ -81,18 +81,21 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
         self.initStyleOption(opt, index)
         widget = opt.widget
 
+        # Read selection from the original option before we clear Qt's chrome flags.
+        is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
         is_current = self._current_index(widget, index)
         is_hover = bool(opt.state & QStyle.StateFlag.State_MouseOver)
 
-        # Prevent Qt/macOS from painting range/multi-select chrome on other rows.
+        # Draw our own clipped highlight (icon → text), not the full-row macOS
+        # selection chrome — but still honor ExtendedSelection multi-select.
         opt.state &= ~QStyle.StateFlag.State_Selected
         opt.state &= ~QStyle.StateFlag.State_HasFocus
         opt.state &= ~QStyle.StateFlag.State_MouseOver
 
-        if is_current or is_hover:
+        if is_selected or is_current or is_hover:
             bg_rect = self._highlight_rect(opt, widget)
             painter.setPen(Qt.PenStyle.NoPen)
-            if is_current:
+            if is_selected or is_current:
                 # Selection colour follows the Preferences accent (qdarktheme maps
                 # the accent onto the palette Highlight role).
                 highlight = opt.palette.color(QPalette.ColorRole.Highlight)

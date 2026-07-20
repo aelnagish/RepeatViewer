@@ -51,7 +51,8 @@ class BrowserDockTitleBar(QWidget):
         self.setMaximumHeight(BROWSER_DOCK_TITLE_HEIGHT)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 0, 2, 0)
+        # 3px above/below so the filter's own bottom border is not clipped.
+        layout.setContentsMargins(6, 3, 2, 3)
         layout.setSpacing(4)
 
         self._title = QLabel(title, self)
@@ -84,7 +85,7 @@ class BrowserDockTitleBar(QWidget):
 
         self._close_btn = self._make_chrome_button(
             tip="Hide panel",
-            text="×",
+            text="✕",
         )
         self._close_btn.clicked.connect(dock.close)
         layout.addWidget(self._close_btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -108,7 +109,7 @@ class BrowserDockTitleBar(QWidget):
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.setToolTip(tip)
         btn.setText(text)
-        btn.setFixedSize(QSize(20, 20))
+        btn.setFixedSize(QSize(18, 18))
         return btn
 
     @staticmethod
