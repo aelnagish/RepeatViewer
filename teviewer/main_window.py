@@ -1789,6 +1789,7 @@ class MainWindow(QMainWindow):
         dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
         return dock
 
