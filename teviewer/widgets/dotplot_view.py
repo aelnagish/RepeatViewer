@@ -22,6 +22,7 @@ from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QGraphicsItem,
     QGraphicsScene,
@@ -46,6 +47,12 @@ from teviewer.backends.dotplot import (
     compute_self_dotplot_for_region,
     sequence_length_of_fasta,
     suggest_word_size,
+)
+from teviewer.backends.paf_dotplot import (
+    PafError,
+    load_alignment_file,
+    result_for_all,
+    result_for_pair,
 )
 from teviewer.backends.fastga_dotplot import (
     DEFAULT_MIN_IDENTITY,
@@ -247,6 +254,32 @@ class _Ruler(QWidget):
         font.setPointSize(8)
         painter.setFont(font)
 
+        entries = view.axis_entries(self._horizontal)
+        if entries:
+            painter.setPen(QPen(_RULER_FG))
+            for entry in entries:
+                centre = entry.offset + entry.length / 2.0
+                pos = view.scene_to_ruler(centre, self._horizontal)
+                text = entry.name
+                if self._horizontal:
+                    if 0 <= pos <= self.width():
+                        w = painter.fontMetrics().horizontalAdvance(text)
+                        painter.drawText(int(pos - w / 2), self.height() - 5, text)
+                else:
+                    if 0 <= pos <= self.height():
+                        painter.save()
+                        painter.translate(self.width() - 4, pos)
+                        painter.rotate(-90)
+                        w = painter.fontMetrics().horizontalAdvance(text)
+                        painter.drawText(int(-w / 2), 0, text)
+                        painter.restore()
+            painter.setPen(QPen(_RULER_LINE))
+            if self._horizontal:
+                painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+            else:
+                painter.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+            return
+
         visible = view.visible_scene_rect()
         length = view.plot_length()
         span = visible.width() if self._horizontal else visible.height()
@@ -341,6 +374,9 @@ class DotplotCanvas(QGraphicsView):
         # only a window of a large sequence is plotted.
         self._offset = 0
         self._fit_scale = 0.0
+        # Sequence boundaries for the concatenated (all sequences) layout.
+        self._axis_x: list = []
+        self._axis_y: list = []
         self._press_pos: QPoint | None = None
         self._panning = False
         self._pan_origin: QPoint | None = None
@@ -372,6 +408,16 @@ class DotplotCanvas(QGraphicsView):
 
     def coordinate_offset(self) -> int:
         return self._offset
+
+    def set_axes(self, x_entries: list, y_entries: list) -> None:
+        """Sequence layout for the concatenated view (empty for a single pair)."""
+        self._axis_x = list(x_entries or [])
+        self._axis_y = list(y_entries or [])
+        self.viewport().update()
+        self._refresh_rulers()
+
+    def axis_entries(self, horizontal: bool) -> list:
+        return self._axis_x if horizontal else self._axis_y
 
     def plot_title(self) -> str:
         return self._title
@@ -513,6 +559,19 @@ class DotplotCanvas(QGraphicsView):
             painter.setPen(edge)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(active)
+
+        if self._axis_x or self._axis_y:
+            sep = QPen(QColor(150, 150, 150))
+            sep.setCosmetic(True)
+            painter.setPen(sep)
+            for entry in self._axis_x[1:]:
+                painter.drawLine(
+                    QPointF(entry.offset, 0), QPointF(entry.offset, self._length)
+                )
+            for entry in self._axis_y[1:]:
+                painter.drawLine(
+                    QPointF(0, entry.offset), QPointF(self._length, entry.offset)
+                )
 
         border = QPen(QColor(120, 120, 120))
         border.setCosmetic(True)
@@ -788,6 +847,9 @@ class DotplotPanel(QWidget):
         self._full_length = 0
         # FastGA is opt-in for large files; the region window is the default.
         self._engine_choice = "region"
+        # "fasta" computes a dotplot; "alignment" displays a PAF/.1aln file.
+        self._mode = "fasta"
+        self._alignments = None
 
         self._word = QSpinBox(self)
         self._word.setRange(MIN_WORD_SIZE, MAX_WORD_SIZE)
@@ -865,6 +927,29 @@ class DotplotPanel(QWidget):
         self._region_start_label = QLabel("From:", self)
         self._region_size_label = QLabel("Window:", self)
 
+        self._pair_combo = QComboBox(self)
+        self._pair_combo.setMinimumWidth(260)
+        self._pair_combo.setToolTip(
+            "Which sequence pair to plot. 'All sequences' lays every query and "
+            "target end to end, with separators between them."
+        )
+        self._pair_label = QLabel("Compare:", self)
+
+        # For an alignment file there is no k-mer step to tune, so the
+        # equivalent of word size is which alignments are drawn at all.
+        self._filter_len = QSpinBox(self)
+        self._filter_len.setRange(0, 10_000_000)
+        self._filter_len.setValue(0)
+        self._filter_len.setSingleStep(100)
+        self._filter_len.setGroupSeparatorShown(True)
+        self._filter_len.setFixedWidth(110)
+        self._filter_len.setToolTip(
+            "Hide alignments shorter than this, in bp.\n"
+            "0 shows everything. Raise it to strip short, noisy matches the "
+            "way a larger word size would when computing a dotplot."
+        )
+        self._filter_len_label = QLabel("Min length:", self)
+
         self._identity_label = QLabel("Min identity:", self)
         self._min_len_label = QLabel("Min length:", self)
         self._seed_freq_label = QLabel("Repeat cutoff:", self)
@@ -911,6 +996,10 @@ class DotplotPanel(QWidget):
         bar.setContentsMargins(6, 4, 6, 4)
         bar.setSpacing(8)
         self._word_label = QLabel("Word size:", self)
+        bar.addWidget(self._pair_label)
+        bar.addWidget(self._pair_combo)
+        bar.addWidget(self._filter_len_label)
+        bar.addWidget(self._filter_len)
         bar.addWidget(self._region_start_label)
         bar.addWidget(self._region_start)
         bar.addWidget(self._region_size_label)
@@ -963,6 +1052,8 @@ class DotplotPanel(QWidget):
         self._seed_freq.valueChanged.connect(self._recompute)
         self._region_start.valueChanged.connect(self._recompute)
         self._region_size.valueChanged.connect(self._recompute)
+        self._pair_combo.currentIndexChanged.connect(self._show_selected_pair)
+        self._filter_len.valueChanged.connect(self._recompute)
         self._reset_btn.clicked.connect(self._canvas.reset_zoom)
         self._zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_by(1.25))
         self._zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_by(1 / 1.25))
@@ -981,6 +1072,9 @@ class DotplotPanel(QWidget):
         self._cancel_running()
         self._path = resolved
         self._loaded_for = None
+        self._mode = "fasta"
+        self._alignments = None
+        self._canvas.set_axes([], [])
         self._sequence_id = ""
         self._canvas.clear_plot()
         self._canvas.set_title("")
@@ -995,6 +1089,91 @@ class DotplotPanel(QWidget):
         except OSError:
             return False
 
+    def load_alignment(self, path: Path) -> None:
+        """Display a PAF (or .1aln, converted) instead of computing anything."""
+        self._mode = "alignment"
+        self._path = path.expanduser().resolve()
+        self._loaded_for = None
+        self._status.setText("Reading alignments…")
+        try:
+            alignments, source = load_alignment_file(self._path)
+        except PafError as exc:
+            self._alignments = None
+            self._sync_engine_controls()
+            self._fail(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._alignments = None
+            self._sync_engine_controls()
+            self._fail(f"Could not read {self._path.name}: {exc}")
+            return
+
+        self._alignments = alignments
+        pairs = alignments.pairs()
+        self._pair_combo.blockSignals(True)
+        self._pair_combo.clear()
+        if len(pairs) > 1:
+            self._pair_combo.addItem("All sequences", ("__all__", "__all__"))
+        for query, target in pairs:
+            label = query if query == target else f"{query}  vs  {target}"
+            self._pair_combo.addItem(label, (query, target))
+        self._pair_combo.setCurrentIndex(0)
+        self._pair_combo.blockSignals(False)
+        longest = max(
+            list(alignments.query_lengths.values())
+            + list(alignments.target_lengths.values())
+            + [1]
+        )
+        for box in (self._region_start, self._region_size):
+            box.blockSignals(True)
+        self._region_start.setMaximum(max(1, longest))
+        self._region_start.setValue(1)
+        self._region_size.setMaximum(max(1_000, longest))
+        self._region_size.setValue(max(1_000, longest))  # whole sequence first
+        for box in (self._region_start, self._region_size):
+            box.blockSignals(False)
+
+        self._sync_engine_controls()
+        if source != self._path:
+            self.statusMessage.emit(f"Converted {self._path.name} to {source.name}")
+        self._show_selected_pair()
+
+    def _show_selected_pair(self) -> None:
+        if self._alignments is None:
+            return
+        data = self._pair_combo.currentData()
+        try:
+            min_len = int(self._filter_len.value())
+            if data is None or data[0] == "__all__":
+                result, x_entries, y_entries = result_for_all(
+                    self._alignments, min_length=min_len
+                )
+            else:
+                full = max(
+                    self._alignments.query_lengths.get(data[0], 0),
+                    self._alignments.target_lengths.get(data[1], 0),
+                    1,
+                )
+                start = int(self._region_start.value())
+                size = int(self._region_size.value())
+                window = None
+                if start > 1 or size < full:
+                    window = (start, min(start + size - 1, full))
+                result = result_for_pair(
+                    self._alignments,
+                    data[0],
+                    data[1],
+                    window=window,
+                    min_length=min_len,
+                )
+                x_entries, y_entries = [], []
+        except Exception as exc:  # noqa: BLE001
+            self._fail(f"Could not build the plot: {exc}")
+            return
+        self._canvas.set_axes(x_entries, y_entries)
+        self._sync_engine_controls()
+        self._apply_result(("alignment", self._path, str(data)), result)
+
     def _use_fastga(self) -> bool:
         """FastGA only when explicitly chosen; the region window is the default.
 
@@ -1008,6 +1187,38 @@ class DotplotPanel(QWidget):
         return self._is_large() and not self._use_fastga()
 
     def _sync_engine_controls(self) -> None:
+        if self._mode == "alignment":
+            # Nothing is computed from an alignment file, so the compute
+            # controls have nothing to act on.
+            for widget in (
+                self._word_label, self._word, self._reverse,
+                self._identity_label, self._identity,
+                self._min_len_label, self._min_len,
+                self._seed_freq_label, self._seed_freq,
+            ):
+                widget.setVisible(False)
+            multi = self._alignments is not None and not self._alignments.is_single_pair()
+            self._pair_label.setVisible(multi)
+            self._pair_combo.setVisible(multi)
+            self._filter_len_label.setVisible(True)
+            self._filter_len.setVisible(True)
+            # A window only makes sense on one pair: with sequences laid end to
+            # end there is no single coordinate space to window into.
+            showing_all = (
+                self._pair_combo.currentData() is None
+                or self._pair_combo.currentData()[0] == "__all__"
+            )
+            for widget in (
+                self._region_start_label, self._region_start,
+                self._region_size_label, self._region_size,
+            ):
+                widget.setVisible(not showing_all)
+            return
+
+        self._pair_label.setVisible(False)
+        self._pair_combo.setVisible(False)
+        self._filter_len_label.setVisible(False)
+        self._filter_len.setVisible(False)
         fastga = self._use_fastga()
         region = self._use_region()
         for widget in (self._word_label, self._word, self._reverse):
@@ -1061,6 +1272,8 @@ class DotplotPanel(QWidget):
         offered behind a button instead: on a large genome it runs for minutes,
         which must never start merely because a tab was clicked.
         """
+        if self._mode == "alignment":
+            return  # already loaded from file; nothing to compute
         self._sync_engine_controls()
         key = self._current_key()
         if self._loaded_for == key or self._thread is not None:
@@ -1093,6 +1306,10 @@ class DotplotPanel(QWidget):
             self._compute_fastga(key)
 
     def _recompute(self) -> None:
+        if self._mode == "alignment":
+            if self._alignments is not None:
+                self._show_selected_pair()
+            return
         if self._loaded_for is None:
             return
         # Changing a FastGA setting must not silently relaunch a long run.
@@ -1237,7 +1454,14 @@ class DotplotPanel(QWidget):
         self._title.setVisible(bool(name))
         self._canvas.set_title(name)
         self._canvas.show_result(result)
-        engine = f"word {result.word_size}" if result.word_size else "FastGA"
+        if result.word_size:
+            engine = f"word {result.word_size}"
+        elif self._mode == "alignment":
+            # The file may come from FastGA, minimap2 or anything else -- do
+            # not claim to know which.
+            engine = self._path.suffix.lstrip(".").upper() or "alignments"
+        else:
+            engine = "FastGA"
         offset = int(getattr(result, "coordinate_offset", 0) or 0)
         full = int(getattr(result, "full_sequence_length", 0) or 0)
         if offset or (full and full > result.sequence_length):
