@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch TEviewer from the TEtrimmer repository root."""
+"""Launch RepeatViewer (TEviewer)."""
 
 from teviewer.cli import main
 

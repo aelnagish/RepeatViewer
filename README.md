@@ -1,91 +1,147 @@
-# TEviewer
+# RepeatViewer (TEviewer)
 
-Standalone **PySide6** desktop application for curating and evaluating transposable element (TE) consensus sequences.
+**RepeatViewer** is a desktop application for working with transposable element (TE) consensus sequences: browse folders of FASTA and tool outputs, run analyses from a toolbar, and inspect results in an integrated preview pane.
 
-TEviewer was split from [TEtrimmer](https://github.com/qjiangzhao/TEtrimmer). Curation logic is vendored from `TEtrimmerGUI` into `teviewer/backends/` so this repository runs **without** installing the full TEtrimmer package.
+Built with **PySide6**, it targets the manual curation workflow—proofreading consensus sequences, checking terminal repeats, comparing dotplots, running BLAST against a reference genome, and cleaning alignments before publication or database submission.
 
-## Features
+The app name shown in the window is **RepeatViewer**. The installable Python package and command-line entry point are **`teviewer`**.
 
-- Folder-based navigator (any input directory with FASTA files or TEtrimmer outputs)
-- Multi-select sequences → run tools from the toolbar
-- File panel: compact search bar, FASTA-only toggle, refresh (F5); green/blue row highlights after jobs
-- In-app preview: FASTA, PDF reports, TEAid HTML (Plotly), Flexidot PNG
-- Background jobs with progress dialog; keyboard shortcuts (Find, Delete, Refresh)
+## What you can do
 
-### Tools (toolbar)
+- Open any folder tree of TE FASTA files, BLAST tables, MSAs, GFF annotations, and HTML reports
+- Define a single reference genome or a **pan-genome** for BLAST and chromosome-scale plots
+- Run curation and annotation tools without leaving the app; outputs land **beside the source FASTA** in the same folder
+- Preview sequences (text, annotation map, self dotplot), Plotly HTML, PDFs, and images inline
+- Detach Folders, Files, or Preview to a second monitor; **View → Reset layout** restores the default docking
 
-| Tool | Description |
-|------|-------------|
-| **Blast** | BLASTN vs genome → hit table + extracted FASTA; optional genome GFF (`*_blast.gff`) |
-| **TE genome map** | Plotly track view of TE hit density / identity along chromosomes (uses `*_blast.txt` after Blast; optional region in dialog) |
-| **Extend** | Extend MSA ends (default 1000 bp left/right) → `*_ext_L1000_R1000.fa`; right-click for custom distances |
-| **TEAid** | Interactive report HTML |
-| **MSA clean** | Remove gappy columns; clean rows (divergence or gap); **clean row and column** = divergence trim then remove gappy columns → `{name}_clean.fa` |
-| **Consensus** | Generate consensus from MSA |
-| **Flexidot** | Dotplot via `pip install flexidot`; 1 file = self plot, 2 = paired, 3+ = multi-sequence |
+RepeatViewer works well on TEtrimmer output folders, curated consensus libraries, or any organized set of TE sequences you already have on disk.
+
+## Browser workspace
+
+Three docked panels form the main interface:
+
+| Panel | Purpose |
+|-------|---------|
+| **Folders** | Workspace roots and subfolders; back / forward / up; filter by name |
+| **Files** | Sortable table (name, length, GC%, sequence count); filter by name; optional columns |
+| **Preview** | FASTA tabs (Text · Annotation · Dotplot), HTML reports, alignments, PDFs, images |
+
+Set the reference under **File → Define genome** before BLAST, genome maps, or genome-aware TEAid plots.
+
+## Typical workflow
+
+1. **Add folders** — drag a workspace root into the Folders panel or use the folder context menu.
+2. **Select a consensus FASTA** — the Files panel lists folder contents; click a file to preview it.
+3. **Define genome** — **File → Define genome** (single FASTA or pan-genome list).
+4. **Run a tool** — use the top toolbar or **Sequence** menu (BLAST, Align, TEAid, Flexidot, …).
+5. **Review outputs** — new files appear in the same folder; recent results are highlighted in green or blue.
+6. **Iterate** — extend ends, clean the MSA, rebuild consensus, re-BLAST, compare dotplots.
+
+Background jobs show progress in the status bar; **Stop** cancels the active task.
+
+## Analysis tools
+
+Available from the toolbar and **Sequence** menu:
+
+| Category | Capabilities |
+|----------|--------------|
+| **BLAST** | BLASTN vs genome; hit tables; optional GFF; interactive TE genome map along chromosomes |
+| **Align** | MAFFT or Clustal Omega; combined multi-sequence alignment |
+| **MSA clean** | Remove gappy columns; trim divergent rows; combined clean |
+| **Consensus** | Build consensus from an alignment |
+| **TEAid** | Interactive HTML TE annotation report |
+| **Flexidot** | Self, paired, and multi-sequence dotplots; in-app HTML dotplots with **Go-to → Annotation** |
+| **Extend** | Extend alignment ends (preset or custom distances) |
+| **TE visualization** | Genome map and TE divergence plot |
+| **Tree** | Phylogenetic tree from alignment |
+| **FastGA** | FastGA alignment workflow |
+| **TSD search** | Target site duplication search |
+| **Minimap2** | Minimap2 alignment when available |
+| **Benchmarking** | Confusion-matrix benchmark against reference classification tables |
+| **Plugins** | Install custom command plugins (**Plugins** menu) |
+
+Bundled **BLAST+** binaries are included for macOS, Linux, and Windows. Turn on **Use system BLAST** in **File → Setting** to point at your own install.
 
 ## Install
 
+**Requirements:** Python 3.10+, conda or venv recommended.
+
 ```bash
-git clone https://github.com/YOUR_USER/TEviewer.git
+git clone https://github.com/qjiangzhao/TEviewer.git
 cd TEviewer
 conda create -n teviewer python=3.10 -y
 conda activate teviewer
 pip install -e .
 ```
 
-### External dependencies
+### Optional external programs
 
-- **Genome FASTA** — required for Blast / Extend / TEAid genome plots  
-- **flexidot** — included in `requirements.txt` (`pip install flexidot`)  
-- **mafft** / **clustalo** — for Align menu (MAFFT on macOS/Linux; Clustal Omega optional fallback)  
-- Bundled **BLAST+** binaries are included under `teviewer/backends/blast/` (macOS/Linux/Windows). Enable “Use system BLAST” in settings to use your own install.
+| Program | Role |
+|---------|------|
+| Reference **genome FASTA** | BLAST, extend, genome maps, TEAid genome tracks |
+| **mafft** / **clustalo** | Alignment menu |
+| **AliView** | Open selected FASTA externally (**Sequence → Open in AliView**) |
+
+Flexidot (with HTML output and RepeatViewer integration) is installed as a dependency of `pip install -e .`.
 
 ## Run
 
 ```bash
 teviewer
-# or
-python TEviewer.py
-
-python TEviewer.py --input-dir /path/to/TEtrimmer_for_proof_curation -g genome.fa
-# short form: -i /path/to/folder -g genome.fa
 ```
 
-CLI flags: `--input-dir` / `-i` (workspace opened on launch), `--genome` / `-g`. There is no separate output directory; each tool writes results next to the selected FASTA files.
+Or from the repository root:
 
-## Project layout
+```bash
+python TEviewer.py
+```
+
+Open a folder and genome immediately:
+
+```bash
+teviewer -i /path/to/consensus/folder -g /path/to/genome.fa
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-i`, `--input-dir` | Workspace folder opened on launch |
+| `-g`, `--genome` | Reference genome FASTA |
+
+Workspace roots, window layout, genomes, and preferences are saved between sessions.
+
+## Shortcuts
+
+| Key | Action |
+|-----|--------|
+| **Ctrl+F** / **⌘F** | Focus file or folder filter (depends on active panel) |
+| **F5** | Refresh current folder |
+| **Delete** | Delete selected files (with confirmation) |
+
+## Project structure
 
 ```
 TEviewer/
-  TEviewer.py              # launcher
+  TEviewer.py              # entry script
   teviewer/
-    main_window.py         # UI
-    project.py             # settings model
-    backends/
-      curation.py          # orchestrates all tools
-      gui_functions.py     # BLAST, extend, flexidot, …
-      teaid_plotter.py
-      crop_end_*.py, remove_gap.py
-      blast/               # bundled BLAST+ binaries
-    views/settings_dialog.py
-    widgets/html_preview.py
+    main_window.py         # browser UI, menus, job runner
+    project.py             # genome, pan-genome, database settings
+    backends/              # analysis engines (BLAST, TEAid, Flexidot, …)
+    views/                 # tool and settings dialogs
+    widgets/               # folder tree, file table, preview tabs
+    plugins/               # plugin API
+  examples/                # sample plugin
 ```
 
-## Create GitHub repository
+## Companion to TEtrimmer
 
-```bash
-cd TEviewer
-git init
-git add .
-git commit -m "Initial standalone TEviewer release with Flexidot"
-gh repo create TEviewer --public --source=. --push
-```
+[TEtrimmer](https://github.com/qjiangzhao/TEtrimmer) automates TE discovery and consensus building from genome assemblies. **RepeatViewer** is the interactive companion for what comes next: inspecting candidates, fixing consensus sequences, running targeted BLAST and annotation, and preparing libraries for release.
+
+The two tools are independent applications; RepeatViewer does not require a TEtrimmer installation.
 
 ## Citation
 
-If you use TEtrimmer/TEviewer in publications, cite TEtrimmer (Nature Communications, 2025) and mention TEviewer for manual curation.
+If RepeatViewer contributes to your work, cite **TEtrimmer** (*Nature Communications*, 2025) when applicable and mention **RepeatViewer (TEviewer)** for manual curation and visualization.
 
 ## License
 
-GPL-3.0-or-later (same as TEtrimmer). Backend code is derived from TEtrimmer / TEtrimmerGUI.
+GPL-3.0-or-later. See repository license file for details.

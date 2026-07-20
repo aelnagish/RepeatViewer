@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "teviewer"
 version = "0.2.0"
-description = "PySide6 GUI for TE consensus curation and visualization"
+description = "RepeatViewer (TEviewer): PySide6 desktop app for TE curation, annotation, and visualization"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.10"
