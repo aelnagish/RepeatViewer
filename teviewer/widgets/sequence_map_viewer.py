@@ -85,6 +85,7 @@ from teviewer.backends.sequence_features import (
     format_single_sequence_summary_parts,
     format_single_sequence_summary_text,
     load_sequence_map_data,
+    summarize_loaded_sequence,
     resolve_features_gff_path,
     save_annotations,
     summarize_single_sequence_fasta,
@@ -113,7 +114,10 @@ from teviewer.widgets.preview_controls import (
     ZOOM_SLIDER_HEIGHT,
     apply_annotation_zoom_slider_style,
 )
-from teviewer.widgets.preview_zoom import nucleotide_base_color_map
+from teviewer.widgets.preview_zoom import (
+    load_show_sequence_summary,
+    nucleotide_base_color_map,
+)
 
 def _annotation_panel_separator(parent: QWidget | None = None) -> QFrame:
     line = QFrame(parent)
@@ -3319,6 +3323,9 @@ class SequenceMapPanel(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._path = fasta_path.expanduser().resolve()
+        # Sequence from the last load_path(), so the summary can be computed
+        # without re-reading and re-parsing the FASTA from disk.
+        self._loaded_data = None
         self._map = SequenceMapWidget(self, embedded=True)
         self._map.statusMessage.connect(self.statusMessage.emit)
         self._map._canvas.addFeatureRequested.connect(
@@ -3802,13 +3809,37 @@ class SequenceMapPanel(QWidget):
         try:
             data = load_sequence_map_data(self._path)
         except (OSError, ValueError) as exc:
+            self._loaded_data = None
             self.statusMessage.emit(str(exc))
             return
+        self._loaded_data = data
         self._map.load(data, fit_after_load=fit_after_load)
         self._feature_undo_stack.clear()
         self.refresh_sequence_summary()
 
+    def select_by_position(self, start: int, end: int) -> None:
+        """Select a 1-based inclusive range (delegates to the map widget)."""
+        self._map.select_by_position(int(start), int(end))
+
+    def selection_range(self) -> tuple[int, int] | None:
+        """Current selection as a 1-based inclusive range, or None."""
+        return self._map.selection_range()
+
     def refresh_sequence_summary(self) -> None:
+        if not load_show_sequence_summary():
+            self._map.set_sequence_summary_text("")
+            return
+
+        # Prefer the sequence we already hold: re-reading the file here meant a
+        # 500 Mbp scaffold was parsed twice per open, doubling both the wait and
+        # peak memory.
+        data = self._loaded_data
+        if data is not None and data.fasta_path == self._path:
+            self._map.set_sequence_summary(
+                summarize_loaded_sequence(data.sequence_id, data.sequence)
+            )
+            return
+
         try:
             summary = summarize_single_sequence_fasta(self._path)
         except (OSError, ValueError):

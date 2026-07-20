@@ -308,6 +308,8 @@ _TOOLBAR_TOOLTIPS = {
     "define_genome": "Set or change the project reference genome FASTA",
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
+    "tree": "Build a phylogenetic tree from an alignment (needs 3+ sequences)",
+    "fastga": "FastGA whole-genome alignment (one genome vs itself, or two genomes)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_benchmark": "TE benchmarking (confusion matrix and library comparison)",
@@ -426,6 +428,163 @@ class AlignWorker(QObject):
                 return
             self.finished.emit(created)
         except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class TreeWorker(QObject):
+    """Build a phylogenetic tree off the UI thread.
+
+    Aligns first when the input is not already an alignment, then builds the
+    tree and (optionally) renders it. Emits the created files so the browser
+    can refresh and preview them, exactly like AlignWorker.
+    """
+
+    progress = Signal(int, str)
+    finished = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, seq_files: list[Path], options, *, num_threads: int = 4) -> None:
+        super().__init__()
+        self._seq_files = list(seq_files)
+        self._options = options
+        self._num_threads = num_threads
+
+    @Slot()
+    def run(self) -> None:
+        from teviewer.backends import tree_builder as tb
+        from teviewer.backends.sequence_aligner import (
+            combined_alignment_output_stem,
+            run_alignment_combined,
+        )
+
+        try:
+            alignment_path = self._resolve_alignment(tb, run_alignment_combined,
+                                                     combined_alignment_output_stem)
+            created: list[str] = []
+            if alignment_path not in self._seq_files:
+                created.append(str(alignment_path))
+
+            self.progress.emit(1, "Building tree…")
+            newick_path = alignment_path.with_suffix(".newick")
+            result = tb.build_tree(
+                alignment_path,
+                newick_path,
+                engine=self._options.engine,
+                model=self._options.model,
+                method=self._options.method,
+                outgroup=self._options.outgroup,
+            )
+            created.append(str(result.newick_path))
+
+            if self._options.render_image:
+                self.progress.emit(2, "Drawing tree…")
+                image_path = alignment_path.with_name(f"{alignment_path.stem}_tree.png")
+                tb.render_tree_image(
+                    result.newick_path,
+                    image_path,
+                    title=f"{alignment_path.stem}  ({tb.engine_display_name(result.engine_used)})",
+                )
+                created.append(str(image_path))
+
+            if result.notes:
+                self.progress.emit(3, result.notes)
+            self.finished.emit(created)
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(str(exc))
+
+    def _resolve_alignment(self, tb, run_alignment_combined, combined_stem) -> Path:
+        """Return a path to an aligned FASTA, aligning first when needed."""
+        if len(self._seq_files) == 1:
+            single = self._seq_files[0]
+            records = tb.read_alignment(single)
+            if tb.is_aligned(records):
+                tb.check_tree_input(records)
+                return single
+            if not self._options.align_first:
+                tb.check_tree_input(records)  # raises the "not aligned" message
+            self.progress.emit(0, "Aligning sequences…")
+            return Path(
+                run_alignment_combined(
+                    self._seq_files, backend="auto", num_threads=self._num_threads
+                )
+            )
+
+        # Several files: they must be combined into one alignment first.
+        if not self._options.align_first:
+            raise tb.TreeBuildError(
+                "Several files were selected. Enable \"Align sequences first\" "
+                "or align them into a single MSA before building a tree."
+            )
+        self.progress.emit(0, "Aligning sequences…")
+        del combined_stem
+        return Path(
+            run_alignment_combined(
+                self._seq_files, backend="auto", num_threads=self._num_threads
+            )
+        )
+
+
+class FastGaWorker(QObject):
+    """Run a FastGA alignment off the UI thread.
+
+    One file is compared against itself (repetitive regions); two files are
+    compared against each other. Indexing a large genome takes minutes, so
+    progress is reported and cancellation is polled throughout.
+    """
+
+    progress = Signal(int, str)
+    finished = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, seq_files: list[Path], options, *, cancel=None) -> None:
+        super().__init__()
+        self._seq_files = list(seq_files)
+        self._options = options
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from teviewer.backends.fastga_dotplot import (
+            FORMAT_ALN,
+            FORMAT_PSL,
+            run_fastga_alignment,
+        )
+
+        try:
+            source1 = self._seq_files[0]
+            source2 = self._seq_files[1] if len(self._seq_files) > 1 else None
+            suffix = {
+                FORMAT_ALN: ".1aln",
+                FORMAT_PSL: ".psl",
+            }.get(self._options.output_format, ".paf")
+            if source2 is None:
+                stem = f"{source1.stem}_self"
+            else:
+                stem = f"{source1.stem}_vs_{source2.stem}"
+            out_path = source1.parent / f"{stem}{suffix}"
+
+            def _progress(message: str) -> None:
+                self.progress.emit(1, message)
+
+            def _cancelled() -> bool:
+                # JobCancellation.requested is a @property, not a method.
+                return bool(self._cancel is not None and self._cancel.requested)
+
+            written = run_fastga_alignment(
+                source1,
+                source2,
+                out_path,
+                fmt=self._options.output_format,
+                threads=self._options.threads,
+                min_identity=self._options.min_identity,
+                min_length=self._options.min_length,
+                symmetric=self._options.symmetric,
+                keep_index=self._options.keep_index,
+                progress=_progress,
+                is_cancelled=_cancelled,
+            )
+            self.finished.emit([str(written)])
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
             self.failed.emit(str(exc))
 
 
@@ -921,7 +1080,11 @@ _METADATA_STAT_CHUNK = 24
 class _MetadataEnrichWorker(QObject):
     """Compute FASTA table metadata off the UI thread."""
 
-    batch_ready = Signal(list)  # list[tuple[str, BrowserFileMetadata]]
+    # The generation travels with the batch so this can connect straight to a
+    # bound method on MainWindow. Connecting via a lambda gave Qt no receiver
+    # QObject, so it used a direct connection and ran the slot on this worker
+    # thread -- which then started a GUI-thread QTimer and crashed the app.
+    batch_ready = Signal(list, int)  # list[tuple[str, BrowserFileMetadata]], generation
     finished = Signal()
 
     def __init__(self, paths: list[Path], generation: int) -> None:
@@ -948,10 +1111,10 @@ class _MetadataEnrichWorker(QObject):
             except Exception:  # noqa: BLE001
                 continue
             if len(batch) >= batch_size:
-                self.batch_ready.emit(list(batch))
+                self.batch_ready.emit(list(batch), self._generation)
                 batch.clear()
         if batch and not self._cancelled:
-            self.batch_ready.emit(batch)
+            self.batch_ready.emit(batch, self._generation)
         self.finished.emit()
 
 
@@ -1808,6 +1971,188 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
         menu.addAction("Change alignment parameters", self._modify_align_parameters)
 
+    def _populate_tree_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Build tree with default parameters", self._run_tree_default)
+            menu.addSeparator()
+        menu.addAction("Change tree parameters…", self._open_tree_dialog)
+
+    def _selected_sequence_files_for_tree(self) -> list[Path]:
+        selected = self._selected_files()
+        files = [
+            p for p in selected
+            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        if not files:
+            QMessageBox.information(
+                self,
+                "Tree",
+                "Select a FASTA alignment, or several FASTA files, to build a tree.\n\n"
+                "A tree needs at least three sequences in total.",
+            )
+            return []
+        if self._count_sequences_in_fastas(files) < 3:
+            QMessageBox.information(
+                self,
+                "Tree",
+                "A tree needs at least three sequences.\n\n"
+                "Select an alignment containing three or more sequences, "
+                "or three or more sequence files.",
+            )
+            return []
+        return files
+
+    def _run_tree_default(self) -> None:
+        from teviewer.job_options import TreeOptions
+
+        files = self._selected_sequence_files_for_tree()
+        if files:
+            self._start_tree_job(files, TreeOptions())
+
+    def _open_tree_dialog(self) -> None:
+        from teviewer.backends import tree_builder as tb
+        from teviewer.views.tool_dialogs import TreeParamsDialog
+
+        files = self._selected_sequence_files_for_tree()
+        if not files:
+            return
+        # Offer outgroup choices only when a single alignment is selected.
+        taxa = tb.taxon_names(files[0]) if len(files) == 1 else []
+        dialog = TreeParamsDialog(taxa=taxa, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._start_tree_job(files, dialog.options())
+
+    def _start_tree_job(self, files: list[Path], options) -> None:
+        self._start_background_job(
+            TreeWorker(files, options, num_threads=self._project.batch_workers),
+            job_title="Tree",
+            total_steps=3,
+            source_files=files,
+            on_finished=self._on_tree_finished,
+            on_failed=self._on_tree_failed,
+        )
+
+    @Slot(list)
+    def _on_tree_finished(self, created: list) -> None:
+        created_paths = [Path(p) for p in created if Path(p).is_file()]
+        source_paths = getattr(self, "_last_job_source_files", [])
+        if self._current_folder:
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created_paths,
+                source_files=source_paths,
+            )
+        self._auto_open_outputs(created_paths)
+        names = ", ".join(p.name for p in created_paths[:6])
+        self._set_status_message(
+            f"Tree completed — {len(created_paths)} file(s): {names}",
+            12000,
+        )
+
+    @Slot(str)
+    def _on_tree_failed(self, error: str) -> None:
+        body = error.strip()
+        if "conda install" not in body.lower() and "not installed" in body.lower():
+            body += (
+                "\n\nFor maximum-likelihood trees install:\n"
+                "conda install -c bioconda iqtree fasttree"
+            )
+        QMessageBox.warning(self, "Tree failed", body)
+
+    def _populate_fastga_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Run FastGA with default parameters", self._run_fastga_default)
+            menu.addSeparator()
+        menu.addAction("Change FastGA parameters…", self._open_fastga_dialog)
+
+    def _selected_files_for_fastga(self) -> list[Path]:
+        from teviewer.backends.fastga_dotplot import fastga_available, install_hint
+
+        if not fastga_available():
+            QMessageBox.warning(
+                self,
+                "FastGA not found",
+                f"FastGA is not installed or not on PATH.\n\n{install_hint()}",
+            )
+            return []
+        selected = self._selected_files()
+        files = [
+            p for p in selected
+            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        if not files:
+            QMessageBox.information(
+                self,
+                "FastGA",
+                "Select one FASTA to compare against itself, or two FASTA files "
+                "to compare against each other.",
+            )
+            return []
+        if len(files) > 2:
+            QMessageBox.information(
+                self,
+                "FastGA",
+                f"{len(files)} files selected. FastGA compares one genome "
+                "against itself, or exactly two against each other.",
+            )
+            return []
+        return files
+
+    def _run_fastga_default(self) -> None:
+        from teviewer.job_options import FastGaOptions
+
+        files = self._selected_files_for_fastga()
+        if files:
+            self._start_fastga_job(files, FastGaOptions())
+
+    def _open_fastga_dialog(self) -> None:
+        from teviewer.views.tool_dialogs import FastGaParamsDialog
+
+        files = self._selected_files_for_fastga()
+        if not files:
+            return
+        dialog = FastGaParamsDialog(file_count=len(files), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._start_fastga_job(files, dialog.options())
+
+    def _start_fastga_job(self, files: list[Path], options) -> None:
+        title = (
+            f"FastGA ({files[0].name} self)"
+            if len(files) == 1
+            else f"FastGA ({files[0].name} vs {files[1].name})"
+        )
+        self._start_background_job(
+            FastGaWorker(files, options, cancel=self._job_cancel),
+            job_title=title,
+            total_steps=1,
+            source_files=files,
+            on_finished=self._on_fastga_finished,
+            on_failed=self._on_fastga_failed,
+        )
+
+    @Slot(list)
+    def _on_fastga_finished(self, created: list) -> None:
+        created_paths = [Path(p) for p in created if Path(p).is_file()]
+        if self._current_folder:
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created_paths,
+                source_files=getattr(self, "_last_job_source_files", []),
+            )
+        names = ", ".join(p.name for p in created_paths)
+        self._set_status_message(f"FastGA completed — {names}", 12000)
+
+    @Slot(str)
+    def _on_fastga_failed(self, error: str) -> None:
+        from teviewer.backends.fastga_dotplot import install_hint
+
+        body = error.strip()
+        if "not installed" in body.lower() and "conda" not in body.lower():
+            body += f"\n\n{install_hint()}"
+        QMessageBox.warning(self, "FastGA failed", body)
+
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Blast with default parameters", self._run_blast)
@@ -1921,6 +2266,8 @@ class MainWindow(QMainWindow):
         seq_menu.addSeparator()
         self._populate_blast_menu(seq_menu.addMenu("&Blast"))
         self._populate_align_menu(seq_menu.addMenu("&Align"))
+        self._populate_tree_menu(seq_menu.addMenu("&Tree"))
+        self._populate_fastga_menu(seq_menu.addMenu("Fast&GA"))
         self._populate_extend_menu(seq_menu.addMenu("&Extend"))
         self._populate_tsd_search_menu(seq_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(seq_menu.addMenu("&TEAid"))
@@ -2314,6 +2661,22 @@ class MainWindow(QMainWindow):
                 "Align",
                 self._run_align_default,
                 self._populate_align_menu,
+                tooltip=tip,
+            )
+        elif tool_id == "tree":
+            self._add_toolbar_text_menu_button(
+                bar,
+                "Tree",
+                self._run_tree_default,
+                self._populate_tree_menu,
+                tooltip=tip,
+            )
+        elif tool_id == "fastga":
+            self._add_toolbar_text_menu_button(
+                bar,
+                "FastGA",
+                self._run_fastga_default,
+                self._populate_fastga_menu,
                 tooltip=tip,
             )
         elif tool_id == "blast":
@@ -3490,8 +3853,12 @@ class MainWindow(QMainWindow):
         worker = _MetadataEnrichWorker(fasta_paths, generation)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        # Connect to the bound method, never a lambda: Qt needs a receiver
+        # QObject to see that this crosses threads and queue the call. The
+        # QueuedConnection is stated explicitly so this cannot regress.
         worker.batch_ready.connect(
-            lambda batch, gen=generation: self._on_metadata_enrich_batch(batch, gen)
+            self._on_metadata_enrich_batch,
+            Qt.ConnectionType.QueuedConnection,
         )
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -3505,7 +3872,9 @@ class MainWindow(QMainWindow):
         self._metadata_enrich_thread = None
         self._metadata_enrich_worker = None
 
+    @Slot(list, int)
     def _on_metadata_enrich_batch(self, batch: list, generation: int) -> None:
+        """Runs on the GUI thread: the connection is explicitly queued."""
         if generation != self._metadata_enrich_generation:
             return
         if self._file_list is None:

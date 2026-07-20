@@ -127,6 +127,13 @@ def write_flexidot_gff_legend_png(
     display_labels: dict[str, str] | None = None,
 ) -> Path:
     """Write a simple color legend PNG for GFF-shaded Flexidot dotplots."""
+    # This runs on a worker thread. Force the headless Agg backend *before*
+    # importing pyplot: otherwise matplotlib auto-selects QtAgg (PySide6 is
+    # installed), which creates QTimers off the GUI thread and segfaults with
+    # "QObject::startTimer: Timers cannot be started from another thread".
+    import matplotlib
+
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
 

@@ -86,10 +86,12 @@ from teviewer.widgets.preview_zoom import (
     load_default_fasta_preview_tab,
     load_preview_fit_mode,
     load_preview_zoom_percent,
+    load_show_sequence_summary,
     save_color_blind_nucleotide_scheme,
     save_default_fasta_preview_tab,
     save_preview_fit_mode,
     save_preview_zoom_percent,
+    save_show_sequence_summary,
 )
 
 from teviewer.database_settings import (
@@ -405,6 +407,7 @@ class SettingsDialog(QDialog):
         for label, tab in (
             ("Text", DefaultFastaPreviewTab.TEXT),
             ("Annotation", DefaultFastaPreviewTab.ANNOTATION),
+            ("Dotplot (Self)", DefaultFastaPreviewTab.DOTPLOT),
         ):
             self._fasta_default_tab.addItem(label, tab.value)
         fasta_tab_index = self._fasta_default_tab.findData(
@@ -414,6 +417,13 @@ class SettingsDialog(QDialog):
             self._fasta_default_tab.setCurrentIndex(fasta_tab_index)
         self._fasta_default_tab.setToolTip(
             "Sub-tab shown when you single-click a single-sequence FASTA file."
+        )
+        self._show_sequence_summary = QCheckBox("Show length and GC% in the preview")
+        self._show_sequence_summary.setChecked(load_show_sequence_summary())
+        self._show_sequence_summary.setToolTip(
+            "GC% requires scanning every base. On very large single-sequence "
+            "FASTA files (whole scaffolds or genomes) that costs a few seconds "
+            "each time the file is opened. Turn this off to skip it."
         )
         self._preview_fit = QComboBox()
         for label, mode in (
@@ -564,6 +574,7 @@ class SettingsDialog(QDialog):
             ("Default preview zoom:", self._preview_zoom),
             ("Default preview fit:", self._preview_fit),
             ("Default FASTA preview tab:", self._fasta_default_tab),
+            ("Show sequence length / GC:", self._show_sequence_summary),
         ])
         performance = _group("Performance", [
             ("Parallel batch workers:", self._batch_workers),
@@ -687,6 +698,7 @@ class SettingsDialog(QDialog):
         save_browser_panel_font_size(self._browser_panel_font.value())
         save_preview_zoom_percent(self._preview_zoom.value())
         save_preview_fit_mode(PreviewFitMode(str(self._preview_fit.currentData())))
+        save_show_sequence_summary(self._show_sequence_summary.isChecked())
         save_default_fasta_preview_tab(
             DefaultFastaPreviewTab(str(self._fasta_default_tab.currentData()))
         )

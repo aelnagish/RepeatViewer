@@ -636,6 +636,270 @@ class AlignParamsDialog(QDialog):
         )
 
 
+class TreeParamsDialog(QDialog):
+    """Build a phylogenetic tree from selected sequences or an alignment."""
+
+    def __init__(
+        self,
+        *,
+        initial: "TreeOptions | None" = None,
+        taxa: list[str] | None = None,
+        title: str = "Tree",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        from teviewer.backends import tree_builder as tb
+        from teviewer.job_options import TreeOptions
+
+        self.setWindowTitle(title)
+        opts = initial or TreeOptions()
+        self._tb = tb
+
+        available = tb.available_tree_engines()
+
+        self._engine = QComboBox(self)
+        self._engine.addItem("Automatic (best available)", tb.ENGINE_AUTO)
+        for engine in available:
+            self._engine.addItem(tb.engine_display_name(engine), engine)
+        idx = self._engine.findData(opts.engine)
+        if idx >= 0:
+            self._engine.setCurrentIndex(idx)
+
+        self._model = QComboBox(self)
+        for label, value in tb.DISTANCE_MODEL_LABELS:
+            self._model.addItem(label, value)
+        idx = self._model.findData(opts.model)
+        if idx >= 0:
+            self._model.setCurrentIndex(idx)
+
+        self._method = QComboBox(self)
+        for label, value in tb.BUILD_METHOD_LABELS:
+            self._method.addItem(label, value)
+        idx = self._method.findData(opts.method)
+        if idx >= 0:
+            self._method.setCurrentIndex(idx)
+
+        self._outgroup = QComboBox(self)
+        self._outgroup.addItem("No Outgroup", tb.NO_OUTGROUP)
+        for name in taxa or []:
+            self._outgroup.addItem(name, name)
+        idx = self._outgroup.findData(opts.outgroup)
+        if idx >= 0:
+            self._outgroup.setCurrentIndex(idx)
+
+        self._align_first = QCheckBox("Align sequences first if not aligned", self)
+        self._align_first.setChecked(opts.align_first)
+        self._align_first.setToolTip(
+            "Runs the usual MAFFT / Clustal Omega step when the selected "
+            "sequences are not already the same length."
+        )
+
+        self._render_image = QCheckBox("Draw the tree as an image", self)
+        self._render_image.setChecked(opts.render_image)
+        self._render_image.setToolTip(
+            "A Newick (.newick) file is always written so the tree can be "
+            "opened in FigTree, iTOL or Dendroscope."
+        )
+
+        for field in (self._engine, self._model, self._method, self._outgroup):
+            field.setFixedWidth(240)
+
+        self._note = QLabel(self)
+        self._note.setWordWrap(True)
+        self._note.setStyleSheet("color: palette(mid);")
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        form.addRow("Tree engine:", self._engine)
+        form.addRow("Genetic distance model:", self._model)
+        form.addRow("Tree build method:", self._method)
+        form.addRow("Outgroup:", self._outgroup)
+        form.addRow("", self._align_first)
+        form.addRow("", self._render_image)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(14)
+        layout.addLayout(form)
+        layout.addWidget(self._note)
+        layout.addWidget(buttons)
+
+        self._engine.currentIndexChanged.connect(self._sync_enabled)
+        self._method.currentIndexChanged.connect(self._sync_enabled)
+        self._sync_enabled()
+
+    def _sync_enabled(self) -> None:
+        """Only the distance method exposes a model / UPGMA choice."""
+        tb = self._tb
+        engine = str(self._engine.currentData())
+        method = str(self._method.currentData())
+
+        resolved = tb.preferred_engine() if engine == tb.ENGINE_AUTO else engine
+        uses_distance = resolved == tb.ENGINE_BIOPYTHON or method == tb.METHOD_UPGMA
+
+        self._model.setEnabled(uses_distance)
+
+        messages: list[str] = []
+        if method == tb.METHOD_UPGMA and resolved != tb.ENGINE_BIOPYTHON:
+            messages.append(
+                "UPGMA is only available with the built-in distance method, "
+                "so that will be used instead of "
+                f"{tb.engine_display_name(resolved)}."
+            )
+        elif not uses_distance:
+            messages.append(
+                f"{tb.engine_display_name(resolved)} selects its own "
+                "substitution model, so the distance model above is unused. "
+                "Branch supports are included."
+            )
+        if tb.ENGINE_IQTREE not in tb.available_tree_engines() and \
+                tb.ENGINE_FASTTREE not in tb.available_tree_engines():
+            messages.append(
+                "For faster maximum-likelihood trees install: "
+                "conda install -c bioconda iqtree fasttree"
+            )
+        self._note.setText("  ".join(messages))
+        self._note.setVisible(bool(messages))
+
+    def options(self) -> "TreeOptions":
+        from teviewer.job_options import TreeOptions
+
+        return TreeOptions(
+            engine=str(self._engine.currentData()),
+            model=str(self._model.currentData()),
+            method=str(self._method.currentData()),
+            outgroup=str(self._outgroup.currentData() or ""),
+            align_first=self._align_first.isChecked(),
+            render_image=self._render_image.isChecked(),
+        )
+
+
+class FastGaParamsDialog(QDialog):
+    """FastGA whole-genome alignment parameters."""
+
+    def __init__(
+        self,
+        *,
+        initial=None,
+        file_count: int = 1,
+        title: str = "FastGA",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        from teviewer.backends.fastga_dotplot import FORMAT_LABELS
+        from teviewer.job_options import FastGaOptions
+
+        self.setWindowTitle(title)
+        opts = initial or FastGaOptions()
+
+        self._format = QComboBox(self)
+        for label, value in FORMAT_LABELS:
+            self._format.addItem(label, value)
+        idx = self._format.findData(opts.output_format)
+        if idx >= 0:
+            self._format.setCurrentIndex(idx)
+
+        self._threads = QSpinBox(self)
+        self._threads.setRange(1, 128)
+        self._threads.setValue(max(1, opts.threads))
+
+        self._identity = QDoubleSpinBox(self)
+        self._identity.setRange(0.5, 1.0)
+        self._identity.setSingleStep(0.05)
+        self._identity.setDecimals(2)
+        self._identity.setValue(opts.min_identity)
+
+        self._min_length = QSpinBox(self)
+        # Below ~100 FastGA fails: an alignment must contain a 40 bp seed and
+        # chains must cover at least 85 bases.
+        self._min_length.setRange(100, 1_000_000)
+        self._min_length.setSingleStep(50)
+        self._min_length.setValue(max(100, opts.min_length))
+        self._min_length.setToolTip(
+            "Shortest alignment to report, in bp. Cannot go below 100 -- "
+            "FastGA rejects limits shorter than its seed length.\n"
+            "Raise this on satellite arrays, where short matches can swamp "
+            "the output."
+        )
+
+        self._symmetric = QCheckBox("Symmetric seeding (-S)", self)
+        self._symmetric.setChecked(opts.symmetric)
+        self._symmetric.setToolTip(
+            "Uses the seeds of both genomes so the result does not depend on "
+            "argument order. Recommended when the repeat structure is the "
+            "point; slower, and not needed when looking for synteny."
+        )
+
+        self._keep_index = QCheckBox("Keep genome index for reuse (-k)", self)
+        self._keep_index.setChecked(opts.keep_index)
+        self._keep_index.setToolTip(
+            "Keeps the .1gdb / .gidx files beside the FASTA so later runs skip "
+            "the index build, which is the slow part of a first run."
+        )
+
+        for field in (self._format, self._threads, self._identity, self._min_length):
+            field.setFixedWidth(240)
+
+        mode = QLabel(self)
+        mode.setWordWrap(True)
+        mode.setStyleSheet("color: palette(mid);")
+        if file_count >= 2:
+            mode.setText(
+                "Two files selected: they will be compared against each other."
+            )
+        else:
+            mode.setText(
+                "One file selected: it will be compared against itself, which "
+                "finds repetitive regions. Self matches are excluded."
+            )
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        form.addRow("Output format:", self._format)
+        form.addRow("Min identity:", self._identity)
+        form.addRow("Min alignment length:", self._min_length)
+        form.addRow("Threads:", self._threads)
+        form.addRow("", self._symmetric)
+        form.addRow("", self._keep_index)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(14)
+        layout.addWidget(mode)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def options(self):
+        from teviewer.job_options import FastGaOptions
+
+        return FastGaOptions(
+            output_format=str(self._format.currentData()),
+            threads=int(self._threads.value()),
+            min_identity=float(self._identity.value()),
+            min_length=int(self._min_length.value()),
+            symmetric=self._symmetric.isChecked(),
+            keep_index=self._keep_index.isChecked(),
+        )
+
+
 class ExtendParamsDialog(QDialog):
     def __init__(
         self,

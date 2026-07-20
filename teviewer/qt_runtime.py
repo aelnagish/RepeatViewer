@@ -28,6 +28,9 @@ def configure_qt_runtime() -> None:
     TEVIEWER_FILTER_STDERR_FD=0 if the HTML preview (TEAid / genome map) misbehaves.
     """
     _configure_macos_app_name()
+    # Must run even when Qt quieting is disabled -- it prevents hard crashes.
+    _configure_matplotlib_backend()
+    install_crash_diagnostics()
     if os.environ.get("TEVIEWER_QUIET_QT", "1").lower() in {"0", "false", "no"}:
         return
 
@@ -35,6 +38,74 @@ def configure_qt_runtime() -> None:
     _configure_macos_pointer()
     _configure_webengine()
     _install_stderr_filter()
+
+
+def install_crash_diagnostics() -> None:
+    """Opt-in diagnostics for segfaults and cross-thread Qt warnings.
+
+    Enable with TEVIEWER_DEBUG_CRASH=1. Two things are installed:
+
+    * ``faulthandler`` -- on a segfault, dumps the Python stack of every thread
+      to stderr instead of the process vanishing silently.
+    * A Qt message handler that, on "Timers cannot be started from another
+      thread", prints the offending thread name and Python stack. If the stack
+      shows no teviewer frames the call came from inside Qt (most likely the
+      macOS accessibility bridge) and is not our bug.
+    """
+    if os.environ.get("TEVIEWER_DEBUG_CRASH", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
+
+    import faulthandler
+    import threading
+    import traceback
+
+    faulthandler.enable()
+
+    try:
+        from PySide6.QtCore import qInstallMessageHandler
+    except ImportError:
+        return
+
+    def _handler(mode, context, message) -> None:
+        text = str(message)
+        sys.stderr.write(f"[qt] {text}\n")
+        if "Timers cannot be started" in text or "another thread" in text:
+            sys.stderr.write(
+                f"[qt]   current thread: {threading.current_thread().name}\n"
+            )
+            sys.stderr.write("[qt]   Python stack:\n")
+            for line in traceback.format_stack():
+                sys.stderr.write("[qt]     " + line.rstrip() + "\n")
+            sys.stderr.flush()
+        del mode, context
+
+    qInstallMessageHandler(_handler)
+    sys.stderr.write(
+        "[teviewer] crash diagnostics on (faulthandler + Qt message handler)\n"
+    )
+
+
+def _configure_matplotlib_backend() -> None:
+    """
+    Force matplotlib's headless Agg backend process-wide.
+
+    Plot rendering runs on background worker threads. Because PySide6 is
+    installed, matplotlib would otherwise auto-select the interactive QtAgg
+    backend, which builds QObjects/QTimers on a non-GUI thread and segfaults
+    ("QObject::startTimer: Timers cannot be started from another thread").
+
+    Setting MPLBACKEND here covers every ``import matplotlib.pyplot`` in the
+    codebase, so individual call sites cannot reintroduce the crash.
+    Set TEVIEWER_MPL_BACKEND to override when debugging plots interactively.
+    """
+    os.environ.setdefault(
+        "MPLBACKEND", os.environ.get("TEVIEWER_MPL_BACKEND", "Agg")
+    )
 
 
 def install_macos_stderr_fd_filter() -> None:

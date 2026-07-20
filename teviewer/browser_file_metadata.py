@@ -10,7 +10,89 @@ from pathlib import Path
 from teviewer.backends.sequence_features import summarize_single_sequence_fasta
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".fna"}
-_MAX_FASTA_SUMMARY_BYTES = 50 * 1024 * 1024
+# Summarising a single-record FASTA loads the whole sequence into memory
+# (Biopython parse + an uppercased copy) and scans it for GC content. Past this
+# size that is slow enough to freeze the UI, so callers fall back to cheaper
+# output. Shared with the preview panel, which performs the same load.
+MAX_FASTA_SUMMARY_BYTES = 50 * 1024 * 1024
+_MAX_FASTA_SUMMARY_BYTES = MAX_FASTA_SUMMARY_BYTES  # backwards-compatible alias
+_FASTA_SCAN_BLOCK_BYTES = 1 << 20  # 1 MiB
+
+
+def _iter_fasta_blocks(path: Path, block_size: int = _FASTA_SCAN_BLOCK_BYTES):
+    """Yield raw byte blocks of a FASTA file, decompressing .gz transparently."""
+    opener = gzip.open(path, "rb") if path.name.lower().endswith(".gz") else path.open("rb")
+    with opener as handle:
+        while True:
+            block = handle.read(block_size)
+            if not block:
+                return
+            yield block
+
+
+def scan_fasta_headers(
+    path: Path,
+    *,
+    stop_at: int | None = None,
+    want_description: bool = False,
+    max_desc_len: int = 120,
+) -> tuple[int, str]:
+    """
+    Count FASTA header lines (and optionally read the first description).
+
+    Scans raw bytes and counts ``b"\\n>"`` with ``bytes.count`` rather than
+    iterating decoded text lines. That avoids UTF-8 decoding the whole file and
+    avoids a Python-level loop per line -- on a 500 MB FASTA it is the
+    difference between tens of seconds and well under one.
+
+    ``stop_at`` stops the scan once that many headers have been seen, and the
+    returned count then *saturates* at ``stop_at`` -- it is a lower bound, only
+    meaningful compared against ``stop_at``. Callers that only need "one
+    sequence or many?" should pass ``stop_at=2``; callers that *display* the
+    real total (the preview info bar, the Sequences column) must leave it
+    ``None``.
+    """
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        return 0, "—"
+
+    count = 0
+    description = "—"
+    tail = b""  # last byte of the previous block: catches a "\n" / ">" split
+    first_block = True
+
+    try:
+        for block in _iter_fasta_blocks(resolved):
+            if first_block:
+                first_block = False
+                if want_description:
+                    start = 0 if block.startswith(b">") else -1
+                    if start == -1:
+                        found = block.find(b"\n>")
+                        start = found + 1 if found != -1 else -1
+                    if start != -1:
+                        end = block.find(b"\n", start)
+                        raw = block[start + 1 : end if end != -1 else len(block)]
+                        text = raw.decode("utf-8", errors="replace").strip()
+                        if text:
+                            description = (
+                                text
+                                if len(text) <= max_desc_len
+                                else text[: max_desc_len - 1] + "…"
+                            )
+                if block.startswith(b">"):
+                    count += 1
+            elif tail == b"\n" and block.startswith(b">"):
+                count += 1
+
+            count += block.count(b"\n>")
+            if stop_at is not None and count >= stop_at:
+                return min(count, stop_at), description
+            tail = block[-1:]
+    except OSError:
+        return 0, "—"
+
+    return count, description
 
 
 @dataclass(frozen=True)
@@ -144,30 +226,11 @@ def quick_metadata_for_file(path: Path) -> BrowserFileMetadata:
 
 
 def _fasta_scan(path: Path, *, max_desc_len: int = 120) -> tuple[int, str]:
-    """One pass: sequence count and first header description."""
-    resolved = path.expanduser().resolve()
-    if not resolved.is_file():
-        return 0, "—"
-    count = 0
-    description = "—"
-    try:
-        if resolved.name.lower().endswith(".gz"):
-            opener = gzip.open(resolved, "rt", encoding="utf-8", errors="replace")
-        else:
-            opener = resolved.open(encoding="utf-8", errors="replace")
-        with opener as handle:
-            for line in handle:
-                if not line.startswith(">"):
-                    continue
-                count += 1
-                if count == 1:
-                    text = line[1:].strip()
-                    description = (
-                        text if len(text) <= max_desc_len else text[: max_desc_len - 1] + "…"
-                    )
-    except OSError:
-        return 0, "—"
-    return count, description
+    """One pass: sequence count and first header description.
+
+    The Sequences column shows the real total, so this must not use ``stop_at``.
+    """
+    return scan_fasta_headers(path, want_description=True, max_desc_len=max_desc_len)
 
 
 def enrich_fasta_metadata(path: Path) -> BrowserFileMetadata:

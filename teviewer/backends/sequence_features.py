@@ -196,29 +196,47 @@ class SingleSequenceSummary:
 _DNA_LETTERS = frozenset("ACGTN")
 
 
+_ASCII_UPPERCASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
 def _gc_percent_for_dna_sequence(sequence: str) -> float | None:
-    """Return G+C percent on unambiguous A/C/G/T bases, or None if not DNA-like."""
-    letters = [base for base in sequence.upper() if base.isalpha()]
-    if not letters:
+    """Return G+C percent on unambiguous A/C/G/T bases, or None if not DNA-like.
+
+    Counts with ``str.count`` (C speed, no allocation). The previous version
+    built Python lists holding one entry per base; on a 500 Mbp scaffold that
+    was ~8 GB of list and ~24 s of work on the UI thread, which hung the app.
+
+    Note: bases are counted as A-Z rather than by ``str.isalpha()``, so exotic
+    non-ASCII "letters" no longer count toward the DNA-likeness ratio. For
+    nucleotide data the result is identical.
+    """
+    upper = sequence.upper()
+    counts = {letter: upper.count(letter) for letter in _ASCII_UPPERCASE}
+    total_letters = sum(counts.values())
+    if not total_letters:
         return None
-    dna_like = sum(1 for base in letters if base in _DNA_LETTERS)
-    if dna_like / len(letters) < 0.85:
+    dna_like = sum(count for letter, count in counts.items() if letter in _DNA_LETTERS)
+    if dna_like / total_letters < 0.85:
         return None
-    acgt = [base for base in letters if base in "ACGT"]
+    acgt = counts["A"] + counts["C"] + counts["G"] + counts["T"]
     if not acgt:
         return None
-    gc = sum(1 for base in acgt if base in "GC")
-    return 100.0 * gc / len(acgt)
+    return 100.0 * (counts["G"] + counts["C"]) / acgt
 
 
-def summarize_single_sequence_fasta(path: Path) -> SingleSequenceSummary:
-    """Length and optional GC content for a one-record FASTA file."""
-    sequence_id, sequence = load_single_sequence_fasta(path)
+def summarize_loaded_sequence(sequence_id: str, sequence: str) -> SingleSequenceSummary:
+    """Summary for a sequence already held in memory (no re-read from disk)."""
     return SingleSequenceSummary(
         sequence_id=sequence_id,
         length=len(sequence),
         gc_percent=_gc_percent_for_dna_sequence(sequence),
     )
+
+
+def summarize_single_sequence_fasta(path: Path) -> SingleSequenceSummary:
+    """Length and optional GC content for a one-record FASTA file."""
+    sequence_id, sequence = load_single_sequence_fasta(path)
+    return summarize_loaded_sequence(sequence_id, sequence)
 
 
 def format_single_sequence_summary_text(summary: SingleSequenceSummary) -> str:

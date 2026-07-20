@@ -30,6 +30,7 @@ class DefaultFastaPreviewTab(str, Enum):
 
     TEXT = "text"
     ANNOTATION = "annotation"
+    DOTPLOT = "dotplot"
 
 
 DEFAULT_FASTA_PREVIEW_TAB = DefaultFastaPreviewTab.TEXT
@@ -117,6 +118,32 @@ def save_default_fasta_preview_tab(tab: DefaultFastaPreviewTab) -> None:
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
     s.setValue("default_fasta_tab", tab.value)
+    s.endGroup()
+
+
+DEFAULT_SHOW_SEQUENCE_SUMMARY = True
+
+
+def load_show_sequence_summary() -> bool:
+    """Whether to show sequence length / GC% for single-sequence FASTA files.
+
+    Computing GC means scanning every base, so on very large sequences (a
+    500 Mbp scaffold) it costs a few seconds even after optimisation. Turning
+    this off skips that work entirely.
+    """
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    raw = s.value("show_sequence_summary", DEFAULT_SHOW_SEQUENCE_SUMMARY)
+    s.endGroup()
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def save_show_sequence_summary(enabled: bool) -> None:
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    s.setValue("show_sequence_summary", bool(enabled))
     s.endGroup()
 
 
