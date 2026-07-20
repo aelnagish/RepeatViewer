@@ -370,6 +370,8 @@ def application_stylesheet(
         font-weight: 600;
         padding: 2px 8px;
         margin: 0px;
+        border: none;
+        background: transparent;
         border-radius: {radius_sm}px;
         text-align: center;
     }}

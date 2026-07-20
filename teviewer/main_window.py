@@ -1423,6 +1423,9 @@ class MainWindow(QMainWindow):
             self._apply_default_browser_layout(force=True)
         else:
             self._apply_default_browser_layout()
+        from teviewer.ui.window_geometry import ensure_floating_docks_on_screen
+
+        ensure_floating_docks_on_screen(self)
         self._repair_browser_chrome()
 
     def _normalize_folder_tree_selection(self) -> None:
@@ -1601,12 +1604,16 @@ class MainWindow(QMainWindow):
                 settings.beginGroup("mainwindow")
                 settings.remove("toolbar_state_v5")
                 settings.endGroup()
+        from teviewer.ui.window_geometry import ensure_floating_docks_on_screen
+
         self._purge_legacy_docks()
         if self._browser_layout_needs_repair():
             self._apply_default_browser_layout(force=True)
         else:
             self._apply_default_browser_layout()
         self._ensure_preview_visible()
+        ensure_floating_docks_on_screen(self)
+        QTimer.singleShot(0, lambda: ensure_floating_docks_on_screen(self))
         self._rebuild_top_toolbar()
         self._repair_browser_chrome()
 
@@ -1667,6 +1674,9 @@ class MainWindow(QMainWindow):
         if self._preview_tabs is not None:
             self._preview_tabs.teardown_all_html_previews()
         self._persist_workspace()
+        from teviewer.ui.window_geometry import ensure_floating_docks_on_screen
+
+        ensure_floating_docks_on_screen(self)
         settings = QSettings()
         settings.beginGroup("mainwindow")
         settings.setValue("toolbar_state_v5", self.saveState())
@@ -2572,15 +2582,38 @@ class MainWindow(QMainWindow):
                 QSizePolicy.Policy.Fixed,
             )
 
+    def _clear_toolbar_button_highlights(
+        self,
+        except_btn: QToolButton | None = None,
+    ) -> None:
+        """Drop stale pressed/focus chrome when another toolbar control is used."""
+        for control in self._job_toolbar_actions:
+            if not isinstance(control, QToolButton):
+                continue
+            if control is except_btn:
+                continue
+            control.setDown(False)
+            control.clearFocus()
+
     def _style_toolbar_button(self, widget) -> None:
         widget.setFont(self._toolbar_font)
         widget.setFixedHeight(self._toolbar_button_height())
+        widget.setAutoRaise(True)
+        widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # Fixed size: keeps a stable width so the custom overflow logic can
         # measure which buttons fit (the native » chevron does not render with
         # the current theme, so we manage overflow ourselves).
         widget.setSizePolicy(
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
+        )
+
+    def _release_toolbar_button(self, btn: QToolButton) -> None:
+        btn.setDown(False)
+        btn.clearFocus()
+        QTimer.singleShot(
+            0,
+            lambda button=btn: (button.setDown(False), button.clearFocus()),
         )
 
     def _register_toolbar_item(self, widget, overflow_handler) -> None:
@@ -2601,7 +2634,15 @@ class MainWindow(QMainWindow):
             btn.setToolTip(tooltip)
         self._style_toolbar_button(btn)
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        btn.clicked.connect(slot)
+
+        def _invoke_slot() -> None:
+            self._clear_toolbar_button_highlights(btn)
+            try:
+                slot()
+            finally:
+                self._release_toolbar_button(btn)
+
+        btn.clicked.connect(_invoke_slot)
         self._toolbar_hbox.addWidget(btn)
         if job_action:
             self._job_toolbar_actions.append(btn)
@@ -2629,7 +2670,15 @@ class MainWindow(QMainWindow):
             btn.setToolTip(tooltip)
         self._style_toolbar_button(btn)
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        btn.clicked.connect(slot)
+
+        def _invoke_slot() -> None:
+            self._clear_toolbar_button_highlights(btn)
+            try:
+                slot()
+            finally:
+                self._release_toolbar_button(btn)
+
+        btn.clicked.connect(_invoke_slot)
         self._toolbar_hbox.addWidget(btn)
         if job_action:
             self._job_toolbar_actions.append(btn)
@@ -2669,10 +2718,12 @@ class MainWindow(QMainWindow):
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
 
         def _show_menu_on_click() -> None:
+            self._clear_toolbar_button_highlights(btn)
             menu = QMenu(btn)
             menu.addAction(run_label or text, default_slot)
             menu_builder(menu, skip_default=True)
             menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+            self._release_toolbar_button(btn)
 
         btn.clicked.connect(_show_menu_on_click)
 
@@ -2730,6 +2781,8 @@ class MainWindow(QMainWindow):
         self._overflow_btn.setText("▼")  # filled triangle reads much larger than ▾
         self._overflow_btn.setToolTip("More tools")
         self._overflow_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._overflow_btn.setAutoRaise(True)
+        self._overflow_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._overflow_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._overflow_btn.setFixedHeight(self._toolbar_button_height())
         overflow_menu = QMenu(self._overflow_btn)

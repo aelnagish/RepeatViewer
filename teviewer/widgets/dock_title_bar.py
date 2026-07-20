@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize, QTimer
-from PySide6.QtGui import QGuiApplication, QMouseEvent
+from PySide6.QtCore import Qt, QSize, QTimer, QRect
+from PySide6.QtGui import QMouseEvent
+from teviewer.ui.window_geometry import clamp_frame_to_screens, ensure_widget_on_screen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QComboBox,
@@ -165,6 +166,8 @@ class BrowserDockTitleBar(QWidget):
 
     @staticmethod
     def _place_floating_dock(dock: QDockWidget) -> None:
+        from PySide6.QtGui import QGuiApplication
+
         screens = QGuiApplication.screens()
         screen = screens[1] if len(screens) > 1 else QGuiApplication.primaryScreen()
         if screen is None:
@@ -174,8 +177,10 @@ class BrowserDockTitleBar(QWidget):
         height = min(max(dock.height(), 240), geo.height())
         x = geo.x() + max(0, (geo.width() - width) // 2)
         y = geo.y() + max(0, (geo.height() - height) // 2)
+        frame = clamp_frame_to_screens(QRect(x, y, width, height))
         window = dock.window()
         handle = window.windowHandle() if window is not None else None
         if handle is not None:
             handle.setScreen(screen)
-        dock.setGeometry(x, y, width, height)
+        dock.setGeometry(frame)
+        ensure_widget_on_screen(dock)
