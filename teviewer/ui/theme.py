@@ -334,17 +334,21 @@ def application_stylesheet(
     QWidget#PreviewZoomBar {{
         background: transparent;
     }}
-    QPushButton#PreviewZoomReset {{
+    QToolButton#PreviewToolsButton {{
         border: 1px solid palette(mid);
         background: palette(base);
         padding: 0px 8px;
         border-radius: {radius_sm}px;
     }}
-    QPushButton#PreviewZoomReset:hover {{
+    QToolButton#PreviewToolsButton:hover {{
         background: palette(alternate-base);
     }}
-    QPushButton#PreviewZoomReset:pressed {{
+    QToolButton#PreviewToolsButton:pressed {{
         background: palette(mid);
+    }}
+    QToolButton#PreviewToolsButton::menu-indicator {{
+        image: none;
+        width: 0px;
     }}
     QTabBar#PreviewFileTabBar::tab:selected {{
         background: palette(highlight);

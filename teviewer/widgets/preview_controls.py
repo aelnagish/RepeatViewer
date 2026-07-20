@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QAction, QWheelEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QHBoxLayout,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -104,11 +106,13 @@ def _make_zoom_percent_spin(
     return spin
 
 
-def _make_preview_reset_button(*, tooltip: str) -> QPushButton:
-    """Bordered reset control matching the preview zoom spinbox (figure-2 style)."""
-    btn = QPushButton("Reset")
-    btn.setObjectName("PreviewZoomReset")
-    btn.setFlat(False)
+def _make_preview_tools_button(*, tooltip: str) -> QToolButton:
+    """Bordered Tools menu control matching the preview zoom spinbox."""
+    btn = QToolButton()
+    btn.setObjectName("PreviewToolsButton")
+    btn.setText("Tools")
+    btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
     btn.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
     btn.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
     btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
@@ -119,10 +123,12 @@ def _make_preview_reset_button(*, tooltip: str) -> QPushButton:
 
 
 class PreviewZoomBar(QWidget):
-    """Compact preview scale controls (% spin / Reset) for the Preview title bar."""
+    """Compact preview scale controls (% spin / Tools) for the Preview title bar."""
 
     zoom_changed = Signal(int)
     fit_mode_changed = Signal(str)
+    edit_text_requested = Signal()
+    save_text_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -140,15 +146,34 @@ class PreviewZoomBar(QWidget):
         self._spin.valueChanged.connect(self._on_spin)
         layout.addWidget(self._spin)
 
-        self._reset_btn = _make_preview_reset_button(
-            tooltip="Restore default preview zoom (100%)",
+        self._tools_btn = _make_preview_tools_button(
+            tooltip="Preview tools",
         )
-        self._reset_btn.clicked.connect(self._reset_zoom)
-        layout.addWidget(self._reset_btn)
+        self._tools_menu = QMenu(self._tools_btn)
+        self._reset_scale_action = QAction("Reset scale", self._tools_menu)
+        self._reset_scale_action.setToolTip("Restore default preview zoom (100%)")
+        self._reset_scale_action.triggered.connect(self._reset_zoom)
+        self._edit_text_action = QAction("Edit text", self._tools_menu)
+        self._edit_text_action.setToolTip("Allow editing the text shown in Preview")
+        self._edit_text_action.triggered.connect(self.edit_text_requested.emit)
+        self._save_text_action = QAction("Save text", self._tools_menu)
+        self._save_text_action.setToolTip("Save Preview text changes to disk")
+        self._save_text_action.triggered.connect(self.save_text_requested.emit)
+        self._tools_menu.addAction(self._reset_scale_action)
+        self._tools_menu.addSeparator()
+        self._tools_menu.addAction(self._edit_text_action)
+        self._tools_menu.addAction(self._save_text_action)
+        self._tools_btn.setMenu(self._tools_menu)
+        layout.addWidget(self._tools_btn)
 
         self._block = False
         self._fit_mode = load_preview_fit_mode()
         self.set_values(load_preview_zoom_percent(), self._fit_mode)
+        self.set_text_actions_enabled(can_edit=False, can_save=False)
+
+    def set_text_actions_enabled(self, *, can_edit: bool, can_save: bool) -> None:
+        self._edit_text_action.setEnabled(can_edit)
+        self._save_text_action.setEnabled(can_save)
 
     def set_values(self, percent: int, fit_mode: PreviewFitMode) -> None:
         self._block = True
@@ -206,11 +231,16 @@ class AnnotationZoomBar(QWidget):
         self._spin.valueChanged.connect(self._on_spin)
         layout.addWidget(self._spin)
 
-        self._reset_btn = _make_preview_reset_button(
-            tooltip="Fit the full sequence in the window",
+        self._tools_btn = _make_preview_tools_button(
+            tooltip="Annotation tools",
         )
-        self._reset_btn.clicked.connect(self.reset_requested.emit)
-        layout.addWidget(self._reset_btn)
+        self._tools_menu = QMenu(self._tools_btn)
+        self._reset_scale_action = QAction("Reset scale", self._tools_menu)
+        self._reset_scale_action.setToolTip("Fit the full sequence in the window")
+        self._reset_scale_action.triggered.connect(self.reset_requested.emit)
+        self._tools_menu.addAction(self._reset_scale_action)
+        self._tools_btn.setMenu(self._tools_menu)
+        layout.addWidget(self._tools_btn)
 
         self._block = False
 
