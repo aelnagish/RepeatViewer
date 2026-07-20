@@ -6,7 +6,19 @@ import math
 import platform
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QThread, Signal, QTimer
+from PySide6.QtCore import (
+    QEvent,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QColor,
     QContextMenuEvent,
@@ -1146,6 +1158,7 @@ class SequenceMapCanvas(QWidget):
     selectionChanged = Signal(int, int)  # 1-based inclusive
     featureClicked = Signal(int)  # index in features list
     addFeatureRequested = Signal(str, str)  # feature_type, label
+    extractSequenceRequested = Signal(int, int)  # 1-based inclusive range
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1909,18 +1922,121 @@ class SequenceMapCanvas(QWidget):
         menu = QMenu(self)
         menu.setObjectName("SequenceMapMenu")
         menu.setToolTipsVisible(False)
-        heading = menu.addAction("Add feature")
-        heading.setEnabled(False)
-        menu.addSeparator()
+
+        add_menu = menu.addMenu("Add annotation")
         for label, feature_type in _ADD_FEATURE_BUTTONS:
-            action = menu.addAction(label)
+            action = add_menu.addAction(label)
             action.triggered.connect(
                 lambda _checked=False, ft=feature_type, bl=label: self.addFeatureRequested.emit(
                     ft, bl
                 )
             )
+
+        menu.addSeparator()
+        selection = self.selection_range()
+        extract = menu.addAction("Extract Sequence…")
+        if selection is None:
+            extract.setEnabled(False)
+        else:
+            start, end = selection
+            extract.triggered.connect(
+                lambda _checked=False, a=start, b=end: self.extractSequenceRequested.emit(a, b)
+            )
+
         menu.exec(event.globalPos())
         event.accept()
+
+class _ExtractSequenceDialog(QDialog):
+    """Name and adjust the range before extracting it as a new FASTA.
+
+    The range starts at whatever was selected on the map but stays editable,
+    so a selection made by dragging can be tidied up to exact coordinates
+    without going back and re-selecting.
+    """
+
+    def __init__(
+        self,
+        *,
+        sequence_id: str,
+        sequence_length: int,
+        start: int,
+        end: int,
+        default_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Extract sequence")
+        self._sequence_length = max(1, int(sequence_length))
+
+        self._start = QSpinBox(self)
+        self._start.setRange(1, self._sequence_length)
+        self._start.setValue(max(1, min(int(start), self._sequence_length)))
+        self._start.setGroupSeparatorShown(True)
+
+        self._end = QSpinBox(self)
+        self._end.setRange(1, self._sequence_length)
+        self._end.setValue(max(1, min(int(end), self._sequence_length)))
+        self._end.setGroupSeparatorShown(True)
+
+        for box in (self._start, self._end):
+            box.setFixedWidth(160)
+
+        self._name = QLineEdit(default_name, self)
+        self._name.setFixedWidth(260)
+        self._name.selectAll()
+
+        self._summary = QLabel(self)
+        self._summary.setStyleSheet("color: palette(mid);")
+
+        source = QLabel(
+            f"From {sequence_id or 'sequence'} ({self._sequence_length:,} bp)", self
+        )
+        source.setStyleSheet("color: palette(mid);")
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        form.addRow("Start:", self._start)
+        form.addRow("End:", self._end)
+        form.addRow("Name:", self._name)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(12)
+        layout.addWidget(source)
+        layout.addLayout(form)
+        layout.addWidget(self._summary)
+        layout.addWidget(self._buttons)
+
+        self._start.valueChanged.connect(self._sync)
+        self._end.valueChanged.connect(self._sync)
+        self._name.textChanged.connect(self._sync)
+        self._sync()
+
+    def _sync(self) -> None:
+        start = self._start.value()
+        end = self._end.value()
+        valid_range = end >= start
+        has_name = bool(self._name.text().strip())
+        if valid_range:
+            self._summary.setText(f"{end - start + 1:,} bp will be extracted.")
+        else:
+            self._summary.setText("End must not be before start.")
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+            valid_range and has_name
+        )
+
+    def values(self) -> tuple[int, int, str]:
+        return self._start.value(), self._end.value(), self._name.text().strip()
+
 
 class SequenceMapWidget(QWidget):
     """Scrollable sequence map with overview and zoom controls."""
@@ -3311,6 +3427,7 @@ class SequenceMapPanel(QWidget):
     statusMessage = Signal(str)
     annotationJobProgress = Signal(str)
     annotationsSaved = Signal(object)  # Path to the written GFF3
+    sequenceExtracted = Signal(object)  # Path to a newly written FASTA
 
     def __init__(
         self,
@@ -3331,6 +3448,7 @@ class SequenceMapPanel(QWidget):
         self._map._canvas.addFeatureRequested.connect(
             lambda ft, bl: self._add_feature_of_type(ft, feature_label=bl)
         )
+        self._map._canvas.extractSequenceRequested.connect(self._on_extract_sequence)
         self._map.deleteFeaturesRequested.connect(
             lambda: self._delete_feature(confirm_empty=False)
         )
@@ -3816,6 +3934,78 @@ class SequenceMapPanel(QWidget):
         self._map.load(data, fit_after_load=fit_after_load)
         self._feature_undo_stack.clear()
         self.refresh_sequence_summary()
+
+    def _next_extraction_name(self, seq_id: str) -> str:
+        """Default name: <seq>_extraction_N, skipping names already on disk."""
+        base = seq_id or self._path.stem
+        parent = self._path.parent
+        index = 1
+        while (parent / f"{base}_extraction_{index}.fasta").exists():
+            index += 1
+        return f"{base}_extraction_{index}"
+
+    @Slot(int, int)
+    def _on_extract_sequence(self, start: int, end: int) -> None:
+        """Write the selected range out as a new single-record FASTA."""
+        from PySide6.QtWidgets import QMessageBox
+
+        data = self._loaded_data
+        if data is None or not getattr(data, "sequence", ""):
+            QMessageBox.warning(
+                self, "Extract sequence", "The sequence is not loaded yet."
+            )
+            return
+
+        sequence = data.sequence
+        dialog = _ExtractSequenceDialog(
+            sequence_id=data.sequence_id,
+            sequence_length=len(sequence),
+            start=min(int(start), int(end)),
+            end=max(int(start), int(end)),
+            default_name=self._next_extraction_name(data.sequence_id),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen_start, chosen_end, name = dialog.values()
+
+        lo = max(1, min(chosen_start, chosen_end))
+        hi = min(len(sequence), max(chosen_start, chosen_end))
+        fragment = sequence[lo - 1 : hi]
+        if not fragment:
+            QMessageBox.warning(self, "Extract sequence", "The selection is empty.")
+            return
+
+        # Keep the file name filesystem-safe without silently renaming the record.
+        safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
+        out_path = self._path.parent / f"{safe}.fasta"
+        if out_path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Extract sequence",
+                f"{out_path.name} already exists. Overwrite it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        header = f">{name} {data.sequence_id}:{lo}-{hi}"
+        try:
+            with out_path.open("w", encoding="utf-8") as handle:
+                handle.write(header + "\n")
+                for offset in range(0, len(fragment), 60):
+                    handle.write(fragment[offset : offset + 60] + "\n")
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Extract sequence", f"Could not write {out_path.name}:\n{exc}"
+            )
+            return
+
+        self.statusMessage.emit(
+            f"Extracted {lo:,}-{hi:,} ({len(fragment):,} bp) to {out_path.name}"
+        )
+        self.sequenceExtracted.emit(out_path)
 
     def select_by_position(self, start: int, end: int) -> None:
         """Select a 1-based inclusive range (delegates to the map widget)."""

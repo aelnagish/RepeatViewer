@@ -1938,6 +1938,7 @@ class MainWindow(QMainWindow):
         set_genome_path_provider(self._genome_path_resolved)
         set_igv_extra_annotations_provider(self._igv_extra_annotations_for_alignment)
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
+        self._preview_tabs.sequenceExtracted.connect(self._on_preview_annotations_saved)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         preview_layout.addWidget(self._preview_tabs, stretch=1)
         self._preview_host.setMinimumHeight(120)

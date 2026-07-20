@@ -488,6 +488,7 @@ class FilePreviewPage(QWidget):
     """Single-file preview page inside a tab."""
 
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
+    sequenceExtracted = Signal(object)  # Path to a FASTA extracted from a selection
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
@@ -875,6 +876,7 @@ class FilePreviewPage(QWidget):
         if self._annotation_panel is None:
             self._annotation_panel = SequenceMapPanel(self.path, self, autoload=False)
             self._annotation_panel.annotationsSaved.connect(self.annotationsSaved.emit)
+            self._annotation_panel.sequenceExtracted.connect(self.sequenceExtracted.emit)
             holder_layout = self._fasta_annotation_holder.layout()
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_annotation_holder)
@@ -1214,6 +1216,7 @@ class PreviewTabWidget(QTabWidget):
     """Tab bar for open files; reuses tabs when the same path is opened again."""
 
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
+    sequenceExtracted = Signal(object)  # Path to a FASTA extracted from a selection
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
 
     def __init__(
@@ -1417,6 +1420,7 @@ class PreviewTabWidget(QTabWidget):
 
     def _wire_preview_page(self, page: FilePreviewPage) -> None:
         page.annotationsSaved.connect(self.annotationsSaved.emit)
+        page.sequenceExtracted.connect(self.sequenceExtracted.emit)
         page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
         self._wheel_zoom_filter.register_page(page)
 
