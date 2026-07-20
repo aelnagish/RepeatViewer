@@ -1837,6 +1837,8 @@ class MainWindow(QMainWindow):
         self._folder_filter.setObjectName("FolderFilter")
         self._folder_filter.setPlaceholderText("Filter by name…")
         self._folder_filter.setClearButtonEnabled(True)
+        self._folder_filter.setFrame(False)
+        self._folder_filter.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self._folder_filter.setFixedHeight(18)
         self._folder_filter.setMaximumHeight(18)
         self._folder_filter.setMinimumWidth(140)
@@ -1870,6 +1872,8 @@ class MainWindow(QMainWindow):
         self._file_filter.setObjectName("FileFilter")
         self._file_filter.setPlaceholderText("Filter by name…")
         self._file_filter.setClearButtonEnabled(True)
+        self._file_filter.setFrame(False)
+        self._file_filter.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
         self._file_filter.setFixedHeight(18)
         self._file_filter.setMaximumHeight(18)
         self._file_filter.setMinimumWidth(140)
@@ -1966,9 +1970,10 @@ class MainWindow(QMainWindow):
         self._preview_file_tabs_host = preview_file_tabs_host
         preview_zoom_host = QWidget()
         preview_zoom_host.setObjectName("PreviewDockZoomHost")
+        preview_zoom_host.setFixedHeight(18)
         preview_zoom_host.setSizePolicy(
             QSizePolicy.Policy.Fixed,
-            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
         )
         preview_zoom_layout = QHBoxLayout(preview_zoom_host)
         preview_zoom_layout.setContentsMargins(0, 0, 0, 0)

@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from teviewer.widgets.dock_title_bar import BROWSER_DOCK_TITLE_HEIGHT
 from teviewer.widgets.preview_zoom import (
     DEFAULT_PREVIEW_ZOOM_PERCENT,
     MAX_PREVIEW_ZOOM_PERCENT,
@@ -30,7 +29,7 @@ from teviewer.widgets.preview_zoom import (
 )
 from teviewer.widgets.spin_boxes import NoWheelSpinBox
 
-ZOOM_BAR_HEIGHT = 20
+ZOOM_BAR_HEIGHT = 18
 ZOOM_CONTROL_HEIGHT = 18
 ZOOM_SPIN_WIDTH = 68
 # Kept for sequence_map_viewer imports (embedded map toolbar height).
@@ -91,6 +90,8 @@ def _make_zoom_percent_spin(
     spin.setObjectName("previewZoomSpin")
     spin.setRange(minimum, maximum)
     spin.setSuffix("%")
+    spin.setFrame(False)
+    spin.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
     spin.setFixedHeight(ZOOM_CONTROL_HEIGHT)
     spin.setFixedWidth(ZOOM_SPIN_WIDTH)
     spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -109,6 +110,7 @@ def _make_preview_reset_button(*, tooltip: str) -> QPushButton:
     btn.setObjectName("PreviewZoomReset")
     btn.setFlat(False)
     btn.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    btn.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
     btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
     btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     btn.setToolTip(tooltip)
@@ -125,7 +127,7 @@ class PreviewZoomBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("PreviewZoomBar")
-        self.setFixedHeight(BROWSER_DOCK_TITLE_HEIGHT - 4)
+        self.setFixedHeight(ZOOM_BAR_HEIGHT)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -189,7 +191,7 @@ class AnnotationZoomBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("PreviewZoomBar")
-        self.setFixedHeight(BROWSER_DOCK_TITLE_HEIGHT - 4)
+        self.setFixedHeight(ZOOM_BAR_HEIGHT)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
