@@ -283,7 +283,7 @@ class BlastDatabaseManagerDialog(QDialog):
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.itemSelectionChanged.connect(self._update_buttons)
 
@@ -328,14 +328,12 @@ class BlastDatabaseManagerDialog(QDialog):
                 status_item.setForeground(Qt.GlobalColor.red)
             self._table.setItem(row, 4, status_item)
 
-    def _selected_index(self) -> int | None:
+    def _selected_indices(self) -> list[int]:
         rows = {idx.row() for idx in self._table.selectedIndexes()}
-        if not rows:
-            return None
-        return next(iter(rows))
+        return sorted(rows)
 
     def _update_buttons(self) -> None:
-        self._remove_btn.setEnabled(self._selected_index() is not None)
+        self._remove_btn.setEnabled(len(self._selected_indices()) > 0)
 
     def _persist(self) -> None:
         save_blast_databases_to_settings(self._project.blast_databases)
@@ -358,21 +356,33 @@ class BlastDatabaseManagerDialog(QDialog):
         self._update_buttons()
 
     def _remove_database(self) -> None:
-        index = self._selected_index()
-        if index is None:
+        indices = self._selected_indices()
+        if not indices:
             return
-        db = self._project.blast_databases[index]
+        # Remove rows from back to front to avoid shifting indices.
+        selected_dbs = [self._project.blast_databases[i] for i in indices]
         answer = QMessageBox.question(
             self,
             "Manage BLAST databases",
-            f"Remove “{db.name}” and delete its index files?",
+            self._remove_prompt_body(selected_dbs),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        shutil.rmtree(db.db_prefix_path.parent, ignore_errors=True)
-        del self._project.blast_databases[index]
+
+        for i in reversed(indices):
+            db = self._project.blast_databases[i]
+            shutil.rmtree(db.db_prefix_path.parent, ignore_errors=True)
+            del self._project.blast_databases[i]
         self._persist()
         self._populate()
         self._update_buttons()
+
+    @staticmethod
+    def _remove_prompt_body(dbs: list[BlastDatabase]) -> str:
+        if len(dbs) == 1:
+            return f"Remove “{dbs[0].name}” and delete its index files?"
+        names = ", ".join(d.name for d in dbs[:3])
+        more = "" if len(dbs) <= 3 else f" (+{len(dbs) - 3} more)"
+        return f"Remove {len(dbs)} BLAST databases: {names}{more} and delete their index files?"
