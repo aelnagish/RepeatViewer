@@ -46,7 +46,7 @@ Available from the toolbar and **Sequence** menu:
 | Category | Capabilities |
 |----------|--------------|
 | **BLAST** | Bundled BLASTN and BLASTP; nucleotide/protein databases; hit tables; BLASTN GFF and interactive genome maps |
-| **Align** | Bundled MAFFT with configurable strategies, penalties, direction handling, and combined multi-sequence alignment |
+| **Align** | Bundled MAFFT and MUSCLE; configurable per-aligner settings, default engine selection, and combined multi-sequence alignment |
 | **MSA clean** | Remove gappy columns; trim divergent rows; combined clean |
 | **Consensus** | Build consensus from an alignment |
 | **TEAid** | Interactive HTML TE annotation report |
@@ -60,7 +60,7 @@ Available from the toolbar and **Sequence** menu:
 | **Benchmarking** | Confusion-matrix benchmark against reference classification tables |
 | **Plugins** | Install custom command plugins (**Plugins** menu) |
 
-Bundled **BLAST+** and **MAFFT** binaries are included for macOS, Linux, and Windows. Turn on **Use system BLAST** or **Use system MAFFT** in **File → Setting** to use an installation from `PATH` instead.
+Bundled **BLAST+**, **MAFFT**, and **MUSCLE** binaries are included for macOS, Linux, and Windows. The corresponding **Use system …** options in **File → Setting** select an installation from `PATH` instead.
 
 ## Install
 

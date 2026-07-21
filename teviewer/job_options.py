@@ -165,12 +165,19 @@ MAFFT_SEQUENCE_TYPES = (
     MAFFT_SEQUENCE_NUCLEOTIDE,
     MAFFT_SEQUENCE_PROTEIN,
 )
+ALIGNER_MAFFT = "mafft"
+ALIGNER_MUSCLE = "muscle"
+ALIGNERS = (ALIGNER_MAFFT, ALIGNER_MUSCLE)
+MUSCLE_MODE_ALIGN = "align"
+MUSCLE_MODE_SUPER5 = "super5"
+MUSCLE_MODES = (MUSCLE_MODE_ALIGN, MUSCLE_MODE_SUPER5)
 
 
 @dataclass
 class AlignOptions:
-    """MAFFT alignment strategy and command-line parameters."""
+    """Default aligner plus MAFFT and MUSCLE command-line parameters."""
 
+    default_aligner: str = ALIGNER_MAFFT
     num_threads: int = DEFAULT_ALIGN_THREADS
     strategy: str = MAFFT_STRATEGY_FFT_NS_1
     sequence_type: str = MAFFT_SEQUENCE_AUTO
@@ -180,6 +187,8 @@ class AlignOptions:
     offset: float = 0.0
     reorder: bool = False
     adjust_direction: bool = False
+    muscle_mode: str = MUSCLE_MODE_ALIGN
+    muscle_num_threads: int = DEFAULT_ALIGN_THREADS
 
 
 @dataclass
@@ -646,7 +655,14 @@ def load_align_options() -> AlignOptions:
     sequence_type = str(v.get("sequence_type", MAFFT_SEQUENCE_AUTO))
     if sequence_type not in MAFFT_SEQUENCE_TYPES:
         sequence_type = MAFFT_SEQUENCE_AUTO
+    default_aligner = str(v.get("default_aligner", ALIGNER_MAFFT))
+    if default_aligner not in ALIGNERS:
+        default_aligner = ALIGNER_MAFFT
+    muscle_mode = str(v.get("muscle_mode", MUSCLE_MODE_ALIGN))
+    if muscle_mode not in MUSCLE_MODES:
+        muscle_mode = MUSCLE_MODE_ALIGN
     return AlignOptions(
+        default_aligner=default_aligner,
         num_threads=max(1, int(v.get("num_threads", DEFAULT_ALIGN_THREADS))),
         strategy=strategy,
         sequence_type=sequence_type,
@@ -657,6 +673,10 @@ def load_align_options() -> AlignOptions:
         reorder=str(v.get("reorder", "false")).lower() in {"1", "true", "yes"},
         adjust_direction=str(v.get("adjust_direction", "false")).lower()
         in {"1", "true", "yes"},
+        muscle_mode=muscle_mode,
+        muscle_num_threads=max(
+            1, int(v.get("muscle_num_threads", DEFAULT_ALIGN_THREADS))
+        ),
     )
 
 
@@ -664,6 +684,7 @@ def save_align_options(opts: AlignOptions) -> None:
     _save_settings_group(
         "align",
         {
+            "default_aligner": opts.default_aligner,
             "num_threads": opts.num_threads,
             "strategy": opts.strategy,
             "sequence_type": opts.sequence_type,
@@ -673,6 +694,8 @@ def save_align_options(opts: AlignOptions) -> None:
             "offset": opts.offset,
             "reorder": opts.reorder,
             "adjust_direction": opts.adjust_direction,
+            "muscle_mode": opts.muscle_mode,
+            "muscle_num_threads": opts.muscle_num_threads,
         },
     )
 

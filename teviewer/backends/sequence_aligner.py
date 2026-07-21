@@ -1,4 +1,4 @@
-"""Sequence alignment using TEviewer's bundled or system MAFFT."""
+"""Sequence alignment using TEviewer's bundled or system MAFFT/MUSCLE."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from pathlib import Path
 from Bio import SeqIO
 
 from teviewer.job_options import (
+    ALIGNER_MAFFT,
+    ALIGNER_MUSCLE,
     MAFFT_SEQUENCE_NUCLEOTIDE,
     MAFFT_SEQUENCE_PROTEIN,
     MAFFT_STRATEGY_AUTO,
@@ -31,6 +33,12 @@ def _mafft_bundle_root() -> Path:
     if hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / "teviewer" / "backends" / "mafft"
     return Path(__file__).resolve().parent / "mafft"
+
+
+def _muscle_bundle_root() -> Path:
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "teviewer" / "backends" / "muscle"
+    return Path(__file__).resolve().parent / "muscle"
 
 
 def bundled_mafft_command(
@@ -70,9 +78,53 @@ def mafft_command(*, use_system_mafft: bool = False) -> tuple[list[str], dict[st
     return bundled_mafft_command()
 
 
-def alignment_backends(*, use_system_mafft: bool = False) -> list[str]:
-    """Return MAFFT when the selected bundled/system executable is available."""
-    return ["mafft"] if mafft_command(use_system_mafft=use_system_mafft) else []
+def bundled_muscle_command(
+    os_type: str | None = None,
+    machine: str | None = None,
+) -> tuple[list[str], dict[str, str]] | None:
+    """Command prefix and environment for TEviewer's bundled MUSCLE 5."""
+    system = os_type or OS_TYPE
+    architecture = (machine or platform.machine()).lower()
+    root = _muscle_bundle_root()
+    env = os.environ.copy()
+    if system == "Darwin":
+        arch_dir = "arm64" if architecture in {"arm64", "aarch64"} else "x86_64"
+        if architecture not in {"arm64", "aarch64", "amd64", "x86_64"}:
+            return None
+        executable = root / "macos" / arch_dir / "muscle"
+    elif system == "Linux":
+        arch_dir = "aarch64" if architecture in {"arm64", "aarch64"} else "x86_64"
+        if architecture not in {"arm64", "aarch64", "amd64", "x86_64"}:
+            return None
+        executable = root / "linux" / arch_dir / "muscle"
+    elif system == "Windows":
+        if architecture not in {"amd64", "x86_64"}:
+            return None
+        executable = root / "windows" / "muscle.exe"
+    else:
+        return None
+    return ([str(executable)], env) if executable.is_file() else None
+
+
+def muscle_command(*, use_system_muscle: bool = False) -> tuple[list[str], dict[str, str]] | None:
+    if use_system_muscle:
+        executable = shutil.which("muscle")
+        return ([executable], os.environ.copy()) if executable else None
+    return bundled_muscle_command()
+
+
+def alignment_backends(
+    *,
+    use_system_mafft: bool = False,
+    use_system_muscle: bool = False,
+) -> list[str]:
+    """Return the selected bundled/system alignment engines that are available."""
+    engines = []
+    if mafft_command(use_system_mafft=use_system_mafft):
+        engines.append(ALIGNER_MAFFT)
+    if muscle_command(use_system_muscle=use_system_muscle):
+        engines.append(ALIGNER_MUSCLE)
+    return engines
 
 
 def _fasta_sequence_count(path: Path) -> int:
@@ -108,6 +160,8 @@ def run_alignment(
     *,
     num_threads: int = 5,
     use_system_mafft: bool = False,
+    use_system_muscle: bool = False,
+    engine: str = ALIGNER_MAFFT,
     strategy: str = MAFFT_STRATEGY_FFT_NS_1,
     sequence_type: str = "auto",
     retree: int = 1,
@@ -116,11 +170,13 @@ def run_alignment(
     offset: float = 0.0,
     reorder: bool = False,
     adjust_direction: bool = False,
+    muscle_mode: str = "align",
+    muscle_num_threads: int = 5,
 ) -> Path:
     """
     Align a FASTA/MSA file. Writes ``<stem>_msa.fa`` next to the input.
 
-    MAFFT is the only alignment engine.
+    ``engine`` selects MAFFT or MUSCLE 5.
     """
     input_fasta = input_fasta.expanduser().resolve()
     if input_fasta.suffix.lower() not in {".fa", ".fasta", ".fas"}:
@@ -132,28 +188,48 @@ def run_alignment(
         )
 
     output_file = input_fasta.parent / f"{input_fasta.stem}_msa.fa"
-    resolved = mafft_command(use_system_mafft=use_system_mafft)
+    if engine == ALIGNER_MUSCLE:
+        resolved = muscle_command(use_system_muscle=use_system_muscle)
+        system_selected = use_system_muscle
+        tool_name = "MUSCLE"
+    elif engine == ALIGNER_MAFFT:
+        resolved = mafft_command(use_system_mafft=use_system_mafft)
+        system_selected = use_system_mafft
+        tool_name = "MAFFT"
+    else:
+        raise ValueError(f"Unknown alignment engine: {engine}")
     if resolved is None:
-        source = "system PATH" if use_system_mafft else "TEviewer bundle"
+        source = "system PATH" if system_selected else "TEviewer bundle"
         raise RuntimeError(
-            f"MAFFT was not found in the {source}. Disable 'Use system MAFFT' "
-            "in Settings to use TEviewer's bundled copy, or install MAFFT on PATH."
+            f"{tool_name} was not found in the {source}. Disable 'Use system "
+            f"{tool_name}' in Preferences to use TEviewer's bundled copy, or install "
+            f"{tool_name} on PATH."
         )
-    _run_mafft(
-        input_fasta,
-        output_file,
-        command=resolved[0],
-        env=resolved[1],
-        num_threads=num_threads,
-        strategy=strategy,
-        sequence_type=sequence_type,
-        retree=retree,
-        max_iterate=max_iterate,
-        gap_open_penalty=gap_open_penalty,
-        offset=offset,
-        reorder=reorder,
-        adjust_direction=adjust_direction,
-    )
+    if engine == ALIGNER_MUSCLE:
+        _run_muscle(
+            input_fasta,
+            output_file,
+            command=resolved[0],
+            env=resolved[1],
+            mode=muscle_mode,
+            num_threads=muscle_num_threads,
+        )
+    else:
+        _run_mafft(
+            input_fasta,
+            output_file,
+            command=resolved[0],
+            env=resolved[1],
+            num_threads=num_threads,
+            strategy=strategy,
+            sequence_type=sequence_type,
+            retree=retree,
+            max_iterate=max_iterate,
+            gap_open_penalty=gap_open_penalty,
+            offset=offset,
+            reorder=reorder,
+            adjust_direction=adjust_direction,
+        )
     return output_file
 
 
@@ -207,6 +283,35 @@ def _run_mafft(
         raise RuntimeError("MAFFT completed without producing an alignment.")
     output_file.write_text(result.stdout, encoding="utf-8")
     logger.info("MAFFT alignment finished: %s", output_file.name)
+
+
+def _run_muscle(
+    input_fasta: Path,
+    output_file: Path,
+    *,
+    command: list[str],
+    env: dict[str, str],
+    mode: str,
+    num_threads: int,
+) -> None:
+    if mode not in {"align", "super5"}:
+        raise ValueError(f"Unknown MUSCLE mode: {mode}")
+    cmd = [
+        *command,
+        f"-{mode}",
+        str(input_fasta),
+        "-output",
+        str(output_file),
+        "-threads",
+        str(max(1, num_threads)),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(_format_subprocess_error("MUSCLE", exc)) from exc
+    if not output_file.is_file() or not output_file.stat().st_size:
+        raise RuntimeError("MUSCLE completed without producing an alignment.")
+    logger.info("MUSCLE alignment finished: %s", output_file.name)
 
 
 def _mafft_arguments(
@@ -269,6 +374,8 @@ def run_alignment_combined(
     *,
     num_threads: int = 5,
     use_system_mafft: bool = False,
+    use_system_muscle: bool = False,
+    engine: str = ALIGNER_MAFFT,
     strategy: str = MAFFT_STRATEGY_FFT_NS_1,
     sequence_type: str = "auto",
     retree: int = 1,
@@ -277,6 +384,8 @@ def run_alignment_combined(
     offset: float = 0.0,
     reorder: bool = False,
     adjust_direction: bool = False,
+    muscle_mode: str = "align",
+    muscle_num_threads: int = 5,
 ) -> Path:
     """Merge selected FASTA files into one input, then align once."""
     if not seq_files:
@@ -311,6 +420,8 @@ def run_alignment_combined(
             combined,
             num_threads=num_threads,
             use_system_mafft=use_system_mafft,
+            use_system_muscle=use_system_muscle,
+            engine=engine,
             strategy=strategy,
             sequence_type=sequence_type,
             retree=retree,
@@ -319,6 +430,8 @@ def run_alignment_combined(
             offset=offset,
             reorder=reorder,
             adjust_direction=adjust_direction,
+            muscle_mode=muscle_mode,
+            muscle_num_threads=muscle_num_threads,
         )
         if aligned.resolve() != desired.resolve() and aligned.is_file():
             if desired.is_file():

@@ -140,6 +140,8 @@ from teviewer.job_options import (
     MAFFT_STRATEGY_FFT_NS_2,
     MAFFT_STRATEGY_GINSI,
     MAFFT_STRATEGY_LINSI,
+    MUSCLE_MODE_ALIGN,
+    MUSCLE_MODE_SUPER5,
     ExtendOptions,
     FlexidotOptions,
     MAX_FLEXIDOT_WORDSIZE,
@@ -600,6 +602,7 @@ class AlignParamsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         opts = initial or AlignOptions()
+        self._default_aligner = opts.default_aligner
 
         self._strategy = QComboBox(self)
         for label, value in (
@@ -693,6 +696,43 @@ class AlignParamsDialog(QDialog):
         form.addRow("", self._reorder)
         form.addRow("", self._adjust_direction)
 
+        mafft_tab = QWidget(self)
+        mafft_tab.setLayout(form)
+
+        self._muscle_mode = QComboBox(self)
+        self._muscle_mode.addItem("Align (high accuracy)", MUSCLE_MODE_ALIGN)
+        self._muscle_mode.addItem("Super5 (large datasets)", MUSCLE_MODE_SUPER5)
+        muscle_mode_index = self._muscle_mode.findData(opts.muscle_mode)
+        if muscle_mode_index >= 0:
+            self._muscle_mode.setCurrentIndex(muscle_mode_index)
+        self._muscle_mode.setFixedWidth(260)
+        self._muscle_mode.setToolTip(
+            "MUSCLE -align is the normal high-accuracy method; -super5 is intended "
+            "for very large sequence sets."
+        )
+        self._muscle_threads = QSpinBox(self)
+        self._muscle_threads.setRange(1, 64)
+        self._muscle_threads.setValue(max(1, opts.muscle_num_threads))
+        self._muscle_threads.setFixedWidth(260)
+        self._muscle_threads.setToolTip("Number passed to MUSCLE's -threads option.")
+        muscle_form = QFormLayout()
+        muscle_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        muscle_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        muscle_form.setHorizontalSpacing(12)
+        muscle_form.setVerticalSpacing(10)
+        muscle_form.addRow("MUSCLE algorithm:", self._muscle_mode)
+        muscle_form.addRow("Threads:", self._muscle_threads)
+        muscle_tab = QWidget(self)
+        muscle_tab.setLayout(muscle_form)
+
+        self._aligner_tabs = QTabWidget(self)
+        self._aligner_tabs.addTab(mafft_tab, "MAFFT")
+        self._aligner_tabs.addTab(muscle_tab, "MUSCLE")
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -702,7 +742,7 @@ class AlignParamsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
-        layout.addLayout(form)
+        layout.addWidget(self._aligner_tabs)
         layout.addWidget(buttons)
 
         self._strategy.currentIndexChanged.connect(self._sync_controls)
@@ -759,6 +799,7 @@ class AlignParamsDialog(QDialog):
 
     def options(self) -> AlignOptions:
         return AlignOptions(
+            default_aligner=self._default_aligner,
             num_threads=max(1, int(self._threads.value())),
             strategy=str(self._strategy.currentData()),
             sequence_type=str(self._sequence_type.currentData()),
@@ -771,6 +812,8 @@ class AlignParamsDialog(QDialog):
                 self._adjust_direction.isChecked()
                 and self._sequence_type.currentData() != MAFFT_SEQUENCE_PROTEIN
             ),
+            muscle_mode=str(self._muscle_mode.currentData()),
+            muscle_num_threads=max(1, int(self._muscle_threads.value())),
         )
 
 

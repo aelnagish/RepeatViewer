@@ -10,6 +10,7 @@ from teviewer.backends.sequence_aligner import (
     _fasta_sequence_count,
     _mafft_arguments,
     bundled_mafft_command,
+    bundled_muscle_command,
     run_alignment,
 )
 from teviewer.job_options import (
@@ -50,6 +51,29 @@ def test_bundled_linux_mafft_rejects_unsupported_architecture() -> None:
     assert bundled_mafft_command("Linux", machine="aarch64") is None
 
 
+@pytest.mark.parametrize(
+    ("os_type", "machine"),
+    [
+        ("Darwin", "arm64"),
+        ("Darwin", "x86_64"),
+        ("Linux", "aarch64"),
+        ("Linux", "x86_64"),
+        ("Windows", "x86_64"),
+    ],
+)
+def test_bundled_muscle_exists_for_supported_platform(
+    os_type: str,
+    machine: str,
+) -> None:
+    resolved = bundled_muscle_command(os_type, machine=machine)
+    assert resolved is not None
+    assert Path(resolved[0][0]).is_file()
+
+
+def test_bundled_muscle_rejects_unsupported_architecture() -> None:
+    assert bundled_muscle_command("Linux", machine="riscv64") is None
+
+
 def test_run_alignment_with_bundled_mafft(tmp_path: Path) -> None:
     if __import__("platform").system() not in {"Darwin", "Linux", "Windows"}:
         pytest.skip("No bundled MAFFT for this platform")
@@ -60,6 +84,23 @@ def test_run_alignment_with_bundled_mafft(tmp_path: Path) -> None:
         num_threads=1,
         strategy=MAFFT_STRATEGY_LINSI,
         sequence_type=MAFFT_SEQUENCE_NUCLEOTIDE,
+    )
+    assert out.is_file()
+    assert out.read_text().count(">") == 2
+
+
+def test_run_alignment_with_bundled_muscle(tmp_path: Path) -> None:
+    system = __import__("platform").system()
+    machine = __import__("platform").machine()
+    if bundled_muscle_command(system, machine=machine) is None:
+        pytest.skip("No bundled MUSCLE for this platform")
+    fasta = tmp_path / "pair.fa"
+    fasta.write_text(">a\nACGTACGT\n>b\nACGTTCGT\n")
+    out = run_alignment(
+        fasta,
+        engine="muscle",
+        muscle_mode="align",
+        muscle_num_threads=1,
     )
     assert out.is_file()
     assert out.read_text().count(">") == 2

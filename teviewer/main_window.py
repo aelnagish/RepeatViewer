@@ -156,6 +156,8 @@ from teviewer.plugins.custom_command import (
 )
 from teviewer.backends.sequence_viewer import open_fasta
 from teviewer.job_options import (
+    ALIGNER_MAFFT,
+    ALIGNER_MUSCLE,
     ALIGN_MODE_COMBINED,
     BLAST_PROGRAM_BLASTN,
     BLAST_PROGRAM_BLASTP,
@@ -355,6 +357,8 @@ def _mafft_option_kwargs(options) -> dict[str, Any]:
         "offset": options.offset,
         "reorder": options.reorder,
         "adjust_direction": options.adjust_direction,
+        "muscle_mode": options.muscle_mode,
+        "muscle_num_threads": options.muscle_num_threads,
     }
 
 
@@ -371,6 +375,8 @@ class AlignWorker(QObject):
         mode: str = "one_by_one",
         max_workers: int = 4,
         use_system_mafft: bool = False,
+        use_system_muscle: bool = False,
+        engine: str = "mafft",
     ):
         super().__init__()
         self._seq_files = seq_files
@@ -378,6 +384,8 @@ class AlignWorker(QObject):
         self._mode = mode
         self._max_workers = max_workers
         self._use_system_mafft = use_system_mafft
+        self._use_system_muscle = use_system_muscle
+        self._engine = engine
 
     @Slot()
     def run(self) -> None:
@@ -390,6 +398,8 @@ class AlignWorker(QObject):
                     self._seq_files,
                     **_mafft_option_kwargs(self._options),
                     use_system_mafft=self._use_system_mafft,
+                    use_system_muscle=self._use_system_muscle,
+                    engine=self._engine,
                 )
                 self.progress.emit(1, "Alignment finished.")
                 self.finished.emit([str(output)])
@@ -409,6 +419,8 @@ class AlignWorker(QObject):
                     seq_path,
                     **_mafft_option_kwargs(self._options),
                     use_system_mafft=self._use_system_mafft,
+                    use_system_muscle=self._use_system_muscle,
+                    engine=self._engine,
                 )
                 return seq_path, str(output), None
             except Exception as exc:  # noqa: BLE001
@@ -466,12 +478,14 @@ class TreeWorker(QObject):
         *,
         align_options,
         use_system_mafft: bool = False,
+        use_system_muscle: bool = False,
     ) -> None:
         super().__init__()
         self._seq_files = list(seq_files)
         self._options = options
         self._align_options = align_options
         self._use_system_mafft = use_system_mafft
+        self._use_system_muscle = use_system_muscle
 
     @Slot()
     def run(self) -> None:
@@ -532,6 +546,8 @@ class TreeWorker(QObject):
                     self._seq_files,
                     **_mafft_option_kwargs(self._align_options),
                     use_system_mafft=self._use_system_mafft,
+                    use_system_muscle=self._use_system_muscle,
+                    engine=self._align_options.default_aligner,
                 )
             )
 
@@ -548,6 +564,8 @@ class TreeWorker(QObject):
                 self._seq_files,
                 **_mafft_option_kwargs(self._align_options),
                 use_system_mafft=self._use_system_mafft,
+                use_system_muscle=self._use_system_muscle,
+                engine=self._align_options.default_aligner,
             )
         )
 
@@ -2170,19 +2188,17 @@ class MainWindow(QMainWindow):
         return "File → Define genome"
 
     def _populate_align_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction("Align with default MAFFT parameters", self._run_align_default)
-            menu.addAction(
-                "Align all selected in one combined MSA",
-                self._align_selected_combined,
-            )
-            menu.addSeparator()
-        else:
-            menu.addAction(
-                "Align all selected in one combined MSA",
-                self._align_selected_combined,
-            )
-            menu.addSeparator()
+        del skip_default
+        default = self._align_options.default_aligner
+        mafft_label = "MAFFT (default)" if default == ALIGNER_MAFFT else "MAFFT"
+        muscle_label = "MUSCLE (default)" if default == ALIGNER_MUSCLE else "MUSCLE"
+        menu.addAction(mafft_label, self._run_mafft_default)
+        menu.addAction(muscle_label, self._run_muscle_default)
+        menu.addAction(
+            "Align all selected in one combined MSA",
+            self._align_selected_combined,
+        )
+        menu.addSeparator()
         menu.addAction("Change alignment parameters", self._modify_align_parameters)
 
     def _populate_tree_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
@@ -2244,6 +2260,7 @@ class MainWindow(QMainWindow):
                 options,
                 align_options=self._align_options,
                 use_system_mafft=self._project.use_system_mafft,
+                use_system_muscle=self._project.use_system_muscle,
             ),
             job_title="Tree",
             total_steps=3,
@@ -3121,6 +3138,7 @@ class MainWindow(QMainWindow):
                 self._run_align_default,
                 self._populate_align_menu,
                 tooltip=tip,
+                show_default_action=False,
             )
         elif tool_id == "tree":
             self._add_toolbar_text_menu_button(
@@ -3452,6 +3470,7 @@ class MainWindow(QMainWindow):
                 load_accent_color(),
             )
             self._project = dialog.apply_to_project()
+            self._align_options = load_align_options()
             self._persist_workspace()
             if dialog.appearance_signature() != old_appearance:
                 from teviewer.widgets.browser_icons import clear_browser_icon_cache
@@ -5260,7 +5279,13 @@ class MainWindow(QMainWindow):
 
     def _run_align_default(self) -> None:
         """Toolbar click: align each selected FASTA separately."""
-        self._align_sequences()
+        self._align_sequences(engine=self._align_options.default_aligner)
+
+    def _run_mafft_default(self) -> None:
+        self._align_sequences(engine=ALIGNER_MAFFT)
+
+    def _run_muscle_default(self) -> None:
+        self._align_sequences(engine=ALIGNER_MUSCLE)
 
     def _count_sequences_in_fastas(self, seq_files: list[Path]) -> int:
         total = 0
@@ -5290,7 +5315,11 @@ class MainWindow(QMainWindow):
                 "for a combined alignment.",
             )
             return
-        self._align_sequences(seq_files, mode=ALIGN_MODE_COMBINED)
+        self._align_sequences(
+            seq_files,
+            mode=ALIGN_MODE_COMBINED,
+            engine=self._align_options.default_aligner,
+        )
 
     def _modify_align_parameters(self) -> None:
         dialog = AlignParamsDialog(
@@ -5305,9 +5334,9 @@ class MainWindow(QMainWindow):
         if accepted:
             self._align_options = dialog.options()
             save_align_options(self._align_options)
+            aligner = self._align_options.default_aligner.upper()
             self._set_status_message(
-                f"MAFFT defaults updated ({self._align_options.strategy}, "
-                f"{self._align_options.num_threads} threads)",
+                f"Alignment defaults updated ({aligner})",
                 6000,
             )
 
@@ -5316,8 +5345,10 @@ class MainWindow(QMainWindow):
         paths: list[Path] | None = None,
         *,
         mode: str | None = None,
+        engine: str | None = None,
     ) -> None:
         opts = self._align_options
+        engine = engine or opts.default_aligner
         if mode is None:
             mode = "one_by_one"
 
@@ -5337,26 +5368,36 @@ class MainWindow(QMainWindow):
                 "Need at least two sequences in the selected FASTA file(s).",
             )
             return
-        if "mafft" not in alignment_backends(
-            use_system_mafft=self._project.use_system_mafft
-        ):
-            if self._project.use_system_mafft:
+        available = alignment_backends(
+            use_system_mafft=self._project.use_system_mafft,
+            use_system_muscle=self._project.use_system_muscle,
+        )
+        if engine not in available:
+            tool_name = engine.upper()
+            use_system = (
+                self._project.use_system_muscle
+                if engine == ALIGNER_MUSCLE
+                else self._project.use_system_mafft
+            )
+            if use_system:
                 detail = (
-                    "System MAFFT is enabled but no 'mafft' command was found on PATH. "
-                    "Disable 'Use system MAFFT' in Settings to use the bundled copy."
+                    f"System {tool_name} is enabled but no '{engine}' command was found "
+                    f"on PATH. Disable 'Use system {tool_name}' in Preferences to use "
+                    "the bundled copy."
                 )
             else:
                 detail = (
-                    "The bundled MAFFT does not support this operating-system architecture. "
-                    "Install MAFFT on PATH and enable 'Use system MAFFT' in Settings."
+                    f"The bundled {tool_name} does not support this operating-system "
+                    f"architecture. Install {tool_name} on PATH and enable 'Use system "
+                    f"{tool_name}' in Preferences."
                 )
             QMessageBox.warning(
                 self,
-                "MAFFT not found",
+                f"{tool_name} not found",
                 detail,
             )
             return
-        title = "Align (MAFFT)"
+        title = f"Align ({engine.upper()})"
         if mode == ALIGN_MODE_COMBINED:
             title = f"{title} (combined)"
         total_steps = 1 if mode == ALIGN_MODE_COMBINED else len(seq_files)
@@ -5367,6 +5408,8 @@ class MainWindow(QMainWindow):
                 mode=mode,
                 max_workers=self._project.batch_workers,
                 use_system_mafft=self._project.use_system_mafft,
+                use_system_muscle=self._project.use_system_muscle,
+                engine=engine,
             ),
             job_title=title,
             total_steps=total_steps,
