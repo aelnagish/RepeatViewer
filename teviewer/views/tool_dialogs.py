@@ -634,6 +634,9 @@ class AlignParamsDialog(QDialog):
         self._max_iterate.setRange(0, 1000)
         self._max_iterate.setValue(opts.max_iterate)
         self._max_iterate.setToolTip("Maximum iterative-refinement cycles in Custom mode.")
+        self._custom_retree = opts.retree
+        self._custom_max_iterate = opts.max_iterate
+        self._last_strategy: str | None = None
 
         self._gap_open = QDoubleSpinBox(self)
         self._gap_open.setRange(0.0, 20.0)
@@ -649,10 +652,13 @@ class AlignParamsDialog(QDialog):
         self._offset.setValue(opts.offset)
         self._offset.setToolTip("MAFFT --ep offset value; default 0.0.")
 
-        self._reorder = QCheckBox("Allow MAFFT to reorder sequences", self)
+        self._reorder = QCheckBox(
+            "--reorder (group similar sequences in the output)", self
+        )
         self._reorder.setChecked(opts.reorder)
         self._adjust_direction = QCheckBox(
-            "Automatically reverse-complement nucleotide sequences", self
+            "--adjustdirectionaccurately (reverse-complement nucleotide sequences)",
+            self,
         )
         self._adjust_direction.setChecked(opts.adjust_direction)
         self._adjust_direction.setToolTip("Uses MAFFT --adjustdirectionaccurately.")
@@ -676,10 +682,10 @@ class AlignParamsDialog(QDialog):
         form.addRow("MAFFT strategy:", self._strategy)
         form.addRow("Sequence type:", self._sequence_type)
         form.addRow("Threads:", self._threads)
-        form.addRow("Guide-tree rebuilds:", self._retree)
-        form.addRow("Refinement iterations:", self._max_iterate)
-        form.addRow("Gap-opening penalty:", self._gap_open)
-        form.addRow("Offset value:", self._offset)
+        form.addRow("--retree (guide-tree rebuilds):", self._retree)
+        form.addRow("--maxiterate (refinement cycles):", self._max_iterate)
+        form.addRow("--op (gap-opening penalty):", self._gap_open)
+        form.addRow("--ep (offset value):", self._offset)
         form.addRow("", self._reorder)
         form.addRow("", self._adjust_direction)
 
@@ -700,19 +706,60 @@ class AlignParamsDialog(QDialog):
         self._sync_controls()
 
     def _sync_controls(self) -> None:
-        custom = self._strategy.currentData() == MAFFT_STRATEGY_CUSTOM
-        self._retree.setEnabled(custom)
-        self._max_iterate.setEnabled(custom)
+        strategy = str(self._strategy.currentData())
+        if self._last_strategy == MAFFT_STRATEGY_CUSTOM:
+            self._custom_retree = self._retree.value()
+            self._custom_max_iterate = self._max_iterate.value()
+
+        if strategy == MAFFT_STRATEGY_AUTO:
+            self._set_fixed_spinbox(self._retree, 0, special_text="MAFFT chooses")
+            self._set_fixed_spinbox(self._max_iterate, -1, special_text="MAFFT chooses")
+        elif strategy == MAFFT_STRATEGY_FFT_NS_1:
+            self._set_fixed_spinbox(self._retree, 1)
+            self._set_fixed_spinbox(self._max_iterate, 0)
+        elif strategy == MAFFT_STRATEGY_FFT_NS_2:
+            self._set_fixed_spinbox(self._retree, 2)
+            self._set_fixed_spinbox(self._max_iterate, 0)
+        elif strategy in {
+            MAFFT_STRATEGY_LINSI,
+            MAFFT_STRATEGY_GINSI,
+            MAFFT_STRATEGY_EINSI,
+        }:
+            self._set_fixed_spinbox(self._retree, 2)
+            self._set_fixed_spinbox(self._max_iterate, 1000)
+        else:
+            self._retree.setSpecialValueText("")
+            self._retree.setRange(1, 100)
+            self._retree.setValue(max(1, self._custom_retree))
+            self._retree.setEnabled(True)
+            self._max_iterate.setSpecialValueText("")
+            self._max_iterate.setRange(0, 1000)
+            self._max_iterate.setValue(max(0, self._custom_max_iterate))
+            self._max_iterate.setEnabled(True)
+
+        self._last_strategy = strategy
         protein = self._sequence_type.currentData() == MAFFT_SEQUENCE_PROTEIN
         self._adjust_direction.setEnabled(not protein)
+
+    @staticmethod
+    def _set_fixed_spinbox(
+        spinbox: QSpinBox,
+        value: int,
+        *,
+        special_text: str = "",
+    ) -> None:
+        spinbox.setSpecialValueText(special_text)
+        spinbox.setRange(value, value)
+        spinbox.setValue(value)
+        spinbox.setEnabled(False)
 
     def options(self) -> AlignOptions:
         return AlignOptions(
             num_threads=max(1, int(self._threads.value())),
             strategy=str(self._strategy.currentData()),
             sequence_type=str(self._sequence_type.currentData()),
-            retree=self._retree.value(),
-            max_iterate=self._max_iterate.value(),
+            retree=max(1, self._retree.value()),
+            max_iterate=max(0, self._max_iterate.value()),
             gap_open_penalty=self._gap_open.value(),
             offset=self._offset.value(),
             reorder=self._reorder.isChecked(),

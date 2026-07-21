@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import pytest
 
 from teviewer.backends.sequence_aligner import (
@@ -12,10 +13,17 @@ from teviewer.backends.sequence_aligner import (
     run_alignment,
 )
 from teviewer.job_options import (
+    AlignOptions,
     MAFFT_SEQUENCE_NUCLEOTIDE,
     MAFFT_STRATEGY_CUSTOM,
     MAFFT_STRATEGY_LINSI,
 )
+
+
+def test_fft_ns_1_is_default_strategy() -> None:
+    options = AlignOptions()
+    assert options.strategy == "fft_ns_1"
+    assert options.retree == 1
 
 
 def test_fasta_sequence_count(tmp_path: Path) -> None:

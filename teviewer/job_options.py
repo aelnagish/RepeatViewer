@@ -155,9 +155,9 @@ class AlignOptions:
     """MAFFT alignment strategy and command-line parameters."""
 
     num_threads: int = DEFAULT_ALIGN_THREADS
-    strategy: str = MAFFT_STRATEGY_AUTO
+    strategy: str = MAFFT_STRATEGY_FFT_NS_1
     sequence_type: str = MAFFT_SEQUENCE_AUTO
-    retree: int = 2
+    retree: int = 1
     max_iterate: int = 0
     gap_open_penalty: float = 1.53
     offset: float = 0.0
@@ -547,9 +547,9 @@ def save_teaid_options(opts: TeaAidOptions) -> None:
 
 def load_align_options() -> AlignOptions:
     v = _load_settings_group("align")
-    strategy = str(v.get("strategy", MAFFT_STRATEGY_AUTO))
+    strategy = str(v.get("strategy", MAFFT_STRATEGY_FFT_NS_1))
     if strategy not in MAFFT_STRATEGIES:
-        strategy = MAFFT_STRATEGY_AUTO
+        strategy = MAFFT_STRATEGY_FFT_NS_1
     sequence_type = str(v.get("sequence_type", MAFFT_SEQUENCE_AUTO))
     if sequence_type not in MAFFT_SEQUENCE_TYPES:
         sequence_type = MAFFT_SEQUENCE_AUTO
@@ -557,7 +557,7 @@ def load_align_options() -> AlignOptions:
         num_threads=max(1, int(v.get("num_threads", DEFAULT_ALIGN_THREADS))),
         strategy=strategy,
         sequence_type=sequence_type,
-        retree=max(1, int(v.get("retree", 2))),
+        retree=max(1, int(v.get("retree", 1))),
         max_iterate=max(0, int(v.get("max_iterate", 0))),
         gap_open_penalty=float(v.get("gap_open_penalty", 1.53)),
         offset=float(v.get("offset", 0.0)),
