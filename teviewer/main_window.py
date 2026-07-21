@@ -1349,7 +1349,8 @@ class MainWindow(QMainWindow):
         self._file_list.currentItemChanged.connect(self._on_file_current_item_changed)
         self._file_list.itemClicked.connect(self._on_file_item_clicked)
         self._file_list.itemDoubleClicked.connect(self._on_file_double_clicked)
-        self._file_list.open_in_preview_requested.connect(self._open_files_in_preview_tabs)
+        self._file_list.open_in_preview_requested.connect(self._open_files_in_preview)
+        self._file_list.open_in_preview_tab_requested.connect(self._open_files_in_preview_tabs)
         self._file_list.open_in_text_editor_requested.connect(self._open_selected_in_text_editor)
         self._file_list.delete_files_requested.connect(self._delete_selected_files)
         self._file_list.cut_files_requested.connect(self._cut_files_to_clipboard)
@@ -4674,6 +4675,8 @@ class MainWindow(QMainWindow):
         current: FileListRow | None,
         _previous: FileListRow | None,
     ) -> None:
+        if self._file_list.suppress_selection_preview():
+            return
         if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
             return
         if self._te_viz_input_dialog is not None and self._te_viz_input_dialog.isVisible():
@@ -4686,7 +4689,12 @@ class MainWindow(QMainWindow):
             self._set_status_file_link(None)
             return
         if path is not None and is_previewable_file(path):
-            QTimer.singleShot(0, lambda p=path: self._open_file_in_preview(p))
+            QTimer.singleShot(0, lambda p=path: self._open_file_in_preview_if_allowed(p))
+
+    def _open_file_in_preview_if_allowed(self, path: Path) -> None:
+        if self._file_list.suppress_selection_preview():
+            return
+        self._open_file_in_preview(path)
 
     def _resolve_te_masking_input_path(self, path: Path) -> Path | None:
         if is_te_hit_table_file(path):
@@ -7028,12 +7036,28 @@ class MainWindow(QMainWindow):
         else:
             self._set_status_message(f"Deleted {deleted} file(s)", 6000)
 
+    def _open_files_in_preview(self, paths: list[Path]) -> None:
+        """Replace the main Preview with the selected file(s) (first file only)."""
+        if self._preview_tabs is None or not paths:
+            return
+        path = paths[0].expanduser().resolve()
+        self._open_preview_tab(path, replace=True)
+        self._set_status_file_link(path)
+        self._set_status_message(f"Opened in Preview: {path.name}", 5000)
+
     def _open_files_in_preview_tabs(self, paths: list[Path]) -> None:
+        """Add one or more files as additional Preview tabs."""
         if self._preview_tabs is None or not paths:
             return
         self._preview_tabs.open_files_in_tabs(paths)
         self._ensure_preview_visible()
-        self._set_status_message(f"Opened {len(paths)} file(s) in tabs", 5000)
+        if len(paths) == 1:
+            self._set_status_message(
+                f"Opened in Additional Tab: {paths[0].name}",
+                5000,
+            )
+        else:
+            self._set_status_message(f"Opened {len(paths)} files in Preview", 5000)
 
     def _create_folder(self, parent: Path | None = None) -> None:
         parent_dir = parent.expanduser().resolve() if parent is not None else None

@@ -6,7 +6,7 @@ import platform
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QMimeData, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QDrag, QFont
+from PySide6.QtGui import QBrush, QDrag, QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
@@ -142,6 +142,7 @@ class FileListTableWidget(QTableWidget):
     itemClicked = Signal(object)
     itemDoubleClicked = Signal(object)
     open_in_preview_requested = Signal(list)
+    open_in_preview_tab_requested = Signal(list)
     open_in_text_editor_requested = Signal(list)
     delete_files_requested = Signal(list)
     duplicate_files_requested = Signal(list)
@@ -162,6 +163,7 @@ class FileListTableWidget(QTableWidget):
         self.setObjectName("FileList")
         self._sort_column = _COL_NAME
         self._sort_ascending = True
+        self._suppress_selection_preview = False
         self._ensure_headers()
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -613,6 +615,20 @@ class FileListTableWidget(QTableWidget):
                 paths.append(path)
         return paths
 
+    def suppress_selection_preview(self) -> bool:
+        """True while a right-click context menu is active (must not swap Preview)."""
+        return self._suppress_selection_preview
+
+    def _clear_suppress_selection_preview(self) -> None:
+        self._suppress_selection_preview = False
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        # Qt changes the current row on right-click *before* customContextMenuRequested.
+        # Block Preview reload until the context menu finishes (see main_window handler).
+        if event.button() == Qt.MouseButton.RightButton:
+            self._suppress_selection_preview = True
+        super().mousePressEvent(event)
+
     def _on_header_clicked(self, column: int) -> None:
         if column == _COL_CHECK:
             return
@@ -649,120 +665,136 @@ class FileListTableWidget(QTableWidget):
         self.currentItemChanged.emit(current, previous)
 
     def _show_context_menu(self, position) -> None:
-        index = self.indexAt(position)
-        if index.isValid() and index.row() not in {r._row for r in self.selectedItems()}:
-            self.selectRow(index.row())
-        paths = self._selected_paths()
-        window = self.window()
-        can_paste = (
-            hasattr(window, "_clipboard_can_paste")
-            and window._clipboard_can_paste()
-            and hasattr(window, "_current_folder")
-            and window._current_folder is not None
-        )
-        if not paths and not can_paste:
-            return
-        menu = QMenu(self)
-        if paths:
-            if len(paths) == 1:
-                path = paths[0]
-                menu.addAction("Open in preview", lambda: self.open_in_preview_requested.emit(paths))
-                menu.addAction(
-                    "Open in text editor",
-                    lambda: self.open_in_text_editor_requested.emit(paths),
-                )
-                menu.addAction("Rename", lambda: self.rename_file_requested.emit(path))
-                if path.suffix.lower() in _FASTA_SUFFIXES:
+        self._suppress_selection_preview = True
+        try:
+            index = self.indexAt(position)
+            if index.isValid() and index.row() not in {r._row for r in self.selectedItems()}:
+                self.selectRow(index.row())
+            paths = self._selected_paths()
+            window = self.window()
+            can_paste = (
+                hasattr(window, "_clipboard_can_paste")
+                and window._clipboard_can_paste()
+                and hasattr(window, "_current_folder")
+                and window._current_folder is not None
+            )
+            if not paths and not can_paste:
+                return
+            menu = QMenu(self)
+            if paths:
+                if len(paths) == 1:
+                    path = paths[0]
                     menu.addAction(
-                        "Add as BLAST database…",
-                        lambda p=path: self.add_blast_database_requested.emit(p),
+                        "Open in Preview",
+                        lambda: self.open_in_preview_requested.emit(paths),
                     )
-                    try:
-                        seq_n = count_fasta_sequences(path)
-                    except Exception:  # noqa: BLE001
-                        seq_n = 0
-                    if seq_n > 1:
+                    menu.addAction(
+                        "Open in Additional Tab",
+                        lambda: self.open_in_preview_tab_requested.emit(paths),
+                    )
+                    menu.addAction(
+                        "Open in text editor",
+                        lambda: self.open_in_text_editor_requested.emit(paths),
+                    )
+                    menu.addAction("Rename", lambda: self.rename_file_requested.emit(path))
+                    if path.suffix.lower() in _FASTA_SUFFIXES:
                         menu.addAction(
-                            f"Separate sequence into {seq_n} files",
-                            lambda: self.separate_fasta_requested.emit(path),
+                            "Add as BLAST database…",
+                            lambda p=path: self.add_blast_database_requested.emit(p),
                         )
-                        menu.addAction(
-                            f"Separate sequence into {seq_n} folders",
-                            lambda: self.separate_fasta_subfolders_requested.emit(path),
-                        )
-                        menu.addAction(
-                            "Extract sequences from list…",
-                            lambda p=path: self.extract_sequences_requested.emit(p),
-                        )
-                    blast_txt = find_blast_table_for_query(path)
-                    if blast_txt is not None:
+                        try:
+                            seq_n = count_fasta_sequences(path)
+                        except Exception:  # noqa: BLE001
+                            seq_n = 0
+                        if seq_n > 1:
+                            menu.addAction(
+                                f"Separate sequence into {seq_n} files",
+                                lambda: self.separate_fasta_requested.emit(path),
+                            )
+                            menu.addAction(
+                                f"Separate sequence into {seq_n} folders",
+                                lambda: self.separate_fasta_subfolders_requested.emit(path),
+                            )
+                            menu.addAction(
+                                "Extract sequences from list…",
+                                lambda p=path: self.extract_sequences_requested.emit(p),
+                            )
+                        blast_txt = find_blast_table_for_query(path)
+                        if blast_txt is not None:
+                            menu.addAction(
+                                "TE density plot",
+                                lambda bt=blast_txt: self.blast_genome_map_requested.emit(bt),
+                            )
+                    if is_te_hit_table_file(path):
                         menu.addAction(
                             "TE density plot",
-                            lambda bt=blast_txt: self.blast_genome_map_requested.emit(bt),
+                            lambda bt=path: self.blast_genome_map_requested.emit(bt),
                         )
-                if is_te_hit_table_file(path):
+                        menu.addAction(
+                            "TE divergence plot",
+                            lambda bt=path: self.blast_divergence_requested.emit(bt),
+                        )
+                else:
                     menu.addAction(
-                        "TE density plot",
-                        lambda bt=path: self.blast_genome_map_requested.emit(bt),
+                        "Open in Preview",
+                        lambda: self.open_in_preview_requested.emit([paths[0]]),
                     )
                     menu.addAction(
-                        "TE divergence plot",
-                        lambda bt=path: self.blast_divergence_requested.emit(bt),
+                        f"Open {len(paths)} files in Preview",
+                        lambda: self.open_in_preview_tab_requested.emit(paths),
                     )
-            else:
-                menu.addAction(
-                    f"Open {len(paths)} files in tabs",
-                    lambda: self.open_in_preview_requested.emit(paths),
-                )
-                menu.addAction(
-                    f"Open {len(paths)} files in text editor",
-                    lambda: self.open_in_text_editor_requested.emit(paths),
-                )
-            menu.addSeparator()
-            menu.addAction("Cut", lambda: self.cut_files_requested.emit(paths))
-            menu.addAction("Copy", lambda: self.copy_files_requested.emit(paths))
-            if can_paste:
+                    menu.addAction(
+                        f"Open {len(paths)} files in text editor",
+                        lambda: self.open_in_text_editor_requested.emit(paths),
+                    )
+                menu.addSeparator()
+                menu.addAction("Cut", lambda: self.cut_files_requested.emit(paths))
+                menu.addAction("Copy", lambda: self.copy_files_requested.emit(paths))
+                if can_paste:
+                    menu.addAction("Paste", lambda: self.paste_files_requested.emit())
+                menu.addSeparator()
+                if len(paths) == 1:
+                    menu.addAction(
+                        "Duplicate",
+                        lambda: self.duplicate_files_requested.emit(paths),
+                    )
+                else:
+                    menu.addAction(
+                        f"Duplicate {len(paths)} files",
+                        lambda: self.duplicate_files_requested.emit(paths),
+                    )
+                menu.addSeparator()
+                menu.addAction("Open in AliView", self._context_open_aliview)
+                if len(paths) == 1:
+                    label = (
+                        "Reveal in Finder"
+                        if platform.system() == "Darwin"
+                        else "Show in file manager"
+                    )
+                    menu.addAction(label, lambda: self._reveal_paths(paths))
+                menu.addSeparator()
+                if len(paths) == 1:
+                    menu.addAction("Delete", lambda: self.delete_files_requested.emit(paths))
+                else:
+                    menu.addAction(
+                        f"Delete {len(paths)} files",
+                        lambda: self.delete_files_requested.emit(paths),
+                    )
+            elif can_paste:
                 menu.addAction("Paste", lambda: self.paste_files_requested.emit())
-            menu.addSeparator()
-            if len(paths) == 1:
-                menu.addAction(
-                    "Duplicate",
-                    lambda: self.duplicate_files_requested.emit(paths),
-                )
-            else:
-                menu.addAction(
-                    f"Duplicate {len(paths)} files",
-                    lambda: self.duplicate_files_requested.emit(paths),
-                )
-            menu.addSeparator()
-            menu.addAction("Open in AliView", self._context_open_aliview)
-            if len(paths) == 1:
-                label = (
-                    "Reveal in Finder"
-                    if platform.system() == "Darwin"
-                    else "Show in file manager"
-                )
-                menu.addAction(label, lambda: self._reveal_paths(paths))
-            menu.addSeparator()
-            if len(paths) == 1:
-                menu.addAction("Delete", lambda: self.delete_files_requested.emit(paths))
-            else:
-                menu.addAction(
-                    f"Delete {len(paths)} files",
-                    lambda: self.delete_files_requested.emit(paths),
-                )
-        elif can_paste:
-            menu.addAction("Paste", lambda: self.paste_files_requested.emit())
 
-        # Grouping needs several FASTA files, so it belongs on a multi-selection.
-        fasta_paths = [p for p in paths if p.suffix.lower() in _FASTA_SUFFIXES]
-        if len(fasta_paths) > 1:
-            menu.addSeparator()
-            menu.addAction(
-                f"Group {len(fasta_paths)} sequences into a list…",
-                lambda ps=list(fasta_paths): self.group_sequences_requested.emit(ps),
-            )
-        menu.exec(self.mapToGlobal(position))
+            # Grouping needs several FASTA files, so it belongs on a multi-selection.
+            fasta_paths = [p for p in paths if p.suffix.lower() in _FASTA_SUFFIXES]
+            if len(fasta_paths) > 1:
+                menu.addSeparator()
+                menu.addAction(
+                    f"Group {len(fasta_paths)} sequences into a list…",
+                    lambda ps=list(fasta_paths): self.group_sequences_requested.emit(ps),
+                )
+            menu.exec(self.mapToGlobal(position))
+        finally:
+            # Keep suppress through this event-loop turn (deferred preview opens).
+            QTimer.singleShot(0, self._clear_suppress_selection_preview)
 
     def _context_open_aliview(self) -> None:
         window = self.window()
