@@ -88,10 +88,9 @@ def bundled_muscle_command(
     root = _muscle_bundle_root()
     env = os.environ.copy()
     if system == "Darwin":
-        arch_dir = "arm64" if architecture in {"arm64", "aarch64"} else "x86_64"
-        if architecture not in {"arm64", "aarch64", "amd64", "x86_64"}:
+        if architecture not in {"arm64", "aarch64"}:
             return None
-        executable = root / "macos" / arch_dir / "muscle"
+        executable = root / "macos" / "arm64" / "muscle"
     elif system == "Linux":
         arch_dir = "aarch64" if architecture in {"arm64", "aarch64"} else "x86_64"
         if architecture not in {"arm64", "aarch64", "amd64", "x86_64"}:

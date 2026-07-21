@@ -55,7 +55,6 @@ def test_bundled_linux_mafft_rejects_unsupported_architecture() -> None:
     ("os_type", "machine"),
     [
         ("Darwin", "arm64"),
-        ("Darwin", "x86_64"),
         ("Linux", "aarch64"),
         ("Linux", "x86_64"),
         ("Windows", "x86_64"),
@@ -72,6 +71,7 @@ def test_bundled_muscle_exists_for_supported_platform(
 
 def test_bundled_muscle_rejects_unsupported_architecture() -> None:
     assert bundled_muscle_command("Linux", machine="riscv64") is None
+    assert bundled_muscle_command("Darwin", machine="x86_64") is None
 
 
 def test_run_alignment_with_bundled_mafft(tmp_path: Path) -> None:
