@@ -2933,7 +2933,31 @@ class MainWindow(QMainWindow):
             if show_default_action:
                 menu.addAction(run_label or text, default_slot)
             menu_builder(menu, skip_default=True)
-            menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+            anchor = btn.mapToGlobal(btn.rect().bottomLeft())
+            anchor.setY(anchor.y() + 1)
+            menu.adjustSize()
+            available = btn.screen().availableGeometry()
+            anchor.setX(
+                max(
+                    available.left(),
+                    min(anchor.x(), available.right() - menu.sizeHint().width() + 1),
+                )
+            )
+            if anchor.y() + menu.sizeHint().height() > available.bottom() + 1:
+                anchor.setY(
+                    max(
+                        available.top(),
+                        btn.mapToGlobal(btn.rect().topLeft()).y()
+                        - menu.sizeHint().height()
+                        - 1,
+                    )
+                )
+
+            # On macOS Qt can re-centre a popup menu over the control that
+            # opened it.  Reapply the anchor once the menu's event loop starts
+            # so the toolbar label (notably BLAST) remains visible.
+            QTimer.singleShot(0, lambda popup=menu, pos=anchor: popup.move(pos))
+            menu.exec(anchor)
             self._release_toolbar_button(btn)
 
         btn.clicked.connect(_show_menu_on_click)
