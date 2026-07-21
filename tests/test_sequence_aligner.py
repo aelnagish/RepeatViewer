@@ -1,17 +1,20 @@
-"""Clustal Omega threading and alignment helpers."""
+"""Bundled MAFFT selection and alignment helpers."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 
 from teviewer.backends.sequence_aligner import (
     _fasta_sequence_count,
+    _mafft_arguments,
     bundled_mafft_command,
-    clustalo_effective_threads,
     run_alignment,
+)
+from teviewer.job_options import (
+    MAFFT_SEQUENCE_NUCLEOTIDE,
+    MAFFT_STRATEGY_CUSTOM,
+    MAFFT_STRATEGY_LINSI,
 )
 
 
@@ -44,32 +47,36 @@ def test_run_alignment_with_bundled_mafft(tmp_path: Path) -> None:
         pytest.skip("No bundled MAFFT for this platform")
     fasta = tmp_path / "pair.fa"
     fasta.write_text(">a\nACGTACGT\n>b\nACGTTCGT\n")
-    out = run_alignment(fasta, backend="mafft", num_threads=1)
+    out = run_alignment(
+        fasta,
+        num_threads=1,
+        strategy=MAFFT_STRATEGY_LINSI,
+        sequence_type=MAFFT_SEQUENCE_NUCLEOTIDE,
+    )
     assert out.is_file()
     assert out.read_text().count(">") == 2
 
 
-def test_clustalo_effective_threads_without_openmp() -> None:
-    with patch(
-        "teviewer.backends.sequence_aligner.clustalo_supports_openmp",
-        return_value=False,
-    ):
-        assert clustalo_effective_threads(5) == 1
-
-
-def test_clustalo_effective_threads_with_openmp() -> None:
-    with patch(
-        "teviewer.backends.sequence_aligner.clustalo_supports_openmp",
-        return_value=True,
-    ):
-        assert clustalo_effective_threads(5) == 5
-
-
-def test_run_alignment_clustalo_on_real_input(tmp_path: Path) -> None:
-    if not __import__("shutil").which("clustalo"):
-        pytest.skip("clustalo not installed")
-    fasta = tmp_path / "pair.fa"
-    fasta.write_text(">a\nACGT\n>b\nACGT\n")
-    out = run_alignment(fasta, backend="clustalo", num_threads=5)
-    assert out.is_file()
-    assert out.name == "pair_msa.fa"
+def test_custom_mafft_arguments_include_advanced_options() -> None:
+    args = _mafft_arguments(
+        num_threads=7,
+        strategy=MAFFT_STRATEGY_CUSTOM,
+        sequence_type=MAFFT_SEQUENCE_NUCLEOTIDE,
+        retree=4,
+        max_iterate=25,
+        gap_open_penalty=2.25,
+        offset=0.2,
+        reorder=True,
+        adjust_direction=True,
+    )
+    assert args == [
+        "--quiet",
+        "--retree", "4",
+        "--maxiterate", "25",
+        "--nuc",
+        "--thread", "7",
+        "--op", "2.25",
+        "--ep", "0.2",
+        "--reorder",
+        "--adjustdirectionaccurately",
+    ]

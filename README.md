@@ -46,7 +46,7 @@ Available from the toolbar and **Sequence** menu:
 | Category | Capabilities |
 |----------|--------------|
 | **BLAST** | BLASTN vs genome; hit tables; optional GFF; interactive TE genome map along chromosomes |
-| **Align** | MAFFT or Clustal Omega; combined multi-sequence alignment |
+| **Align** | Bundled MAFFT with configurable strategies, penalties, direction handling, and combined multi-sequence alignment |
 | **MSA clean** | Remove gappy columns; trim divergent rows; combined clean |
 | **Consensus** | Build consensus from an alignment |
 | **TEAid** | Interactive HTML TE annotation report |
@@ -79,7 +79,6 @@ pip install -e .
 | Program | Role |
 |---------|------|
 | Reference **genome FASTA** | BLAST, extend, genome maps, TEAid genome tracks |
-| **clustalo** | Optional alternative alignment backend; MAFFT is bundled |
 | **AliView** | Open selected FASTA externally (**Sequence → Open in AliView**) |
 
 Flexidot (with HTML output and RepeatViewer integration) is installed as a dependency of `pip install -e .`.

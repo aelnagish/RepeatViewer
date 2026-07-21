@@ -1,4 +1,4 @@
-"""Sequence alignment via external CLI tools (MAFFT, Clustal Omega)."""
+"""Sequence alignment using TEviewer's bundled or system MAFFT."""
 
 from __future__ import annotations
 
@@ -8,16 +8,24 @@ import platform
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from Bio import SeqIO
 
+from teviewer.job_options import (
+    MAFFT_SEQUENCE_NUCLEOTIDE,
+    MAFFT_SEQUENCE_PROTEIN,
+    MAFFT_STRATEGY_AUTO,
+    MAFFT_STRATEGY_CUSTOM,
+    MAFFT_STRATEGY_EINSI,
+    MAFFT_STRATEGY_FFT_NS_1,
+    MAFFT_STRATEGY_FFT_NS_2,
+    MAFFT_STRATEGY_GINSI,
+    MAFFT_STRATEGY_LINSI,
+)
+
 OS_TYPE = platform.system()
 logger = logging.getLogger(__name__)
-
-_clustalo_openmp: bool | None = None
-
 
 def _mafft_bundle_root() -> Path:
     if hasattr(sys, "_MEIPASS"):
@@ -63,13 +71,8 @@ def mafft_command(*, use_system_mafft: bool = False) -> tuple[list[str], dict[st
 
 
 def alignment_backends(*, use_system_mafft: bool = False) -> list[str]:
-    """Installed aligners detected on PATH."""
-    found: list[str] = []
-    if mafft_command(use_system_mafft=use_system_mafft):
-        found.append("mafft")
-    if shutil.which("clustalo"):
-        found.append("clustalo")
-    return found
+    """Return MAFFT when the selected bundled/system executable is available."""
+    return ["mafft"] if mafft_command(use_system_mafft=use_system_mafft) else []
 
 
 def _fasta_sequence_count(path: Path) -> int:
@@ -79,45 +82,6 @@ def _fasta_sequence_count(path: Path) -> int:
             if line.startswith(">"):
                 count += 1
     return count
-
-
-def clustalo_supports_openmp() -> bool:
-    """Whether the installed ``clustalo`` binary was built with OpenMP threading."""
-    global _clustalo_openmp
-    if _clustalo_openmp is not None:
-        return _clustalo_openmp
-    exe = shutil.which("clustalo")
-    if not exe:
-        _clustalo_openmp = False
-        return False
-    with tempfile.TemporaryDirectory(prefix="teviewer_clustalo_probe_") as tmp:
-        inp = Path(tmp) / "probe.fa"
-        out = Path(tmp) / "probe_out.fa"
-        inp.write_text(">a\nACGT\n>b\nACGT\n", encoding="utf-8")
-        try:
-            proc = subprocess.run(
-                [exe, "-i", str(inp), "-o", str(out), "--outfmt=fa", "--force", "--threads", "2"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            _clustalo_openmp = False
-            return False
-        if proc.returncode == 0 and out.is_file():
-            _clustalo_openmp = True
-            return True
-        _clustalo_openmp = False
-        return False
-
-
-def clustalo_effective_threads(requested: int) -> int:
-    """Clamp thread count when Clustal Omega lacks OpenMP (common on macOS conda builds)."""
-    requested = max(1, int(requested))
-    if clustalo_supports_openmp():
-        return requested
-    return 1
 
 
 def combined_alignment_output_stem(seq_files: list[Path]) -> str:
@@ -142,14 +106,21 @@ def _next_available_fasta(parent: Path, stem_base: str) -> Path:
 def run_alignment(
     input_fasta: Path,
     *,
-    backend: str = "auto",
     num_threads: int = 5,
     use_system_mafft: bool = False,
+    strategy: str = MAFFT_STRATEGY_AUTO,
+    sequence_type: str = "auto",
+    retree: int = 2,
+    max_iterate: int = 0,
+    gap_open_penalty: float = 1.53,
+    offset: float = 0.0,
+    reorder: bool = False,
+    adjust_direction: bool = False,
 ) -> Path:
     """
     Align a FASTA/MSA file. Writes ``<stem>_msa.fa`` next to the input.
 
-    ``backend``: ``auto`` (MAFFT then Clustal Omega), ``mafft``, or ``clustalo``.
+    MAFFT is the only alignment engine.
     """
     input_fasta = input_fasta.expanduser().resolve()
     if input_fasta.suffix.lower() not in {".fa", ".fasta", ".fas"}:
@@ -161,47 +132,29 @@ def run_alignment(
         )
 
     output_file = input_fasta.parent / f"{input_fasta.stem}_msa.fa"
-    order = ["mafft", "clustalo"] if backend == "auto" else [backend]
-    errors: list[str] = []
-
-    for tool in order:
-        if tool == "mafft":
-            resolved = mafft_command(use_system_mafft=use_system_mafft)
-            if resolved is None:
-                source = "system PATH" if use_system_mafft else "TEviewer bundle"
-                errors.append(f"MAFFT was not found in the {source}.")
-                continue
-            try:
-                _run_mafft(
-                    input_fasta,
-                    output_file,
-                    command=resolved[0],
-                    env=resolved[1],
-                    num_threads=num_threads,
-                )
-                return output_file
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"MAFFT: {exc}")
-        elif tool == "clustalo":
-            if not shutil.which("clustalo"):
-                errors.append("Clustal Omega (clustalo) not found on PATH.")
-                continue
-            try:
-                _run_clustalo(input_fasta, output_file, num_threads=num_threads)
-                return output_file
-            except Exception as exc:  # noqa: BLE001
-                errors.append(str(exc))
-        else:
-            raise ValueError(f"Unknown aligner: {tool}")
-
-    hint = (
-        "Disable 'Use system MAFFT' in Settings to use TEviewer's bundled copy, "
-        "or install MAFFT on PATH. Clustal Omega can be installed separately."
+    resolved = mafft_command(use_system_mafft=use_system_mafft)
+    if resolved is None:
+        source = "system PATH" if use_system_mafft else "TEviewer bundle"
+        raise RuntimeError(
+            f"MAFFT was not found in the {source}. Disable 'Use system MAFFT' "
+            "in Settings to use TEviewer's bundled copy, or install MAFFT on PATH."
+        )
+    _run_mafft(
+        input_fasta,
+        output_file,
+        command=resolved[0],
+        env=resolved[1],
+        num_threads=num_threads,
+        strategy=strategy,
+        sequence_type=sequence_type,
+        retree=retree,
+        max_iterate=max_iterate,
+        gap_open_penalty=gap_open_penalty,
+        offset=offset,
+        reorder=reorder,
+        adjust_direction=adjust_direction,
     )
-    detail = "\n".join(errors)
-    if not detail:
-        detail = "No aligner could run."
-    raise RuntimeError(f"{detail}\n\n{hint}")
+    return output_file
 
 
 def _format_subprocess_error(tool: str, exc: subprocess.CalledProcessError) -> str:
@@ -219,17 +172,27 @@ def _run_mafft(
     command: list[str],
     env: dict[str, str],
     num_threads: int,
+    strategy: str,
+    sequence_type: str,
+    retree: int,
+    max_iterate: int,
+    gap_open_penalty: float,
+    offset: float,
+    reorder: bool,
+    adjust_direction: bool,
 ) -> None:
-    cmd = [
-        *command,
-        "--quiet",
-        "--nuc",
-        "--retree",
-        "1",
-        "--thread",
-        str(max(1, num_threads)),
-        str(input_fasta),
-    ]
+    arguments = _mafft_arguments(
+        num_threads=num_threads,
+        strategy=strategy,
+        sequence_type=sequence_type,
+        retree=retree,
+        max_iterate=max_iterate,
+        gap_open_penalty=gap_open_penalty,
+        offset=offset,
+        reorder=reorder,
+        adjust_direction=adjust_direction,
+    )
+    cmd = [*command, *arguments, str(input_fasta)]
     try:
         result = subprocess.run(
             cmd,
@@ -246,42 +209,74 @@ def _run_mafft(
     logger.info("MAFFT alignment finished: %s", output_file.name)
 
 
-def _run_clustalo(input_fasta: Path, output_file: Path, *, num_threads: int) -> None:
-    threads = clustalo_effective_threads(num_threads)
-    cmd = [
-        "clustalo",
-        "-i",
-        str(input_fasta),
-        "-o",
-        str(output_file),
-        "--outfmt=fa",
-        "--force",
-        "--threads",
-        str(threads),
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:
-        if threads > 1 and "openmp" in f"{exc.stderr or ''}{exc.stdout or ''}".lower():
-            cmd[-1] = "1"
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        else:
-            raise RuntimeError(_format_subprocess_error("Clustal Omega", exc)) from exc
-    if not output_file.is_file():
-        raise RuntimeError("Clustal Omega did not produce an output file.")
-    if threads < num_threads:
-        logger.info(
-            "Clustal Omega ran with 1 thread (installed build lacks OpenMP support)."
-        )
-    logger.info("Clustal Omega alignment finished: %s", output_file.name)
+def _mafft_arguments(
+    *,
+    num_threads: int,
+    strategy: str,
+    sequence_type: str,
+    retree: int,
+    max_iterate: int,
+    gap_open_penalty: float,
+    offset: float,
+    reorder: bool,
+    adjust_direction: bool,
+) -> list[str]:
+    """Translate persisted alignment options into MAFFT CLI arguments."""
+    strategy_args = {
+        MAFFT_STRATEGY_AUTO: ["--auto"],
+        MAFFT_STRATEGY_FFT_NS_1: ["--retree", "1", "--maxiterate", "0"],
+        MAFFT_STRATEGY_FFT_NS_2: ["--retree", "2", "--maxiterate", "0"],
+        MAFFT_STRATEGY_LINSI: ["--localpair", "--maxiterate", "1000"],
+        MAFFT_STRATEGY_GINSI: ["--globalpair", "--maxiterate", "1000"],
+        MAFFT_STRATEGY_EINSI: ["--genafpair", "--maxiterate", "1000"],
+        MAFFT_STRATEGY_CUSTOM: [
+            "--retree",
+            str(max(1, retree)),
+            "--maxiterate",
+            str(max(0, max_iterate)),
+        ],
+    }
+    if strategy not in strategy_args:
+        raise ValueError(f"Unknown MAFFT strategy: {strategy}")
+    args = ["--quiet", *strategy_args[strategy]]
+    if sequence_type == MAFFT_SEQUENCE_NUCLEOTIDE:
+        args.append("--nuc")
+    elif sequence_type == MAFFT_SEQUENCE_PROTEIN:
+        args.append("--amino")
+    elif sequence_type != "auto":
+        raise ValueError(f"Unknown MAFFT sequence type: {sequence_type}")
+    args.extend(
+        [
+            "--thread",
+            str(max(1, num_threads)),
+            "--op",
+            f"{gap_open_penalty:g}",
+            "--ep",
+            f"{offset:g}",
+        ]
+    )
+    if reorder:
+        args.append("--reorder")
+    if adjust_direction:
+        if sequence_type == MAFFT_SEQUENCE_PROTEIN:
+            raise ValueError("Reverse-complement adjustment is only valid for DNA/RNA.")
+        args.append("--adjustdirectionaccurately")
+    return args
 
 
 def run_alignment_combined(
     seq_files: list[Path],
     *,
-    backend: str = "auto",
     num_threads: int = 5,
     use_system_mafft: bool = False,
+    strategy: str = MAFFT_STRATEGY_AUTO,
+    sequence_type: str = "auto",
+    retree: int = 2,
+    max_iterate: int = 0,
+    gap_open_penalty: float = 1.53,
+    offset: float = 0.0,
+    reorder: bool = False,
+    adjust_direction: bool = False,
 ) -> Path:
     """Merge selected FASTA files into one input, then align once."""
     if not seq_files:
@@ -314,9 +309,16 @@ def run_alignment_combined(
     try:
         aligned = run_alignment(
             combined,
-            backend=backend,
             num_threads=num_threads,
             use_system_mafft=use_system_mafft,
+            strategy=strategy,
+            sequence_type=sequence_type,
+            retree=retree,
+            max_iterate=max_iterate,
+            gap_open_penalty=gap_open_penalty,
+            offset=offset,
+            reorder=reorder,
+            adjust_direction=adjust_direction,
         )
         if aligned.resolve() != desired.resolve() and aligned.is_file():
             if desired.is_file():

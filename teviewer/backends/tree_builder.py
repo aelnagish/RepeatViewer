@@ -9,7 +9,7 @@ Two engines, mirroring how alignment backends are handled in
 
       conda install -c bioconda iqtree fasttree
 
-  These are optional: like blast+/mafft/clustalo they are detected at runtime
+  These are optional: like BLAST+ and system MAFFT they are detected at runtime
   and never required for the app to work.
 
 * **Biopython (always available)** -- distance-based Neighbor-Joining or UPGMA.

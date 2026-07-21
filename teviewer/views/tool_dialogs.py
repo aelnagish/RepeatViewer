@@ -126,9 +126,16 @@ from teviewer.job_options import (
     configure_report_evalue_spinbox,
     DivergenceRowOptions,
     AlignOptions,
-    ALIGN_BACKEND_AUTO,
-    ALIGN_BACKEND_CLUSTALO,
-    ALIGN_BACKEND_MAFFT,
+    MAFFT_SEQUENCE_AUTO,
+    MAFFT_SEQUENCE_NUCLEOTIDE,
+    MAFFT_SEQUENCE_PROTEIN,
+    MAFFT_STRATEGY_AUTO,
+    MAFFT_STRATEGY_CUSTOM,
+    MAFFT_STRATEGY_EINSI,
+    MAFFT_STRATEGY_FFT_NS_1,
+    MAFFT_STRATEGY_FFT_NS_2,
+    MAFFT_STRATEGY_GINSI,
+    MAFFT_STRATEGY_LINSI,
     ExtendOptions,
     FlexidotOptions,
     MAX_FLEXIDOT_WORDSIZE,
@@ -590,32 +597,91 @@ class AlignParamsDialog(QDialog):
         self.setWindowTitle(title)
         opts = initial or AlignOptions()
 
-        self._backend = QComboBox(self)
-        self._backend.addItem("Auto (MAFFT → Clustal)", ALIGN_BACKEND_AUTO)
-        self._backend.addItem("MAFFT", ALIGN_BACKEND_MAFFT)
-        self._backend.addItem("Clustal Omega", ALIGN_BACKEND_CLUSTALO)
-        idx = self._backend.findData(opts.backend)
+        self._strategy = QComboBox(self)
+        for label, value in (
+            ("Auto (MAFFT chooses)", MAFFT_STRATEGY_AUTO),
+            ("FFT-NS-1 (very fast)", MAFFT_STRATEGY_FFT_NS_1),
+            ("FFT-NS-2 (fast)", MAFFT_STRATEGY_FFT_NS_2),
+            ("L-INS-i (local homology)", MAFFT_STRATEGY_LINSI),
+            ("G-INS-i (global homology)", MAFFT_STRATEGY_GINSI),
+            ("E-INS-i (large internal gaps)", MAFFT_STRATEGY_EINSI),
+            ("Custom", MAFFT_STRATEGY_CUSTOM),
+        ):
+            self._strategy.addItem(label, value)
+        idx = self._strategy.findData(opts.strategy)
         if idx >= 0:
-            self._backend.setCurrentIndex(idx)
+            self._strategy.setCurrentIndex(idx)
+
+        self._sequence_type = QComboBox(self)
+        self._sequence_type.addItem("Auto-detect", MAFFT_SEQUENCE_AUTO)
+        self._sequence_type.addItem("Nucleotide", MAFFT_SEQUENCE_NUCLEOTIDE)
+        self._sequence_type.addItem("Protein", MAFFT_SEQUENCE_PROTEIN)
+        idx = self._sequence_type.findData(opts.sequence_type)
+        if idx >= 0:
+            self._sequence_type.setCurrentIndex(idx)
 
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 64)
         self._threads.setValue(max(1, opts.num_threads))
-        self._threads.setToolTip(
-            "MAFFT uses all requested threads. Clustal Omega uses 1 thread "
-            "when the installed build lacks OpenMP (common on macOS)."
-        )
+        self._threads.setToolTip("Number passed to MAFFT's --thread option.")
 
-        for field in (self._backend, self._threads):
-            field.setFixedWidth(200)
+        self._retree = QSpinBox(self)
+        self._retree.setRange(1, 100)
+        self._retree.setValue(opts.retree)
+        self._retree.setToolTip("Number of guide-tree rebuilds in Custom mode.")
+
+        self._max_iterate = QSpinBox(self)
+        self._max_iterate.setRange(0, 1000)
+        self._max_iterate.setValue(opts.max_iterate)
+        self._max_iterate.setToolTip("Maximum iterative-refinement cycles in Custom mode.")
+
+        self._gap_open = QDoubleSpinBox(self)
+        self._gap_open.setRange(0.0, 20.0)
+        self._gap_open.setDecimals(3)
+        self._gap_open.setSingleStep(0.1)
+        self._gap_open.setValue(opts.gap_open_penalty)
+        self._gap_open.setToolTip("MAFFT --op gap-opening penalty; default 1.53.")
+
+        self._offset = QDoubleSpinBox(self)
+        self._offset.setRange(-10.0, 10.0)
+        self._offset.setDecimals(3)
+        self._offset.setSingleStep(0.05)
+        self._offset.setValue(opts.offset)
+        self._offset.setToolTip("MAFFT --ep offset value; default 0.0.")
+
+        self._reorder = QCheckBox("Allow MAFFT to reorder sequences", self)
+        self._reorder.setChecked(opts.reorder)
+        self._adjust_direction = QCheckBox(
+            "Automatically reverse-complement nucleotide sequences", self
+        )
+        self._adjust_direction.setChecked(opts.adjust_direction)
+        self._adjust_direction.setToolTip("Uses MAFFT --adjustdirectionaccurately.")
+
+        for field in (
+            self._strategy,
+            self._sequence_type,
+            self._threads,
+            self._retree,
+            self._max_iterate,
+            self._gap_open,
+            self._offset,
+        ):
+            field.setFixedWidth(260)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
-        form.addRow("Aligner:", self._backend)
+        form.addRow("MAFFT strategy:", self._strategy)
+        form.addRow("Sequence type:", self._sequence_type)
         form.addRow("Threads:", self._threads)
+        form.addRow("Guide-tree rebuilds:", self._retree)
+        form.addRow("Refinement iterations:", self._max_iterate)
+        form.addRow("Gap-opening penalty:", self._gap_open)
+        form.addRow("Offset value:", self._offset)
+        form.addRow("", self._reorder)
+        form.addRow("", self._adjust_direction)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -629,11 +695,31 @@ class AlignParamsDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
+        self._strategy.currentIndexChanged.connect(self._sync_controls)
+        self._sequence_type.currentIndexChanged.connect(self._sync_controls)
+        self._sync_controls()
+
+    def _sync_controls(self) -> None:
+        custom = self._strategy.currentData() == MAFFT_STRATEGY_CUSTOM
+        self._retree.setEnabled(custom)
+        self._max_iterate.setEnabled(custom)
+        protein = self._sequence_type.currentData() == MAFFT_SEQUENCE_PROTEIN
+        self._adjust_direction.setEnabled(not protein)
+
     def options(self) -> AlignOptions:
-        backend = str(self._backend.currentData())
         return AlignOptions(
-            backend=backend,
             num_threads=max(1, int(self._threads.value())),
+            strategy=str(self._strategy.currentData()),
+            sequence_type=str(self._sequence_type.currentData()),
+            retree=self._retree.value(),
+            max_iterate=self._max_iterate.value(),
+            gap_open_penalty=self._gap_open.value(),
+            offset=self._offset.value(),
+            reorder=self._reorder.isChecked(),
+            adjust_direction=(
+                self._adjust_direction.isChecked()
+                and self._sequence_type.currentData() != MAFFT_SEQUENCE_PROTEIN
+            ),
         )
 
 
@@ -691,7 +777,7 @@ class TreeParamsDialog(QDialog):
         self._align_first = QCheckBox("Align sequences first if not aligned", self)
         self._align_first.setChecked(opts.align_first)
         self._align_first.setToolTip(
-            "Runs the usual MAFFT / Clustal Omega step when the selected "
+            "Runs MAFFT with the saved alignment parameters when the selected "
             "sequences are not already the same length."
         )
 

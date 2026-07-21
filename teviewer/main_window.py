@@ -342,6 +342,20 @@ _JOB_DISPLAY_TITLES = {
 }
 
 
+def _mafft_option_kwargs(options) -> dict[str, Any]:
+    return {
+        "num_threads": options.num_threads,
+        "strategy": options.strategy,
+        "sequence_type": options.sequence_type,
+        "retree": options.retree,
+        "max_iterate": options.max_iterate,
+        "gap_open_penalty": options.gap_open_penalty,
+        "offset": options.offset,
+        "reorder": options.reorder,
+        "adjust_direction": options.adjust_direction,
+    }
+
+
 class AlignWorker(QObject):
     progress = Signal(int, str)
     finished = Signal(list)
@@ -351,16 +365,14 @@ class AlignWorker(QObject):
         self,
         seq_files: list[Path],
         *,
-        backend: str = "auto",
-        num_threads: int = 5,
+        options,
         mode: str = "one_by_one",
         max_workers: int = 4,
         use_system_mafft: bool = False,
     ):
         super().__init__()
         self._seq_files = seq_files
-        self._backend = backend
-        self._num_threads = num_threads
+        self._options = options
         self._mode = mode
         self._max_workers = max_workers
         self._use_system_mafft = use_system_mafft
@@ -374,8 +386,7 @@ class AlignWorker(QObject):
                 self.progress.emit(0, "Aligning combined MSA…")
                 output = run_alignment_combined(
                     self._seq_files,
-                    backend=self._backend,
-                    num_threads=self._num_threads,
+                    **_mafft_option_kwargs(self._options),
                     use_system_mafft=self._use_system_mafft,
                 )
                 self.progress.emit(1, "Alignment finished.")
@@ -394,8 +405,7 @@ class AlignWorker(QObject):
             try:
                 output = run_alignment(
                     seq_path,
-                    backend=self._backend,
-                    num_threads=self._num_threads,
+                    **_mafft_option_kwargs(self._options),
                     use_system_mafft=self._use_system_mafft,
                 )
                 return seq_path, str(output), None
@@ -452,13 +462,13 @@ class TreeWorker(QObject):
         seq_files: list[Path],
         options,
         *,
-        num_threads: int = 4,
+        align_options,
         use_system_mafft: bool = False,
     ) -> None:
         super().__init__()
         self._seq_files = list(seq_files)
         self._options = options
-        self._num_threads = num_threads
+        self._align_options = align_options
         self._use_system_mafft = use_system_mafft
 
     @Slot()
@@ -518,8 +528,7 @@ class TreeWorker(QObject):
             return Path(
                 run_alignment_combined(
                     self._seq_files,
-                    backend="auto",
-                    num_threads=self._num_threads,
+                    **_mafft_option_kwargs(self._align_options),
                     use_system_mafft=self._use_system_mafft,
                 )
             )
@@ -535,8 +544,7 @@ class TreeWorker(QObject):
         return Path(
             run_alignment_combined(
                 self._seq_files,
-                backend="auto",
-                num_threads=self._num_threads,
+                **_mafft_option_kwargs(self._align_options),
                 use_system_mafft=self._use_system_mafft,
             )
         )
@@ -2161,7 +2169,7 @@ class MainWindow(QMainWindow):
 
     def _populate_align_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("Align with default parameters", self._run_align_default)
+            menu.addAction("Align with default MAFFT parameters", self._run_align_default)
             menu.addAction(
                 "Align all selected in one combined MSA",
                 self._align_selected_combined,
@@ -2232,7 +2240,7 @@ class MainWindow(QMainWindow):
             TreeWorker(
                 files,
                 options,
-                num_threads=self._project.batch_workers,
+                align_options=self._align_options,
                 use_system_mafft=self._project.use_system_mafft,
             ),
             job_title="Tree",
@@ -5262,7 +5270,7 @@ class MainWindow(QMainWindow):
             self._align_options = dialog.options()
             save_align_options(self._align_options)
             self._set_status_message(
-                f"Alignment defaults updated ({self._align_options.backend}, "
+                f"MAFFT defaults updated ({self._align_options.strategy}, "
                 f"{self._align_options.num_threads} threads)",
                 6000,
             )
@@ -5271,13 +5279,9 @@ class MainWindow(QMainWindow):
         self,
         paths: list[Path] | None = None,
         *,
-        backend: str | None = None,
-        num_threads: int | None = None,
         mode: str | None = None,
     ) -> None:
         opts = self._align_options
-        backend = backend if backend is not None else opts.backend
-        num_threads = num_threads if num_threads is not None else opts.num_threads
         if mode is None:
             mode = "one_by_one"
 
@@ -5297,7 +5301,7 @@ class MainWindow(QMainWindow):
                 "Need at least two sequences in the selected FASTA file(s).",
             )
             return
-        if backend == "mafft" and "mafft" not in alignment_backends(
+        if "mafft" not in alignment_backends(
             use_system_mafft=self._project.use_system_mafft
         ):
             if self._project.use_system_mafft:
@@ -5316,26 +5320,14 @@ class MainWindow(QMainWindow):
                 detail,
             )
             return
-        if backend == "clustalo" and "clustalo" not in alignment_backends():
-            QMessageBox.warning(
-                self,
-                "Clustal Omega not found",
-                "Install Clustal Omega (e.g. conda install -c bioconda clustalo).",
-            )
-            return
-        title = {
-            "mafft": "Align (MAFFT)",
-            "clustalo": "Align (Clustal)",
-            "auto": "Align",
-        }.get(backend, "Align")
+        title = "Align (MAFFT)"
         if mode == ALIGN_MODE_COMBINED:
             title = f"{title} (combined)"
         total_steps = 1 if mode == ALIGN_MODE_COMBINED else len(seq_files)
         self._start_background_job(
             AlignWorker(
                 seq_files,
-                backend=backend,
-                num_threads=num_threads,
+                options=opts,
                 mode=mode,
                 max_workers=self._project.batch_workers,
                 use_system_mafft=self._project.use_system_mafft,
@@ -5368,11 +5360,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_align_failed(self, error: str) -> None:
-        backends = alignment_backends()
         body = error.strip()
-        if "conda install" not in body.lower():
-            detected = ", ".join(backends) if backends else "none"
-            body = f"{body}\n\nDetected on PATH: {detected}"
         QMessageBox.critical(self, "Alignment failed", body)
 
     def _run_blast(self) -> None:

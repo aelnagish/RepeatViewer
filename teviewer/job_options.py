@@ -122,20 +122,47 @@ class TsdSearchOptions:
     cluster_eps: float = DEFAULT_TSD_CLUSTER_EPS
 
 
-ALIGN_BACKEND_AUTO = "auto"
-ALIGN_BACKEND_MAFFT = "mafft"
-ALIGN_BACKEND_CLUSTALO = "clustalo"
-DEFAULT_ALIGN_BACKEND = ALIGN_BACKEND_AUTO
 DEFAULT_ALIGN_THREADS = 5
 ALIGN_MODE_COMBINED = "combined"
+MAFFT_STRATEGY_AUTO = "auto"
+MAFFT_STRATEGY_FFT_NS_1 = "fft_ns_1"
+MAFFT_STRATEGY_FFT_NS_2 = "fft_ns_2"
+MAFFT_STRATEGY_LINSI = "linsi"
+MAFFT_STRATEGY_GINSI = "ginsi"
+MAFFT_STRATEGY_EINSI = "einsi"
+MAFFT_STRATEGY_CUSTOM = "custom"
+MAFFT_STRATEGIES = (
+    MAFFT_STRATEGY_AUTO,
+    MAFFT_STRATEGY_FFT_NS_1,
+    MAFFT_STRATEGY_FFT_NS_2,
+    MAFFT_STRATEGY_LINSI,
+    MAFFT_STRATEGY_GINSI,
+    MAFFT_STRATEGY_EINSI,
+    MAFFT_STRATEGY_CUSTOM,
+)
+MAFFT_SEQUENCE_AUTO = "auto"
+MAFFT_SEQUENCE_NUCLEOTIDE = "nucleotide"
+MAFFT_SEQUENCE_PROTEIN = "protein"
+MAFFT_SEQUENCE_TYPES = (
+    MAFFT_SEQUENCE_AUTO,
+    MAFFT_SEQUENCE_NUCLEOTIDE,
+    MAFFT_SEQUENCE_PROTEIN,
+)
 
 
 @dataclass
 class AlignOptions:
-    """MAFFT / Clustal alignment: backend and thread count."""
+    """MAFFT alignment strategy and command-line parameters."""
 
-    backend: str = DEFAULT_ALIGN_BACKEND
     num_threads: int = DEFAULT_ALIGN_THREADS
+    strategy: str = MAFFT_STRATEGY_AUTO
+    sequence_type: str = MAFFT_SEQUENCE_AUTO
+    retree: int = 2
+    max_iterate: int = 0
+    gap_open_penalty: float = 1.53
+    offset: float = 0.0
+    reorder: bool = False
+    adjust_direction: bool = False
 
 
 @dataclass
@@ -520,12 +547,23 @@ def save_teaid_options(opts: TeaAidOptions) -> None:
 
 def load_align_options() -> AlignOptions:
     v = _load_settings_group("align")
-    backend = str(v.get("backend", DEFAULT_ALIGN_BACKEND))
-    if backend not in (ALIGN_BACKEND_AUTO, ALIGN_BACKEND_MAFFT, ALIGN_BACKEND_CLUSTALO):
-        backend = DEFAULT_ALIGN_BACKEND
+    strategy = str(v.get("strategy", MAFFT_STRATEGY_AUTO))
+    if strategy not in MAFFT_STRATEGIES:
+        strategy = MAFFT_STRATEGY_AUTO
+    sequence_type = str(v.get("sequence_type", MAFFT_SEQUENCE_AUTO))
+    if sequence_type not in MAFFT_SEQUENCE_TYPES:
+        sequence_type = MAFFT_SEQUENCE_AUTO
     return AlignOptions(
-        backend=backend,
         num_threads=max(1, int(v.get("num_threads", DEFAULT_ALIGN_THREADS))),
+        strategy=strategy,
+        sequence_type=sequence_type,
+        retree=max(1, int(v.get("retree", 2))),
+        max_iterate=max(0, int(v.get("max_iterate", 0))),
+        gap_open_penalty=float(v.get("gap_open_penalty", 1.53)),
+        offset=float(v.get("offset", 0.0)),
+        reorder=str(v.get("reorder", "false")).lower() in {"1", "true", "yes"},
+        adjust_direction=str(v.get("adjust_direction", "false")).lower()
+        in {"1", "true", "yes"},
     )
 
 
@@ -533,8 +571,15 @@ def save_align_options(opts: AlignOptions) -> None:
     _save_settings_group(
         "align",
         {
-            "backend": opts.backend,
             "num_threads": opts.num_threads,
+            "strategy": opts.strategy,
+            "sequence_type": opts.sequence_type,
+            "retree": opts.retree,
+            "max_iterate": opts.max_iterate,
+            "gap_open_penalty": opts.gap_open_penalty,
+            "offset": opts.offset,
+            "reorder": opts.reorder,
+            "adjust_direction": opts.adjust_direction,
         },
     )
 

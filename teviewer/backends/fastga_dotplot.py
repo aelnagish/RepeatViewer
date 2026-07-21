@@ -13,7 +13,7 @@ the viewer draws the main diagonal itself.
 Output is parsed from PAF, and returned as the same ``DotplotResult`` the k-mer
 engine produces, so the canvas needs no changes.
 
-FastGA is optional and detected at runtime, like blast/mafft/clustalo::
+FastGA is optional and detected at runtime, like BLAST and MAFFT::
 
     conda install -c bioconda fastga
 

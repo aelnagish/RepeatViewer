@@ -79,4 +79,4 @@ def _open_with_system(path: Path) -> None:
 
 def run_mafft_alignment(input_fasta: Path, num_threads: int = 5) -> Path:
     """Run MAFFT (legacy alias). Prefer ``sequence_aligner.run_alignment``."""
-    return run_alignment(input_fasta, backend="mafft", num_threads=num_threads)
+    return run_alignment(input_fasta, num_threads=num_threads)
