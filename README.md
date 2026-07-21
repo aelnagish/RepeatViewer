@@ -45,7 +45,7 @@ Available from the toolbar and **Sequence** menu:
 
 | Category | Capabilities |
 |----------|--------------|
-| **BLAST** | BLASTN vs genome; hit tables; optional GFF; interactive TE genome map along chromosomes |
+| **BLAST** | Bundled BLASTN and BLASTP; nucleotide/protein databases; hit tables; BLASTN GFF and interactive genome maps |
 | **Align** | Bundled MAFFT with configurable strategies, penalties, direction handling, and combined multi-sequence alignment |
 | **MSA clean** | Remove gappy columns; trim divergent rows; combined clean |
 | **Consensus** | Build consensus from an alignment |

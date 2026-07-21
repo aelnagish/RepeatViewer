@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QTextEdit,
@@ -73,7 +75,7 @@ def _run_cancel_button_box(parent: QWidget) -> QDialogButtonBox:
 from teviewer.branding import APP_DISPLAY_NAME
 from teviewer.backends.blast_genome_plot import format_genome_length_bp
 from teviewer.backends.database_prepare import blast_database_is_ready
-from teviewer.project import BLAST_MOLECULE_NUCL, TEviewerProject
+from teviewer.project import BLAST_MOLECULE_NUCL, BLAST_MOLECULE_PROT, TEviewerProject
 from teviewer.job_options import (
     TE_GENOME_MAP_COLOR_FAMILY,
     TE_GENOME_MAP_COLOR_IDENTITY,
@@ -97,6 +99,8 @@ from teviewer.job_options import (
     DEFAULT_BLAST_MINIMUM_BIT_SCORE,
     DEFAULT_BLAST_THREADS,
     DEFAULT_BLAST_TOP_MSA_LINES,
+    BLAST_PROGRAM_BLASTN,
+    BLAST_PROGRAM_BLASTP,
     DEFAULT_CONSENSUS_AMBIGUOUS,
     DEFAULT_CONSENSUS_THRESHOLD,
     DEFAULT_EXTEND_LEFT,
@@ -1384,29 +1388,119 @@ class BlastParamsDialog(QDialog):
         self._project = project
         opts = initial or BlastOptions()
 
-        self._database = QComboBox()
-        self._database.setMinimumWidth(220)
-        manage_btn = QPushButton("Add/Manage databases…")
-        manage_btn.clicked.connect(self._manage_databases)
-        database_row = QWidget()
-        database_h = QHBoxLayout(database_row)
-        database_h.setContentsMargins(0, 0, 0, 0)
-        database_h.setSpacing(8)
-        database_h.addWidget(self._database, 1)
-        database_h.addWidget(manage_btn)
-        self._populate_database_combo(selected_name=opts.blast_database_name)
+        self._tabs = QTabWidget()
+        self._blastn_database = QComboBox()
+        self._blastp_database = QComboBox()
+        for combo in (self._blastn_database, self._blastp_database):
+            combo.setMinimumWidth(220)
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
         self._evalue.setValue(normalize_blast_evalue(opts.e_value))
 
+        self._word_size = QSpinBox()
+        self._word_size.setRange(4, 10_000)
+        self._word_size.setValue(opts.word_size)
+        self._word_size.setToolTip(
+            "BLASTN -word_size: length of the exact seed match used to begin a search. "
+            "Smaller values are more sensitive but slower."
+        )
+
+        self._gap_open = QSpinBox()
+        self._gap_open.setRange(0, 1000)
+        self._gap_open.setValue(opts.gap_open)
+        self._gap_open.setToolTip("BLASTN -gapopen: cost for opening a gap.")
+
+        self._gap_extend = QSpinBox()
+        self._gap_extend.setRange(0, 1000)
+        self._gap_extend.setValue(opts.gap_extend)
+        self._gap_extend.setToolTip("BLASTN -gapextend: cost for extending an existing gap.")
+
+        self._penalty = QSpinBox()
+        self._penalty.setRange(-1000, 0)
+        self._penalty.setValue(opts.penalty)
+        self._penalty.setToolTip("BLASTN -penalty: score assigned to a nucleotide mismatch.")
+
+        self._percent_identity = QDoubleSpinBox()
+        self._percent_identity.setRange(0.0, 100.0)
+        self._percent_identity.setDecimals(1)
+        self._percent_identity.setSuffix(" %")
+        self._percent_identity.setValue(opts.percent_identity)
+        self._percent_identity.setToolTip(
+            "BLASTN -perc_identity: discard HSPs below this percent identity; 0 disables the filter."
+        )
+
+        self._query_coverage = QDoubleSpinBox()
+        self._query_coverage.setRange(0.0, 100.0)
+        self._query_coverage.setDecimals(1)
+        self._query_coverage.setSuffix(" %")
+        self._query_coverage.setValue(opts.query_coverage_hsp)
+        self._query_coverage.setToolTip(
+            "BLASTN -qcov_hsp_perc: discard HSPs covering less than this percentage "
+            "of the query; 0 disables the filter."
+        )
+
+        self._blastn_write_text = QCheckBox("Export BLAST text file (*.txt)")
+        self._blastn_write_text.setChecked(opts.write_text)
+        self._blastn_write_gff = QCheckBox("Export GFF file (*.gff)")
+        self._blastn_write_gff.setChecked(opts.write_gff)
+
+        self._blastp_evalue = QDoubleSpinBox()
+        configure_report_evalue_spinbox(self._blastp_evalue)
+        self._blastp_evalue.setValue(normalize_blast_evalue(opts.blastp_e_value))
+
+        self._blastp_word_size = QSpinBox()
+        self._blastp_word_size.setRange(2, 10_000)
+        self._blastp_word_size.setValue(opts.blastp_word_size)
+        self._blastp_word_size.setToolTip(
+            "BLASTP -word_size: length of the protein seed used to begin a search."
+        )
+
+        self._blastp_gap_open = QSpinBox()
+        self._blastp_gap_open.setRange(0, 1000)
+        self._blastp_gap_open.setValue(opts.blastp_gap_open)
+        self._blastp_gap_open.setToolTip("BLASTP -gapopen: cost for opening a gap.")
+
+        self._blastp_gap_extend = QSpinBox()
+        self._blastp_gap_extend.setRange(0, 1000)
+        self._blastp_gap_extend.setValue(opts.blastp_gap_extend)
+        self._blastp_gap_extend.setToolTip("BLASTP -gapextend: cost for extending a gap.")
+
+        self._blastp_query_coverage = QDoubleSpinBox()
+        self._blastp_query_coverage.setRange(0.0, 100.0)
+        self._blastp_query_coverage.setDecimals(1)
+        self._blastp_query_coverage.setSuffix(" %")
+        self._blastp_query_coverage.setValue(opts.blastp_query_coverage_hsp)
+        self._blastp_query_coverage.setToolTip(
+            "BLASTP -qcov_hsp_perc: discard HSPs below this query coverage; 0 disables the filter."
+        )
+        self._blastp_write_text = QCheckBox("Export BLAST text file (*.txt)")
+        self._blastp_write_text.setChecked(opts.blastp_write_text)
+        self._blastp_write_gff = QCheckBox("Export GFF file (*.gff)")
+        self._blastp_write_gff.setChecked(opts.blastp_write_gff)
+
         self._max_msa = QSpinBox()
         self._max_msa.setRange(10, 5000)
         self._max_msa.setValue(opts.max_msa_lines)
+        self._max_msa_help = (
+            "Set the maximum number of sequences to be included in a multiple sequence "
+            "alignment. Default: 100"
+        )
+        self._max_msa.setToolTip(self._max_msa_help)
 
         self._top_msa = QSpinBox()
         self._top_msa.setRange(10, 5000)
+        self._top_msa.setMaximum(self._max_msa.value())
         self._top_msa.setValue(opts.top_msa_lines)
+        self._max_msa.valueChanged.connect(self._top_msa.setMaximum)
+        self._top_msa_help = (
+            "If the sequence number of the multiple sequence alignment (MSA) is greater "
+            "than <max_msa_lines>, TEtrimmer first sorts sequences by length and chooses "
+            "<top_msa_lines> sequences. It then randomly selects sequences from all remaining "
+            "BLAST hits until <max_msa_lines> sequences are found for the multiple sequence "
+            "alignment. Default: 100"
+        )
+        self._top_msa.setToolTip(self._top_msa_help)
 
         self._min_bit_score = QDoubleSpinBox()
         self._min_bit_score.setRange(0.0, 1_000_000.0)
@@ -1416,65 +1510,249 @@ class BlastParamsDialog(QDialog):
         self._min_bit_score.setToolTip("Minimum bit score for hits written to GFF.")
 
         # Uniform field size so the inputs line up symmetrically.
-        for field in (self._evalue, self._max_msa, self._top_msa, self._min_bit_score):
+        for field in (
+            self._evalue,
+            self._word_size,
+            self._gap_open,
+            self._gap_extend,
+            self._penalty,
+            self._percent_identity,
+            self._query_coverage,
+            self._blastp_evalue,
+            self._blastp_word_size,
+            self._blastp_gap_open,
+            self._blastp_gap_extend,
+            self._blastp_query_coverage,
+            self._max_msa,
+            self._top_msa,
+            self._min_bit_score,
+        ):
             field.setFixedWidth(150)
             field.setAlignment(Qt.AlignmentFlag.AlignRight)
 
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-        form.addRow("Database", database_row)
-        form.addRow("E-value", self._evalue)
-        form.addRow("Max MSA lines", self._max_msa)
-        form.addRow("Top longest lines", self._top_msa)
-        form.addRow("Minimum bit score (GFF)", self._min_bit_score)
+        blastn_tab = QWidget()
+        blastn_form = self._parameter_form(blastn_tab)
+        blastn_form.addRow("Database:", self._database_row(self._blastn_database))
+        blastn_form.addRow("-evalue:", self._evalue)
+        blastn_form.addRow("-word_size:", self._word_size)
+        blastn_form.addRow("-gapopen:", self._gap_open)
+        blastn_form.addRow("-gapextend:", self._gap_extend)
+        blastn_form.addRow("-penalty:", self._penalty)
+        blastn_form.addRow("-perc_identity:", self._percent_identity)
+        blastn_form.addRow("-qcov_hsp_perc:", self._query_coverage)
+        blastn_form.addRow("", self._blastn_write_text)
+        blastn_form.addRow("", self._blastn_write_gff)
+        self._tabs.addTab(blastn_tab, "blastn")
+
+        blastp_tab = QWidget()
+        blastp_form = self._parameter_form(blastp_tab)
+        blastp_form.addRow("Database:", self._database_row(self._blastp_database))
+        blastp_form.addRow("-evalue:", self._blastp_evalue)
+        blastp_form.addRow("-word_size:", self._blastp_word_size)
+        blastp_form.addRow("-gapopen:", self._blastp_gap_open)
+        blastp_form.addRow("-gapextend:", self._blastp_gap_extend)
+        blastp_form.addRow("-qcov_hsp_perc:", self._blastp_query_coverage)
+        blastp_form.addRow("", self._blastp_write_text)
+        blastp_form.addRow("", self._blastp_write_gff)
+        self._tabs.addTab(blastp_tab, "blastp")
+
+        self._populate_database_combos(
+            blastn_name=opts.blast_database_name,
+            blastp_name=opts.blastp_database_name,
+        )
+        self._tabs.setCurrentIndex(1 if opts.program == BLAST_PROGRAM_BLASTP else 0)
+
+        self._post_box = QGroupBox("Post-processing")
+        post_layout = QVBoxLayout(self._post_box)
+        post_form = QFormLayout()
+        post_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        post_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        post_form.setHorizontalSpacing(12)
+        post_form.setVerticalSpacing(10)
+        post_form.addRow(
+            "Max MSA lines:",
+            self._field_with_help(self._max_msa, "Max MSA lines", self._max_msa_help),
+        )
+        post_form.addRow(
+            "Top longest lines:",
+            self._field_with_help(self._top_msa, "Top longest lines", self._top_msa_help),
+        )
+        post_form.addRow("Minimum bit score (GFF):", self._min_bit_score)
+        post_layout.addLayout(post_form)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        restore = buttons.addButton("Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole)
+        restore.clicked.connect(self._restore_defaults)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addWidget(self._tabs)
+        layout.addWidget(self._post_box)
         layout.addWidget(buttons)
+        self._tabs.currentChanged.connect(self._update_postprocessing_visibility)
+        self._update_postprocessing_visibility(self._tabs.currentIndex())
 
-    def _populate_database_combo(self, *, selected_name=_KEEP_CURRENT) -> None:
-        target = self._database.currentData() if selected_name is _KEEP_CURRENT else selected_name
-        self._database.clear()
-        if self._project.has_genome_configured() and self._project.genome_file is not None:
-            self._database.addItem(f"Current genome ({self._project.genome_file.name})", None)
-        model = self._database.model()
+    @staticmethod
+    def _parameter_form(parent: QWidget) -> QFormLayout:
+        form = QFormLayout(parent)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        return form
+
+    def _database_row(self, combo: QComboBox) -> QWidget:
+        manage = QPushButton("Add/Manage databases…")
+        manage.clicked.connect(self._manage_databases)
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(combo, 1)
+        layout.addWidget(manage)
+        return row
+
+    def _field_with_help(self, field: QWidget, title: str, help_text: str) -> QWidget:
+        button = QToolButton()
+        button.setText("?")
+        button.setToolTip(help_text)
+        button.setAutoRaise(False)
+        button.setFixedSize(22, 22)
+        button.setStyleSheet(
+            "QToolButton {"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 10px;"
+            "  background: palette(base);"
+            "  font-weight: 600;"
+            "  padding: 0px;"
+            "}"
+            "QToolButton:hover { background: palette(alternate-base); }"
+        )
+        button.clicked.connect(
+            lambda checked=False, t=title, text=help_text: QMessageBox.information(
+                self, t, text
+            )
+        )
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(field)
+        layout.addWidget(button)
+        return row
+
+    def _update_postprocessing_visibility(self, tab_index: int) -> None:
+        self._post_box.setVisible(tab_index == 0)
+        if self.isVisible():
+            self.adjustSize()
+
+    def _populate_database_combo(
+        self,
+        combo: QComboBox,
+        molecule_type: str,
+        *,
+        selected_name=_KEEP_CURRENT,
+    ) -> None:
+        target = combo.currentData() if selected_name is _KEEP_CURRENT else selected_name
+        combo.clear()
+        if molecule_type == BLAST_MOLECULE_NUCL:
+            if self._project.has_genome_configured() and self._project.genome_file is not None:
+                combo.addItem(f"Current genome ({self._project.genome_file.name})", None)
+            else:
+                combo.addItem("Current genome (not configured)", None)
+        else:
+            combo.addItem("Select a protein database…", None)
+        model = combo.model()
         for db in self._project.blast_databases:
-            if db.molecule_type != BLAST_MOLECULE_NUCL:
+            if db.molecule_type != molecule_type:
                 continue
             ready = blast_database_is_ready(db)
             label = db.name if ready else f"{db.name} (unavailable — index files missing)"
-            self._database.addItem(label, db.name)
+            combo.addItem(label, db.name)
             if not ready and isinstance(model, QStandardItemModel):
-                item = model.item(self._database.count() - 1)
+                item = model.item(combo.count() - 1)
                 if item is not None:
                     item.setEnabled(False)
-        index = self._database.findData(target) if target is not None else 0
-        self._database.setCurrentIndex(index if index >= 0 else 0)
+        index = combo.findData(target) if target is not None else 0
+        combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _populate_database_combos(
+        self,
+        *,
+        blastn_name=_KEEP_CURRENT,
+        blastp_name=_KEEP_CURRENT,
+    ) -> None:
+        self._populate_database_combo(
+            self._blastn_database,
+            BLAST_MOLECULE_NUCL,
+            selected_name=blastn_name,
+        )
+        self._populate_database_combo(
+            self._blastp_database,
+            BLAST_MOLECULE_PROT,
+            selected_name=blastp_name,
+        )
 
     def _manage_databases(self) -> None:
         from teviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
 
         dialog = BlastDatabaseManagerDialog(self._project, parent=self)
         exec_modal_dialog(dialog)
-        self._populate_database_combo()
+        self._populate_database_combos()
+
+    def _restore_defaults(self) -> None:
+        defaults = BlastOptions()
+        self._evalue.setValue(defaults.e_value)
+        self._word_size.setValue(defaults.word_size)
+        self._gap_open.setValue(defaults.gap_open)
+        self._gap_extend.setValue(defaults.gap_extend)
+        self._penalty.setValue(defaults.penalty)
+        self._percent_identity.setValue(defaults.percent_identity)
+        self._query_coverage.setValue(defaults.query_coverage_hsp)
+        self._blastn_write_text.setChecked(defaults.write_text)
+        self._blastn_write_gff.setChecked(defaults.write_gff)
+        self._blastp_evalue.setValue(defaults.blastp_e_value)
+        self._blastp_word_size.setValue(defaults.blastp_word_size)
+        self._blastp_gap_open.setValue(defaults.blastp_gap_open)
+        self._blastp_gap_extend.setValue(defaults.blastp_gap_extend)
+        self._blastp_query_coverage.setValue(defaults.blastp_query_coverage_hsp)
+        self._blastp_write_text.setChecked(defaults.blastp_write_text)
+        self._blastp_write_gff.setChecked(defaults.blastp_write_gff)
+        self._max_msa.setValue(defaults.max_msa_lines)
+        self._top_msa.setValue(defaults.top_msa_lines)
+        self._min_bit_score.setValue(defaults.minimum_bit_score)
+        self._blastn_database.setCurrentIndex(0)
+        self._blastp_database.setCurrentIndex(0)
 
     def options(self) -> BlastOptions:
         return BlastOptions(
+            program=(
+                BLAST_PROGRAM_BLASTP if self._tabs.currentIndex() == 1 else BLAST_PROGRAM_BLASTN
+            ),
             e_value=normalize_blast_evalue(self._evalue.value()),
+            word_size=self._word_size.value(),
+            gap_open=self._gap_open.value(),
+            gap_extend=self._gap_extend.value(),
+            penalty=self._penalty.value(),
+            percent_identity=self._percent_identity.value(),
+            query_coverage_hsp=self._query_coverage.value(),
             max_msa_lines=self._max_msa.value(),
             top_msa_lines=self._top_msa.value(),
-            write_gff=True,
+            write_text=self._blastn_write_text.isChecked(),
+            write_gff=self._blastn_write_gff.isChecked(),
             minimum_bit_score=self._min_bit_score.value(),
-            blast_database_name=self._database.currentData(),
+            blast_database_name=self._blastn_database.currentData(),
+            blastp_e_value=normalize_blast_evalue(self._blastp_evalue.value()),
+            blastp_word_size=self._blastp_word_size.value(),
+            blastp_gap_open=self._blastp_gap_open.value(),
+            blastp_gap_extend=self._blastp_gap_extend.value(),
+            blastp_query_coverage_hsp=self._blastp_query_coverage.value(),
+            blastp_database_name=self._blastp_database.currentData(),
+            blastp_write_text=self._blastp_write_text.isChecked(),
+            blastp_write_gff=self._blastp_write_gff.isChecked(),
         )
 
 

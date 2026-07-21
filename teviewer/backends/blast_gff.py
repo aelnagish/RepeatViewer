@@ -44,6 +44,7 @@ def blast_hits_to_gff_rows(
     blast_txt: Path,
     *,
     minimum_bit_score: float = 0.0,
+    protein_coordinates: bool = False,
 ) -> list[list[str]]:
     """Convert BLAST hits to GFF rows (sorted by chromosome, start)."""
     df = read_blast_table(blast_txt)
@@ -63,6 +64,8 @@ def blast_hits_to_gff_rows(
         sstart = int(hit["sstart"])
         send = int(hit["send"])
         start, end, strand = _normalize_strand(sstart, send, str(hit.get("sstrand", "")))
+        if protein_coordinates:
+            strand = "."
         color = color_by_query[query]
 
         rows.append(
@@ -87,16 +90,25 @@ def write_blast_gff(
     *,
     minimum_bit_score: float = 0.0,
     output_path: Path | None = None,
+    protein_coordinates: bool = False,
 ) -> Path:
-    """Write GFF3 next to the BLAST table; coordinates match the reference genome."""
+    """Write GFF3 next to a BLAST table using subject-sequence coordinates."""
     blast_txt = blast_txt.expanduser().resolve()
     out = (output_path or blast_gff_output_path(blast_txt)).expanduser().resolve()
-    gff_rows = blast_hits_to_gff_rows(blast_txt, minimum_bit_score=minimum_bit_score)
+    gff_rows = blast_hits_to_gff_rows(
+        blast_txt,
+        minimum_bit_score=minimum_bit_score,
+        protein_coordinates=protein_coordinates,
+    )
 
     lines = [
         "##gff-version 3",
         "",
-        "##this gff works with the original genome fasta",
+        (
+            "##coordinates refer to the original protein database FASTA"
+            if protein_coordinates
+            else "##this gff works with the original genome fasta"
+        ),
         "",
     ]
     for gff_list in gff_rows:

@@ -193,6 +193,12 @@ def blast(
     bed_file=False,
     self_blast=False,
     word_size=11,
+    gap_open=5,
+    gap_extend=2,
+    penalty=-3,
+    percent_identity=0.0,
+    query_coverage_hsp=0.0,
+    program="blastn",
     os_type='Darwin',
     num_threads=1,
     use_system_blast=False,
@@ -200,6 +206,9 @@ def blast(
 ):
     from teviewer.job_options import normalize_blast_evalue
 
+    program = str(program).lower()
+    if program not in {"blastn", "blastp"}:
+        raise ValueError(f"Unsupported BLAST program: {program}")
     e_value = normalize_blast_evalue(e_value)
     script_dir = get_original_file_path()
     blast_dir = os.path.join(script_dir, 'blast')
@@ -207,30 +216,30 @@ def blast(
     base_name = os.path.basename(input_file)
     label_suffix = f"_{output_label}" if output_label else ""
 
-    # Define blast out without header
+    output_tag = "blast" if program == "blastn" else "blastp"
+    # Define BLAST output without header.
     blast_out_file = os.path.join(
-        blast_out_dir, f'{base_name}{label_suffix}_no_header.b'
+        blast_out_dir, f'{base_name}{label_suffix}_{output_tag}_no_header.b'
     )
-    # Define blast out with header
+    # Define BLAST output with header.
     blast_out_file_header = os.path.join(
-        blast_out_dir, f'{base_name}{label_suffix}_blast.txt'
+        blast_out_dir, f'{base_name}{label_suffix}_{output_tag}.txt'
     )
 
-    # Check if the blastn command is available in PATH
-    # Use the user system blastn when it exists, otherwise use the build-in version
-    if use_system_blast and check_cmd_in_path('blastn'):
-        blastn = "blastn"
+    # Use the requested system executable when enabled, otherwise the bundled copy.
+    if use_system_blast and check_cmd_in_path(program):
+        blast_executable = program
     else:
         if os_type == "Linux":
-            blastn = os.path.join(blast_dir, "blastn_linux")
+            blast_executable = os.path.join(blast_dir, f"{program}_linux")
         elif os_type == "Darwin":
-            blastn = os.path.join(blast_dir, "blastn_mac")
+            blast_executable = os.path.join(blast_dir, f"{program}_mac")
         else:
-            blastn = os.path.join(blast_dir, "blastn.exe")
+            blast_executable = os.path.join(blast_dir, f"{program}.exe")
 
     # -outfmt 6 use "\t" as deliminator. -outfmt 10 use "," as deliminator
     blast_cmd = [
-        str(blastn),
+        str(blast_executable),
         "-query", input_file,
         "-db", blast_database,
         "-max_target_seqs", str(10000),
@@ -249,6 +258,22 @@ def blast(
             "-reward", "2",
             "-penalty", "-3"
         ])
+    elif program == "blastn":
+        blast_cmd.extend([
+            "-word_size", str(max(4, int(word_size))),
+            "-gapopen", str(max(0, int(gap_open))),
+            "-gapextend", str(max(0, int(gap_extend))),
+            "-penalty", str(min(0, int(penalty))),
+            "-perc_identity", str(max(0.0, min(100.0, float(percent_identity)))),
+            "-qcov_hsp_perc", str(max(0.0, min(100.0, float(query_coverage_hsp)))),
+        ])
+    else:
+        blast_cmd.extend([
+            "-word_size", str(max(2, int(word_size))),
+            "-gapopen", str(max(0, int(gap_open))),
+            "-gapextend", str(max(0, int(gap_extend))),
+            "-qcov_hsp_perc", str(max(0.0, min(100.0, float(query_coverage_hsp)))),
+        ])
 
     try:
         # Run the BLAST command
@@ -256,25 +281,25 @@ def blast(
 
     except FileNotFoundError:
         logging.error(
-            f"'blastn' command not found. Please ensure 'blastn' is installed correctly.\n"
+            f"'{program}' command not found. Please ensure '{program}' is installed correctly.\n"
             f'{traceback.format_exc()}'
         )
-        return 'blastn_not_found', False
+        return ('blastn_not_found' if program == 'blastn' else 'blastp_not_found'), False
 
     except subprocess.CalledProcessError as e:
         logging.error(f'An error occurred during BLAST: \n {traceback.format_exc()}')
         logging.error(f'\nBLAST failed with error code {e.returncode}')
         # Print the error generated from the BLAST itself
         logging.error(e.stderr)
-        return 'blastn_got_error', False
+        return ('blastn_got_error' if program == 'blastn' else 'blastp_got_error'), False
 
     # Check if the blast hit number is 0
     if os.path.isfile(blast_out_file) and os.path.getsize(blast_out_file) == 0:
-        return 'blast_n_zero', False
+        return ('blast_n_zero' if program == 'blastn' else 'blastp_zero_hits'), False
 
     if not os.path.isfile(blast_out_file):
         logging.error(f"BLAST produced no output file: {blast_out_file}")
-        return 'blastn_got_error', False
+        return ('blastn_got_error' if program == 'blastn' else 'blastp_got_error'), False
 
     try:
         # Always produce one canonical BLAST table with header.
@@ -313,6 +338,13 @@ def blast(
             blast_out_file, delimiter="\t", header=None, names=header
         )
         blast_out_file_df.to_csv(blast_out_file_header, sep="\t", index=False)
+        if program == "blastp":
+            try:
+                os.remove(blast_out_file)
+            except OSError:
+                pass
+            return False, blast_out_file_header
+
         blast_out_bed_file = f'{blast_out_file}.bed'
         blast_data_bed_df = pd.read_csv(blast_out_file, delimiter='\t', header=None)
 

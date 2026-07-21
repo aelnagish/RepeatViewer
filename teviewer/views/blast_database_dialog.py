@@ -44,7 +44,7 @@ from teviewer.views.tool_dialogs import exec_modal_dialog
 
 _MOLECULE_LABELS = {
     BLAST_MOLECULE_NUCL: "Nucleotide",
-    BLAST_MOLECULE_PROT: "Protein (not usable by Blast yet)",
+    BLAST_MOLECULE_PROT: "Protein",
 }
 
 
@@ -121,8 +121,7 @@ class AddBlastDatabaseDialog(QDialog):
         fasta_h.addWidget(self._fasta, 1)
         fasta_h.addWidget(browse_btn)
 
-        # BLASTN in TEviewer searches nucleotide databases only; protein entries
-        # can still be indexed here for future tools / external BLAST use.
+        # blastn uses nucleotide databases; blastp uses protein databases.
         self._molecule_type: QComboBox | None = None
         if allow_molecule_type:
             combo = QComboBox(self)

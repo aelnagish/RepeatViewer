@@ -157,6 +157,8 @@ from teviewer.plugins.custom_command import (
 from teviewer.backends.sequence_viewer import open_fasta
 from teviewer.job_options import (
     ALIGN_MODE_COMBINED,
+    BLAST_PROGRAM_BLASTN,
+    BLAST_PROGRAM_BLASTP,
     load_align_options,
     load_blast_options,
     load_consensus_options,
@@ -2505,10 +2507,16 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "FastGA failed", body)
 
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction("Blast with default parameters", self._run_blast)
-            menu.addSeparator()
-        menu.addAction("Change blast parameters", self._change_blast_parameters)
+        menu.addAction(
+            "blastn",
+            lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTN),
+        )
+        menu.addAction(
+            "blastp",
+            lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTP),
+        )
+        menu.addSeparator()
+        menu.addAction("BLAST parameters…", self._change_blast_parameters)
 
     def _populate_te_visualization_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -2909,8 +2917,9 @@ class MainWindow(QMainWindow):
         *,
         tooltip: str = "",
         run_label: str | None = None,
+        show_default_action: bool = True,
     ) -> QToolButton:
-        """Text-only toolbar button; click opens a menu with the default action first."""
+        """Text-only toolbar button; click opens its actions and optional default action."""
         btn = QToolButton(self._toolbar_container)
         btn.setText(text)
         if tooltip:
@@ -2921,7 +2930,8 @@ class MainWindow(QMainWindow):
         def _show_menu_on_click() -> None:
             self._clear_toolbar_button_highlights(btn)
             menu = QMenu(btn)
-            menu.addAction(run_label or text, default_slot)
+            if show_default_action:
+                menu.addAction(run_label or text, default_slot)
             menu_builder(menu, skip_default=True)
             menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
             self._release_toolbar_button(btn)
@@ -2934,7 +2944,8 @@ class MainWindow(QMainWindow):
         def _overflow(menu: QMenu) -> None:
             sub = menu.addMenu(text)
             sub.setEnabled(btn.isEnabled())
-            sub.addAction(run_label or text, default_slot)
+            if show_default_action:
+                sub.addAction(run_label or text, default_slot)
             menu_builder(sub, skip_default=True)
 
         self._register_toolbar_item(btn, _overflow)
@@ -3110,6 +3121,7 @@ class MainWindow(QMainWindow):
                 self._run_blast,
                 self._populate_blast_menu,
                 tooltip=tip,
+                show_default_action=False,
             )
         elif tool_id == "te_genome_map":
             self._add_toolbar_text_menu_button(
@@ -3245,7 +3257,7 @@ class MainWindow(QMainWindow):
     ) -> int:
         n = len(seq_files)
         blast_opts = job_kwargs.get("blast_options")
-        if func_name == "blast" and blast_opts is not None and blast_opts.blast_database_name:
+        if func_name == "blast" and blast_opts is not None and blast_opts.active_database_name:
             return n
         if not self._project.is_pan_genome_mode:
             if func_name == "flexidot" and n > 1 and job_kwargs.get("flexidot_combined", True):
@@ -5364,7 +5376,11 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Alignment failed", body)
 
     def _run_blast(self) -> None:
-        self._apply_function("blast", blast_options=self._blast_options)
+        self._run_blast_program(BLAST_PROGRAM_BLASTN)
+
+    def _run_blast_program(self, program: str) -> None:
+        options = replace(self._blast_options, program=program)
+        self._apply_function("blast", blast_options=options)
 
     def _change_blast_parameters(self) -> None:
         dialog = BlastParamsDialog(project=self._project, initial=self._blast_options, parent=self)
@@ -7248,8 +7264,20 @@ class MainWindow(QMainWindow):
         uses_saved_blast_database = (
             func_name == "blast"
             and blast_opts_for_gate is not None
-            and blast_opts_for_gate.blast_database_name
+            and blast_opts_for_gate.active_database_name
         )
+        if (
+            func_name == "blast"
+            and blast_opts_for_gate is not None
+            and blast_opts_for_gate.program == BLAST_PROGRAM_BLASTP
+            and not blast_opts_for_gate.blastp_database_name
+        ):
+            QMessageBox.warning(
+                self,
+                "Protein database required",
+                "Select a protein database in the blastp tab under BLAST parameters.",
+            )
+            return
         if (
             func_name in {"blast", "extend", "teaid", "flexidot"}
             and not uses_saved_blast_database

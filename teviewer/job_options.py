@@ -13,9 +13,26 @@ DEFAULT_BLAST_EVALUE = DEFAULT_REPORT_EVALUE
 MIN_BLAST_EVALUE = 1e-4
 DEFAULT_BLAST_THREADS = 1
 DEFAULT_BLAST_MAX_MSA_LINES = 100
-DEFAULT_BLAST_TOP_MSA_LINES = 70
+DEFAULT_BLAST_TOP_MSA_LINES = 100
 DEFAULT_BLAST_WRITE_GFF = True
+DEFAULT_BLAST_WRITE_TEXT = True
 DEFAULT_BLAST_MINIMUM_BIT_SCORE = 0.0
+DEFAULT_BLAST_WORD_SIZE = 11
+DEFAULT_BLAST_GAP_OPEN = 5
+DEFAULT_BLAST_GAP_EXTEND = 2
+DEFAULT_BLAST_PENALTY = -3
+DEFAULT_BLAST_PERCENT_IDENTITY = 0.0
+DEFAULT_BLAST_QUERY_COVERAGE = 0.0
+BLAST_PROGRAM_BLASTN = "blastn"
+BLAST_PROGRAM_BLASTP = "blastp"
+BLAST_PROGRAMS = (BLAST_PROGRAM_BLASTN, BLAST_PROGRAM_BLASTP)
+DEFAULT_BLASTP_EVALUE = DEFAULT_BLAST_EVALUE
+DEFAULT_BLASTP_WORD_SIZE = 3
+DEFAULT_BLASTP_GAP_OPEN = 11
+DEFAULT_BLASTP_GAP_EXTEND = 1
+DEFAULT_BLASTP_QUERY_COVERAGE = 0.0
+DEFAULT_BLASTP_WRITE_TEXT = True
+DEFAULT_BLASTP_WRITE_GFF = False
 
 DEFAULT_TE_GENOME_MAP_BIN_BP = 100_000
 TE_GENOME_MAP_DENSITY_HIT_COUNT = "hit_count"
@@ -201,13 +218,35 @@ class FastGaOptions:
 
 @dataclass
 class BlastOptions:
+    program: str = BLAST_PROGRAM_BLASTN
     e_value: float = DEFAULT_BLAST_EVALUE
     num_threads: int = DEFAULT_BLAST_THREADS
+    word_size: int = DEFAULT_BLAST_WORD_SIZE
+    gap_open: int = DEFAULT_BLAST_GAP_OPEN
+    gap_extend: int = DEFAULT_BLAST_GAP_EXTEND
+    penalty: int = DEFAULT_BLAST_PENALTY
+    percent_identity: float = DEFAULT_BLAST_PERCENT_IDENTITY
+    query_coverage_hsp: float = DEFAULT_BLAST_QUERY_COVERAGE
     max_msa_lines: int = DEFAULT_BLAST_MAX_MSA_LINES
     top_msa_lines: int = DEFAULT_BLAST_TOP_MSA_LINES
+    write_text: bool = DEFAULT_BLAST_WRITE_TEXT
     write_gff: bool = DEFAULT_BLAST_WRITE_GFF
     minimum_bit_score: float = DEFAULT_BLAST_MINIMUM_BIT_SCORE
     blast_database_name: str | None = None
+    blastp_e_value: float = DEFAULT_BLASTP_EVALUE
+    blastp_word_size: int = DEFAULT_BLASTP_WORD_SIZE
+    blastp_gap_open: int = DEFAULT_BLASTP_GAP_OPEN
+    blastp_gap_extend: int = DEFAULT_BLASTP_GAP_EXTEND
+    blastp_query_coverage_hsp: float = DEFAULT_BLASTP_QUERY_COVERAGE
+    blastp_database_name: str | None = None
+    blastp_write_text: bool = DEFAULT_BLASTP_WRITE_TEXT
+    blastp_write_gff: bool = DEFAULT_BLASTP_WRITE_GFF
+
+    @property
+    def active_database_name(self) -> str | None:
+        if self.program == BLAST_PROGRAM_BLASTP:
+            return self.blastp_database_name
+        return self.blast_database_name
 
 
 DEFAULT_CONSENSUS_THRESHOLD = 0.8
@@ -442,16 +481,53 @@ def _save_settings_group(group: str, values: dict) -> None:
 
 def load_blast_options() -> BlastOptions:
     v = _load_settings_group("blast")
+    program = str(v.get("program", BLAST_PROGRAM_BLASTN))
+    if program not in BLAST_PROGRAMS:
+        program = BLAST_PROGRAM_BLASTN
     return BlastOptions(
+        program=program,
         e_value=normalize_blast_evalue(float(v.get("e_value", DEFAULT_BLAST_EVALUE))),
         num_threads=int(v.get("num_threads", DEFAULT_BLAST_THREADS)),
+        word_size=max(4, int(v.get("word_size", DEFAULT_BLAST_WORD_SIZE))),
+        gap_open=max(0, int(v.get("gap_open", DEFAULT_BLAST_GAP_OPEN))),
+        gap_extend=max(0, int(v.get("gap_extend", DEFAULT_BLAST_GAP_EXTEND))),
+        penalty=min(0, int(v.get("penalty", DEFAULT_BLAST_PENALTY))),
+        percent_identity=max(
+            0.0,
+            min(100.0, float(v.get("percent_identity", DEFAULT_BLAST_PERCENT_IDENTITY))),
+        ),
+        query_coverage_hsp=max(
+            0.0,
+            min(100.0, float(v.get("query_coverage_hsp", DEFAULT_BLAST_QUERY_COVERAGE))),
+        ),
         max_msa_lines=int(v.get("max_msa_lines", DEFAULT_BLAST_MAX_MSA_LINES)),
         top_msa_lines=int(v.get("top_msa_lines", DEFAULT_BLAST_TOP_MSA_LINES)),
+        write_text=bool(v.get("write_text", DEFAULT_BLAST_WRITE_TEXT)),
         write_gff=bool(v.get("write_gff", DEFAULT_BLAST_WRITE_GFF)),
         minimum_bit_score=float(
             v.get("minimum_bit_score", DEFAULT_BLAST_MINIMUM_BIT_SCORE)
         ),
         blast_database_name=(str(v["blast_database_name"]) if v.get("blast_database_name") else None),
+        blastp_e_value=normalize_blast_evalue(
+            float(v.get("blastp_e_value", DEFAULT_BLASTP_EVALUE))
+        ),
+        blastp_word_size=max(2, int(v.get("blastp_word_size", DEFAULT_BLASTP_WORD_SIZE))),
+        blastp_gap_open=max(0, int(v.get("blastp_gap_open", DEFAULT_BLASTP_GAP_OPEN))),
+        blastp_gap_extend=max(
+            0, int(v.get("blastp_gap_extend", DEFAULT_BLASTP_GAP_EXTEND))
+        ),
+        blastp_query_coverage_hsp=max(
+            0.0,
+            min(
+                100.0,
+                float(v.get("blastp_query_coverage_hsp", DEFAULT_BLASTP_QUERY_COVERAGE)),
+            ),
+        ),
+        blastp_database_name=(
+            str(v["blastp_database_name"]) if v.get("blastp_database_name") else None
+        ),
+        blastp_write_text=bool(v.get("blastp_write_text", DEFAULT_BLASTP_WRITE_TEXT)),
+        blastp_write_gff=bool(v.get("blastp_write_gff", DEFAULT_BLASTP_WRITE_GFF)),
     )
 
 
@@ -459,12 +535,29 @@ def save_blast_options(opts: BlastOptions) -> None:
     _save_settings_group(
         "blast",
         {
+            "program": opts.program,
             "e_value": opts.e_value,
+            "num_threads": opts.num_threads,
+            "word_size": opts.word_size,
+            "gap_open": opts.gap_open,
+            "gap_extend": opts.gap_extend,
+            "penalty": opts.penalty,
+            "percent_identity": opts.percent_identity,
+            "query_coverage_hsp": opts.query_coverage_hsp,
             "max_msa_lines": opts.max_msa_lines,
             "top_msa_lines": opts.top_msa_lines,
+            "write_text": opts.write_text,
             "write_gff": opts.write_gff,
             "minimum_bit_score": opts.minimum_bit_score,
             "blast_database_name": opts.blast_database_name or "",
+            "blastp_e_value": opts.blastp_e_value,
+            "blastp_word_size": opts.blastp_word_size,
+            "blastp_gap_open": opts.blastp_gap_open,
+            "blastp_gap_extend": opts.blastp_gap_extend,
+            "blastp_query_coverage_hsp": opts.blastp_query_coverage_hsp,
+            "blastp_database_name": opts.blastp_database_name or "",
+            "blastp_write_text": opts.blastp_write_text,
+            "blastp_write_gff": opts.blastp_write_gff,
         },
     )
 

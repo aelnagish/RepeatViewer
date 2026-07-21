@@ -232,7 +232,12 @@ def _genome_work_items(
     ]
 
 
-def _find_blast_database(project: TEviewerProject, name: str) -> BlastDatabase:
+def _find_blast_database(
+    project: TEviewerProject,
+    name: str,
+    *,
+    molecule_type: str | None = None,
+) -> BlastDatabase:
     for db in project.blast_databases:
         if db.name == name:
             if not blast_database_is_ready(db):
@@ -241,6 +246,9 @@ def _find_blast_database(project: TEviewerProject, name: str) -> BlastDatabase:
                     f"(expected at {db.db_prefix_path}). Rebuild it in "
                     "Add/Manage databases…."
                 )
+            if molecule_type is not None and db.molecule_type != molecule_type:
+                expected = "protein" if molecule_type == "prot" else "nucleotide"
+                raise RuntimeError(f"BLAST database '{name}' is not a {expected} database.")
             return db
     raise RuntimeError(f"BLAST database '{name}' is no longer registered.")
 
@@ -577,19 +585,48 @@ def run_on_sequence(
 
     if func_name == "blast":
         if genome_db is None:
-            raise RuntimeError("Genome BLAST database not prepared.")
+            raise RuntimeError("BLAST database not prepared.")
         blast_opts = blast_options or BlastOptions()
+        is_blastp = blast_opts.program == "blastp"
         blast_bed, blast_txt = run_blast(
             str(seq_path),
             str(genome_db),
             str(out_dir),
-            e_value=blast_opts.e_value,
+            e_value=(blast_opts.blastp_e_value if is_blastp else blast_opts.e_value),
+            word_size=(blast_opts.blastp_word_size if is_blastp else blast_opts.word_size),
+            gap_open=(blast_opts.blastp_gap_open if is_blastp else blast_opts.gap_open),
+            gap_extend=(blast_opts.blastp_gap_extend if is_blastp else blast_opts.gap_extend),
+            penalty=blast_opts.penalty,
+            percent_identity=(
+                0.0 if is_blastp else blast_opts.percent_identity
+            ),
+            query_coverage_hsp=(
+                blast_opts.blastp_query_coverage_hsp
+                if is_blastp
+                else blast_opts.query_coverage_hsp
+            ),
+            program=blast_opts.program,
             bed_file=True,
             os_type=os_type,
             num_threads=analysis_threads_per_job(project.batch_workers),
             use_system_blast=project.use_system_blast,
             output_label=genome_label or None,
         )
+        if is_blastp:
+            if not blast_txt:
+                raise RuntimeError(f"BLASTP failed: {blast_bed}")
+            blast_txt_path = Path(str(blast_txt)).resolve()
+            if blast_opts.blastp_write_gff:
+                gff_path = write_blast_gff(
+                    blast_txt_path,
+                    protein_coordinates=True,
+                )
+                created.append(str(gff_path.resolve()))
+            if blast_opts.blastp_write_text:
+                created.append(str(blast_txt_path))
+            else:
+                blast_txt_path.unlink(missing_ok=True)
+            return created
         if not blast_bed:
             raise RuntimeError(f"Blast failed: {blast_bed}")
         max_lines = blast_opts.max_msa_lines
@@ -609,13 +646,17 @@ def run_on_sequence(
         # Expose both Blast outputs so the UI highlights all newly generated files.
         if blast_txt:
             blast_txt_path = Path(str(blast_txt)).resolve()
-            created.append(str(blast_txt_path))
-            gff_path = write_blast_gff(
-                blast_txt_path,
-                minimum_bit_score=blast_opts.minimum_bit_score,
-            )
-            created.append(str(gff_path.resolve()))
-        # Keep *_blast.txt for downstream plots; remove temporary BED intermediates.
+            if blast_opts.write_gff:
+                gff_path = write_blast_gff(
+                    blast_txt_path,
+                    minimum_bit_score=blast_opts.minimum_bit_score,
+                )
+                created.append(str(gff_path.resolve()))
+            if blast_opts.write_text:
+                created.append(str(blast_txt_path))
+            else:
+                blast_txt_path.unlink(missing_ok=True)
+        # Remove temporary BED intermediates.
         for tmp in (Path(str(blast_bed)), Path(str(blast_bed_filtered))):
             try:
                 tmp.unlink(missing_ok=True)
@@ -891,11 +932,18 @@ def run_batch(
     db_cache: dict[Path, str] = {}
     chrom_cache: dict[Path, dict[str, int]] = {}
 
-    selected_blast_db_name = blast_options.blast_database_name if blast_options else None
+    selected_blast_db_name = blast_options.active_database_name if blast_options else None
     if func_name == "blast" and selected_blast_db_name:
-        db = _find_blast_database(project, selected_blast_db_name)
+        expected_molecule = "prot" if blast_options and blast_options.program == "blastp" else "nucl"
+        db = _find_blast_database(
+            project,
+            selected_blast_db_name,
+            molecule_type=expected_molecule,
+        )
         genome_items = [(db.name, db.source_fasta)]
         db_cache = {db.source_fasta: str(db.db_prefix_path)}
+    elif func_name == "blast" and blast_options and blast_options.program == "blastp":
+        raise RuntimeError("Select a protein database in the blastp parameter tab.")
     elif genome_dependent:
         if not project.has_genome_configured():
             raise RuntimeError("Genome FASTA is required for this tool.")
