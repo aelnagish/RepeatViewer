@@ -109,6 +109,7 @@ from teviewer.backends.igv_viewer import (
 from teviewer.backends.job_cancel import CANCELLED_MESSAGE, JobCancellation, JobCancelledError
 
 logger = logging.getLogger(__name__)
+operation_logger = logging.getLogger("teviewer.operations")
 from teviewer.backends.te_benchmark import (
     default_tetrimmer_home,
     require_bedtools,
@@ -1823,6 +1824,12 @@ class MainWindow(QMainWindow):
 
     def _show_job_progress(self, job_title: str, total_steps: int) -> None:
         self._job_running = True
+        self._active_job_log_title = job_title
+        operation_logger.info(
+            "JOB START name=%s total_steps=%s",
+            self._job_display_title(job_title),
+            total_steps,
+        )
         self.statusBar().clearMessage()
         if self._task_progress is not None:
             self._task_progress.start(self._running_job_title(job_title), total_steps)
@@ -2680,7 +2687,51 @@ class MainWindow(QMainWindow):
 
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.addAction(f"&About {APP_DISPLAY_NAME}", self._show_about)
+        self._connect_menu_operation_logging()
         self._rebuild_top_toolbar()
+
+    @staticmethod
+    def _clean_menu_label(text: str) -> str:
+        return text.replace("&", "").replace("…", "...").strip()
+
+    def _connect_menu_operation_logging(self) -> None:
+        """Log menu-launched operations without logging ordinary file previews."""
+
+        def connect_menu(menu: QMenu, parents: list[str]) -> None:
+            menu_label = self._clean_menu_label(menu.title())
+            path = [*parents, menu_label] if menu_label else parents
+            for action in menu.actions():
+                submenu = action.menu()
+                if submenu is not None:
+                    connect_menu(submenu, path)
+                    continue
+                if action.isSeparator() or action.property("operationLogConnected"):
+                    continue
+                label = self._clean_menu_label(action.text())
+                menu_path = " > ".join([*path, label])
+                action.triggered.connect(
+                    lambda checked=False, operation=menu_path: self._log_menu_operation(
+                        operation
+                    )
+                )
+                action.setProperty("operationLogConnected", True)
+
+        for action in self.menuBar().actions():
+            menu = action.menu()
+            if menu is not None:
+                connect_menu(menu, [])
+
+    def _log_menu_operation(self, operation: str) -> None:
+        try:
+            selected = self._selected_files()
+        except Exception:  # noqa: BLE001
+            selected = []
+        operation_logger.info(
+            "MENU operation=%s selected=[%s] folder=%s",
+            operation,
+            ", ".join(str(path) for path in selected),
+            str(self._current_folder) if self._current_folder is not None else "",
+        )
 
     def _install_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+Shift+G"), self, self._open_set_genome)
@@ -5823,6 +5874,12 @@ class MainWindow(QMainWindow):
         self._benchmark_worker.moveToThread(self._benchmark_thread)
         self._benchmark_thread.started.connect(self._benchmark_worker.run)
         self._benchmark_worker.progress.connect(self._on_job_progress)
+        self._benchmark_worker.finished.connect(
+            lambda result, title=job_title: self._log_job_finished(title, result)
+        )
+        self._benchmark_worker.failed.connect(
+            lambda error, title=job_title: self._log_job_failed(title, error)
+        )
         self._benchmark_worker.finished.connect(self._on_te_benchmark_finished)
         self._benchmark_worker.failed.connect(self._on_te_benchmark_failed)
         self._benchmark_worker.finished.connect(self._benchmark_thread.quit)
@@ -7563,6 +7620,7 @@ class MainWindow(QMainWindow):
         self._plugins_menu.addAction("Design your plugin…", self._open_command_plugin_designer)
         self._plugins_menu.addSeparator()
         self._populate_plugins_menu_actions()
+        self._connect_menu_operation_logging()
 
     def _open_plugin_manager(self) -> None:
         dialog = PluginManageDialog(
@@ -7682,6 +7740,12 @@ class MainWindow(QMainWindow):
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_job_progress)
+        self._worker.finished.connect(
+            lambda result, title=job_title: self._log_job_finished(title, result)
+        )
+        self._worker.failed.connect(
+            lambda error, title=job_title: self._log_job_failed(title, error)
+        )
         self._worker.finished.connect(self._finish_background_job)
         self._worker.failed.connect(self._finish_background_job)
         self._worker.finished.connect(on_finished)
@@ -7694,8 +7758,32 @@ class MainWindow(QMainWindow):
 
     @Slot(int, str)
     def _on_job_progress(self, value: int, label: str) -> None:
+        operation_logger.info(
+            "JOB STEP name=%s step=%s detail=%s",
+            self._job_display_title(getattr(self, "_active_job_log_title", "job")),
+            value,
+            label,
+        )
         if self._task_progress is not None:
             self._task_progress.update(value, self._parse_progress_filename(label))
+
+    def _log_job_finished(self, job_title: str, result) -> None:
+        if isinstance(result, (list, tuple)):
+            outputs = ", ".join(str(item) for item in result)
+        else:
+            outputs = str(result) if result is not None else ""
+        operation_logger.info(
+            "JOB FINISH name=%s outputs=[%s]",
+            self._job_display_title(job_title),
+            outputs,
+        )
+
+    def _log_job_failed(self, job_title: str, error) -> None:
+        operation_logger.error(
+            "JOB ERROR name=%s error=%s",
+            self._job_display_title(job_title),
+            error,
+        )
 
     @Slot()
     def _finish_background_job(self) -> None:
