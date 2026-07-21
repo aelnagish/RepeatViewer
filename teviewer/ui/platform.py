@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import subprocess
 from pathlib import Path
+from teviewer.external_process import log_command
 
 
 def reveal_in_file_manager(path: Path) -> None:
@@ -13,12 +14,14 @@ def reveal_in_file_manager(path: Path) -> None:
     system = platform.system()
     try:
         if system == "Darwin":
-            subprocess.run(["open", "-R", str(path)], check=False)
+            command = ["open", "-R", str(path)]
         elif system == "Windows":
-            subprocess.run(["explorer", "/select,", str(path)], check=False)
+            command = ["explorer", "/select,", str(path)]
         elif path.is_file():
-            subprocess.run(["xdg-open", str(path.parent)], check=False)
+            command = ["xdg-open", str(path.parent)]
         else:
-            subprocess.run(["xdg-open", str(path)], check=False)
+            command = ["xdg-open", str(path)]
+        log_command("file-manager", command, inputs=[path])
+        subprocess.run(command, check=False)
     except OSError:
         pass

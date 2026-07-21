@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import subprocess
+import logging
 import threading
 import time
 from typing import Iterable
+
+from teviewer.external_process import log_command
+
+process_logger = logging.getLogger("teviewer.commands")
 
 
 class JobCancelledError(Exception):
@@ -91,31 +96,69 @@ def run_subprocess_with_cancel(
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess, polling for user cancellation and terminating it on stop."""
+    command = list(cmd)
+    tool = command[0].rsplit("/", 1)[-1] if command else "external"
+    log_command(tool, command)
     proc = subprocess.Popen(
-        list(cmd),
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         env=env,
     )
+    started = time.monotonic()
+    process_logger.info("START tool=%s pid=%s", tool, proc.pid)
+    captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
+
+    def _drain(name: str, stream) -> None:
+        if stream is None:
+            return
+        for line in iter(stream.readline, ""):
+            captured[name].append(line)
+            process_logger.info("%s %s | %s", tool, name, line.rstrip("\r\n"))
+
+    readers = [
+        threading.Thread(target=_drain, args=("stdout", proc.stdout), daemon=True),
+        threading.Thread(target=_drain, args=("stderr", proc.stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
     if cancel is not None:
         cancel.register_process(proc)
     try:
         while True:
             if cancel is not None and cancel.requested:
                 terminate_process(proc)
-                proc.communicate()
+                for reader in readers:
+                    reader.join()
+                process_logger.warning(
+                    "CANCELLED tool=%s pid=%s exit=%s elapsed=%.3fs",
+                    tool,
+                    proc.pid,
+                    proc.returncode,
+                    time.monotonic() - started,
+                )
                 raise JobCancelledError("Job stopped by user")
-            try:
-                stdout, stderr = proc.communicate(timeout=0.25)
+            if proc.poll() is not None:
                 break
-            except subprocess.TimeoutExpired:
-                continue
+            time.sleep(0.25)
+        for reader in readers:
+            reader.join()
+        stdout = "".join(captured["stdout"])
+        stderr = "".join(captured["stderr"])
         result = subprocess.CompletedProcess(
             proc.args,
             proc.returncode,
             stdout,
             stderr,
+        )
+        process_logger.log(
+            logging.INFO if proc.returncode == 0 else logging.ERROR,
+            "FINISH tool=%s pid=%s exit=%s elapsed=%.3fs",
+            tool,
+            proc.pid,
+            proc.returncode,
+            time.monotonic() - started,
         )
         if check and result.returncode != 0:
             raise subprocess.CalledProcessError(

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from teviewer.external_process import run_logged_process
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -104,15 +105,16 @@ def convert_aln_to_paf(path: Path, out_path: Path | None = None) -> Path:
     source = path.expanduser().resolve()
     target = out_path or source.with_suffix(".paf")
     try:
-        with target.open("w", encoding="utf-8") as handle:
-            proc = subprocess.run(
-                [exe, str(source)],
-                stdout=handle,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-                cwd=str(source.parent),
-            )
+        cmd = [exe, str(source)]
+        proc = run_logged_process(
+            cmd,
+            tool="ALNtoPAF",
+            inputs=[source],
+            cwd=source.parent,
+            stdout_is_result=True,
+            output_path=target,
+        )
+        target.write_text(proc.stdout, encoding="utf-8")
     except OSError as exc:
         raise PafError(f"Could not run ALNtoPAF: {exc}") from exc
     if proc.returncode != 0:

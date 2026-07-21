@@ -8,6 +8,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from Bio import SeqIO
@@ -25,6 +26,7 @@ from teviewer.job_options import (
     MAFFT_STRATEGY_GINSI,
     MAFFT_STRATEGY_LINSI,
 )
+from teviewer.external_process import run_logged_process
 
 OS_TYPE = platform.system()
 logger = logging.getLogger(__name__)
@@ -267,15 +269,35 @@ def _run_mafft(
         reorder=reorder,
         adjust_direction=adjust_direction,
     )
-    cmd = [*command, *arguments, str(input_fasta)]
+    with tempfile.NamedTemporaryFile(
+        prefix=".teviewer_mafft_progress_",
+        suffix=".log",
+        dir=input_fasta.parent,
+        delete=False,
+    ) as progress_handle:
+        progress_path = Path(progress_handle.name)
+    cmd = [
+        *command,
+        *arguments,
+        "--progress",
+        str(progress_path),
+        str(input_fasta),
+    ]
     try:
-        result = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        try:
+            result = run_logged_process(
+                cmd,
+                tool="MAFFT",
+                inputs=[input_fasta],
+                cwd=input_fasta.parent,
+                check=True,
+                env=env,
+                stdout_is_result=True,
+                output_path=output_file,
+                progress_file=progress_path,
+            )
+        finally:
+            progress_path.unlink(missing_ok=True)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(_format_subprocess_error("MAFFT", exc)) from exc
     if not result.stdout.strip():
@@ -305,7 +327,15 @@ def _run_muscle(
         str(max(1, num_threads)),
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+        result = run_logged_process(
+            cmd,
+            tool="MUSCLE",
+            inputs=[input_fasta],
+            cwd=input_fasta.parent,
+            check=True,
+            env=env,
+            output_path=output_file,
+        )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(_format_subprocess_error("MUSCLE", exc)) from exc
     if not output_file.is_file() or not output_file.stat().st_size:
@@ -342,7 +372,7 @@ def _mafft_arguments(
     }
     if strategy not in strategy_args:
         raise ValueError(f"Unknown MAFFT strategy: {strategy}")
-    args = ["--quiet", *strategy_args[strategy]]
+    args = [*strategy_args[strategy]]
     if sequence_type == MAFFT_SEQUENCE_NUCLEOTIDE:
         args.append("--nuc")
     elif sequence_type == MAFFT_SEQUENCE_PROTEIN:

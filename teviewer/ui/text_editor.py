@@ -7,6 +7,7 @@ import platform
 import shlex
 import shutil
 import subprocess
+from teviewer.external_process import log_command
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -79,8 +80,10 @@ def open_in_text_editor(path: Path) -> None:
         if not command:
             continue
         try:
+            full_command = [*command, str(resolved)]
+            log_command("text-editor", full_command, inputs=[resolved])
             subprocess.Popen(
-                [*command, str(resolved)],
+                full_command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,

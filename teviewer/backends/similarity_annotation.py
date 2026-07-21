@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+from teviewer.external_process import run_logged_process
 import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -699,7 +700,13 @@ def _run_blast_tabular(
             "-num_threads",
             str(max(1, num_threads)),
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        run_logged_process(
+            cmd,
+            tool=program,
+            inputs=[query_path, db_path],
+            check=True,
+            output_path=out_path,
+        )
         if not out_path.is_file() or out_path.stat().st_size == 0:
             return []
         rows: list[dict[str, str]] = []
@@ -848,6 +855,7 @@ def _annotate_protein_database(
         except FileNotFoundError as exc:
             return (), str(exc)
         except subprocess.CalledProcessError as exc:
+            log_process_output("rpstblastn", stdout=exc.stdout, stderr=exc.stderr)
             detail = (exc.stderr or exc.stdout or "").strip()
             return (), f"{database.name}: BLASTP failed.{chr(10)}{detail}"
 
@@ -1023,7 +1031,13 @@ def _annotate_cdd_database(
                 "-num_threads",
                 str(max(1, blast_threads)),
             ]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            run_logged_process(
+                cmd,
+                tool="rpstblastn",
+                inputs=[query_fa, cdd_profile],
+                check=True,
+                output_path=out_path,
+            )
         except FileNotFoundError as exc:
             return (), str(exc)
         except subprocess.CalledProcessError as exc:

@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import subprocess
+from teviewer.external_process import run_logged_process
 import tempfile
 import traceback
 from dataclasses import dataclass
@@ -20,6 +21,17 @@ from teviewer.backends.gui_functions import (
 from teviewer.project import DATABASE_TYPE_DNA, BlastDatabase, UserDatabase
 
 logger = logging.getLogger(__name__)
+
+
+def _run_logged(cmd, *, inputs=(), **kwargs):
+    tool = Path(cmd[0]).name
+    return run_logged_process(
+        cmd,
+        tool=tool,
+        inputs=inputs,
+        cwd=kwargs.get("cwd"),
+        check=bool(kwargs.get("check", False)),
+    )
 
 CDD_MARKER = "Cdd.pn"
 CDD_INDEX_MINUTES = 20
@@ -262,8 +274,9 @@ def build_cdd_profile_index(
         "rps",
     ]
     logger.info("Building CDD profile index: %s", " ".join(cmd))
-    subprocess.run(
+    _run_logged(
         cmd,
+        inputs=[cdd_pn],
         check=True,
         cwd=str(cdd_dir),
         stdout=subprocess.PIPE,
@@ -301,7 +314,7 @@ def build_blast_index(
         str(seq_path),
     ]
     logger.info("Building BLAST index: %s", " ".join(cmd))
-    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    _run_logged(cmd, inputs=[seq_path], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if not index_is_ready(kind, seq_path):
         raise RuntimeError(f"BLAST index generation failed for {seq_path.name}.")
     return seq_path
@@ -370,7 +383,7 @@ def build_named_blast_database(
     ]
     logger.info("Building named BLAST database: %s", " ".join(cmd))
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _run_logged(cmd, inputs=[source_fasta], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(format_prepare_error(exc)) from exc
     if not named_blast_index_exists(db_prefix, protein=protein):
@@ -408,8 +421,8 @@ def build_hmm_index(hmm_path: Path) -> Path:
     cmd = ["hmmpress", "-f", str(hmm_path)]
     logger.info("Pressing HMM database: %s", " ".join(cmd))
     try:
-        completed = subprocess.run(
-            cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        completed = _run_logged(
+            cmd, inputs=[hmm_path], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
@@ -452,7 +465,7 @@ def _run_blastp_test(db_path: Path, *, use_system_blast: bool) -> None:
             "-evalue",
             "10",
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _run_logged(cmd, inputs=[query, db_path], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def _run_blastn_test(db_path: Path, *, use_system_blast: bool) -> None:
@@ -476,7 +489,7 @@ def _run_blastn_test(db_path: Path, *, use_system_blast: bool) -> None:
             "-evalue",
             "10",
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _run_logged(cmd, inputs=[query, db_path], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def _run_hmm_test(hmm_path: Path) -> None:

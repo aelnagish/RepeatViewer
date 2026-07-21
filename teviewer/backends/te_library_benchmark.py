@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from teviewer.external_process import run_logged_process
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -326,7 +327,14 @@ def run_repeatmasker_lib_benchmark(
         "-dir",
         str(output_dir),
     ]
-    subprocess.run(cmd, check=True)
+    run_logged_process(
+        cmd,
+        tool="RepeatMasker",
+        inputs=[standard_fasta, query_fasta],
+        cwd=output_dir,
+        check=True,
+        output_path=output_dir,
+    )
     out_path = output_dir / f"{query_fasta.name}.out"
     if not out_path.is_file():
         candidates = sorted(output_dir.glob("*.out"))

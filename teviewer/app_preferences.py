@@ -220,7 +220,7 @@ def setup_file_logging() -> None:
             return
     try:
         handler = logging.handlers.RotatingFileHandler(
-            path, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+            path, maxBytes=10_000_000, backupCount=5, encoding="utf-8"
         )
     except OSError:
         return

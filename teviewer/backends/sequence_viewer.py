@@ -11,6 +11,7 @@ from pathlib import Path
 
 from teviewer.backends.gui_functions import get_original_file_path
 from teviewer.backends.sequence_aligner import run_alignment
+from teviewer.external_process import log_command
 
 OS_TYPE = platform.system()
 
@@ -48,8 +49,10 @@ def open_fasta(path: Path, *, use_system_viewer: bool = False) -> None:
     launcher, jar_path = aliview_paths()
     if OS_TYPE == "Windows":
         if jar_path:
+            command = ["java", "-jar", str(jar_path), str(path)]
+            log_command("AliView", command, inputs=[path])
             subprocess.Popen(
-                ["java", "-jar", str(jar_path), str(path)],
+                command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -57,8 +60,10 @@ def open_fasta(path: Path, *, use_system_viewer: bool = False) -> None:
         raise FileNotFoundError("AliView JAR not found in teviewer/backends/aliview/")
 
     if launcher and launcher.is_file():
+        command = [str(launcher), str(path)]
+        log_command("AliView", command, inputs=[path])
         subprocess.Popen(
-            [str(launcher), str(path)],
+            command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -70,11 +75,15 @@ def open_fasta(path: Path, *, use_system_viewer: bool = False) -> None:
 
 def _open_with_system(path: Path) -> None:
     if OS_TYPE == "Darwin":
-        subprocess.Popen(["open", str(path)])
+        command = ["open", str(path)]
+        log_command("system-viewer", command, inputs=[path])
+        subprocess.Popen(command)
     elif OS_TYPE == "Windows":
         os.startfile(str(path))  # type: ignore[attr-defined]
     else:
-        subprocess.Popen(["xdg-open", str(path)])
+        command = ["xdg-open", str(path)]
+        log_command("system-viewer", command, inputs=[path])
+        subprocess.Popen(command)
 
 
 def run_mafft_alignment(input_fasta: Path, num_threads: int = 5) -> Path:

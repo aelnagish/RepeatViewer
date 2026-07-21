@@ -119,7 +119,6 @@ def test_custom_mafft_arguments_include_advanced_options() -> None:
         adjust_direction=True,
     )
     assert args == [
-        "--quiet",
         "--retree", "4",
         "--maxiterate", "25",
         "--nuc",

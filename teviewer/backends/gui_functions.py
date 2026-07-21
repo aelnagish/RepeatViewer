@@ -8,6 +8,7 @@ import threading
 import traceback
 
 from teviewer.backends.job_cancel import JobCancelledError, run_subprocess_with_cancel
+from teviewer.external_process import run_logged_process
 import pandas as pd
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
@@ -160,12 +161,13 @@ def check_database(
                     str(database_path),
                 ]
 
-                subprocess.run(
+                run_logged_process(
                     makeblastdb_cmd,
+                    tool="makeblastdb",
+                    inputs=[genome_file],
+                    cwd=os.path.dirname(database_path),
                     check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                    output_path=database_path,
                 )
 
             except FileNotFoundError:
@@ -277,7 +279,14 @@ def blast(
 
     try:
         # Run the BLAST command
-        subprocess.run(blast_cmd, check=True, capture_output=True, text=True)
+        run_logged_process(
+            blast_cmd,
+            tool=program,
+            inputs=[input_file, blast_database],
+            cwd=blast_out_dir,
+            check=True,
+            output_path=blast_out_file,
+        )
 
     except FileNotFoundError:
         logging.error(
@@ -589,7 +598,8 @@ def _flexidot_help_text(exe: str) -> str:
         return _flexidot_help_cache[exe]
     text = ""
     try:
-        result = subprocess.run([exe, "-h"], capture_output=True, text=True, timeout=20)
+        cmd = [exe, "-h"]
+        result = run_logged_process(cmd, tool="Flexidot", timeout=20)
         text = ((result.stdout or "") + (result.stderr or "")).lower()
     except Exception:  # noqa: BLE001
         text = ""
@@ -786,7 +796,6 @@ def align_sequences(input_file, output_file, num_thread=5):
 
     # Construct the command as a list of strings
     mafft_cmd = ['mafft', 
-                 '--quiet',
                  '--nuc', 
                  '--retree', '1', 
                  '--thread', str(num_thread),
@@ -795,12 +804,14 @@ def align_sequences(input_file, output_file, num_thread=5):
 
     try:
         # Execute the command
-        result = subprocess.run(
+        result = run_logged_process(
             mafft_cmd,
+            tool="MAFFT",
+            inputs=[input_file],
+            cwd=os.path.dirname(os.path.abspath(output_file)),
             check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            stdout_is_result=True,
+            output_path=output_file,
         )
 
     except FileNotFoundError as e:

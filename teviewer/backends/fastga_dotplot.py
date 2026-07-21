@@ -25,9 +25,30 @@ which the current viewer does not do.
 from __future__ import annotations
 
 import shutil
+import logging
 import subprocess
 import tempfile
+import threading
+import time
 from contextlib import contextmanager
+from teviewer.external_process import log_command, log_process_output
+
+process_logger = logging.getLogger("teviewer.commands")
+
+
+def _stream_stderr(proc: subprocess.Popen, tool: str) -> tuple[list[str], threading.Thread]:
+    lines: list[str] = []
+
+    def _read() -> None:
+        if proc.stderr is None:
+            return
+        for line in iter(proc.stderr.readline, ""):
+            lines.append(line)
+            process_logger.info("%s stderr | %s", tool, line.rstrip("\r\n"))
+
+    thread = threading.Thread(target=_read, daemon=True)
+    thread.start()
+    return lines, thread
 from pathlib import Path
 
 from teviewer.backends.dotplot import (
@@ -278,6 +299,12 @@ def run_fastga_alignment(
         stream_to_file = fmt != FORMAT_ALN
         handle = out_path.open("w", encoding="utf-8") if stream_to_file else None
         try:
+            log_command(
+                "FastGA",
+                cmd,
+                inputs=[p for p in (source1, source2) if p is not None],
+                cwd=source1.parent,
+            )
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE if stream_to_file else subprocess.DEVNULL,
@@ -285,6 +312,9 @@ def run_fastga_alignment(
                 text=True,
                 cwd=str(source1.parent),
             )
+            process_started = time.monotonic()
+            process_logger.info("START tool=FastGA pid=%s", proc.pid)
+            stderr_lines, stderr_thread = _stream_stderr(proc, "FastGA")
         except OSError as exc:
             if handle is not None:
                 handle.close()
@@ -311,13 +341,19 @@ def run_fastga_alignment(
         finally:
             if handle is not None:
                 handle.close()
-            stderr = ""
-            try:
-                if proc.stderr is not None:
-                    stderr = proc.stderr.read()
-            except Exception:  # noqa: BLE001
-                stderr = ""
             proc.wait()
+            stderr_thread.join()
+            stderr = "".join(stderr_lines)
+
+    process_logger.log(
+        logging.INFO if proc.returncode == 0 else logging.ERROR,
+        "FINISH tool=FastGA pid=%s exit=%s elapsed=%.3fs",
+        proc.pid,
+        proc.returncode,
+        time.monotonic() - process_started,
+    )
+
+    log_process_output("FastGA", output_path=out_path)
 
     if proc.returncode not in (0, None):
         raise FastgaError(
@@ -368,6 +404,7 @@ def run_fastga_self_dotplot(
             progress("Running FastGA (indexing on first run may take a while)…")
 
         try:
+            log_command("FastGA", cmd, inputs=[fasta], cwd=fasta.parent)
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -375,6 +412,9 @@ def run_fastga_self_dotplot(
                 text=True,
                 cwd=str(fasta.parent),
             )
+            process_started = time.monotonic()
+            process_logger.info("START tool=FastGA pid=%s", proc.pid)
+            stderr_lines, stderr_thread = _stream_stderr(proc, "FastGA")
         except OSError as exc:
             raise FastgaError(f"Could not start FastGA: {exc}") from exc
 
@@ -388,13 +428,17 @@ def run_fastga_self_dotplot(
                     proc.terminate()
                     raise FastgaError("Cancelled.")
         finally:
-            stderr = ""
-            try:
-                if proc.stderr is not None:
-                    stderr = proc.stderr.read()
-            except Exception:  # noqa: BLE001
-                stderr = ""
             proc.wait()
+            stderr_thread.join()
+            stderr = "".join(stderr_lines)
+
+    process_logger.log(
+        logging.INFO if proc.returncode == 0 else logging.ERROR,
+        "FINISH tool=FastGA pid=%s exit=%s elapsed=%.3fs",
+        proc.pid,
+        proc.returncode,
+        time.monotonic() - process_started,
+    )
 
     if proc.returncode not in (0, None):
         raise FastgaError(

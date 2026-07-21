@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from teviewer.external_process import run_logged_process
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -303,12 +304,11 @@ class UserCommandPlugin(TEviewerPlugin):
             before_names[name] = _snapshot_directory_names(parent)
 
         for index, command in enumerate(commands, start=1):
-            proc = subprocess.run(
+            proc = run_logged_process(
                 command,
+                tool=f"plugin:{self.spec.label}",
+                cwd=work_dir,
                 shell=True,
-                cwd=str(work_dir),
-                capture_output=True,
-                text=True,
             )
             if proc.returncode != 0:
                 stderr = (proc.stderr or proc.stdout or "").strip()

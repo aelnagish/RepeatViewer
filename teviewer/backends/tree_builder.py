@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 import shutil
 import subprocess
+from teviewer.external_process import run_logged_process
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -380,12 +381,13 @@ def _root_with_outgroup(tree: Tree, outgroup: str) -> None:
 
 
 def _run_tool(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    tool = Path(cmd[0]).name
     try:
-        return subprocess.run(
+        return run_logged_process(
             cmd,
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
+            tool=tool,
+            inputs=[arg for arg in cmd if Path(arg).suffix.lower() in {".fa", ".fasta", ".fas"}],
+            cwd=cwd,
             check=False,
         )
     except OSError as exc:
