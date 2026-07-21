@@ -60,7 +60,7 @@ Available from the toolbar and **Sequence** menu:
 | **Benchmarking** | Confusion-matrix benchmark against reference classification tables |
 | **Plugins** | Install custom command plugins (**Plugins** menu) |
 
-Bundled **BLAST+** binaries are included for macOS, Linux, and Windows. Turn on **Use system BLAST** in **File → Setting** to point at your own install.
+Bundled **BLAST+** and **MAFFT** binaries are included for macOS, Linux, and Windows. Turn on **Use system BLAST** or **Use system MAFFT** in **File → Setting** to use an installation from `PATH` instead.
 
 ## Install
 
@@ -79,7 +79,7 @@ pip install -e .
 | Program | Role |
 |---------|------|
 | Reference **genome FASTA** | BLAST, extend, genome maps, TEAid genome tracks |
-| **mafft** / **clustalo** | Alignment menu |
+| **clustalo** | Optional alternative alignment backend; MAFFT is bundled |
 | **AliView** | Open selected FASTA externally (**Sequence → Open in AliView**) |
 
 Flexidot (with HTML output and RepeatViewer integration) is installed as a dependency of `pip install -e .`.

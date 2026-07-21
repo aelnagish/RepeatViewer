@@ -355,6 +355,7 @@ class AlignWorker(QObject):
         num_threads: int = 5,
         mode: str = "one_by_one",
         max_workers: int = 4,
+        use_system_mafft: bool = False,
     ):
         super().__init__()
         self._seq_files = seq_files
@@ -362,6 +363,7 @@ class AlignWorker(QObject):
         self._num_threads = num_threads
         self._mode = mode
         self._max_workers = max_workers
+        self._use_system_mafft = use_system_mafft
 
     @Slot()
     def run(self) -> None:
@@ -374,6 +376,7 @@ class AlignWorker(QObject):
                     self._seq_files,
                     backend=self._backend,
                     num_threads=self._num_threads,
+                    use_system_mafft=self._use_system_mafft,
                 )
                 self.progress.emit(1, "Alignment finished.")
                 self.finished.emit([str(output)])
@@ -393,6 +396,7 @@ class AlignWorker(QObject):
                     seq_path,
                     backend=self._backend,
                     num_threads=self._num_threads,
+                    use_system_mafft=self._use_system_mafft,
                 )
                 return seq_path, str(output), None
             except Exception as exc:  # noqa: BLE001
@@ -443,11 +447,19 @@ class TreeWorker(QObject):
     finished = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, seq_files: list[Path], options, *, num_threads: int = 4) -> None:
+    def __init__(
+        self,
+        seq_files: list[Path],
+        options,
+        *,
+        num_threads: int = 4,
+        use_system_mafft: bool = False,
+    ) -> None:
         super().__init__()
         self._seq_files = list(seq_files)
         self._options = options
         self._num_threads = num_threads
+        self._use_system_mafft = use_system_mafft
 
     @Slot()
     def run(self) -> None:
@@ -505,7 +517,10 @@ class TreeWorker(QObject):
             self.progress.emit(0, "Aligning sequences…")
             return Path(
                 run_alignment_combined(
-                    self._seq_files, backend="auto", num_threads=self._num_threads
+                    self._seq_files,
+                    backend="auto",
+                    num_threads=self._num_threads,
+                    use_system_mafft=self._use_system_mafft,
                 )
             )
 
@@ -519,7 +534,10 @@ class TreeWorker(QObject):
         del combined_stem
         return Path(
             run_alignment_combined(
-                self._seq_files, backend="auto", num_threads=self._num_threads
+                self._seq_files,
+                backend="auto",
+                num_threads=self._num_threads,
+                use_system_mafft=self._use_system_mafft,
             )
         )
 
@@ -2211,7 +2229,12 @@ class MainWindow(QMainWindow):
 
     def _start_tree_job(self, files: list[Path], options) -> None:
         self._start_background_job(
-            TreeWorker(files, options, num_threads=self._project.batch_workers),
+            TreeWorker(
+                files,
+                options,
+                num_threads=self._project.batch_workers,
+                use_system_mafft=self._project.use_system_mafft,
+            ),
             job_title="Tree",
             total_steps=3,
             source_files=files,
@@ -5274,11 +5297,23 @@ class MainWindow(QMainWindow):
                 "Need at least two sequences in the selected FASTA file(s).",
             )
             return
-        if backend == "mafft" and "mafft" not in alignment_backends():
+        if backend == "mafft" and "mafft" not in alignment_backends(
+            use_system_mafft=self._project.use_system_mafft
+        ):
+            if self._project.use_system_mafft:
+                detail = (
+                    "System MAFFT is enabled but no 'mafft' command was found on PATH. "
+                    "Disable 'Use system MAFFT' in Settings to use the bundled copy."
+                )
+            else:
+                detail = (
+                    "The bundled MAFFT does not support this operating-system architecture. "
+                    "Install MAFFT on PATH and enable 'Use system MAFFT' in Settings."
+                )
             QMessageBox.warning(
                 self,
                 "MAFFT not found",
-                "Install MAFFT on your PATH (e.g. conda install -c bioconda mafft).",
+                detail,
             )
             return
         if backend == "clustalo" and "clustalo" not in alignment_backends():
@@ -5303,6 +5338,7 @@ class MainWindow(QMainWindow):
                 num_threads=num_threads,
                 mode=mode,
                 max_workers=self._project.batch_workers,
+                use_system_mafft=self._project.use_system_mafft,
             ),
             job_title=title,
             total_steps=total_steps,

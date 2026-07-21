@@ -146,6 +146,7 @@ def save_workspace(
     )
     save_blast_databases_to_settings(project.blast_databases, s=s)
     s.setValue("use_system_blast", project.use_system_blast)
+    s.setValue("use_system_mafft", project.use_system_mafft)
     s.setValue("use_system_sequence_viewer", project.use_system_sequence_viewer)
     s.setValue("batch_workers", project.batch_workers)
     if root_folders is not None:
@@ -372,6 +373,12 @@ class SettingsDialog(QDialog):
 
         self._system_blast = QCheckBox()
         self._system_blast.setChecked(project.use_system_blast)
+        self._system_mafft = QCheckBox()
+        self._system_mafft.setChecked(project.use_system_mafft)
+        self._system_mafft.setToolTip(
+            "Use the mafft command from PATH. Leave off to use TEviewer's "
+            "bundled MAFFT for this operating system."
+        )
         self._system_viewer = QCheckBox()
         self._system_viewer.setChecked(project.use_system_sequence_viewer)
         self._color_blind_scheme = QCheckBox()
@@ -566,6 +573,7 @@ class SettingsDialog(QDialog):
         ])
         seq_tools = _group("Sequence tools", [
             ("Use system BLAST:", self._system_blast),
+            ("Use system MAFFT:", self._system_mafft),
             ("Use system sequence viewer:", self._system_viewer),
             ("Color-blind nucleotide:", self._color_blind_scheme),
         ])
@@ -693,6 +701,7 @@ class SettingsDialog(QDialog):
 
     def apply_to_project(self) -> TEviewerProject:
         self._project.use_system_blast = self._system_blast.isChecked()
+        self._project.use_system_mafft = self._system_mafft.isChecked()
         self._project.use_system_sequence_viewer = self._system_viewer.isChecked()
         self._project.batch_workers = self._batch_workers.value()
         save_browser_panel_font_size(self._browser_panel_font.value())
@@ -861,6 +870,7 @@ class SettingsDialog(QDialog):
             user_databases=load_user_databases_from_settings(),
             blast_databases=load_blast_databases_from_settings(),
             use_system_blast=bool(s.value("use_system_blast", False)),
+            use_system_mafft=bool(s.value("use_system_mafft", False)),
             use_system_sequence_viewer=bool(s.value("use_system_sequence_viewer", False)),
             batch_workers=int(s.value("batch_workers", 4)),
         )

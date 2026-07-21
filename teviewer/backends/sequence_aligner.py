@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 from Bio import SeqIO
-
-from teviewer.backends.gui_functions import align_sequences
 
 OS_TYPE = platform.system()
 logger = logging.getLogger(__name__)
@@ -19,10 +19,53 @@ logger = logging.getLogger(__name__)
 _clustalo_openmp: bool | None = None
 
 
-def alignment_backends() -> list[str]:
+def _mafft_bundle_root() -> Path:
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "teviewer" / "backends" / "mafft"
+    return Path(__file__).resolve().parent / "mafft"
+
+
+def bundled_mafft_command(
+    os_type: str | None = None,
+    machine: str | None = None,
+) -> tuple[list[str], dict[str, str]] | None:
+    """Command prefix and environment for TEviewer's bundled MAFFT."""
+    system = os_type or OS_TYPE
+    architecture = (machine or platform.machine()).lower()
+    root = _mafft_bundle_root()
+    env = os.environ.copy()
+    if system == "Darwin":
+        executable = root / "macos" / "bin" / "mafft"
+        libexec = root / "macos" / "libexec"
+        if executable.is_file() and libexec.is_dir():
+            env["MAFFT_BINARIES"] = str(libexec)
+            return [str(executable)], env
+    elif system == "Windows":
+        if architecture not in {"amd64", "x86_64"}:
+            return None
+        wrapper = root / "windows" / "mafft.bat"
+        if wrapper.is_file():
+            return [str(wrapper)], env
+    elif system == "Linux":
+        if architecture not in {"amd64", "x86_64"}:
+            return None
+        wrapper = root / "linux" / "mafft.bat"
+        if wrapper.is_file():
+            return [str(wrapper)], env
+    return None
+
+
+def mafft_command(*, use_system_mafft: bool = False) -> tuple[list[str], dict[str, str]] | None:
+    if use_system_mafft:
+        executable = shutil.which("mafft")
+        return ([executable], os.environ.copy()) if executable else None
+    return bundled_mafft_command()
+
+
+def alignment_backends(*, use_system_mafft: bool = False) -> list[str]:
     """Installed aligners detected on PATH."""
     found: list[str] = []
-    if OS_TYPE != "Windows" and shutil.which("mafft"):
+    if mafft_command(use_system_mafft=use_system_mafft):
         found.append("mafft")
     if shutil.which("clustalo"):
         found.append("clustalo")
@@ -101,6 +144,7 @@ def run_alignment(
     *,
     backend: str = "auto",
     num_threads: int = 5,
+    use_system_mafft: bool = False,
 ) -> Path:
     """
     Align a FASTA/MSA file. Writes ``<stem>_msa.fa`` next to the input.
@@ -122,14 +166,19 @@ def run_alignment(
 
     for tool in order:
         if tool == "mafft":
-            if OS_TYPE == "Windows":
-                errors.append("MAFFT is not supported on Windows in TEviewer.")
-                continue
-            if not shutil.which("mafft"):
-                errors.append("MAFFT not found on PATH.")
+            resolved = mafft_command(use_system_mafft=use_system_mafft)
+            if resolved is None:
+                source = "system PATH" if use_system_mafft else "TEviewer bundle"
+                errors.append(f"MAFFT was not found in the {source}.")
                 continue
             try:
-                align_sequences(str(input_fasta), str(output_file), num_thread=num_threads)
+                _run_mafft(
+                    input_fasta,
+                    output_file,
+                    command=resolved[0],
+                    env=resolved[1],
+                    num_threads=num_threads,
+                )
                 return output_file
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"MAFFT: {exc}")
@@ -146,8 +195,8 @@ def run_alignment(
             raise ValueError(f"Unknown aligner: {tool}")
 
     hint = (
-        "Install MAFFT (macOS/Linux: conda install -c bioconda mafft) "
-        "or Clustal Omega (conda install -c bioconda clustalo)."
+        "Disable 'Use system MAFFT' in Settings to use TEviewer's bundled copy, "
+        "or install MAFFT on PATH. Clustal Omega can be installed separately."
     )
     detail = "\n".join(errors)
     if not detail:
@@ -161,6 +210,40 @@ def _format_subprocess_error(tool: str, exc: subprocess.CalledProcessError) -> s
         first_line = detail.splitlines()[0].strip()
         return f"{tool}: {first_line}"
     return f"{tool} failed (exit {exc.returncode})."
+
+
+def _run_mafft(
+    input_fasta: Path,
+    output_file: Path,
+    *,
+    command: list[str],
+    env: dict[str, str],
+    num_threads: int,
+) -> None:
+    cmd = [
+        *command,
+        "--quiet",
+        "--nuc",
+        "--retree",
+        "1",
+        "--thread",
+        str(max(1, num_threads)),
+        str(input_fasta),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(_format_subprocess_error("MAFFT", exc)) from exc
+    if not result.stdout.strip():
+        raise RuntimeError("MAFFT completed without producing an alignment.")
+    output_file.write_text(result.stdout, encoding="utf-8")
+    logger.info("MAFFT alignment finished: %s", output_file.name)
 
 
 def _run_clustalo(input_fasta: Path, output_file: Path, *, num_threads: int) -> None:
@@ -198,6 +281,7 @@ def run_alignment_combined(
     *,
     backend: str = "auto",
     num_threads: int = 5,
+    use_system_mafft: bool = False,
 ) -> Path:
     """Merge selected FASTA files into one input, then align once."""
     if not seq_files:
@@ -228,7 +312,12 @@ def run_alignment_combined(
     combined = parent / f".teviewer_{desired.stem}_input.fa"
     SeqIO.write(records, str(combined), "fasta")
     try:
-        aligned = run_alignment(combined, backend=backend, num_threads=num_threads)
+        aligned = run_alignment(
+            combined,
+            backend=backend,
+            num_threads=num_threads,
+            use_system_mafft=use_system_mafft,
+        )
         if aligned.resolve() != desired.resolve() and aligned.is_file():
             if desired.is_file():
                 desired.unlink()

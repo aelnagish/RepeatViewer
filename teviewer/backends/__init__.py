@@ -1,5 +1,20 @@
-"""Standalone TE analysis backends (vendored from TEtrimmer proof-curation tools)."""
+"""Standalone TE analysis backends (vendored from TEtrimmer proof-curation tools).
 
-from teviewer.backends.curation import run_batch, run_on_sequence
+Keep package import lightweight: individual backends such as the bundled
+aligner should not load the full pandas/plotting curation stack.
+"""
+
+
+def run_batch(*args, **kwargs):
+    from teviewer.backends.curation import run_batch as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def run_on_sequence(*args, **kwargs):
+    from teviewer.backends.curation import run_on_sequence as implementation
+
+    return implementation(*args, **kwargs)
+
 
 __all__ = ["run_batch", "run_on_sequence"]
