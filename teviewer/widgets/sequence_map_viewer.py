@@ -201,6 +201,7 @@ _OVERVIEW_HEIGHT = 16
 _SEQUENCE_ROW = 14
 _TRACK_HEIGHT = 12
 _TRACK_GAP = 0
+_SELECTION_HIGHLIGHT_MARGIN = 4
 _FEATURE_UNDO_LIMIT = 32
 _LEFT_MARGIN = 8
 _RIGHT_MARGIN = 8
@@ -1217,7 +1218,9 @@ class SequenceMapCanvas(QWidget):
         return self._font_point_size
 
     def _sequence_top(self) -> int:
-        return 0
+        # In the single-line view, leave room for the range-selection border
+        # above the bases so the DNA row can sit in the highlight's middle.
+        return 0 if self.uses_wrap() else _SELECTION_HIGHLIGHT_MARGIN
 
     def set_sequence(self, sequence: str, features: list[SequenceFeature]) -> None:
         self._sequence = sequence.upper()
@@ -1475,7 +1478,10 @@ class SequenceMapCanvas(QWidget):
     def _content_height(self) -> int:
         if self.uses_wrap():
             return int(self._sequence_block_height()) + 8
-        return max(_SEQUENCE_ROW + 2, int(self._seq_row_height()) + 2)
+        return max(
+            _SEQUENCE_ROW + 2,
+            int(self._seq_row_height()) + 2 * _SELECTION_HIGHLIGHT_MARGIN + 2,
+        )
 
     def _update_geometry(self) -> None:
         height = self._content_height()
@@ -1831,7 +1837,14 @@ class SequenceMapCanvas(QWidget):
             else:
                 x1 = origin_x + (a - 1) * cell_w - self._scroll_px
                 x2 = origin_x + b * cell_w - self._scroll_px
-                rect = QRectF(x1, float(origin_y), x2 - x1, float(cell_h))
+                # Extend equally above and below the DNA cells, keeping the
+                # sequence centered inside a larger, unmistakable highlight.
+                rect = QRectF(
+                    x1,
+                    float(origin_y - _SELECTION_HIGHLIGHT_MARGIN),
+                    x2 - x1,
+                    float(cell_h + 2 * _SELECTION_HIGHLIGHT_MARGIN),
+                )
                 painter.fillRect(rect, _SELECTION_FILL)
                 painter.setPen(QPen(_SELECTION_BORDER, 1))
                 painter.drawRect(rect)
