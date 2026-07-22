@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QAction, QWheelEvent
+from PySide6.QtGui import QAction, QFont, QFontMetrics, QWheelEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -371,6 +371,13 @@ class FastaTabStrip(QWidget):
             btn.setFlat(True)
             btn.setFixedHeight(FASTA_TAB_STRIP_HEIGHT)
             btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+            # The selected tab is demi-bold in the stylesheet.  Measure that
+            # wider state up front so labels such as "Annotation" never get
+            # clipped when the font weight changes after layout.
+            selected_font = btn.font()
+            selected_font.setWeight(QFont.Weight.DemiBold)
+            text_width = QFontMetrics(selected_font).horizontalAdvance(label)
+            btn.setMinimumWidth(text_width + 24)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self._group.addButton(btn, index)
             layout.addWidget(btn)
