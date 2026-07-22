@@ -62,7 +62,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
-    QStyle,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -197,11 +196,12 @@ _ANNOT_FEATURE_HEIGHT = 18
 _ANNOT_MIN_VIEWPORT_HEIGHT = 56
 _OVERVIEW_SYNC_MS = 16
 _RULER_HEIGHT = 20
+_VIEWPORT_RULER_HEIGHT = 16
 _OVERVIEW_HEIGHT = 16
 _SEQUENCE_ROW = 14
 _TRACK_HEIGHT = 12
 _TRACK_GAP = 0
-_SELECTION_HIGHLIGHT_MARGIN = 4
+_SELECTION_HIGHLIGHT_MARGIN = 2
 _FEATURE_UNDO_LIMIT = 32
 _LEFT_MARGIN = 8
 _RIGHT_MARGIN = 8
@@ -375,16 +375,8 @@ def _add_feature_column_width(control: _AddFeatureControl) -> int:
     return max(_MIN_FEATURE_COLUMN_WIDTH, offset + control.button().sizeHint().width())
 
 
-def _checkbox_label_offset(widget: QWidget) -> int:
-    style = widget.style()
-    return (
-        style.pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth, None, widget)
-        + style.pixelMetric(QStyle.PixelMetric.PM_CheckBoxLabelSpacing, None, widget)
-    )
-
-
 class _AddFeatureControl(QWidget):
-    """Add-feature button with leading offset so label text lines up with checkboxes."""
+    """Add-feature button hosted in a shared annotation column."""
 
     clicked = Signal()
 
@@ -775,7 +767,7 @@ class ViewportRulerWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(_RULER_HEIGHT)
+        self.setFixedHeight(_VIEWPORT_RULER_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._sequence = ""
         self._scroll_px = 0.0
@@ -826,11 +818,11 @@ class ViewportRulerWidget(QWidget):
                 continue
             if bp != seq_len:
                 # Keep ticks above the sequence row (leave a small gap at the bottom).
-                painter.drawLine(int(x), 1, int(x), _RULER_HEIGHT - 8)
+                painter.drawLine(int(x), 1, int(x), _VIEWPORT_RULER_HEIGHT - 8)
             text = str(bp)
             if x - last_label_x < min_label_w and bp != start_bp:
                 continue
-            painter.drawText(int(x + 2), _RULER_HEIGHT - 6, text)
+            painter.drawText(int(x + 2), _VIEWPORT_RULER_HEIGHT - 6, text)
             last_label_x = x
         painter.end()
 
@@ -3754,11 +3746,10 @@ class SequenceMapPanel(QWidget):
             available - label_width - auto_trailing - all_width,
         )
         widths = [0] * _ANNOTATION_FEATURE_COLUMN_COUNT
-        label_offset = 0
-        if self._auto_ann_checks:
-            label_offset = _checkbox_label_offset(next(iter(self._auto_ann_checks.values())))
         for control, (label, _feature_type) in zip(self._add_feature_buttons, _ADD_FEATURE_BUTTONS):
-            control.set_label_offset(label_offset)
+            # Align the button's left edge with the checkbox indicator below,
+            # rather than aligning its text with the checkbox label.
+            control.set_label_offset(0)
             column = _ANNOTATION_FEATURE_COLUMN.get(label, 0)
             widths[column] = max(widths[column], _add_feature_column_width(control))
         for mode, check in self._auto_ann_checks.items():
