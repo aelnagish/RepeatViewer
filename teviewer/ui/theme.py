@@ -209,7 +209,7 @@ def application_stylesheet(
        then isn't painted at all -- that produced frameless "text only" buttons
        and arrow-less combo boxes. Padding is safe; border-radius is not. */
     QPushButton {{
-        padding: 4px 10px;
+        padding: 2px 10px;
     }}
     QLineEdit, QSpinBox, QDoubleSpinBox {{
         border-radius: {radius_sm}px;
