@@ -23,7 +23,7 @@ from teviewer.backends.separate_fasta import count_fasta_sequences
 from teviewer.browser_file_metadata import BrowserFileMetadata
 from teviewer.widgets.browser_icons import browser_file_icon
 
-_FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
+_FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_SORT = Qt.ItemDataRole.UserRole + 1
 
@@ -54,7 +54,7 @@ _HEADERS = (
     "Length",
     "# Sequences",
     "% GC",
-    "Molecule Type",
+    "Type",
     "Description",
     "Modified",
     "Size",

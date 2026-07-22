@@ -10,7 +10,7 @@ from teviewer.project import TEviewerProject
 
 logger = logging.getLogger(__name__)
 
-_FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
+_FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 
 
 class PluginRegistry:

@@ -386,7 +386,11 @@ def _run_tool(cmd: list[str], *, cwd: Path | None = None) -> subprocess.Complete
         return run_logged_process(
             cmd,
             tool=tool,
-            inputs=[arg for arg in cmd if Path(arg).suffix.lower() in {".fa", ".fasta", ".fas"}],
+            inputs=[
+                arg
+                for arg in cmd
+                if Path(arg).suffix.lower() in {".fa", ".fasta", ".fas", ".faa"}
+            ],
             cwd=cwd,
             check=False,
         )

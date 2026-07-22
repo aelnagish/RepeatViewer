@@ -307,7 +307,7 @@ _SOURCE_FG_LIGHT = QColor(0, 70, 140)
 _SOURCE_BG_DARK = QColor(35, 55, 90)
 _SOURCE_FG_DARK = QColor(170, 205, 255)
 
-_FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
+_FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 
 _TOOLBAR_TOOLTIPS = {
     "define_genome": "Set or change the project reference genome FASTA",
@@ -5083,7 +5083,7 @@ class MainWindow(QMainWindow):
         # The user should click a file in the panel to fill inputs.
 
     def _is_fasta_file(self, path: Path) -> bool:
-        return path.suffix.lower() in {".fa", ".fasta", ".fna", ".fas"}
+        return path.suffix.lower() in {".fa", ".fasta", ".fna", ".fas", ".faa"}
 
     def _validate_te_consensus_fastas(self, fasta_paths: list[Path]) -> list[Path] | None:
         if not fasta_paths:

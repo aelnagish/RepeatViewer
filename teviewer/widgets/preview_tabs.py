@@ -48,7 +48,7 @@ from teviewer.widgets.preview_zoom import (
 
 logger = logging.getLogger(__name__)
 
-_FASTA_SUFFIXES = {".fa", ".fasta", ".fas"}
+_FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 _ALIGNMENT_PREVIEW_SUFFIXES = {".bam", ".sam"}
 _FASTA_PREVIEW_MAX_BYTES = 1024**3
 _FASTA_TOO_LARGE_MESSAGE = "The file size is too big to show"

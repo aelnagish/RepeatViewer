@@ -38,6 +38,18 @@ def test_quick_metadata_skips_fasta_read(tmp_path: Path) -> None:
     assert rich.description_text == "seq"
 
 
+def test_protein_fasta_metadata(tmp_path: Path) -> None:
+    fasta = tmp_path / "proteins.faa"
+    fasta.write_text(">protein_1\nMKWVTFISLL\n")
+
+    meta = metadata_for_file(fasta)
+
+    assert meta.molecule_type == "Protein"
+    assert meta.sequence_count_text == "1"
+    assert meta.length_text == "10"
+    assert meta.gc_text == "—"
+
+
 def test_non_fasta_metadata(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("hello")

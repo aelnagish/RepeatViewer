@@ -76,6 +76,6 @@ def write_predicted_orfs_fasta(path: Path) -> Path:
 def write_translated_orfs_fasta(path: Path) -> Path:
     """Predict ORFs, then translate them with Biopython into protein FASTA."""
     source = path.expanduser().resolve()
-    output = source.with_name(f"{source.stem}_translated_orfs.faa")
+    output = source.with_name(f"{source.stem}_translated.faa")
     SeqIO.write(predicted_orf_records(source, translate=True), str(output), "fasta")
     return output

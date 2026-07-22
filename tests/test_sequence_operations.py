@@ -44,4 +44,4 @@ def test_orf_prediction_and_translation_use_detected_strand(
     protein = next(SeqIO.parse(protein_output, "fasta"))
     assert str(dna.seq) == "ATGAAATAA"
     assert str(protein.seq) == "MK"
-    assert protein_output.suffix == ".faa"
+    assert protein_output.name == "input_translated.faa"

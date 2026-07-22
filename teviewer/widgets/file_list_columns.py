@@ -25,7 +25,7 @@ TOGGLEABLE_COLUMNS: dict[int, str] = {
     COL_LENGTH: "Length",
     COL_SEQUENCES: "# Sequences",
     COL_GC: "% GC",
-    COL_TYPE: "Molecule Type",
+    COL_TYPE: "Type",
     COL_DESCRIPTION: "Description",
     COL_MODIFIED: "Modified",
     COL_SIZE: "Size",

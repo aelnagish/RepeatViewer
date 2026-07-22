@@ -180,7 +180,7 @@ def run_alignment(
     ``engine`` selects MAFFT or MUSCLE 5.
     """
     input_fasta = input_fasta.expanduser().resolve()
-    if input_fasta.suffix.lower() not in {".fa", ".fasta", ".fas"}:
+    if input_fasta.suffix.lower() not in {".fa", ".fasta", ".fas", ".faa"}:
         raise ValueError("Align only works on .fa / .fasta files.")
     if _fasta_sequence_count(input_fasta) < 2:
         raise ValueError(

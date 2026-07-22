@@ -12,7 +12,7 @@ from pathlib import Path
 from teviewer.app_preferences import config_dir
 from teviewer.backends.sequence_features import summarize_single_sequence_fasta
 
-_FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".fna"}
+_FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".fna", ".faa"}
 # Summarising a single-record FASTA loads the whole sequence into memory
 # (Biopython parse + an uppercased copy) and scans it for GC content. Past this
 # size that is slow enough to freeze the UI, so callers fall back to cheaper
@@ -242,6 +242,8 @@ def is_fasta_path(path: Path) -> bool:
 def _molecule_type(path: Path) -> str:
     suffix = path.suffix.lower()
     name = path.name.lower()
+    if suffix == ".faa":
+        return "Protein"
     if is_fasta_path(path):
         return "DNA"
     if suffix in {".gff", ".gff3", ".gtf", ".bed"}:
@@ -357,12 +359,13 @@ def enrich_fasta_metadata(path: Path) -> BrowserFileMetadata:
     gc_text = "—"
     length_key = -1.0
     gc_key = -1.0
+    is_protein = path.suffix.lower() == ".faa"
     if seq_count == 1 and size <= _MAX_FASTA_SUMMARY_BYTES:
         try:
             summary = summarize_single_sequence_fasta(path)
             length_text = f"{summary.length:,}"
             length_key = float(summary.length)
-            if summary.gc_percent is not None:
+            if not is_protein and summary.gc_percent is not None:
                 gc_text = f"{summary.gc_percent:.1f}"
                 gc_key = float(summary.gc_percent)
         except (OSError, ValueError):
@@ -373,7 +376,7 @@ def enrich_fasta_metadata(path: Path) -> BrowserFileMetadata:
         description_text=description,
         length_text=length_text,
         size_text=_format_file_size(size),
-        molecule_type="DNA",
+        molecule_type="Protein" if is_protein else "DNA",
         sequence_count_text=seq_text,
         gc_text=gc_text,
         sort_name=path.name.lower(),

@@ -70,6 +70,7 @@ def _type_group_key(path: Path) -> tuple[str, str]:
         ("fasta", ".fa"),
         ("fasta", ".fas"),
         ("fasta", ".fna"),
+        ("fasta", ".faa"),
         ("html", ".html"),
         ("html", ".htm"),
         ("methylation", ".cov"),
