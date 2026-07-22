@@ -654,6 +654,12 @@ def run_flexidot(
     filetype: str = "html",
     lcs_shading: bool = True,
     use_gff: bool = False,
+    substitution_count: int = 0,
+    wobble_conversion: bool = False,
+    max_n_percentage: float = 10.0,
+    include_reverse: bool = True,
+    only_vs_first: bool = False,
+    line_width: float = 1.0,
     gff_source_fastas: list[str | os.PathLike] | None = None,
     gff_output_stem: str | None = None,
     cancel=None,
@@ -706,6 +712,15 @@ def run_flexidot(
         flexidot_cmd.append("--teviewer-integration")
     if lcs_shading and str(mode) in {"1", "2"}:
         flexidot_cmd.append("-x")
+    if substitution_count > 0:
+        flexidot_cmd.extend(["-S", str(int(substitution_count))])
+    if wobble_conversion:
+        flexidot_cmd.extend(["-w", "--max_n", str(float(max_n_percentage))])
+    if not include_reverse:
+        flexidot_cmd.append("-r")
+    if only_vs_first and str(mode) == "1":
+        flexidot_cmd.append("-O")
+    flexidot_cmd.extend(["-A", str(float(line_width))])
 
     temp_gff_paths: list[str] = []
     if use_gff:

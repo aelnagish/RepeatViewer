@@ -272,6 +272,12 @@ DEFAULT_FLEXIDOT_WORDSIZE = 3
 DEFAULT_FLEXIDOT_LCS_SHADING = True
 DEFAULT_FLEXIDOT_USE_GFF = False
 DEFAULT_FLEXIDOT_OUTPUT_FORMAT = "html"
+DEFAULT_FLEXIDOT_SUBSTITUTIONS = 0
+DEFAULT_FLEXIDOT_WOBBLE_CONVERSION = False
+DEFAULT_FLEXIDOT_MAX_N_PERCENTAGE = 10.0
+DEFAULT_FLEXIDOT_INCLUDE_REVERSE = True
+DEFAULT_FLEXIDOT_ONLY_VS_FIRST = False
+DEFAULT_FLEXIDOT_LINE_WIDTH = 1.0
 FLEXIDOT_OUTPUT_HTML = "html"
 FLEXIDOT_OUTPUT_PNG = "png"
 FLEXIDOT_OUTPUT_PDF = "pdf"
@@ -296,12 +302,18 @@ def normalize_flexidot_output_format(value: str) -> str:
 
 @dataclass
 class FlexidotOptions:
-    """Flexidot -k (word size), -x (LCS shading), optional -g/-G GFF, and output format."""
+    """Saved matching, display, and output parameters for Flexidot."""
 
     wordsize: int = DEFAULT_FLEXIDOT_WORDSIZE
     lcs_shading: bool = DEFAULT_FLEXIDOT_LCS_SHADING
     use_gff: bool = DEFAULT_FLEXIDOT_USE_GFF
     output_format: str = DEFAULT_FLEXIDOT_OUTPUT_FORMAT
+    substitution_count: int = DEFAULT_FLEXIDOT_SUBSTITUTIONS
+    wobble_conversion: bool = DEFAULT_FLEXIDOT_WOBBLE_CONVERSION
+    max_n_percentage: float = DEFAULT_FLEXIDOT_MAX_N_PERCENTAGE
+    include_reverse: bool = DEFAULT_FLEXIDOT_INCLUDE_REVERSE
+    only_vs_first: bool = DEFAULT_FLEXIDOT_ONLY_VS_FIRST
+    line_width: float = DEFAULT_FLEXIDOT_LINE_WIDTH
 
 
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
@@ -918,6 +930,15 @@ def load_flexidot_options() -> FlexidotOptions:
         output_format=normalize_flexidot_output_format(
             str(v.get("output_format", DEFAULT_FLEXIDOT_OUTPUT_FORMAT))
         ),
+        substitution_count=max(0, min(20, int(v.get("substitution_count", 0)))),
+        wobble_conversion=str(v.get("wobble_conversion", "false")).lower()
+        in {"1", "true", "yes"},
+        max_n_percentage=max(0.0, min(100.0, float(v.get("max_n_percentage", 10.0)))),
+        include_reverse=str(v.get("include_reverse", "true")).lower()
+        in {"1", "true", "yes"},
+        only_vs_first=str(v.get("only_vs_first", "false")).lower()
+        in {"1", "true", "yes"},
+        line_width=max(0.1, min(20.0, float(v.get("line_width", 1.0)))),
     )
 
 
@@ -929,6 +950,12 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
             "lcs_shading": opts.lcs_shading,
             "use_gff": opts.use_gff,
             "output_format": normalize_flexidot_output_format(opts.output_format),
+            "substitution_count": opts.substitution_count,
+            "wobble_conversion": opts.wobble_conversion,
+            "max_n_percentage": opts.max_n_percentage,
+            "include_reverse": opts.include_reverse,
+            "only_vs_first": opts.only_vs_first,
+            "line_width": opts.line_width,
         },
     )
 

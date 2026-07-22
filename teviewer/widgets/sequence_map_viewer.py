@@ -196,7 +196,7 @@ _ANNOT_FEATURE_HEIGHT = 18
 _ANNOT_MIN_VIEWPORT_HEIGHT = 56
 _OVERVIEW_SYNC_MS = 16
 _RULER_HEIGHT = 20
-_VIEWPORT_RULER_HEIGHT = 16
+_VIEWPORT_RULER_HEIGHT = 14
 _OVERVIEW_HEIGHT = 16
 _SEQUENCE_ROW = 14
 _TRACK_HEIGHT = 12
@@ -817,12 +817,11 @@ class ViewportRulerWidget(QWidget):
             if x < _LEFT_MARGIN or x > vw - 4:
                 continue
             if bp != seq_len:
-                # Keep ticks above the sequence row (leave a small gap at the bottom).
-                painter.drawLine(int(x), 1, int(x), _VIEWPORT_RULER_HEIGHT - 8)
+                painter.drawLine(int(x), 1, int(x), _VIEWPORT_RULER_HEIGHT - 3)
             text = str(bp)
             if x - last_label_x < min_label_w and bp != start_bp:
                 continue
-            painter.drawText(int(x + 2), _VIEWPORT_RULER_HEIGHT - 6, text)
+            painter.drawText(int(x + 2), _VIEWPORT_RULER_HEIGHT - 2, text)
             last_label_x = x
         painter.end()
 

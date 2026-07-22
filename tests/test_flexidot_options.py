@@ -26,9 +26,26 @@ def test_save_and_load_flexidot_output_format(monkeypatch) -> None:
     monkeypatch.setattr("teviewer.job_options._load_settings_group", _load)
 
     save_flexidot_options(
-        FlexidotOptions(wordsize=5, lcs_shading=False, use_gff=True, output_format="png")
+        FlexidotOptions(
+            wordsize=5,
+            lcs_shading=False,
+            use_gff=True,
+            output_format="png",
+            substitution_count=2,
+            wobble_conversion=True,
+            max_n_percentage=25.0,
+            include_reverse=False,
+            only_vs_first=True,
+            line_width=2.5,
+        )
     )
     loaded = load_flexidot_options()
     assert loaded.output_format == "png"
     assert loaded.wordsize == 5
     assert loaded.use_gff is True
+    assert loaded.substitution_count == 2
+    assert loaded.wobble_conversion is True
+    assert loaded.max_n_percentage == 25.0
+    assert loaded.include_reverse is False
+    assert loaded.only_vs_first is True
+    assert loaded.line_width == 2.5

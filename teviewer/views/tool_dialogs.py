@@ -1853,6 +1853,10 @@ class FlexidotParamsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Flexidot parameters")
         opts = initial or FlexidotOptions()
+        # These supported settings remain persisted but are intentionally not
+        # exposed in this compact dialog.
+        self._lcs_shading = opts.lcs_shading
+        self._only_vs_first_value = opts.only_vs_first
         self._wordsize = QSpinBox()
         self._wordsize.setRange(MIN_FLEXIDOT_WORDSIZE, MAX_FLEXIDOT_WORDSIZE)
         self._wordsize.setValue(
@@ -1861,12 +1865,6 @@ class FlexidotParamsDialog(QDialog):
         self._wordsize.setToolTip(
             f"K-mer length (-k), {MIN_FLEXIDOT_WORDSIZE}–{MAX_FLEXIDOT_WORDSIZE}. "
             "Larger values are faster but less sensitive."
-        )
-
-        self._lcs = QCheckBox("LCS shading for multi-sequence plots (-x)")
-        self._lcs.setChecked(opts.lcs_shading)
-        self._lcs.setToolTip(
-            "Highlights long shared subsequences in all-vs-all dotplots (mode 2+ sequences)."
         )
 
         self._use_gff = QCheckBox("Show GFF features on dotplot (-g)")
@@ -1897,31 +1895,122 @@ class FlexidotParamsDialog(QDialog):
             "PNG/SVG/PDF write a static image."
         )
 
+        self._substitutions = QSpinBox()
+        self._substitutions.setRange(0, 20)
+        self._substitutions.setValue(opts.substitution_count)
+        self._substitutions.setToolTip(
+            "Flexidot -S: substitutions allowed inside each k-mer window. "
+            "Zero uses the much faster exact-match engine."
+        )
+        self._wobble = QCheckBox("Expand ambiguous IUPAC bases (-w)")
+        self._wobble.setChecked(opts.wobble_conversion)
+        self._wobble.setToolTip(
+            "Treat ambiguity codes such as R, Y, and N as their possible bases. "
+            "This can substantially increase computation time."
+        )
+        self._max_n = QDoubleSpinBox()
+        self._max_n.setRange(0.0, 100.0)
+        self._max_n.setDecimals(1)
+        self._max_n.setSuffix(" %")
+        self._max_n.setValue(opts.max_n_percentage)
+        self._max_n.setToolTip(
+            "Flexidot --max_n: maximum N percentage allowed in a k-mer when "
+            "ambiguous-base expansion is enabled."
+        )
+        self._wobble.toggled.connect(self._max_n.setEnabled)
+        self._max_n.setEnabled(self._wobble.isChecked())
+
+        self._include_reverse = QCheckBox(
+            "Calculate reverse-complement matches (disable: -r / --norev)"
+        )
+        self._include_reverse.setChecked(opts.include_reverse)
+        self._include_reverse.setToolTip(
+            "Enabled by default. Clear it to pass Flexidot -r / --norev and "
+            "omit reverse-complement matches."
+        )
+        self._line_width = QDoubleSpinBox()
+        self._line_width.setRange(0.1, 20.0)
+        self._line_width.setDecimals(1)
+        self._line_width.setSingleStep(0.2)
+        self._line_width.setValue(opts.line_width)
+        self._line_width.setToolTip(
+            "Flexidot -A / --line_width: thickness of forward and "
+            "reverse-complement match lines in the generated dotplot."
+        )
+
+        for field in (
+            self._wordsize,
+            self._output_format,
+            self._substitutions,
+            self._max_n,
+            self._line_width,
+        ):
+            field.setFixedWidth(260)
+
+        tabs = QTabWidget()
+        flexidot_tab = QWidget()
+        flexidot_layout = QVBoxLayout(flexidot_tab)
         form = QFormLayout()
-        form.addRow("Word size (k-mer):", self._wordsize)
-        form.addRow("Output format:", self._output_format)
-        form.addRow(self._lcs)
-        form.addRow(self._use_gff)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        form.addRow("Word size (k-mer, -k):", self._wordsize)
+        form.addRow("Output format (-f):", self._output_format)
+        form.addRow("Allowed substitutions (-S):", self._substitutions)
+        form.addRow("Maximum N content (--max_n):", self._max_n)
+        form.addRow("Match line thickness (-A / --line_width):", self._line_width)
+        form.addRow("", self._wobble)
+        form.addRow("", self._include_reverse)
+        form.addRow("", self._use_gff)
+        flexidot_layout.addLayout(form)
+        flexidot_layout.addStretch()
+        tabs.addTab(flexidot_tab, "Flexidot")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        restore = buttons.addButton(
+            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
+        )
+        restore.clicked.connect(self._restore_defaults)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addWidget(tabs)
         layout.addWidget(buttons)
+
+    def _restore_defaults(self) -> None:
+        defaults = FlexidotOptions()
+        self._wordsize.setValue(defaults.wordsize)
+        self._output_format.setCurrentIndex(
+            max(0, self._output_format.findData(defaults.output_format))
+        )
+        self._lcs_shading = defaults.lcs_shading
+        self._use_gff.setChecked(defaults.use_gff)
+        self._substitutions.setValue(defaults.substitution_count)
+        self._wobble.setChecked(defaults.wobble_conversion)
+        self._max_n.setValue(defaults.max_n_percentage)
+        self._include_reverse.setChecked(defaults.include_reverse)
+        self._only_vs_first_value = defaults.only_vs_first
+        self._line_width.setValue(defaults.line_width)
 
     def options(self) -> FlexidotOptions:
         fmt = self._output_format.currentData()
         return FlexidotOptions(
             wordsize=self._wordsize.value(),
-            lcs_shading=self._lcs.isChecked(),
+            lcs_shading=self._lcs_shading,
             use_gff=self._use_gff.isChecked(),
             output_format=normalize_flexidot_output_format(
                 str(fmt or FLEXIDOT_OUTPUT_HTML)
             ),
+            substitution_count=self._substitutions.value(),
+            wobble_conversion=self._wobble.isChecked(),
+            max_n_percentage=self._max_n.value(),
+            include_reverse=self._include_reverse.isChecked(),
+            only_vs_first=self._only_vs_first_value,
+            line_width=self._line_width.value(),
         )
 
 
