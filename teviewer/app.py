@@ -42,6 +42,10 @@ def run_app(argv: list[str] | None = None) -> int:
 
         install_macos_stderr_fd_filter()
 
+        from teviewer.widgets.browser_dock import install_global_click_log
+
+        install_global_click_log(app)
+
         # Organisation / application identity must be set before any QSettings
         # read, so preferences resolve to the same store the dialog writes to.
         app.setApplicationName(APP_DISPLAY_NAME)
