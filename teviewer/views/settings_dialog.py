@@ -12,7 +12,6 @@ from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -30,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from teviewer.widgets.combo_boxes import NoWheelComboBox
 from teviewer.widgets.spin_boxes import NoWheelSpinBox
 
 if TYPE_CHECKING:
@@ -392,7 +392,7 @@ class SettingsDialog(QDialog):
             "Use the muscle command from PATH. Leave off to use TEviewer's "
             "bundled MUSCLE for this operating system and CPU."
         )
-        self._default_aligner = QComboBox()
+        self._default_aligner = NoWheelComboBox()
         self._default_aligner.addItem("MAFFT", ALIGNER_MAFFT)
         self._default_aligner.addItem("MUSCLE", ALIGNER_MUSCLE)
         align_options = load_align_options()
@@ -436,7 +436,7 @@ class SettingsDialog(QDialog):
         self._preview_zoom.setToolTip(
             "Default scale for HTML plots, images, and text files in the Preview panel."
         )
-        self._fasta_default_tab = QComboBox()
+        self._fasta_default_tab = NoWheelComboBox()
         for label, tab in (
             ("Text", DefaultFastaPreviewTab.TEXT),
             ("Annotation", DefaultFastaPreviewTab.ANNOTATION),
@@ -458,7 +458,7 @@ class SettingsDialog(QDialog):
             "FASTA files (whole scaffolds or genomes) that costs a few seconds "
             "each time the file is opened. Turn this off to skip it."
         )
-        self._preview_fit = QComboBox()
+        self._preview_fit = NoWheelComboBox()
         for label, mode in (
             ("Fit window", PreviewFitMode.FIT_WINDOW),
             ("Fit width", PreviewFitMode.FIT_WIDTH),
@@ -469,7 +469,7 @@ class SettingsDialog(QDialog):
         if fit_index >= 0:
             self._preview_fit.setCurrentIndex(fit_index)
 
-        self._theme_mode = QComboBox()
+        self._theme_mode = NoWheelComboBox()
         for label, mode in THEME_LABELS:
             self._theme_mode.addItem(label, mode)
         theme_index = self._theme_mode.findData(load_theme_mode())
