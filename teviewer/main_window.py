@@ -342,6 +342,9 @@ _JOB_DISPLAY_TITLES = {
     "flexidot": "Flexidot",
     "te_annotation": "TE annotation",
     "tsd_search": "TSD search",
+    "reverse_complement": "Reverse complement",
+    "orf_prediction": "ORF prediction",
+    "dna_translation": "DNA translation",
     "te_confusion_benchmark": "Confusion matrix benchmark",
     "te_library_benchmark": "TE library benchmark",
 }
@@ -2645,25 +2648,39 @@ class MainWindow(QMainWindow):
         file_menu.addAction("&Quit", self.close, "Ctrl+Q")
 
         seq_menu = self.menuBar().addMenu("&Sequence")
-        seq_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
-        seq_menu.addSeparator()
-        self._populate_blast_menu(seq_menu.addMenu("&Blast"))
-        self._populate_align_menu(seq_menu.addMenu("&Align"))
         seq_menu.addAction("New Sequence…", self._new_sequence)
         seq_menu.addAction("Group Sequences into a List…", self._group_sequences)
         seq_menu.addAction("Extract Sequences from List…", self._extract_sequences_from_list)
         seq_menu.addSeparator()
-        self._populate_tree_menu(seq_menu.addMenu("&Tree"))
-        self._populate_fastga_menu(seq_menu.addMenu("Fast&GA"))
-        self._populate_extend_menu(seq_menu.addMenu("&Extend"))
-        self._populate_tsd_search_menu(seq_menu.addMenu("TSD &search"))
-        self._populate_teaid_menu(seq_menu.addMenu("&TEAid"))
-        self._populate_msa_clean_menu(seq_menu.addMenu("MSA &clean"))
-        self._populate_consensus_menu(seq_menu.addMenu("&Consensus"))
-        self._populate_flexidot_menu(seq_menu.addMenu("&Flexidot"))
-        seq_menu.addAction("TE &annotation", self._run_te_annotation)
-        self._populate_te_visualization_menu(seq_menu.addMenu("TE &visualization"))
-        self._populate_benchmarking_menu(seq_menu.addMenu("&Benchmarking"))
+        seq_menu.addAction(
+            "Reverser Complement",
+            lambda: self._apply_function("reverse_complement"),
+        )
+        seq_menu.addAction(
+            "ORF Prediction",
+            lambda: self._apply_function("orf_prediction"),
+        )
+        seq_menu.addAction(
+            "Translate",
+            lambda: self._apply_function("dna_translation"),
+        )
+
+        tools_menu = self.menuBar().addMenu("&Tools")
+        tools_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
+        tools_menu.addSeparator()
+        self._populate_blast_menu(tools_menu.addMenu("&Blast"))
+        self._populate_align_menu(tools_menu.addMenu("&Align"))
+        self._populate_tree_menu(tools_menu.addMenu("&Tree"))
+        self._populate_fastga_menu(tools_menu.addMenu("Fast&GA"))
+        self._populate_extend_menu(tools_menu.addMenu("&Extend"))
+        self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
+        self._populate_teaid_menu(tools_menu.addMenu("&TEAid"))
+        self._populate_msa_clean_menu(tools_menu.addMenu("MSA &clean"))
+        self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
+        self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
+        tools_menu.addAction("TE &annotation", self._run_te_annotation)
+        self._populate_te_visualization_menu(tools_menu.addMenu("TE &visualization"))
+        self._populate_benchmarking_menu(tools_menu.addMenu("&Benchmarking"))
 
         plugins_menu = self.menuBar().addMenu("&Plugins")
         self._plugins_menu = plugins_menu

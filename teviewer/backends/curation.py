@@ -39,6 +39,11 @@ from teviewer.backends.gui_functions import (
     run_flexidot,
 )
 from teviewer.backends.remove_gap import remove_gaps_with_similarity_check
+from teviewer.backends.sequence_operations import (
+    write_predicted_orfs_fasta,
+    write_reverse_complement_fasta,
+    write_translated_orfs_fasta,
+)
 from teviewer.backends.teaid_plotter import (
     TeaidInputError,
     con_generater,
@@ -79,6 +84,9 @@ _DISPLAY_NAMES = {
     "flexidot": "Flexidot",
     "te_annotation": "TE annotation",
     "tsd_search": "TSD search",
+    "reverse_complement": "Reverse complement",
+    "orf_prediction": "ORF prediction",
+    "dna_translation": "DNA translation",
 }
 
 
@@ -886,6 +894,15 @@ def run_on_sequence(
             cancel=cancel,
         )
         created.extend(str(p) for p in outs)
+
+    elif func_name == "reverse_complement":
+        created.append(str(write_reverse_complement_fasta(seq_path)))
+
+    elif func_name == "orf_prediction":
+        created.append(str(write_predicted_orfs_fasta(seq_path)))
+
+    elif func_name == "dna_translation":
+        created.append(str(write_translated_orfs_fasta(seq_path)))
 
     elif func_name == "tsd_search":
         tsd_opts = tsd_search_options or TsdSearchOptions()
