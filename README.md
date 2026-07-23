@@ -140,7 +140,3 @@ The two tools are independent applications; RepeatViewer does not require a TEtr
 ## Citation
 
 If RepeatViewer contributes to your work, cite **TEtrimmer** (*Nature Communications*, 2025) when applicable and mention **RepeatViewer (TEviewer)** for manual curation and visualization.
-
-## License
-
-GPL-3.0-or-later. See repository license file for details.
