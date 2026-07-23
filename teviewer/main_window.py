@@ -240,6 +240,7 @@ from teviewer.widgets.browser_icons import (
     browser_folder_icon,
     browser_folder_spacer_icon,
 )
+from teviewer.widgets.browser_dock import PreviewDockWidget
 from teviewer.widgets.browser_panel_settings import load_browser_panel_font_size
 from teviewer.ui.platform import reveal_in_file_manager
 from teviewer.ui.text_editor import open_in_text_editor
@@ -1877,8 +1878,15 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(message, timeout)
 
-    def _make_browser_dock(self, title: str, object_name: str, widget: QWidget) -> QDockWidget:
-        dock = QDockWidget(title, self)
+    def _make_browser_dock(
+        self,
+        title: str,
+        object_name: str,
+        widget: QWidget,
+        *,
+        dock_cls: type[QDockWidget] = QDockWidget,
+    ) -> QDockWidget:
+        dock = dock_cls(title, self)
         dock.setObjectName(object_name)
         dock.setWidget(widget)
         dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
@@ -2034,7 +2042,9 @@ class MainWindow(QMainWindow):
 
         self._dock_folders = self._make_browser_dock("Folders", "dock_folders", folder_side)
         self._dock_files = self._make_browser_dock("Files", "dock_files", files_panel)
-        self._dock_preview = self._make_browser_dock("Preview", "dock_preview", self._preview_host)
+        self._dock_preview = self._make_browser_dock(
+            "Preview", "dock_preview", self._preview_host, dock_cls=PreviewDockWidget
+        )
 
         self._dock_files.setTitleBarWidget(
             BrowserDockTitleBar(self._dock_files, "Files", trailing=files_trailing)
