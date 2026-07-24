@@ -153,7 +153,7 @@ class _ToolbarPopup(QWidget):
             if action.isSeparator():
                 row = QWidget(panel)
                 row_layout = QHBoxLayout(row)
-                row_layout.setContentsMargins(8, 5, 8, 5)
+                row_layout.setContentsMargins(8, 1, 8, 1)
                 row_layout.setSpacing(0)
                 separator = QFrame(row)
                 separator.setFixedHeight(1)
@@ -2365,7 +2365,7 @@ class MainWindow(QMainWindow):
     def _populate_tree_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Build tree with default parameters", self._run_tree_default)
-            menu.addSeparator()
+        menu.addSeparator()
         menu.addAction("Change tree parameters…", self._open_tree_dialog)
 
     def _selected_sequence_files_for_tree(self) -> list[Path]:
@@ -2594,7 +2594,7 @@ class MainWindow(QMainWindow):
     def _populate_fastga_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Run FastGA with default parameters", self._run_fastga_default)
-            menu.addSeparator()
+        menu.addSeparator()
         menu.addAction("Change FastGA parameters…", self._open_fastga_dialog)
 
     def _selected_files_for_fastga(self) -> list[Path]:
@@ -2720,13 +2720,13 @@ class MainWindow(QMainWindow):
     def _populate_tsd_search_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("TSD search with default parameters", self._run_tsd_search)
-            menu.addSeparator()
+        menu.addSeparator()
         menu.addAction("Change TSD search parameters", self._modify_tsd_search_parameters)
 
     def _populate_teaid_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("TEAid with default parameters", self._run_teaid)
-            menu.addSeparator()
+        menu.addSeparator()
         menu.addAction("Change TEAid parameters", self._modify_teaid_parameters)
 
     def _populate_msa_clean_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
@@ -2754,7 +2754,7 @@ class MainWindow(QMainWindow):
     def _populate_consensus_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Consensus with default parameters", self._run_consensus)
-            menu.addSeparator()
+        menu.addSeparator()
         menu.addAction("Change consensus parameters", self._modify_consensus_parameters)
 
     def _populate_flexidot_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
