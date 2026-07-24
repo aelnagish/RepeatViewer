@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QDrag, QDropEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QListView,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -246,6 +248,183 @@ def save_toolbar_font_size(size: int) -> None:
     s.endGroup()
 
 
+class _ReorderOnlyListWidget(QListWidget):
+    """List that only reorders rows — items cannot be freely stacked on each other."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._drag_rows: list[int] = []
+        self._drop_line_y: int | None = None
+        self.setViewMode(QListView.ViewMode.ListMode)
+        self.setMovement(QListView.Movement.Static)
+        self.setFlow(QListView.Flow.TopToBottom)
+        self.setWrapping(False)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(False)  # custom insertion line in paintEvent
+        self.setDragDropOverwriteMode(False)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+        # DragDrop (not InternalMove): we reorder ourselves in dropEvent.
+        # InternalMove makes Qt delete the dragged rows after drop, which made
+        # items disappear when combined with a custom dropEvent.
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+
+    def startDrag(self, supported_actions) -> None:  # noqa: N802
+        selected = self.selectedItems()
+        if not selected:
+            return
+        self._drag_rows = sorted({self.row(item) for item in selected if self.row(item) >= 0})
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return
+        mime = self.model().mimeData(indexes)
+        if mime is None:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        first = selected[0]
+        rect = self.visualItemRect(first)
+        if rect.isValid():
+            drag.setPixmap(self.viewport().grab(rect))
+            drag.setHotSpot(rect.center() - rect.topLeft())
+        # Prefer Copy so Qt never removes source rows after the drag finishes.
+        drag.exec(
+            Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+            Qt.DropAction.CopyAction,
+        )
+        self._drag_rows = []
+        self._clear_drop_indicator()
+
+    def _insertion_y_for_pos(self, pos) -> int:
+        """Y coordinate of the insertion line for the pointer position."""
+        target_item = self.itemAt(pos)
+        if target_item is None:
+            if self.count() == 0:
+                return 2
+            last = self.item(self.count() - 1)
+            return self.visualItemRect(last).bottom()
+        rect = self.visualItemRect(target_item)
+        if pos.y() > rect.center().y():
+            return rect.bottom()
+        return rect.top()
+
+    def _set_drop_indicator(self, y: int | None) -> None:
+        if self._drop_line_y == y:
+            return
+        self._drop_line_y = y
+        self.viewport().update()
+
+    def _clear_drop_indicator(self) -> None:
+        self._set_drop_indicator(None)
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        if event.source() is not self:
+            event.ignore()
+            self._clear_drop_indicator()
+            return
+
+        rows = list(self._drag_rows)
+        if not rows:
+            rows = sorted({self.row(item) for item in self.selectedItems() if self.row(item) >= 0})
+        if not rows:
+            event.ignore()
+            self._clear_drop_indicator()
+            return
+
+        entries: list[tuple[str, object]] = []
+        for index in range(self.count()):
+            item = self.item(index)
+            if item is None:
+                continue
+            entries.append((item.text(), item.data(Qt.ItemDataRole.UserRole)))
+
+        moving = [entries[row] for row in rows if 0 <= row < len(entries)]
+        if not moving:
+            event.ignore()
+            self._clear_drop_indicator()
+            return
+        remaining = [entry for index, entry in enumerate(entries) if index not in set(rows)]
+
+        pos = event.position().toPoint()
+        target_item = self.itemAt(pos)
+        if target_item is None:
+            drop_row = len(remaining)
+        else:
+            target_row = self.row(target_item)
+            # Map target row into the "remaining" list (rows already removed).
+            drop_row = sum(1 for row in range(target_row) if row not in set(rows))
+            rect = self.visualItemRect(target_item)
+            if pos.y() > rect.center().y():
+                drop_row += 1
+            drop_row = max(0, min(drop_row, len(remaining)))
+
+        new_order = remaining[:drop_row] + moving + remaining[drop_row:]
+        self.clear()
+        selected_ids: set[object] = {data for _text, data in moving}
+        first_selected: QListWidgetItem | None = None
+        for text, data in new_order:
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, data)
+            item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsDragEnabled
+                | Qt.ItemFlag.ItemIsDropEnabled
+            )
+            self.addItem(item)
+            if data in selected_ids:
+                item.setSelected(True)
+                if first_selected is None:
+                    first_selected = item
+        if first_selected is not None:
+            self.setCurrentItem(first_selected)
+
+        self._clear_drop_indicator()
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if event.source() is self:
+            self._set_drop_indicator(self._insertion_y_for_pos(event.position().toPoint()))
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            return
+        self._clear_drop_indicator()
+        event.ignore()
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.source() is self:
+            self._set_drop_indicator(self._insertion_y_for_pos(event.position().toPoint()))
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._clear_drop_indicator()
+        super().dragLeaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if self._drop_line_y is None:
+            return
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        y = self._drop_line_y
+        left = 6
+        right = self.viewport().width() - 6
+        pen = QPen(QColor("#0a84ff"), 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(left + 4, y, right - 4, y)
+        # Small end caps so the insertion point is easy to see.
+        painter.setBrush(QColor("#0a84ff"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(left - 1, y - 3, 6, 6)
+        painter.drawEllipse(right - 5, y - 3, 6, 6)
+        painter.end()
+
 class ToolbarCustomizeWidget(QWidget):
     """Inline panel to choose toolbar buttons and font size."""
 
@@ -280,11 +459,8 @@ class ToolbarCustomizeWidget(QWidget):
         font_row.addWidget(self._font_size)
         font_row.addStretch()
 
-        self._list = QListWidget()
+        self._list = _ReorderOnlyListWidget()
         self._list.setMinimumHeight(280)
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._populate(self._catalog)
 
         button_row = QHBoxLayout()
@@ -340,7 +516,6 @@ class ToolbarCustomizeWidget(QWidget):
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
             | Qt.ItemFlag.ItemIsDragEnabled
-            | Qt.ItemFlag.ItemIsDropEnabled
         )
         self._list.addItem(item)
         return item
