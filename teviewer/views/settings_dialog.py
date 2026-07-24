@@ -30,21 +30,13 @@ from PySide6.QtWidgets import (
 )
 
 from teviewer.widgets.combo_boxes import NoWheelComboBox
-from teviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
+from teviewer.widgets.spin_boxes import NoWheelSpinBox
 
 if TYPE_CHECKING:
     from teviewer.plugins.registry import PluginRegistry
 
 from teviewer.pan_genome import GENOME_MODE_SINGLE, parse_pan_genomes_json
 from teviewer.project import TEviewerProject
-from teviewer.job_options import (
-    DivergenceRowOptions,
-    GapRowOptions,
-    GappyColumnOptions,
-    MsaCleanOptions,
-    load_msa_clean_options,
-    save_msa_clean_options,
-)
 from teviewer.views.toolbar_dialog import (
     ToolbarCustomizeWidget,
     build_toolbar_catalog,
@@ -508,59 +500,6 @@ class SettingsDialog(QDialog):
         )
         self._copy_diag_btn.clicked.connect(self._copy_diagnostics)
 
-        # MSA clean pipeline
-        msa_clean = load_msa_clean_options()
-        self._msa_method_order = msa_clean.method_order
-        self._msa_use_divergence = QCheckBox("Clean rows with divergence")
-        self._msa_use_divergence.setChecked(msa_clean.use_divergence)
-        self._msa_div_threshold = NoWheelDoubleSpinBox()
-        self._msa_div_threshold.setRange(0.0, 1.0)
-        self._msa_div_threshold.setDecimals(2)
-        self._msa_div_threshold.setSingleStep(0.05)
-        self._msa_div_threshold.setValue(msa_clean.divergence.threshold)
-        self._msa_div_window = NoWheelSpinBox()
-        self._msa_div_window.setRange(1, 10_000)
-        self._msa_div_window.setSuffix(" bp")
-        self._msa_div_window.setValue(msa_clean.divergence.window_size)
-
-        self._msa_use_gap_row = QCheckBox("Clean rows with gaps")
-        self._msa_use_gap_row.setChecked(msa_clean.use_gap_row)
-        self._msa_row_gap_threshold = NoWheelDoubleSpinBox()
-        self._msa_row_gap_threshold.setRange(0.0, 1.0)
-        self._msa_row_gap_threshold.setDecimals(3)
-        self._msa_row_gap_threshold.setSingleStep(0.01)
-        self._msa_row_gap_threshold.setValue(msa_clean.gap_row.gap_threshold)
-        self._msa_row_gap_window = NoWheelSpinBox()
-        self._msa_row_gap_window.setRange(1, 10_000)
-        self._msa_row_gap_window.setSuffix(" bp")
-        self._msa_row_gap_window.setValue(msa_clean.gap_row.window_size)
-
-        self._msa_use_gappy_columns = QCheckBox("Remove gappy columns")
-        self._msa_use_gappy_columns.setChecked(msa_clean.use_gappy_columns)
-        self._msa_col_gap_threshold = NoWheelDoubleSpinBox()
-        self._msa_col_gap_threshold.setRange(0.0, 1.0)
-        self._msa_col_gap_threshold.setDecimals(2)
-        self._msa_col_gap_threshold.setSingleStep(0.05)
-        self._msa_col_gap_threshold.setValue(msa_clean.gappy.gap_threshold)
-        self._msa_simi_gap_threshold = NoWheelDoubleSpinBox()
-        self._msa_simi_gap_threshold.setRange(0.0, 1.0)
-        self._msa_simi_gap_threshold.setDecimals(2)
-        self._msa_simi_gap_threshold.setSingleStep(0.05)
-        self._msa_simi_gap_threshold.setValue(msa_clean.gappy.simi_check_gap_thr)
-        self._msa_similarity_threshold = NoWheelDoubleSpinBox()
-        self._msa_similarity_threshold.setRange(0.0, 1.0)
-        self._msa_similarity_threshold.setDecimals(2)
-        self._msa_similarity_threshold.setSingleStep(0.05)
-        self._msa_similarity_threshold.setValue(msa_clean.gappy.similarity_thr)
-        self._msa_min_nucleotide = NoWheelSpinBox()
-        self._msa_min_nucleotide.setRange(1, 50)
-        self._msa_min_nucleotide.setValue(msa_clean.gappy.min_nucleotide)
-
-        self._msa_use_divergence.toggled.connect(self._sync_msa_clean_controls)
-        self._msa_use_gap_row.toggled.connect(self._sync_msa_clean_controls)
-        self._msa_use_gappy_columns.toggled.connect(self._sync_msa_clean_controls)
-        self._sync_msa_clean_controls()
-
         # Every combo and spin box gets the same width so the columns are symmetric.
         for widget in (
             self._batch_workers,
@@ -570,14 +509,6 @@ class SettingsDialog(QDialog):
             self._preview_fit,
             self._fasta_default_tab,
             self._theme_mode,
-            self._msa_div_threshold,
-            self._msa_div_window,
-            self._msa_row_gap_threshold,
-            self._msa_row_gap_window,
-            self._msa_col_gap_threshold,
-            self._msa_simi_gap_threshold,
-            self._msa_similarity_threshold,
-            self._msa_min_nucleotide,
         ):
             widget.setFixedWidth(_FIELD_WIDTH)
 
@@ -674,19 +605,6 @@ class SettingsDialog(QDialog):
             (None, _center_row(self._clear_cache_btn, self._open_log_btn)),
             (None, _center_row(self._open_config_btn, self._copy_diag_btn)),
         ])
-        msa_clean_settings = _group("MSA clean", [
-            (None, self._msa_use_divergence),
-            ("Divergence threshold:", self._msa_div_threshold),
-            ("Divergence window:", self._msa_div_window),
-            (None, self._msa_use_gap_row),
-            ("Row gap threshold:", self._msa_row_gap_threshold),
-            ("Row gap window:", self._msa_row_gap_window),
-            (None, self._msa_use_gappy_columns),
-            ("Column gap threshold:", self._msa_col_gap_threshold),
-            ("Similarity-check gap:", self._msa_simi_gap_threshold),
-            ("Similarity threshold:", self._msa_similarity_threshold),
-            ("Minimum nucleotides:", self._msa_min_nucleotide),
-        ])
 
         content = QWidget()
         content_v = QVBoxLayout(content)
@@ -700,7 +618,6 @@ class SettingsDialog(QDialog):
             startup,
             blast_databases,
             diagnostics,
-            msa_clean_settings,
         ):
             content_v.addWidget(box)
         content_v.addStretch()
@@ -765,17 +682,6 @@ class SettingsDialog(QDialog):
         self.colorBlindToggled.emit(checked)
 
     def accept(self) -> None:
-        if not (
-            self._msa_use_divergence.isChecked()
-            or self._msa_use_gap_row.isChecked()
-            or self._msa_use_gappy_columns.isChecked()
-        ):
-            QMessageBox.warning(
-                self,
-                "MSA clean",
-                "Enable at least one MSA cleaning method.",
-            )
-            return
         if not self._toolbar_panel.has_visible_tools():
             QMessageBox.warning(
                 self,
@@ -810,46 +716,11 @@ class SettingsDialog(QDialog):
         save_reopen_last_folder(self._reopen_last.isChecked())
         save_restore_geometry(self._restore_geometry.isChecked())
         save_verbose_logging(self._verbose_logging.isChecked())
-        save_msa_clean_options(
-            MsaCleanOptions(
-                use_divergence=self._msa_use_divergence.isChecked(),
-                use_gap_row=self._msa_use_gap_row.isChecked(),
-                use_gappy_columns=self._msa_use_gappy_columns.isChecked(),
-                method_order=self._msa_method_order,
-                divergence=DivergenceRowOptions(
-                    threshold=self._msa_div_threshold.value(),
-                    window_size=self._msa_div_window.value(),
-                ),
-                gap_row=GapRowOptions(
-                    gap_threshold=self._msa_row_gap_threshold.value(),
-                    window_size=self._msa_row_gap_window.value(),
-                ),
-                gappy=GappyColumnOptions(
-                    gap_threshold=self._msa_col_gap_threshold.value(),
-                    simi_check_gap_thr=self._msa_simi_gap_threshold.value(),
-                    similarity_thr=self._msa_similarity_threshold.value(),
-                    min_nucleotide=self._msa_min_nucleotide.value(),
-                ),
-            )
-        )
         base_dir_text = self._blast_db_base_dir.text().strip()
         if base_dir_text:
             save_blast_db_base_dir(Path(base_dir_text))
         self._save_settings()
         return self._project
-
-    def _sync_msa_clean_controls(self, _checked: bool | None = None) -> None:
-        for widget in (self._msa_div_threshold, self._msa_div_window):
-            widget.setEnabled(self._msa_use_divergence.isChecked())
-        for widget in (self._msa_row_gap_threshold, self._msa_row_gap_window):
-            widget.setEnabled(self._msa_use_gap_row.isChecked())
-        for widget in (
-            self._msa_col_gap_threshold,
-            self._msa_simi_gap_threshold,
-            self._msa_similarity_threshold,
-            self._msa_min_nucleotide,
-        ):
-            widget.setEnabled(self._msa_use_gappy_columns.isChecked())
 
     def selected_theme_mode(self) -> str:
         return str(self._theme_mode.currentData())

@@ -18,6 +18,8 @@ from PySide6.QtCore import (
     QItemSelectionModel,
     QMimeData,
     QObject,
+    QPoint,
+    QRect,
     QSettings,
     QSize,
     Qt,
@@ -47,6 +49,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDockWidget,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHeaderView,
     QFileDialog,
     QHBoxLayout,
@@ -79,42 +82,133 @@ _BROWSER_FILES_PREVIEW_SPLIT = (170, 210)
 
 
 class _ToolbarPopup(QWidget):
-    """Non-grabbing toolbar dropdown with explicit screen positioning."""
+    """Toolbar dropdown that does not steal the mouse grab.
+
+    ``QMenu.popup`` grabs the mouse, so the first click on another tool only
+    dismisses the open menu. This lightweight popup stays below the toolbar and
+    lets FastGA → MSA clean (and other) switches happen in one click.
+
+    Visually approximates a macOS menu: rounded panel, soft hairline border,
+    inset separators, and rounded blue item highlight.
+    """
 
     closed = Signal()
+    _SHADOW = 12
 
-    def __init__(self, actions: list[QAction]) -> None:
+    def __init__(self, actions: list[QAction], parent: QWidget | None = None) -> None:
         super().__init__(
-            None,
-            Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint,
+            parent,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint,
         )
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(1, 1, 1, 1)
-        layout.setSpacing(0)
-        self.setStyleSheet(
-            "_ToolbarPopup { border: 1px solid palette(mid); background: palette(window); }"
-            "QPushButton { border: 0; border-radius: 0; padding: 5px 26px 5px 14px;"
-            " text-align: left; background: transparent; }"
-            "QPushButton:hover { background: palette(highlight);"
-            " color: palette(highlighted-text); }"
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setObjectName("ToolbarPopup")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(self._SHADOW, self._SHADOW, self._SHADOW, self._SHADOW)
+        outer.setSpacing(0)
+
+        panel = QWidget(self)
+        panel.setObjectName("ToolbarPopupPanel")
+        panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(1)
+
+        panel.setStyleSheet(
+            "QWidget#ToolbarPopupPanel {"
+            "  background: #f6f6f6;"
+            "  border: 1px solid #c8c8c8;"
+            "  border-radius: 8px;"
+            "}"
+            "QWidget#ToolbarPopupPanel QPushButton {"
+            "  border: 0;"
+            "  border-radius: 5px;"
+            "  padding: 4px 18px 4px 12px;"
+            "  text-align: left;"
+            "  background: transparent;"
+            "  color: #1d1d1f;"
+            "  font-size: 13px;"
+            "}"
+            "QWidget#ToolbarPopupPanel QPushButton:hover {"
+            "  background: #0a84ff;"
+            "  color: #ffffff;"
+            "}"
+            "QWidget#ToolbarPopupPanel QPushButton:disabled {"
+            "  color: #aeaeb2;"
+            "  background: transparent;"
+            "}"
         )
+
+        shadow = QGraphicsDropShadowEffect(panel)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 48))
+        panel.setGraphicsEffect(shadow)
+
         for action in actions:
             if action.isSeparator():
-                separator = QFrame(self)
-                separator.setFrameShape(QFrame.Shape.HLine)
-                layout.addWidget(separator)
+                row = QWidget(panel)
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(8, 5, 8, 5)
+                row_layout.setSpacing(0)
+                separator = QFrame(row)
+                separator.setFixedHeight(1)
+                separator.setStyleSheet("background: #d8d8d8; border: 0;")
+                row_layout.addWidget(separator)
+                layout.addWidget(row)
                 continue
-            button = QPushButton(action.text().replace("&", ""), self)
+            button = QPushButton(action.text().replace("&", ""), panel)
+            button.setCursor(Qt.CursorShape.ArrowCursor)
             button.setEnabled(action.isEnabled())
             button.setToolTip(action.toolTip())
             button.clicked.connect(
-                lambda checked=False, selected=action: self._run_action(selected)
+                lambda _checked=False, selected=action: self._run_action(selected)
             )
             layout.addWidget(button)
+
+        outer.addWidget(panel)
 
     def _run_action(self, action: QAction) -> None:
         self.close()
         action.trigger()
+
+    def show_below(self, widget: QWidget) -> None:
+        self.adjustSize()
+        # Align the visible panel (inside shadow padding) with the button.
+        pad = self._SHADOW
+        anchor = widget.mapToGlobal(QPoint(-pad, widget.height() + 1 - pad))
+        screen = widget.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = self.sizeHint().width()
+            height = self.sizeHint().height()
+            x = max(available.left(), min(anchor.x(), available.right() - width + 1))
+            y = anchor.y()
+            if y + height > available.bottom():
+                y = max(
+                    available.top(),
+                    widget.mapToGlobal(QPoint(0, 0)).y() - height + pad - 1,
+                )
+            self.setGeometry(QRect(x, y, width, height))
+        else:
+            self.move(anchor)
+        self.show()
+        self.raise_()
+        self.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        # Defer so a click on another toolbar tool can open its menu in the
+        # same gesture after this popup closes.
+        QTimer.singleShot(0, self._close_if_unfocused)
+
+    def _close_if_unfocused(self) -> None:
+        if self.isVisible() and not self.isActiveWindow():
+            self.close()
 
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
@@ -1341,7 +1435,8 @@ class MainWindow(QMainWindow):
         self._toolbar_items: list[tuple] = []  # (widget, overflow_handler|None), ordered
         self._overflow_hidden: list[tuple] = []
         self._overflow_btn: QToolButton | None = None
-        self._active_toolbar_menu: QMenu | None = None
+        self._active_toolbar_menu: _ToolbarPopup | None = None
+        self._active_toolbar_menu_button: QToolButton | None = None
         self._toolbar_font = QFont(self.font())
         self._browser_panel_font = QFont(self.font())
         self._apply_toolbar_theme()
@@ -2900,6 +2995,7 @@ class MainWindow(QMainWindow):
         if self._active_toolbar_menu is not None:
             self._active_toolbar_menu.close()
         self._active_toolbar_menu = None
+        self._active_toolbar_menu_button = None
         if self._functions_toolbar is not None:
             self._functions_toolbar.removeEventFilter(self)
             self.removeToolBar(self._functions_toolbar)
@@ -3068,48 +3164,39 @@ class MainWindow(QMainWindow):
 
         def _show_menu_on_click() -> None:
             active_menu = self._active_toolbar_menu
+            active_btn = self._active_toolbar_menu_button
+            # Second click on the same tool closes the menu.
+            if active_menu is not None and active_btn is btn:
+                active_menu.close()
+                return
             if active_menu is not None:
                 active_menu.close()
             self._clear_toolbar_button_highlights(btn)
-            menu = QMenu(btn)
-            menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-            if show_default_action:
-                menu.addAction(run_label or text, default_slot)
-            menu_builder(menu, skip_default=True)
-            anchor = btn.mapToGlobal(btn.rect().bottomLeft())
-            anchor.setY(anchor.y() + 1)
-            menu.adjustSize()
-            available = btn.screen().availableGeometry()
-            anchor.setX(
-                max(
-                    available.left(),
-                    min(anchor.x(), available.right() - menu.sizeHint().width() + 1),
-                )
-            )
-            if anchor.y() + menu.sizeHint().height() > available.bottom() + 1:
-                anchor.setY(
-                    max(
-                        available.top(),
-                        btn.mapToGlobal(btn.rect().topLeft()).y()
-                        - menu.sizeHint().height()
-                        - 1,
-                    )
-                )
 
-            # On macOS Qt can re-centre a popup menu over the control that
-            # opened it.  Reapply the anchor once the menu's event loop starts
-            # so the toolbar label (notably BLAST) remains visible.
-            QTimer.singleShot(0, lambda popup=menu, pos=anchor: popup.move(pos))
-            self._active_toolbar_menu = menu
+            # Build actions via a temporary QMenu (structure only; not shown).
+            scratch = QMenu(btn)
+            if show_default_action:
+                scratch.addAction(run_label or text, default_slot)
+            menu_builder(scratch, skip_default=True)
+            actions = list(scratch.actions())
+            if not actions:
+                return
+
+            popup = _ToolbarPopup(actions, parent=self)
+            self._active_toolbar_menu = popup
+            self._active_toolbar_menu_button = btn
+            btn.setDown(True)
 
             def _menu_closed() -> None:
-                if self._active_toolbar_menu is menu:
+                if self._active_toolbar_menu is popup:
                     self._active_toolbar_menu = None
+                    self._active_toolbar_menu_button = None
                 self._release_toolbar_button(btn)
 
-            menu.aboutToHide.connect(_menu_closed)
-            menu.popup(anchor)
+            popup.closed.connect(_menu_closed)
+            popup.show_below(btn)
 
+        btn._teviewer_open_menu = _show_menu_on_click  # type: ignore[attr-defined]
         btn.clicked.connect(_show_menu_on_click)
 
         self._toolbar_hbox.addWidget(btn)

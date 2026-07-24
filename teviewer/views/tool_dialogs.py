@@ -2415,7 +2415,8 @@ class MsaCleanParamsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("MSA clean parameters")
-        self.setMinimumWidth(650)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(520)
         opts = initial or MsaCleanOptions()
 
         self._method_order = QListWidget()
@@ -2443,11 +2444,16 @@ class MsaCleanParamsDialog(QDialog):
         )
         self._available_method = QComboBox()
         self._add_method_button = QPushButton("Add")
-        self._remove_method_button = QPushButton("Remove selected")
+        self._remove_method_button = QPushButton("Remove")
+        for btn in (self._add_method_button, self._remove_method_button):
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            btn.setFixedWidth(btn.sizeHint().width())
         self._add_method_button.clicked.connect(self._add_selected_method)
         self._remove_method_button.clicked.connect(self._remove_selected_method)
         self._method_order.currentRowChanged.connect(self._sync_method_controls)
         self._refresh_available_methods()
+
+        spin_width = 90
 
         div_box = QGroupBox("Clean rows with divergence")
         self._div_threshold = QDoubleSpinBox()
@@ -2455,13 +2461,16 @@ class MsaCleanParamsDialog(QDialog):
         self._div_threshold.setDecimals(2)
         self._div_threshold.setSingleStep(0.05)
         self._div_threshold.setValue(opts.divergence.threshold)
+        self._div_threshold.setFixedWidth(spin_width)
 
         self._div_window = QSpinBox()
         self._div_window.setRange(1, 10_000)
         self._div_window.setValue(opts.divergence.window_size)
+        self._div_window.setFixedWidth(spin_width)
 
         div_form = QFormLayout(div_box)
         div_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        div_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         div_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         div_form.addRow("Divergence threshold:", self._div_threshold)
         div_form.addRow("Window size (bp):", self._div_window)
@@ -2472,13 +2481,16 @@ class MsaCleanParamsDialog(QDialog):
         self._row_gap_threshold.setDecimals(3)
         self._row_gap_threshold.setSingleStep(0.01)
         self._row_gap_threshold.setValue(opts.gap_row.gap_threshold)
+        self._row_gap_threshold.setFixedWidth(spin_width)
 
         self._row_gap_window = QSpinBox()
         self._row_gap_window.setRange(1, 10_000)
         self._row_gap_window.setValue(opts.gap_row.window_size)
+        self._row_gap_window.setFixedWidth(spin_width)
 
         gap_form = QFormLayout(gap_box)
         gap_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        gap_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         gap_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         gap_form.addRow("Gap proportion threshold:", self._row_gap_threshold)
         gap_form.addRow("Window size (bp):", self._row_gap_window)
@@ -2489,25 +2501,30 @@ class MsaCleanParamsDialog(QDialog):
         self._gap_threshold.setDecimals(2)
         self._gap_threshold.setSingleStep(0.05)
         self._gap_threshold.setValue(opts.gappy.gap_threshold)
+        self._gap_threshold.setFixedWidth(spin_width)
 
         self._simi_gap = QDoubleSpinBox()
         self._simi_gap.setRange(0.0, 1.0)
         self._simi_gap.setDecimals(2)
         self._simi_gap.setSingleStep(0.05)
         self._simi_gap.setValue(opts.gappy.simi_check_gap_thr)
+        self._simi_gap.setFixedWidth(spin_width)
 
         self._similarity = QDoubleSpinBox()
         self._similarity.setRange(0.0, 1.0)
         self._similarity.setDecimals(2)
         self._similarity.setSingleStep(0.05)
         self._similarity.setValue(opts.gappy.similarity_thr)
+        self._similarity.setFixedWidth(spin_width)
 
         self._min_nt = QSpinBox()
         self._min_nt.setRange(1, 50)
         self._min_nt.setValue(opts.gappy.min_nucleotide)
+        self._min_nt.setFixedWidth(spin_width)
 
         gappy_form = QFormLayout(gappy_box)
         gappy_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        gappy_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         gappy_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         gappy_form.addRow("Gap threshold:", self._gap_threshold)
         gappy_form.addRow("Similarity check gap threshold:", self._simi_gap)
@@ -2528,11 +2545,13 @@ class MsaCleanParamsDialog(QDialog):
         layout.addWidget(order_label)
         layout.addWidget(self._method_order)
         method_controls = QHBoxLayout()
+        method_controls.setSpacing(6)
         method_controls.addWidget(self._available_method, 1)
-        method_controls.addWidget(self._add_method_button)
-        method_controls.addWidget(self._remove_method_button)
+        method_controls.addWidget(self._add_method_button, 0)
+        method_controls.addWidget(self._remove_method_button, 0)
         layout.addLayout(method_controls)
         layout.addWidget(buttons)
+        self.adjustSize()
 
     def _listed_method_ids(self) -> list[str]:
         return [
