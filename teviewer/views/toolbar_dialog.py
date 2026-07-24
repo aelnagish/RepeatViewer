@@ -29,9 +29,6 @@ DEFAULT_TOOLBAR_FONT_SIZE = 12
 MAX_TOOLBAR_FONT_SIZE = 20
 MIN_TOOLBAR_FONT_SIZE = 8
 
-# Always first on the toolbar / in Settings → Toolbar.
-FIXED_TOOLBAR_PREFIX: tuple[str, ...] = ("blast", "align")
-
 # Removed from toolbar customization (kept elsewhere in the app if needed).
 TOOLBAR_CUSTOMIZE_HIDDEN = frozenset({"te_divergence_plot", "_sep_plugins"})
 
@@ -79,18 +76,13 @@ ALL_BUILTIN_TOOLBAR_IDS: tuple[str, ...] = (
 DEFAULT_TOOLBAR_ORDER: list[str] = [
     "blast",
     "align",
-    "define_genome",
     "tree",
-    "fastga",
-    "msa_clean",
     "flexidot",
     "teaid",
-    "te_genome_map",
-    "aliview",
+    "msa_clean",
     "extend",
     "consensus",
-    "te_benchmark",
-    "plugin:minimap2",
+    "te_genome_map",
 ]
 
 TOOLBAR_LABELS: dict[str, str] = {
@@ -109,7 +101,7 @@ TOOLBAR_LABELS: dict[str, str] = {
     "blast": "BLAST",
     "extend": "MSA Extend",
     "teaid": "TEAid",
-    "msa_clean": "MSA clean",
+    "msa_clean": "MSA Clean",
     "consensus": "Consensus",
     "flexidot": "Flexidot",
     "te_annotation": "TE annotation",
@@ -158,7 +150,7 @@ def normalize_toolbar_order(
     *,
     known: set[str] | None = None,
 ) -> list[str]:
-    """Drop removed ids, dedupe, and pin BLAST / Align at the front."""
+    """Drop removed ids and dedupe while preserving order."""
     cleaned: list[str] = []
     seen: set[str] = set()
     for tool_id in order:
@@ -170,22 +162,12 @@ def normalize_toolbar_order(
             continue
         cleaned.append(tool_id)
         seen.add(tool_id)
-    fixed = [tool_id for tool_id in FIXED_TOOLBAR_PREFIX if tool_id in cleaned]
-    rest = [tool_id for tool_id in cleaned if tool_id not in FIXED_TOOLBAR_PREFIX]
-    return fixed + rest
+    return cleaned
 
 
 def default_toolbar_order_for(registry: PluginRegistry | None = None) -> list[str]:
-    order = list(DEFAULT_TOOLBAR_ORDER)
-    if registry is None:
-        return normalize_toolbar_order(order)
-    plugin_tool_ids = [plugin_tool_id(p.id) for p in registry.all_plugins()]
-    known = set(order)
-    for tool_id in plugin_tool_ids:
-        if tool_id not in known:
-            order.append(tool_id)
-            known.add(tool_id)
-    return normalize_toolbar_order(order)
+    del registry  # Default set is fixed; plugins are added via Add button.
+    return normalize_toolbar_order(list(DEFAULT_TOOLBAR_ORDER))
 
 
 def build_toolbar_catalog(
@@ -228,12 +210,6 @@ def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
     )
     while visible and is_toolbar_separator(visible[0]):
         visible.pop(0)
-    if "define_genome" not in visible:
-        insert_at = len([t for t in FIXED_TOOLBAR_PREFIX if t in visible])
-        visible.insert(insert_at, "define_genome")
-    for tool_id in default_order:
-        if tool_id not in visible and tool_id not in TOOLBAR_CUSTOMIZE_HIDDEN:
-            visible.append(tool_id)
     return normalize_toolbar_order(visible, known=known)
 
 
@@ -285,11 +261,8 @@ class ToolbarCustomizeWidget(QWidget):
         self._registry = registry
         self._labels = toolbar_labels_for(registry)
         self._default_order = default_toolbar_order_for(registry)
-        self._enforcing_order = False
 
-        hint = QLabel(
-            "Drag to change button order. BLAST and Align stay at positions 1 and 2."
-        )
+        hint = QLabel("Drag to change button order.")
         hint.setWordWrap(True)
 
         self._font_size = QSpinBox()
@@ -309,9 +282,9 @@ class ToolbarCustomizeWidget(QWidget):
 
         self._list = QListWidget()
         self._list.setMinimumHeight(280)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self._list.model().rowsMoved.connect(self._enforce_fixed_prefix)
         self._populate(self._catalog)
 
         button_row = QHBoxLayout()
@@ -327,7 +300,7 @@ class ToolbarCustomizeWidget(QWidget):
         button_row.addWidget(self._add_btn)
 
         remove_btn = QPushButton("Remove")
-        remove_btn.setToolTip("Remove the selected toolbar button")
+        remove_btn.setToolTip("Remove the selected toolbar button(s)")
         remove_btn.clicked.connect(self._remove_selected)
         button_row.addWidget(remove_btn)
 
@@ -346,15 +319,7 @@ class ToolbarCustomizeWidget(QWidget):
         layout.addLayout(button_row)
 
     def _current_tool_ids(self) -> set[str]:
-        ids: set[str] = set()
-        for row in range(self._list.count()):
-            item = self._list.item(row)
-            if item is None:
-                continue
-            tool_id = item.data(Qt.ItemDataRole.UserRole)
-            if tool_id:
-                ids.add(str(tool_id))
-        return ids
+        return set(self._list_tool_ids())
 
     def _list_tool_ids(self) -> list[str]:
         ids: list[str] = []
@@ -394,8 +359,6 @@ class ToolbarCustomizeWidget(QWidget):
         added = 0
         for tool_id in tool_ids:
             if tool_id in current_ids or tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
-                continue
-            if tool_id in FIXED_TOOLBAR_PREFIX:
                 continue
             menu.addAction(
                 toolbar_item_label(tool_id, self._labels),
@@ -444,24 +407,20 @@ class ToolbarCustomizeWidget(QWidget):
         if tool_id in self._current_tool_ids():
             return
         item = self._append_list_item(tool_id, visible=True)
-        self._enforce_fixed_prefix()
         self._list.setCurrentItem(item)
         self._list.scrollToItem(item)
 
     def _remove_selected(self) -> None:
-        item = self._list.currentItem()
-        if item is None:
+        selected = self._list.selectedItems()
+        if not selected:
             return
-        tool_id = item.data(Qt.ItemDataRole.UserRole)
-        if tool_id in FIXED_TOOLBAR_PREFIX:
-            QMessageBox.information(
-                self,
-                "Toolbar",
-                "BLAST and Align stay on the toolbar and cannot be removed.",
-            )
-            return
-        row = self._list.row(item)
-        self._list.takeItem(row)
+        rows = sorted(
+            (self._list.row(item) for item in selected),
+            reverse=True,
+        )
+        for row in rows:
+            if row >= 0:
+                self._list.takeItem(row)
 
     def _populate(self, catalog: list[tuple[str, bool]]) -> None:
         self._list.clear()
@@ -469,32 +428,10 @@ class ToolbarCustomizeWidget(QWidget):
             [tool_id for tool_id, _visible in catalog if tool_id not in TOOLBAR_CUSTOMIZE_HIDDEN],
             known=set(self._labels),
         )
-        for index, tool_id in enumerate(FIXED_TOOLBAR_PREFIX):
-            if tool_id not in ordered_ids and tool_id in self._labels:
-                ordered_ids.insert(index, tool_id)
         for tool_id in ordered_ids:
             if tool_id not in self._labels and not is_toolbar_separator(tool_id):
                 continue
             self._append_list_item(tool_id, visible=True)
-
-    def _enforce_fixed_prefix(self, *_args) -> None:
-        if self._enforcing_order:
-            return
-        entries = self._list_tool_ids()
-        if not entries:
-            return
-        ordered_ids = normalize_toolbar_order(entries, known=set(self._labels))
-        for tool_id in FIXED_TOOLBAR_PREFIX:
-            if tool_id not in ordered_ids and tool_id in self._labels:
-                insert_at = list(FIXED_TOOLBAR_PREFIX).index(tool_id)
-                ordered_ids.insert(insert_at, tool_id)
-        if entries == ordered_ids:
-            return
-        self._enforcing_order = True
-        try:
-            self._populate([(tool_id, True) for tool_id in ordered_ids])
-        finally:
-            self._enforcing_order = False
 
     def _reset_default(self) -> None:
         self._font_size.setValue(DEFAULT_TOOLBAR_FONT_SIZE)

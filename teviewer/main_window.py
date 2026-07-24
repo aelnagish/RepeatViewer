@@ -3501,7 +3501,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "msa_clean":
             self._add_toolbar_text_menu_button(
                 bar,
-                "MSA clean",
+                "MSA Clean",
                 self._run_default_msa_clean,
                 self._populate_msa_clean_menu,
                 tooltip=tip,
