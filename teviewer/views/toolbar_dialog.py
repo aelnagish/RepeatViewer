@@ -28,10 +28,28 @@ TOOLBAR_SETTINGS_GROUP = "toolbar"
 DEFAULT_TOOLBAR_FONT_SIZE = 12
 MAX_TOOLBAR_FONT_SIZE = 20
 MIN_TOOLBAR_FONT_SIZE = 8
-TOOLBAR_CUSTOMIZE_HIDDEN = frozenset({"te_divergence_plot"})
 
-# Sequence menu tools that can be added to the toolbar (menu order).
+# Always first on the toolbar / in Settings → Toolbar.
+FIXED_TOOLBAR_PREFIX: tuple[str, ...] = ("blast", "align")
+
+# Removed from toolbar customization (kept elsewhere in the app if needed).
+TOOLBAR_CUSTOMIZE_HIDDEN = frozenset({"te_divergence_plot", "_sep_plugins"})
+
+# Add-button menus mirror the main menu bar (toolbar-capable items only).
+FILE_TOOLBAR_IDS: tuple[str, ...] = (
+    "define_genome",
+)
+
 SEQUENCE_TOOLBAR_IDS: tuple[str, ...] = (
+    "new_sequence",
+    "group_sequences",
+    "extract_sequences",
+    "reverse_complement",
+    "orf_prediction",
+    "translate",
+)
+
+TOOLS_TOOLBAR_IDS: tuple[str, ...] = (
     "aliview",
     "blast",
     "align",
@@ -45,25 +63,23 @@ SEQUENCE_TOOLBAR_IDS: tuple[str, ...] = (
     "flexidot",
     "te_annotation",
     "te_genome_map",
-    "te_divergence_plot",
     "te_benchmark",
 )
 
-
 # Built-in tools known to the customize dialog.
 ALL_BUILTIN_TOOLBAR_IDS: tuple[str, ...] = (
-    "define_genome",
+    *FILE_TOOLBAR_IDS,
     *SEQUENCE_TOOLBAR_IDS,
+    *TOOLS_TOOLBAR_IDS,
     "_sep1",
-    "_sep_plugins",
     "plugin:minimap2",
 )
 
 # Default visible toolbar (Settings → Toolbar → Reset to default).
 DEFAULT_TOOLBAR_ORDER: list[str] = [
-    "define_genome",
     "blast",
     "align",
+    "define_genome",
     "tree",
     "fastga",
     "msa_clean",
@@ -74,30 +90,33 @@ DEFAULT_TOOLBAR_ORDER: list[str] = [
     "extend",
     "consensus",
     "te_benchmark",
-    "_sep_plugins",
     "plugin:minimap2",
-    "te_divergence_plot",
 ]
 
 TOOLBAR_LABELS: dict[str, str] = {
     "define_genome": "Define genome",
+    "new_sequence": "New Sequence…",
+    "group_sequences": "Group Sequences into a List…",
+    "extract_sequences": "Extract Sequences from List…",
+    "reverse_complement": "Reverse Complement",
+    "orf_prediction": "ORF Prediction",
+    "translate": "Translate",
     "aliview": "AliView",
     "_sep1": "— separator —",
-    "align": "Align (MAFFT)",
+    "align": "Align",
     "tree": "Tree",
     "fastga": "FastGA",
     "blast": "BLAST",
-    "extend": "Extend",
+    "extend": "MSA Extend",
     "teaid": "TEAid",
     "msa_clean": "MSA clean",
     "consensus": "Consensus",
     "flexidot": "Flexidot",
     "te_annotation": "TE annotation",
-    "te_genome_map": "TE visualization",
+    "te_genome_map": "Visualization",
     "te_benchmark": "Benchmarking",
     "te_divergence_plot": "TE divergence",
     "tsd_search": "TSD search",
-    "_sep_plugins": "— plugins —",
     "plugin:minimap2": "Minimap2",
 }
 
@@ -108,7 +127,7 @@ def is_toolbar_separator(tool_id: str) -> bool:
 
 def toolbar_item_label(tool_id: str, labels: dict[str, str] | None = None) -> str:
     lookup = labels or TOOLBAR_LABELS
-    if tool_id.startswith("_sep") and tool_id != "_sep_plugins":
+    if is_toolbar_separator(tool_id):
         return "— separator —"
     return lookup.get(tool_id, tool_id)
 
@@ -134,26 +153,39 @@ def toolbar_labels_for(registry: PluginRegistry | None = None) -> dict[str, str]
     return labels
 
 
+def normalize_toolbar_order(
+    order: list[str],
+    *,
+    known: set[str] | None = None,
+) -> list[str]:
+    """Drop removed ids, dedupe, and pin BLAST / Align at the front."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for tool_id in order:
+        if tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
+            continue
+        if tool_id in seen:
+            continue
+        if known is not None and tool_id not in known and not is_toolbar_separator(tool_id):
+            continue
+        cleaned.append(tool_id)
+        seen.add(tool_id)
+    fixed = [tool_id for tool_id in FIXED_TOOLBAR_PREFIX if tool_id in cleaned]
+    rest = [tool_id for tool_id in cleaned if tool_id not in FIXED_TOOLBAR_PREFIX]
+    return fixed + rest
+
+
 def default_toolbar_order_for(registry: PluginRegistry | None = None) -> list[str]:
     order = list(DEFAULT_TOOLBAR_ORDER)
     if registry is None:
-        return order
+        return normalize_toolbar_order(order)
     plugin_tool_ids = [plugin_tool_id(p.id) for p in registry.all_plugins()]
-    if not plugin_tool_ids:
-        return [
-            tool_id
-            for tool_id in order
-            if tool_id != "_sep_plugins" and not tool_id.startswith("plugin:")
-        ]
     known = set(order)
-    if "_sep_plugins" not in known:
-        order.append("_sep_plugins")
-        known.add("_sep_plugins")
     for tool_id in plugin_tool_ids:
         if tool_id not in known:
             order.append(tool_id)
             known.add(tool_id)
-    return order
+    return normalize_toolbar_order(order)
 
 
 def build_toolbar_catalog(
@@ -164,7 +196,7 @@ def build_toolbar_catalog(
     labels = toolbar_labels_for(registry)
     catalog: list[tuple[str, bool]] = []
     seen: set[str] = set()
-    for tool_id in visible_order:
+    for tool_id in normalize_toolbar_order(visible_order, known=set(labels)):
         if tool_id in seen:
             continue
         if tool_id not in labels and not is_toolbar_separator(tool_id):
@@ -190,22 +222,19 @@ def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
     else:
         ids = [part.strip() for part in str(raw).split(",") if part.strip()]
     known = set(labels)
-    visible = [
-        tool_id
-        for tool_id in ids
-        if tool_id in known or is_toolbar_separator(tool_id)
-    ]
-    while visible and visible[0].startswith("_sep"):
+    visible = normalize_toolbar_order(
+        [tool_id for tool_id in ids if tool_id in known or is_toolbar_separator(tool_id)],
+        known=known,
+    )
+    while visible and is_toolbar_separator(visible[0]):
         visible.pop(0)
     if "define_genome" not in visible:
-        if "blast" in visible:
-            visible.insert(visible.index("blast"), "define_genome")
-        else:
-            visible.insert(0, "define_genome")
+        insert_at = len([t for t in FIXED_TOOLBAR_PREFIX if t in visible])
+        visible.insert(insert_at, "define_genome")
     for tool_id in default_order:
-        if tool_id not in visible:
+        if tool_id not in visible and tool_id not in TOOLBAR_CUSTOMIZE_HIDDEN:
             visible.append(tool_id)
-    return visible
+    return normalize_toolbar_order(visible, known=known)
 
 
 def save_toolbar_order(
@@ -215,11 +244,7 @@ def save_toolbar_order(
     from PySide6.QtCore import QSettings
 
     known = set(toolbar_labels_for(registry))
-    cleaned = [
-        tool_id
-        for tool_id in order
-        if tool_id in known or is_toolbar_separator(tool_id)
-    ]
+    cleaned = normalize_toolbar_order(order, known=known)
     s = QSettings()
     s.beginGroup(TOOLBAR_SETTINGS_GROUP)
     s.setValue("order", cleaned)
@@ -260,8 +285,11 @@ class ToolbarCustomizeWidget(QWidget):
         self._registry = registry
         self._labels = toolbar_labels_for(registry)
         self._default_order = default_toolbar_order_for(registry)
+        self._enforcing_order = False
 
-        hint = QLabel("Drag to change button order.")
+        hint = QLabel(
+            "Drag to change button order. BLAST and Align stay at positions 1 and 2."
+        )
         hint.setWordWrap(True)
 
         self._font_size = QSpinBox()
@@ -283,6 +311,7 @@ class ToolbarCustomizeWidget(QWidget):
         self._list.setMinimumHeight(280)
         self._list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._list.model().rowsMoved.connect(self._enforce_fixed_prefix)
         self._populate(self._catalog)
 
         button_row = QHBoxLayout()
@@ -291,11 +320,16 @@ class ToolbarCustomizeWidget(QWidget):
 
         self._add_btn = QPushButton("Add button…")
         self._add_btn.setToolTip(
-            "Add Sequence menu tools, plugins, or a separator to this list"
+            "Add File, Sequence, Tools, or Plugins items, or a separator"
         )
         self._add_menu = QMenu(self)
         self._add_btn.clicked.connect(self._show_add_menu)
         button_row.addWidget(self._add_btn)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.setToolTip("Remove the selected toolbar button")
+        remove_btn.clicked.connect(self._remove_selected)
+        button_row.addWidget(remove_btn)
 
         reset_btn = QPushButton("Reset to default")
         reset_btn.clicked.connect(self._reset_default)
@@ -322,17 +356,26 @@ class ToolbarCustomizeWidget(QWidget):
                 ids.add(str(tool_id))
         return ids
 
+    def _list_tool_ids(self) -> list[str]:
+        ids: list[str] = []
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            if item is None:
+                continue
+            tool_id = item.data(Qt.ItemDataRole.UserRole)
+            if tool_id:
+                ids.append(str(tool_id))
+        return ids
+
     def _append_list_item(self, tool_id: str, *, visible: bool = True) -> QListWidgetItem:
+        del visible
         item = QListWidgetItem(toolbar_item_label(tool_id, self._labels))
         item.setData(Qt.ItemDataRole.UserRole, tool_id)
         item.setFlags(
-            item.flags()
-            | Qt.ItemFlag.ItemIsUserCheckable
-            | Qt.ItemFlag.ItemIsEnabled
+            Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
-        )
-        item.setCheckState(
-            Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked
+            | Qt.ItemFlag.ItemIsDragEnabled
+            | Qt.ItemFlag.ItemIsDropEnabled
         )
         self._list.addItem(item)
         return item
@@ -341,24 +384,35 @@ class ToolbarCustomizeWidget(QWidget):
         self._populate_add_menu()
         self._add_menu.exec(self._add_btn.mapToGlobal(self._add_btn.rect().bottomLeft()))
 
+    def _add_category_menu(
+        self,
+        title: str,
+        tool_ids: tuple[str, ...],
+        current_ids: set[str],
+    ) -> None:
+        menu = self._add_menu.addMenu(title)
+        added = 0
+        for tool_id in tool_ids:
+            if tool_id in current_ids or tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
+                continue
+            if tool_id in FIXED_TOOLBAR_PREFIX:
+                continue
+            menu.addAction(
+                toolbar_item_label(tool_id, self._labels),
+                lambda checked=False, tid=tool_id: self._add_tool(tid),
+            )
+            added += 1
+        if added == 0:
+            empty = menu.addAction(f"(all {title} tools listed)")
+            empty.setEnabled(False)
+
     def _populate_add_menu(self) -> None:
         self._add_menu.clear()
         current_ids = self._current_tool_ids()
 
-        sequence_menu = self._add_menu.addMenu("Sequence")
-        sequence_added = 0
-        for tool_id in SEQUENCE_TOOLBAR_IDS:
-            if tool_id in current_ids:
-                continue
-            label = toolbar_item_label(tool_id, self._labels)
-            sequence_menu.addAction(
-                label,
-                lambda checked=False, tid=tool_id: self._add_tool(tid),
-            )
-            sequence_added += 1
-        if sequence_added == 0:
-            empty = sequence_menu.addAction("(all Sequence tools listed)")
-            empty.setEnabled(False)
+        self._add_category_menu("File", FILE_TOOLBAR_IDS, current_ids)
+        self._add_category_menu("Sequence", SEQUENCE_TOOLBAR_IDS, current_ids)
+        self._add_category_menu("Tools", TOOLS_TOOLBAR_IDS, current_ids)
 
         plugins_menu = self._add_menu.addMenu("Plugins")
         plugins_added = 0
@@ -376,12 +430,6 @@ class ToolbarCustomizeWidget(QWidget):
             empty = plugins_menu.addAction("(all plugins listed)")
             empty.setEnabled(False)
 
-        if "_sep_plugins" not in current_ids:
-            self._add_menu.addAction(
-                toolbar_item_label("_sep_plugins", self._labels),
-                lambda: self._add_tool("_sep_plugins"),
-            )
-
         self._add_menu.addSeparator()
         self._add_menu.addAction(
             "— separator —",
@@ -389,43 +437,74 @@ class ToolbarCustomizeWidget(QWidget):
         )
 
     def _add_tool(self, tool_id: str) -> None:
-        if is_toolbar_separator(tool_id) and tool_id != "_sep_plugins":
+        if tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
+            return
+        if is_toolbar_separator(tool_id):
             tool_id = next_separator_tool_id(self._current_tool_ids())
         if tool_id in self._current_tool_ids():
             return
         item = self._append_list_item(tool_id, visible=True)
+        self._enforce_fixed_prefix()
         self._list.setCurrentItem(item)
         self._list.scrollToItem(item)
 
+    def _remove_selected(self) -> None:
+        item = self._list.currentItem()
+        if item is None:
+            return
+        tool_id = item.data(Qt.ItemDataRole.UserRole)
+        if tool_id in FIXED_TOOLBAR_PREFIX:
+            QMessageBox.information(
+                self,
+                "Toolbar",
+                "BLAST and Align stay on the toolbar and cannot be removed.",
+            )
+            return
+        row = self._list.row(item)
+        self._list.takeItem(row)
+
     def _populate(self, catalog: list[tuple[str, bool]]) -> None:
         self._list.clear()
-        for tool_id, visible in catalog:
+        ordered_ids = normalize_toolbar_order(
+            [tool_id for tool_id, _visible in catalog if tool_id not in TOOLBAR_CUSTOMIZE_HIDDEN],
+            known=set(self._labels),
+        )
+        for index, tool_id in enumerate(FIXED_TOOLBAR_PREFIX):
+            if tool_id not in ordered_ids and tool_id in self._labels:
+                ordered_ids.insert(index, tool_id)
+        for tool_id in ordered_ids:
             if tool_id not in self._labels and not is_toolbar_separator(tool_id):
                 continue
-            self._append_list_item(tool_id, visible=visible)
+            self._append_list_item(tool_id, visible=True)
+
+    def _enforce_fixed_prefix(self, *_args) -> None:
+        if self._enforcing_order:
+            return
+        entries = self._list_tool_ids()
+        if not entries:
+            return
+        ordered_ids = normalize_toolbar_order(entries, known=set(self._labels))
+        for tool_id in FIXED_TOOLBAR_PREFIX:
+            if tool_id not in ordered_ids and tool_id in self._labels:
+                insert_at = list(FIXED_TOOLBAR_PREFIX).index(tool_id)
+                ordered_ids.insert(insert_at, tool_id)
+        if entries == ordered_ids:
+            return
+        self._enforcing_order = True
+        try:
+            self._populate([(tool_id, True) for tool_id in ordered_ids])
+        finally:
+            self._enforcing_order = False
 
     def _reset_default(self) -> None:
         self._font_size.setValue(DEFAULT_TOOLBAR_FONT_SIZE)
-        self._populate(
-            [
-                (tool_id, True)
-                for tool_id in self._default_order
-            ]
-        )
+        self._populate([(tool_id, True) for tool_id in self._default_order])
 
     def has_visible_tools(self) -> bool:
         return bool(self.result_order())
 
     def result_order(self) -> list[str]:
-        order: list[str] = []
-        for row in range(self._list.count()):
-            item = self._list.item(row)
-            if item is None or item.checkState() != Qt.CheckState.Checked:
-                continue
-            tool_id = item.data(Qt.ItemDataRole.UserRole)
-            if tool_id and (str(tool_id) in self._labels or is_toolbar_separator(str(tool_id))):
-                order.append(str(tool_id))
-        return order
+        return normalize_toolbar_order(self._list_tool_ids(), known=set(self._labels))
 
     def result_font_size(self) -> int:
         return self._font_size.value()

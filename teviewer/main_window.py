@@ -451,6 +451,12 @@ _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 
 _TOOLBAR_TOOLTIPS = {
     "define_genome": "Set or change the project reference genome FASTA",
+    "new_sequence": "Create a new empty sequence FASTA",
+    "group_sequences": "Combine selected sequences into one list FASTA",
+    "extract_sequences": "Extract selected records from a list FASTA",
+    "reverse_complement": "Reverse-complement selected FASTA sequences",
+    "orf_prediction": "Predict ORFs in selected FASTA sequences",
+    "translate": "Translate selected DNA FASTA to protein",
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
     "tree": "Build a phylogenetic tree from an alignment (needs 3+ sequences)",
@@ -3135,7 +3141,7 @@ class MainWindow(QMainWindow):
         return btn
 
     def _add_toolbar_spacer(self, bar: QToolBar, width: int = 10) -> None:
-        """Invisible gap between toolbar groups (no dot or vertical rule)."""
+        """Invisible gap between toolbar groups."""
         spacer = QWidget(self._toolbar_container)
         spacer.setFixedWidth(width)
         spacer.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
@@ -3143,6 +3149,27 @@ class MainWindow(QMainWindow):
         self._toolbar_hbox.addWidget(spacer)
         self._register_toolbar_item(spacer, None)  # no menu entry for spacers
 
+    def _add_toolbar_separator(self, bar: QToolBar) -> None:
+        """Visible vertical rule between toolbar groups (also in overflow menu)."""
+        del bar
+        wrap = QWidget(self._toolbar_container)
+        wrap.setObjectName("ToolbarSeparator")
+        wrap.setFixedWidth(11)
+        wrap.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(5, 5, 5, 5)
+        row.setSpacing(0)
+        line = QFrame(wrap)
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFixedWidth(1)
+        line.setStyleSheet("background: #b0b0b0; border: 0; max-width: 1px;")
+        row.addWidget(line)
+        self._toolbar_hbox.addWidget(wrap)
+
+        def _overflow(menu: QMenu) -> None:
+            menu.addSeparator()
+
+        self._register_toolbar_item(wrap, _overflow)
     def _add_toolbar_text_menu_button(
         self,
         bar,
@@ -3334,13 +3361,58 @@ class MainWindow(QMainWindow):
     def _add_toolbar_tool(self, bar, tool_id: str) -> None:
         tip = _TOOLBAR_TOOLTIPS.get(tool_id, "")
         if tool_id.startswith("_sep"):
-            self._add_toolbar_spacer(bar, width=11 if tool_id == "_sep_plugins" else 7)
+            self._add_toolbar_separator(bar)
         elif tool_id == "define_genome":
             self._add_toolbar_plain_button(
                 bar,
                 "Define genome",
                 self._open_set_genome,
                 job_action=False,
+                tooltip=tip,
+            )
+        elif tool_id == "new_sequence":
+            self._add_toolbar_text_action(
+                bar,
+                "New Sequence…",
+                self._new_sequence,
+                job_action=False,
+                tooltip=tip,
+            )
+        elif tool_id == "group_sequences":
+            self._add_toolbar_text_action(
+                bar,
+                "Group Sequences…",
+                self._group_sequences,
+                job_action=False,
+                tooltip=tip,
+            )
+        elif tool_id == "extract_sequences":
+            self._add_toolbar_text_action(
+                bar,
+                "Extract Sequences…",
+                self._extract_sequences_from_list,
+                job_action=False,
+                tooltip=tip,
+            )
+        elif tool_id == "reverse_complement":
+            self._add_toolbar_text_action(
+                bar,
+                "Reverse Complement",
+                lambda: self._apply_function("reverse_complement"),
+                tooltip=tip,
+            )
+        elif tool_id == "orf_prediction":
+            self._add_toolbar_text_action(
+                bar,
+                "ORF Prediction",
+                lambda: self._apply_function("orf_prediction"),
+                tooltip=tip,
+            )
+        elif tool_id == "translate":
+            self._add_toolbar_text_action(
+                bar,
+                "Translate",
+                lambda: self._apply_function("dna_translation"),
                 tooltip=tip,
             )
         elif tool_id == "aliview":
@@ -3388,7 +3460,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "te_genome_map":
             self._add_toolbar_text_menu_button(
                 bar,
-                "TE visualization",
+                "Visualization",
                 self._open_te_density_plot_dialog,
                 self._populate_te_visualization_menu,
                 tooltip=tip,
@@ -3413,7 +3485,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "extend":
             self._add_toolbar_text_menu_button(
                 bar,
-                "Extend",
+                "MSA Extend",
                 self._run_extend,
                 self._populate_extend_menu,
                 tooltip=tip,
