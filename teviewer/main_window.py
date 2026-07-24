@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDockWidget,
+    QFrame,
     QHeaderView,
     QFileDialog,
     QHBoxLayout,
@@ -75,6 +76,51 @@ from PySide6.QtWidgets import (
 _BROWSER_DOCK_WIDTH = 480
 _BROWSER_FOLDER_TREE_WIDTH = 120
 _BROWSER_FILES_PREVIEW_SPLIT = (170, 210)
+
+
+class _ToolbarPopup(QWidget):
+    """Non-grabbing toolbar dropdown with explicit screen positioning."""
+
+    closed = Signal()
+
+    def __init__(self, actions: list[QAction]) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint,
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+        self.setStyleSheet(
+            "_ToolbarPopup { border: 1px solid palette(mid); background: palette(window); }"
+            "QPushButton { border: 0; border-radius: 0; padding: 5px 26px 5px 14px;"
+            " text-align: left; background: transparent; }"
+            "QPushButton:hover { background: palette(highlight);"
+            " color: palette(highlighted-text); }"
+        )
+        for action in actions:
+            if action.isSeparator():
+                separator = QFrame(self)
+                separator.setFrameShape(QFrame.Shape.HLine)
+                layout.addWidget(separator)
+                continue
+            button = QPushButton(action.text().replace("&", ""), self)
+            button.setEnabled(action.isEnabled())
+            button.setToolTip(action.toolTip())
+            button.clicked.connect(
+                lambda checked=False, selected=action: self._run_action(selected)
+            )
+            layout.addWidget(button)
+
+    def _run_action(self, action: QAction) -> None:
+        self.close()
+        action.trigger()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self.closed.emit()
+
+
 from teviewer import __version__
 from teviewer.branding import APP_DISPLAY_NAME
 from teviewer.backends.genome_prepare import ensure_genome_artifacts
@@ -239,7 +285,7 @@ from teviewer.widgets.browser_icons import (
     browser_folder_icon,
     browser_folder_spacer_icon,
 )
-from teviewer.widgets.browser_dock import PreviewDockWidget
+from teviewer.widgets.browser_dock import PreviewDockWidget, ZeroDockTitleBar
 from teviewer.widgets.browser_panel_settings import load_browser_panel_font_size
 from teviewer.ui.platform import reveal_in_file_manager
 from teviewer.ui.text_editor import open_in_text_editor
@@ -2076,15 +2122,15 @@ class MainWindow(QMainWindow):
         preview_zoom_layout.setSpacing(6)
         preview_zoom_layout.addWidget(self._preview_zoom_bar)
         preview_zoom_layout.addWidget(self._annotation_zoom_bar)
-        self._dock_preview.setTitleBarWidget(
-            BrowserDockTitleBar(
-                self._dock_preview,
-                "Preview",
-                leading=preview_file_tabs_host,
-                leading_stretch=1,
-                trailing=preview_zoom_host,
-            )
+        preview_title_bar = BrowserDockTitleBar(
+            self._dock_preview,
+            "Preview",
+            leading=preview_file_tabs_host,
+            leading_stretch=1,
+            trailing=preview_zoom_host,
         )
+        self._dock_preview.setTitleBarWidget(ZeroDockTitleBar(self._dock_preview))
+        preview_layout.insertWidget(0, preview_title_bar)
         self._dock_folders.setTitleBarWidget(
             BrowserDockTitleBar(self._dock_folders, "Folders", trailing=folders_trailing)
         )
