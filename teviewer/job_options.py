@@ -5,6 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+
+def _to_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 DEFAULT_EXTEND_LEFT = 1000
 DEFAULT_EXTEND_RIGHT = 1000
 # Default reporting E-value (shown as 0.0001 with four decimal places in the UI).
@@ -175,9 +182,9 @@ MUSCLE_MODES = (MUSCLE_MODE_ALIGN, MUSCLE_MODE_SUPER5)
 
 @dataclass
 class AlignOptions:
-    """Default aligner plus MAFFT and MUSCLE command-line parameters."""
+    """Combined-MSA aligner plus MAFFT and MUSCLE command-line parameters."""
 
-    default_aligner: str = ALIGNER_MAFFT
+    combined_aligner: str = ALIGNER_MAFFT
     num_threads: int = DEFAULT_ALIGN_THREADS
     strategy: str = MAFFT_STRATEGY_FFT_NS_1
     sequence_type: str = MAFFT_SEQUENCE_AUTO
@@ -393,13 +400,6 @@ class GapRowOptions:
     window_size: int = DEFAULT_GAP_ROW_WINDOW_SIZE
 
 
-MSA_CLEAN_METHOD_CHOICES: tuple[tuple[str, str], ...] = (
-    ("msa_clean_gappy", "Remove gappy columns"),
-    ("msa_clean_div", "Clean row with divergence"),
-    ("msa_clean_gap", "Clean row with gap"),
-    ("msa_clean_row_col", "Clean row and column"),
-)
-MSA_CLEAN_METHOD_IDS = frozenset(mid for mid, _ in MSA_CLEAN_METHOD_CHOICES)
 DEFAULT_MSA_CLEAN_METHOD = "msa_clean_gappy"
 
 MSA_CLEAN_METHOD_DESCRIPTIONS: dict[str, str] = {
@@ -409,23 +409,10 @@ MSA_CLEAN_METHOD_DESCRIPTIONS: dict[str, str] = {
         "(uses the clean row with divergence parameters below)."
     ),
     "msa_clean_gap": (
-        "After divergence trimming, trim ends where rows are mostly gaps "
+        "Trim alignment ends where rows are mostly gaps "
         "(uses the clean row with gap parameters below)."
     ),
-    "msa_clean_row_col": (
-        "Step 1: clean row with divergence. "
-        "Step 2: remove gappy columns on that result. "
-        "Final output: {name}_clean.fa (intermediate {name}_cd.fa)."
-    ),
 }
-
-
-def msa_clean_method_label(method_id: str) -> str:
-    for mid, label in MSA_CLEAN_METHOD_CHOICES:
-        if mid == method_id:
-            return label
-    return method_id
-
 
 def msa_clean_method_description(method_id: str) -> str:
     return MSA_CLEAN_METHOD_DESCRIPTIONS.get(
@@ -438,14 +425,16 @@ def msa_clean_method_description(method_id: str) -> str:
 class MsaCleanOptions:
     """All MSA clean tool parameters (gappy columns + row cleaning)."""
 
-    default_method: str = DEFAULT_MSA_CLEAN_METHOD
+    use_divergence: bool = False
+    use_gap_row: bool = False
+    use_gappy_columns: bool = True
     gappy: GappyColumnOptions = field(default_factory=GappyColumnOptions)
     divergence: DivergenceRowOptions = field(default_factory=DivergenceRowOptions)
     gap_row: GapRowOptions = field(default_factory=GapRowOptions)
 
     def __post_init__(self) -> None:
-        if self.default_method not in MSA_CLEAN_METHOD_IDS:
-            self.default_method = DEFAULT_MSA_CLEAN_METHOD
+        if not (self.use_divergence or self.use_gap_row or self.use_gappy_columns):
+            self.use_gappy_columns = True
 
 
 def load_msa_clean_options() -> MsaCleanOptions:
@@ -453,9 +442,21 @@ def load_msa_clean_options() -> MsaCleanOptions:
 
     s = QSettings()
     s.beginGroup("msa_clean")
-    method = str(s.value("default_method", DEFAULT_MSA_CLEAN_METHOD))
+    if s.contains("use_divergence"):
+        use_divergence = _to_bool(s.value("use_divergence"), False)
+        use_gap_row = _to_bool(s.value("use_gap_row"), False)
+        use_gappy_columns = _to_bool(s.value("use_gappy_columns"), True)
+    else:
+        # Migrate the former single-method toolbar setting into the equivalent
+        # configurable pipeline.
+        method = str(s.value("default_method", DEFAULT_MSA_CLEAN_METHOD))
+        use_divergence = method in {"msa_clean_div", "msa_clean_gap", "msa_clean_row_col"}
+        use_gap_row = method == "msa_clean_gap"
+        use_gappy_columns = method in {"msa_clean_gappy", "msa_clean_row_col"}
     opts = MsaCleanOptions(
-        default_method=method,
+        use_divergence=use_divergence,
+        use_gap_row=use_gap_row,
+        use_gappy_columns=use_gappy_columns,
         gappy=GappyColumnOptions(
             gap_threshold=float(s.value("gappy_gap_threshold", DEFAULT_GAP_COL_GAP_THRESHOLD)),
             simi_check_gap_thr=float(
@@ -667,14 +668,16 @@ def load_align_options() -> AlignOptions:
     sequence_type = str(v.get("sequence_type", MAFFT_SEQUENCE_AUTO))
     if sequence_type not in MAFFT_SEQUENCE_TYPES:
         sequence_type = MAFFT_SEQUENCE_AUTO
-    default_aligner = str(v.get("default_aligner", ALIGNER_MAFFT))
-    if default_aligner not in ALIGNERS:
-        default_aligner = ALIGNER_MAFFT
+    combined_aligner = str(
+        v.get("combined_aligner", v.get("default_aligner", ALIGNER_MAFFT))
+    )
+    if combined_aligner not in ALIGNERS:
+        combined_aligner = ALIGNER_MAFFT
     muscle_mode = str(v.get("muscle_mode", MUSCLE_MODE_ALIGN))
     if muscle_mode not in MUSCLE_MODES:
         muscle_mode = MUSCLE_MODE_ALIGN
     return AlignOptions(
-        default_aligner=default_aligner,
+        combined_aligner=combined_aligner,
         num_threads=max(1, int(v.get("num_threads", DEFAULT_ALIGN_THREADS))),
         strategy=strategy,
         sequence_type=sequence_type,
@@ -696,7 +699,7 @@ def save_align_options(opts: AlignOptions) -> None:
     _save_settings_group(
         "align",
         {
-            "default_aligner": opts.default_aligner,
+            "combined_aligner": opts.combined_aligner,
             "num_threads": opts.num_threads,
             "strategy": opts.strategy,
             "sequence_type": opts.sequence_type,
@@ -1019,7 +1022,10 @@ def save_msa_clean_options(opts: MsaCleanOptions) -> None:
 
     s = QSettings()
     s.beginGroup("msa_clean")
-    s.setValue("default_method", opts.default_method)
+    s.remove("default_method")
+    s.setValue("use_divergence", opts.use_divergence)
+    s.setValue("use_gap_row", opts.use_gap_row)
+    s.setValue("use_gappy_columns", opts.use_gappy_columns)
     g = opts.gappy
     s.setValue("gappy_gap_threshold", g.gap_threshold)
     s.setValue("gappy_simi_check_gap_thr", g.simi_check_gap_thr)

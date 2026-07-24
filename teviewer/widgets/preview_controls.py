@@ -106,11 +106,11 @@ def _make_zoom_percent_spin(
     return spin
 
 
-def _make_preview_tools_button(*, tooltip: str) -> QToolButton:
-    """Bordered Tools menu control matching the preview zoom spinbox."""
+def _make_preview_actions_button(*, tooltip: str) -> QToolButton:
+    """Bordered Actions menu control matching the preview zoom spinbox."""
     btn = QToolButton()
-    btn.setObjectName("PreviewToolsButton")
-    btn.setText("Tools")
+    btn.setObjectName("PreviewActionsButton")
+    btn.setText("Actions")
     btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
     btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
     btn.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -123,7 +123,7 @@ def _make_preview_tools_button(*, tooltip: str) -> QToolButton:
 
 
 class PreviewZoomBar(QWidget):
-    """Compact preview scale controls (% spin / Tools) for the Preview title bar."""
+    """Compact preview scale controls (% spin / Actions) for the Preview title bar."""
 
     zoom_changed = Signal(int)
     fit_mode_changed = Signal(str)
@@ -146,25 +146,25 @@ class PreviewZoomBar(QWidget):
         self._spin.valueChanged.connect(self._on_spin)
         layout.addWidget(self._spin)
 
-        self._tools_btn = _make_preview_tools_button(
-            tooltip="Preview tools",
+        self._actions_btn = _make_preview_actions_button(
+            tooltip="Preview actions",
         )
-        self._tools_menu = QMenu(self._tools_btn)
-        self._reset_scale_action = QAction("Reset scale", self._tools_menu)
+        self._actions_menu = QMenu(self._actions_btn)
+        self._reset_scale_action = QAction("Reset scale", self._actions_menu)
         self._reset_scale_action.setToolTip("Restore default preview zoom (100%)")
         self._reset_scale_action.triggered.connect(self._reset_zoom)
-        self._edit_text_action = QAction("Edit text", self._tools_menu)
+        self._edit_text_action = QAction("Edit text", self._actions_menu)
         self._edit_text_action.setToolTip("Allow editing the text shown in Preview")
         self._edit_text_action.triggered.connect(self.edit_text_requested.emit)
-        self._save_text_action = QAction("Save text", self._tools_menu)
+        self._save_text_action = QAction("Save text", self._actions_menu)
         self._save_text_action.setToolTip("Save Preview text changes to disk")
         self._save_text_action.triggered.connect(self.save_text_requested.emit)
-        self._tools_menu.addAction(self._reset_scale_action)
-        self._tools_menu.addSeparator()
-        self._tools_menu.addAction(self._edit_text_action)
-        self._tools_menu.addAction(self._save_text_action)
-        self._tools_btn.setMenu(self._tools_menu)
-        layout.addWidget(self._tools_btn)
+        self._actions_menu.addAction(self._reset_scale_action)
+        self._actions_menu.addSeparator()
+        self._actions_menu.addAction(self._edit_text_action)
+        self._actions_menu.addAction(self._save_text_action)
+        self._actions_btn.setMenu(self._actions_menu)
+        layout.addWidget(self._actions_btn)
 
         self._block = False
         self._fit_mode = load_preview_fit_mode()
@@ -231,16 +231,16 @@ class AnnotationZoomBar(QWidget):
         self._spin.valueChanged.connect(self._on_spin)
         layout.addWidget(self._spin)
 
-        self._tools_btn = _make_preview_tools_button(
-            tooltip="Annotation tools",
+        self._actions_btn = _make_preview_actions_button(
+            tooltip="Annotation actions",
         )
-        self._tools_menu = QMenu(self._tools_btn)
-        self._reset_scale_action = QAction("Reset scale", self._tools_menu)
+        self._actions_menu = QMenu(self._actions_btn)
+        self._reset_scale_action = QAction("Reset scale", self._actions_menu)
         self._reset_scale_action.setToolTip("Fit the full sequence in the window")
         self._reset_scale_action.triggered.connect(self.reset_requested.emit)
-        self._tools_menu.addAction(self._reset_scale_action)
-        self._tools_btn.setMenu(self._tools_menu)
-        layout.addWidget(self._tools_btn)
+        self._actions_menu.addAction(self._reset_scale_action)
+        self._actions_btn.setMenu(self._actions_menu)
+        layout.addWidget(self._actions_btn)
 
         self._block = False
 

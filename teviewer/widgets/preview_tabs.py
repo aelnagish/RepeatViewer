@@ -1696,10 +1696,10 @@ class PreviewTabWidget(QTabWidget):
             self._header_bar.set_header_zoom_mode("preview" if show_controls else "hidden")
         else:
             self._zoom_bar.setVisible(show_controls)
-        # Fit mode is configured in Preferences; title bar has % / Tools.
+        # Fit mode is configured in Preferences; title bar has % / Actions.
         for control in (
             self._zoom_bar._spin,
-            self._zoom_bar._tools_btn,
+            self._zoom_bar._actions_btn,
         ):
             control.setEnabled(show_controls)
         self._sync_text_tool_actions()

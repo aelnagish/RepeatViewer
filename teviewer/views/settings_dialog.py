@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from teviewer.widgets.combo_boxes import NoWheelComboBox
-from teviewer.widgets.spin_boxes import NoWheelSpinBox
+from teviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
 
 if TYPE_CHECKING:
     from teviewer.plugins.registry import PluginRegistry
@@ -38,10 +38,12 @@ if TYPE_CHECKING:
 from teviewer.pan_genome import GENOME_MODE_SINGLE, parse_pan_genomes_json
 from teviewer.project import TEviewerProject
 from teviewer.job_options import (
-    ALIGNER_MAFFT,
-    ALIGNER_MUSCLE,
-    load_align_options,
-    save_align_options,
+    DivergenceRowOptions,
+    GapRowOptions,
+    GappyColumnOptions,
+    MsaCleanOptions,
+    load_msa_clean_options,
+    save_msa_clean_options,
 )
 from teviewer.views.toolbar_dialog import (
     ToolbarCustomizeWidget,
@@ -380,31 +382,6 @@ class SettingsDialog(QDialog):
 
         self._system_blast = QCheckBox()
         self._system_blast.setChecked(project.use_system_blast)
-        self._system_mafft = QCheckBox()
-        self._system_mafft.setChecked(project.use_system_mafft)
-        self._system_mafft.setToolTip(
-            "Use the mafft command from PATH. Leave off to use TEviewer's "
-            "bundled MAFFT for this operating system."
-        )
-        self._system_muscle = QCheckBox()
-        self._system_muscle.setChecked(project.use_system_muscle)
-        self._system_muscle.setToolTip(
-            "Use the muscle command from PATH. Leave off to use TEviewer's "
-            "bundled MUSCLE for this operating system and CPU."
-        )
-        self._default_aligner = NoWheelComboBox()
-        self._default_aligner.addItem("MAFFT", ALIGNER_MAFFT)
-        self._default_aligner.addItem("MUSCLE", ALIGNER_MUSCLE)
-        align_options = load_align_options()
-        default_aligner_index = self._default_aligner.findData(
-            align_options.default_aligner
-        )
-        if default_aligner_index >= 0:
-            self._default_aligner.setCurrentIndex(default_aligner_index)
-        self._default_aligner.setToolTip(
-            "Default engine for combined alignment and automatic alignment before "
-            "tree building. MAFFT and MUSCLE remain available in the Align menu."
-        )
         self._system_viewer = QCheckBox()
         self._system_viewer.setChecked(project.use_system_sequence_viewer)
         self._color_blind_scheme = QCheckBox()
@@ -533,6 +510,58 @@ class SettingsDialog(QDialog):
         )
         self._copy_diag_btn.clicked.connect(self._copy_diagnostics)
 
+        # MSA clean pipeline
+        msa_clean = load_msa_clean_options()
+        self._msa_use_divergence = QCheckBox("Clean rows with divergence")
+        self._msa_use_divergence.setChecked(msa_clean.use_divergence)
+        self._msa_div_threshold = NoWheelDoubleSpinBox()
+        self._msa_div_threshold.setRange(0.0, 1.0)
+        self._msa_div_threshold.setDecimals(2)
+        self._msa_div_threshold.setSingleStep(0.05)
+        self._msa_div_threshold.setValue(msa_clean.divergence.threshold)
+        self._msa_div_window = NoWheelSpinBox()
+        self._msa_div_window.setRange(1, 10_000)
+        self._msa_div_window.setSuffix(" bp")
+        self._msa_div_window.setValue(msa_clean.divergence.window_size)
+
+        self._msa_use_gap_row = QCheckBox("Clean rows with gaps")
+        self._msa_use_gap_row.setChecked(msa_clean.use_gap_row)
+        self._msa_row_gap_threshold = NoWheelDoubleSpinBox()
+        self._msa_row_gap_threshold.setRange(0.0, 1.0)
+        self._msa_row_gap_threshold.setDecimals(3)
+        self._msa_row_gap_threshold.setSingleStep(0.01)
+        self._msa_row_gap_threshold.setValue(msa_clean.gap_row.gap_threshold)
+        self._msa_row_gap_window = NoWheelSpinBox()
+        self._msa_row_gap_window.setRange(1, 10_000)
+        self._msa_row_gap_window.setSuffix(" bp")
+        self._msa_row_gap_window.setValue(msa_clean.gap_row.window_size)
+
+        self._msa_use_gappy_columns = QCheckBox("Remove gappy columns")
+        self._msa_use_gappy_columns.setChecked(msa_clean.use_gappy_columns)
+        self._msa_col_gap_threshold = NoWheelDoubleSpinBox()
+        self._msa_col_gap_threshold.setRange(0.0, 1.0)
+        self._msa_col_gap_threshold.setDecimals(2)
+        self._msa_col_gap_threshold.setSingleStep(0.05)
+        self._msa_col_gap_threshold.setValue(msa_clean.gappy.gap_threshold)
+        self._msa_simi_gap_threshold = NoWheelDoubleSpinBox()
+        self._msa_simi_gap_threshold.setRange(0.0, 1.0)
+        self._msa_simi_gap_threshold.setDecimals(2)
+        self._msa_simi_gap_threshold.setSingleStep(0.05)
+        self._msa_simi_gap_threshold.setValue(msa_clean.gappy.simi_check_gap_thr)
+        self._msa_similarity_threshold = NoWheelDoubleSpinBox()
+        self._msa_similarity_threshold.setRange(0.0, 1.0)
+        self._msa_similarity_threshold.setDecimals(2)
+        self._msa_similarity_threshold.setSingleStep(0.05)
+        self._msa_similarity_threshold.setValue(msa_clean.gappy.similarity_thr)
+        self._msa_min_nucleotide = NoWheelSpinBox()
+        self._msa_min_nucleotide.setRange(1, 50)
+        self._msa_min_nucleotide.setValue(msa_clean.gappy.min_nucleotide)
+
+        self._msa_use_divergence.toggled.connect(self._sync_msa_clean_controls)
+        self._msa_use_gap_row.toggled.connect(self._sync_msa_clean_controls)
+        self._msa_use_gappy_columns.toggled.connect(self._sync_msa_clean_controls)
+        self._sync_msa_clean_controls()
+
         # Every combo and spin box gets the same width so the columns are symmetric.
         for widget in (
             self._batch_workers,
@@ -542,7 +571,14 @@ class SettingsDialog(QDialog):
             self._preview_fit,
             self._fasta_default_tab,
             self._theme_mode,
-            self._default_aligner,
+            self._msa_div_threshold,
+            self._msa_div_window,
+            self._msa_row_gap_threshold,
+            self._msa_row_gap_window,
+            self._msa_col_gap_threshold,
+            self._msa_simi_gap_threshold,
+            self._msa_similarity_threshold,
+            self._msa_min_nucleotide,
         ):
             widget.setFixedWidth(_FIELD_WIDTH)
 
@@ -599,10 +635,7 @@ class SettingsDialog(QDialog):
             ("Accent colour:", accent_field),
         ])
         seq_tools = _group("Sequence tools", [
-            ("Default aligner:", self._default_aligner),
             ("Use system BLAST:", self._system_blast),
-            ("Use system MAFFT:", self._system_mafft),
-            ("Use system MUSCLE:", self._system_muscle),
             ("Use system sequence viewer:", self._system_viewer),
             ("Color-blind nucleotide:", self._color_blind_scheme),
         ])
@@ -643,12 +676,34 @@ class SettingsDialog(QDialog):
             (None, _center_row(self._clear_cache_btn, self._open_log_btn)),
             (None, _center_row(self._open_config_btn, self._copy_diag_btn)),
         ])
+        msa_clean_settings = _group("MSA clean", [
+            (None, self._msa_use_divergence),
+            ("Divergence threshold:", self._msa_div_threshold),
+            ("Divergence window:", self._msa_div_window),
+            (None, self._msa_use_gap_row),
+            ("Row gap threshold:", self._msa_row_gap_threshold),
+            ("Row gap window:", self._msa_row_gap_window),
+            (None, self._msa_use_gappy_columns),
+            ("Column gap threshold:", self._msa_col_gap_threshold),
+            ("Similarity-check gap:", self._msa_simi_gap_threshold),
+            ("Similarity threshold:", self._msa_similarity_threshold),
+            ("Minimum nucleotides:", self._msa_min_nucleotide),
+        ])
 
         content = QWidget()
         content_v = QVBoxLayout(content)
         content_v.setContentsMargins(10, 10, 10, 10)
         content_v.setSpacing(10)
-        for box in (appearance, seq_tools, files_preview, performance, startup, blast_databases, diagnostics):
+        for box in (
+            appearance,
+            seq_tools,
+            files_preview,
+            performance,
+            startup,
+            blast_databases,
+            diagnostics,
+            msa_clean_settings,
+        ):
             content_v.addWidget(box)
         content_v.addStretch()
 
@@ -712,6 +767,17 @@ class SettingsDialog(QDialog):
         self.colorBlindToggled.emit(checked)
 
     def accept(self) -> None:
+        if not (
+            self._msa_use_divergence.isChecked()
+            or self._msa_use_gap_row.isChecked()
+            or self._msa_use_gappy_columns.isChecked()
+        ):
+            QMessageBox.warning(
+                self,
+                "MSA clean",
+                "Enable at least one MSA cleaning method.",
+            )
+            return
         if not self._toolbar_panel.has_visible_tools():
             QMessageBox.warning(
                 self,
@@ -730,11 +796,6 @@ class SettingsDialog(QDialog):
 
     def apply_to_project(self) -> TEviewerProject:
         self._project.use_system_blast = self._system_blast.isChecked()
-        self._project.use_system_mafft = self._system_mafft.isChecked()
-        self._project.use_system_muscle = self._system_muscle.isChecked()
-        align_options = load_align_options()
-        align_options.default_aligner = str(self._default_aligner.currentData())
-        save_align_options(align_options)
         self._project.use_system_sequence_viewer = self._system_viewer.isChecked()
         self._project.batch_workers = self._batch_workers.value()
         save_browser_panel_font_size(self._browser_panel_font.value())
@@ -752,11 +813,45 @@ class SettingsDialog(QDialog):
         save_reopen_last_folder(self._reopen_last.isChecked())
         save_restore_geometry(self._restore_geometry.isChecked())
         save_verbose_logging(self._verbose_logging.isChecked())
+        save_msa_clean_options(
+            MsaCleanOptions(
+                use_divergence=self._msa_use_divergence.isChecked(),
+                use_gap_row=self._msa_use_gap_row.isChecked(),
+                use_gappy_columns=self._msa_use_gappy_columns.isChecked(),
+                divergence=DivergenceRowOptions(
+                    threshold=self._msa_div_threshold.value(),
+                    window_size=self._msa_div_window.value(),
+                ),
+                gap_row=GapRowOptions(
+                    gap_threshold=self._msa_row_gap_threshold.value(),
+                    window_size=self._msa_row_gap_window.value(),
+                ),
+                gappy=GappyColumnOptions(
+                    gap_threshold=self._msa_col_gap_threshold.value(),
+                    simi_check_gap_thr=self._msa_simi_gap_threshold.value(),
+                    similarity_thr=self._msa_similarity_threshold.value(),
+                    min_nucleotide=self._msa_min_nucleotide.value(),
+                ),
+            )
+        )
         base_dir_text = self._blast_db_base_dir.text().strip()
         if base_dir_text:
             save_blast_db_base_dir(Path(base_dir_text))
         self._save_settings()
         return self._project
+
+    def _sync_msa_clean_controls(self, _checked: bool | None = None) -> None:
+        for widget in (self._msa_div_threshold, self._msa_div_window):
+            widget.setEnabled(self._msa_use_divergence.isChecked())
+        for widget in (self._msa_row_gap_threshold, self._msa_row_gap_window):
+            widget.setEnabled(self._msa_use_gap_row.isChecked())
+        for widget in (
+            self._msa_col_gap_threshold,
+            self._msa_simi_gap_threshold,
+            self._msa_similarity_threshold,
+            self._msa_min_nucleotide,
+        ):
+            widget.setEnabled(self._msa_use_gappy_columns.isChecked())
 
     def selected_theme_mode(self) -> str:
         return str(self._theme_mode.currentData())

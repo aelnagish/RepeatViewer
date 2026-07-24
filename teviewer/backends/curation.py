@@ -79,7 +79,6 @@ _DISPLAY_NAMES = {
     "msa_clean_gappy": "MSA remove gappy columns",
     "msa_clean_div": "Clean row with divergence",
     "msa_clean_gap": "Clean row with gap",
-    "msa_clean_row_col": "Clean row and column",
     "consensus_generation": "Consensus",
     "flexidot": "Flexidot",
     "te_annotation": "TE annotation",
@@ -793,27 +792,61 @@ def run_on_sequence(
         )
         created.append(gcol_out)
 
-    elif func_name == "msa_clean_row_col":
+    elif func_name == "msa_clean":
         msa_opts = msa_clean_options or MsaCleanOptions()
         div = msa_opts.divergence
+        gap = msa_opts.gap_row
         g = msa_opts.gappy
-        div_out = f"{seq_path}_cd.fa"
-        clean_out = f"{seq_path}_clean.fa"
-        crop_end_div(
-            str(seq_path),
-            div_out,
-            threshold=div.threshold,
-            window_size=div.window_size,
+        enabled_count = sum(
+            (
+                msa_opts.use_divergence,
+                msa_opts.use_gap_row,
+                msa_opts.use_gappy_columns,
+            )
         )
-        remove_gaps_with_similarity_check(
-            div_out,
-            clean_out,
-            gap_threshold=g.gap_threshold,
-            simi_check_gap_thr=g.simi_check_gap_thr,
-            similarity_thr=g.similarity_thr,
-            min_nucleotide=g.min_nucleotide,
-        )
-        created.append(clean_out)
+        current = str(seq_path)
+        final_output = ""
+
+        if msa_opts.use_divergence:
+            final_output = (
+                f"{seq_path}_cd.fa" if enabled_count == 1 else f"{seq_path}_clean_div.fa"
+            )
+            crop_end_div(
+                current,
+                final_output,
+                threshold=div.threshold,
+                window_size=div.window_size,
+            )
+            current = final_output
+
+        if msa_opts.use_gap_row:
+            final_output = (
+                f"{seq_path}_cg.fa" if enabled_count == 1 else f"{seq_path}_clean_gap.fa"
+            )
+            crop_end_gap(
+                current,
+                final_output,
+                gap_threshold=gap.gap_threshold,
+                window_size=gap.window_size,
+            )
+            current = final_output
+
+        if msa_opts.use_gappy_columns:
+            final_output = (
+                f"{seq_path}_gcol.fa" if enabled_count == 1 else f"{seq_path}_clean.fa"
+            )
+            remove_gaps_with_similarity_check(
+                current,
+                final_output,
+                gap_threshold=g.gap_threshold,
+                simi_check_gap_thr=g.simi_check_gap_thr,
+                similarity_thr=g.similarity_thr,
+                min_nucleotide=g.min_nucleotide,
+            )
+
+        if not final_output:
+            raise ValueError("Enable at least one MSA cleaning method.")
+        created.append(final_output)
 
     elif func_name in {"msa_clean_div", "msa_clean_gap"}:
         msa_opts = msa_clean_options or MsaCleanOptions()
@@ -821,17 +854,17 @@ def run_on_sequence(
         gap = msa_opts.gap_row
         div_out = f"{seq_path}_cd.fa"
         gap_out = f"{seq_path}_cg.fa"
-        crop_end_div(
-            str(seq_path),
-            div_out,
-            threshold=div.threshold,
-            window_size=div.window_size,
-        )
         if func_name == "msa_clean_div":
+            crop_end_div(
+                str(seq_path),
+                div_out,
+                threshold=div.threshold,
+                window_size=div.window_size,
+            )
             created.append(div_out)
         else:
             crop_end_gap(
-                div_out,
+                str(seq_path),
                 gap_out,
                 gap_threshold=gap.gap_threshold,
                 window_size=gap.window_size,

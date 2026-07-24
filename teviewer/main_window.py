@@ -175,7 +175,6 @@ from teviewer.job_options import (
     load_te_library_benchmark_options,
     load_tsd_search_options,
     msa_clean_method_description,
-    msa_clean_method_label,
     save_align_options,
     save_blast_options,
     save_consensus_options,
@@ -338,7 +337,6 @@ _JOB_DISPLAY_TITLES = {
     "msa_clean_gappy": "MSA remove gappy columns",
     "msa_clean_div": "Clean row with divergence",
     "msa_clean_gap": "Clean row with gap",
-    "msa_clean_row_col": "Clean row and column",
     "consensus_generation": "Consensus",
     "flexidot": "Flexidot",
     "te_annotation": "TE annotation",
@@ -552,7 +550,7 @@ class TreeWorker(QObject):
                     **_mafft_option_kwargs(self._align_options),
                     use_system_mafft=self._use_system_mafft,
                     use_system_muscle=self._use_system_muscle,
-                    engine=self._align_options.default_aligner,
+                    engine=self._align_options.combined_aligner,
                 )
             )
 
@@ -570,7 +568,7 @@ class TreeWorker(QObject):
                 **_mafft_option_kwargs(self._align_options),
                 use_system_mafft=self._use_system_mafft,
                 use_system_muscle=self._use_system_muscle,
-                engine=self._align_options.default_aligner,
+                engine=self._align_options.combined_aligner,
             )
         )
 
@@ -2214,13 +2212,10 @@ class MainWindow(QMainWindow):
 
     def _populate_align_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         del skip_default
-        default = self._align_options.default_aligner
-        mafft_label = "MAFFT (default)" if default == ALIGNER_MAFFT else "MAFFT"
-        muscle_label = "MUSCLE (default)" if default == ALIGNER_MUSCLE else "MUSCLE"
-        menu.addAction(mafft_label, self._run_mafft_default)
-        menu.addAction(muscle_label, self._run_muscle_default)
+        menu.addAction("MAFFT", self._run_mafft_default)
+        menu.addAction("MUSCLE", self._run_muscle_default)
         menu.addAction(
-            "Align all selected in one combined MSA",
+            "Align all selected files in one MSA",
             self._align_selected_combined,
         )
         menu.addSeparator()
@@ -2595,29 +2590,27 @@ class MainWindow(QMainWindow):
 
     def _populate_msa_clean_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("MSA clean with default parameters", self._run_default_msa_clean)
+            menu.addAction("MSA clean with configured methods", self._run_default_msa_clean)
             menu.addSeparator()
-            menu.addAction("Change MSA clean parameters", self._modify_msa_clean_parameters)
+            menu.addAction("Configure MSA clean methods", self._modify_msa_clean_parameters)
             menu.addSeparator()
         else:
-            menu.addAction("Change MSA clean parameters", self._modify_msa_clean_parameters)
+            menu.addAction("Configure MSA clean methods", self._modify_msa_clean_parameters)
             menu.addSeparator()
-        menu.addAction(
+        self._add_msa_clean_menu_action(
+            menu,
             "Remove gappy columns",
-            lambda: self._apply_msa_clean("msa_clean_gappy"),
-        )
-        menu.addAction(
-            "Clean row with divergence",
-            lambda: self._apply_msa_clean("msa_clean_div"),
-        )
-        menu.addAction(
-            "Clean row with gap",
-            lambda: self._apply_msa_clean("msa_clean_gap"),
+            "msa_clean_gappy",
         )
         self._add_msa_clean_menu_action(
             menu,
-            "Clean row and column",
-            "msa_clean_row_col",
+            "Clean row with divergence",
+            "msa_clean_div",
+        )
+        self._add_msa_clean_menu_action(
+            menu,
+            "Clean row with gap",
+            "msa_clean_gap",
         )
 
     def _populate_consensus_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
@@ -5400,7 +5393,7 @@ class MainWindow(QMainWindow):
 
     def _run_align_default(self) -> None:
         """Toolbar click: align each selected FASTA separately."""
-        self._align_sequences(engine=self._align_options.default_aligner)
+        self._align_sequences(engine=self._align_options.combined_aligner)
 
     def _run_mafft_default(self) -> None:
         self._align_sequences(engine=ALIGNER_MAFFT)
@@ -5439,12 +5432,14 @@ class MainWindow(QMainWindow):
         self._align_sequences(
             seq_files,
             mode=ALIGN_MODE_COMBINED,
-            engine=self._align_options.default_aligner,
+            engine=self._align_options.combined_aligner,
         )
 
     def _modify_align_parameters(self) -> None:
         dialog = AlignParamsDialog(
             initial=self._align_options,
+            use_system_mafft=self._project.use_system_mafft,
+            use_system_muscle=self._project.use_system_muscle,
             parent=self,
         )
         accepted = False
@@ -5455,9 +5450,12 @@ class MainWindow(QMainWindow):
         if accepted:
             self._align_options = dialog.options()
             save_align_options(self._align_options)
-            aligner = self._align_options.default_aligner.upper()
+            self._project.use_system_mafft = dialog.use_system_mafft()
+            self._project.use_system_muscle = dialog.use_system_muscle()
+            self._persist_workspace()
+            aligner = self._align_options.combined_aligner.upper()
             self._set_status_message(
-                f"Alignment defaults updated ({aligner})",
+                f"Alignment parameters updated (combined MSA: {aligner})",
                 6000,
             )
 
@@ -5469,7 +5467,7 @@ class MainWindow(QMainWindow):
         engine: str | None = None,
     ) -> None:
         opts = self._align_options
-        engine = engine or opts.default_aligner
+        engine = engine or opts.combined_aligner
         if mode is None:
             mode = "one_by_one"
 
@@ -5503,14 +5501,14 @@ class MainWindow(QMainWindow):
             if use_system:
                 detail = (
                     f"System {tool_name} is enabled but no '{engine}' command was found "
-                    f"on PATH. Disable 'Use system {tool_name}' in Preferences to use "
-                    "the bundled copy."
+                    f"on PATH. Disable 'Use {tool_name} from the system PATH' in "
+                    "Alignment parameters to use the bundled copy."
                 )
             else:
                 detail = (
                     f"The bundled {tool_name} does not support this operating-system "
-                    f"architecture. Install {tool_name} on PATH and enable 'Use system "
-                    f"{tool_name}' in Preferences."
+                    f"architecture. Install {tool_name} on PATH and enable "
+                    f"'Use {tool_name} from the system PATH' in Alignment parameters."
                 )
             QMessageBox.warning(
                 self,
@@ -6769,14 +6767,20 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             self._msa_clean_options = dialog.options()
             save_msa_clean_options(self._msa_clean_options)
-            label = msa_clean_method_label(self._msa_clean_options.default_method)
+            labels = []
+            if self._msa_clean_options.use_divergence:
+                labels.append("divergence rows")
+            if self._msa_clean_options.use_gap_row:
+                labels.append("gap rows")
+            if self._msa_clean_options.use_gappy_columns:
+                labels.append("gappy columns")
             self._set_status_message(
-                f"MSA clean parameters updated (toolbar default: {label})",
+                f"MSA clean methods updated: {', '.join(labels)}",
                 5000,
             )
 
     def _run_default_msa_clean(self) -> None:
-        self._apply_msa_clean(self._msa_clean_options.default_method)
+        self._apply_msa_clean("msa_clean")
 
     def _apply_msa_clean(self, func_name: str) -> None:
         self._apply_function(

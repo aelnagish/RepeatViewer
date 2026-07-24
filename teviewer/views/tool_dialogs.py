@@ -77,6 +77,8 @@ from teviewer.backends.blast_genome_plot import format_genome_length_bp
 from teviewer.backends.database_prepare import blast_database_is_ready
 from teviewer.project import BLAST_MOLECULE_NUCL, BLAST_MOLECULE_PROT, TEviewerProject
 from teviewer.job_options import (
+    ALIGNER_MAFFT,
+    ALIGNER_MUSCLE,
     TE_GENOME_MAP_COLOR_FAMILY,
     TE_GENOME_MAP_COLOR_IDENTITY,
     TE_GENOME_MAP_COLOR_ORDER,
@@ -148,11 +150,9 @@ from teviewer.job_options import (
     MIN_FLEXIDOT_WORDSIZE,
     GapRowOptions,
     GappyColumnOptions,
-    MSA_CLEAN_METHOD_CHOICES,
     MsaCleanOptions,
     TeaAidOptions,
     TsdSearchOptions,
-    msa_clean_method_description,
     normalize_blast_evalue,
     normalize_flexidot_output_format,
 )
@@ -596,13 +596,14 @@ class AlignParamsDialog(QDialog):
         self,
         *,
         initial: AlignOptions | None = None,
+        use_system_mafft: bool = False,
+        use_system_muscle: bool = False,
         title: str = "Alignment parameters",
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         opts = initial or AlignOptions()
-        self._default_aligner = opts.default_aligner
 
         self._strategy = QComboBox(self)
         for label, value in (
@@ -729,9 +730,48 @@ class AlignParamsDialog(QDialog):
         muscle_tab = QWidget(self)
         muscle_tab.setLayout(muscle_form)
 
+        self._combined_aligner = QComboBox(self)
+        self._combined_aligner.addItem("MAFFT", ALIGNER_MAFFT)
+        self._combined_aligner.addItem("MUSCLE", ALIGNER_MUSCLE)
+        combined_index = self._combined_aligner.findData(opts.combined_aligner)
+        if combined_index >= 0:
+            self._combined_aligner.setCurrentIndex(combined_index)
+        self._combined_aligner.setFixedWidth(260)
+        self._combined_aligner.setToolTip(
+            "Tool used by “Align all selected files in one MSA”."
+        )
+        self._use_system_mafft = QCheckBox("Use MAFFT from the system PATH", self)
+        self._use_system_mafft.setChecked(use_system_mafft)
+        self._use_system_mafft.setToolTip(
+            "Use the system mafft command instead of the bundled MAFFT."
+        )
+        self._use_system_muscle = QCheckBox("Use MUSCLE from the system PATH", self)
+        self._use_system_muscle.setChecked(use_system_muscle)
+        self._use_system_muscle.setToolTip(
+            "Use the system muscle command instead of the bundled MUSCLE."
+        )
+        others_form = QFormLayout()
+        others_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        others_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        others_form.setHorizontalSpacing(12)
+        others_form.setVerticalSpacing(10)
+        others_form.addRow(
+            "Tool to align all selected files in one MSA:",
+            self._combined_aligner,
+        )
+        others_form.addRow("", self._use_system_mafft)
+        others_form.addRow("", self._use_system_muscle)
+        others_tab = QWidget(self)
+        others_tab.setLayout(others_form)
+
         self._aligner_tabs = QTabWidget(self)
         self._aligner_tabs.addTab(mafft_tab, "MAFFT")
         self._aligner_tabs.addTab(muscle_tab, "MUSCLE")
+        self._aligner_tabs.addTab(others_tab, "Others")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -799,7 +839,7 @@ class AlignParamsDialog(QDialog):
 
     def options(self) -> AlignOptions:
         return AlignOptions(
-            default_aligner=self._default_aligner,
+            combined_aligner=str(self._combined_aligner.currentData()),
             num_threads=max(1, int(self._threads.value())),
             strategy=str(self._strategy.currentData()),
             sequence_type=str(self._sequence_type.currentData()),
@@ -815,6 +855,12 @@ class AlignParamsDialog(QDialog):
             muscle_mode=str(self._muscle_mode.currentData()),
             muscle_num_threads=max(1, int(self._muscle_threads.value())),
         )
+
+    def use_system_mafft(self) -> bool:
+        return self._use_system_mafft.isChecked()
+
+    def use_system_muscle(self) -> bool:
+        return self._use_system_muscle.isChecked()
 
 
 class TreeParamsDialog(QDialog):
@@ -2351,27 +2397,52 @@ class MsaCleanParamsDialog(QDialog):
         self.setMinimumWidth(420)
         opts = initial or MsaCleanOptions()
 
-        default_box = QGroupBox("Toolbar default")
-        self._default_method = QComboBox()
-        for method_id, label in MSA_CLEAN_METHOD_CHOICES:
-            self._default_method.addItem(label, method_id)
-        index = self._default_method.findData(opts.default_method, Qt.ItemDataRole.UserRole)
-        if index >= 0:
-            self._default_method.setCurrentIndex(index)
-        default_form = QFormLayout(default_box)
-        default_form.addRow(
-            "Default clean method:",
-            self._default_method,
+        explanation = QLabel(
+            "Enable any combination of methods. Selected methods run from top "
+            "to bottom: divergence rows, gap rows, then gappy columns."
         )
-        self._default_method.setToolTip(
-            "Used when you click the main MSA clean toolbar button (not the menu items)."
-        )
-        self._method_help = QLabel()
-        self._method_help.setWordWrap(True)
-        self._default_method.currentIndexChanged.connect(self._update_method_help)
-        self._update_method_help()
+        explanation.setWordWrap(True)
+
+        div_box = QGroupBox("Clean rows with divergence")
+        div_box.setCheckable(True)
+        div_box.setChecked(opts.use_divergence)
+        self._use_divergence = div_box
+        self._div_threshold = QDoubleSpinBox()
+        self._div_threshold.setRange(0.0, 1.0)
+        self._div_threshold.setDecimals(2)
+        self._div_threshold.setSingleStep(0.05)
+        self._div_threshold.setValue(opts.divergence.threshold)
+
+        self._div_window = QSpinBox()
+        self._div_window.setRange(1, 10_000)
+        self._div_window.setValue(opts.divergence.window_size)
+
+        div_form = QFormLayout(div_box)
+        div_form.addRow("Divergence threshold:", self._div_threshold)
+        div_form.addRow("Window size (bp):", self._div_window)
+
+        gap_box = QGroupBox("Clean rows with gaps")
+        gap_box.setCheckable(True)
+        gap_box.setChecked(opts.use_gap_row)
+        self._use_gap_row = gap_box
+        self._row_gap_threshold = QDoubleSpinBox()
+        self._row_gap_threshold.setRange(0.0, 1.0)
+        self._row_gap_threshold.setDecimals(3)
+        self._row_gap_threshold.setSingleStep(0.01)
+        self._row_gap_threshold.setValue(opts.gap_row.gap_threshold)
+
+        self._row_gap_window = QSpinBox()
+        self._row_gap_window.setRange(1, 10_000)
+        self._row_gap_window.setValue(opts.gap_row.window_size)
+
+        gap_form = QFormLayout(gap_box)
+        gap_form.addRow("Gap proportion threshold:", self._row_gap_threshold)
+        gap_form.addRow("Window size (bp):", self._row_gap_window)
 
         gappy_box = QGroupBox("Remove gappy columns")
+        gappy_box.setCheckable(True)
+        gappy_box.setChecked(opts.use_gappy_columns)
+        self._use_gappy_columns = gappy_box
         self._gap_threshold = QDoubleSpinBox()
         self._gap_threshold.setRange(0.0, 1.0)
         self._gap_threshold.setDecimals(2)
@@ -2400,68 +2471,44 @@ class MsaCleanParamsDialog(QDialog):
         gappy_form.addRow("Similarity threshold:", self._similarity)
         gappy_form.addRow("Min nucleotides per column:", self._min_nt)
 
-        div_box = QGroupBox("Clean row with divergence")
-        self._div_threshold = QDoubleSpinBox()
-        self._div_threshold.setRange(0.0, 1.0)
-        self._div_threshold.setDecimals(2)
-        self._div_threshold.setSingleStep(0.05)
-        self._div_threshold.setValue(opts.divergence.threshold)
-
-        self._div_window = QSpinBox()
-        self._div_window.setRange(1, 10_000)
-        self._div_window.setValue(opts.divergence.window_size)
-
-        div_form = QFormLayout(div_box)
-        div_form.addRow("Divergence threshold:", self._div_threshold)
-        div_form.addRow("Window size (bp):", self._div_window)
-
-        gap_box = QGroupBox("Clean row with gap")
-        self._row_gap_threshold = QDoubleSpinBox()
-        self._row_gap_threshold.setRange(0.0, 1.0)
-        self._row_gap_threshold.setDecimals(3)
-        self._row_gap_threshold.setSingleStep(0.01)
-        self._row_gap_threshold.setValue(opts.gap_row.gap_threshold)
-
-        self._row_gap_window = QSpinBox()
-        self._row_gap_window.setRange(1, 10_000)
-        self._row_gap_window.setValue(opts.gap_row.window_size)
-
-        gap_form = QFormLayout(gap_box)
-        gap_form.addRow("Gap proportion threshold:", self._row_gap_threshold)
-        gap_form.addRow("Window size (bp):", self._row_gap_window)
-
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        for method_box in (
+            self._use_divergence,
+            self._use_gap_row,
+            self._use_gappy_columns,
+        ):
+            method_box.toggled.connect(self._sync_method_selection)
+        self._sync_method_selection()
 
         layout = QVBoxLayout(self)
-        layout.addWidget(default_box)
-        layout.addWidget(self._method_help)
-        layout.addWidget(gappy_box)
+        layout.addWidget(explanation)
         layout.addWidget(div_box)
         layout.addWidget(gap_box)
+        layout.addWidget(gappy_box)
         layout.addWidget(buttons)
 
-
-    def _update_method_help(self, _index: int | None = None) -> None:
-        method_id = self._default_method.currentData(Qt.ItemDataRole.UserRole)
-        if method_id is None:
-            method_id = self._default_method.currentData()
-        text = msa_clean_method_description(str(method_id or ""))
-        self._default_method.setToolTip(text)
+    def _sync_method_selection(self, _checked: bool | None = None) -> None:
+        any_enabled = (
+            self._use_divergence.isChecked()
+            or self._use_gap_row.isChecked()
+            or self._use_gappy_columns.isChecked()
+        )
+        if self._ok_button is not None:
+            self._ok_button.setEnabled(any_enabled)
+            self._ok_button.setToolTip(
+                "" if any_enabled else "Enable at least one cleaning method."
+            )
 
     def options(self) -> MsaCleanOptions:
-        method_index = self._default_method.currentIndex()
-        default_method = self._default_method.itemData(
-            method_index,
-            Qt.ItemDataRole.UserRole,
-        )
-        if default_method is None:
-            default_method = self._default_method.itemData(method_index)
         return MsaCleanOptions(
-            default_method=str(default_method),
+            use_divergence=self._use_divergence.isChecked(),
+            use_gap_row=self._use_gap_row.isChecked(),
+            use_gappy_columns=self._use_gappy_columns.isChecked(),
             gappy=GappyColumnOptions(
                 gap_threshold=self._gap_threshold.value(),
                 simi_check_gap_thr=self._simi_gap.value(),

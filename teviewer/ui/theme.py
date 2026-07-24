@@ -334,19 +334,19 @@ def application_stylesheet(
     QWidget#PreviewZoomBar {{
         background: transparent;
     }}
-    QToolButton#PreviewToolsButton {{
+    QToolButton#PreviewActionsButton {{
         border: 1px solid palette(mid);
         background: palette(base);
         padding: 0px 8px;
         border-radius: {radius_sm}px;
     }}
-    QToolButton#PreviewToolsButton:hover {{
+    QToolButton#PreviewActionsButton:hover {{
         background: palette(alternate-base);
     }}
-    QToolButton#PreviewToolsButton:pressed {{
+    QToolButton#PreviewActionsButton:pressed {{
         background: palette(mid);
     }}
-    QToolButton#PreviewToolsButton::menu-indicator {{
+    QToolButton#PreviewActionsButton::menu-indicator {{
         image: none;
         width: 0px;
     }}
