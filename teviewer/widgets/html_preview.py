@@ -28,6 +28,7 @@ from teviewer.backends.flexidot_go_to import (
     payload_from_console_message,
 )
 from teviewer.backends.html_preview_policy import (
+    embedded_html_disabled_reason,
     flexidot_browser_fallback_reason,
     should_use_webengine_for_html,
     use_embedded_html_preview,
@@ -204,7 +205,7 @@ class LazyHtmlPreview(QWidget):
         if not use_embedded_html_preview():
             self._load_browser_fallback(
                 resolved,
-                reason="Embedded HTML preview disabled (TEVIEWER_EMBED_HTML=0).",
+                reason=embedded_html_disabled_reason(),
             )
             return
         if self._inner is None:
@@ -249,7 +250,7 @@ class LazyHtmlPreview(QWidget):
             if self._inner is None:
                 self._inner = HtmlFallbackPreview(
                     self,
-                    reason="Embedded HTML preview disabled (TEVIEWER_EMBED_HTML=0).",
+                    reason=embedded_html_disabled_reason(),
                 )
                 self._status.hide()
                 self._layout.addWidget(self._inner, stretch=1)

@@ -1,14 +1,30 @@
+import os
 from pathlib import Path
 
 import pytest
 
 from teviewer.backends import html_preview_policy as policy
+from teviewer.backends import webengine_probe
+
+
+def _fake_webengine_is_safe(*, force_probe: bool = False) -> bool:
+    """Stand-in for the real probe: honors the env override, skips the subprocess."""
+    del force_probe
+    flag = os.environ.get("TEVIEWER_EMBED_HTML", "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    return True
 
 
 @pytest.fixture(autouse=True)
 def _clear_html_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TEVIEWER_EMBED_HTML", raising=False)
     monkeypatch.delenv("TEVIEWER_FLEXIDOT_WEBENGINE", raising=False)
+    # Policy defers to the real crash probe when no env override is set; pin it
+    # to "safe" (unless the test sets TEVIEWER_EMBED_HTML=0 itself) so these
+    # tests exercise the policy logic, not this machine's actual WebEngine
+    # health or a slow subprocess probe.
+    monkeypatch.setattr(webengine_probe, "webengine_is_safe", _fake_webengine_is_safe)
 
 
 def test_flexidot_html_uses_webengine_by_default() -> None:
@@ -31,3 +47,18 @@ def test_embed_html_disabled_blocks_all(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("TEVIEWER_EMBED_HTML", "0")
     assert policy.should_use_webengine_for_html(Path("/tmp/teaid_report.html")) is False
     assert policy.should_use_webengine_for_html(Path("/tmp/gene_flexidot.html")) is False
+
+
+def test_unsafe_webengine_probe_blocks_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the crash probe reports WebEngine is unsafe, fall back for every file."""
+    monkeypatch.setattr(webengine_probe, "webengine_is_safe", lambda **_: False)
+    assert policy.should_use_webengine_for_html(Path("/tmp/teaid_report.html")) is False
+    assert policy.should_use_webengine_for_html(Path("/tmp/gene_flexidot.html")) is False
+    assert "WebEngine" in policy.embedded_html_disabled_reason()
+
+
+def test_embed_html_disabled_reason_reflects_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEVIEWER_EMBED_HTML", "0")
+    assert "TEVIEWER_EMBED_HTML=0" in policy.embedded_html_disabled_reason()

@@ -1342,13 +1342,13 @@ class MainWindow(QMainWindow):
         self._overflow_hidden: list[tuple] = []
         self._overflow_btn: QToolButton | None = None
         self._active_toolbar_menu: QMenu | None = None
-        self._active_toolbar_menu_button: QToolButton | None = None
         self._toolbar_font = QFont(self.font())
         self._browser_panel_font = QFont(self.font())
         self._apply_toolbar_theme()
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
+        # Do not install a Python event filter on QApplication: PySide6 can
+        # segfault on macOS when an app-level filter runs during
+        # QObject::setProperty (nested getWrapperForQObject). See
+        # teviewer.views.dialog_polish for the same constraint.
 
         self._project = SettingsDialog.load_project_from_settings()
         from teviewer.app_preferences import load_reopen_last_folder
@@ -2900,7 +2900,6 @@ class MainWindow(QMainWindow):
         if self._active_toolbar_menu is not None:
             self._active_toolbar_menu.close()
         self._active_toolbar_menu = None
-        self._active_toolbar_menu_button = None
         if self._functions_toolbar is not None:
             self._functions_toolbar.removeEventFilter(self)
             self.removeToolBar(self._functions_toolbar)
@@ -3102,12 +3101,10 @@ class MainWindow(QMainWindow):
             # so the toolbar label (notably BLAST) remains visible.
             QTimer.singleShot(0, lambda popup=menu, pos=anchor: popup.move(pos))
             self._active_toolbar_menu = menu
-            self._active_toolbar_menu_button = btn
 
             def _menu_closed() -> None:
                 if self._active_toolbar_menu is menu:
                     self._active_toolbar_menu = None
-                    self._active_toolbar_menu_button = None
                 self._release_toolbar_button(btn)
 
             menu.aboutToHide.connect(_menu_closed)
@@ -3188,27 +3185,6 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._relayout_toolbar_overflow)
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt API)
-        if (
-            self._active_toolbar_menu is not None
-            and event.type() == QEvent.Type.MouseButtonPress
-            and isinstance(event, QMouseEvent)
-        ):
-            target = QApplication.widgetAt(event.globalPosition().toPoint())
-            while target is not None and not isinstance(target, QToolButton):
-                target = target.parentWidget()
-            if (
-                isinstance(target, QToolButton)
-                and any(target is widget for widget, _handler in self._toolbar_items)
-                and target is not self._active_toolbar_menu_button
-                and target.isVisible()
-                and target.isEnabled()
-            ):
-                # Popup menus grab the first outside click. Forward a click on
-                # another toolbar tool after closing the current menu so users
-                # can switch dropdowns in one step.
-                self._active_toolbar_menu.close()
-                QTimer.singleShot(0, target.click)
-                return True
         if obj is self._toolbar_container and event.type() == QEvent.Type.Resize:
             self._relayout_toolbar_overflow()
         return super().eventFilter(obj, event)

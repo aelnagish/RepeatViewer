@@ -9,9 +9,26 @@ from teviewer.backends.curation import is_flexidot_html_file
 
 
 def use_embedded_html_preview() -> bool:
-    """Return False when ``TEVIEWER_EMBED_HTML=0`` (browser-only for all HTML)."""
+    """Return False when embedded HTML preview should not be used.
+
+    Honors ``TEVIEWER_EMBED_HTML`` overrides, and otherwise defers to the
+    Qt WebEngine crash probe (macOS + certain PySide6 builds segfault on
+    ``QWebEngineView`` creation) so we never build a WebEngine view in the
+    main process unless it is known to be safe on this machine.
+    """
+    from teviewer.backends.webengine_probe import webengine_is_safe
+
+    return webengine_is_safe()
+
+
+def embedded_html_disabled_reason() -> str:
+    """Human-readable reason embedded HTML preview is unavailable right now."""
     flag = os.environ.get("TEVIEWER_EMBED_HTML", "").strip().lower()
-    return flag not in {"0", "false", "no", "off"}
+    if flag in {"0", "false", "no", "off"}:
+        return "Embedded HTML preview disabled (TEVIEWER_EMBED_HTML=0)."
+    from teviewer.backends.webengine_probe import webengine_browser_fallback_reason
+
+    return webengine_browser_fallback_reason()
 
 
 def use_flexidot_plotly_webengine() -> bool:

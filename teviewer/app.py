@@ -113,6 +113,11 @@ def run_app(argv: list[str] | None = None) -> int:
         window.show()
         app.processEvents()
         splash.finish(window)
+
+        from teviewer.backends.webengine_probe import warmup_webengine_probe
+
+        warmup_webengine_probe()
+
         return app.exec()
     except Exception:
         import traceback
