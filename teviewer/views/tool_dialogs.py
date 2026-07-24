@@ -1476,6 +1476,7 @@ class BlastParamsDialog(QDialog):
         self.setWindowTitle("Blast parameters")
         self._project = project
         opts = initial or BlastOptions()
+        self._initial_program = opts.program
 
         self._tabs = QTabWidget()
         self._blastn_database = QComboBox()
@@ -1644,6 +1645,16 @@ class BlastParamsDialog(QDialog):
         blastp_form.addRow("", self._blastp_write_text)
         blastp_form.addRow("", self._blastp_write_gff)
         self._tabs.addTab(blastp_tab, "blastp")
+
+        others_tab = QWidget()
+        others_form = self._parameter_form(others_tab)
+        self._use_system_blast = QCheckBox("Use BLAST from the system PATH")
+        self._use_system_blast.setChecked(project.use_system_blast)
+        self._use_system_blast.setToolTip(
+            "Use BLAST+ programs installed on the system PATH instead of the bundled programs."
+        )
+        others_form.addRow("", self._use_system_blast)
+        self._tabs.addTab(others_tab, "Others")
 
         self._populate_database_combos(
             blastn_name=opts.blast_database_name,
@@ -1815,12 +1826,22 @@ class BlastParamsDialog(QDialog):
         self._min_bit_score.setValue(defaults.minimum_bit_score)
         self._blastn_database.setCurrentIndex(0)
         self._blastp_database.setCurrentIndex(0)
+        self._use_system_blast.setChecked(False)
+
+    def use_system_blast(self) -> bool:
+        return self._use_system_blast.isChecked()
 
     def options(self) -> BlastOptions:
+        tab_index = self._tabs.currentIndex()
+        program = (
+            BLAST_PROGRAM_BLASTP
+            if tab_index == 1
+            else BLAST_PROGRAM_BLASTN
+            if tab_index == 0
+            else self._initial_program
+        )
         return BlastOptions(
-            program=(
-                BLAST_PROGRAM_BLASTP if self._tabs.currentIndex() == 1 else BLAST_PROGRAM_BLASTN
-            ),
+            program=program,
             e_value=normalize_blast_evalue(self._evalue.value()),
             word_size=self._word_size.value(),
             gap_open=self._gap_open.value(),
@@ -2394,19 +2415,41 @@ class MsaCleanParamsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("MSA clean parameters")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(650)
         opts = initial or MsaCleanOptions()
 
-        explanation = QLabel(
-            "Enable any combination of methods. Selected methods run from top "
-            "to bottom: divergence rows, gap rows, then gappy columns."
+        self._method_order = QListWidget()
+        self._method_order.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._method_order.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._method_order.setMaximumHeight(100)
+        self._method_labels = {
+            "msa_clean_div": "Clean rows with divergence",
+            "msa_clean_gap": "Clean rows with gaps",
+            "msa_clean_gappy": "Remove gappy columns",
+        }
+        enabled_methods = {
+            "msa_clean_div": opts.use_divergence,
+            "msa_clean_gap": opts.use_gap_row,
+            "msa_clean_gappy": opts.use_gappy_columns,
+        }
+        for method_id in opts.method_order:
+            if not enabled_methods[method_id]:
+                continue
+            item = QListWidgetItem(self._method_labels[method_id])
+            item.setData(Qt.ItemDataRole.UserRole, method_id)
+            self._method_order.addItem(item)
+        self._method_order.setToolTip(
+            "Only methods in this list are used. Drag them to change the execution order."
         )
-        explanation.setWordWrap(True)
+        self._available_method = QComboBox()
+        self._add_method_button = QPushButton("Add")
+        self._remove_method_button = QPushButton("Remove selected")
+        self._add_method_button.clicked.connect(self._add_selected_method)
+        self._remove_method_button.clicked.connect(self._remove_selected_method)
+        self._method_order.currentRowChanged.connect(self._sync_method_controls)
+        self._refresh_available_methods()
 
         div_box = QGroupBox("Clean rows with divergence")
-        div_box.setCheckable(True)
-        div_box.setChecked(opts.use_divergence)
-        self._use_divergence = div_box
         self._div_threshold = QDoubleSpinBox()
         self._div_threshold.setRange(0.0, 1.0)
         self._div_threshold.setDecimals(2)
@@ -2418,13 +2461,12 @@ class MsaCleanParamsDialog(QDialog):
         self._div_window.setValue(opts.divergence.window_size)
 
         div_form = QFormLayout(div_box)
+        div_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        div_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         div_form.addRow("Divergence threshold:", self._div_threshold)
         div_form.addRow("Window size (bp):", self._div_window)
 
         gap_box = QGroupBox("Clean rows with gaps")
-        gap_box.setCheckable(True)
-        gap_box.setChecked(opts.use_gap_row)
-        self._use_gap_row = gap_box
         self._row_gap_threshold = QDoubleSpinBox()
         self._row_gap_threshold.setRange(0.0, 1.0)
         self._row_gap_threshold.setDecimals(3)
@@ -2436,13 +2478,12 @@ class MsaCleanParamsDialog(QDialog):
         self._row_gap_window.setValue(opts.gap_row.window_size)
 
         gap_form = QFormLayout(gap_box)
+        gap_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        gap_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         gap_form.addRow("Gap proportion threshold:", self._row_gap_threshold)
         gap_form.addRow("Window size (bp):", self._row_gap_window)
 
         gappy_box = QGroupBox("Remove gappy columns")
-        gappy_box.setCheckable(True)
-        gappy_box.setChecked(opts.use_gappy_columns)
-        self._use_gappy_columns = gappy_box
         self._gap_threshold = QDoubleSpinBox()
         self._gap_threshold.setRange(0.0, 1.0)
         self._gap_threshold.setDecimals(2)
@@ -2466,6 +2507,8 @@ class MsaCleanParamsDialog(QDialog):
         self._min_nt.setValue(opts.gappy.min_nucleotide)
 
         gappy_form = QFormLayout(gappy_box)
+        gappy_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        gappy_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         gappy_form.addRow("Gap threshold:", self._gap_threshold)
         gappy_form.addRow("Similarity check gap threshold:", self._simi_gap)
         gappy_form.addRow("Similarity threshold:", self._similarity)
@@ -2476,39 +2519,65 @@ class MsaCleanParamsDialog(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        for method_box in (
-            self._use_divergence,
-            self._use_gap_row,
-            self._use_gappy_columns,
-        ):
-            method_box.toggled.connect(self._sync_method_selection)
-        self._sync_method_selection()
 
         layout = QVBoxLayout(self)
-        layout.addWidget(explanation)
         layout.addWidget(div_box)
         layout.addWidget(gap_box)
         layout.addWidget(gappy_box)
+        order_label = QLabel("Combined MSA clean")
+        layout.addWidget(order_label)
+        layout.addWidget(self._method_order)
+        method_controls = QHBoxLayout()
+        method_controls.addWidget(self._available_method, 1)
+        method_controls.addWidget(self._add_method_button)
+        method_controls.addWidget(self._remove_method_button)
+        layout.addLayout(method_controls)
         layout.addWidget(buttons)
 
-    def _sync_method_selection(self, _checked: bool | None = None) -> None:
-        any_enabled = (
-            self._use_divergence.isChecked()
-            or self._use_gap_row.isChecked()
-            or self._use_gappy_columns.isChecked()
+    def _listed_method_ids(self) -> list[str]:
+        return [
+            str(self._method_order.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(self._method_order.count())
+        ]
+
+    def _refresh_available_methods(self) -> None:
+        listed = set(self._listed_method_ids())
+        self._available_method.clear()
+        for method_id, label in self._method_labels.items():
+            if method_id not in listed:
+                self._available_method.addItem(label, method_id)
+        self._sync_method_controls()
+
+    def _sync_method_controls(self, _row: int | None = None) -> None:
+        self._add_method_button.setEnabled(self._available_method.count() > 0)
+        self._remove_method_button.setEnabled(
+            self._method_order.count() > 1 and self._method_order.currentRow() >= 0
         )
-        if self._ok_button is not None:
-            self._ok_button.setEnabled(any_enabled)
-            self._ok_button.setToolTip(
-                "" if any_enabled else "Enable at least one cleaning method."
-            )
+
+    def _add_selected_method(self) -> None:
+        method_id = self._available_method.currentData()
+        if method_id is None:
+            return
+        item = QListWidgetItem(self._method_labels[str(method_id)])
+        item.setData(Qt.ItemDataRole.UserRole, method_id)
+        self._method_order.addItem(item)
+        self._method_order.setCurrentItem(item)
+        self._refresh_available_methods()
+
+    def _remove_selected_method(self) -> None:
+        row = self._method_order.currentRow()
+        if row < 0 or self._method_order.count() <= 1:
+            return
+        self._method_order.takeItem(row)
+        self._refresh_available_methods()
 
     def options(self) -> MsaCleanOptions:
+        method_order = tuple(self._listed_method_ids())
         return MsaCleanOptions(
-            use_divergence=self._use_divergence.isChecked(),
-            use_gap_row=self._use_gap_row.isChecked(),
-            use_gappy_columns=self._use_gappy_columns.isChecked(),
+            use_divergence="msa_clean_div" in method_order,
+            use_gap_row="msa_clean_gap" in method_order,
+            use_gappy_columns="msa_clean_gappy" in method_order,
+            method_order=method_order,
             gappy=GappyColumnOptions(
                 gap_threshold=self._gap_threshold.value(),
                 simi_check_gap_thr=self._simi_gap.value(),

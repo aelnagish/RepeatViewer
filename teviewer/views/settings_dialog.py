@@ -380,8 +380,6 @@ class SettingsDialog(QDialog):
         self._settings = QSettings()
         self._plugin_registry = plugin_registry
 
-        self._system_blast = QCheckBox()
-        self._system_blast.setChecked(project.use_system_blast)
         self._system_viewer = QCheckBox()
         self._system_viewer.setChecked(project.use_system_sequence_viewer)
         self._color_blind_scheme = QCheckBox()
@@ -512,6 +510,7 @@ class SettingsDialog(QDialog):
 
         # MSA clean pipeline
         msa_clean = load_msa_clean_options()
+        self._msa_method_order = msa_clean.method_order
         self._msa_use_divergence = QCheckBox("Clean rows with divergence")
         self._msa_use_divergence.setChecked(msa_clean.use_divergence)
         self._msa_div_threshold = NoWheelDoubleSpinBox()
@@ -635,7 +634,6 @@ class SettingsDialog(QDialog):
             ("Accent colour:", accent_field),
         ])
         seq_tools = _group("Sequence tools", [
-            ("Use system BLAST:", self._system_blast),
             ("Use system sequence viewer:", self._system_viewer),
             ("Color-blind nucleotide:", self._color_blind_scheme),
         ])
@@ -795,7 +793,6 @@ class SettingsDialog(QDialog):
         return order, font_size
 
     def apply_to_project(self) -> TEviewerProject:
-        self._project.use_system_blast = self._system_blast.isChecked()
         self._project.use_system_sequence_viewer = self._system_viewer.isChecked()
         self._project.batch_workers = self._batch_workers.value()
         save_browser_panel_font_size(self._browser_panel_font.value())
@@ -818,6 +815,7 @@ class SettingsDialog(QDialog):
                 use_divergence=self._msa_use_divergence.isChecked(),
                 use_gap_row=self._msa_use_gap_row.isChecked(),
                 use_gappy_columns=self._msa_use_gappy_columns.isChecked(),
+                method_order=self._msa_method_order,
                 divergence=DivergenceRowOptions(
                     threshold=self._msa_div_threshold.value(),
                     window_size=self._msa_div_window.value(),

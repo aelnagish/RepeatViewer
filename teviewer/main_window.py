@@ -2553,7 +2553,7 @@ class MainWindow(QMainWindow):
             lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTP),
         )
         menu.addSeparator()
-        menu.addAction("BLAST parameters…", self._change_blast_parameters)
+        menu.addAction("Change BLAST parameters", self._change_blast_parameters)
 
     def _populate_te_visualization_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -2589,14 +2589,9 @@ class MainWindow(QMainWindow):
         menu.addAction("Change TEAid parameters", self._modify_teaid_parameters)
 
     def _populate_msa_clean_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction("MSA clean with configured methods", self._run_default_msa_clean)
-            menu.addSeparator()
-            menu.addAction("Configure MSA clean methods", self._modify_msa_clean_parameters)
-            menu.addSeparator()
-        else:
-            menu.addAction("Configure MSA clean methods", self._modify_msa_clean_parameters)
-            menu.addSeparator()
+        del skip_default
+        menu.addAction("Combined MSA clean", self._run_default_msa_clean)
+        menu.addSeparator()
         self._add_msa_clean_menu_action(
             menu,
             "Remove gappy columns",
@@ -2612,6 +2607,8 @@ class MainWindow(QMainWindow):
             "Clean row with gap",
             "msa_clean_gap",
         )
+        menu.addSeparator()
+        menu.addAction("Change MSA clean parameters", self._modify_msa_clean_parameters)
 
     def _populate_consensus_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -3327,6 +3324,7 @@ class MainWindow(QMainWindow):
                 self._run_default_msa_clean,
                 self._populate_msa_clean_menu,
                 tooltip=tip,
+                show_default_action=False,
             )
         elif tool_id == "consensus":
             self._add_toolbar_text_menu_button(
@@ -5574,6 +5572,8 @@ class MainWindow(QMainWindow):
             if dialog.exec():
                 self._blast_options = dialog.options()
                 save_blast_options(self._blast_options)
+                self._project.use_system_blast = dialog.use_system_blast()
+                self._persist_workspace()
                 self._set_status_message("Blast parameters updated", 4000)
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
