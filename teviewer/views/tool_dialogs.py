@@ -1735,12 +1735,6 @@ class BlastParamsDialog(QDialog):
         blastx_form.addRow("-qcov_hsp_perc:", self._blastx_query_coverage)
         blastx_form.addRow("", self._blastx_write_text)
         blastx_form.addRow("", self._blastx_write_gff)
-        # blastx is not bundled, so it always needs BLAST+ on the system PATH.
-        blastx_note = QLabel(
-            "blastx uses BLAST+ from your system PATH (not bundled).", self
-        )
-        blastx_note.setStyleSheet("color: palette(mid);")
-        blastx_form.addRow("", blastx_note)
         self._use_system_blast_x = QCheckBox("Use BLAST from the system PATH")
         self._use_system_blast_x.setChecked(project.use_system_blast)
         self._use_system_blast_x.setToolTip(self._use_system_blast.toolTip())
