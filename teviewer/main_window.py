@@ -3239,6 +3239,28 @@ class MainWindow(QMainWindow):
         self._register_toolbar_item(btn, _overflow)
         return btn
 
+    def _add_toolbar_action_button(
+        self, bar, text: str, slot, *, tooltip: str = ""
+    ) -> QToolButton:
+        """Text-only toolbar button whose click runs a single action, no menu."""
+        del bar
+        btn = QToolButton(self._toolbar_container)
+        btn.setText(text)
+        if tooltip:
+            btn.setToolTip(tooltip)
+        self._style_toolbar_button(btn)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        btn.clicked.connect(slot)
+        self._toolbar_hbox.addWidget(btn)
+        self._job_toolbar_actions.append(btn)
+
+        def _overflow(menu: QMenu) -> None:
+            action = menu.addAction(text, slot)
+            action.setEnabled(btn.isEnabled())
+
+        self._register_toolbar_item(btn, _overflow)
+        return btn
+
     def _build_top_toolbar(self) -> None:
         bar = QToolBar("Functions", self)
         bar.setObjectName("FunctionsToolBar")
@@ -3449,13 +3471,11 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
             )
         elif tool_id == "blast":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "BLAST",
-                self._run_blast,
-                self._populate_blast_menu,
-                tooltip=tip,
-                show_default_action=False,
+                self._open_blast_dialog,
+                tooltip="Set BLAST parameters and run (blastn or blastp by tab)",
             )
         elif tool_id == "te_genome_map":
             self._add_toolbar_text_menu_button(
@@ -5745,6 +5765,28 @@ class MainWindow(QMainWindow):
     def _run_blast_program(self, program: str) -> None:
         options = replace(self._blast_options, program=program)
         self._apply_function("blast", blast_options=options)
+
+    def _open_blast_dialog(self) -> None:
+        """Click BLAST -> parameters dialog. Run launches the active tab's program.
+
+        The dialog's tabs (blastn / blastp) are the program choice, so the one
+        Run button covers both. Cancel keeps the last saved settings; Run saves
+        the edits and starts the job.
+        """
+        dialog = BlastParamsDialog(
+            project=self._project, initial=self._blast_options, parent=self
+        )
+        try:
+            if not dialog.exec():
+                return  # Cancel: nothing changes, saved settings stay put.
+            self._blast_options = dialog.options()
+            save_blast_options(self._blast_options)
+            self._project.use_system_blast = dialog.use_system_blast()
+            self._persist_workspace()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        # Run the program of whichever tab was active, with the just-saved options.
+        self._apply_function("blast", blast_options=self._blast_options)
 
     def _change_blast_parameters(self) -> None:
         dialog = BlastParamsDialog(project=self._project, initial=self._blast_options, parent=self)

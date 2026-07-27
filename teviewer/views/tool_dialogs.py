@@ -1645,7 +1645,16 @@ class BlastParamsDialog(QDialog):
         blastn_form.addRow("-qcov_hsp_perc:", self._query_coverage)
         blastn_form.addRow("", self._blastn_write_text)
         blastn_form.addRow("", self._blastn_write_gff)
-        self._tabs.addTab(blastn_tab, "blastn")
+        # The system-PATH toggle is a shared setting, shown on both program
+        # tabs (one checkbox each, kept in sync) so it is reachable wherever you
+        # are without a separate tab.
+        self._use_system_blast = QCheckBox("Use BLAST from the system PATH")
+        self._use_system_blast.setChecked(project.use_system_blast)
+        self._use_system_blast.setToolTip(
+            "Use BLAST+ programs installed on the system PATH instead of the bundled programs."
+        )
+        blastn_form.addRow("", self._use_system_blast)
+        self._tabs.addTab(blastn_tab, "BLASTn")
 
         blastp_tab = QWidget()
         blastp_form = self._parameter_form(blastp_tab)
@@ -1658,17 +1667,15 @@ class BlastParamsDialog(QDialog):
         blastp_form.addRow("-qcov_hsp_perc:", self._blastp_query_coverage)
         blastp_form.addRow("", self._blastp_write_text)
         blastp_form.addRow("", self._blastp_write_gff)
-        self._tabs.addTab(blastp_tab, "blastp")
+        self._use_system_blast_p = QCheckBox("Use BLAST from the system PATH")
+        self._use_system_blast_p.setChecked(project.use_system_blast)
+        self._use_system_blast_p.setToolTip(self._use_system_blast.toolTip())
+        blastp_form.addRow("", self._use_system_blast_p)
+        self._tabs.addTab(blastp_tab, "BLASTp")
 
-        others_tab = QWidget()
-        others_form = self._parameter_form(others_tab)
-        self._use_system_blast = QCheckBox("Use BLAST from the system PATH")
-        self._use_system_blast.setChecked(project.use_system_blast)
-        self._use_system_blast.setToolTip(
-            "Use BLAST+ programs installed on the system PATH instead of the bundled programs."
-        )
-        others_form.addRow("", self._use_system_blast)
-        self._tabs.addTab(others_tab, "Others")
+        # Keep the two copies of the shared toggle in step.
+        self._use_system_blast.toggled.connect(self._use_system_blast_p.setChecked)
+        self._use_system_blast_p.toggled.connect(self._use_system_blast.setChecked)
 
         self._populate_database_combos(
             blastn_name=opts.blast_database_name,
@@ -1697,6 +1704,10 @@ class BlastParamsDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        # BLAST runs straight from this dialog, and the button names which
+        # BLAST runs straight from this dialog, so the accept button says Run.
+        self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._run_button.setText("Run")
         restore = buttons.addButton("Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole)
         restore.clicked.connect(self._restore_defaults)
         buttons.accepted.connect(self.accept)
