@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QCompleter,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -30,12 +29,20 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
     QTextEdit,
+)
+
+# Use the wheel-ignoring spin boxes everywhere in these parameter dialogs, so
+# scrolling over a field never changes its value by accident -- only the arrows
+# or typing do. Aliased to the standard names so all existing construction
+# sites pick them up unchanged.
+from teviewer.widgets.spin_boxes import (  # noqa: E402
+    NoWheelDoubleSpinBox as QDoubleSpinBox,
+    NoWheelSpinBox as QSpinBox,
 )
 
 
@@ -103,6 +110,7 @@ from teviewer.job_options import (
     DEFAULT_BLAST_TOP_MSA_LINES,
     BLAST_PROGRAM_BLASTN,
     BLAST_PROGRAM_BLASTP,
+    BLAST_PROGRAM_BLASTX,
     DEFAULT_CONSENSUS_AMBIGUOUS,
     DEFAULT_CONSENSUS_THRESHOLD,
     DEFAULT_EXTEND_LEFT,
@@ -1579,6 +1587,49 @@ class BlastParamsDialog(QDialog):
         self._blastp_write_gff = QCheckBox("Export GFF file (*.gff)")
         self._blastp_write_gff.setChecked(opts.blastp_write_gff)
 
+        # --- blastx: nucleotide query translated against a protein database ---
+        self._blastx_database = QComboBox()
+        self._blastx_database.setMinimumWidth(220)
+
+        self._blastx_evalue = QDoubleSpinBox()
+        configure_report_evalue_spinbox(self._blastx_evalue)
+        self._blastx_evalue.setValue(normalize_blast_evalue(opts.blastx_e_value))
+
+        self._blastx_threads = QSpinBox()
+        self._blastx_threads.setRange(1, 128)
+        self._blastx_threads.setValue(max(1, opts.blastx_num_threads))
+        self._blastx_threads.setToolTip("BLASTX -num_threads: CPU threads used for this search.")
+
+        self._blastx_word_size = QSpinBox()
+        self._blastx_word_size.setRange(2, 10_000)
+        self._blastx_word_size.setValue(opts.blastx_word_size)
+        self._blastx_word_size.setToolTip(
+            "BLASTX -word_size: length of the protein seed used to begin a search."
+        )
+
+        self._blastx_gap_open = QSpinBox()
+        self._blastx_gap_open.setRange(0, 1000)
+        self._blastx_gap_open.setValue(opts.blastx_gap_open)
+        self._blastx_gap_open.setToolTip("BLASTX -gapopen: cost for opening a gap.")
+
+        self._blastx_gap_extend = QSpinBox()
+        self._blastx_gap_extend.setRange(0, 1000)
+        self._blastx_gap_extend.setValue(opts.blastx_gap_extend)
+        self._blastx_gap_extend.setToolTip("BLASTX -gapextend: cost for extending a gap.")
+
+        self._blastx_query_coverage = QDoubleSpinBox()
+        self._blastx_query_coverage.setRange(0.0, 100.0)
+        self._blastx_query_coverage.setDecimals(1)
+        self._blastx_query_coverage.setSuffix(" %")
+        self._blastx_query_coverage.setValue(opts.blastx_query_coverage_hsp)
+        self._blastx_query_coverage.setToolTip(
+            "BLASTX -qcov_hsp_perc: discard HSPs below this query coverage; 0 disables the filter."
+        )
+        self._blastx_write_text = QCheckBox("Export BLAST text file (*.txt)")
+        self._blastx_write_text.setChecked(opts.blastx_write_text)
+        self._blastx_write_gff = QCheckBox("Export GFF file (*.gff)")
+        self._blastx_write_gff.setChecked(opts.blastx_write_gff)
+
         self._max_msa = QSpinBox()
         self._max_msa.setRange(10, 5000)
         self._max_msa.setValue(opts.max_msa_lines)
@@ -1645,7 +1696,16 @@ class BlastParamsDialog(QDialog):
         blastn_form.addRow("-qcov_hsp_perc:", self._query_coverage)
         blastn_form.addRow("", self._blastn_write_text)
         blastn_form.addRow("", self._blastn_write_gff)
-        self._tabs.addTab(blastn_tab, "blastn")
+        # The system-PATH toggle is a shared setting, shown on both program
+        # tabs (one checkbox each, kept in sync) so it is reachable wherever you
+        # are without a separate tab.
+        self._use_system_blast = QCheckBox("Use BLAST from the system PATH")
+        self._use_system_blast.setChecked(project.use_system_blast)
+        self._use_system_blast.setToolTip(
+            "Use BLAST+ programs installed on the system PATH instead of the bundled programs."
+        )
+        blastn_form.addRow("", self._use_system_blast)
+        self._tabs.addTab(blastn_tab, "BLASTn")
 
         blastp_tab = QWidget()
         blastp_form = self._parameter_form(blastp_tab)
@@ -1658,23 +1718,45 @@ class BlastParamsDialog(QDialog):
         blastp_form.addRow("-qcov_hsp_perc:", self._blastp_query_coverage)
         blastp_form.addRow("", self._blastp_write_text)
         blastp_form.addRow("", self._blastp_write_gff)
-        self._tabs.addTab(blastp_tab, "blastp")
+        self._use_system_blast_p = QCheckBox("Use BLAST from the system PATH")
+        self._use_system_blast_p.setChecked(project.use_system_blast)
+        self._use_system_blast_p.setToolTip(self._use_system_blast.toolTip())
+        blastp_form.addRow("", self._use_system_blast_p)
+        self._tabs.addTab(blastp_tab, "BLASTp")
 
-        others_tab = QWidget()
-        others_form = self._parameter_form(others_tab)
-        self._use_system_blast = QCheckBox("Use BLAST from the system PATH")
-        self._use_system_blast.setChecked(project.use_system_blast)
-        self._use_system_blast.setToolTip(
-            "Use BLAST+ programs installed on the system PATH instead of the bundled programs."
-        )
-        others_form.addRow("", self._use_system_blast)
-        self._tabs.addTab(others_tab, "Others")
+        blastx_tab = QWidget()
+        blastx_form = self._parameter_form(blastx_tab)
+        blastx_form.addRow("Database:", self._database_row(self._blastx_database))
+        blastx_form.addRow("-evalue:", self._blastx_evalue)
+        blastx_form.addRow("Threads:", self._blastx_threads)
+        blastx_form.addRow("-word_size:", self._blastx_word_size)
+        blastx_form.addRow("-gapopen:", self._blastx_gap_open)
+        blastx_form.addRow("-gapextend:", self._blastx_gap_extend)
+        blastx_form.addRow("-qcov_hsp_perc:", self._blastx_query_coverage)
+        blastx_form.addRow("", self._blastx_write_text)
+        blastx_form.addRow("", self._blastx_write_gff)
+        self._use_system_blast_x = QCheckBox("Use BLAST from the system PATH")
+        self._use_system_blast_x.setChecked(project.use_system_blast)
+        self._use_system_blast_x.setToolTip(self._use_system_blast.toolTip())
+        blastx_form.addRow("", self._use_system_blast_x)
+        self._tabs.addTab(blastx_tab, "BLASTx")
+
+        # Keep the three copies of the shared toggle in step.
+        for src in (self._use_system_blast, self._use_system_blast_p, self._use_system_blast_x):
+            for dst in (self._use_system_blast, self._use_system_blast_p, self._use_system_blast_x):
+                if src is not dst:
+                    src.toggled.connect(dst.setChecked)
 
         self._populate_database_combos(
             blastn_name=opts.blast_database_name,
             blastp_name=opts.blastp_database_name,
+            blastx_name=opts.blastx_database_name,
         )
-        self._tabs.setCurrentIndex(1 if opts.program == BLAST_PROGRAM_BLASTP else 0)
+        program_tab = {
+            BLAST_PROGRAM_BLASTP: 1,
+            BLAST_PROGRAM_BLASTX: 2,
+        }.get(opts.program, 0)
+        self._tabs.setCurrentIndex(program_tab)
 
         self._post_box = QGroupBox("Post-processing")
         post_layout = QVBoxLayout(self._post_box)
@@ -1697,6 +1779,10 @@ class BlastParamsDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        # BLAST runs straight from this dialog, and the button names which
+        # BLAST runs straight from this dialog, so the accept button says Run.
+        self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._run_button.setText("Run")
         restore = buttons.addButton("Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole)
         restore.clicked.connect(self._restore_defaults)
         buttons.accepted.connect(self.accept)
@@ -1798,6 +1884,7 @@ class BlastParamsDialog(QDialog):
         *,
         blastn_name=_KEEP_CURRENT,
         blastp_name=_KEEP_CURRENT,
+        blastx_name=_KEEP_CURRENT,
     ) -> None:
         self._populate_database_combo(
             self._blastn_database,
@@ -1808,6 +1895,12 @@ class BlastParamsDialog(QDialog):
             self._blastp_database,
             BLAST_MOLECULE_PROT,
             selected_name=blastp_name,
+        )
+        # blastx also searches a protein database.
+        self._populate_database_combo(
+            self._blastx_database,
+            BLAST_MOLECULE_PROT,
+            selected_name=blastx_name,
         )
 
     def _manage_databases(self) -> None:
@@ -1837,25 +1930,31 @@ class BlastParamsDialog(QDialog):
         self._blastp_query_coverage.setValue(defaults.blastp_query_coverage_hsp)
         self._blastp_write_text.setChecked(defaults.blastp_write_text)
         self._blastp_write_gff.setChecked(defaults.blastp_write_gff)
+        self._blastx_evalue.setValue(defaults.blastx_e_value)
+        self._blastx_threads.setValue(defaults.blastx_num_threads)
+        self._blastx_word_size.setValue(defaults.blastx_word_size)
+        self._blastx_gap_open.setValue(defaults.blastx_gap_open)
+        self._blastx_gap_extend.setValue(defaults.blastx_gap_extend)
+        self._blastx_query_coverage.setValue(defaults.blastx_query_coverage_hsp)
+        self._blastx_write_text.setChecked(defaults.blastx_write_text)
+        self._blastx_write_gff.setChecked(defaults.blastx_write_gff)
         self._max_msa.setValue(defaults.max_msa_lines)
         self._top_msa.setValue(defaults.top_msa_lines)
         self._min_bit_score.setValue(defaults.minimum_bit_score)
         self._blastn_database.setCurrentIndex(0)
         self._blastp_database.setCurrentIndex(0)
+        self._blastx_database.setCurrentIndex(0)
         self._use_system_blast.setChecked(False)
 
     def use_system_blast(self) -> bool:
         return self._use_system_blast.isChecked()
 
     def options(self) -> BlastOptions:
-        tab_index = self._tabs.currentIndex()
-        program = (
-            BLAST_PROGRAM_BLASTP
-            if tab_index == 1
-            else BLAST_PROGRAM_BLASTN
-            if tab_index == 0
-            else self._initial_program
-        )
+        program = {
+            0: BLAST_PROGRAM_BLASTN,
+            1: BLAST_PROGRAM_BLASTP,
+            2: BLAST_PROGRAM_BLASTX,
+        }.get(self._tabs.currentIndex(), self._initial_program)
         return BlastOptions(
             program=program,
             e_value=normalize_blast_evalue(self._evalue.value()),
@@ -1881,6 +1980,15 @@ class BlastParamsDialog(QDialog):
             blastp_database_name=self._blastp_database.currentData(),
             blastp_write_text=self._blastp_write_text.isChecked(),
             blastp_write_gff=self._blastp_write_gff.isChecked(),
+            blastx_e_value=normalize_blast_evalue(self._blastx_evalue.value()),
+            blastx_num_threads=self._blastx_threads.value(),
+            blastx_word_size=self._blastx_word_size.value(),
+            blastx_gap_open=self._blastx_gap_open.value(),
+            blastx_gap_extend=self._blastx_gap_extend.value(),
+            blastx_query_coverage_hsp=self._blastx_query_coverage.value(),
+            blastx_database_name=self._blastx_database.currentData(),
+            blastx_write_text=self._blastx_write_text.isChecked(),
+            blastx_write_gff=self._blastx_write_gff.isChecked(),
         )
 
 

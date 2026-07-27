@@ -42,7 +42,11 @@ DEFAULT_BLAST_PERCENT_IDENTITY = 0.0
 DEFAULT_BLAST_QUERY_COVERAGE = 0.0
 BLAST_PROGRAM_BLASTN = "blastn"
 BLAST_PROGRAM_BLASTP = "blastp"
-BLAST_PROGRAMS = (BLAST_PROGRAM_BLASTN, BLAST_PROGRAM_BLASTP)
+BLAST_PROGRAM_BLASTX = "blastx"
+BLAST_PROGRAMS = (BLAST_PROGRAM_BLASTN, BLAST_PROGRAM_BLASTP, BLAST_PROGRAM_BLASTX)
+# blastx translates a nucleotide query and searches a protein database, so it
+# shares blastp's protein-style scoring but takes DNA in.
+BLAST_PROGRAMS_PROTEIN_DB = (BLAST_PROGRAM_BLASTP, BLAST_PROGRAM_BLASTX)
 DEFAULT_BLASTP_EVALUE = DEFAULT_BLAST_EVALUE
 DEFAULT_BLASTP_WORD_SIZE = 3
 DEFAULT_BLASTP_GAP_OPEN = 11
@@ -50,6 +54,14 @@ DEFAULT_BLASTP_GAP_EXTEND = 1
 DEFAULT_BLASTP_QUERY_COVERAGE = 0.0
 DEFAULT_BLASTP_WRITE_TEXT = True
 DEFAULT_BLASTP_WRITE_GFF = False
+
+DEFAULT_BLASTX_EVALUE = DEFAULT_BLAST_EVALUE
+DEFAULT_BLASTX_WORD_SIZE = 3
+DEFAULT_BLASTX_GAP_OPEN = 11
+DEFAULT_BLASTX_GAP_EXTEND = 1
+DEFAULT_BLASTX_QUERY_COVERAGE = 0.0
+DEFAULT_BLASTX_WRITE_TEXT = True
+DEFAULT_BLASTX_WRITE_GFF = False
 
 DEFAULT_TE_GENOME_MAP_BIN_BP = 100_000
 TE_GENOME_MAP_DENSITY_HIT_COUNT = "hit_count"
@@ -268,11 +280,22 @@ class BlastOptions:
     blastp_write_text: bool = DEFAULT_BLASTP_WRITE_TEXT
     blastp_write_gff: bool = DEFAULT_BLASTP_WRITE_GFF
     blastp_num_threads: int = field(default_factory=_default_tool_threads)
+    blastx_e_value: float = DEFAULT_BLASTX_EVALUE
+    blastx_word_size: int = DEFAULT_BLASTX_WORD_SIZE
+    blastx_gap_open: int = DEFAULT_BLASTX_GAP_OPEN
+    blastx_gap_extend: int = DEFAULT_BLASTX_GAP_EXTEND
+    blastx_query_coverage_hsp: float = DEFAULT_BLASTX_QUERY_COVERAGE
+    blastx_database_name: str | None = None
+    blastx_write_text: bool = DEFAULT_BLASTX_WRITE_TEXT
+    blastx_write_gff: bool = DEFAULT_BLASTX_WRITE_GFF
+    blastx_num_threads: int = field(default_factory=_default_tool_threads)
 
     @property
     def active_database_name(self) -> str | None:
         if self.program == BLAST_PROGRAM_BLASTP:
             return self.blastp_database_name
+        if self.program == BLAST_PROGRAM_BLASTX:
+            return self.blastx_database_name
         return self.blast_database_name
 
 
@@ -582,6 +605,29 @@ def load_blast_options() -> BlastOptions:
         blastp_num_threads=max(
             1, int(v.get("blastp_num_threads", _default_tool_threads()))
         ),
+        blastx_e_value=normalize_blast_evalue(
+            float(v.get("blastx_e_value", DEFAULT_BLASTX_EVALUE))
+        ),
+        blastx_word_size=max(2, int(v.get("blastx_word_size", DEFAULT_BLASTX_WORD_SIZE))),
+        blastx_gap_open=max(0, int(v.get("blastx_gap_open", DEFAULT_BLASTX_GAP_OPEN))),
+        blastx_gap_extend=max(
+            0, int(v.get("blastx_gap_extend", DEFAULT_BLASTX_GAP_EXTEND))
+        ),
+        blastx_query_coverage_hsp=max(
+            0.0,
+            min(
+                100.0,
+                float(v.get("blastx_query_coverage_hsp", DEFAULT_BLASTX_QUERY_COVERAGE)),
+            ),
+        ),
+        blastx_database_name=(
+            str(v["blastx_database_name"]) if v.get("blastx_database_name") else None
+        ),
+        blastx_write_text=bool(v.get("blastx_write_text", DEFAULT_BLASTX_WRITE_TEXT)),
+        blastx_write_gff=bool(v.get("blastx_write_gff", DEFAULT_BLASTX_WRITE_GFF)),
+        blastx_num_threads=max(
+            1, int(v.get("blastx_num_threads", _default_tool_threads()))
+        ),
     )
 
 
@@ -613,6 +659,15 @@ def save_blast_options(opts: BlastOptions) -> None:
             "blastp_write_text": opts.blastp_write_text,
             "blastp_write_gff": opts.blastp_write_gff,
             "blastp_num_threads": opts.blastp_num_threads,
+            "blastx_e_value": opts.blastx_e_value,
+            "blastx_word_size": opts.blastx_word_size,
+            "blastx_gap_open": opts.blastx_gap_open,
+            "blastx_gap_extend": opts.blastx_gap_extend,
+            "blastx_query_coverage_hsp": opts.blastx_query_coverage_hsp,
+            "blastx_database_name": opts.blastx_database_name or "",
+            "blastx_write_text": opts.blastx_write_text,
+            "blastx_write_gff": opts.blastx_write_gff,
+            "blastx_num_threads": opts.blastx_num_threads,
         },
     )
 
