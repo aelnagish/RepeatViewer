@@ -243,7 +243,12 @@ def _configure_webengine() -> None:
         if flag not in flags:
             flags = f"{flags} {flag}".strip()
     if sys.platform == "darwin":
-        for flag in ("--disable-gpu", "--no-sandbox"):
+        for flag in (
+            "--disable-gpu",
+            "--disable-gpu-compositing",
+            "--disable-gpu-rasterization",
+            "--no-sandbox",
+        ):
             if flag not in flags:
                 flags = f"{flags} {flag}".strip()
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = flags

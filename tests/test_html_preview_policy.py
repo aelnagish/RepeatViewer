@@ -49,16 +49,17 @@ def test_embed_html_disabled_blocks_all(monkeypatch: pytest.MonkeyPatch) -> None
     assert policy.should_use_webengine_for_html(Path("/tmp/gene_flexidot.html")) is False
 
 
-def test_unsafe_webengine_probe_blocks_all(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the crash probe reports WebEngine is unsafe, fall back for every file."""
-    monkeypatch.setattr(webengine_probe, "webengine_is_safe", lambda **_: False)
-    assert policy.should_use_webengine_for_html(Path("/tmp/teaid_report.html")) is False
-    assert policy.should_use_webengine_for_html(Path("/tmp/gene_flexidot.html")) is False
-    assert "WebEngine" in policy.embedded_html_disabled_reason()
-
-
-def test_embed_html_disabled_reason_reflects_env_override(
+def test_unsafe_webengine_probe_does_not_block_embedded_preview(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Background probe failure must not force browser-only mode by default."""
+    monkeypatch.setattr(webengine_probe, "webengine_is_safe", lambda **_: False)
+    assert policy.should_use_webengine_for_html(Path("/tmp/teaid_report.html")) is True
+    assert policy.may_attempt_embedded_html_preview() is True
+
+
+def test_embed_html_env_opt_out_blocks_preview(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEVIEWER_EMBED_HTML", "0")
+    assert policy.may_attempt_embedded_html_preview() is False
+    assert policy.should_use_webengine_for_html(Path("/tmp/teaid_report.html")) is False
     assert "TEVIEWER_EMBED_HTML=0" in policy.embedded_html_disabled_reason()

@@ -110,6 +110,23 @@ def clear_webengine_probe_cache() -> None:
         pass
 
 
+def mark_webengine_safe() -> None:
+    """Record that WebEngine loaded successfully in the main GUI process."""
+    global _PROBE_RESULT
+    with _PROBE_LOCK:
+        _PROBE_RESULT = True
+        _write_cached(True)
+
+
+def webengine_is_known_unsafe() -> bool:
+    """True when a probe or prior run marked WebEngine unsafe on this machine."""
+    with _PROBE_LOCK:
+        if _PROBE_RESULT is False:
+            return True
+    cached = _read_cached()
+    return cached is False
+
+
 def webengine_is_safe(*, force_probe: bool = False) -> bool:
     """Return False when embedded HTML preview would likely segfault this machine."""
     global _PROBE_RESULT

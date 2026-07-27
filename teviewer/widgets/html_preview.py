@@ -30,6 +30,7 @@ from teviewer.backends.flexidot_go_to import (
 from teviewer.backends.html_preview_policy import (
     embedded_html_disabled_reason,
     flexidot_browser_fallback_reason,
+    may_attempt_embedded_html_preview,
     should_use_webengine_for_html,
     use_embedded_html_preview,
 )
@@ -199,28 +200,52 @@ class LazyHtmlPreview(QWidget):
 
     def load_html_file(self, path: Path, *, force: bool = False) -> None:
         resolved = path.expanduser().resolve()
-        if not should_use_webengine_for_html(resolved):
+        if not force and not should_use_webengine_for_html(resolved):
             self._load_browser_fallback(resolved, auto_open=is_flexidot_html_file(resolved))
             return
-        if not use_embedded_html_preview():
+        if not may_attempt_embedded_html_preview(force=force):
             self._load_browser_fallback(
                 resolved,
                 reason=embedded_html_disabled_reason(),
             )
             return
+        if isinstance(self._inner, HtmlFallbackPreview):
+            self._layout.removeWidget(self._inner)
+            self._inner.deleteLater()
+            self._inner = None
         if self._inner is None:
             self._inner = self._create_inner_viewer()
+            if isinstance(self._inner, HtmlFallbackPreview):
+                self._inner.load_html_file(resolved)
+                self._status.hide()
+                self._layout.addWidget(self._inner, stretch=1)
+                return
             self._status.hide()
             self._layout.addWidget(self._inner, stretch=1)
 
         if hasattr(self._inner, "load_html_file"):
             self._inner.load_html_file(path, force=force)
+        if self._inner is not None:
+            self._status.hide()
         if hasattr(self._inner, "is_view_active") and not self._inner.is_view_active():
             return
         if hasattr(self._inner, "set_zoom_percent"):
             self._inner.set_zoom_percent(self._zoom_percent)
         if hasattr(self._inner, "set_fit_mode"):
             self._inner.set_fit_mode(self._fit_mode)
+
+    def try_embedded_preview(self, path: Path) -> None:
+        """Retry embedded Plotly/HTML preview after browser fallback."""
+        from teviewer.backends.webengine_probe import clear_webengine_probe_cache
+
+        clear_webengine_probe_cache()
+        if self._inner is not None:
+            if hasattr(self._inner, "teardown"):
+                self._inner.teardown()
+            self._layout.removeWidget(self._inner)
+            self._inner.deleteLater()
+            self._inner = None
+        self.load_html_file(path, force=True)
 
     def _load_browser_fallback(
         self,
@@ -241,6 +266,7 @@ class LazyHtmlPreview(QWidget):
         self._status.hide()
         self._layout.addWidget(self._inner, stretch=1)
         self._inner.load_html_file(path)
+        self._inner.set_retry_handler(lambda p=path: self.try_embedded_preview(p))
         if auto_open:
             QTimer.singleShot(150, lambda p=path: open_html_in_browser(p))
 
@@ -296,9 +322,15 @@ class LazyHtmlPreview(QWidget):
 
             viewer = HtmlWebEnginePreview(self)
             viewer.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
+            from teviewer.backends.webengine_probe import mark_webengine_safe
+
+            mark_webengine_safe()
             return viewer
         except ImportError:
-            return HtmlFallbackPreview(self, reason="PySide6-Addons not installed")
+            return HtmlFallbackPreview(
+                self,
+                reason="PySide6-Addons not installed.\n\npip install 'PySide6-Addons>=6.6'",
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("WebEngine init failed")
             return HtmlFallbackPreview(self, reason=str(exc))
@@ -927,13 +959,30 @@ class HtmlFallbackPreview(QWidget):
             "Or open the report in your browser:"
         )
         self._label.setWordWrap(True)
+        self._try_btn = QPushButton("Try in-app preview")
+        self._try_btn.clicked.connect(self._try_in_app)
+        self._try_btn.setToolTip(
+            "Attempt to show this report inside TEviewer (requires Qt WebEngine)."
+        )
         self._open_btn = QPushButton("Open in browser")
         self._open_btn.clicked.connect(self._open_in_browser)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self._try_btn)
+        btn_row.addWidget(self._open_btn)
+        btn_row.addStretch()
         layout.addWidget(self._label)
-        layout.addWidget(self._open_btn)
+        layout.addLayout(btn_row)
         layout.addStretch()
         self._current_path: Path | None = None
         self._current_url: str | None = None
+        self._retry_handler = None
+
+    def set_retry_handler(self, handler) -> None:
+        self._retry_handler = handler
+
+    def _try_in_app(self) -> None:
+        if self._retry_handler is not None:
+            self._retry_handler()
 
     def load_html_file(self, path: Path) -> None:
         self._current_path = path.expanduser().resolve()

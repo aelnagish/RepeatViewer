@@ -32,6 +32,7 @@ def run_app(argv: list[str] | None = None) -> int:
             apply_macos_app_name()
 
         # High-DPI on Qt6 is enabled by default; keep AA flag for older Qt builds.
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
         QApplication.setHighDpiScaleFactorRoundingPolicy(
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
         )

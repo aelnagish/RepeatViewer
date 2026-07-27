@@ -8,17 +8,24 @@ from pathlib import Path
 from teviewer.backends.curation import is_flexidot_html_file
 
 
-def use_embedded_html_preview() -> bool:
-    """Return False when embedded HTML preview should not be used.
+def may_attempt_embedded_html_preview(*, force: bool = False) -> bool:
+    """True when TEviewer should try loading HTML inside Qt WebEngine.
 
-    Honors ``TEVIEWER_EMBED_HTML`` overrides, and otherwise defers to the
-    Qt WebEngine crash probe (macOS + certain PySide6 builds segfault on
-    ``QWebEngineView`` creation) so we never build a WebEngine view in the
-    main process unless it is known to be safe on this machine.
+    Embedded preview is **on by default**. Set ``TEVIEWER_EMBED_HTML=0`` to
+    always use the system browser. A failed background safety probe does not
+    block preview — the main GUI process may still render Plotly HTML fine.
     """
-    from teviewer.backends.webengine_probe import webengine_is_safe
+    flag = os.environ.get("TEVIEWER_EMBED_HTML", "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    if force or flag in {"1", "true", "yes", "on"}:
+        return True
+    return True
 
-    return webengine_is_safe()
+
+def use_embedded_html_preview() -> bool:
+    """Return False only when embedded HTML preview is turned off."""
+    return may_attempt_embedded_html_preview()
 
 
 def embedded_html_disabled_reason() -> str:
@@ -26,9 +33,11 @@ def embedded_html_disabled_reason() -> str:
     flag = os.environ.get("TEVIEWER_EMBED_HTML", "").strip().lower()
     if flag in {"0", "false", "no", "off"}:
         return "Embedded HTML preview disabled (TEVIEWER_EMBED_HTML=0)."
-    from teviewer.backends.webengine_probe import webengine_browser_fallback_reason
-
-    return webengine_browser_fallback_reason()
+    return (
+        "Embedded HTML preview could not be started.\n\n"
+        "Install PySide6-Addons (pip install 'PySide6-Addons>=6.6') "
+        "or use Open in browser."
+    )
 
 
 def use_flexidot_plotly_webengine() -> bool:
@@ -48,7 +57,7 @@ def use_flexidot_plotly_webengine() -> bool:
 
 def should_use_webengine_for_html(path: Path) -> bool:
     """True when this HTML file should load in the in-app WebEngine viewer."""
-    if not use_embedded_html_preview():
+    if not may_attempt_embedded_html_preview():
         return False
     resolved = path.expanduser().resolve()
     if is_flexidot_html_file(resolved):
