@@ -601,44 +601,55 @@ def run_on_sequence(
         if genome_db is None:
             raise RuntimeError("BLAST database not prepared.")
         blast_opts = blast_options or BlastOptions()
-        is_blastp = blast_opts.program == "blastp"
+        program = blast_opts.program
+        # blastp and blastx both search a protein database and give hits in
+        # protein coordinates (no strand / BED), differing only in the query.
+        is_protein = program in ("blastp", "blastx")
+        if program == "blastx":
+            p_evalue = blast_opts.blastx_e_value
+            p_word = blast_opts.blastx_word_size
+            p_gap_open = blast_opts.blastx_gap_open
+            p_gap_extend = blast_opts.blastx_gap_extend
+            p_qcov = blast_opts.blastx_query_coverage_hsp
+            p_threads = blast_opts.blastx_num_threads
+            p_write_text = blast_opts.blastx_write_text
+            p_write_gff = blast_opts.blastx_write_gff
+        else:  # blastp
+            p_evalue = blast_opts.blastp_e_value
+            p_word = blast_opts.blastp_word_size
+            p_gap_open = blast_opts.blastp_gap_open
+            p_gap_extend = blast_opts.blastp_gap_extend
+            p_qcov = blast_opts.blastp_query_coverage_hsp
+            p_threads = blast_opts.blastp_num_threads
+            p_write_text = blast_opts.blastp_write_text
+            p_write_gff = blast_opts.blastp_write_gff
+
         blast_bed, blast_txt = run_blast(
             str(seq_path),
             str(genome_db),
             str(out_dir),
-            e_value=(blast_opts.blastp_e_value if is_blastp else blast_opts.e_value),
-            word_size=(blast_opts.blastp_word_size if is_blastp else blast_opts.word_size),
-            gap_open=(blast_opts.blastp_gap_open if is_blastp else blast_opts.gap_open),
-            gap_extend=(blast_opts.blastp_gap_extend if is_blastp else blast_opts.gap_extend),
+            e_value=(p_evalue if is_protein else blast_opts.e_value),
+            word_size=(p_word if is_protein else blast_opts.word_size),
+            gap_open=(p_gap_open if is_protein else blast_opts.gap_open),
+            gap_extend=(p_gap_extend if is_protein else blast_opts.gap_extend),
             penalty=blast_opts.penalty,
-            percent_identity=(
-                0.0 if is_blastp else blast_opts.percent_identity
-            ),
-            query_coverage_hsp=(
-                blast_opts.blastp_query_coverage_hsp
-                if is_blastp
-                else blast_opts.query_coverage_hsp
-            ),
-            program=blast_opts.program,
+            percent_identity=(0.0 if is_protein else blast_opts.percent_identity),
+            query_coverage_hsp=(p_qcov if is_protein else blast_opts.query_coverage_hsp),
+            program=program,
             bed_file=True,
             os_type=os_type,
-            num_threads=(
-                blast_opts.blastp_num_threads if is_blastp else blast_opts.num_threads
-            ),
+            num_threads=(p_threads if is_protein else blast_opts.num_threads),
             use_system_blast=project.use_system_blast,
             output_label=genome_label or None,
         )
-        if is_blastp:
+        if is_protein:
             if not blast_txt:
-                raise RuntimeError(f"BLASTP failed: {blast_bed}")
+                raise RuntimeError(f"{program.upper()} failed: {blast_bed}")
             blast_txt_path = Path(str(blast_txt)).resolve()
-            if blast_opts.blastp_write_gff:
-                gff_path = write_blast_gff(
-                    blast_txt_path,
-                    protein_coordinates=True,
-                )
+            if p_write_gff:
+                gff_path = write_blast_gff(blast_txt_path, protein_coordinates=True)
                 created.append(str(gff_path.resolve()))
-            if blast_opts.blastp_write_text:
+            if p_write_text:
                 created.append(str(blast_txt_path))
             else:
                 blast_txt_path.unlink(missing_ok=True)
@@ -1001,7 +1012,11 @@ def run_batch(
 
     selected_blast_db_name = blast_options.active_database_name if blast_options else None
     if func_name == "blast" and selected_blast_db_name:
-        expected_molecule = "prot" if blast_options and blast_options.program == "blastp" else "nucl"
+        expected_molecule = (
+            "prot"
+            if blast_options and blast_options.program in ("blastp", "blastx")
+            else "nucl"
+        )
         db = _find_blast_database(
             project,
             selected_blast_db_name,

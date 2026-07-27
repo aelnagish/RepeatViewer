@@ -209,7 +209,7 @@ def blast(
     from teviewer.job_options import normalize_blast_evalue
 
     program = str(program).lower()
-    if program not in {"blastn", "blastp"}:
+    if program not in {"blastn", "blastp", "blastx"}:
         raise ValueError(f"Unsupported BLAST program: {program}")
     e_value = normalize_blast_evalue(e_value)
     script_dir = get_original_file_path()
@@ -218,7 +218,7 @@ def blast(
     base_name = os.path.basename(input_file)
     label_suffix = f"_{output_label}" if output_label else ""
 
-    output_tag = "blast" if program == "blastn" else "blastp"
+    output_tag = {"blastn": "blast", "blastp": "blastp", "blastx": "blastx"}[program]
     # Define BLAST output without header.
     blast_out_file = os.path.join(
         blast_out_dir, f'{base_name}{label_suffix}_{output_tag}_no_header.b'
@@ -347,7 +347,8 @@ def blast(
             blast_out_file, delimiter="\t", header=None, names=header
         )
         blast_out_file_df.to_csv(blast_out_file_header, sep="\t", index=False)
-        if program == "blastp":
+        if program in ("blastp", "blastx"):
+            # Protein hits: no strand/BED, just the tabular text output.
             try:
                 os.remove(blast_out_file)
             except OSError:

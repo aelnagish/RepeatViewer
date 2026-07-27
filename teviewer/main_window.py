@@ -302,6 +302,7 @@ from teviewer.job_options import (
     ALIGN_MODE_COMBINED,
     BLAST_PROGRAM_BLASTN,
     BLAST_PROGRAM_BLASTP,
+    BLAST_PROGRAM_BLASTX,
     load_align_options,
     load_blast_options,
     load_consensus_options,
@@ -7695,7 +7696,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Protein database required",
-                "Select a protein database in the blastp tab under BLAST parameters.",
+                "Select a protein database in the BLASTp tab under BLAST parameters.",
+            )
+            return
+        if (
+            func_name == "blast"
+            and blast_opts_for_gate is not None
+            and blast_opts_for_gate.program == BLAST_PROGRAM_BLASTX
+            and not blast_opts_for_gate.blastx_database_name
+        ):
+            QMessageBox.warning(
+                self,
+                "Protein database required",
+                "blastx searches a protein database. Select one in the BLASTx tab "
+                "under BLAST parameters.",
             )
             return
         if (
