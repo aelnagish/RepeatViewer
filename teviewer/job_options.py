@@ -12,6 +12,16 @@ def _to_bool(value, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _default_tool_threads() -> int:
+    """Live default thread count: the Preferences 'Threads for tools' value."""
+    try:
+        from teviewer.backends.thread_budget import load_batch_workers
+
+        return load_batch_workers()
+    except Exception:  # noqa: BLE001
+        return 4
+
+
 DEFAULT_EXTEND_LEFT = 1000
 DEFAULT_EXTEND_RIGHT = 1000
 # Default reporting E-value (shown as 0.0001 with four decimal places in the UI).
@@ -185,7 +195,7 @@ class AlignOptions:
     """Combined-MSA aligner plus MAFFT and MUSCLE command-line parameters."""
 
     combined_aligner: str = ALIGNER_MAFFT
-    num_threads: int = DEFAULT_ALIGN_THREADS
+    num_threads: int = field(default_factory=_default_tool_threads)
     strategy: str = MAFFT_STRATEGY_FFT_NS_1
     sequence_type: str = MAFFT_SEQUENCE_AUTO
     retree: int = 1
@@ -195,7 +205,7 @@ class AlignOptions:
     reorder: bool = False
     adjust_direction: bool = False
     muscle_mode: str = MUSCLE_MODE_ALIGN
-    muscle_num_threads: int = DEFAULT_ALIGN_THREADS
+    muscle_num_threads: int = field(default_factory=_default_tool_threads)
 
 
 @dataclass
@@ -224,7 +234,7 @@ class FastGaOptions:
     """
 
     output_format: str = "paf"
-    threads: int = 8
+    threads: int = field(default_factory=_default_tool_threads)
     min_identity: float = 0.7
     min_length: int = 100
     seed_freq: int = 200
@@ -236,7 +246,7 @@ class FastGaOptions:
 class BlastOptions:
     program: str = BLAST_PROGRAM_BLASTN
     e_value: float = DEFAULT_BLAST_EVALUE
-    num_threads: int = DEFAULT_BLAST_THREADS
+    num_threads: int = field(default_factory=_default_tool_threads)
     word_size: int = DEFAULT_BLAST_WORD_SIZE
     gap_open: int = DEFAULT_BLAST_GAP_OPEN
     gap_extend: int = DEFAULT_BLAST_GAP_EXTEND
@@ -257,6 +267,7 @@ class BlastOptions:
     blastp_database_name: str | None = None
     blastp_write_text: bool = DEFAULT_BLASTP_WRITE_TEXT
     blastp_write_gff: bool = DEFAULT_BLASTP_WRITE_GFF
+    blastp_num_threads: int = field(default_factory=_default_tool_threads)
 
     @property
     def active_database_name(self) -> str | None:
@@ -527,7 +538,7 @@ def load_blast_options() -> BlastOptions:
     return BlastOptions(
         program=program,
         e_value=normalize_blast_evalue(float(v.get("e_value", DEFAULT_BLAST_EVALUE))),
-        num_threads=int(v.get("num_threads", DEFAULT_BLAST_THREADS)),
+        num_threads=max(1, int(v.get("num_threads", _default_tool_threads()))),
         word_size=max(4, int(v.get("word_size", DEFAULT_BLAST_WORD_SIZE))),
         gap_open=max(0, int(v.get("gap_open", DEFAULT_BLAST_GAP_OPEN))),
         gap_extend=max(0, int(v.get("gap_extend", DEFAULT_BLAST_GAP_EXTEND))),
@@ -568,6 +579,9 @@ def load_blast_options() -> BlastOptions:
         ),
         blastp_write_text=bool(v.get("blastp_write_text", DEFAULT_BLASTP_WRITE_TEXT)),
         blastp_write_gff=bool(v.get("blastp_write_gff", DEFAULT_BLASTP_WRITE_GFF)),
+        blastp_num_threads=max(
+            1, int(v.get("blastp_num_threads", _default_tool_threads()))
+        ),
     )
 
 
@@ -598,6 +612,7 @@ def save_blast_options(opts: BlastOptions) -> None:
             "blastp_database_name": opts.blastp_database_name or "",
             "blastp_write_text": opts.blastp_write_text,
             "blastp_write_gff": opts.blastp_write_gff,
+            "blastp_num_threads": opts.blastp_num_threads,
         },
     )
 
@@ -696,7 +711,7 @@ def load_align_options() -> AlignOptions:
         muscle_mode = MUSCLE_MODE_ALIGN
     return AlignOptions(
         combined_aligner=combined_aligner,
-        num_threads=max(1, int(v.get("num_threads", DEFAULT_ALIGN_THREADS))),
+        num_threads=max(1, int(v.get("num_threads", _default_tool_threads()))),
         strategy=strategy,
         sequence_type=sequence_type,
         retree=max(1, int(v.get("retree", 1))),
@@ -708,7 +723,7 @@ def load_align_options() -> AlignOptions:
         in {"1", "true", "yes"},
         muscle_mode=muscle_mode,
         muscle_num_threads=max(
-            1, int(v.get("muscle_num_threads", DEFAULT_ALIGN_THREADS))
+            1, int(v.get("muscle_num_threads", _default_tool_threads()))
         ),
     )
 

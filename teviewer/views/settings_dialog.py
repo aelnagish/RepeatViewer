@@ -573,11 +573,10 @@ class SettingsDialog(QDialog):
             ("Default preview zoom:", self._preview_zoom),
             ("Default preview fit:", self._preview_fit),
             ("Default FASTA preview tab:", self._fasta_default_tab),
-            ("Show sequence length / GC:", self._show_sequence_summary),
         ])
         performance = _group("Performance", [
-            ("Parallel batch workers:", self._batch_workers),
-            ("Threads reserved for UI:", self._ui_thread_reserve),
+            ("Threads for tools:", self._batch_workers),
+            ("Threads for the UI:", self._ui_thread_reserve),
         ])
         startup = _group("Startup", [
             ("Reopen last folder:", self._reopen_last),

@@ -5067,8 +5067,7 @@ class MainWindow(QMainWindow):
         if path is None:
             self._set_status_file_link(None)
             return
-        if path is not None and is_previewable_file(path):
-            QTimer.singleShot(0, lambda p=path: self._open_file_in_preview_if_allowed(p))
+        QTimer.singleShot(0, lambda p=path: self._open_file_in_preview_if_allowed(p))
 
     def _open_file_in_preview_if_allowed(self, path: Path) -> None:
         if self._file_list.suppress_selection_preview():

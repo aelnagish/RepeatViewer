@@ -622,7 +622,9 @@ def run_on_sequence(
             program=blast_opts.program,
             bed_file=True,
             os_type=os_type,
-            num_threads=analysis_threads_per_job(project.batch_workers),
+            num_threads=(
+                blast_opts.blastp_num_threads if is_blastp else blast_opts.num_threads
+            ),
             use_system_blast=project.use_system_blast,
             output_label=genome_label or None,
         )

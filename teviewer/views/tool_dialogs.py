@@ -1488,6 +1488,11 @@ class BlastParamsDialog(QDialog):
         configure_report_evalue_spinbox(self._evalue)
         self._evalue.setValue(normalize_blast_evalue(opts.e_value))
 
+        self._threads = QSpinBox()
+        self._threads.setRange(1, 128)
+        self._threads.setValue(max(1, opts.num_threads))
+        self._threads.setToolTip("BLASTN -num_threads: CPU threads used for this search.")
+
         self._word_size = QSpinBox()
         self._word_size.setRange(4, 10_000)
         self._word_size.setValue(opts.word_size)
@@ -1538,6 +1543,11 @@ class BlastParamsDialog(QDialog):
         self._blastp_evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._blastp_evalue)
         self._blastp_evalue.setValue(normalize_blast_evalue(opts.blastp_e_value))
+
+        self._blastp_threads = QSpinBox()
+        self._blastp_threads.setRange(1, 128)
+        self._blastp_threads.setValue(max(1, opts.blastp_num_threads))
+        self._blastp_threads.setToolTip("BLASTP -num_threads: CPU threads used for this search.")
 
         self._blastp_word_size = QSpinBox()
         self._blastp_word_size.setRange(2, 10_000)
@@ -1602,6 +1612,7 @@ class BlastParamsDialog(QDialog):
         # Uniform field size so the inputs line up symmetrically.
         for field in (
             self._evalue,
+            self._threads,
             self._word_size,
             self._gap_open,
             self._gap_extend,
@@ -1609,6 +1620,7 @@ class BlastParamsDialog(QDialog):
             self._percent_identity,
             self._query_coverage,
             self._blastp_evalue,
+            self._blastp_threads,
             self._blastp_word_size,
             self._blastp_gap_open,
             self._blastp_gap_extend,
@@ -1624,6 +1636,7 @@ class BlastParamsDialog(QDialog):
         blastn_form = self._parameter_form(blastn_tab)
         blastn_form.addRow("Database:", self._database_row(self._blastn_database))
         blastn_form.addRow("-evalue:", self._evalue)
+        blastn_form.addRow("Threads:", self._threads)
         blastn_form.addRow("-word_size:", self._word_size)
         blastn_form.addRow("-gapopen:", self._gap_open)
         blastn_form.addRow("-gapextend:", self._gap_extend)
@@ -1638,6 +1651,7 @@ class BlastParamsDialog(QDialog):
         blastp_form = self._parameter_form(blastp_tab)
         blastp_form.addRow("Database:", self._database_row(self._blastp_database))
         blastp_form.addRow("-evalue:", self._blastp_evalue)
+        blastp_form.addRow("Threads:", self._blastp_threads)
         blastp_form.addRow("-word_size:", self._blastp_word_size)
         blastp_form.addRow("-gapopen:", self._blastp_gap_open)
         blastp_form.addRow("-gapextend:", self._blastp_gap_extend)
@@ -1806,6 +1820,7 @@ class BlastParamsDialog(QDialog):
     def _restore_defaults(self) -> None:
         defaults = BlastOptions()
         self._evalue.setValue(defaults.e_value)
+        self._threads.setValue(defaults.num_threads)
         self._word_size.setValue(defaults.word_size)
         self._gap_open.setValue(defaults.gap_open)
         self._gap_extend.setValue(defaults.gap_extend)
@@ -1815,6 +1830,7 @@ class BlastParamsDialog(QDialog):
         self._blastn_write_text.setChecked(defaults.write_text)
         self._blastn_write_gff.setChecked(defaults.write_gff)
         self._blastp_evalue.setValue(defaults.blastp_e_value)
+        self._blastp_threads.setValue(defaults.blastp_num_threads)
         self._blastp_word_size.setValue(defaults.blastp_word_size)
         self._blastp_gap_open.setValue(defaults.blastp_gap_open)
         self._blastp_gap_extend.setValue(defaults.blastp_gap_extend)
@@ -1843,6 +1859,7 @@ class BlastParamsDialog(QDialog):
         return BlastOptions(
             program=program,
             e_value=normalize_blast_evalue(self._evalue.value()),
+            num_threads=self._threads.value(),
             word_size=self._word_size.value(),
             gap_open=self._gap_open.value(),
             gap_extend=self._gap_extend.value(),
@@ -1856,6 +1873,7 @@ class BlastParamsDialog(QDialog):
             minimum_bit_score=self._min_bit_score.value(),
             blast_database_name=self._blastn_database.currentData(),
             blastp_e_value=normalize_blast_evalue(self._blastp_evalue.value()),
+            blastp_num_threads=self._blastp_threads.value(),
             blastp_word_size=self._blastp_word_size.value(),
             blastp_gap_open=self._blastp_gap_open.value(),
             blastp_gap_extend=self._blastp_gap_extend.value(),
