@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QCompleter,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -30,12 +29,20 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
     QTextEdit,
+)
+
+# Use the wheel-ignoring spin boxes everywhere in these parameter dialogs, so
+# scrolling over a field never changes its value by accident -- only the arrows
+# or typing do. Aliased to the standard names so all existing construction
+# sites pick them up unchanged.
+from teviewer.widgets.spin_boxes import (  # noqa: E402
+    NoWheelDoubleSpinBox as QDoubleSpinBox,
+    NoWheelSpinBox as QSpinBox,
 )
 
 
