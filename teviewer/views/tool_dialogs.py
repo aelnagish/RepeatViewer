@@ -1698,15 +1698,13 @@ class BlastParamsDialog(QDialog):
         blastn_form.addRow("-qcov_hsp_perc:", self._query_coverage)
         blastn_form.addRow("", self._blastn_write_text)
         blastn_form.addRow("", self._blastn_write_gff)
-        # The system-PATH toggle is a shared setting, shown on both program
-        # tabs (one checkbox each, kept in sync) so it is reachable wherever you
-        # are without a separate tab.
-        self._use_system_blast = QCheckBox("Use BLAST from the system PATH")
+        # The system-PATH toggle applies to all three programs, so it lives once
+        # on the Options tab rather than being repeated on every program tab.
+        self._use_system_blast = QCheckBox("Use BLAST+ from the system PATH")
         self._use_system_blast.setChecked(project.use_system_blast)
         self._use_system_blast.setToolTip(
             "Use BLAST+ programs installed on the system PATH instead of the bundled programs."
         )
-        blastn_form.addRow("", self._use_system_blast)
         self._tabs.addTab(blastn_tab, "BLASTn")
 
         blastp_tab = QWidget()
@@ -1720,10 +1718,6 @@ class BlastParamsDialog(QDialog):
         blastp_form.addRow("-qcov_hsp_perc:", self._blastp_query_coverage)
         blastp_form.addRow("", self._blastp_write_text)
         blastp_form.addRow("", self._blastp_write_gff)
-        self._use_system_blast_p = QCheckBox("Use BLAST from the system PATH")
-        self._use_system_blast_p.setChecked(project.use_system_blast)
-        self._use_system_blast_p.setToolTip(self._use_system_blast.toolTip())
-        blastp_form.addRow("", self._use_system_blast_p)
         self._tabs.addTab(blastp_tab, "BLASTp")
 
         blastx_tab = QWidget()
@@ -1737,18 +1731,18 @@ class BlastParamsDialog(QDialog):
         blastx_form.addRow("-qcov_hsp_perc:", self._blastx_query_coverage)
         blastx_form.addRow("", self._blastx_write_text)
         blastx_form.addRow("", self._blastx_write_gff)
-        self._use_system_blast_x = QCheckBox("Use BLAST from the system PATH")
-        self._use_system_blast_x.setChecked(project.use_system_blast)
-        self._use_system_blast_x.setToolTip(self._use_system_blast.toolTip())
-        blastx_form.addRow("", self._use_system_blast_x)
         self._tabs.addTab(blastx_tab, "BLASTx")
 
-        # --- Right Click: which program a right-click on the BLAST button runs ---
-        right_click_tab = QWidget()
-        rc_layout = QVBoxLayout(right_click_tab)
-        rc_layout.setContentsMargins(16, 14, 16, 14)
-        rc_layout.setSpacing(8)
-        rc_layout.addWidget(
+        # --- Options: right-click program + shared executable setting ---
+        options_tab = QWidget()
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
             QLabel("Right-clicking the BLAST button runs, with saved settings:", self)
         )
         self._right_click_group = QButtonGroup(self)
@@ -1762,17 +1756,18 @@ class BlastParamsDialog(QDialog):
             radio.setChecked(opts.right_click_program == value)
             self._right_click_group.addButton(radio)
             self._right_click_buttons[value] = radio
-            rc_layout.addWidget(radio)
+            rc_box_layout.addWidget(radio)
         if not any(b.isChecked() for b in self._right_click_buttons.values()):
             self._right_click_buttons[BLAST_PROGRAM_BLASTN].setChecked(True)
-        rc_layout.addStretch(1)
-        self._tabs.addTab(right_click_tab, "Right Click")
+        options_layout.addWidget(rc_box)
 
-        # Keep the three copies of the shared toggle in step.
-        for src in (self._use_system_blast, self._use_system_blast_p, self._use_system_blast_x):
-            for dst in (self._use_system_blast, self._use_system_blast_p, self._use_system_blast_x):
-                if src is not dst:
-                    src.toggled.connect(dst.setChecked)
+        exe_box = QGroupBox("Executables", self)
+        exe_box_layout = QVBoxLayout(exe_box)
+        exe_box_layout.addWidget(self._use_system_blast)
+        options_layout.addWidget(exe_box)
+
+        options_layout.addStretch(1)
+        self._tabs.addTab(options_tab, "Options")
 
         self._populate_database_combos(
             blastn_name=opts.blast_database_name,
