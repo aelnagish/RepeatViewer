@@ -706,6 +706,15 @@ class AlignParamsDialog(QDialog):
         form.addRow("--ep (offset value):", self._offset)
         form.addRow("", self._reorder)
         form.addRow("", self._adjust_direction)
+        self._mafft_combined = QCheckBox(
+            "Combine all selected files into one MSA", self
+        )
+        self._mafft_combined.setChecked(opts.mafft_combined)
+        self._mafft_combined.setToolTip(
+            "Pool every sequence from the selected files into a single alignment, "
+            "instead of aligning each file on its own."
+        )
+        form.addRow("", self._mafft_combined)
 
         mafft_tab = QWidget(self)
         mafft_tab.setLayout(form)
@@ -737,19 +746,15 @@ class AlignParamsDialog(QDialog):
         muscle_form.setVerticalSpacing(10)
         muscle_form.addRow("MUSCLE algorithm:", self._muscle_mode)
         muscle_form.addRow("Threads:", self._muscle_threads)
+        self._muscle_combined = QCheckBox(
+            "Combine all selected files into one MSA", self
+        )
+        self._muscle_combined.setChecked(opts.muscle_combined)
+        self._muscle_combined.setToolTip(self._mafft_combined.toolTip())
+        muscle_form.addRow("", self._muscle_combined)
         muscle_tab = QWidget(self)
         muscle_tab.setLayout(muscle_form)
 
-        self._combined_aligner = QComboBox(self)
-        self._combined_aligner.addItem("MAFFT", ALIGNER_MAFFT)
-        self._combined_aligner.addItem("MUSCLE", ALIGNER_MUSCLE)
-        combined_index = self._combined_aligner.findData(opts.combined_aligner)
-        if combined_index >= 0:
-            self._combined_aligner.setCurrentIndex(combined_index)
-        self._combined_aligner.setFixedWidth(260)
-        self._combined_aligner.setToolTip(
-            "Tool used by “Align all selected files in one MSA”."
-        )
         self._use_system_mafft = QCheckBox("Use MAFFT from the system PATH", self)
         self._use_system_mafft.setChecked(use_system_mafft)
         self._use_system_mafft.setToolTip(
@@ -760,32 +765,47 @@ class AlignParamsDialog(QDialog):
         self._use_system_muscle.setToolTip(
             "Use the system muscle command instead of the bundled MUSCLE."
         )
-        others_form = QFormLayout()
-        others_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the Align button runs, with saved settings:", self)
         )
-        others_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
-        )
-        others_form.setHorizontalSpacing(12)
-        others_form.setVerticalSpacing(10)
-        others_form.addRow(
-            "Tool to align all selected files in one MSA:",
-            self._combined_aligner,
-        )
-        others_form.addRow("", self._use_system_mafft)
-        others_form.addRow("", self._use_system_muscle)
-        others_tab = QWidget(self)
-        others_tab.setLayout(others_form)
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (("MAFFT", ALIGNER_MAFFT), ("MUSCLE", ALIGNER_MUSCLE)):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_aligner == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+            rc_box_layout.addWidget(radio)
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[ALIGNER_MAFFT].setChecked(True)
+        options_layout.addWidget(rc_box)
+
+        exe_box = QGroupBox("Executables", self)
+        exe_box_layout = QVBoxLayout(exe_box)
+        exe_box_layout.addWidget(self._use_system_mafft)
+        exe_box_layout.addWidget(self._use_system_muscle)
+        options_layout.addWidget(exe_box)
+        options_layout.addStretch(1)
 
         self._aligner_tabs = QTabWidget(self)
         self._aligner_tabs.addTab(mafft_tab, "MAFFT")
         self._aligner_tabs.addTab(muscle_tab, "MUSCLE")
-        self._aligner_tabs.addTab(others_tab, "Others")
+        self._aligner_tabs.addTab(options_tab, "Options")
+        self._options_tab_index = self._aligner_tabs.count() - 1
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
@@ -797,7 +817,39 @@ class AlignParamsDialog(QDialog):
 
         self._strategy.currentIndexChanged.connect(self._sync_controls)
         self._sequence_type.currentIndexChanged.connect(self._sync_controls)
+        self._aligner_tabs.currentChanged.connect(self._update_run_button)
+        self._update_run_button(self._aligner_tabs.currentIndex())
         self._sync_controls()
+
+    def _update_run_button(self, tab_index: int) -> None:
+        """Run on an aligner tab; Save on the Options tab (nothing to run)."""
+        self._run_button.setText(
+            "Save" if tab_index == self._options_tab_index else "Run"
+        )
+
+    def should_run(self) -> bool:
+        return self._aligner_tabs.currentIndex() != self._options_tab_index
+
+    def selected_aligner(self) -> str:
+        """The aligner of the active tab (MAFFT/MUSCLE); falls back to right-click."""
+        index = self._aligner_tabs.currentIndex()
+        if index == 0:
+            return ALIGNER_MAFFT
+        if index == 1:
+            return ALIGNER_MUSCLE
+        return self.right_click_aligner()
+
+    def right_click_aligner(self) -> str:
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                return value
+        return ALIGNER_MAFFT
+
+    def combined_for(self, aligner: str) -> bool:
+        """Whether the given aligner should combine into one MSA."""
+        if aligner == ALIGNER_MUSCLE:
+            return self._muscle_combined.isChecked()
+        return self._mafft_combined.isChecked()
 
     def _sync_controls(self) -> None:
         strategy = str(self._strategy.currentData())
@@ -849,7 +901,7 @@ class AlignParamsDialog(QDialog):
 
     def options(self) -> AlignOptions:
         return AlignOptions(
-            combined_aligner=str(self._combined_aligner.currentData()),
+            combined_aligner=self.right_click_aligner(),
             num_threads=max(1, int(self._threads.value())),
             strategy=str(self._strategy.currentData()),
             sequence_type=str(self._sequence_type.currentData()),
@@ -864,6 +916,9 @@ class AlignParamsDialog(QDialog):
             ),
             muscle_mode=str(self._muscle_mode.currentData()),
             muscle_num_threads=max(1, int(self._muscle_threads.value())),
+            mafft_combined=self._mafft_combined.isChecked(),
+            muscle_combined=self._muscle_combined.isChecked(),
+            right_click_aligner=self.right_click_aligner(),
         )
 
     def use_system_mafft(self) -> bool:

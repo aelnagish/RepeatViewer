@@ -3462,13 +3462,15 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
             )
         elif tool_id == "align":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "Align",
-                self._run_align_default,
-                self._populate_align_menu,
-                tooltip=tip,
-                show_default_action=False,
+                self._open_align_dialog,
+                tooltip=(
+                    "Click: set parameters and run (MAFFT or MUSCLE by tab).\n"
+                    "Right-click: run the aligner chosen in the Options tab."
+                ),
+                right_click_slot=self._quick_align_right_click,
             )
         elif tool_id == "tree":
             self._add_toolbar_text_menu_button(
@@ -5654,7 +5656,51 @@ class MainWindow(QMainWindow):
             engine=self._align_options.combined_aligner,
         )
 
+    def _mode_for_aligner(self, aligner: str) -> str:
+        """'combined' or 'one_by_one' from the aligner's saved combine flag."""
+        combined = (
+            self._align_options.muscle_combined
+            if aligner == ALIGNER_MUSCLE
+            else self._align_options.mafft_combined
+        )
+        return ALIGN_MODE_COMBINED if combined else "one_by_one"
+
+    def _open_align_dialog(self) -> None:
+        """Click Align: parameters dialog. Run runs the active aligner tab."""
+        dialog = AlignParamsDialog(
+            initial=self._align_options,
+            use_system_mafft=self._project.use_system_mafft,
+            use_system_muscle=self._project.use_system_muscle,
+            parent=self,
+        )
+        run_after = False
+        aligner = ALIGNER_MAFFT
+        try:
+            if not dialog.exec():
+                return  # Cancel: nothing changes.
+            self._align_options = dialog.options()
+            save_align_options(self._align_options)
+            self._project.use_system_mafft = dialog.use_system_mafft()
+            self._project.use_system_muscle = dialog.use_system_muscle()
+            self._persist_workspace()
+            run_after = dialog.should_run()
+            aligner = dialog.selected_aligner()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        if run_after:
+            self._align_sequences(
+                engine=aligner, mode=self._mode_for_aligner(aligner)
+            )
+        else:
+            self._set_status_message("Alignment settings saved", 4000)
+
+    def _quick_align_right_click(self) -> None:
+        """Right-click Align: run the aligner chosen in the Options tab."""
+        aligner = self._align_options.right_click_aligner
+        self._align_sequences(engine=aligner, mode=self._mode_for_aligner(aligner))
+
     def _modify_align_parameters(self) -> None:
+        # Kept for the menu-bar Align submenu: change parameters without running.
         dialog = AlignParamsDialog(
             initial=self._align_options,
             use_system_mafft=self._project.use_system_mafft,
@@ -5672,11 +5718,7 @@ class MainWindow(QMainWindow):
             self._project.use_system_mafft = dialog.use_system_mafft()
             self._project.use_system_muscle = dialog.use_system_muscle()
             self._persist_workspace()
-            aligner = self._align_options.combined_aligner.upper()
-            self._set_status_message(
-                f"Alignment parameters updated (combined MSA: {aligner})",
-                6000,
-            )
+            self._set_status_message("Alignment parameters updated", 4000)
 
     def _align_sequences(
         self,

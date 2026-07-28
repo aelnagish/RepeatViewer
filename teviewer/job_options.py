@@ -218,6 +218,11 @@ class AlignOptions:
     adjust_direction: bool = False
     muscle_mode: str = MUSCLE_MODE_ALIGN
     muscle_num_threads: int = field(default_factory=_default_tool_threads)
+    # Per-aligner "combine all selected files into one MSA" choice.
+    mafft_combined: bool = False
+    muscle_combined: bool = False
+    # Which aligner a right-click on the Align toolbar button runs.
+    right_click_aligner: str = ALIGNER_MAFFT
 
 
 @dataclass
@@ -772,6 +777,13 @@ def load_align_options() -> AlignOptions:
     muscle_mode = str(v.get("muscle_mode", MUSCLE_MODE_ALIGN))
     if muscle_mode not in MUSCLE_MODES:
         muscle_mode = MUSCLE_MODE_ALIGN
+    right_click_aligner = str(v.get("right_click_aligner", ALIGNER_MAFFT))
+    if right_click_aligner not in ALIGNERS:
+        right_click_aligner = ALIGNER_MAFFT
+
+    def _flag(key: str) -> bool:
+        return str(v.get(key, "false")).lower() in {"1", "true", "yes"}
+
     return AlignOptions(
         combined_aligner=combined_aligner,
         num_threads=max(1, int(v.get("num_threads", _default_tool_threads()))),
@@ -781,13 +793,15 @@ def load_align_options() -> AlignOptions:
         max_iterate=max(0, int(v.get("max_iterate", 0))),
         gap_open_penalty=float(v.get("gap_open_penalty", 1.53)),
         offset=float(v.get("offset", 0.0)),
-        reorder=str(v.get("reorder", "false")).lower() in {"1", "true", "yes"},
-        adjust_direction=str(v.get("adjust_direction", "false")).lower()
-        in {"1", "true", "yes"},
+        reorder=_flag("reorder"),
+        adjust_direction=_flag("adjust_direction"),
         muscle_mode=muscle_mode,
         muscle_num_threads=max(
             1, int(v.get("muscle_num_threads", _default_tool_threads()))
         ),
+        mafft_combined=_flag("mafft_combined"),
+        muscle_combined=_flag("muscle_combined"),
+        right_click_aligner=right_click_aligner,
     )
 
 
@@ -807,6 +821,9 @@ def save_align_options(opts: AlignOptions) -> None:
             "adjust_direction": opts.adjust_direction,
             "muscle_mode": opts.muscle_mode,
             "muscle_num_threads": opts.muscle_num_threads,
+            "mafft_combined": opts.mafft_combined,
+            "muscle_combined": opts.muscle_combined,
+            "right_click_aligner": opts.right_click_aligner,
         },
     )
 
