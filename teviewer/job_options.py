@@ -289,6 +289,8 @@ class BlastOptions:
     blastx_write_text: bool = DEFAULT_BLASTX_WRITE_TEXT
     blastx_write_gff: bool = DEFAULT_BLASTX_WRITE_GFF
     blastx_num_threads: int = field(default_factory=_default_tool_threads)
+    # Which program a right-click on the BLAST toolbar button runs.
+    right_click_program: str = BLAST_PROGRAM_BLASTN
 
     @property
     def active_database_name(self) -> str | None:
@@ -628,6 +630,11 @@ def load_blast_options() -> BlastOptions:
         blastx_num_threads=max(
             1, int(v.get("blastx_num_threads", _default_tool_threads()))
         ),
+        right_click_program=(
+            str(v.get("right_click_program", BLAST_PROGRAM_BLASTN))
+            if str(v.get("right_click_program", BLAST_PROGRAM_BLASTN)) in BLAST_PROGRAMS
+            else BLAST_PROGRAM_BLASTN
+        ),
     )
 
 
@@ -668,6 +675,7 @@ def save_blast_options(opts: BlastOptions) -> None:
             "blastx_write_text": opts.blastx_write_text,
             "blastx_write_gff": opts.blastx_write_gff,
             "blastx_num_threads": opts.blastx_num_threads,
+            "right_click_program": opts.right_click_program,
         },
     )
 

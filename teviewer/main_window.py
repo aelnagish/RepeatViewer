@@ -3241,9 +3241,20 @@ class MainWindow(QMainWindow):
         return btn
 
     def _add_toolbar_action_button(
-        self, bar, text: str, slot, *, tooltip: str = ""
+        self,
+        bar,
+        text: str,
+        slot,
+        *,
+        tooltip: str = "",
+        right_click_slot=None,
     ) -> QToolButton:
-        """Text-only toolbar button whose click runs a single action, no menu."""
+        """Text-only toolbar button whose click runs a single action.
+
+        ``right_click_slot`` runs a second action on right-click -- used by
+        BLAST, where left-click opens the dialog and right-click runs the
+        program chosen in the dialog's Right Click tab with saved settings.
+        """
         del bar
         btn = QToolButton(self._toolbar_container)
         btn.setText(text)
@@ -3254,6 +3265,10 @@ class MainWindow(QMainWindow):
         btn.clicked.connect(slot)
         self._toolbar_hbox.addWidget(btn)
         self._job_toolbar_actions.append(btn)
+
+        if right_click_slot is not None:
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(lambda _pos: right_click_slot())
 
         def _overflow(menu: QMenu) -> None:
             action = menu.addAction(text, slot)
@@ -3476,7 +3491,12 @@ class MainWindow(QMainWindow):
                 bar,
                 "BLAST",
                 self._open_blast_dialog,
-                tooltip="Set BLAST parameters and run (blastn or blastp by tab)",
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: run the program chosen in the Right Click tab, "
+                    "with saved settings."
+                ),
+                right_click_slot=self._quick_blast_right_click,
             )
         elif tool_id == "te_genome_map":
             self._add_toolbar_text_menu_button(
@@ -5767,6 +5787,13 @@ class MainWindow(QMainWindow):
         options = replace(self._blast_options, program=program)
         self._apply_function("blast", blast_options=options)
 
+    def _quick_blast_right_click(self) -> None:
+        """Right-click on BLAST: run the program chosen in the Right Click tab."""
+        program = getattr(
+            self._blast_options, "right_click_program", BLAST_PROGRAM_BLASTN
+        )
+        self._run_blast_program(program)
+
     def _open_blast_dialog(self) -> None:
         """Click BLAST -> parameters dialog. Run launches the active tab's program.
 
@@ -5784,10 +5811,14 @@ class MainWindow(QMainWindow):
             save_blast_options(self._blast_options)
             self._project.use_system_blast = dialog.use_system_blast()
             self._persist_workspace()
+            run_after = dialog.should_run()
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
-        # Run the program of whichever tab was active, with the just-saved options.
-        self._apply_function("blast", blast_options=self._blast_options)
+        # The Right Click tab only saves the preference; the program tabs run.
+        if run_after:
+            self._apply_function("blast", blast_options=self._blast_options)
+        else:
+            self._set_status_message("BLAST settings saved", 4000)
 
     def _change_blast_parameters(self) -> None:
         dialog = BlastParamsDialog(project=self._project, initial=self._blast_options, parent=self)

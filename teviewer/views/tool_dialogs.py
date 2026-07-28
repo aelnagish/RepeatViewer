@@ -25,8 +25,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QButtonGroup,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QTabWidget,
@@ -1741,6 +1743,31 @@ class BlastParamsDialog(QDialog):
         blastx_form.addRow("", self._use_system_blast_x)
         self._tabs.addTab(blastx_tab, "BLASTx")
 
+        # --- Right Click: which program a right-click on the BLAST button runs ---
+        right_click_tab = QWidget()
+        rc_layout = QVBoxLayout(right_click_tab)
+        rc_layout.setContentsMargins(16, 14, 16, 14)
+        rc_layout.setSpacing(8)
+        rc_layout.addWidget(
+            QLabel("Right-clicking the BLAST button runs, with saved settings:", self)
+        )
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("blastn", BLAST_PROGRAM_BLASTN),
+            ("blastp", BLAST_PROGRAM_BLASTP),
+            ("blastx", BLAST_PROGRAM_BLASTX),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_program == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+            rc_layout.addWidget(radio)
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[BLAST_PROGRAM_BLASTN].setChecked(True)
+        rc_layout.addStretch(1)
+        self._tabs.addTab(right_click_tab, "Right Click")
+
         # Keep the three copies of the shared toggle in step.
         for src in (self._use_system_blast, self._use_system_blast_p, self._use_system_blast_x):
             for dst in (self._use_system_blast, self._use_system_blast_p, self._use_system_blast_x):
@@ -1780,9 +1807,10 @@ class BlastParamsDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         # BLAST runs straight from this dialog, and the button names which
-        # BLAST runs straight from this dialog, so the accept button says Run.
+        # A program tab runs on accept; the Right Click tab only saves the
+        # preference, so the button and behaviour switch on that tab.
+        self._right_click_tab_index = self._tabs.count() - 1
         self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run")
         restore = buttons.addButton("Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole)
         restore.clicked.connect(self._restore_defaults)
         buttons.accepted.connect(self.accept)
@@ -1793,7 +1821,19 @@ class BlastParamsDialog(QDialog):
         layout.addWidget(self._post_box)
         layout.addWidget(buttons)
         self._tabs.currentChanged.connect(self._update_postprocessing_visibility)
+        self._tabs.currentChanged.connect(self._update_run_button)
         self._update_postprocessing_visibility(self._tabs.currentIndex())
+        self._update_run_button(self._tabs.currentIndex())
+
+    def _update_run_button(self, tab_index: int) -> None:
+        """Run on a program tab; Save on the Right Click tab (nothing to run)."""
+        self._run_button.setText(
+            "Save" if tab_index == self._right_click_tab_index else "Run"
+        )
+
+    def should_run(self) -> bool:
+        """False on the Right Click tab, where the button only saves the choice."""
+        return self._tabs.currentIndex() != self._right_click_tab_index
 
     @staticmethod
     def _parameter_form(parent: QWidget) -> QFormLayout:
@@ -1989,7 +2029,14 @@ class BlastParamsDialog(QDialog):
             blastx_database_name=self._blastx_database.currentData(),
             blastx_write_text=self._blastx_write_text.isChecked(),
             blastx_write_gff=self._blastx_write_gff.isChecked(),
+            right_click_program=self._selected_right_click_program(),
         )
+
+    def _selected_right_click_program(self) -> str:
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                return value
+        return BLAST_PROGRAM_BLASTN
 
 
 class ConsensusParamsDialog(QDialog):
