@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -2691,12 +2692,13 @@ class MsaCleanParamsDialog(QDialog):
         self._div_window.setValue(opts.divergence.window_size)
         self._div_window.setFixedWidth(spin_width)
 
-        div_form = QFormLayout(div_box)
-        div_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
-        div_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        div_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        div_form.addRow("Divergence threshold:", self._div_threshold)
-        div_form.addRow("Window size (bp):", self._div_window)
+        self._fill_labeled_grid(
+            div_box,
+            [
+                ("Divergence threshold:", self._div_threshold),
+                ("Window size (bp):", self._div_window),
+            ],
+        )
 
         gap_box = QGroupBox("Clean rows with gaps")
         self._row_gap_threshold = QDoubleSpinBox()
@@ -2711,12 +2713,13 @@ class MsaCleanParamsDialog(QDialog):
         self._row_gap_window.setValue(opts.gap_row.window_size)
         self._row_gap_window.setFixedWidth(spin_width)
 
-        gap_form = QFormLayout(gap_box)
-        gap_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
-        gap_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        gap_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        gap_form.addRow("Gap proportion threshold:", self._row_gap_threshold)
-        gap_form.addRow("Window size (bp):", self._row_gap_window)
+        self._fill_labeled_grid(
+            gap_box,
+            [
+                ("Gap proportion threshold:", self._row_gap_threshold),
+                ("Window size (bp):", self._row_gap_window),
+            ],
+        )
 
         gappy_box = QGroupBox("Remove gappy columns")
         self._gap_threshold = QDoubleSpinBox()
@@ -2745,14 +2748,15 @@ class MsaCleanParamsDialog(QDialog):
         self._min_nt.setValue(opts.gappy.min_nucleotide)
         self._min_nt.setFixedWidth(spin_width)
 
-        gappy_form = QFormLayout(gappy_box)
-        gappy_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
-        gappy_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        gappy_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        gappy_form.addRow("Gap threshold:", self._gap_threshold)
-        gappy_form.addRow("Similarity check gap threshold:", self._simi_gap)
-        gappy_form.addRow("Similarity threshold:", self._similarity)
-        gappy_form.addRow("Min nucleotides per column:", self._min_nt)
+        self._fill_labeled_grid(
+            gappy_box,
+            [
+                ("Gap threshold:", self._gap_threshold),
+                ("Similarity check gap threshold:", self._simi_gap),
+                ("Similarity threshold:", self._similarity),
+                ("Min nucleotides per column:", self._min_nt),
+            ],
+        )
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -2775,6 +2779,30 @@ class MsaCleanParamsDialog(QDialog):
         layout.addLayout(method_controls)
         layout.addWidget(buttons)
         self.adjustSize()
+
+    @staticmethod
+    def _fill_labeled_grid(box, rows) -> None:
+        """Lay out (label, widget) rows in a group box with a real label column.
+
+        Uses an explicit QGridLayout rather than QFormLayout: the form's label
+        column was collapsing to nothing here, clipping the descriptions to a
+        stray character. A grid gives column 0 its natural width and stretches
+        column 1, so every label is always fully visible.
+        """
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        for row, (text, widget) in enumerate(rows):
+            label = QLabel(text)
+            grid.addWidget(
+                label,
+                row,
+                0,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            )
+            grid.addWidget(widget, row, 1)
 
     def _listed_method_ids(self) -> list[str]:
         return [
