@@ -328,6 +328,8 @@ DEFAULT_FLEXIDOT_ONLY_VS_FIRST = False
 DEFAULT_FLEXIDOT_LINE_WIDTH = 1.0
 DEFAULT_FLEXIDOT_LENGTH_SCALING = False
 DEFAULT_FLEXIDOT_COMBINED = True
+# Also run each selected file separately (in addition to / instead of combined).
+DEFAULT_FLEXIDOT_RUN_SEPARATELY = False
 # Flexidot comparison modes (-m): "0"=self, "1"=pairwise, "2"=all-vs-all.
 # Empty tuple means "auto": self for a single file, pairwise/all-vs-all when
 # combining (matching the historical behaviour).
@@ -379,6 +381,8 @@ class FlexidotOptions:
     length_scaling: bool = DEFAULT_FLEXIDOT_LENGTH_SCALING
     # Combine all selected files into one dotplot; also the right-click mode.
     combined: bool = DEFAULT_FLEXIDOT_COMBINED
+    # Also run each file separately; may be combined with ``combined`` (both).
+    run_separately: bool = DEFAULT_FLEXIDOT_RUN_SEPARATELY
     # Explicit flexidot comparison modes (-m); empty tuple = auto (see above).
     modes: tuple[str, ...] = DEFAULT_FLEXIDOT_MODES
 
@@ -1077,6 +1081,8 @@ def load_flexidot_options() -> FlexidotOptions:
         length_scaling=str(v.get("length_scaling", "false")).lower()
         in {"1", "true", "yes"},
         combined=str(v.get("combined", "true")).lower() in {"1", "true", "yes"},
+        run_separately=str(v.get("run_separately", "false")).lower()
+        in {"1", "true", "yes"},
         modes=parse_flexidot_modes(v.get("modes", "")),
     )
 
@@ -1097,6 +1103,7 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
             "line_width": opts.line_width,
             "length_scaling": opts.length_scaling,
             "combined": opts.combined,
+            "run_separately": opts.run_separately,
             "modes": ",".join(opts.modes),
         },
     )

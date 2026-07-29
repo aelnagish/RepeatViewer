@@ -2249,8 +2249,14 @@ class FlexidotParamsDialog(QDialog):
         self._combined = QCheckBox("Combine all selected files into one dotplot")
         self._combined.setChecked(opts.combined)
         self._combined.setToolTip(
-            "Draw a single dotplot comparing all selected files, instead of one "
-            "plot per file. Also the mode used for a right-click run."
+            "Draw a single dotplot comparing all selected files. Can be enabled "
+            "together with the per-file option below."
+        )
+        self._run_separately = QCheckBox("Also run each file separately")
+        self._run_separately.setChecked(opts.run_separately)
+        self._run_separately.setToolTip(
+            "Produce one dotplot per selected file. Enable this alongside "
+            "'Combine' to generate both the combined plot and per-file plots."
         )
 
         # Flexidot comparison modes (-m). Multi-select: any ticked modes are
@@ -2303,6 +2309,7 @@ class FlexidotParamsDialog(QDialog):
         files_box = QGroupBox("File handling", self)
         files_box_layout = QVBoxLayout(files_box)
         files_box_layout.addWidget(self._combined)
+        files_box_layout.addWidget(self._run_separately)
         options_layout.addWidget(files_box)
 
         modes_box = QGroupBox("Comparison modes (-m)", self)
@@ -2358,6 +2365,7 @@ class FlexidotParamsDialog(QDialog):
         self._line_width.setValue(defaults.line_width)
         self._length_scaling.setChecked(defaults.length_scaling)
         self._combined.setChecked(defaults.combined)
+        self._run_separately.setChecked(defaults.run_separately)
         self._mode_self.setChecked("0" in defaults.modes)
         self._mode_pairwise.setChecked("1" in defaults.modes)
         self._mode_allvsall.setChecked("2" in defaults.modes)
@@ -2390,6 +2398,7 @@ class FlexidotParamsDialog(QDialog):
             line_width=self._line_width.value(),
             length_scaling=self._length_scaling.isChecked(),
             combined=self._combined.isChecked(),
+            run_separately=self._run_separately.isChecked(),
             modes=self._selected_modes(),
         )
 

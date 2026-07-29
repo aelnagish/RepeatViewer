@@ -3559,12 +3559,15 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
             )
         elif tool_id == "flexidot":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "Flexidot",
-                self._run_flexidot_combined,
-                self._populate_flexidot_menu,
-                tooltip=tip,
+                self._open_flexidot_dialog,
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: run with saved settings."
+                ),
+                right_click_slot=self._run_flexidot_saved,
             )
         elif tool_id == "tsd_search":
             self._add_toolbar_text_menu_button(
@@ -3639,7 +3642,8 @@ class MainWindow(QMainWindow):
             return n
         if not self._project.is_pan_genome_mode:
             if func_name == "flexidot" and n > 1 and job_kwargs.get("flexidot_combined", True):
-                return 1
+                # 1 combined plot, plus n per-file plots when "both" is chosen.
+                return 1 + n if job_kwargs.get("flexidot_separate", False) else 1
             if func_name.startswith("plugin:"):
                 plugin = self._plugin_registry.get(func_name[len("plugin:") :])
                 if plugin is not None and not plugin.supports_parallel:
@@ -3650,6 +3654,8 @@ class MainWindow(QMainWindow):
             return n * pan_n
         if func_name == "flexidot":
             if n > 1 and job_kwargs.get("flexidot_combined", True):
+                if job_kwargs.get("flexidot_separate", False):
+                    return pan_n + n * pan_n
                 return pan_n
             return n * pan_n
         if func_name.startswith("plugin:"):
@@ -6971,6 +6977,33 @@ class MainWindow(QMainWindow):
             flexidot_combined=True,
             flexidot_options=self._flexidot_options,
         )
+
+    def _run_flexidot_saved(self) -> None:
+        """Run Flexidot with saved settings (combined and/or per-file)."""
+        combined = self._flexidot_options.combined
+        separate = self._flexidot_options.run_separately
+        if not combined and not separate:
+            # Clearing both is meaningless; fall back to a combined run.
+            combined = True
+        self._apply_function(
+            "flexidot",
+            flexidot_combined=combined,
+            flexidot_separate=separate,
+            flexidot_options=self._flexidot_options,
+        )
+
+    def _open_flexidot_dialog(self) -> None:
+        """Click Flexidot: parameters dialog. Run uses the saved combine mode."""
+        dialog = FlexidotParamsDialog(initial=self._flexidot_options, parent=self)
+        try:
+            if not dialog.exec():
+                return
+            self._flexidot_options = dialog.options()
+            save_flexidot_options(self._flexidot_options)
+            self._persist_workspace()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        self._run_flexidot_saved()
 
     def _run_te_annotation(self) -> None:
         from teviewer.backends.te_annotation_batch import is_single_sequence_fasta

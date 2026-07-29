@@ -1003,6 +1003,7 @@ def run_batch(
     tsd_search_options: TsdSearchOptions | None = None,
     max_workers: int = 4,
     flexidot_combined: bool = True,
+    flexidot_separate: bool = False,
     cancel: JobCancellation | None = None,
 ) -> dict:
     seq_list = list(seq_files)
@@ -1067,13 +1068,16 @@ def run_batch(
                 failures.append(f"batch{label}: {exc}")
             completed += 1
             progress_cb(completed, f"{display_name}: finished")
-        return {
-            "func_name": func_name,
-            "total": total_steps,
-            "failures": failures,
-            "created_outputs": created_outputs,
-            "source_files": source_files,
-        }
+        # Combined-only: return now. If the user also asked for per-file plots,
+        # fall through and run each file separately as well.
+        if not flexidot_separate:
+            return {
+                "func_name": func_name,
+                "total": total_steps,
+                "failures": failures,
+                "created_outputs": created_outputs,
+                "source_files": source_files,
+            }
 
     work_items: list[tuple[Path, str, Path | None]] = []
     if genome_dependent and genome_items:
