@@ -153,7 +153,7 @@ def run_flexidot_classifier(
     for path in plot_files:
         if not path.is_file():
             raise FileNotFoundError(f"Plot file not found: {path}")
-    kind = _classify_input_kind(plot_files)
+    _classify_input_kind(plot_files)  # validates input; raises on mixed/unsupported
 
     if home is None:
         home = default_flexidot_classifier_home()
@@ -180,19 +180,224 @@ def run_flexidot_classifier(
         shutil.copy2(path, input_dir / path.name)
 
     # The script keys off relative "input"/"output"; run it with cwd=workdir.
-    run_logged_process(
+    proc = run_logged_process(
         [python_exe, str(main_py)],
         tool="Flexidot-Classifier",
         inputs=[str(p) for p in plot_files],
         cwd=workdir,
-        check=True,
+        check=False,  # inspect ourselves so we can surface the real traceback
         timeout=timeout,
     )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        low = detail.lower()
+        hint = ""
+        if "modulenotfounderror" in low or "no module named" in low:
+            hint = (
+                "\n\nThe classifier's Python is missing its dependencies "
+                "(numpy, opencv-python, Pillow, PyMuPDF). It ran with:\n"
+                f"  {python_exe}\n"
+                "Set up its own environment so it doesn't use TEviewer's Python:\n"
+                f"  cd {home}\n"
+                "  python3 -m venv .venv\n"
+                "  ./.venv/bin/pip install -r requirements.txt\n"
+                "(Or use the button's automatic install.)"
+            )
+        raise RuntimeError(
+            f"Flexidot-Classifier failed (exit {proc.returncode}).\n\n"
+            f"{detail[-2000:]}{hint}"
+        )
 
     result = _parse_output(workdir / "output" / "final")
     if not keep_workdir:
         shutil.rmtree(workdir, ignore_errors=True)
     return result
+
+
+INSTALL_REPO_URL = "https://github.com/tudipffmgt/Flexidot-Classifier.git"
+
+# Copy-pasteable manual steps, shown as the fallback to auto-install.
+MANUAL_INSTALL_COMMANDS = (
+    "git clone https://github.com/tudipffmgt/Flexidot-Classifier.git"
+    " ~/Documents/Flexidot-Classifier\n"
+    "cd ~/Documents/Flexidot-Classifier\n"
+    "python3.12 -m venv .venv\n"
+    "./.venv/bin/pip install -r requirements.txt"
+)
+
+
+def default_install_dir() -> Path:
+    """Where auto-install places the clone (matches the auto-detect path)."""
+    return Path.home() / "Documents" / "Flexidot-Classifier"
+
+
+def _python_for_venv() -> str | None:
+    """Find a system Python (prefer 3.12+) to build the classifier's venv."""
+    for name in ("python3.12", "python3.13", "python3.11", "python3.10", "python3"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _venv_python(venv_dir: Path) -> Path:
+    posix = venv_dir / "bin" / "python"
+    win = venv_dir / "Scripts" / "python.exe"
+    return posix if posix.is_file() else win
+
+
+def install_flexidot_classifier(
+    dest: Path | None = None,
+    *,
+    progress=None,
+    cancel=None,
+) -> Path:
+    """Clone the classifier and provision its virtual environment.
+
+    This only *fetches* the public repository (it does not redistribute the
+    code), so it is not gated by the licence question that bundling would be.
+    Requires ``git`` and a system Python (>=3.10) and network access.
+    """
+
+    def report(message: str) -> None:
+        if progress is not None:
+            progress(message)
+
+    dest = Path(dest).expanduser() if dest else default_install_dir()
+
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError(
+            "git was not found on PATH. Install git, or run the manual commands."
+        )
+
+    if (dest / "main.py").is_file():
+        report(f"Repository already present at {dest}; skipping clone.")
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        report(f"Cloning Flexidot-Classifier into {dest}…")
+        run_logged_process(
+            [git, "clone", INSTALL_REPO_URL, str(dest)],
+            tool="Flexidot-Classifier setup",
+            check=True,
+            timeout=600,
+        )
+
+    venv_dir = dest / ".venv"
+    venv_py = _venv_python(venv_dir)
+    if not venv_py.is_file():
+        system_py = _python_for_venv()
+        if system_py is None:
+            raise RuntimeError(
+                "No system Python (>=3.10) found to create the environment."
+            )
+        report("Creating virtual environment (.venv)…")
+        run_logged_process(
+            [system_py, "-m", "venv", str(venv_dir)],
+            tool="Flexidot-Classifier setup",
+            check=True,
+            timeout=300,
+        )
+        venv_py = _venv_python(venv_dir)
+    if not venv_py.is_file():
+        raise RuntimeError(f"Failed to create a virtual environment in {venv_dir}.")
+
+    report("Installing dependencies (numpy, opencv, Pillow, PyMuPDF)…")
+    run_logged_process(
+        [str(venv_py), "-m", "pip", "install", "-r", str(dest / "requirements.txt")],
+        tool="Flexidot-Classifier setup",
+        check=True,
+        timeout=1800,
+    )
+    report("Flexidot-Classifier setup complete.")
+    return dest
+
+
+def generate_self_dotplots(
+    seq_files: list[Path],
+    *,
+    flexidot_options=None,
+    filetype: str = "png",
+    out_dir: Path | None = None,
+    cancel=None,
+) -> list[Path]:
+    """Produce Flexidot self-mode (-m 0) plots for the classifier.
+
+    Runs Flexidot per selected FASTA in ``png`` (or ``pdf``) — the formats the
+    classifier can read, never HTML. Self-dotplots need no genome, so this
+    calls ``run_flexidot`` directly rather than the genome-gated batch path.
+
+    Each file is rendered into its *own fresh directory* so every produced plot
+    is unambiguously new. (A before/after diff in the data folder silently
+    misses plots because Flexidot overwrites a deterministic ``<seq>_flexidot``
+    name that may already exist from an earlier run.) Returns the plot files.
+    """
+    from teviewer.backends.gui_functions import run_flexidot
+    from teviewer.job_options import FlexidotOptions
+
+    opts = flexidot_options or FlexidotOptions()
+    ext = "pdf" if str(filetype).lower() == "pdf" else "png"
+    root = Path(out_dir).expanduser().resolve() if out_dir else None
+    if root is not None:
+        root.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = []
+    for index, seq_file in enumerate(seq_files):
+        seq_file = Path(seq_file).expanduser().resolve()
+        if root is not None:
+            target = root / f"{index:03d}_{seq_file.stem}"
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target = Path(tempfile.mkdtemp(prefix="flexidot_selfplot_"))
+        run_flexidot(
+            str(seq_file),
+            str(target),
+            wordsize=opts.wordsize,
+            mode="0",  # self-comparison — the classifier's expected input
+            filetype=ext,
+            lcs_shading=opts.lcs_shading,
+            use_gff=opts.use_gff,
+            substitution_count=opts.substitution_count,
+            wobble_conversion=opts.wobble_conversion,
+            max_n_percentage=opts.max_n_percentage,
+            include_reverse=opts.include_reverse,
+            only_vs_first=opts.only_vs_first,
+            line_width=opts.line_width,
+            length_scaling=False,  # -L is pairwise/all-vs-all only
+            gff_source_fastas=[str(seq_file)],
+            cancel=cancel,
+        )
+        # Fresh dir → every plot of this type is a product of this run.
+        created.extend(sorted(target.glob(f"*.{ext}")))
+    return created
+
+
+def generate_and_classify(
+    seq_files: list[Path],
+    *,
+    flexidot_options=None,
+    home: Path | None = None,
+    filetype: str = "png",
+    work_root: Path | None = None,
+    cancel=None,
+) -> tuple[ClassifierResult, list[Path]]:
+    """One-click: make self-dotplots for ``seq_files`` then classify them."""
+    seq_files = [Path(p).expanduser().resolve() for p in seq_files]
+    if not seq_files:
+        raise ValueError("No sequence files selected to classify.")
+    plots = generate_self_dotplots(
+        seq_files,
+        flexidot_options=flexidot_options,
+        filetype=filetype,
+        out_dir=work_root,
+        cancel=cancel,
+    )
+    if not plots:
+        raise RuntimeError(
+            "Flexidot produced no PNG/PDF plots to classify. Check that the "
+            "selected FASTA files contain sequences."
+        )
+    result = run_flexidot_classifier(plots, home=home)
+    return result, plots
 
 
 def _parse_output(final_dir: Path) -> ClassifierResult:
