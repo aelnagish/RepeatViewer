@@ -2253,6 +2253,27 @@ class FlexidotParamsDialog(QDialog):
             "plot per file. Also the mode used for a right-click run."
         )
 
+        # Flexidot comparison modes (-m). Multi-select: any ticked modes are
+        # passed together (e.g. -m 0,1,2). None ticked = automatic.
+        self._mode_self = QCheckBox("Self (-m 0): each sequence against itself")
+        self._mode_pairwise = QCheckBox("Pairwise (-m 1): every pair of sequences")
+        self._mode_allvsall = QCheckBox("All-vs-all (-m 2): full comparison matrix")
+        self._mode_self.setToolTip(
+            "Flexidot -m 0. Classic single-sequence dotplot for each sequence."
+        )
+        self._mode_pairwise.setToolTip(
+            "Flexidot -m 1. One dotplot per pair of sequences."
+        )
+        self._mode_allvsall.setToolTip(
+            "Flexidot -m 2. A matrix of all sequences against all sequences."
+        )
+        for cb, val in (
+            (self._mode_self, "0"),
+            (self._mode_pairwise, "1"),
+            (self._mode_allvsall, "2"),
+        ):
+            cb.setChecked(val in opts.modes)
+
         tabs = QTabWidget()
         flexidot_tab = QWidget()
         flexidot_layout = QVBoxLayout(flexidot_tab)
@@ -2283,6 +2304,21 @@ class FlexidotParamsDialog(QDialog):
         files_box_layout = QVBoxLayout(files_box)
         files_box_layout.addWidget(self._combined)
         options_layout.addWidget(files_box)
+
+        modes_box = QGroupBox("Comparison modes (-m)", self)
+        modes_box_layout = QVBoxLayout(modes_box)
+        modes_box_layout.addWidget(self._mode_self)
+        modes_box_layout.addWidget(self._mode_pairwise)
+        modes_box_layout.addWidget(self._mode_allvsall)
+        modes_hint = QLabel(
+            "Tick one or more. Leave all unticked for automatic "
+            "(self for a single file, all-vs-all when combining).",
+            self,
+        )
+        modes_hint.setWordWrap(True)
+        modes_hint.setStyleSheet("color: palette(mid);")
+        modes_box_layout.addWidget(modes_hint)
+        options_layout.addWidget(modes_box)
 
         anno_box = QGroupBox("Annotation", self)
         anno_box_layout = QVBoxLayout(anno_box)
@@ -2322,6 +2358,20 @@ class FlexidotParamsDialog(QDialog):
         self._line_width.setValue(defaults.line_width)
         self._length_scaling.setChecked(defaults.length_scaling)
         self._combined.setChecked(defaults.combined)
+        self._mode_self.setChecked("0" in defaults.modes)
+        self._mode_pairwise.setChecked("1" in defaults.modes)
+        self._mode_allvsall.setChecked("2" in defaults.modes)
+
+    def _selected_modes(self) -> tuple[str, ...]:
+        return tuple(
+            val
+            for cb, val in (
+                (self._mode_self, "0"),
+                (self._mode_pairwise, "1"),
+                (self._mode_allvsall, "2"),
+            )
+            if cb.isChecked()
+        )
 
     def options(self) -> FlexidotOptions:
         fmt = self._output_format.currentData()
@@ -2340,6 +2390,7 @@ class FlexidotParamsDialog(QDialog):
             line_width=self._line_width.value(),
             length_scaling=self._length_scaling.isChecked(),
             combined=self._combined.isChecked(),
+            modes=self._selected_modes(),
         )
 
 

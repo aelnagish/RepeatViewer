@@ -326,6 +326,19 @@ DEFAULT_FLEXIDOT_MAX_N_PERCENTAGE = 10.0
 DEFAULT_FLEXIDOT_INCLUDE_REVERSE = True
 DEFAULT_FLEXIDOT_ONLY_VS_FIRST = False
 DEFAULT_FLEXIDOT_LINE_WIDTH = 1.0
+DEFAULT_FLEXIDOT_LENGTH_SCALING = False
+DEFAULT_FLEXIDOT_COMBINED = True
+# Flexidot comparison modes (-m): "0"=self, "1"=pairwise, "2"=all-vs-all.
+# Empty tuple means "auto": self for a single file, pairwise/all-vs-all when
+# combining (matching the historical behaviour).
+FLEXIDOT_MODE_CHOICES = ("0", "1", "2")
+DEFAULT_FLEXIDOT_MODES: tuple[str, ...] = ()
+
+
+def parse_flexidot_modes(raw: object) -> tuple[str, ...]:
+    """Normalise a stored/typed modes value into an ordered ``0/1/2`` tuple."""
+    tokens = {t.strip() for t in str(raw or "").replace(" ", "").split(",")}
+    return tuple(m for m in FLEXIDOT_MODE_CHOICES if m in tokens)
 FLEXIDOT_OUTPUT_HTML = "html"
 FLEXIDOT_OUTPUT_PNG = "png"
 FLEXIDOT_OUTPUT_PDF = "pdf"
@@ -362,6 +375,12 @@ class FlexidotOptions:
     include_reverse: bool = DEFAULT_FLEXIDOT_INCLUDE_REVERSE
     only_vs_first: bool = DEFAULT_FLEXIDOT_ONLY_VS_FIRST
     line_width: float = DEFAULT_FLEXIDOT_LINE_WIDTH
+    # Scale pairwise/all-vs-all plots by sequence length (flexidot -L).
+    length_scaling: bool = DEFAULT_FLEXIDOT_LENGTH_SCALING
+    # Combine all selected files into one dotplot; also the right-click mode.
+    combined: bool = DEFAULT_FLEXIDOT_COMBINED
+    # Explicit flexidot comparison modes (-m); empty tuple = auto (see above).
+    modes: tuple[str, ...] = DEFAULT_FLEXIDOT_MODES
 
 
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
@@ -1055,6 +1074,10 @@ def load_flexidot_options() -> FlexidotOptions:
         only_vs_first=str(v.get("only_vs_first", "false")).lower()
         in {"1", "true", "yes"},
         line_width=max(0.1, min(20.0, float(v.get("line_width", 1.0)))),
+        length_scaling=str(v.get("length_scaling", "false")).lower()
+        in {"1", "true", "yes"},
+        combined=str(v.get("combined", "true")).lower() in {"1", "true", "yes"},
+        modes=parse_flexidot_modes(v.get("modes", "")),
     )
 
 
@@ -1072,6 +1095,9 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
             "include_reverse": opts.include_reverse,
             "only_vs_first": opts.only_vs_first,
             "line_width": opts.line_width,
+            "length_scaling": opts.length_scaling,
+            "combined": opts.combined,
+            "modes": ",".join(opts.modes),
         },
     )
 
