@@ -2238,6 +2238,21 @@ class FlexidotParamsDialog(QDialog):
         ):
             field.setFixedWidth(260)
 
+        self._length_scaling = QCheckBox(
+            "Scale plots by sequence length (-L, pairwise / all-vs-all)"
+        )
+        self._length_scaling.setChecked(opts.length_scaling)
+        self._length_scaling.setToolTip(
+            "Scale each dotplot to the sequence lengths instead of a square "
+            "panel. Only affects pairwise and all-vs-all comparisons."
+        )
+        self._combined = QCheckBox("Combine all selected files into one dotplot")
+        self._combined.setChecked(opts.combined)
+        self._combined.setToolTip(
+            "Draw a single dotplot comparing all selected files, instead of one "
+            "plot per file. Also the mode used for a right-click run."
+        )
+
         tabs = QTabWidget()
         flexidot_tab = QWidget()
         flexidot_layout = QVBoxLayout(flexidot_tab)
@@ -2253,14 +2268,33 @@ class FlexidotParamsDialog(QDialog):
         form.addRow("Match line thickness (-A / --line_width):", self._line_width)
         form.addRow("", self._wobble)
         form.addRow("", self._include_reverse)
-        form.addRow("", self._use_gff)
+        form.addRow("", self._length_scaling)
         flexidot_layout.addLayout(form)
         flexidot_layout.addStretch()
         tabs.addTab(flexidot_tab, "Flexidot")
 
+        # --- Options: file handling and annotation shading ---
+        options_tab = QWidget()
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(12)
+
+        files_box = QGroupBox("File handling", self)
+        files_box_layout = QVBoxLayout(files_box)
+        files_box_layout.addWidget(self._combined)
+        options_layout.addWidget(files_box)
+
+        anno_box = QGroupBox("Annotation", self)
+        anno_box_layout = QVBoxLayout(anno_box)
+        anno_box_layout.addWidget(self._use_gff)
+        options_layout.addWidget(anno_box)
+        options_layout.addStretch(1)
+        tabs.addTab(options_tab, "Options")
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Run")
         restore = buttons.addButton(
             "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
         )
@@ -2286,6 +2320,8 @@ class FlexidotParamsDialog(QDialog):
         self._include_reverse.setChecked(defaults.include_reverse)
         self._only_vs_first_value = defaults.only_vs_first
         self._line_width.setValue(defaults.line_width)
+        self._length_scaling.setChecked(defaults.length_scaling)
+        self._combined.setChecked(defaults.combined)
 
     def options(self) -> FlexidotOptions:
         fmt = self._output_format.currentData()
@@ -2302,6 +2338,8 @@ class FlexidotParamsDialog(QDialog):
             include_reverse=self._include_reverse.isChecked(),
             only_vs_first=self._only_vs_first_value,
             line_width=self._line_width.value(),
+            length_scaling=self._length_scaling.isChecked(),
+            combined=self._combined.isChecked(),
         )
 
 
