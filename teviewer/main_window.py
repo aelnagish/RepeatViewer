@@ -3771,12 +3771,15 @@ class MainWindow(QMainWindow):
                 right_click_slot=self._quick_align_right_click,
             )
         elif tool_id == "tree":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "Tree",
                 self._run_tree_default,
-                self._populate_tree_menu,
-                tooltip=tip,
+                tooltip=(
+                    "Click: build tree with default parameters.\n"
+                    "Right-click: change parameters."
+                ),
+                right_click_slot=self._open_tree_dialog,
             )
         elif tool_id == "fastga":
             self._add_toolbar_text_menu_button(
