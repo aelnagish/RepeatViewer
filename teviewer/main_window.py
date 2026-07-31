@@ -8,6 +8,7 @@ import shutil
 import platform
 import tempfile
 import time
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -4441,7 +4442,13 @@ class MainWindow(QMainWindow):
                     and not self._is_intermediate_teaid_folder(entry.name)
                     and entry.is_dir(follow_symlinks=False)
                 ]
-            return sorted(children, key=lambda p: p.name.lower())
+            return sorted(
+                children,
+                key=lambda p: [
+                    int(part) if part.isdigit() else part.lower()
+                    for part in re.split(r"(\d+)", p.name)
+                ],
+            )
         except OSError:
             return []
 
