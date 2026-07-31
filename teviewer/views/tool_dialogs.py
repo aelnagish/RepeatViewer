@@ -135,6 +135,7 @@ from teviewer.job_options import (
     DEFAULT_GAP_ROW_GAP_THRESHOLD,
     DEFAULT_GAP_ROW_WINDOW_SIZE,
     DEFAULT_TEAID_EVALUE,
+    DEFAULT_TEAID_X_AXIS_LABEL,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
     MAX_TEAID_SELF_BLAST_WORD_SIZE,
     MIN_TEAID_SELF_BLAST_WORD_SIZE,
@@ -2702,9 +2703,19 @@ class TeaAidParamsDialog(QDialog):
             "BLASTN word size (-word_size) for the TEAid self-BLAST dot plot only (4–25)."
         )
 
+        self._x_axis_label = QLineEdit()
+        self._x_axis_label.setText(opts.x_axis_label or DEFAULT_TEAID_X_AXIS_LABEL)
+        self._x_axis_label.setPlaceholderText(DEFAULT_TEAID_X_AXIS_LABEL)
+        self._x_axis_label.setToolTip(
+            "Text written on the consensus (x-)axis of the TEAid panels. Change it "
+            "when working with non-TE sequences, e.g. 'Tandem repeat (bp)' or "
+            "'Monomer (bp)'."
+        )
+
         form = QFormLayout()
         form.addRow("Genome BLAST E-value:", self._evalue)
         form.addRow("Self BLAST word size:", self._word_size)
+        form.addRow("Consensus axis label:", self._x_axis_label)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -2723,6 +2734,7 @@ class TeaAidParamsDialog(QDialog):
                 default=DEFAULT_TEAID_EVALUE,
             ),
             self_blast_word_size=self._word_size.value(),
+            x_axis_label=self._x_axis_label.text().strip() or DEFAULT_TEAID_X_AXIS_LABEL,
         )
 
 

@@ -33,6 +33,7 @@ Developer: Jiangzhao Qian
 os_type = platform.system()
 
 TEAID_DIVERGENCE_HIST_MAX = 0.6
+DEFAULT_TEAID_X_AXIS_LABEL = "TE consensus (bp)"
 TEAID_PAN_PANEL_PX_MIN = 260
 TEAID_PAN_PANEL_PX_MAX = 380
 TEAID_PAN_X_TICKANGLE = -45
@@ -982,9 +983,10 @@ def _configure_blast_subplot(
     show_x_title=True,
     show_y_title=True,
     x_tickangle=0,
+    x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
 ):
     fig.update_xaxes(
-        title_text='TE consensus (bp)' if show_x_title else '',
+        title_text=x_axis_label if show_x_title else '',
         showgrid=False,
         showticklabels=True,
         title_font=_AXIS_TITLE_FONT,
@@ -1021,9 +1023,10 @@ def _configure_coverage_subplot(
     show_x_title=True,
     show_y_title=True,
     x_tickangle=0,
+    x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
 ):
     fig.update_xaxes(
-        title_text='TE consensus (bp)' if show_x_title else '',
+        title_text=x_axis_label if show_x_title else '',
         showgrid=False,
         showticklabels=True,
         title_font=_AXIS_TITLE_FONT,
@@ -1058,9 +1061,10 @@ def _configure_self_dot_subplot(
     show_x_title=True,
     show_y_title=True,
     x_tickangle=0,
+    x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
 ):
     fig.update_xaxes(
-        title_text='TE consensus (bp)' if show_x_title else '',
+        title_text=x_axis_label if show_x_title else '',
         showgrid=False,
         showticklabels=True,
         title_font=_AXIS_TITLE_FONT,
@@ -1073,7 +1077,7 @@ def _configure_self_dot_subplot(
         col=col,
     )
     fig.update_yaxes(
-        title_text='TE consensus (bp)' if show_y_title else '',
+        title_text=x_axis_label if show_y_title else '',
         showgrid=False,
         showticklabels=True,
         title_font=_AXIS_TITLE_FONT,
@@ -1180,6 +1184,8 @@ def _assemble_teaid_2x2_figure(
     cons_len,
     panels,
     fig_dot,
+    *,
+    x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
 ):
     divergence_max = panels['divergence_max']
     coverage_max = panels['coverage_max']
@@ -1247,9 +1253,13 @@ def _assemble_teaid_2x2_figure(
     )
 
     fig.update_annotations(font=_SUBPLOT_TITLE_FONT)
-    _configure_blast_subplot(fig, 1, 1, cons_len, divergence_max, consensus_ticks)
-    _configure_coverage_subplot(fig, 1, 2, cons_len, coverage_max, consensus_ticks)
-    _configure_self_dot_subplot(fig, 2, 1, cons_len)
+    _configure_blast_subplot(
+        fig, 1, 1, cons_len, divergence_max, consensus_ticks, x_axis_label=x_axis_label
+    )
+    _configure_coverage_subplot(
+        fig, 1, 2, cons_len, coverage_max, consensus_ticks, x_axis_label=x_axis_label
+    )
+    _configure_self_dot_subplot(fig, 2, 1, cons_len, x_axis_label=x_axis_label)
     _configure_divergence_subplot(fig, 2, 2, div_hist_max)
 
     fig.update_layout(
@@ -1269,6 +1279,8 @@ def _assemble_teaid_pan_genome_figure(
     cons_len,
     genome_panels,
     fig_dot,
+    *,
+    x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
 ):
     """
     Pan-genome layout: four rows (BLAST hits, coverage, divergence, self dot),
@@ -1391,7 +1403,7 @@ def _assemble_teaid_pan_genome_figure(
         text_y=consensus_center,
     )
     _configure_self_dot_subplot(
-        fig, 4, 1, cons_len, x_tickangle=TEAID_PAN_X_TICKANGLE
+        fig, 4, 1, cons_len, x_tickangle=TEAID_PAN_X_TICKANGLE, x_axis_label=x_axis_label
     )
 
     fig.update_annotations(font={'size': 12, 'family': 'Arial, sans-serif', 'color': 'black'})
@@ -1433,6 +1445,7 @@ def teaid_pan_genome_plotter(
     num_threads=5,
     use_system_blast=False,
     self_blast_word_size=11,
+    x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
 ):
     """
     Combined TEAid report for pan-genome mode.
@@ -1484,6 +1497,7 @@ def teaid_pan_genome_plotter(
         cons_len,
         genome_panels,
         fig_dot,
+        x_axis_label=x_axis_label,
     )
     _write_teaid_html(fig, output_dir, input_file)
     logging.info('TEAid pan-genome finished: %s.', os.path.basename(input_file))
@@ -1502,6 +1516,7 @@ def teaid_plotter(
     conduct_cdd=False,
     prepared_cdd=None,
     output_name_tag=None,
+    x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
 ):
     # Used global variable: os_type
 
@@ -1548,7 +1563,9 @@ def teaid_plotter(
         use_system_blast=use_system_blast,
         self_blast_word_size=self_blast_word_size,
     )
-    fig = _assemble_teaid_2x2_figure(plot_main_title, cons_len, panels, fig_dot)
+    fig = _assemble_teaid_2x2_figure(
+        plot_main_title, cons_len, panels, fig_dot, x_axis_label=x_axis_label
+    )
     _write_teaid_html(fig, output_dir, input_file, output_name_tag=output_name_tag)
 
     logging.info(f'TEAid finished: {os.path.basename(input_file)}.')

@@ -390,6 +390,9 @@ class FlexidotOptions:
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
 DEFAULT_TEAID_THREADS = 1
 DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 11
+# Text written on the consensus (x-)axis of the TEAid panels. Configurable so
+# non-TE users (e.g. tandem repeats) can relabel it.
+DEFAULT_TEAID_X_AXIS_LABEL = "TE consensus (bp)"
 MIN_TEAID_SELF_BLAST_WORD_SIZE = 4
 MAX_TEAID_SELF_BLAST_WORD_SIZE = 25
 
@@ -425,6 +428,7 @@ class TeaAidOptions:
     e_value: float = DEFAULT_TEAID_EVALUE
     self_blast_word_size: int = DEFAULT_TEAID_SELF_BLAST_WORD_SIZE
     num_threads: int = DEFAULT_TEAID_THREADS
+    x_axis_label: str = DEFAULT_TEAID_X_AXIS_LABEL
 
 
 # remove_gaps_with_similarity_check defaults (TEtrimmerGUI)
@@ -771,6 +775,10 @@ def load_teaid_options() -> TeaAidOptions:
         ),
         self_blast_word_size=word_size,
         num_threads=max(1, int(v.get("num_threads", DEFAULT_TEAID_THREADS))),
+        x_axis_label=(
+            str(v.get("x_axis_label", DEFAULT_TEAID_X_AXIS_LABEL)).strip()
+            or DEFAULT_TEAID_X_AXIS_LABEL
+        ),
     )
 
 
@@ -780,6 +788,7 @@ def save_teaid_options(opts: TeaAidOptions) -> None:
         {
             "e_value": opts.e_value,
             "self_blast_word_size": opts.self_blast_word_size,
+            "x_axis_label": opts.x_axis_label,
         },
     )
 

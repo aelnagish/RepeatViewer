@@ -757,6 +757,7 @@ def run_on_sequence(
                     num_threads=analysis_threads_per_job(project.batch_workers),
                     use_system_blast=project.use_system_blast,
                     self_blast_word_size=teaid_opts.self_blast_word_size,
+                    x_axis_label=teaid_opts.x_axis_label,
                 )
             else:
                 run_ok = teaid_plotter(
@@ -769,6 +770,7 @@ def run_on_sequence(
                     use_system_blast=project.use_system_blast,
                     self_blast_word_size=teaid_opts.self_blast_word_size,
                     output_name_tag=genome_label or None,
+                    x_axis_label=teaid_opts.x_axis_label,
                 )
         except TeaidInputError as exc:
             if scratch_dir is not None:
