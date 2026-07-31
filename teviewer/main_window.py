@@ -3535,7 +3535,14 @@ class MainWindow(QMainWindow):
 
         if right_click_slot is not None:
             btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            btn.customContextMenuRequested.connect(lambda _pos: right_click_slot())
+            # Defer to the next event-loop tick so the right-click mouse event
+            # finishes (the button releases its grab) before the slot runs.
+            # Without this, a slot that opens a modal dialog — e.g. TEAid's
+            # "change parameters" — leaves the toolbar stuck highlighted and
+            # unresponsive.
+            btn.customContextMenuRequested.connect(
+                lambda _pos: QTimer.singleShot(0, right_click_slot)
+            )
 
         def _overflow(menu: QMenu) -> None:
             action = menu.addAction(text, slot)
