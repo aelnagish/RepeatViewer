@@ -3800,12 +3800,15 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
             )
         elif tool_id == "teaid":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "TEAid",
                 self._run_teaid,
-                self._populate_teaid_menu,
-                tooltip=tip,
+                tooltip=(
+                    "Click: run TEAid with saved parameters.\n"
+                    "Right-click: change parameters."
+                ),
+                right_click_slot=self._modify_teaid_parameters,
             )
         elif tool_id == "msa_clean":
             self._add_toolbar_text_menu_button(
