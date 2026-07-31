@@ -3782,12 +3782,15 @@ class MainWindow(QMainWindow):
                 right_click_slot=self._open_tree_dialog,
             )
         elif tool_id == "fastga":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "FastGA",
                 self._run_fastga_default,
-                self._populate_fastga_menu,
-                tooltip=tip,
+                tooltip=(
+                    "Click: run FastGA with default parameters.\n"
+                    "Right-click: change parameters."
+                ),
+                right_click_slot=self._open_fastga_dialog,
             )
         elif tool_id == "blast":
             self._add_toolbar_action_button(
