@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -25,8 +26,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QButtonGroup,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QTabWidget,
@@ -132,6 +135,7 @@ from teviewer.job_options import (
     DEFAULT_GAP_ROW_GAP_THRESHOLD,
     DEFAULT_GAP_ROW_WINDOW_SIZE,
     DEFAULT_TEAID_EVALUE,
+    DEFAULT_TEAID_X_AXIS_LABEL,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
     MAX_TEAID_SELF_BLAST_WORD_SIZE,
     MIN_TEAID_SELF_BLAST_WORD_SIZE,
@@ -704,6 +708,15 @@ class AlignParamsDialog(QDialog):
         form.addRow("--ep (offset value):", self._offset)
         form.addRow("", self._reorder)
         form.addRow("", self._adjust_direction)
+        self._mafft_combined = QCheckBox(
+            "Combine all selected files into one MSA", self
+        )
+        self._mafft_combined.setChecked(opts.mafft_combined)
+        self._mafft_combined.setToolTip(
+            "Pool every sequence from the selected files into a single alignment, "
+            "instead of aligning each file on its own."
+        )
+        form.addRow("", self._mafft_combined)
 
         mafft_tab = QWidget(self)
         mafft_tab.setLayout(form)
@@ -735,19 +748,15 @@ class AlignParamsDialog(QDialog):
         muscle_form.setVerticalSpacing(10)
         muscle_form.addRow("MUSCLE algorithm:", self._muscle_mode)
         muscle_form.addRow("Threads:", self._muscle_threads)
+        self._muscle_combined = QCheckBox(
+            "Combine all selected files into one MSA", self
+        )
+        self._muscle_combined.setChecked(opts.muscle_combined)
+        self._muscle_combined.setToolTip(self._mafft_combined.toolTip())
+        muscle_form.addRow("", self._muscle_combined)
         muscle_tab = QWidget(self)
         muscle_tab.setLayout(muscle_form)
 
-        self._combined_aligner = QComboBox(self)
-        self._combined_aligner.addItem("MAFFT", ALIGNER_MAFFT)
-        self._combined_aligner.addItem("MUSCLE", ALIGNER_MUSCLE)
-        combined_index = self._combined_aligner.findData(opts.combined_aligner)
-        if combined_index >= 0:
-            self._combined_aligner.setCurrentIndex(combined_index)
-        self._combined_aligner.setFixedWidth(260)
-        self._combined_aligner.setToolTip(
-            "Tool used by “Align all selected files in one MSA”."
-        )
         self._use_system_mafft = QCheckBox("Use MAFFT from the system PATH", self)
         self._use_system_mafft.setChecked(use_system_mafft)
         self._use_system_mafft.setToolTip(
@@ -758,32 +767,47 @@ class AlignParamsDialog(QDialog):
         self._use_system_muscle.setToolTip(
             "Use the system muscle command instead of the bundled MUSCLE."
         )
-        others_form = QFormLayout()
-        others_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the Align button runs, with saved settings:", self)
         )
-        others_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
-        )
-        others_form.setHorizontalSpacing(12)
-        others_form.setVerticalSpacing(10)
-        others_form.addRow(
-            "Tool to align all selected files in one MSA:",
-            self._combined_aligner,
-        )
-        others_form.addRow("", self._use_system_mafft)
-        others_form.addRow("", self._use_system_muscle)
-        others_tab = QWidget(self)
-        others_tab.setLayout(others_form)
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (("MAFFT", ALIGNER_MAFFT), ("MUSCLE", ALIGNER_MUSCLE)):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_aligner == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+            rc_box_layout.addWidget(radio)
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[ALIGNER_MAFFT].setChecked(True)
+        options_layout.addWidget(rc_box)
+
+        exe_box = QGroupBox("Executables", self)
+        exe_box_layout = QVBoxLayout(exe_box)
+        exe_box_layout.addWidget(self._use_system_mafft)
+        exe_box_layout.addWidget(self._use_system_muscle)
+        options_layout.addWidget(exe_box)
+        options_layout.addStretch(1)
 
         self._aligner_tabs = QTabWidget(self)
         self._aligner_tabs.addTab(mafft_tab, "MAFFT")
         self._aligner_tabs.addTab(muscle_tab, "MUSCLE")
-        self._aligner_tabs.addTab(others_tab, "Others")
+        self._aligner_tabs.addTab(options_tab, "Options")
+        self._options_tab_index = self._aligner_tabs.count() - 1
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
@@ -795,7 +819,39 @@ class AlignParamsDialog(QDialog):
 
         self._strategy.currentIndexChanged.connect(self._sync_controls)
         self._sequence_type.currentIndexChanged.connect(self._sync_controls)
+        self._aligner_tabs.currentChanged.connect(self._update_run_button)
+        self._update_run_button(self._aligner_tabs.currentIndex())
         self._sync_controls()
+
+    def _update_run_button(self, tab_index: int) -> None:
+        """Run on an aligner tab; Save on the Options tab (nothing to run)."""
+        self._run_button.setText(
+            "Save" if tab_index == self._options_tab_index else "Run"
+        )
+
+    def should_run(self) -> bool:
+        return self._aligner_tabs.currentIndex() != self._options_tab_index
+
+    def selected_aligner(self) -> str:
+        """The aligner of the active tab (MAFFT/MUSCLE); falls back to right-click."""
+        index = self._aligner_tabs.currentIndex()
+        if index == 0:
+            return ALIGNER_MAFFT
+        if index == 1:
+            return ALIGNER_MUSCLE
+        return self.right_click_aligner()
+
+    def right_click_aligner(self) -> str:
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                return value
+        return ALIGNER_MAFFT
+
+    def combined_for(self, aligner: str) -> bool:
+        """Whether the given aligner should combine into one MSA."""
+        if aligner == ALIGNER_MUSCLE:
+            return self._muscle_combined.isChecked()
+        return self._mafft_combined.isChecked()
 
     def _sync_controls(self) -> None:
         strategy = str(self._strategy.currentData())
@@ -847,7 +903,7 @@ class AlignParamsDialog(QDialog):
 
     def options(self) -> AlignOptions:
         return AlignOptions(
-            combined_aligner=str(self._combined_aligner.currentData()),
+            combined_aligner=self.right_click_aligner(),
             num_threads=max(1, int(self._threads.value())),
             strategy=str(self._strategy.currentData()),
             sequence_type=str(self._sequence_type.currentData()),
@@ -862,6 +918,9 @@ class AlignParamsDialog(QDialog):
             ),
             muscle_mode=str(self._muscle_mode.currentData()),
             muscle_num_threads=max(1, int(self._muscle_threads.value())),
+            mafft_combined=self._mafft_combined.isChecked(),
+            muscle_combined=self._muscle_combined.isChecked(),
+            right_click_aligner=self.right_click_aligner(),
         )
 
     def use_system_mafft(self) -> bool:
@@ -1696,15 +1755,13 @@ class BlastParamsDialog(QDialog):
         blastn_form.addRow("-qcov_hsp_perc:", self._query_coverage)
         blastn_form.addRow("", self._blastn_write_text)
         blastn_form.addRow("", self._blastn_write_gff)
-        # The system-PATH toggle is a shared setting, shown on both program
-        # tabs (one checkbox each, kept in sync) so it is reachable wherever you
-        # are without a separate tab.
-        self._use_system_blast = QCheckBox("Use BLAST from the system PATH")
+        # The system-PATH toggle applies to all three programs, so it lives once
+        # on the Options tab rather than being repeated on every program tab.
+        self._use_system_blast = QCheckBox("Use BLAST+ from the system PATH")
         self._use_system_blast.setChecked(project.use_system_blast)
         self._use_system_blast.setToolTip(
             "Use BLAST+ programs installed on the system PATH instead of the bundled programs."
         )
-        blastn_form.addRow("", self._use_system_blast)
         self._tabs.addTab(blastn_tab, "BLASTn")
 
         blastp_tab = QWidget()
@@ -1718,10 +1775,6 @@ class BlastParamsDialog(QDialog):
         blastp_form.addRow("-qcov_hsp_perc:", self._blastp_query_coverage)
         blastp_form.addRow("", self._blastp_write_text)
         blastp_form.addRow("", self._blastp_write_gff)
-        self._use_system_blast_p = QCheckBox("Use BLAST from the system PATH")
-        self._use_system_blast_p.setChecked(project.use_system_blast)
-        self._use_system_blast_p.setToolTip(self._use_system_blast.toolTip())
-        blastp_form.addRow("", self._use_system_blast_p)
         self._tabs.addTab(blastp_tab, "BLASTp")
 
         blastx_tab = QWidget()
@@ -1735,17 +1788,43 @@ class BlastParamsDialog(QDialog):
         blastx_form.addRow("-qcov_hsp_perc:", self._blastx_query_coverage)
         blastx_form.addRow("", self._blastx_write_text)
         blastx_form.addRow("", self._blastx_write_gff)
-        self._use_system_blast_x = QCheckBox("Use BLAST from the system PATH")
-        self._use_system_blast_x.setChecked(project.use_system_blast)
-        self._use_system_blast_x.setToolTip(self._use_system_blast.toolTip())
-        blastx_form.addRow("", self._use_system_blast_x)
         self._tabs.addTab(blastx_tab, "BLASTx")
 
-        # Keep the three copies of the shared toggle in step.
-        for src in (self._use_system_blast, self._use_system_blast_p, self._use_system_blast_x):
-            for dst in (self._use_system_blast, self._use_system_blast_p, self._use_system_blast_x):
-                if src is not dst:
-                    src.toggled.connect(dst.setChecked)
+        # --- Options: right-click program + shared executable setting ---
+        options_tab = QWidget()
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the BLAST button runs, with saved settings:", self)
+        )
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("blastn", BLAST_PROGRAM_BLASTN),
+            ("blastp", BLAST_PROGRAM_BLASTP),
+            ("blastx", BLAST_PROGRAM_BLASTX),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_program == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+            rc_box_layout.addWidget(radio)
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[BLAST_PROGRAM_BLASTN].setChecked(True)
+        options_layout.addWidget(rc_box)
+
+        exe_box = QGroupBox("Executables", self)
+        exe_box_layout = QVBoxLayout(exe_box)
+        exe_box_layout.addWidget(self._use_system_blast)
+        options_layout.addWidget(exe_box)
+
+        options_layout.addStretch(1)
+        self._tabs.addTab(options_tab, "Options")
 
         self._populate_database_combos(
             blastn_name=opts.blast_database_name,
@@ -1780,9 +1859,10 @@ class BlastParamsDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         # BLAST runs straight from this dialog, and the button names which
-        # BLAST runs straight from this dialog, so the accept button says Run.
+        # A program tab runs on accept; the Right Click tab only saves the
+        # preference, so the button and behaviour switch on that tab.
+        self._right_click_tab_index = self._tabs.count() - 1
         self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run")
         restore = buttons.addButton("Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole)
         restore.clicked.connect(self._restore_defaults)
         buttons.accepted.connect(self.accept)
@@ -1793,7 +1873,19 @@ class BlastParamsDialog(QDialog):
         layout.addWidget(self._post_box)
         layout.addWidget(buttons)
         self._tabs.currentChanged.connect(self._update_postprocessing_visibility)
+        self._tabs.currentChanged.connect(self._update_run_button)
         self._update_postprocessing_visibility(self._tabs.currentIndex())
+        self._update_run_button(self._tabs.currentIndex())
+
+    def _update_run_button(self, tab_index: int) -> None:
+        """Run on a program tab; Save on the Right Click tab (nothing to run)."""
+        self._run_button.setText(
+            "Save" if tab_index == self._right_click_tab_index else "Run"
+        )
+
+    def should_run(self) -> bool:
+        """False on the Right Click tab, where the button only saves the choice."""
+        return self._tabs.currentIndex() != self._right_click_tab_index
 
     @staticmethod
     def _parameter_form(parent: QWidget) -> QFormLayout:
@@ -1989,7 +2081,14 @@ class BlastParamsDialog(QDialog):
             blastx_database_name=self._blastx_database.currentData(),
             blastx_write_text=self._blastx_write_text.isChecked(),
             blastx_write_gff=self._blastx_write_gff.isChecked(),
+            right_click_program=self._selected_right_click_program(),
         )
+
+    def _selected_right_click_program(self) -> str:
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                return value
+        return BLAST_PROGRAM_BLASTN
 
 
 class ConsensusParamsDialog(QDialog):
@@ -2140,6 +2239,48 @@ class FlexidotParamsDialog(QDialog):
         ):
             field.setFixedWidth(260)
 
+        self._length_scaling = QCheckBox(
+            "Scale plots by sequence length (-L, pairwise / all-vs-all)"
+        )
+        self._length_scaling.setChecked(opts.length_scaling)
+        self._length_scaling.setToolTip(
+            "Scale each dotplot to the sequence lengths instead of a square "
+            "panel. Only affects pairwise and all-vs-all comparisons."
+        )
+        self._combined = QCheckBox("Combine all selected files into one dotplot")
+        self._combined.setChecked(opts.combined)
+        self._combined.setToolTip(
+            "Draw a single dotplot comparing all selected files. Can be enabled "
+            "together with the per-file option below."
+        )
+        self._run_separately = QCheckBox("Also run each file separately")
+        self._run_separately.setChecked(opts.run_separately)
+        self._run_separately.setToolTip(
+            "Produce one dotplot per selected file. Enable this alongside "
+            "'Combine' to generate both the combined plot and per-file plots."
+        )
+
+        # Flexidot comparison modes (-m). Multi-select: any ticked modes are
+        # passed together (e.g. -m 0,1,2). None ticked = automatic.
+        self._mode_self = QCheckBox("Self (-m 0): each sequence against itself")
+        self._mode_pairwise = QCheckBox("Pairwise (-m 1): every pair of sequences")
+        self._mode_allvsall = QCheckBox("All-vs-all (-m 2): full comparison matrix")
+        self._mode_self.setToolTip(
+            "Flexidot -m 0. Classic single-sequence dotplot for each sequence."
+        )
+        self._mode_pairwise.setToolTip(
+            "Flexidot -m 1. One dotplot per pair of sequences."
+        )
+        self._mode_allvsall.setToolTip(
+            "Flexidot -m 2. A matrix of all sequences against all sequences."
+        )
+        for cb, val in (
+            (self._mode_self, "0"),
+            (self._mode_pairwise, "1"),
+            (self._mode_allvsall, "2"),
+        ):
+            cb.setChecked(val in opts.modes)
+
         tabs = QTabWidget()
         flexidot_tab = QWidget()
         flexidot_layout = QVBoxLayout(flexidot_tab)
@@ -2155,14 +2296,49 @@ class FlexidotParamsDialog(QDialog):
         form.addRow("Match line thickness (-A / --line_width):", self._line_width)
         form.addRow("", self._wobble)
         form.addRow("", self._include_reverse)
-        form.addRow("", self._use_gff)
+        form.addRow("", self._length_scaling)
         flexidot_layout.addLayout(form)
         flexidot_layout.addStretch()
         tabs.addTab(flexidot_tab, "Flexidot")
 
+        # --- Options: file handling and annotation shading ---
+        options_tab = QWidget()
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(12)
+
+        files_box = QGroupBox("File handling", self)
+        files_box_layout = QVBoxLayout(files_box)
+        files_box_layout.addWidget(self._combined)
+        files_box_layout.addWidget(self._run_separately)
+        options_layout.addWidget(files_box)
+
+        modes_box = QGroupBox("Comparison modes (-m)", self)
+        modes_box_layout = QVBoxLayout(modes_box)
+        modes_box_layout.addWidget(self._mode_self)
+        modes_box_layout.addWidget(self._mode_pairwise)
+        modes_box_layout.addWidget(self._mode_allvsall)
+        modes_hint = QLabel(
+            "Tick one or more. Leave all unticked for automatic "
+            "(self for a single file, all-vs-all when combining).",
+            self,
+        )
+        modes_hint.setWordWrap(True)
+        modes_hint.setStyleSheet("color: palette(mid);")
+        modes_box_layout.addWidget(modes_hint)
+        options_layout.addWidget(modes_box)
+
+        anno_box = QGroupBox("Annotation", self)
+        anno_box_layout = QVBoxLayout(anno_box)
+        anno_box_layout.addWidget(self._use_gff)
+        options_layout.addWidget(anno_box)
+        options_layout.addStretch(1)
+        tabs.addTab(options_tab, "Options")
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Run")
         restore = buttons.addButton(
             "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
         )
@@ -2188,6 +2364,23 @@ class FlexidotParamsDialog(QDialog):
         self._include_reverse.setChecked(defaults.include_reverse)
         self._only_vs_first_value = defaults.only_vs_first
         self._line_width.setValue(defaults.line_width)
+        self._length_scaling.setChecked(defaults.length_scaling)
+        self._combined.setChecked(defaults.combined)
+        self._run_separately.setChecked(defaults.run_separately)
+        self._mode_self.setChecked("0" in defaults.modes)
+        self._mode_pairwise.setChecked("1" in defaults.modes)
+        self._mode_allvsall.setChecked("2" in defaults.modes)
+
+    def _selected_modes(self) -> tuple[str, ...]:
+        return tuple(
+            val
+            for cb, val in (
+                (self._mode_self, "0"),
+                (self._mode_pairwise, "1"),
+                (self._mode_allvsall, "2"),
+            )
+            if cb.isChecked()
+        )
 
     def options(self) -> FlexidotOptions:
         fmt = self._output_format.currentData()
@@ -2204,6 +2397,10 @@ class FlexidotParamsDialog(QDialog):
             include_reverse=self._include_reverse.isChecked(),
             only_vs_first=self._only_vs_first_value,
             line_width=self._line_width.value(),
+            length_scaling=self._length_scaling.isChecked(),
+            combined=self._combined.isChecked(),
+            run_separately=self._run_separately.isChecked(),
+            modes=self._selected_modes(),
         )
 
 
@@ -2506,9 +2703,19 @@ class TeaAidParamsDialog(QDialog):
             "BLASTN word size (-word_size) for the TEAid self-BLAST dot plot only (4–25)."
         )
 
+        self._x_axis_label = QLineEdit()
+        self._x_axis_label.setText(opts.x_axis_label or DEFAULT_TEAID_X_AXIS_LABEL)
+        self._x_axis_label.setPlaceholderText(DEFAULT_TEAID_X_AXIS_LABEL)
+        self._x_axis_label.setToolTip(
+            "Text written on the consensus (x-)axis of the TEAid panels. Change it "
+            "when working with non-TE sequences, e.g. 'Tandem repeat (bp)' or "
+            "'Monomer (bp)'."
+        )
+
         form = QFormLayout()
         form.addRow("Genome BLAST E-value:", self._evalue)
         form.addRow("Self BLAST word size:", self._word_size)
+        form.addRow("Consensus axis label:", self._x_axis_label)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -2527,6 +2734,7 @@ class TeaAidParamsDialog(QDialog):
                 default=DEFAULT_TEAID_EVALUE,
             ),
             self_blast_word_size=self._word_size.value(),
+            x_axis_label=self._x_axis_label.text().strip() or DEFAULT_TEAID_X_AXIS_LABEL,
         )
 
 
@@ -2594,12 +2802,13 @@ class MsaCleanParamsDialog(QDialog):
         self._div_window.setValue(opts.divergence.window_size)
         self._div_window.setFixedWidth(spin_width)
 
-        div_form = QFormLayout(div_box)
-        div_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
-        div_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        div_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        div_form.addRow("Divergence threshold:", self._div_threshold)
-        div_form.addRow("Window size (bp):", self._div_window)
+        self._fill_labeled_grid(
+            div_box,
+            [
+                ("Divergence threshold:", self._div_threshold),
+                ("Window size (bp):", self._div_window),
+            ],
+        )
 
         gap_box = QGroupBox("Clean rows with gaps")
         self._row_gap_threshold = QDoubleSpinBox()
@@ -2614,12 +2823,13 @@ class MsaCleanParamsDialog(QDialog):
         self._row_gap_window.setValue(opts.gap_row.window_size)
         self._row_gap_window.setFixedWidth(spin_width)
 
-        gap_form = QFormLayout(gap_box)
-        gap_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
-        gap_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        gap_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        gap_form.addRow("Gap proportion threshold:", self._row_gap_threshold)
-        gap_form.addRow("Window size (bp):", self._row_gap_window)
+        self._fill_labeled_grid(
+            gap_box,
+            [
+                ("Gap proportion threshold:", self._row_gap_threshold),
+                ("Window size (bp):", self._row_gap_window),
+            ],
+        )
 
         gappy_box = QGroupBox("Remove gappy columns")
         self._gap_threshold = QDoubleSpinBox()
@@ -2648,14 +2858,15 @@ class MsaCleanParamsDialog(QDialog):
         self._min_nt.setValue(opts.gappy.min_nucleotide)
         self._min_nt.setFixedWidth(spin_width)
 
-        gappy_form = QFormLayout(gappy_box)
-        gappy_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
-        gappy_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        gappy_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        gappy_form.addRow("Gap threshold:", self._gap_threshold)
-        gappy_form.addRow("Similarity check gap threshold:", self._simi_gap)
-        gappy_form.addRow("Similarity threshold:", self._similarity)
-        gappy_form.addRow("Min nucleotides per column:", self._min_nt)
+        self._fill_labeled_grid(
+            gappy_box,
+            [
+                ("Gap threshold:", self._gap_threshold),
+                ("Similarity check gap threshold:", self._simi_gap),
+                ("Similarity threshold:", self._similarity),
+                ("Min nucleotides per column:", self._min_nt),
+            ],
+        )
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -2678,6 +2889,30 @@ class MsaCleanParamsDialog(QDialog):
         layout.addLayout(method_controls)
         layout.addWidget(buttons)
         self.adjustSize()
+
+    @staticmethod
+    def _fill_labeled_grid(box, rows) -> None:
+        """Lay out (label, widget) rows in a group box with a real label column.
+
+        Uses an explicit QGridLayout rather than QFormLayout: the form's label
+        column was collapsing to nothing here, clipping the descriptions to a
+        stray character. A grid gives column 0 its natural width and stretches
+        column 1, so every label is always fully visible.
+        """
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        for row, (text, widget) in enumerate(rows):
+            label = QLabel(text)
+            grid.addWidget(
+                label,
+                row,
+                0,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            )
+            grid.addWidget(widget, row, 1)
 
     def _listed_method_ids(self) -> list[str]:
         return [

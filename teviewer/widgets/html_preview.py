@@ -416,26 +416,33 @@ class HtmlWebEnginePreview(QWidget):
         return str(Path.home() / f"teviewer_plot{suffix}")
 
     def _handle_download(self, download) -> None:
-        """Route Plotly's in-page SVG download through a native Qt save dialog."""
+        """Route a Plotly in-page image download through a native Qt save dialog.
+
+        Honours the download's own format: the Plotly camera exports PNG, while
+        the dedicated "Save SVG" buttons export SVG. Whatever extension the
+        download carries is what we save (defaulting to SVG if none is given).
+        """
         try:
             if download.page() is not self._view.page():
                 return
         except RuntimeError:
             return
         suggested = download.downloadFileName() or "teviewer_plot.svg"
-        start = Path(self._export_start_path(".svg")).with_name(suggested)
+        suffix = Path(suggested).suffix.lower() or ".svg"
+        fmt = suffix.lstrip(".").upper()
+        start = Path(self._export_start_path(suffix)).with_name(suggested)
         destination, _ = QFileDialog.getSaveFileName(
             self,
-            "Save plot as SVG",
+            f"Save plot as {fmt}",
             str(start),
-            "SVG image (*.svg);;All files (*)",
+            f"{fmt} image (*{suffix});;All files (*)",
         )
         if not destination:
             download.cancel()
             return
         output = Path(destination).expanduser()
-        if output.suffix.lower() != ".svg":
-            output = output.with_suffix(".svg")
+        if output.suffix.lower() != suffix:
+            output = output.with_suffix(suffix)
         download.setDownloadDirectory(str(output.parent))
         download.setDownloadFileName(output.name)
         download.accept()

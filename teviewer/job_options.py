@@ -218,6 +218,11 @@ class AlignOptions:
     adjust_direction: bool = False
     muscle_mode: str = MUSCLE_MODE_ALIGN
     muscle_num_threads: int = field(default_factory=_default_tool_threads)
+    # Per-aligner "combine all selected files into one MSA" choice.
+    mafft_combined: bool = False
+    muscle_combined: bool = False
+    # Which aligner a right-click on the Align toolbar button runs.
+    right_click_aligner: str = ALIGNER_MAFFT
 
 
 @dataclass
@@ -289,6 +294,8 @@ class BlastOptions:
     blastx_write_text: bool = DEFAULT_BLASTX_WRITE_TEXT
     blastx_write_gff: bool = DEFAULT_BLASTX_WRITE_GFF
     blastx_num_threads: int = field(default_factory=_default_tool_threads)
+    # Which program a right-click on the BLAST toolbar button runs.
+    right_click_program: str = BLAST_PROGRAM_BLASTN
 
     @property
     def active_database_name(self) -> str | None:
@@ -319,6 +326,21 @@ DEFAULT_FLEXIDOT_MAX_N_PERCENTAGE = 10.0
 DEFAULT_FLEXIDOT_INCLUDE_REVERSE = True
 DEFAULT_FLEXIDOT_ONLY_VS_FIRST = False
 DEFAULT_FLEXIDOT_LINE_WIDTH = 1.0
+DEFAULT_FLEXIDOT_LENGTH_SCALING = False
+DEFAULT_FLEXIDOT_COMBINED = True
+# Also run each selected file separately (in addition to / instead of combined).
+DEFAULT_FLEXIDOT_RUN_SEPARATELY = False
+# Flexidot comparison modes (-m): "0"=self, "1"=pairwise, "2"=all-vs-all.
+# Empty tuple means "auto": self for a single file, pairwise/all-vs-all when
+# combining (matching the historical behaviour).
+FLEXIDOT_MODE_CHOICES = ("0", "1", "2")
+DEFAULT_FLEXIDOT_MODES: tuple[str, ...] = ()
+
+
+def parse_flexidot_modes(raw: object) -> tuple[str, ...]:
+    """Normalise a stored/typed modes value into an ordered ``0/1/2`` tuple."""
+    tokens = {t.strip() for t in str(raw or "").replace(" ", "").split(",")}
+    return tuple(m for m in FLEXIDOT_MODE_CHOICES if m in tokens)
 FLEXIDOT_OUTPUT_HTML = "html"
 FLEXIDOT_OUTPUT_PNG = "png"
 FLEXIDOT_OUTPUT_PDF = "pdf"
@@ -355,11 +377,22 @@ class FlexidotOptions:
     include_reverse: bool = DEFAULT_FLEXIDOT_INCLUDE_REVERSE
     only_vs_first: bool = DEFAULT_FLEXIDOT_ONLY_VS_FIRST
     line_width: float = DEFAULT_FLEXIDOT_LINE_WIDTH
+    # Scale pairwise/all-vs-all plots by sequence length (flexidot -L).
+    length_scaling: bool = DEFAULT_FLEXIDOT_LENGTH_SCALING
+    # Combine all selected files into one dotplot; also the right-click mode.
+    combined: bool = DEFAULT_FLEXIDOT_COMBINED
+    # Also run each file separately; may be combined with ``combined`` (both).
+    run_separately: bool = DEFAULT_FLEXIDOT_RUN_SEPARATELY
+    # Explicit flexidot comparison modes (-m); empty tuple = auto (see above).
+    modes: tuple[str, ...] = DEFAULT_FLEXIDOT_MODES
 
 
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
 DEFAULT_TEAID_THREADS = 1
 DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 11
+# Text written on the consensus (x-)axis of the TEAid panels. Configurable so
+# non-TE users (e.g. tandem repeats) can relabel it.
+DEFAULT_TEAID_X_AXIS_LABEL = "TE consensus (bp)"
 MIN_TEAID_SELF_BLAST_WORD_SIZE = 4
 MAX_TEAID_SELF_BLAST_WORD_SIZE = 25
 
@@ -395,6 +428,7 @@ class TeaAidOptions:
     e_value: float = DEFAULT_TEAID_EVALUE
     self_blast_word_size: int = DEFAULT_TEAID_SELF_BLAST_WORD_SIZE
     num_threads: int = DEFAULT_TEAID_THREADS
+    x_axis_label: str = DEFAULT_TEAID_X_AXIS_LABEL
 
 
 # remove_gaps_with_similarity_check defaults (TEtrimmerGUI)
@@ -628,6 +662,11 @@ def load_blast_options() -> BlastOptions:
         blastx_num_threads=max(
             1, int(v.get("blastx_num_threads", _default_tool_threads()))
         ),
+        right_click_program=(
+            str(v.get("right_click_program", BLAST_PROGRAM_BLASTN))
+            if str(v.get("right_click_program", BLAST_PROGRAM_BLASTN)) in BLAST_PROGRAMS
+            else BLAST_PROGRAM_BLASTN
+        ),
     )
 
 
@@ -668,6 +707,7 @@ def save_blast_options(opts: BlastOptions) -> None:
             "blastx_write_text": opts.blastx_write_text,
             "blastx_write_gff": opts.blastx_write_gff,
             "blastx_num_threads": opts.blastx_num_threads,
+            "right_click_program": opts.right_click_program,
         },
     )
 
@@ -735,6 +775,10 @@ def load_teaid_options() -> TeaAidOptions:
         ),
         self_blast_word_size=word_size,
         num_threads=max(1, int(v.get("num_threads", DEFAULT_TEAID_THREADS))),
+        x_axis_label=(
+            str(v.get("x_axis_label", DEFAULT_TEAID_X_AXIS_LABEL)).strip()
+            or DEFAULT_TEAID_X_AXIS_LABEL
+        ),
     )
 
 
@@ -744,6 +788,7 @@ def save_teaid_options(opts: TeaAidOptions) -> None:
         {
             "e_value": opts.e_value,
             "self_blast_word_size": opts.self_blast_word_size,
+            "x_axis_label": opts.x_axis_label,
         },
     )
 
@@ -764,6 +809,13 @@ def load_align_options() -> AlignOptions:
     muscle_mode = str(v.get("muscle_mode", MUSCLE_MODE_ALIGN))
     if muscle_mode not in MUSCLE_MODES:
         muscle_mode = MUSCLE_MODE_ALIGN
+    right_click_aligner = str(v.get("right_click_aligner", ALIGNER_MAFFT))
+    if right_click_aligner not in ALIGNERS:
+        right_click_aligner = ALIGNER_MAFFT
+
+    def _flag(key: str) -> bool:
+        return str(v.get(key, "false")).lower() in {"1", "true", "yes"}
+
     return AlignOptions(
         combined_aligner=combined_aligner,
         num_threads=max(1, int(v.get("num_threads", _default_tool_threads()))),
@@ -773,13 +825,15 @@ def load_align_options() -> AlignOptions:
         max_iterate=max(0, int(v.get("max_iterate", 0))),
         gap_open_penalty=float(v.get("gap_open_penalty", 1.53)),
         offset=float(v.get("offset", 0.0)),
-        reorder=str(v.get("reorder", "false")).lower() in {"1", "true", "yes"},
-        adjust_direction=str(v.get("adjust_direction", "false")).lower()
-        in {"1", "true", "yes"},
+        reorder=_flag("reorder"),
+        adjust_direction=_flag("adjust_direction"),
         muscle_mode=muscle_mode,
         muscle_num_threads=max(
             1, int(v.get("muscle_num_threads", _default_tool_threads()))
         ),
+        mafft_combined=_flag("mafft_combined"),
+        muscle_combined=_flag("muscle_combined"),
+        right_click_aligner=right_click_aligner,
     )
 
 
@@ -799,6 +853,9 @@ def save_align_options(opts: AlignOptions) -> None:
             "adjust_direction": opts.adjust_direction,
             "muscle_mode": opts.muscle_mode,
             "muscle_num_threads": opts.muscle_num_threads,
+            "mafft_combined": opts.mafft_combined,
+            "muscle_combined": opts.muscle_combined,
+            "right_click_aligner": opts.right_click_aligner,
         },
     )
 
@@ -1030,6 +1087,12 @@ def load_flexidot_options() -> FlexidotOptions:
         only_vs_first=str(v.get("only_vs_first", "false")).lower()
         in {"1", "true", "yes"},
         line_width=max(0.1, min(20.0, float(v.get("line_width", 1.0)))),
+        length_scaling=str(v.get("length_scaling", "false")).lower()
+        in {"1", "true", "yes"},
+        combined=str(v.get("combined", "true")).lower() in {"1", "true", "yes"},
+        run_separately=str(v.get("run_separately", "false")).lower()
+        in {"1", "true", "yes"},
+        modes=parse_flexidot_modes(v.get("modes", "")),
     )
 
 
@@ -1047,6 +1110,10 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
             "include_reverse": opts.include_reverse,
             "only_vs_first": opts.only_vs_first,
             "line_width": opts.line_width,
+            "length_scaling": opts.length_scaling,
+            "combined": opts.combined,
+            "run_separately": opts.run_separately,
+            "modes": ",".join(opts.modes),
         },
     )
 

@@ -786,6 +786,88 @@ class FastGaWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class FlexidotClassifierWorker(QObject):
+    """Run the external Flexidot-Classifier off the UI thread.
+
+    Two modes:
+    * ``plot_files`` given → classify existing Flexidot PDF/PNG plots.
+    * ``seq_files`` given → generate self-mode (-m 0) PNG plots first, then
+      classify them (one-click flow).
+    Emits a ClassifierResult (per-class counts, indices, annotated images).
+    """
+
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        plot_files: list[Path] | None = None,
+        seq_files: list[Path] | None = None,
+        flexidot_options=None,
+        home=None,
+        cancel=None,
+    ) -> None:
+        super().__init__()
+        self._plot_files = list(plot_files) if plot_files else None
+        self._seq_files = list(seq_files) if seq_files else None
+        self._flexidot_options = flexidot_options
+        self._home = home
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from teviewer.backends.flexidot_classifier import (
+            generate_and_classify,
+            run_flexidot_classifier,
+        )
+
+        try:
+            if self._seq_files is not None:
+                self.progress.emit(1, "Generating self-dotplots and classifying…")
+                result, _plots = generate_and_classify(
+                    self._seq_files,
+                    flexidot_options=self._flexidot_options,
+                    home=self._home,
+                    cancel=self._cancel,
+                )
+            else:
+                self.progress.emit(1, "Classifying dotplots…")
+                result = run_flexidot_classifier(self._plot_files, home=self._home)
+            self.finished.emit(result)
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(str(exc))
+
+
+class FlexidotClassifierInstallWorker(QObject):
+    """Clone + provision the external Flexidot-Classifier off the UI thread."""
+
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, dest=None, *, cancel=None) -> None:
+        super().__init__()
+        self._dest = dest
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from teviewer.backends.flexidot_classifier import install_flexidot_classifier
+
+        try:
+            def _progress(message: str) -> None:
+                self.progress.emit(1, message)
+
+            home = install_flexidot_classifier(
+                self._dest, progress=_progress, cancel=self._cancel
+            )
+            self.finished.emit(str(home))
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(str(exc))
+
+
 class GenomeMapWorker(QObject):
     """Build TE genome map HTML off the UI thread."""
 
@@ -2692,6 +2774,181 @@ class MainWindow(QMainWindow):
             body += f"\n\n{install_hint()}"
         QMessageBox.warning(self, "FastGA failed", body)
 
+    def _open_flexidot_classifier(self) -> None:
+        """Classify existing Flexidot self-dotplot files (PDF/PNG).
+
+        Show-results only: opens the annotated image(s) and reports counts. It
+        does not (yet) write the suggested class back onto sequences — see the
+        TODO in teviewer/backends/flexidot_classifier.py.
+        """
+        home = self._flexidot_classifier_home_or_prompt()
+        if home is None:
+            return
+        start_dir = str(self._current_folder) if self._current_folder else ""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Flexidot self-dotplot files to classify (all PDF or all PNG)",
+            start_dir,
+            "Flexidot plots (*.pdf *.png)",
+        )
+        if not paths:
+            return
+        plot_files = [Path(p) for p in paths]
+        self._start_background_job(
+            FlexidotClassifierWorker(
+                plot_files=plot_files, home=home, cancel=self._job_cancel
+            ),
+            job_title="Flexidot-Classifier",
+            total_steps=1,
+            source_files=plot_files,
+            on_finished=self._on_flexidot_classifier_finished,
+            on_failed=self._on_flexidot_classifier_failed,
+        )
+
+    def _generate_and_classify_flexidot(self) -> None:
+        """One-click: make self-dotplots for the selection, then classify them."""
+        home = self._flexidot_classifier_home_or_prompt()
+        if home is None:
+            return
+        if flexidot_executable() is None:
+            QMessageBox.warning(
+                self,
+                "Flexidot not found",
+                "Flexidot is not on PATH.\n\nInstall with:\n  pip install flexidot",
+            )
+            return
+        selected = self._selected_files()
+        seq_files = [p for p in selected if p.suffix.lower() in _FASTA_SUFFIXES]
+        if not seq_files:
+            QMessageBox.information(
+                self,
+                "No sequence selected",
+                "Select one or more FASTA sequence files in the Files panel.",
+            )
+            return
+        self._start_background_job(
+            FlexidotClassifierWorker(
+                seq_files=seq_files,
+                flexidot_options=self._flexidot_options,
+                home=home,
+                cancel=self._job_cancel,
+            ),
+            job_title="Flexidot-Classifier (generate + classify)",
+            total_steps=1,
+            source_files=seq_files,
+            on_finished=self._on_flexidot_classifier_finished,
+            on_failed=self._on_flexidot_classifier_failed,
+        )
+
+    @Slot(object)
+    def _on_flexidot_classifier_finished(self, result) -> None:
+        counts = getattr(result, "counts", {}) or {}
+        summary = (
+            ", ".join(f"{k.upper()}: {v}" for k, v in counts.items())
+            or "no elements detected"
+        )
+        images = [
+            Path(p)
+            for p in getattr(result, "annotated_images", [])
+            if Path(p).is_file()
+        ]
+        for index, img in enumerate(images):
+            self._open_preview_tab(img, replace=(index == 0))
+        self._set_status_message(f"Flexidot-Classifier — {summary}", 15000)
+        QMessageBox.information(
+            self,
+            "Flexidot-Classifier",
+            f"Detected — {summary}.\n\n"
+            "These are image-based suggestions; confirm before curating. If the "
+            "boxes are misaligned, the tool's crop/threshold settings need "
+            "calibrating to TEviewer's Flexidot rendering.",
+        )
+
+    @Slot(str)
+    def _on_flexidot_classifier_failed(self, error: str) -> None:
+        QMessageBox.warning(
+            self, "Flexidot-Classifier failed", error.strip() or "Unknown error."
+        )
+
+    def _flexidot_classifier_home_or_prompt(self):
+        """Return the classifier home, or offer guided install and return None."""
+        from teviewer.backends.flexidot_classifier import (
+            default_flexidot_classifier_home,
+        )
+
+        home = default_flexidot_classifier_home()
+        if home is not None:
+            return home
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Flexidot Classifier not installed")
+        box.setText(
+            "The Flexidot Classifier tool isn't installed yet.\n\n"
+            "RepeatViewer can download and set it up for you (needs git, "
+            "Python 3.10+, and an internet connection), or you can install it "
+            "manually."
+        )
+        install_btn = box.addButton(
+            "Install automatically", QMessageBox.ButtonRole.AcceptRole
+        )
+        commands_btn = box.addButton(
+            "Show commands", QMessageBox.ButtonRole.ActionRole
+        )
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is install_btn:
+            self._start_flexidot_classifier_install()
+        elif clicked is commands_btn:
+            self._show_flexidot_classifier_commands()
+        return None
+
+    def _show_flexidot_classifier_commands(self) -> None:
+        from teviewer.backends.flexidot_classifier import MANUAL_INSTALL_COMMANDS
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Install Flexidot Classifier")
+        box.setText(
+            "Run these in a terminal, then click Flexidot Classifier again:"
+        )
+        box.setInformativeText(MANUAL_INSTALL_COMMANDS)
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box.exec()
+
+    def _start_flexidot_classifier_install(self) -> None:
+        self._start_background_job(
+            FlexidotClassifierInstallWorker(cancel=self._job_cancel),
+            job_title="Flexidot Classifier setup",
+            total_steps=4,
+            source_files=[],
+            on_finished=self._on_flexidot_classifier_installed,
+            on_failed=self._on_flexidot_classifier_install_failed,
+        )
+
+    @Slot(object)
+    def _on_flexidot_classifier_installed(self, home) -> None:
+        QMessageBox.information(
+            self,
+            "Flexidot Classifier installed",
+            f"Installed to {home}.\n\nClick Flexidot Classifier again to run it.",
+        )
+
+    @Slot(str)
+    def _on_flexidot_classifier_install_failed(self, error: str) -> None:
+        from teviewer.backends.flexidot_classifier import MANUAL_INSTALL_COMMANDS
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Flexidot Classifier setup failed")
+        box.setText(
+            (error.strip() or "Automatic setup failed.")
+            + "\n\nYou can install it manually instead:"
+        )
+        box.setInformativeText(MANUAL_INSTALL_COMMANDS)
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box.exec()
+
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         menu.addAction(
             "blastn",
@@ -2775,6 +3032,15 @@ class MainWindow(QMainWindow):
                 flexidot_combined=False,
                 flexidot_options=self._flexidot_options,
             ),
+        )
+        menu.addSeparator()
+        menu.addAction(
+            "Classify selection (generate self-dotplots + classify)",
+            self._generate_and_classify_flexidot,
+        )
+        menu.addAction(
+            "Classify existing plot files…",
+            self._open_flexidot_classifier,
         )
         menu.addSeparator()
         menu.addAction("Change Flexidot parameters", self._modify_flexidot_parameters)
@@ -3242,9 +3508,20 @@ class MainWindow(QMainWindow):
         return btn
 
     def _add_toolbar_action_button(
-        self, bar, text: str, slot, *, tooltip: str = ""
+        self,
+        bar,
+        text: str,
+        slot,
+        *,
+        tooltip: str = "",
+        right_click_slot=None,
     ) -> QToolButton:
-        """Text-only toolbar button whose click runs a single action, no menu."""
+        """Text-only toolbar button whose click runs a single action.
+
+        ``right_click_slot`` runs a second action on right-click -- used by
+        BLAST, where left-click opens the dialog and right-click runs the
+        program chosen in the dialog's Right Click tab with saved settings.
+        """
         del bar
         btn = QToolButton(self._toolbar_container)
         btn.setText(text)
@@ -3255,6 +3532,10 @@ class MainWindow(QMainWindow):
         btn.clicked.connect(slot)
         self._toolbar_hbox.addWidget(btn)
         self._job_toolbar_actions.append(btn)
+
+        if right_click_slot is not None:
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(lambda _pos: right_click_slot())
 
         def _overflow(menu: QMenu) -> None:
             action = menu.addAction(text, slot)
@@ -3448,13 +3729,15 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
             )
         elif tool_id == "align":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "Align",
-                self._run_align_default,
-                self._populate_align_menu,
-                tooltip=tip,
-                show_default_action=False,
+                self._open_align_dialog,
+                tooltip=(
+                    "Click: set parameters and run (MAFFT or MUSCLE by tab).\n"
+                    "Right-click: run the aligner chosen in the Options tab."
+                ),
+                right_click_slot=self._quick_align_right_click,
             )
         elif tool_id == "tree":
             self._add_toolbar_text_menu_button(
@@ -3477,7 +3760,12 @@ class MainWindow(QMainWindow):
                 bar,
                 "BLAST",
                 self._open_blast_dialog,
-                tooltip="Set BLAST parameters and run (blastn or blastp by tab)",
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: run the program chosen in the Right Click tab, "
+                    "with saved settings."
+                ),
+                right_click_slot=self._quick_blast_right_click,
             )
         elif tool_id == "te_genome_map":
             self._add_toolbar_text_menu_button(
@@ -3513,12 +3801,15 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
             )
         elif tool_id == "teaid":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "TEAid",
                 self._run_teaid,
-                self._populate_teaid_menu,
-                tooltip=tip,
+                tooltip=(
+                    "Click: run TEAid with saved parameters.\n"
+                    "Right-click: change parameters."
+                ),
+                right_click_slot=self._modify_teaid_parameters,
             )
         elif tool_id == "msa_clean":
             self._add_toolbar_text_menu_button(
@@ -3538,12 +3829,27 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
             )
         elif tool_id == "flexidot":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "Flexidot",
-                self._run_flexidot_combined,
-                self._populate_flexidot_menu,
-                tooltip=tip,
+                self._open_flexidot_dialog,
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: run with saved settings."
+                ),
+                right_click_slot=self._run_flexidot_saved,
+            )
+        elif tool_id == "flexidot_classifier":
+            self._add_toolbar_action_button(
+                bar,
+                "Flexidot Classifier",
+                self._generate_and_classify_flexidot,
+                tooltip=(
+                    "Classify selected sequences as LTR / tandem / satellite.\n"
+                    "Click: generate self-dotplots and classify.\n"
+                    "Right-click: classify existing plot files."
+                ),
+                right_click_slot=self._open_flexidot_classifier,
             )
         elif tool_id == "tsd_search":
             self._add_toolbar_text_menu_button(
@@ -3618,7 +3924,8 @@ class MainWindow(QMainWindow):
             return n
         if not self._project.is_pan_genome_mode:
             if func_name == "flexidot" and n > 1 and job_kwargs.get("flexidot_combined", True):
-                return 1
+                # 1 combined plot, plus n per-file plots when "both" is chosen.
+                return 1 + n if job_kwargs.get("flexidot_separate", False) else 1
             if func_name.startswith("plugin:"):
                 plugin = self._plugin_registry.get(func_name[len("plugin:") :])
                 if plugin is not None and not plugin.supports_parallel:
@@ -3629,6 +3936,8 @@ class MainWindow(QMainWindow):
             return n * pan_n
         if func_name == "flexidot":
             if n > 1 and job_kwargs.get("flexidot_combined", True):
+                if job_kwargs.get("flexidot_separate", False):
+                    return pan_n + n * pan_n
                 return pan_n
             return n * pan_n
         if func_name.startswith("plugin:"):
@@ -5641,7 +5950,51 @@ class MainWindow(QMainWindow):
             engine=self._align_options.combined_aligner,
         )
 
+    def _mode_for_aligner(self, aligner: str) -> str:
+        """'combined' or 'one_by_one' from the aligner's saved combine flag."""
+        combined = (
+            self._align_options.muscle_combined
+            if aligner == ALIGNER_MUSCLE
+            else self._align_options.mafft_combined
+        )
+        return ALIGN_MODE_COMBINED if combined else "one_by_one"
+
+    def _open_align_dialog(self) -> None:
+        """Click Align: parameters dialog. Run runs the active aligner tab."""
+        dialog = AlignParamsDialog(
+            initial=self._align_options,
+            use_system_mafft=self._project.use_system_mafft,
+            use_system_muscle=self._project.use_system_muscle,
+            parent=self,
+        )
+        run_after = False
+        aligner = ALIGNER_MAFFT
+        try:
+            if not dialog.exec():
+                return  # Cancel: nothing changes.
+            self._align_options = dialog.options()
+            save_align_options(self._align_options)
+            self._project.use_system_mafft = dialog.use_system_mafft()
+            self._project.use_system_muscle = dialog.use_system_muscle()
+            self._persist_workspace()
+            run_after = dialog.should_run()
+            aligner = dialog.selected_aligner()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        if run_after:
+            self._align_sequences(
+                engine=aligner, mode=self._mode_for_aligner(aligner)
+            )
+        else:
+            self._set_status_message("Alignment settings saved", 4000)
+
+    def _quick_align_right_click(self) -> None:
+        """Right-click Align: run the aligner chosen in the Options tab."""
+        aligner = self._align_options.right_click_aligner
+        self._align_sequences(engine=aligner, mode=self._mode_for_aligner(aligner))
+
     def _modify_align_parameters(self) -> None:
+        # Kept for the menu-bar Align submenu: change parameters without running.
         dialog = AlignParamsDialog(
             initial=self._align_options,
             use_system_mafft=self._project.use_system_mafft,
@@ -5659,11 +6012,7 @@ class MainWindow(QMainWindow):
             self._project.use_system_mafft = dialog.use_system_mafft()
             self._project.use_system_muscle = dialog.use_system_muscle()
             self._persist_workspace()
-            aligner = self._align_options.combined_aligner.upper()
-            self._set_status_message(
-                f"Alignment parameters updated (combined MSA: {aligner})",
-                6000,
-            )
+            self._set_status_message("Alignment parameters updated", 4000)
 
     def _align_sequences(
         self,
@@ -5774,6 +6123,13 @@ class MainWindow(QMainWindow):
         options = replace(self._blast_options, program=program)
         self._apply_function("blast", blast_options=options)
 
+    def _quick_blast_right_click(self) -> None:
+        """Right-click on BLAST: run the program chosen in the Right Click tab."""
+        program = getattr(
+            self._blast_options, "right_click_program", BLAST_PROGRAM_BLASTN
+        )
+        self._run_blast_program(program)
+
     def _open_blast_dialog(self) -> None:
         """Click BLAST -> parameters dialog. Run launches the active tab's program.
 
@@ -5791,10 +6147,14 @@ class MainWindow(QMainWindow):
             save_blast_options(self._blast_options)
             self._project.use_system_blast = dialog.use_system_blast()
             self._persist_workspace()
+            run_after = dialog.should_run()
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
-        # Run the program of whichever tab was active, with the just-saved options.
-        self._apply_function("blast", blast_options=self._blast_options)
+        # The Right Click tab only saves the preference; the program tabs run.
+        if run_after:
+            self._apply_function("blast", blast_options=self._blast_options)
+        else:
+            self._set_status_message("BLAST settings saved", 4000)
 
     def _change_blast_parameters(self) -> None:
         dialog = BlastParamsDialog(project=self._project, initial=self._blast_options, parent=self)
@@ -6905,6 +7265,33 @@ class MainWindow(QMainWindow):
             flexidot_combined=True,
             flexidot_options=self._flexidot_options,
         )
+
+    def _run_flexidot_saved(self) -> None:
+        """Run Flexidot with saved settings (combined and/or per-file)."""
+        combined = self._flexidot_options.combined
+        separate = self._flexidot_options.run_separately
+        if not combined and not separate:
+            # Clearing both is meaningless; fall back to a combined run.
+            combined = True
+        self._apply_function(
+            "flexidot",
+            flexidot_combined=combined,
+            flexidot_separate=separate,
+            flexidot_options=self._flexidot_options,
+        )
+
+    def _open_flexidot_dialog(self) -> None:
+        """Click Flexidot: parameters dialog. Run uses the saved combine mode."""
+        dialog = FlexidotParamsDialog(initial=self._flexidot_options, parent=self)
+        try:
+            if not dialog.exec():
+                return
+            self._flexidot_options = dialog.options()
+            save_flexidot_options(self._flexidot_options)
+            self._persist_workspace()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        self._run_flexidot_saved()
 
     def _run_te_annotation(self) -> None:
         from teviewer.backends.te_annotation_batch import is_single_sequence_fasta

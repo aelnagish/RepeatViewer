@@ -661,6 +661,7 @@ def run_flexidot(
     include_reverse: bool = True,
     only_vs_first: bool = False,
     line_width: float = 1.0,
+    length_scaling: bool = False,
     gff_source_fastas: list[str | os.PathLike] | None = None,
     gff_output_stem: str | None = None,
     cancel=None,
@@ -711,7 +712,10 @@ def run_flexidot(
         # Show "Go to <seq> <start>-<end>" buttons in the dotplot that jump the
         # Annotation view; only available in the forked Flexidot build.
         flexidot_cmd.append("--teviewer-integration")
-    if lcs_shading and str(mode) in {"1", "2"}:
+    # ``mode`` may be a single value ("0") or a comma list ("0,1,2"); the
+    # mode-dependent flags below apply if any selected mode qualifies.
+    mode_set = {m for m in str(mode).replace(" ", "").split(",") if m}
+    if lcs_shading and mode_set & {"1", "2"}:
         flexidot_cmd.append("-x")
     if substitution_count > 0:
         flexidot_cmd.extend(["-S", str(int(substitution_count))])
@@ -719,8 +723,11 @@ def run_flexidot(
         flexidot_cmd.extend(["-w", "--max_n", str(float(max_n_percentage))])
     if not include_reverse:
         flexidot_cmd.append("-r")
-    if only_vs_first and str(mode) == "1":
+    if only_vs_first and "1" in mode_set:
         flexidot_cmd.append("-O")
+    # Length scaling only affects pairwise / all-vs-all plots.
+    if length_scaling and mode_set & {"1", "2"}:
+        flexidot_cmd.append("-L")
     flexidot_cmd.extend(["-A", str(float(line_width))])
 
     temp_gff_paths: list[str] = []

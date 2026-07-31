@@ -517,7 +517,11 @@ def run_flexidot_combined(
         raise ValueError("Combined Flexidot requires at least two sequences.")
     flex_opts = flexidot_options or FlexidotOptions()
     filetype = effective_flexidot_filetype(flex_opts.output_format)
-    mode = "1" if len(seq_files) == 2 else "2"
+    # Explicit modes win; otherwise auto (pairwise for 2, all-vs-all for 3+).
+    if flex_opts.modes:
+        mode = ",".join(flex_opts.modes)
+    else:
+        mode = "1" if len(seq_files) == 2 else "2"
     out_dir = seq_files[0].parent.resolve()
     combined = out_dir / f"_flexidot_{len(seq_files)}seq.fa"
     records = []
@@ -552,6 +556,7 @@ def run_flexidot_combined(
                 include_reverse=flex_opts.include_reverse,
                 only_vs_first=flex_opts.only_vs_first,
                 line_width=flex_opts.line_width,
+                length_scaling=flex_opts.length_scaling,
                 gff_source_fastas=[str(path) for path in seq_files],
                 gff_output_stem=flexidot_output_stem(seq_files, genome_label),
                 cancel=cancel,
@@ -752,6 +757,7 @@ def run_on_sequence(
                     num_threads=analysis_threads_per_job(project.batch_workers),
                     use_system_blast=project.use_system_blast,
                     self_blast_word_size=teaid_opts.self_blast_word_size,
+                    x_axis_label=teaid_opts.x_axis_label,
                 )
             else:
                 run_ok = teaid_plotter(
@@ -764,6 +770,7 @@ def run_on_sequence(
                     use_system_blast=project.use_system_blast,
                     self_blast_word_size=teaid_opts.self_blast_word_size,
                     output_name_tag=genome_label or None,
+                    x_axis_label=teaid_opts.x_axis_label,
                 )
         except TeaidInputError as exc:
             if scratch_dir is not None:
@@ -920,6 +927,7 @@ def run_on_sequence(
                 include_reverse=flex_opts.include_reverse,
                 only_vs_first=flex_opts.only_vs_first,
                 line_width=flex_opts.line_width,
+                length_scaling=flex_opts.length_scaling,
                 gff_source_fastas=[str(seq_path)],
                 gff_output_stem=flexidot_output_stem([seq_path.resolve()], genome_label),
                 cancel=cancel,
@@ -997,6 +1005,7 @@ def run_batch(
     tsd_search_options: TsdSearchOptions | None = None,
     max_workers: int = 4,
     flexidot_combined: bool = True,
+    flexidot_separate: bool = False,
     cancel: JobCancellation | None = None,
 ) -> dict:
     seq_list = list(seq_files)
@@ -1061,13 +1070,16 @@ def run_batch(
                 failures.append(f"batch{label}: {exc}")
             completed += 1
             progress_cb(completed, f"{display_name}: finished")
-        return {
-            "func_name": func_name,
-            "total": total_steps,
-            "failures": failures,
-            "created_outputs": created_outputs,
-            "source_files": source_files,
-        }
+        # Combined-only: return now. If the user also asked for per-file plots,
+        # fall through and run each file separately as well.
+        if not flexidot_separate:
+            return {
+                "func_name": func_name,
+                "total": total_steps,
+                "failures": failures,
+                "created_outputs": created_outputs,
+                "source_files": source_files,
+            }
 
     work_items: list[tuple[Path, str, Path | None]] = []
     if genome_dependent and genome_items:
@@ -1104,7 +1116,15 @@ def run_batch(
                 genome_db=db_cache.get(genome_path) if genome_path else None,
                 chrom_sizes=chrom_cache.get(genome_path) if genome_path else None,
                 flexidot_options=flexidot_options,
-                flexidot_mode="0" if func_name == "flexidot" else flexidot_mode,
+                flexidot_mode=(
+                    ",".join(flexidot_options.modes)
+                    if func_name == "flexidot"
+                    and flexidot_options is not None
+                    and flexidot_options.modes
+                    else "0"
+                    if func_name == "flexidot"
+                    else flexidot_mode
+                ),
                 extend=extend,
                 blast_options=blast_options,
                 teaid_options=teaid_options,
