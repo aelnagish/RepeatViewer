@@ -1509,6 +1509,33 @@ class _MetadataEnrichWorker(QObject):
         self.finished.emit()
 
 
+class _ToolbarActionButton(QToolButton):
+    """Toolbar button with a reliable right-click action.
+
+    We do NOT use ``customContextMenuRequested`` for the right-click: on macOS
+    that fires during the press while the button holds the mouse grab, so a slot
+    that opens a modal dialog leaves the whole toolbar grabbed and frozen.
+    Instead we swallow the right-button press (no grab, no context-menu event)
+    and emit ``rightClicked`` on release, after Qt has finished with the event.
+    """
+
+    rightClicked = Signal()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if event.button() == Qt.MouseButton.RightButton:
+            event.accept()  # swallow: don't enter pressed state / grab
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if event.button() == Qt.MouseButton.RightButton:
+            event.accept()
+            if self.rect().contains(event.pos()):
+                self.rightClicked.emit()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class MainWindow(QMainWindow):
     """Browser panel with folders, files, and preview."""
 
@@ -3523,7 +3550,7 @@ class MainWindow(QMainWindow):
         program chosen in the dialog's Right Click tab with saved settings.
         """
         del bar
-        btn = QToolButton(self._toolbar_container)
+        btn = _ToolbarActionButton(self._toolbar_container)
         btn.setText(text)
         if tooltip:
             btn.setToolTip(tooltip)
@@ -3534,8 +3561,12 @@ class MainWindow(QMainWindow):
         self._job_toolbar_actions.append(btn)
 
         if right_click_slot is not None:
-            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            btn.customContextMenuRequested.connect(lambda _pos: right_click_slot())
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+            # Run on the next event-loop tick so the release event fully
+            # finishes before a modal dialog (e.g. TEAid params) opens.
+            btn.rightClicked.connect(
+                lambda s=right_click_slot: QTimer.singleShot(0, s)
+            )
 
         def _overflow(menu: QMenu) -> None:
             action = menu.addAction(text, slot)
