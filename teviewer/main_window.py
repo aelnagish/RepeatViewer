@@ -2978,12 +2978,16 @@ class MainWindow(QMainWindow):
 
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         menu.addAction(
-            "blastn",
+            "BLASTn",
             lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTN),
         )
         menu.addAction(
-            "blastp",
+            "BLASTp",
             lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTP),
+        )
+        menu.addAction(
+            "BLASTx",
+            lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTX),
         )
         menu.addSeparator()
         menu.addAction("Change BLAST parameters", self._change_blast_parameters)
