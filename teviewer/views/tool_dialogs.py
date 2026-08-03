@@ -4271,18 +4271,14 @@ class RepeatQuantifyDialog(QDialog):
     def __init__(self, *, candidates, start_dir: str = "", parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Repeat quantify")
-        self.setMinimumWidth(560)
         self._start_dir = start_dir
         cand = [Path(p) for p in candidates]
 
         self._genome_combo = QComboBox()
         self._library_combo = QComboBox()
         for combo in (self._genome_combo, self._library_combo):
-            # A stable minimum width keeps the combo from collapsing/jumping.
-            combo.setMinimumWidth(260)
-            combo.setSizeAdjustPolicy(
-                QComboBox.SizeAdjustPolicy.AdjustToContentsOnFirstShow
-            )
+            # Fixed width: compact, symmetric, and never collapses/jumps.
+            combo.setFixedWidth(320)
             for path in cand:
                 combo.addItem(path.name, str(path.expanduser().resolve()))
             combo.currentIndexChanged.connect(lambda _i, c=combo: self._sync_tooltip(c))
@@ -4300,7 +4296,7 @@ class RepeatQuantifyDialog(QDialog):
 
         inputs_box = QGroupBox("Inputs", self)
         form = QFormLayout(inputs_box)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
         form.addRow(
@@ -4343,8 +4339,10 @@ class RepeatQuantifyDialog(QDialog):
         row = QWidget()
         hbox = QHBoxLayout(row)
         hbox.setContentsMargins(0, 0, 0, 0)
-        hbox.addWidget(combo, 1)
+        hbox.setSpacing(8)
+        hbox.addWidget(combo)
         hbox.addWidget(browse)
+        hbox.addStretch(1)
         return row
 
     @staticmethod
