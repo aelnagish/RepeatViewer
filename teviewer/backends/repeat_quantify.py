@@ -100,6 +100,23 @@ def _fasta_lengths(fasta: Path) -> dict[str, int]:
     return {rec.id: len(rec.seq) for rec in SeqIO.parse(str(fasta), "fasta")}
 
 
+def library_duplicate_warnings(fasta: Path) -> list[str]:
+    """Warn when the library has repeated record ids (they silently merge)."""
+    lengths: dict[str, list[int]] = {}
+    for rec in SeqIO.parse(str(fasta), "fasta"):
+        lengths.setdefault(rec.id, []).append(len(rec.seq))
+    warnings: list[str] = []
+    for name, lens in lengths.items():
+        if len(lens) > 1:
+            shown = ", ".join(f"{length:,}" for length in lens)
+            warnings.append(
+                f"'{name}' appears {len(lens)}× in the library ({shown} bp) — "
+                f"hits are merged into one row and copy_number uses {lens[-1]:,} bp. "
+                "Give each entry a unique name to keep them separate."
+            )
+    return warnings
+
+
 def _array_stats(by_scaffold: dict) -> tuple[int, int, int]:
     """Return (arrays, covered_bp, max_array_bp) from per-scaffold intervals."""
     arrays = 0
@@ -547,6 +564,7 @@ def write_summary_html(
     path: Path,
     *,
     target_label: str = "",
+    warnings: list[str] | None = None,
 ) -> Path:
     """Render one or more QuantifyResults as a styled HTML summary page."""
     path = Path(path)
@@ -611,16 +629,23 @@ def write_summary_html(
         "border-left:2px solid #eee;padding-left:16px;}"
         "aside h4{margin:0 0 8px;} dt{font-weight:bold;margin-top:8px;}"
         "dd{margin:2px 0 0;color:#555;}"
+        ".warn{background:#fff8e1;border:1px solid #f0c36d;border-radius:6px;"
+        "padding:8px 12px;margin:0 0 16px;font-size:13px;color:#5c4400;}"
+        ".warn ul{margin:6px 0 0;padding-left:20px;} .warn b{color:#7a5b00;}"
     )
     glen = results[0].target_length if results else 0
     genome_line = (
         f"Genome: {_html_escape(target_label)}, {glen:,} bp"
         if target_label else f"Genome: {glen:,} bp"
     )
+    banner = ""
+    if warnings:
+        items = "".join(f"<li>{_html_escape(w)}</li>" for w in warnings)
+        banner = f"<div class='warn'><b>⚠ Library warning</b><ul>{items}</ul></div>"
     path.write_text(
         f"<!doctype html><html><head><meta charset='utf-8'><style>{style}</style>"
         f"</head><body><h2>Repeat quantification</h2>"
-        f"<p class='genome'>{genome_line}</p>"
+        f"<p class='genome'>{genome_line}</p>{banner}"
         f"<div class='wrap'><div class='tables'>{''.join(blocks)}</div>{aside}</div>"
         f"</body></html>"
     )

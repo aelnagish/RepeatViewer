@@ -888,12 +888,14 @@ class RepeatQuantifyWorker(QObject):
     @Slot()
     def run(self) -> None:
         from teviewer.backends.repeat_quantify import (
+            library_duplicate_warnings,
             quantify_library,
             write_landscape_html,
             write_summary_html,
         )
 
         try:
+            lib_warnings = library_duplicate_warnings(self._library)
             outputs: list[str] = []
             for index, target in enumerate(self._targets, 1):
                 self.progress.emit(index, f"Quantifying {target.name}…")
@@ -910,6 +912,7 @@ class RepeatQuantifyWorker(QObject):
                     results,
                     out_dir / f"{target.stem}_repeat_quant.html",
                     target_label=target.name,
+                    warnings=lib_warnings,
                 )
                 outputs.append(str(summary))
                 for result in results:
