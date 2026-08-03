@@ -2956,48 +2956,35 @@ class MainWindow(QMainWindow):
             self, "Flexidot-Classifier failed", error.strip() or "Unknown error."
         )
 
+    def _repeat_quantify_candidates(self) -> list[Path]:
+        """FASTA files to offer in the quantify dialog: selection first, then folder."""
+        seen: dict[str, Path] = {}
+        for path in self._selected_files():
+            if path.suffix.lower() in _FASTA_SUFFIXES and path.is_file():
+                seen.setdefault(str(path.expanduser().resolve()), path)
+        if self._current_folder and self._current_folder.is_dir():
+            for path in sorted(self._current_folder.iterdir()):
+                if path.is_file() and path.suffix.lower() in _FASTA_SUFFIXES:
+                    seen.setdefault(str(path.expanduser().resolve()), path)
+        return list(seen.values())
+
     def _open_repeat_quantify(self) -> None:
-        """Quantify a tandem-repeat / satellite library across selected FASTA."""
-        selected = self._selected_files()
-        targets = [p for p in selected if p.suffix.lower() in _FASTA_SUFFIXES]
-        if not targets:
-            QMessageBox.information(
-                self,
-                "Repeat quantify",
-                "Select the target FASTA (scaffolds / assembly) in the Files panel.",
-            )
-            return
+        """Quantify a tandem-repeat / satellite library across a target FASTA."""
+        from teviewer.views.tool_dialogs import RepeatQuantifyDialog
+
+        candidates = self._repeat_quantify_candidates()
         start_dir = str(self._current_folder) if self._current_folder else ""
-        library, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select tandem-repeat / satellite library FASTA",
-            start_dir,
-            "FASTA (*.fa *.fasta *.fna);;All files (*)",
+        dialog = RepeatQuantifyDialog(
+            candidates=candidates, start_dir=start_dir, parent=self
         )
-        if not library:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Repeat quantify")
-        box.setText("Choose the quantification engine:")
-        box.setInformativeText(
-            "BLASTn is fast (per-family table + GFF). RepeatMasker adds the "
-            "genome-wide divergence landscape but is slower."
-        )
-        b_both = box.addButton("Both", QMessageBox.ButtonRole.AcceptRole)
-        b_blast = box.addButton("BLASTn (fast)", QMessageBox.ButtonRole.ActionRole)
-        b_rm = box.addButton("RepeatMasker", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is b_both:
-            engine = "both"
-        elif clicked is b_blast:
-            engine = "blastn"
-        elif clicked is b_rm:
-            engine = "repeatmasker"
-        else:
+        target = dialog.target()
+        library = dialog.library()
+        engine = dialog.engine()
+        if target is None or library is None:
             return
+        targets = [target]
         if engine in ("both", "repeatmasker"):
             from teviewer.backends.repeat_quantify import (
                 repeatmasker_executable_available,

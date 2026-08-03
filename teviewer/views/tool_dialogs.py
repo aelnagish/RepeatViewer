@@ -4256,3 +4256,132 @@ class TeLibraryBenchmarkDialog(QDialog):
 
 # Backward-compatible alias (removed from menus; use TeDensityPlotDialog).
 TeGenomeMapDefaultsDialog = TeDensityPlotDialog
+
+
+class RepeatQuantifyDialog(QDialog):
+    """Choose a target (database) and a library FASTA, plus the engine.
+
+    Both fields are pre-populated with the FASTA files already available (the
+    current selection / folder) so they can be picked directly, and each has a
+    Browse button for files elsewhere.
+    """
+
+    _FASTA_FILTER = "FASTA (*.fa *.fasta *.fna *.fas);;All files (*)"
+
+    def __init__(self, *, candidates, start_dir: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Repeat quantify")
+        self.setMinimumWidth(560)
+        self._start_dir = start_dir
+        cand = [Path(p) for p in candidates]
+
+        self._target_combo = QComboBox()
+        self._library_combo = QComboBox()
+        for combo in (self._target_combo, self._library_combo):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            for path in cand:
+                combo.addItem(path.name, str(path.expanduser().resolve()))
+            combo.currentIndexChanged.connect(lambda _i, c=combo: self._sync_tooltip(c))
+            self._sync_tooltip(combo)
+        # Sensible default: library defaults to the 2nd candidate if distinct.
+        if self._library_combo.count() > 1:
+            self._library_combo.setCurrentIndex(1)
+
+        target_browse = QPushButton("Browse…")
+        library_browse = QPushButton("Browse…")
+        target_browse.clicked.connect(lambda: self._browse(self._target_combo))
+        library_browse.clicked.connect(lambda: self._browse(self._library_combo))
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.addRow(
+            "Target (scaffolds / assembly):",
+            self._field_row(self._target_combo, target_browse),
+        )
+        form.addRow(
+            "Library (monomers / satellites):",
+            self._field_row(self._library_combo, library_browse),
+        )
+
+        engine_box = QGroupBox("Engine", self)
+        engine_layout = QVBoxLayout(engine_box)
+        self._engine_group = QButtonGroup(self)
+        self._eng_both = QRadioButton("Both (BLASTn + RepeatMasker)")
+        self._eng_blast = QRadioButton("BLASTn (fast — table + GFF)")
+        self._eng_rm = QRadioButton("RepeatMasker (adds divergence landscape)")
+        self._eng_both.setChecked(True)
+        for rb in (self._eng_both, self._eng_blast, self._eng_rm):
+            self._engine_group.addButton(rb)
+            engine_layout.addWidget(rb)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Run")
+        buttons.accepted.connect(self._try_accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(engine_box)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _field_row(combo: QComboBox, browse: QPushButton) -> QWidget:
+        row = QWidget()
+        hbox = QHBoxLayout(row)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.addWidget(combo, 1)
+        hbox.addWidget(browse)
+        return row
+
+    @staticmethod
+    def _sync_tooltip(combo: QComboBox) -> None:
+        data = combo.currentData()
+        combo.setToolTip(str(data) if data else "")
+
+    def _browse(self, combo: QComboBox) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select FASTA", self._start_dir, self._FASTA_FILTER
+        )
+        if not path:
+            return
+        resolved = str(Path(path).expanduser().resolve())
+        index = combo.findData(resolved)
+        if index < 0:
+            combo.addItem(Path(path).name, resolved)
+            index = combo.count() - 1
+        combo.setCurrentIndex(index)
+
+    def _try_accept(self) -> None:
+        target = self.target()
+        library = self.library()
+        if target is None or library is None:
+            QMessageBox.information(
+                self, "Repeat quantify",
+                "Choose both a target FASTA and a library FASTA "
+                "(pick from the list or Browse).",
+            )
+            return
+        if target == library:
+            QMessageBox.warning(
+                self, "Repeat quantify",
+                "Target and library must be different files.",
+            )
+            return
+        self.accept()
+
+    def target(self) -> Path | None:
+        data = self._target_combo.currentData()
+        return Path(data) if data else None
+
+    def library(self) -> Path | None:
+        data = self._library_combo.currentData()
+        return Path(data) if data else None
+
+    def engine(self) -> str:
+        if self._eng_blast.isChecked():
+            return "blastn"
+        if self._eng_rm.isChecked():
+            return "repeatmasker"
+        return "both"
