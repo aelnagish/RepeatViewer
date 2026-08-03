@@ -66,6 +66,10 @@ class FamilyQuant:
     mean_identity: float = 0.0
     mean_divergence: float = 0.0   # RepeatMasker only (0 for blastn)
     scaffolds: int = 0         # distinct target sequences hit
+    monomer_len: int = 0       # library monomer length (period size)
+    copy_number: int = 0       # covered_bp / monomer_len
+    mean_array_bp: float = 0.0  # covered_bp / arrays
+    max_array_bp: int = 0      # largest single contiguous array
 
 
 @dataclass
@@ -91,6 +95,26 @@ def _fasta_total_length(fasta: Path) -> int:
     return sum(len(rec.seq) for rec in SeqIO.parse(str(fasta), "fasta"))
 
 
+def _fasta_lengths(fasta: Path) -> dict[str, int]:
+    """Map each record id to its length (used for satellite copy number)."""
+    return {rec.id: len(rec.seq) for rec in SeqIO.parse(str(fasta), "fasta")}
+
+
+def _array_stats(by_scaffold: dict) -> tuple[int, int, int]:
+    """Return (arrays, covered_bp, max_array_bp) from per-scaffold intervals."""
+    arrays = 0
+    covered = 0
+    max_array = 0
+    for _scaf, ivals in by_scaffold.items():
+        for start, end in _merge_intervals(ivals):
+            arrays += 1
+            length = end - start + 1
+            covered += length
+            if length > max_array:
+                max_array = length
+    return arrays, covered, max_array
+
+
 def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Merge overlapping/adjacent [start, end] intervals (1-based inclusive)."""
     if not intervals:
@@ -106,8 +130,14 @@ def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
-def _aggregate_blast_tab(tab_path: Path, target_length: int) -> list[FamilyQuant]:
+def _aggregate_blast_tab(
+    tab_path: Path,
+    target_length: int,
+    *,
+    monomer_lengths: dict[str, int] | None = None,
+) -> list[FamilyQuant]:
     """Aggregate a blastn outfmt-6 file into per-family quantification."""
+    monomer_lengths = monomer_lengths or {}
     # family -> {"pident_len": [(pident, length), ...],
     #            "by_scaffold": {sseqid: [(sstart, send), ...]}}
     acc: dict[str, dict] = {}
@@ -136,15 +166,11 @@ def _aggregate_blast_tab(tab_path: Path, target_length: int) -> list[FamilyQuant
     families: list[FamilyQuant] = []
     for fam_name, data in acc.items():
         hits = len(data["pident_len"])
-        arrays = 0
-        covered = 0
-        for _sseqid, ivals in data["by_scaffold"].items():
-            merged = _merge_intervals(ivals)
-            arrays += len(merged)
-            covered += sum(end - start + 1 for start, end in merged)
+        arrays, covered, max_array = _array_stats(data["by_scaffold"])
         total_len = sum(length for _pi, length in data["pident_len"]) or 1
         mean_id = sum(pi * length for pi, length in data["pident_len"]) / total_len
         pct = (covered / target_length * 100.0) if target_length else 0.0
+        mono = int(monomer_lengths.get(fam_name, 0))
         families.append(
             FamilyQuant(
                 family=fam_name,
@@ -154,6 +180,10 @@ def _aggregate_blast_tab(tab_path: Path, target_length: int) -> list[FamilyQuant
                 pct_of_target=round(pct, 4),
                 mean_identity=round(mean_id, 2),
                 scaffolds=len(data["by_scaffold"]),
+                monomer_len=mono,
+                copy_number=round(covered / mono) if mono else 0,
+                mean_array_bp=round(covered / arrays, 1) if arrays else 0.0,
+                max_array_bp=max_array,
             )
         )
     families.sort(key=lambda f: f.covered_bp, reverse=True)
@@ -162,12 +192,16 @@ def _aggregate_blast_tab(tab_path: Path, target_length: int) -> list[FamilyQuant
 
 def _write_summary_tsv(result: QuantifyResult, path: Path) -> Path:
     lines = [
-        "family\thits\tarrays\tcovered_bp\tpct_of_target\tmean_identity\tscaffolds"
+        "family\tmonomer_len\tcopy_number\thits\tarrays\tcovered_bp\t"
+        "pct_of_target\tmean_array_bp\tmax_array_bp\tmean_identity\t"
+        "mean_divergence\tscaffolds"
     ]
     for f in result.families:
         lines.append(
-            f"{f.family}\t{f.hits}\t{f.arrays}\t{f.covered_bp}\t"
-            f"{f.pct_of_target}\t{f.mean_identity}\t{f.scaffolds}"
+            f"{f.family}\t{f.monomer_len}\t{f.copy_number}\t{f.hits}\t"
+            f"{f.arrays}\t{f.covered_bp}\t{f.pct_of_target}\t"
+            f"{round(f.mean_array_bp)}\t{f.max_array_bp}\t{f.mean_identity}\t"
+            f"{f.mean_divergence}\t{f.scaffolds}"
         )
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -275,7 +309,9 @@ def quantify_library_blastn(
     result = QuantifyResult(
         engine="blastn",
         target_length=target_length,
-        families=_aggregate_blast_tab(tab_path, target_length),
+        families=_aggregate_blast_tab(
+            tab_path, target_length, monomer_lengths=_fasta_lengths(library_fasta)
+        ),
     )
     result.summary_tsv = _write_summary_tsv(
         result, out_dir / f"{target_fasta.stem}_repeat_quant.tsv"
@@ -326,7 +362,13 @@ def _parse_repeatmasker_out(out_path: Path) -> list[dict]:
     return rows
 
 
-def _aggregate_rm_rows(rows: list[dict], target_length: int) -> list[FamilyQuant]:
+def _aggregate_rm_rows(
+    rows: list[dict],
+    target_length: int,
+    *,
+    monomer_lengths: dict[str, int] | None = None,
+) -> list[FamilyQuant]:
+    monomer_lengths = monomer_lengths or {}
     acc: dict[str, dict] = {}
     for r in rows:
         fam = acc.setdefault(
@@ -338,15 +380,11 @@ def _aggregate_rm_rows(rows: list[dict], target_length: int) -> list[FamilyQuant
 
     families: list[FamilyQuant] = []
     for fam_name, data in acc.items():
-        arrays = 0
-        covered = 0
-        for _scaf, ivals in data["by_scaffold"].items():
-            merged = _merge_intervals(ivals)
-            arrays += len(merged)
-            covered += sum(end - start + 1 for start, end in merged)
+        arrays, covered, max_array = _array_stats(data["by_scaffold"])
         total_len = sum(length for _d, length in data["div_len"]) or 1
         mean_div = sum(d * length for d, length in data["div_len"]) / total_len
         pct = (covered / target_length * 100.0) if target_length else 0.0
+        mono = int(monomer_lengths.get(fam_name, 0))
         families.append(
             FamilyQuant(
                 family=fam_name,
@@ -357,6 +395,10 @@ def _aggregate_rm_rows(rows: list[dict], target_length: int) -> list[FamilyQuant
                 mean_identity=round(100.0 - mean_div, 2),
                 mean_divergence=round(mean_div, 2),
                 scaffolds=len(data["by_scaffold"]),
+                monomer_len=mono,
+                copy_number=round(covered / mono) if mono else 0,
+                mean_array_bp=round(covered / arrays, 1) if arrays else 0.0,
+                max_array_bp=max_array,
             )
         )
     families.sort(key=lambda f: f.covered_bp, reverse=True)
@@ -430,7 +472,9 @@ def quantify_library_repeatmasker(
     result = QuantifyResult(
         engine="repeatmasker",
         target_length=target_length,
-        families=_aggregate_rm_rows(rows, target_length),
+        families=_aggregate_rm_rows(
+            rows, target_length, monomer_lengths=_fasta_lengths(library_fasta)
+        ),
         rm_out=rm_out,
     )
     result.summary_tsv = _write_summary_tsv(
@@ -459,20 +503,28 @@ def _html_escape(text: str) -> str:
 # Column display headers and their short definitions (shown as a side panel).
 _COLUMN_LABELS = {
     "family": "family",
+    "monomer_len": "monomer_len",
+    "copy_number": "copy_number",
     "hits": "hits",
     "arrays": "arrays",
     "covered_bp": "covered_bp",
     "pct_of_target": "%target (%)",
+    "mean_array_bp": "mean_array_bp",
+    "max_array_bp": "max_array_bp",
     "mean_identity": "mean_identity",
     "mean_divergence": "mean_divergence",
     "scaffolds": "scaffolds",
 }
 _COLUMN_DEFS = [
     ("family", "Library family that was matched."),
-    ("hits", "Number of alignment fragments (≈ monomer copies detected)."),
+    ("monomer_len", "Length of the library monomer (period size), bp."),
+    ("copy_number", "Estimated copies = covered_bp ÷ monomer length."),
+    ("hits", "Number of alignment fragments (raw hit count)."),
     ("arrays", "Hits merged into contiguous blocks (≈ distinct array loci)."),
     ("covered_bp", "Target bp covered by the family (overlaps counted once)."),
     ("%target (%)", "covered_bp as a percentage of the target length."),
+    ("mean_array_bp", "Average tandem-array length = covered_bp ÷ arrays."),
+    ("max_array_bp", "Largest single contiguous array, bp."),
     ("mean_identity", "Length-weighted mean % identity to the consensus "
                       "(high = young / conserved copies)."),
     ("mean_divergence", "RepeatMasker Kimura substitution % "
@@ -514,7 +566,8 @@ def write_summary_html(
             f"({pct:.2f}%)</span></div>"
         )
         show_div = result.engine == "repeatmasker"
-        cols = ["family", "hits", "arrays", "covered_bp", "pct_of_target",
+        cols = ["family", "monomer_len", "copy_number", "hits", "arrays",
+                "covered_bp", "pct_of_target", "mean_array_bp", "max_array_bp",
                 "mean_identity"] + (["mean_divergence"] if show_div else []) + ["scaffolds"]
         thead = "".join(f"<th>{_COLUMN_LABELS[c]}</th>" for c in cols)
         by_name = {f.family: f for f in result.families}
@@ -524,9 +577,10 @@ def write_summary_html(
             if f is None:
                 continue
             cells = [
-                _html_escape(f.family), f"{f.hits}", f"{f.arrays}",
-                f"{f.covered_bp:,}", f"{f.pct_of_target:.3f}",
-                f"{f.mean_identity:.1f}",
+                _html_escape(f.family), f"{f.monomer_len:,}", f"{f.copy_number:,}",
+                f"{f.hits}", f"{f.arrays}", f"{f.covered_bp:,}",
+                f"{f.pct_of_target:.3f}", f"{f.mean_array_bp:,.0f}",
+                f"{f.max_array_bp:,}", f"{f.mean_identity:.1f}",
             ]
             if show_div:
                 cells.append(f"{f.mean_divergence:.1f}")
