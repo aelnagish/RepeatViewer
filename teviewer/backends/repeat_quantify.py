@@ -452,6 +452,27 @@ def _write_landscape_tsv(
     return path
 
 
+# RepeatMasker's FastaDB rejects sequence ids longer than this.
+_RM_MAX_ID_LEN = 50
+
+
+def _sanitize_fasta_ids(src: Path, dest: Path, prefix: str) -> dict[str, str]:
+    """Rewrite ``src`` to ``dest`` with short unique ids (RepeatMasker <=50).
+
+    Returns a ``{short_id: original_id}`` map so output names can be restored.
+    """
+    from Bio.SeqRecord import SeqRecord
+
+    mapping: dict[str, str] = {}
+    records = []
+    for index, rec in enumerate(SeqIO.parse(str(src), "fasta")):
+        short = f"{prefix}{index}"
+        mapping[short] = rec.id
+        records.append(SeqRecord(rec.seq, id=short, description=""))
+    SeqIO.write(records, str(dest), "fasta")
+    return mapping
+
+
 def quantify_library_repeatmasker(
     library_fasta: Path,
     target_fasta: Path,
@@ -480,10 +501,17 @@ def quantify_library_repeatmasker(
         if not path.is_file():
             raise FileNotFoundError(f"FASTA not found: {path}")
 
+    library_map: dict[str, str] = {}
     if rm_out is None:
+        # RepeatMasker's FastaDB caps ids at 50 chars, so feed it short ids and
+        # map the family (library) names back afterward.
+        short_lib = out_dir / f"{target_fasta.stem}_rm_lib.fa"
+        short_query = out_dir / f"{target_fasta.stem}_rm.fa"
+        library_map = _sanitize_fasta_ids(library_fasta, short_lib, "L")
+        _sanitize_fasta_ids(target_fasta, short_query, "q")
         rm_out = run_repeatmasker_lib_benchmark(
-            query_fasta=target_fasta,
-            standard_fasta=library_fasta,
+            query_fasta=short_query,
+            standard_fasta=short_lib,
             output_dir=out_dir,
             threads=threads,
             div=div,
@@ -492,6 +520,9 @@ def quantify_library_repeatmasker(
     rm_out = Path(rm_out).expanduser().resolve()
 
     rows = _parse_repeatmasker_out(rm_out)
+    if library_map:  # restore original family names
+        for row in rows:
+            row["family"] = library_map.get(row["family"], row["family"])
     target_length = _fasta_total_length(target_fasta)
     result = QuantifyResult(
         engine="repeatmasker",
