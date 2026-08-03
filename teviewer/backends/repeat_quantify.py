@@ -29,7 +29,7 @@ from teviewer.backends.gui_functions import (
     check_database,
     get_original_file_path,
 )
-from teviewer.external_process import run_logged_process
+from teviewer.backends.job_cancel import run_subprocess_with_cancel
 
 # blastn tabular fields we request (outfmt 6 + qlen/slen).
 _BLAST_FIELDS = (
@@ -265,7 +265,7 @@ def quantify_library_blastn(
     *,
     e_value: float = 1e-5,
     min_identity: float = 0.0,
-    word_size: int = 7,
+    word_size: int = 11,
     threads: int = 1,
     use_system_blast: bool = False,
     cancel=None,
@@ -305,6 +305,7 @@ def quantify_library_blastn(
 
         cmd = [
             _blastn_executable(use_system_blast),
+            "-task", "blastn",
             "-query", str(library_fasta),
             "-db", db_path,
             "-evalue", str(e_value),
@@ -316,9 +317,8 @@ def quantify_library_blastn(
         ]
         if min_identity and min_identity > 0:
             cmd.extend(["-perc_identity", str(float(min_identity))])
-        run_logged_process(
-            cmd, tool="Repeat quantify (blastn)", check=True, cwd=out_dir
-        )
+        # Cancellable runner so Stop actually terminates BLASTn on big inputs.
+        run_subprocess_with_cancel(cmd, cancel=cancel, check=True)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

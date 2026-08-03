@@ -927,6 +927,8 @@ class RepeatQuantifyWorker(QObject):
                             )
                         )
             self.finished.emit(outputs)
+        except JobCancelledError:
+            self.finished.emit([])  # stopped by user; end quietly
         except Exception as exc:  # noqa: BLE001 - surface to the UI
             self.failed.emit(str(exc))
 
