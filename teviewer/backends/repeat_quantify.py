@@ -431,3 +431,130 @@ def quantify_library_repeatmasker(
         result.landscape, out_dir / f"{target_fasta.stem}_repeat_landscape.tsv"
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# HTML result rendering (for the preview pane)
+# ---------------------------------------------------------------------------
+
+def _html_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def write_summary_html(
+    results: list[QuantifyResult],
+    path: Path,
+    *,
+    target_label: str = "",
+) -> Path:
+    """Render one or more QuantifyResults as a styled HTML summary page."""
+    path = Path(path)
+    blocks: list[str] = []
+    for result in results:
+        header = (
+            f"Engine: {result.engine} &nbsp;|&nbsp; "
+            f"target {result.target_length:,} bp &nbsp;|&nbsp; "
+            f"covered {result.total_covered_bp:,} bp "
+            f"({(result.total_covered_bp / result.target_length * 100.0) if result.target_length else 0:.2f}%)"
+        )
+        show_div = result.engine == "repeatmasker"
+        cols = ["family", "hits", "arrays", "covered_bp", "pct_of_target",
+                "mean_identity"] + (["mean_divergence"] if show_div else []) + ["scaffolds"]
+        thead = "".join(f"<th>{c}</th>" for c in cols)
+        body_rows = []
+        for f in result.families:
+            cells = [
+                _html_escape(f.family), f"{f.hits}", f"{f.arrays}",
+                f"{f.covered_bp:,}", f"{f.pct_of_target:.3f}",
+                f"{f.mean_identity:.1f}",
+            ]
+            if show_div:
+                cells.append(f"{f.mean_divergence:.1f}")
+            cells.append(f"{f.scaffolds}")
+            body_rows.append("<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
+        blocks.append(
+            f"<h3>{header}</h3><table><thead><tr>{thead}</tr></thead>"
+            f"<tbody>{''.join(body_rows)}</tbody></table>"
+        )
+    style = (
+        "body{font-family:Arial,sans-serif;margin:16px;color:#111;}"
+        "table{border-collapse:collapse;margin:8px 0 24px;font-size:13px;}"
+        "th,td{border:1px solid #ccc;padding:4px 8px;text-align:right;}"
+        "th{background:#f2f2f2;} td:first-child,th:first-child{text-align:left;}"
+        "tr:nth-child(even){background:#fafafa;}h2{margin:0 0 4px;}"
+    )
+    title = f"Repeat quantification — {_html_escape(target_label)}" if target_label else "Repeat quantification"
+    path.write_text(
+        f"<!doctype html><html><head><meta charset='utf-8'><style>{style}</style>"
+        f"</head><body><h2>{title}</h2>{''.join(blocks)}</body></html>"
+    )
+    return path
+
+
+def write_landscape_html(result: QuantifyResult, path: Path) -> Path:
+    """Stacked-bar Kimura divergence landscape (bp vs divergence, per family)."""
+    import plotly.graph_objects as go
+    import plotly.io as pio
+
+    path = Path(path)
+    families = sorted({fam for fam, _b, _bp in result.landscape})
+    bins = sorted({b for _f, b, _bp in result.landscape})
+    lookup = {(fam, b): bp for fam, b, bp in result.landscape}
+    fig = go.Figure()
+    for fam in families:
+        fig.add_trace(
+            go.Bar(
+                x=bins,
+                y=[lookup.get((fam, b), 0) for b in bins],
+                name=fam,
+            )
+        )
+    fig.update_layout(
+        barmode="stack",
+        title="Repeat divergence landscape",
+        xaxis_title="Divergence (%)",
+        yaxis_title="Covered bp",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font={"family": "Arial, sans-serif", "size": 12, "color": "black"},
+    )
+    pio.write_html(fig, file=str(path), auto_open=False, config={"responsive": True})
+    return path
+
+
+def repeatmasker_executable_available() -> bool:
+    """True if RepeatMasker is on PATH (needed for the RepeatMasker engine)."""
+    import shutil
+
+    return shutil.which("RepeatMasker") is not None
+
+
+def quantify_library(
+    library_fasta: Path,
+    target_fasta: Path,
+    out_dir: Path,
+    *,
+    engine: str = "both",
+    threads: int = 4,
+    cancel=None,
+) -> list[QuantifyResult]:
+    """Run the requested engine(s): ``blastn``, ``repeatmasker``, or ``both``."""
+    results: list[QuantifyResult] = []
+    if engine in ("blastn", "both"):
+        results.append(
+            quantify_library_blastn(
+                library_fasta, target_fasta, out_dir, threads=threads, cancel=cancel
+            )
+        )
+    if engine in ("repeatmasker", "both"):
+        results.append(
+            quantify_library_repeatmasker(
+                library_fasta, target_fasta, out_dir, threads=threads, cancel=cancel
+            )
+        )
+    return results

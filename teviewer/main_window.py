@@ -868,6 +868,65 @@ class FlexidotClassifierInstallWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class RepeatQuantifyWorker(QObject):
+    """Quantify a repeat library across target sequences off the UI thread."""
+
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self, library: Path, targets: list[Path], *, engine: str, threads: int, cancel=None
+    ) -> None:
+        super().__init__()
+        self._library = Path(library)
+        self._targets = list(targets)
+        self._engine = engine
+        self._threads = threads
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from teviewer.backends.repeat_quantify import (
+            quantify_library,
+            write_landscape_html,
+            write_summary_html,
+        )
+
+        try:
+            outputs: list[str] = []
+            for index, target in enumerate(self._targets, 1):
+                self.progress.emit(index, f"Quantifying {target.name}…")
+                out_dir = target.parent / f"{target.stem}_repeat_quant"
+                results = quantify_library(
+                    self._library,
+                    target,
+                    out_dir,
+                    engine=self._engine,
+                    threads=self._threads,
+                    cancel=self._cancel,
+                )
+                summary = write_summary_html(
+                    results,
+                    out_dir / f"{target.stem}_repeat_quant.html",
+                    target_label=target.name,
+                )
+                outputs.append(str(summary))
+                for result in results:
+                    if result.engine == "repeatmasker" and result.landscape:
+                        outputs.append(
+                            str(
+                                write_landscape_html(
+                                    result,
+                                    out_dir / f"{target.stem}_repeat_landscape.html",
+                                )
+                            )
+                        )
+            self.finished.emit(outputs)
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(str(exc))
+
+
 class GenomeMapWorker(QObject):
     """Build TE genome map HTML off the UI thread."""
 
@@ -2897,6 +2956,97 @@ class MainWindow(QMainWindow):
             self, "Flexidot-Classifier failed", error.strip() or "Unknown error."
         )
 
+    def _open_repeat_quantify(self) -> None:
+        """Quantify a tandem-repeat / satellite library across selected FASTA."""
+        selected = self._selected_files()
+        targets = [p for p in selected if p.suffix.lower() in _FASTA_SUFFIXES]
+        if not targets:
+            QMessageBox.information(
+                self,
+                "Repeat quantify",
+                "Select the target FASTA (scaffolds / assembly) in the Files panel.",
+            )
+            return
+        start_dir = str(self._current_folder) if self._current_folder else ""
+        library, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select tandem-repeat / satellite library FASTA",
+            start_dir,
+            "FASTA (*.fa *.fasta *.fna);;All files (*)",
+        )
+        if not library:
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Repeat quantify")
+        box.setText("Choose the quantification engine:")
+        box.setInformativeText(
+            "BLASTn is fast (per-family table + GFF). RepeatMasker adds the "
+            "genome-wide divergence landscape but is slower."
+        )
+        b_both = box.addButton("Both", QMessageBox.ButtonRole.AcceptRole)
+        b_blast = box.addButton("BLASTn (fast)", QMessageBox.ButtonRole.ActionRole)
+        b_rm = box.addButton("RepeatMasker", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_both:
+            engine = "both"
+        elif clicked is b_blast:
+            engine = "blastn"
+        elif clicked is b_rm:
+            engine = "repeatmasker"
+        else:
+            return
+        if engine in ("both", "repeatmasker"):
+            from teviewer.backends.repeat_quantify import (
+                repeatmasker_executable_available,
+            )
+
+            if not repeatmasker_executable_available():
+                QMessageBox.warning(
+                    self,
+                    "RepeatMasker not found",
+                    "RepeatMasker is not on PATH. Install it, or choose the "
+                    "BLASTn engine instead.",
+                )
+                return
+        self._start_background_job(
+            RepeatQuantifyWorker(
+                Path(library),
+                targets,
+                engine=engine,
+                threads=self._project.batch_workers,
+                cancel=self._job_cancel,
+            ),
+            job_title="Repeat quantify",
+            total_steps=len(targets),
+            source_files=targets,
+            on_finished=self._on_repeat_quantify_finished,
+            on_failed=self._on_repeat_quantify_failed,
+        )
+
+    @Slot(object)
+    def _on_repeat_quantify_finished(self, outputs) -> None:
+        paths = [Path(p) for p in outputs if Path(p).is_file()]
+        if self._current_folder:
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=paths,
+                source_files=getattr(self, "_last_job_source_files", []),
+            )
+        for index, path in enumerate(paths):
+            self._open_preview_tab(path, replace=(index == 0))
+        self._set_status_message(
+            f"Repeat quantify — {len(paths)} report(s) written", 12000
+        )
+
+    @Slot(str)
+    def _on_repeat_quantify_failed(self, error: str) -> None:
+        QMessageBox.warning(
+            self, "Repeat quantify failed", error.strip() or "Unknown error."
+        )
+
     def _flexidot_classifier_home_or_prompt(self):
         """Return the classifier home, or offer guided install and return None."""
         from teviewer.backends.flexidot_classifier import (
@@ -3130,6 +3280,9 @@ class MainWindow(QMainWindow):
         self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
         self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
         tools_menu.addAction("TE &annotation", self._run_te_annotation)
+        tools_menu.addAction(
+            "Repeat &quantify (library vs sequences)…", self._open_repeat_quantify
+        )
         self._populate_te_visualization_menu(tools_menu.addMenu("TE &visualization"))
         self._populate_benchmarking_menu(tools_menu.addMenu("&Benchmarking"))
 
