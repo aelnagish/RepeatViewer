@@ -62,6 +62,7 @@ class FamilyQuant:
     covered_bp: int = 0        # bp of target covered (merged, non-double-counted)
     pct_of_target: float = 0.0
     mean_identity: float = 0.0
+    mean_divergence: float = 0.0   # RepeatMasker only (0 for blastn)
     scaffolds: int = 0         # distinct target sequences hit
 
 
@@ -74,6 +75,10 @@ class QuantifyResult:
     families: list[FamilyQuant] = field(default_factory=list)
     summary_tsv: Path | None = None
     gff: Path | None = None
+    # RepeatMasker landscape: (family, divergence_bin_start, bp) rows.
+    landscape: list[tuple[str, float, int]] = field(default_factory=list)
+    landscape_tsv: Path | None = None
+    rm_out: Path | None = None
 
     @property
     def total_covered_bp(self) -> int:
@@ -267,5 +272,162 @@ def quantify_library_blastn(
     )
     result.gff = _write_arrays_gff(
         tab_path, out_dir / f"{target_fasta.stem}_repeat_quant.gff"
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# RepeatMasker engine (standard: -lib library, genome-wide + divergence landscape)
+# ---------------------------------------------------------------------------
+
+# RepeatMasker .out whitespace columns (0-based): see REPEATMASKER_OUT_COLUMNS
+# in blast_genome_plot.py. We only need divergence, query coords, and the
+# matching repeat (library family) name.
+_RM_PERC_DIV = 1
+_RM_QUERY_NAME = 4
+_RM_QUERY_START = 5
+_RM_QUERY_END = 6
+_RM_REPEAT_NAME = 9
+
+
+def _parse_repeatmasker_out(out_path: Path) -> list[dict]:
+    """Parse a RepeatMasker ``.out`` into per-hit dicts on the target."""
+    rows: list[dict] = []
+    with open(out_path) as handle:
+        for line in handle:
+            parts = line.split()
+            if len(parts) < 10:
+                continue
+            try:
+                div = float(parts[_RM_PERC_DIV])
+                qstart = int(parts[_RM_QUERY_START])
+                qend = int(parts[_RM_QUERY_END])
+            except ValueError:
+                continue  # header / non-data lines
+            rows.append(
+                {
+                    "family": parts[_RM_REPEAT_NAME],
+                    "scaffold": parts[_RM_QUERY_NAME],
+                    "start": min(qstart, qend),
+                    "end": max(qstart, qend),
+                    "divergence": div,
+                }
+            )
+    return rows
+
+
+def _aggregate_rm_rows(rows: list[dict], target_length: int) -> list[FamilyQuant]:
+    acc: dict[str, dict] = {}
+    for r in rows:
+        fam = acc.setdefault(
+            r["family"], {"div_len": [], "by_scaffold": {}}
+        )
+        length = r["end"] - r["start"] + 1
+        fam["div_len"].append((r["divergence"], length))
+        fam["by_scaffold"].setdefault(r["scaffold"], []).append((r["start"], r["end"]))
+
+    families: list[FamilyQuant] = []
+    for fam_name, data in acc.items():
+        arrays = 0
+        covered = 0
+        for _scaf, ivals in data["by_scaffold"].items():
+            merged = _merge_intervals(ivals)
+            arrays += len(merged)
+            covered += sum(end - start + 1 for start, end in merged)
+        total_len = sum(length for _d, length in data["div_len"]) or 1
+        mean_div = sum(d * length for d, length in data["div_len"]) / total_len
+        pct = (covered / target_length * 100.0) if target_length else 0.0
+        families.append(
+            FamilyQuant(
+                family=fam_name,
+                hits=len(data["div_len"]),
+                arrays=arrays,
+                covered_bp=covered,
+                pct_of_target=round(pct, 4),
+                mean_identity=round(100.0 - mean_div, 2),
+                mean_divergence=round(mean_div, 2),
+                scaffolds=len(data["by_scaffold"]),
+            )
+        )
+    families.sort(key=lambda f: f.covered_bp, reverse=True)
+    return families
+
+
+def _landscape_from_rows(
+    rows: list[dict], *, bin_width: float = 1.0, div_max: float = 50.0
+) -> list[tuple[str, float, int]]:
+    """Bin covered bp by divergence, per family (for a Kimura landscape)."""
+    bins: dict[tuple[str, float], int] = {}
+    for r in rows:
+        div = min(max(r["divergence"], 0.0), div_max)
+        bin_start = float(int(div / bin_width) * bin_width)
+        length = r["end"] - r["start"] + 1
+        key = (r["family"], bin_start)
+        bins[key] = bins.get(key, 0) + length
+    return sorted(
+        ((fam, b, bp) for (fam, b), bp in bins.items()),
+        key=lambda t: (t[0], t[1]),
+    )
+
+
+def _write_landscape_tsv(
+    landscape: list[tuple[str, float, int]], path: Path
+) -> Path:
+    lines = ["family\tdivergence_bin\tbp"]
+    for fam, b, bp in landscape:
+        lines.append(f"{fam}\t{b}\t{bp}")
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def quantify_library_repeatmasker(
+    library_fasta: Path,
+    target_fasta: Path,
+    out_dir: Path,
+    *,
+    threads: int = 4,
+    rm_out: Path | None = None,
+    cancel=None,
+) -> QuantifyResult:
+    """Quantify ``library_fasta`` across ``target_fasta`` with RepeatMasker ``-lib``.
+
+    Runs RepeatMasker (target masked with the library) unless an existing
+    ``.out`` is supplied, then aggregates per family and builds a per-family
+    divergence landscape. Returns the same QuantifyResult shape as the blastn
+    engine so the UI can treat both uniformly.
+    """
+    from teviewer.backends.te_library_benchmark import run_repeatmasker_lib_benchmark
+
+    library_fasta = Path(library_fasta).expanduser().resolve()
+    target_fasta = Path(target_fasta).expanduser().resolve()
+    out_dir = Path(out_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for path in (library_fasta, target_fasta):
+        if not path.is_file():
+            raise FileNotFoundError(f"FASTA not found: {path}")
+
+    if rm_out is None:
+        rm_out = run_repeatmasker_lib_benchmark(
+            query_fasta=target_fasta,
+            standard_fasta=library_fasta,
+            output_dir=out_dir,
+            threads=threads,
+        )
+    rm_out = Path(rm_out).expanduser().resolve()
+
+    rows = _parse_repeatmasker_out(rm_out)
+    target_length = _fasta_total_length(target_fasta)
+    result = QuantifyResult(
+        engine="repeatmasker",
+        target_length=target_length,
+        families=_aggregate_rm_rows(rows, target_length),
+        rm_out=rm_out,
+    )
+    result.summary_tsv = _write_summary_tsv(
+        result, out_dir / f"{target_fasta.stem}_repeat_quant_rm.tsv"
+    )
+    result.landscape = _landscape_from_rows(rows)
+    result.landscape_tsv = _write_landscape_tsv(
+        result.landscape, out_dir / f"{target_fasta.stem}_repeat_landscape.tsv"
     )
     return result
