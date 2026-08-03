@@ -456,6 +456,40 @@ def _html_escape(text: str) -> str:
     )
 
 
+# Column display headers and their short definitions (shown as a side panel).
+_COLUMN_LABELS = {
+    "family": "family",
+    "hits": "hits",
+    "arrays": "arrays",
+    "covered_bp": "covered_bp",
+    "pct_of_target": "%target (%)",
+    "mean_identity": "mean_identity",
+    "mean_divergence": "mean_divergence",
+    "scaffolds": "scaffolds",
+}
+_COLUMN_DEFS = [
+    ("family", "Library family that was matched."),
+    ("hits", "Number of alignment fragments (≈ monomer copies detected)."),
+    ("arrays", "Hits merged into contiguous blocks (≈ distinct array loci)."),
+    ("covered_bp", "Target bp covered by the family (overlaps counted once)."),
+    ("%target (%)", "covered_bp as a percentage of the target length."),
+    ("mean_identity", "Length-weighted mean % identity to the consensus "
+                      "(high = young / conserved copies)."),
+    ("mean_divergence", "RepeatMasker Kimura substitution % "
+                        "(high = old / diverged copies)."),
+    ("scaffolds", "Number of distinct target sequences hit."),
+]
+
+
+def _global_family_order(results: list[QuantifyResult]) -> list[str]:
+    """One family order used by every table: by max covered_bp across engines."""
+    max_cov: dict[str, int] = {}
+    for result in results:
+        for fam in result.families:
+            max_cov[fam.family] = max(max_cov.get(fam.family, 0), fam.covered_bp)
+    return sorted(max_cov, key=lambda name: max_cov[name], reverse=True)
+
+
 def write_summary_html(
     results: list[QuantifyResult],
     path: Path,
@@ -464,6 +498,7 @@ def write_summary_html(
 ) -> Path:
     """Render one or more QuantifyResults as a styled HTML summary page."""
     path = Path(path)
+    family_order = _global_family_order(results)
     blocks: list[str] = []
     for result in results:
         header = (
@@ -475,9 +510,13 @@ def write_summary_html(
         show_div = result.engine == "repeatmasker"
         cols = ["family", "hits", "arrays", "covered_bp", "pct_of_target",
                 "mean_identity"] + (["mean_divergence"] if show_div else []) + ["scaffolds"]
-        thead = "".join(f"<th>{c}</th>" for c in cols)
+        thead = "".join(f"<th>{_COLUMN_LABELS[c]}</th>" for c in cols)
+        by_name = {f.family: f for f in result.families}
         body_rows = []
-        for f in result.families:
+        for fam_name in family_order:  # same order in every table
+            f = by_name.get(fam_name)
+            if f is None:
+                continue
             cells = [
                 _html_escape(f.family), f"{f.hits}", f"{f.arrays}",
                 f"{f.covered_bp:,}", f"{f.pct_of_target:.3f}",
@@ -491,17 +530,30 @@ def write_summary_html(
             f"<h3>{header}</h3><table><thead><tr>{thead}</tr></thead>"
             f"<tbody>{''.join(body_rows)}</tbody></table>"
         )
+    definitions = "".join(
+        f"<dt>{_html_escape(k)}</dt><dd>{_html_escape(v)}</dd>"
+        for k, v in _COLUMN_DEFS
+    )
+    aside = f"<aside><h4>Column definitions</h4><dl>{definitions}</dl></aside>"
     style = (
         "body{font-family:Arial,sans-serif;margin:16px;color:#111;}"
+        ".wrap{display:flex;align-items:flex-start;gap:28px;}"
+        ".tables{flex:1;min-width:0;}"
         "table{border-collapse:collapse;margin:8px 0 24px;font-size:13px;}"
         "th,td{border:1px solid #ccc;padding:4px 8px;text-align:right;}"
         "th{background:#f2f2f2;} td:first-child,th:first-child{text-align:left;}"
         "tr:nth-child(even){background:#fafafa;}h2{margin:0 0 4px;}"
+        "aside{width:300px;flex:none;font-size:12px;color:#333;"
+        "border-left:2px solid #eee;padding-left:16px;}"
+        "aside h4{margin:0 0 8px;} dt{font-weight:bold;margin-top:8px;}"
+        "dd{margin:2px 0 0;color:#555;}"
     )
     title = f"Repeat quantification — {_html_escape(target_label)}" if target_label else "Repeat quantification"
     path.write_text(
         f"<!doctype html><html><head><meta charset='utf-8'><style>{style}</style>"
-        f"</head><body><h2>{title}</h2>{''.join(blocks)}</body></html>"
+        f"</head><body><h2>{title}</h2>"
+        f"<div class='wrap'><div class='tables'>{''.join(blocks)}</div>{aside}</div>"
+        f"</body></html>"
     )
     return path
 
