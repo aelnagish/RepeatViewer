@@ -4923,6 +4923,13 @@ class MainWindow(QMainWindow):
                 return path
         return None
 
+    def _focus_preview_widget(self) -> None:
+        if self._preview_tabs is None:
+            return
+        current = self._preview_tabs.currentWidget()
+        if current is not None:
+            current.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _current_file_sort_mode(self) -> FileSortMode:
         return load_file_sort_mode()
 
