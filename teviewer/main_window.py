@@ -919,6 +919,7 @@ class RepeatQuantifyWorker(QObject):
                                 write_landscape_html(
                                     result,
                                     out_dir / f"{target.stem}_repeat_landscape.html",
+                                    target_label=target.name,
                                 )
                             )
                         )

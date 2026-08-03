@@ -498,14 +498,20 @@ def write_summary_html(
 ) -> Path:
     """Render one or more QuantifyResults as a styled HTML summary page."""
     path = Path(path)
+    engine_display = {"blastn": "BLASTn", "repeatmasker": "RepeatMasker"}
     family_order = _global_family_order(results)
     blocks: list[str] = []
     for result in results:
+        pct = (
+            result.total_covered_bp / result.target_length * 100.0
+            if result.target_length else 0.0
+        )
         header = (
-            f"Engine: {result.engine} &nbsp;|&nbsp; "
-            f"target {result.target_length:,} bp &nbsp;|&nbsp; "
-            f"covered {result.total_covered_bp:,} bp "
-            f"({(result.total_covered_bp / result.target_length * 100.0) if result.target_length else 0:.2f}%)"
+            "<div class='qhead'>"
+            f"<span class='qname'>Quantifier: "
+            f"{engine_display.get(result.engine, result.engine)}</span>"
+            f"<span class='qcov'>Covered: {result.total_covered_bp:,} bp "
+            f"({pct:.2f}%)</span></div>"
         )
         show_div = result.engine == "repeatmasker"
         cols = ["family", "hits", "arrays", "covered_bp", "pct_of_target",
@@ -527,7 +533,7 @@ def write_summary_html(
             cells.append(f"{f.scaffolds}")
             body_rows.append("<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
         blocks.append(
-            f"<h3>{header}</h3><table><thead><tr>{thead}</tr></thead>"
+            f"{header}<table><thead><tr>{thead}</tr></thead>"
             f"<tbody>{''.join(body_rows)}</tbody></table>"
         )
     definitions = "".join(
@@ -539,26 +545,37 @@ def write_summary_html(
         "body{font-family:Arial,sans-serif;margin:16px;color:#111;}"
         ".wrap{display:flex;align-items:flex-start;gap:28px;}"
         ".tables{flex:1;min-width:0;}"
-        "table{border-collapse:collapse;margin:8px 0 24px;font-size:13px;}"
+        ".genome{font-size:14px;margin:0 0 16px;color:#333;}"
+        ".qhead{margin:16px 0 4px;}"
+        ".qname{font-weight:bold;font-size:14px;}"
+        ".qcov{color:#555;margin-left:14px;}"
+        "table{border-collapse:collapse;margin:4px 0 20px;font-size:13px;}"
         "th,td{border:1px solid #ccc;padding:4px 8px;text-align:right;}"
         "th{background:#f2f2f2;} td:first-child,th:first-child{text-align:left;}"
-        "tr:nth-child(even){background:#fafafa;}h2{margin:0 0 4px;}"
+        "tr:nth-child(even){background:#fafafa;}h2{margin:0 0 6px;}"
         "aside{width:300px;flex:none;font-size:12px;color:#333;"
         "border-left:2px solid #eee;padding-left:16px;}"
         "aside h4{margin:0 0 8px;} dt{font-weight:bold;margin-top:8px;}"
         "dd{margin:2px 0 0;color:#555;}"
     )
-    title = f"Repeat quantification — {_html_escape(target_label)}" if target_label else "Repeat quantification"
+    glen = results[0].target_length if results else 0
+    genome_line = (
+        f"Genome: {_html_escape(target_label)}, {glen:,} bp"
+        if target_label else f"Genome: {glen:,} bp"
+    )
     path.write_text(
         f"<!doctype html><html><head><meta charset='utf-8'><style>{style}</style>"
-        f"</head><body><h2>{title}</h2>"
+        f"</head><body><h2>Repeat quantification</h2>"
+        f"<p class='genome'>{genome_line}</p>"
         f"<div class='wrap'><div class='tables'>{''.join(blocks)}</div>{aside}</div>"
         f"</body></html>"
     )
     return path
 
 
-def write_landscape_html(result: QuantifyResult, path: Path) -> Path:
+def write_landscape_html(
+    result: QuantifyResult, path: Path, *, target_label: str = ""
+) -> Path:
     """Stacked-bar Kimura divergence landscape (bp vs divergence, per family)."""
     import plotly.graph_objects as go
     import plotly.io as pio
@@ -576,15 +593,28 @@ def write_landscape_html(result: QuantifyResult, path: Path) -> Path:
                 name=fam,
             )
         )
+    title = (
+        f"Repeat divergence landscape — {target_label}"
+        if target_label else "Repeat divergence landscape"
+    )
     fig.update_layout(
         barmode="stack",
-        title="Repeat divergence landscape",
+        title=title,
         xaxis_title="Divergence (%)",
         yaxis_title="Covered bp",
         plot_bgcolor="white",
         paper_bgcolor="white",
         font={"family": "Arial, sans-serif", "size": 12, "color": "black"},
     )
+    # Draw solid x- and y-axis lines.
+    axis_line = {
+        "showline": True,
+        "linecolor": "black",
+        "linewidth": 1,
+        "ticks": "outside",
+    }
+    fig.update_xaxes(**axis_line)
+    fig.update_yaxes(**axis_line)
     pio.write_html(fig, file=str(path), auto_open=False, config={"responsive": True})
     return path
 
