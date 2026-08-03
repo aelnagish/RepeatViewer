@@ -265,6 +265,7 @@ def quantify_library_blastn(
     *,
     e_value: float = 1e-5,
     min_identity: float = 0.0,
+    min_coverage: float = 0.0,
     word_size: int = 11,
     threads: int = 1,
     use_system_blast: bool = False,
@@ -317,6 +318,8 @@ def quantify_library_blastn(
         ]
         if min_identity and min_identity > 0:
             cmd.extend(["-perc_identity", str(float(min_identity))])
+        if min_coverage and min_coverage > 0:
+            cmd.extend(["-qcov_hsp_perc", str(float(min_coverage))])
         # Cancellable runner so Stop actually terminates BLASTn on big inputs.
         run_subprocess_with_cancel(cmd, cancel=cancel, check=True)
     finally:
@@ -719,6 +722,7 @@ def quantify_library(
     blast_word_size: int = 11,
     blast_evalue: float = 1e-5,
     blast_min_identity: float = 0.0,
+    blast_min_coverage: float = 0.0,
     rm_div: int = 40,
     rm_sensitivity: str = "sensitive",
     cancel=None,
@@ -731,6 +735,7 @@ def quantify_library(
                 library_fasta, target_fasta, out_dir,
                 e_value=blast_evalue,
                 min_identity=blast_min_identity,
+                min_coverage=blast_min_coverage,
                 word_size=blast_word_size,
                 threads=threads,
                 cancel=cancel,

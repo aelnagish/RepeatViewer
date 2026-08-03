@@ -4360,9 +4360,18 @@ class RepeatQuantifyDialog(QDialog):
         minid.setSuffix(" %")
         minid.setValue(0)
         minid.setToolTip("BLASTn -perc_identity. 0 = no minimum.")
-        for w in (word, evalue, minid):
+        mincov = QDoubleSpinBox(self)
+        mincov.setRange(0.0, 100.0)
+        mincov.setDecimals(0)
+        mincov.setSuffix(" %")
+        mincov.setValue(0)
+        mincov.setToolTip(
+            "BLASTn -qcov_hsp_perc: minimum query (monomer) coverage per hit. "
+            "0 = no minimum."
+        )
+        for w in (word, evalue, minid, mincov):
             w.setFixedWidth(150)
-        return {"word": word, "evalue": evalue, "minid": minid}
+        return {"word": word, "evalue": evalue, "minid": minid, "mincov": mincov}
 
     def _make_rm_controls(self) -> dict:
         div = QSpinBox(self)
@@ -4391,6 +4400,7 @@ class RepeatQuantifyDialog(QDialog):
             ("Word size:", c["word"]),
             ("E-value:", c["evalue"]),
             ("Min identity:", c["minid"]),
+            ("Min coverage:", c["mincov"]),
         ]
 
     @staticmethod
@@ -4485,6 +4495,7 @@ class RepeatQuantifyDialog(QDialog):
             "blast_word_size": blast["word"].value() if blast else 11,
             "blast_evalue": blast["evalue"].value() if blast else 1e-5,
             "blast_min_identity": blast["minid"].value() if blast else 0.0,
+            "blast_min_coverage": blast["mincov"].value() if blast else 0.0,
             "rm_div": rm["div"].value() if rm else 40,
             "rm_sensitivity": rm["sens"].currentData() if rm else "sensitive",
         }
