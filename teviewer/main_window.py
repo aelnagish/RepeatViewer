@@ -876,13 +876,15 @@ class RepeatQuantifyWorker(QObject):
     failed = Signal(str)
 
     def __init__(
-        self, library: Path, targets: list[Path], *, engine: str, threads: int, cancel=None
+        self, library: Path, targets: list[Path], *, engine: str, threads: int,
+        params: dict | None = None, cancel=None
     ) -> None:
         super().__init__()
         self._library = Path(library)
         self._targets = list(targets)
         self._engine = engine
         self._threads = threads
+        self._params = params or {}
         self._cancel = cancel
 
     @Slot()
@@ -907,6 +909,7 @@ class RepeatQuantifyWorker(QObject):
                     engine=self._engine,
                     threads=self._threads,
                     cancel=self._cancel,
+                    **self._params,
                 )
                 summary = write_summary_html(
                     results,
@@ -2988,6 +2991,7 @@ class MainWindow(QMainWindow):
         target = dialog.target()
         library = dialog.library()
         engine = dialog.engine()
+        params = dialog.params()
         if target is None or library is None:
             return
         targets = [target]
@@ -3010,6 +3014,7 @@ class MainWindow(QMainWindow):
                 targets,
                 engine=engine,
                 threads=self._project.batch_workers,
+                params=params,
                 cancel=self._job_cancel,
             ),
             job_title="Repeat quantify",

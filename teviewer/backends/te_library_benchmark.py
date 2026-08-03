@@ -298,8 +298,15 @@ def run_repeatmasker_lib_benchmark(
     standard_fasta: Path,
     output_dir: Path,
     threads: int = 4,
+    div: int = 40,
+    sensitivity: str = "sensitive",
 ) -> Path:
-    """Run RepeatMasker ``-lib standard query`` and return the ``.out`` path."""
+    """Run RepeatMasker ``-lib standard query`` and return the ``.out`` path.
+
+    ``div`` is the ``-div`` cutoff (report only copies < div% diverged).
+    ``sensitivity`` is ``"sensitive"`` (-s), ``"default"`` (none), or
+    ``"quick"`` (-q). Defaults reproduce the original behaviour.
+    """
     exe = repeatmasker_executable()
     if not exe:
         raise RuntimeError(
@@ -310,13 +317,14 @@ def run_repeatmasker_lib_benchmark(
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        exe,
-        "-pa",
-        str(max(1, int(threads))),
-        "-s",
+    cmd = [exe, "-pa", str(max(1, int(threads)))]
+    if sensitivity == "sensitive":
+        cmd.append("-s")
+    elif sensitivity == "quick":
+        cmd.append("-q")
+    cmd += [
         "-div",
-        "40",
+        str(int(div)),
         "-gff",
         "-no_is",
         "-norna",

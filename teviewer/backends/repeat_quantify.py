@@ -455,6 +455,8 @@ def quantify_library_repeatmasker(
     out_dir: Path,
     *,
     threads: int = 4,
+    div: int = 40,
+    sensitivity: str = "sensitive",
     rm_out: Path | None = None,
     cancel=None,
 ) -> QuantifyResult:
@@ -481,6 +483,8 @@ def quantify_library_repeatmasker(
             standard_fasta=library_fasta,
             output_dir=out_dir,
             threads=threads,
+            div=div,
+            sensitivity=sensitivity,
         )
     rm_out = Path(rm_out).expanduser().resolve()
 
@@ -712,6 +716,11 @@ def quantify_library(
     *,
     engine: str = "both",
     threads: int = 4,
+    blast_word_size: int = 11,
+    blast_evalue: float = 1e-5,
+    blast_min_identity: float = 0.0,
+    rm_div: int = 40,
+    rm_sensitivity: str = "sensitive",
     cancel=None,
 ) -> list[QuantifyResult]:
     """Run the requested engine(s): ``blastn``, ``repeatmasker``, or ``both``."""
@@ -719,13 +728,22 @@ def quantify_library(
     if engine in ("blastn", "both"):
         results.append(
             quantify_library_blastn(
-                library_fasta, target_fasta, out_dir, threads=threads, cancel=cancel
+                library_fasta, target_fasta, out_dir,
+                e_value=blast_evalue,
+                min_identity=blast_min_identity,
+                word_size=blast_word_size,
+                threads=threads,
+                cancel=cancel,
             )
         )
     if engine in ("repeatmasker", "both"):
         results.append(
             quantify_library_repeatmasker(
-                library_fasta, target_fasta, out_dir, threads=threads, cancel=cancel
+                library_fasta, target_fasta, out_dir,
+                threads=threads,
+                div=rm_div,
+                sensitivity=rm_sensitivity,
+                cancel=cancel,
             )
         )
     return results
