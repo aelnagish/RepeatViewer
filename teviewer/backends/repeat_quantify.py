@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -232,34 +234,42 @@ def quantify_library_blastn(
             raise FileNotFoundError(f"FASTA not found: {path}")
 
     os_type = platform.system()
-    db = check_database(
-        str(target_fasta),
-        str(out_dir),
-        os_type=os_type,
-        use_system_blast=use_system_blast,
-    )
-    if db in {"makeblastdb_not_found", "makeblastdb_got_error"}:
-        raise RuntimeError(
-            "Could not build a BLAST database for the target sequences "
-            f"({db}). Check that makeblastdb is available."
-        )
-    db_path = os.path.join(str(out_dir), blast_database_basename(str(target_fasta)))
-
+    # Build the BLAST database in a throwaway scratch dir so the ~8 index files
+    # don't clutter the results folder; removed after the search.
+    scratch = Path(tempfile.mkdtemp(prefix="repeat_quant_db_", dir=str(out_dir)))
     tab_path = out_dir / f"{target_fasta.stem}_vs_{library_fasta.stem}.blastn.tsv"
-    cmd = [
-        _blastn_executable(use_system_blast),
-        "-query", str(library_fasta),
-        "-db", db_path,
-        "-evalue", str(e_value),
-        "-word_size", str(int(word_size)),
-        "-num_threads", str(max(1, int(threads))),
-        "-dust", "no",
-        "-outfmt", f"6 {_BLAST_FIELDS}",
-        "-out", str(tab_path),
-    ]
-    if min_identity and min_identity > 0:
-        cmd.extend(["-perc_identity", str(float(min_identity))])
-    run_logged_process(cmd, tool="Repeat quantify (blastn)", check=True, cwd=out_dir)
+    try:
+        db = check_database(
+            str(target_fasta),
+            str(scratch),
+            os_type=os_type,
+            use_system_blast=use_system_blast,
+        )
+        if db in {"makeblastdb_not_found", "makeblastdb_got_error"}:
+            raise RuntimeError(
+                "Could not build a BLAST database for the target sequences "
+                f"({db}). Check that makeblastdb is available."
+            )
+        db_path = os.path.join(str(scratch), blast_database_basename(str(target_fasta)))
+
+        cmd = [
+            _blastn_executable(use_system_blast),
+            "-query", str(library_fasta),
+            "-db", db_path,
+            "-evalue", str(e_value),
+            "-word_size", str(int(word_size)),
+            "-num_threads", str(max(1, int(threads))),
+            "-dust", "no",
+            "-outfmt", f"6 {_BLAST_FIELDS}",
+            "-out", str(tab_path),
+        ]
+        if min_identity and min_identity > 0:
+            cmd.extend(["-perc_identity", str(float(min_identity))])
+        run_logged_process(
+            cmd, tool="Repeat quantify (blastn)", check=True, cwd=out_dir
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     target_length = _fasta_total_length(target_fasta)
     result = QuantifyResult(
