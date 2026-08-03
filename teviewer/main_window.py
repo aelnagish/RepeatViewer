@@ -3267,9 +3267,7 @@ class MainWindow(QMainWindow):
         self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
         self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
         tools_menu.addAction("TE &annotation", self._run_te_annotation)
-        tools_menu.addAction(
-            "Repeat &quantify (library vs sequences)…", self._open_repeat_quantify
-        )
+        tools_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
         self._populate_te_visualization_menu(tools_menu.addMenu("TE &visualization"))
         self._populate_benchmarking_menu(tools_menu.addMenu("&Benchmarking"))
 
@@ -3935,6 +3933,13 @@ class MainWindow(QMainWindow):
                     "Right-click: change parameters."
                 ),
                 right_click_slot=self._open_fastga_dialog,
+            )
+        elif tool_id == "repeat_quantify":
+            self._add_toolbar_text_action(
+                bar,
+                "Repeat Quantify",
+                self._open_repeat_quantify,
+                tooltip="Quantify a repeat / satellite library across a genome.",
             )
         elif tool_id == "blast":
             self._add_toolbar_action_button(

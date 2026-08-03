@@ -4275,10 +4275,14 @@ class RepeatQuantifyDialog(QDialog):
         self._start_dir = start_dir
         cand = [Path(p) for p in candidates]
 
-        self._target_combo = QComboBox()
+        self._genome_combo = QComboBox()
         self._library_combo = QComboBox()
-        for combo in (self._target_combo, self._library_combo):
-            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        for combo in (self._genome_combo, self._library_combo):
+            # A stable minimum width keeps the combo from collapsing/jumping.
+            combo.setMinimumWidth(260)
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToContentsOnFirstShow
+            )
             for path in cand:
                 combo.addItem(path.name, str(path.expanduser().resolve()))
             combo.currentIndexChanged.connect(lambda _i, c=combo: self._sync_tooltip(c))
@@ -4287,30 +4291,36 @@ class RepeatQuantifyDialog(QDialog):
         if self._library_combo.count() > 1:
             self._library_combo.setCurrentIndex(1)
 
-        target_browse = QPushButton("Browse…")
+        genome_browse = QPushButton("Browse…")
         library_browse = QPushButton("Browse…")
-        target_browse.clicked.connect(lambda: self._browse(self._target_combo))
+        for browse in (genome_browse, library_browse):
+            browse.setFixedWidth(88)  # short + symmetric
+        genome_browse.clicked.connect(lambda: self._browse(self._genome_combo))
         library_browse.clicked.connect(lambda: self._browse(self._library_combo))
 
-        form = QFormLayout()
+        inputs_box = QGroupBox("Inputs", self)
+        form = QFormLayout(inputs_box)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        form.addRow(
-            "Target (scaffolds / assembly):",
-            self._field_row(self._target_combo, target_browse),
-        )
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
         form.addRow(
             "Library (monomers / satellites):",
             self._field_row(self._library_combo, library_browse),
         )
+        form.addRow(
+            "Genome (scaffolds / assembly):",
+            self._field_row(self._genome_combo, genome_browse),
+        )
 
-        engine_box = QGroupBox("Engine", self)
+        engine_box = QGroupBox("Repeat quantify using:", self)
         engine_layout = QVBoxLayout(engine_box)
+        engine_layout.setSpacing(8)
         self._engine_group = QButtonGroup(self)
-        self._eng_both = QRadioButton("Both (BLASTn + RepeatMasker)")
-        self._eng_blast = QRadioButton("BLASTn (fast — table + GFF)")
-        self._eng_rm = QRadioButton("RepeatMasker (adds divergence landscape)")
+        self._eng_blast = QRadioButton("BLASTn")
+        self._eng_rm = QRadioButton("RepeatMasker")
+        self._eng_both = QRadioButton("Both")
         self._eng_both.setChecked(True)
-        for rb in (self._eng_both, self._eng_blast, self._eng_rm):
+        for rb in (self._eng_blast, self._eng_rm, self._eng_both):
             self._engine_group.addButton(rb)
             engine_layout.addWidget(rb)
 
@@ -4322,7 +4332,9 @@ class RepeatQuantifyDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(14)
+        layout.addWidget(inputs_box)
         layout.addWidget(engine_box)
         layout.addWidget(buttons)
 
@@ -4372,7 +4384,7 @@ class RepeatQuantifyDialog(QDialog):
         self.accept()
 
     def target(self) -> Path | None:
-        data = self._target_combo.currentData()
+        data = self._genome_combo.currentData()
         return Path(data) if data else None
 
     def library(self) -> Path | None:
