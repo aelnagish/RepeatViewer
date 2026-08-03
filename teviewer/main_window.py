@@ -3100,7 +3100,7 @@ class MainWindow(QMainWindow):
         seq_menu.addAction("Extract Sequences from List…", self._extract_sequences_from_list)
         seq_menu.addSeparator()
         seq_menu.addAction(
-            "Reverser Complement",
+            "Reverse Complement",
             lambda: self._apply_function("reverse_complement"),
         )
         seq_menu.addAction(
