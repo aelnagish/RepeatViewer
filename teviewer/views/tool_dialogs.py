@@ -4308,76 +4308,26 @@ class RepeatQuantifyDialog(QDialog):
             self._field_row(self._genome_combo, genome_browse),
         )
 
-        engine_box = QGroupBox("Repeat quantify using:", self)
-        engine_layout = QVBoxLayout(engine_box)
-        engine_layout.setSpacing(8)
-        self._engine_group = QButtonGroup(self)
-        self._eng_blast = QRadioButton("BLASTn")
-        self._eng_rm = QRadioButton("RepeatMasker")
-        self._eng_both = QRadioButton("Both")
-        self._eng_both.setChecked(True)
-        for rb in (self._eng_blast, self._eng_rm, self._eng_both):
-            self._engine_group.addButton(rb)
-            engine_layout.addWidget(rb)
-            rb.toggled.connect(self._update_engine_enabled)
-
-        # --- BLASTn options ---
-        self._blast_word = QSpinBox(self)
-        self._blast_word.setRange(4, 24)
-        self._blast_word.setValue(11)
-        self._blast_word.setToolTip(
-            "BLASTn -word_size. Lower is more sensitive but much slower on "
-            "big/repetitive genomes (7 can hang; 11 is a good balance)."
+        # Tabs are the engine choice; each tab holds that engine's parameters.
+        self._tabs = QTabWidget(self)
+        self._blast_a = self._make_blast_controls()
+        self._rm_b = self._make_rm_controls()
+        self._blast_c = self._make_blast_controls()
+        self._rm_d = self._make_rm_controls()
+        self._tabs.addTab(
+            self._params_tab(self._blast_rows(self._blast_a)), "BLASTn"
         )
-        self._blast_evalue = QDoubleSpinBox(self)
-        configure_report_evalue_spinbox(self._blast_evalue)
-        self._blast_evalue.setValue(1e-5)
-        self._blast_minid = QDoubleSpinBox(self)
-        self._blast_minid.setRange(0.0, 100.0)
-        self._blast_minid.setDecimals(0)
-        self._blast_minid.setSuffix(" %")
-        self._blast_minid.setValue(0)
-        self._blast_minid.setToolTip("BLASTn -perc_identity. 0 = no minimum.")
-        self._blast_box = QGroupBox("BLASTn options", self)
-        bform = QFormLayout(self._blast_box)
-        bform.setHorizontalSpacing(12)
-        bform.setVerticalSpacing(8)
-        for w in (self._blast_word, self._blast_evalue, self._blast_minid):
-            w.setFixedWidth(150)
-        bform.addRow("Word size:", self._blast_word)
-        bform.addRow("E-value:", self._blast_evalue)
-        bform.addRow("Min identity:", self._blast_minid)
-
-        # --- RepeatMasker options ---
-        self._rm_div = QSpinBox(self)
-        self._rm_div.setRange(1, 100)
-        self._rm_div.setValue(40)
-        self._rm_div.setSuffix(" %")
-        self._rm_div.setToolTip(
-            "RepeatMasker -div: report only copies less than this % diverged "
-            "(higher captures older copies, but noisier)."
+        self._tabs.addTab(
+            self._params_tab(self._rm_rows(self._rm_b)), "RepeatMasker"
         )
-        self._rm_sens = QComboBox(self)
-        self._rm_sens.addItem("Sensitive (-s)", "sensitive")
-        self._rm_sens.addItem("Default", "default")
-        self._rm_sens.addItem("Quick (-q)", "quick")
-        self._rm_sens.setToolTip(
-            "RepeatMasker search sensitivity. Sensitive is slowest; Quick is "
-            "fastest on large genomes."
+        both_rows = (
+            [("BLASTn", None)]
+            + self._blast_rows(self._blast_c)
+            + [("RepeatMasker", None)]
+            + self._rm_rows(self._rm_d)
         )
-        self._rm_div.setFixedWidth(150)
-        self._rm_sens.setFixedWidth(180)
-        self._rm_box = QGroupBox("RepeatMasker options", self)
-        rform = QFormLayout(self._rm_box)
-        rform.setHorizontalSpacing(12)
-        rform.setVerticalSpacing(8)
-        rform.addRow("Divergence cutoff (-div):", self._rm_div)
-        rform.addRow("Sensitivity:", self._rm_sens)
-
-        options_row = QHBoxLayout()
-        options_row.setSpacing(14)
-        options_row.addWidget(self._blast_box)
-        options_row.addWidget(self._rm_box)
+        self._tabs.addTab(self._params_tab(both_rows), "Both")
+        self._tabs.setCurrentIndex(2)  # default: Both
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -4390,10 +4340,84 @@ class RepeatQuantifyDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(14)
         layout.addWidget(inputs_box)
-        layout.addWidget(engine_box)
-        layout.addLayout(options_row)
+        layout.addWidget(self._tabs)
         layout.addWidget(buttons)
-        self._update_engine_enabled()
+
+    def _make_blast_controls(self) -> dict:
+        word = QSpinBox(self)
+        word.setRange(4, 24)
+        word.setValue(11)
+        word.setToolTip(
+            "BLASTn -word_size. Lower is more sensitive but much slower on "
+            "big/repetitive genomes (7 can hang; 11 is a good balance)."
+        )
+        evalue = QDoubleSpinBox(self)
+        configure_report_evalue_spinbox(evalue)
+        evalue.setValue(1e-5)
+        minid = QDoubleSpinBox(self)
+        minid.setRange(0.0, 100.0)
+        minid.setDecimals(0)
+        minid.setSuffix(" %")
+        minid.setValue(0)
+        minid.setToolTip("BLASTn -perc_identity. 0 = no minimum.")
+        for w in (word, evalue, minid):
+            w.setFixedWidth(150)
+        return {"word": word, "evalue": evalue, "minid": minid}
+
+    def _make_rm_controls(self) -> dict:
+        div = QSpinBox(self)
+        div.setRange(1, 100)
+        div.setValue(40)
+        div.setSuffix(" %")
+        div.setFixedWidth(150)
+        div.setToolTip(
+            "RepeatMasker -div: report only copies less than this % diverged "
+            "(higher captures older copies, but noisier)."
+        )
+        sens = QComboBox(self)
+        sens.addItem("Sensitive (-s)", "sensitive")
+        sens.addItem("Default", "default")
+        sens.addItem("Quick (-q)", "quick")
+        sens.setFixedWidth(150)
+        sens.setToolTip(
+            "RepeatMasker search sensitivity. Sensitive is slowest; Quick is "
+            "fastest on large genomes."
+        )
+        return {"div": div, "sens": sens}
+
+    @staticmethod
+    def _blast_rows(c: dict) -> list:
+        return [
+            ("Word size:", c["word"]),
+            ("E-value:", c["evalue"]),
+            ("Min identity:", c["minid"]),
+        ]
+
+    @staticmethod
+    def _rm_rows(c: dict) -> list:
+        return [
+            ("Divergence cutoff (-div):", c["div"]),
+            ("Sensitivity:", c["sens"]),
+        ]
+
+    def _params_tab(self, rows: list) -> QWidget:
+        """Build a tab from (label, widget) rows; a None widget = bold header."""
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        form.setContentsMargins(16, 14, 16, 14)
+        for label, widget in rows:
+            if widget is None:
+                header = QLabel(label, self)
+                font = header.font()
+                font.setBold(True)
+                header.setFont(font)
+                form.addRow(header)
+            else:
+                form.addRow(label, widget)
+        return tab
 
     @staticmethod
     def _field_row(combo: QComboBox, browse: QPushButton) -> QWidget:
@@ -4451,22 +4475,16 @@ class RepeatQuantifyDialog(QDialog):
         return Path(data) if data else None
 
     def engine(self) -> str:
-        if self._eng_blast.isChecked():
-            return "blastn"
-        if self._eng_rm.isChecked():
-            return "repeatmasker"
-        return "both"
-
-    def _update_engine_enabled(self) -> None:
-        engine = self.engine()
-        self._blast_box.setEnabled(engine in ("blastn", "both"))
-        self._rm_box.setEnabled(engine in ("repeatmasker", "both"))
+        return ("blastn", "repeatmasker", "both")[self._tabs.currentIndex()]
 
     def params(self) -> dict:
+        idx = self._tabs.currentIndex()
+        blast = {0: self._blast_a, 2: self._blast_c}.get(idx)
+        rm = {1: self._rm_b, 2: self._rm_d}.get(idx)
         return {
-            "blast_word_size": self._blast_word.value(),
-            "blast_evalue": self._blast_evalue.value(),
-            "blast_min_identity": self._blast_minid.value(),
-            "rm_div": self._rm_div.value(),
-            "rm_sensitivity": self._rm_sens.currentData(),
+            "blast_word_size": blast["word"].value() if blast else 11,
+            "blast_evalue": blast["evalue"].value() if blast else 1e-5,
+            "blast_min_identity": blast["minid"].value() if blast else 0.0,
+            "rm_div": rm["div"].value() if rm else 40,
+            "rm_sensitivity": rm["sens"].currentData() if rm else "sensitive",
         }
