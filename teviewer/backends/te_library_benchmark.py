@@ -335,14 +335,36 @@ def run_repeatmasker_lib_benchmark(
         "-dir",
         str(output_dir),
     ]
-    run_logged_process(
+    proc = run_logged_process(
         cmd,
         tool="RepeatMasker",
         inputs=[standard_fasta, query_fasta],
         cwd=output_dir,
-        check=True,
+        check=False,  # inspect so we can surface RepeatMasker's real error
         output_path=output_dir,
     )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        low = detail.lower()
+        hint = ""
+        if "trf" in low and ("not found" in low or "no such" in low):
+            hint = (
+                "\n\nRepeatMasker needs TRF (Tandem Repeats Finder) on PATH. "
+                "Install it: conda install -c bioconda trf"
+            )
+        elif "rmblast" in low or "makeblastdb" in low or "search engine" in low:
+            hint = (
+                "\n\nRepeatMasker's search engine (rmblast) may not be configured. "
+                "Reinstall via conda: conda install -c bioconda repeatmasker rmblast"
+            )
+        elif "configure" in low or "no repeat" in low or "libraries" in low:
+            hint = (
+                "\n\nRepeatMasker may not be configured. Run its configure step, "
+                "or reinstall it (conda install -c bioconda repeatmasker)."
+            )
+        raise RuntimeError(
+            f"RepeatMasker failed (exit {proc.returncode}).\n\n{detail[-2000:]}{hint}"
+        )
     out_path = output_dir / f"{query_fasta.name}.out"
     if not out_path.is_file():
         candidates = sorted(output_dir.glob("*.out"))
