@@ -12,6 +12,7 @@ from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QPixmap, QShortcut, QT
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
     QLabel,
+    QMenu,
     QMessageBox,
     QScrollArea,
     QSizePolicy,
@@ -1340,6 +1341,12 @@ class FilePreviewPage(QWidget):
 # Cap per-file tab width so a few long names do not stretch across the title bar.
 MAX_PREVIEW_FILE_TAB_WIDTH = 200
 
+# Tabs now persist until closed by hand, so an unbounded number of live
+# WebEngine renderers (one OS process each) could pile up. Keep only the N
+# most-recently-used pages loaded; older tabs stay in the bar but release
+# their HTML preview and reload from disk when clicked again.
+MAX_LIVE_PREVIEW_TABS = 8
+
 
 class PreviewFileTabBar(QTabBar):
     """Title-bar file tabs: content-sized with a max width; scroll when too many."""
@@ -1354,6 +1361,7 @@ class PreviewFileTabBar(QTabBar):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMinimumWidth(0)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
     def tabSizeHint(self, index: int) -> QSize:  # noqa: N802
         size = super().tabSizeHint(index)
@@ -1405,12 +1413,16 @@ class PreviewTabWidget(QTabWidget):
             self._header_bar.fasta_tab_changed.connect(self._on_header_fasta_tab_changed)
 
         self.setTabBar(PreviewFileTabBar(self))
+        self.tabBar().customContextMenuRequested.connect(
+            lambda pos: self._show_tab_context_menu(self.tabBar(), pos)
+        )
         self.setTabsClosable(True)
         self.setMovable(True)
         self.setDocumentMode(True)
         self.setUsesScrollButtons(True)
         self.tabCloseRequested.connect(self._close_tab)
         self._path_to_index: dict[str, int] = {}
+        self._lru_order: list[int] = []  # id(FilePreviewPage), most recent first
         self._external_tab_bar_host: QWidget | None = None
         self._title_tab_bar: PreviewFileTabBar | None = None
         self._tab_bar_sync_guard = False
@@ -1452,8 +1464,32 @@ class PreviewTabWidget(QTabWidget):
             self._title_tab_bar.tabCloseRequested.connect(self._close_tab)
             self._title_tab_bar.currentChanged.connect(self._on_title_tab_current_changed)
             self._title_tab_bar.tabMoved.connect(self._on_title_tab_moved)
+            self._title_tab_bar.customContextMenuRequested.connect(
+                lambda pos: self._show_tab_context_menu(self._title_tab_bar, pos)
+            )
 
         self._sync_tab_bar_visible()
+
+    def _show_tab_context_menu(self, tab_bar: QTabBar, pos) -> None:
+        """Right-click menu on a preview tab: Close / Close Others / Close All.
+
+        Tabs persist until closed by hand, so this is the bulk-cleanup path.
+        """
+        index = tab_bar.tabAt(pos)
+        if index < 0:
+            return
+        menu = QMenu(tab_bar)
+        close_action = menu.addAction("Close Tab")
+        others_action = menu.addAction("Close Other Tabs")
+        all_action = menu.addAction("Close All Tabs")
+        others_action.setEnabled(self.count() > 1)
+        chosen = menu.exec(tab_bar.mapToGlobal(pos))
+        if chosen is close_action:
+            self._close_tab(index)
+        elif chosen is others_action:
+            self.close_other_tabs(index)
+        elif chosen is all_action:
+            self.close_all_tabs()
 
     def _on_title_tab_current_changed(self, index: int) -> None:
         if self._tab_bar_sync_guard or self._title_tab_bar is None:
@@ -1555,15 +1591,59 @@ class PreviewTabWidget(QTabWidget):
         if isinstance(widget, FilePreviewPage):
             widget._delete_annotation_features_if_active()
 
+    def _touch_lru(self, widget: FilePreviewPage) -> None:
+        """Mark ``widget`` as the most recently used page."""
+        wid = id(widget)
+        try:
+            self._lru_order.remove(wid)
+        except ValueError:
+            pass
+        self._lru_order.insert(0, wid)
+
+    def _forget_lru(self, widget: object) -> None:
+        try:
+            self._lru_order.remove(id(widget))
+        except ValueError:
+            pass
+
+    def _enforce_live_tab_limit(self) -> None:
+        """Release HTML previews on tabs beyond MAX_LIVE_PREVIEW_TABS.
+
+        The tab itself stays in the bar; only its WebEngine renderer is torn
+        down. Activating the tab again calls reload_from_disk(), which rebuilds
+        the view. This keeps memory flat no matter how many tabs are open.
+        """
+        pages: dict[int, FilePreviewPage] = {}
+        for tab_index in range(self.count()):
+            widget = self.widget(tab_index)
+            if isinstance(widget, FilePreviewPage):
+                pages[id(widget)] = widget
+        self._lru_order = [wid for wid in self._lru_order if wid in pages]
+        for wid in self._lru_order[MAX_LIVE_PREVIEW_TABS:]:
+            page = pages[wid]
+            if getattr(page, "_preview_unloaded", False):
+                continue
+            try:
+                page.teardown_html_preview()
+            except Exception:  # noqa: BLE001 - never let eviction break tab switching
+                logger.debug("Preview eviction failed for %s", page.path, exc_info=True)
+                continue
+            page._preview_unloaded = True
+
     def _on_preview_tab_changed(self, index: int) -> None:
         for tab_index in range(self.count()):
             widget = self.widget(tab_index)
             if not isinstance(widget, FilePreviewPage):
                 continue
             if tab_index == index:
+                self._touch_lru(widget)
+                if getattr(widget, "_preview_unloaded", False):
+                    widget._preview_unloaded = False
+                    widget.reload_from_disk()
                 widget.resume_html_preview()
             else:
                 widget.suspend_html_preview()
+        self._enforce_live_tab_limit()
         if self._title_tab_bar is not None and not self._tab_bar_sync_guard:
             self._tab_bar_sync_guard = True
             try:
@@ -1736,61 +1816,74 @@ class PreviewTabWidget(QTabWidget):
             if callable(refresh):
                 refresh()
 
+    def _replace_page_at(self, index: int, resolved: Path) -> None:
+        """Show ``resolved`` in the existing tab ``index``.
+
+        The page is recreated in place when the preview kind crosses the
+        HTML <-> non-HTML boundary (see :func:`_switching_html_preview`);
+        otherwise the existing page just loads the new path. Tabs other than
+        ``index`` are never touched.
+        """
+        widget = self.widget(index)
+        if not isinstance(widget, FilePreviewPage):
+            return
+        if str(widget.path) == str(resolved):
+            widget.reload_from_disk()
+        elif _switching_html_preview(widget.path, resolved):
+            was_current = self.currentIndex() == index
+            self._forget_lru(widget)
+            widget.teardown_html_preview()
+            self.removeTab(index)
+            widget.deleteLater()
+            page = FilePreviewPage(resolved)
+            self._wire_preview_page(page)
+            self.insertTab(index, page, resolved.name)
+            if was_current:
+                self.setCurrentIndex(index)
+                self.setCurrentWidget(page)
+                page.show()
+        else:
+            widget.load_path(resolved)
+        self.setTabText(index, resolved.name)
+        self._rebuild_path_index()
+
     def open_file(self, path: Path, *, replace: bool = False) -> None:
-        """Open one file. replace=True uses a single reusable preview tab."""
+        """Open one file.
+
+        ``replace=True`` (single click in the file list) reuses the *active*
+        tab: whatever tab you are currently on becomes the file you clicked.
+        Every other tab keeps its content and stays open.
+
+        ``replace=False`` (right-click "Open in Additional Tab") always appends
+        a new tab and makes it active, leaving existing tabs untouched.
+
+        Either way, a file that is already open somewhere just gets focused
+        instead of being loaded a second time.
+        """
         resolved = path.expanduser().resolve()
         key = str(resolved)
 
-        if replace:
-            if self.count() == 1:
-                widget = self.widget(0)
-                if isinstance(widget, FilePreviewPage):
-                    if str(widget.path) == key:
-                        widget.reload_from_disk()
-                        self._sync_tab_bar_visible()
-                    elif _switching_html_preview(widget.path, resolved):
-                        widget.teardown_html_preview()
-                        widget.deleteLater()
-                        self.removeTab(0)
-                        page = FilePreviewPage(resolved)
-                        self._add_preview_page(page, name=resolved.name)
-                        self._path_to_index = {key: 0}
-                        self.setCurrentIndex(0)
-                        self.setCurrentWidget(page)
-                        page.show()
-                        self._apply_zoom_to_current_tab()
-                        self._sync_tab_bar_visible()
-                        return
-                    else:
-                        widget.load_path(resolved)
-                    self.setTabText(0, resolved.name)
-                    self._path_to_index = {key: 0}
-                    self.setCurrentIndex(0)
-                    self._apply_zoom_to_current_tab()
-                    self._sync_tab_bar_visible()
-                    return
-            self.close_all_tabs()
-            page = FilePreviewPage(resolved)
-            self._add_preview_page(page, name=resolved.name)
-            self._path_to_index = {key: 0}
-            self.setCurrentIndex(0)
-            self.setCurrentWidget(page)
-            page.show()
-            self._apply_zoom_to_current_tab()
-            self._sync_tab_bar_visible()
-            return
-
-        if key in self._path_to_index:
-            index = self._path_to_index[key]
-            if 0 <= index < self.count():
-                widget = self.widget(index)
+        existing = self._path_to_index.get(key)
+        if existing is not None:
+            if 0 <= existing < self.count():
+                widget = self.widget(existing)
                 if isinstance(widget, FilePreviewPage):
                     widget.reload_from_disk()
-                self.setCurrentIndex(index)
+                self.setCurrentIndex(existing)
                 self._apply_zoom_to_current_tab()
                 self._sync_tab_bar_visible()
                 return
             del self._path_to_index[key]
+
+        if replace and self.count():
+            target = self.currentIndex()
+            if not (0 <= target < self.count()):
+                target = 0
+            self._replace_page_at(target, resolved)
+            self.setCurrentIndex(target)
+            self._apply_zoom_to_current_tab()
+            self._sync_tab_bar_visible()
+            return
 
         page = FilePreviewPage(resolved)
         index = self._add_preview_page(page, name=resolved.name)
@@ -1824,9 +1917,20 @@ class PreviewTabWidget(QTabWidget):
                 widget.teardown_html_preview()
             self.removeTab(0)
             if widget is not None:
+                self._forget_lru(widget)
                 widget.deleteLater()
         self._path_to_index.clear()
+        self._lru_order.clear()
         self._sync_tab_bar_visible()
+
+    def close_other_tabs(self, keep_index: int) -> None:
+        """Close every tab except ``keep_index``."""
+        if not (0 <= keep_index < self.count()):
+            return
+        keep = self.widget(keep_index)
+        for index in range(self.count() - 1, -1, -1):
+            if self.widget(index) is not keep:
+                self._close_tab(index)
 
     def close_paths(self, paths: list[Path]) -> None:
         """Close preview tabs whose files were deleted."""
@@ -1857,6 +1961,7 @@ class PreviewTabWidget(QTabWidget):
             widget.teardown_html_preview()
         self.removeTab(index)
         if widget is not None:
+            self._forget_lru(widget)
             widget.deleteLater()
         self._rebuild_path_index()
         self._sync_tab_bar_visible()

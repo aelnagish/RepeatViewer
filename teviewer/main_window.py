@@ -8096,7 +8096,11 @@ class MainWindow(QMainWindow):
             self._set_status_message(f"Deleted {deleted} file(s)", 6000)
 
     def _open_files_in_preview(self, paths: list[Path]) -> None:
-        """Replace the main Preview with the selected file(s) (first file only)."""
+        """Show the selected file (first only) in the active Preview tab.
+
+        Other open tabs keep their content; use "Open in Additional Tab" to add
+        a new one instead of reusing the active tab.
+        """
         if self._preview_tabs is None or not paths:
             return
         path = paths[0].expanduser().resolve()
