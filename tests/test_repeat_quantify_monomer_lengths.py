@@ -13,6 +13,7 @@ import pytest
 from teviewer.backends.repeat_quantify import (
     _aggregate_rm_rows,
     _fasta_lengths,
+    _format_copy_number,
 )
 
 
@@ -116,6 +117,48 @@ def test_rm_aggregate_without_a_match_stays_zero(tmp_path):
     )[0]
     assert fam.monomer_len == 0
     assert fam.copy_number == 0
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0.0, "0"),          # no monomer length known
+        (0.199, "0.2"),      # 35S_rDNA: 3,625 bp of an 18,206 bp consensus
+        (0.5, "0.5"),
+        (0.004, "0"),        # rounds away below two decimals
+        (1.0, "1"),
+        (1699.06, "1699"),   # whole copies stay integral
+    ],
+)
+def test_format_copy_number(value, expected):
+    assert _format_copy_number(value) == expected
+
+
+def test_format_copy_number_thousands_separator():
+    assert _format_copy_number(1699.06, thousands=True) == "1,699"
+    assert _format_copy_number(0.199, thousands=True) == "0.2"
+
+
+def test_sub_monomer_coverage_reports_a_fraction(tmp_path):
+    """A family covering less than one monomer must not read as a bare 0.
+
+    Mirrors 35S_rDNA in the Crocus library: an 18 kb locus consensus with only
+    a few kb covered is a fifth of a copy, not "absent".
+    """
+    lib = _write_fasta(
+        tmp_path / "lib.fa",
+        [("35S_rDNA#Simple_repeat/rDNA/45S", "A" * 18_206)],
+    )
+    rows = [
+        {"family": "35S_rDNA", "scaffold": "chr1",
+         "start": 1, "end": 3625, "divergence": 8.0},
+    ]
+    fam = _aggregate_rm_rows(
+        rows, target_length=40_000_000, monomer_lengths=_fasta_lengths(lib)
+    )[0]
+    assert fam.monomer_len == 18_206
+    assert fam.copy_number == pytest.approx(0.2, abs=0.01)
+    assert _format_copy_number(fam.copy_number) == "0.2"
 
 
 if __name__ == "__main__":

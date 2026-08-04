@@ -67,7 +67,7 @@ class FamilyQuant:
     mean_divergence: float = 0.0   # RepeatMasker only (0 for blastn)
     scaffolds: int = 0         # distinct target sequences hit
     monomer_len: int = 0       # library monomer length (period size)
-    copy_number: int = 0       # covered_bp / monomer_len
+    copy_number: float = 0.0   # covered_bp / monomer_len (fractional below 1)
     mean_array_bp: float = 0.0  # covered_bp / arrays
     max_array_bp: int = 0      # largest single contiguous array
 
@@ -89,6 +89,19 @@ class QuantifyResult:
     @property
     def total_covered_bp(self) -> int:
         return sum(f.covered_bp for f in self.families)
+
+
+def _format_copy_number(value: float, *, thousands: bool = False) -> str:
+    """Render copy number: whole copies as an integer, sub-copy as a fraction.
+
+    A family covering less than one monomer -- e.g. a partial hit against the
+    18 kb 35S_rDNA locus consensus -- used to round to a bare ``0``, which
+    reads like "not found" rather than "a fifth of one copy". Keep two
+    decimals below 1 and round to whole copies at or above it.
+    """
+    if 0 < value < 1:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{value:,.0f}" if thousands else f"{value:.0f}"
 
 
 def _fasta_total_length(fasta: Path) -> int:
@@ -223,7 +236,7 @@ def _aggregate_blast_tab(
                 mean_identity=round(mean_id, 2),
                 scaffolds=len(data["by_scaffold"]),
                 monomer_len=mono,
-                copy_number=round(covered / mono) if mono else 0,
+                copy_number=round(covered / mono, 2) if mono else 0.0,
                 mean_array_bp=round(covered / arrays, 1) if arrays else 0.0,
                 max_array_bp=max_array,
             )
@@ -240,7 +253,7 @@ def _write_summary_tsv(result: QuantifyResult, path: Path) -> Path:
     ]
     for f in result.families:
         lines.append(
-            f"{f.family}\t{f.monomer_len}\t{f.copy_number}\t{f.hits}\t"
+            f"{f.family}\t{f.monomer_len}\t{_format_copy_number(f.copy_number)}\t{f.hits}\t"
             f"{f.arrays}\t{f.covered_bp}\t{f.pct_of_target}\t"
             f"{round(f.mean_array_bp)}\t{f.max_array_bp}\t{f.mean_identity}\t"
             f"{f.mean_divergence}\t{f.scaffolds}"
@@ -441,7 +454,7 @@ def _aggregate_rm_rows(
                 mean_divergence=round(mean_div, 2),
                 scaffolds=len(data["by_scaffold"]),
                 monomer_len=mono,
-                copy_number=round(covered / mono) if mono else 0,
+                copy_number=round(covered / mono, 2) if mono else 0.0,
                 mean_array_bp=round(covered / arrays, 1) if arrays else 0.0,
                 max_array_bp=max_array,
             )
@@ -598,7 +611,8 @@ _COLUMN_LABELS = {
 _COLUMN_DEFS = [
     ("family", "Library family that was matched."),
     ("monomer_len", "Length of the library monomer (period size), bp."),
-    ("copy_number", "Estimated copies = covered_bp ÷ monomer length."),
+    ("copy_number", "Estimated copies = covered_bp ÷ monomer length. Shown as a "
+                    "fraction when a family covers less than one full monomer."),
     ("hits", "Number of alignment fragments (raw hit count)."),
     ("arrays", "Hits merged into contiguous blocks (≈ distinct array loci)."),
     ("covered_bp", "Target bp covered by the family (overlaps counted once)."),
@@ -658,7 +672,8 @@ def write_summary_html(
             if f is None:
                 continue
             cells = [
-                _html_escape(f.family), f"{f.monomer_len:,}", f"{f.copy_number:,}",
+                _html_escape(f.family), f"{f.monomer_len:,}",
+                _format_copy_number(f.copy_number, thousands=True),
                 f"{f.hits}", f"{f.arrays}", f"{f.covered_bp:,}",
                 f"{f.pct_of_target:.3f}", f"{f.mean_array_bp:,.0f}",
                 f"{f.max_array_bp:,}", f"{f.mean_identity:.1f}",
