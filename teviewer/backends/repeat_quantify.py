@@ -96,8 +96,33 @@ def _fasta_total_length(fasta: Path) -> int:
 
 
 def _fasta_lengths(fasta: Path) -> dict[str, int]:
-    """Map each record id to its length (used for satellite copy number)."""
-    return {rec.id: len(rec.seq) for rec in SeqIO.parse(str(fasta), "fasta")}
+    """Map each record id to its length (used for satellite copy number).
+
+    Library headers carry the class as a suffix (``TRC_7#Simple_repeat/TRC_7``)
+    and blastn reports that whole string back as ``sseqid``. RepeatMasker does
+    not: its ``.out`` splits the header on ``#`` and reports the bare name in
+    the "matching repeat" column, so a full-id lookup misses and monomer_len /
+    copy_number come out 0. Register the pre-``#`` stem as an extra key so both
+    engines resolve.
+
+    A stem shared by two different library entries is ambiguous and is left
+    out rather than resolved arbitrarily; an exact id always wins over a stem.
+    """
+    lengths: dict[str, int] = {}
+    stem_ids: dict[str, set[str]] = {}
+    stem_lengths: dict[str, int] = {}
+    for rec in SeqIO.parse(str(fasta), "fasta"):
+        # Last duplicate wins, matching what library_duplicate_warnings() reports.
+        lengths[rec.id] = len(rec.seq)
+        stem = rec.id.split("#", 1)[0]
+        if stem == rec.id:
+            continue
+        stem_ids.setdefault(stem, set()).add(rec.id)
+        stem_lengths[stem] = len(rec.seq)
+    for stem, ids in stem_ids.items():
+        if len(ids) == 1 and stem not in lengths:
+            lengths[stem] = stem_lengths[stem]
+    return lengths
 
 
 def library_duplicate_warnings(fasta: Path) -> list[str]:
