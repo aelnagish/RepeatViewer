@@ -4256,3 +4256,246 @@ class TeLibraryBenchmarkDialog(QDialog):
 
 # Backward-compatible alias (removed from menus; use TeDensityPlotDialog).
 TeGenomeMapDefaultsDialog = TeDensityPlotDialog
+
+
+class RepeatQuantifyDialog(QDialog):
+    """Choose a target (database) and a library FASTA, plus the engine.
+
+    Both fields are pre-populated with the FASTA files already available (the
+    current selection / folder) so they can be picked directly, and each has a
+    Browse button for files elsewhere.
+    """
+
+    _FASTA_FILTER = "FASTA (*.fa *.fasta *.fna *.fas);;All files (*)"
+
+    def __init__(self, *, candidates, start_dir: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Repeat quantify")
+        self._start_dir = start_dir
+        cand = [Path(p) for p in candidates]
+
+        self._genome_combo = QComboBox()
+        self._library_combo = QComboBox()
+        for combo in (self._genome_combo, self._library_combo):
+            # Fixed width: compact, symmetric, and never collapses/jumps.
+            combo.setFixedWidth(320)
+            for path in cand:
+                combo.addItem(path.name, str(path.expanduser().resolve()))
+            combo.currentIndexChanged.connect(lambda _i, c=combo: self._sync_tooltip(c))
+            self._sync_tooltip(combo)
+        # Sensible default: library defaults to the 2nd candidate if distinct.
+        if self._library_combo.count() > 1:
+            self._library_combo.setCurrentIndex(1)
+
+        genome_browse = QPushButton("Browse…")
+        library_browse = QPushButton("Browse…")
+        for browse in (genome_browse, library_browse):
+            browse.setFixedWidth(88)  # short + symmetric
+        genome_browse.clicked.connect(lambda: self._browse(self._genome_combo))
+        library_browse.clicked.connect(lambda: self._browse(self._library_combo))
+
+        inputs_box = QGroupBox("Inputs", self)
+        form = QFormLayout(inputs_box)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        form.addRow(
+            "Library (monomers / satellites):",
+            self._field_row(self._library_combo, library_browse),
+        )
+        form.addRow(
+            "Genome (scaffolds / assembly):",
+            self._field_row(self._genome_combo, genome_browse),
+        )
+
+        # Tabs are the engine choice; each tab holds that engine's parameters.
+        self._tabs = QTabWidget(self)
+        self._blast_a = self._make_blast_controls()
+        self._rm_b = self._make_rm_controls()
+        self._blast_c = self._make_blast_controls()
+        self._rm_d = self._make_rm_controls()
+        self._tabs.addTab(
+            self._params_tab(self._blast_rows(self._blast_a)), "BLASTn"
+        )
+        self._tabs.addTab(
+            self._params_tab(self._rm_rows(self._rm_b)), "RepeatMasker"
+        )
+        both_rows = (
+            [("BLASTn", None)]
+            + self._blast_rows(self._blast_c)
+            + [("RepeatMasker", None)]
+            + self._rm_rows(self._rm_d)
+        )
+        self._tabs.addTab(self._params_tab(both_rows), "Both")
+        self._tabs.setCurrentIndex(2)  # default: Both
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Run")
+        buttons.accepted.connect(self._try_accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(14)
+        layout.addWidget(inputs_box)
+        layout.addWidget(self._tabs)
+        layout.addWidget(buttons)
+
+    def _make_blast_controls(self) -> dict:
+        word = QSpinBox(self)
+        word.setRange(4, 24)
+        word.setValue(11)
+        word.setToolTip(
+            "BLASTn -word_size. Lower is more sensitive but much slower on "
+            "big/repetitive genomes (7 can hang; 11 is a good balance)."
+        )
+        evalue = QDoubleSpinBox(self)
+        configure_report_evalue_spinbox(evalue)
+        evalue.setValue(1e-5)
+        minid = QDoubleSpinBox(self)
+        minid.setRange(0.0, 100.0)
+        minid.setDecimals(0)
+        minid.setSuffix(" %")
+        minid.setValue(0)
+        minid.setToolTip("BLASTn -perc_identity. 0 = no minimum.")
+        mincov = QDoubleSpinBox(self)
+        mincov.setRange(0.0, 100.0)
+        mincov.setDecimals(0)
+        mincov.setSuffix(" %")
+        mincov.setValue(0)
+        mincov.setToolTip(
+            "BLASTn -qcov_hsp_perc: minimum query (monomer) coverage per hit. "
+            "0 = no minimum."
+        )
+        for w in (word, evalue, minid, mincov):
+            w.setFixedWidth(150)
+        return {"word": word, "evalue": evalue, "minid": minid, "mincov": mincov}
+
+    def _make_rm_controls(self) -> dict:
+        div = QSpinBox(self)
+        div.setRange(1, 100)
+        div.setValue(40)
+        div.setSuffix(" %")
+        div.setFixedWidth(150)
+        div.setToolTip(
+            "RepeatMasker -div: report only copies less than this % diverged "
+            "(higher captures older copies, but noisier)."
+        )
+        sens = QComboBox(self)
+        sens.addItem("Sensitive (-s)", "sensitive")
+        sens.addItem("Default", "default")
+        sens.addItem("Quick (-q)", "quick")
+        sens.setFixedWidth(150)
+        sens.setToolTip(
+            "RepeatMasker search sensitivity. Sensitive is slowest; Quick is "
+            "fastest on large genomes."
+        )
+        return {"div": div, "sens": sens}
+
+    @staticmethod
+    def _blast_rows(c: dict) -> list:
+        return [
+            ("Word size:", c["word"]),
+            ("E-value:", c["evalue"]),
+            ("Min identity:", c["minid"]),
+            ("Min coverage:", c["mincov"]),
+        ]
+
+    @staticmethod
+    def _rm_rows(c: dict) -> list:
+        return [
+            ("Divergence cutoff (-div):", c["div"]),
+            ("Sensitivity:", c["sens"]),
+        ]
+
+    def _params_tab(self, rows: list) -> QWidget:
+        """Build a tab from (label, widget) rows; a None widget = bold header."""
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        form.setContentsMargins(16, 14, 16, 14)
+        for label, widget in rows:
+            if widget is None:
+                header = QLabel(label, self)
+                font = header.font()
+                font.setBold(True)
+                header.setFont(font)
+                form.addRow(header)
+            else:
+                form.addRow(label, widget)
+        return tab
+
+    @staticmethod
+    def _field_row(combo: QComboBox, browse: QPushButton) -> QWidget:
+        row = QWidget()
+        hbox = QHBoxLayout(row)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.setSpacing(8)
+        hbox.addWidget(combo)
+        hbox.addWidget(browse)
+        hbox.addStretch(1)
+        return row
+
+    @staticmethod
+    def _sync_tooltip(combo: QComboBox) -> None:
+        data = combo.currentData()
+        combo.setToolTip(str(data) if data else "")
+
+    def _browse(self, combo: QComboBox) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select FASTA", self._start_dir, self._FASTA_FILTER
+        )
+        if not path:
+            return
+        resolved = str(Path(path).expanduser().resolve())
+        index = combo.findData(resolved)
+        if index < 0:
+            combo.addItem(Path(path).name, resolved)
+            index = combo.count() - 1
+        combo.setCurrentIndex(index)
+
+    def _try_accept(self) -> None:
+        target = self.target()
+        library = self.library()
+        if target is None or library is None:
+            QMessageBox.information(
+                self, "Repeat quantify",
+                "Choose both a target FASTA and a library FASTA "
+                "(pick from the list or Browse).",
+            )
+            return
+        if target == library:
+            QMessageBox.warning(
+                self, "Repeat quantify",
+                "Target and library must be different files.",
+            )
+            return
+        self.accept()
+
+    def target(self) -> Path | None:
+        data = self._genome_combo.currentData()
+        return Path(data) if data else None
+
+    def library(self) -> Path | None:
+        data = self._library_combo.currentData()
+        return Path(data) if data else None
+
+    def engine(self) -> str:
+        return ("blastn", "repeatmasker", "both")[self._tabs.currentIndex()]
+
+    def params(self) -> dict:
+        idx = self._tabs.currentIndex()
+        blast = {0: self._blast_a, 2: self._blast_c}.get(idx)
+        rm = {1: self._rm_b, 2: self._rm_d}.get(idx)
+        return {
+            "blast_word_size": blast["word"].value() if blast else 11,
+            "blast_evalue": blast["evalue"].value() if blast else 1e-5,
+            "blast_min_identity": blast["minid"].value() if blast else 0.0,
+            "blast_min_coverage": blast["mincov"].value() if blast else 0.0,
+            "rm_div": rm["div"].value() if rm else 40,
+            "rm_sensitivity": rm["sens"].currentData() if rm else "sensitive",
+        }

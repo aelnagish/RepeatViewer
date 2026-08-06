@@ -868,6 +868,74 @@ class FlexidotClassifierInstallWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class RepeatQuantifyWorker(QObject):
+    """Quantify a repeat library across target sequences off the UI thread."""
+
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self, library: Path, targets: list[Path], *, engine: str, threads: int,
+        params: dict | None = None, cancel=None
+    ) -> None:
+        super().__init__()
+        self._library = Path(library)
+        self._targets = list(targets)
+        self._engine = engine
+        self._threads = threads
+        self._params = params or {}
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from teviewer.backends.repeat_quantify import (
+            library_duplicate_warnings,
+            quantify_library,
+            write_landscape_html,
+            write_summary_html,
+        )
+
+        try:
+            lib_warnings = library_duplicate_warnings(self._library)
+            outputs: list[str] = []
+            for index, target in enumerate(self._targets, 1):
+                self.progress.emit(index, f"Quantifying {target.name}…")
+                out_dir = target.parent / f"{target.stem}_repeat_quant"
+                results = quantify_library(
+                    self._library,
+                    target,
+                    out_dir,
+                    engine=self._engine,
+                    threads=self._threads,
+                    cancel=self._cancel,
+                    **self._params,
+                )
+                summary = write_summary_html(
+                    results,
+                    out_dir / f"{target.stem}_repeat_quant.html",
+                    target_label=target.name,
+                    warnings=lib_warnings,
+                )
+                outputs.append(str(summary))
+                for result in results:
+                    if result.engine == "repeatmasker" and result.landscape:
+                        outputs.append(
+                            str(
+                                write_landscape_html(
+                                    result,
+                                    out_dir / f"{target.stem}_repeat_landscape.html",
+                                    target_label=target.name,
+                                )
+                            )
+                        )
+            self.finished.emit(outputs)
+        except JobCancelledError:
+            self.finished.emit([])  # stopped by user; end quietly
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(str(exc))
+
+
 class GenomeMapWorker(QObject):
     """Build TE genome map HTML off the UI thread."""
 
@@ -2897,6 +2965,86 @@ class MainWindow(QMainWindow):
             self, "Flexidot-Classifier failed", error.strip() or "Unknown error."
         )
 
+    def _repeat_quantify_candidates(self) -> list[Path]:
+        """FASTA files to offer in the quantify dialog: selection first, then folder."""
+        seen: dict[str, Path] = {}
+        for path in self._selected_files():
+            if path.suffix.lower() in _FASTA_SUFFIXES and path.is_file():
+                seen.setdefault(str(path.expanduser().resolve()), path)
+        if self._current_folder and self._current_folder.is_dir():
+            for path in sorted(self._current_folder.iterdir()):
+                if path.is_file() and path.suffix.lower() in _FASTA_SUFFIXES:
+                    seen.setdefault(str(path.expanduser().resolve()), path)
+        return list(seen.values())
+
+    def _open_repeat_quantify(self) -> None:
+        """Quantify a tandem-repeat / satellite library across a target FASTA."""
+        from teviewer.views.tool_dialogs import RepeatQuantifyDialog
+
+        candidates = self._repeat_quantify_candidates()
+        start_dir = str(self._current_folder) if self._current_folder else ""
+        dialog = RepeatQuantifyDialog(
+            candidates=candidates, start_dir=start_dir, parent=self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        target = dialog.target()
+        library = dialog.library()
+        engine = dialog.engine()
+        params = dialog.params()
+        if target is None or library is None:
+            return
+        targets = [target]
+        if engine in ("both", "repeatmasker"):
+            from teviewer.backends.repeat_quantify import (
+                repeatmasker_executable_available,
+            )
+
+            if not repeatmasker_executable_available():
+                QMessageBox.warning(
+                    self,
+                    "RepeatMasker not found",
+                    "RepeatMasker is not on PATH. Install it, or choose the "
+                    "BLASTn engine instead.",
+                )
+                return
+        self._start_background_job(
+            RepeatQuantifyWorker(
+                Path(library),
+                targets,
+                engine=engine,
+                threads=self._project.batch_workers,
+                params=params,
+                cancel=self._job_cancel,
+            ),
+            job_title="Repeat quantify",
+            total_steps=len(targets),
+            source_files=targets,
+            on_finished=self._on_repeat_quantify_finished,
+            on_failed=self._on_repeat_quantify_failed,
+        )
+
+    @Slot(object)
+    def _on_repeat_quantify_finished(self, outputs) -> None:
+        paths = [Path(p) for p in outputs if Path(p).is_file()]
+        if self._current_folder:
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=paths,
+                source_files=getattr(self, "_last_job_source_files", []),
+            )
+        for index, path in enumerate(paths):
+            self._open_preview_tab(path, replace=(index == 0))
+        self._set_status_message(
+            f"Repeat quantify — {len(paths)} report(s) written", 12000
+        )
+
+    @Slot(str)
+    def _on_repeat_quantify_failed(self, error: str) -> None:
+        QMessageBox.warning(
+            self, "Repeat quantify failed", error.strip() or "Unknown error."
+        )
+
     def _flexidot_classifier_home_or_prompt(self):
         """Return the classifier home, or offer guided install and return None."""
         from teviewer.backends.flexidot_classifier import (
@@ -2978,12 +3126,16 @@ class MainWindow(QMainWindow):
 
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         menu.addAction(
-            "blastn",
+            "BLASTn",
             lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTN),
         )
         menu.addAction(
-            "blastp",
+            "BLASTp",
             lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTP),
+        )
+        menu.addAction(
+            "BLASTx",
+            lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTX),
         )
         menu.addSeparator()
         menu.addAction("Change BLAST parameters", self._change_blast_parameters)
@@ -3100,7 +3252,7 @@ class MainWindow(QMainWindow):
         seq_menu.addAction("Extract Sequences from List…", self._extract_sequences_from_list)
         seq_menu.addSeparator()
         seq_menu.addAction(
-            "Reverser Complement",
+            "Reverse Complement",
             lambda: self._apply_function("reverse_complement"),
         )
         seq_menu.addAction(
@@ -3126,6 +3278,7 @@ class MainWindow(QMainWindow):
         self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
         self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
         tools_menu.addAction("TE &annotation", self._run_te_annotation)
+        tools_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
         self._populate_te_visualization_menu(tools_menu.addMenu("TE &visualization"))
         self._populate_benchmarking_menu(tools_menu.addMenu("&Benchmarking"))
 
@@ -3791,6 +3944,13 @@ class MainWindow(QMainWindow):
                     "Right-click: change parameters."
                 ),
                 right_click_slot=self._open_fastga_dialog,
+            )
+        elif tool_id == "repeat_quantify":
+            self._add_toolbar_text_action(
+                bar,
+                "Repeat Quantify",
+                self._open_repeat_quantify,
+                tooltip="Quantify a repeat / satellite library across a genome.",
             )
         elif tool_id == "blast":
             self._add_toolbar_action_button(
@@ -4922,6 +5082,13 @@ class MainWindow(QMainWindow):
             if record_id == seq_id or flexidot_sanitize_name(record_id) == seq_id:
                 return path
         return None
+
+    def _focus_preview_widget(self) -> None:
+        if self._preview_tabs is None:
+            return
+        current = self._preview_tabs.currentWidget()
+        if current is not None:
+            current.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _current_file_sort_mode(self) -> FileSortMode:
         return load_file_sort_mode()
@@ -7929,7 +8096,11 @@ class MainWindow(QMainWindow):
             self._set_status_message(f"Deleted {deleted} file(s)", 6000)
 
     def _open_files_in_preview(self, paths: list[Path]) -> None:
-        """Replace the main Preview with the selected file(s) (first file only)."""
+        """Show the selected file (first only) in the active Preview tab.
+
+        Other open tabs keep their content; use "Open in Additional Tab" to add
+        a new one instead of reusing the active tab.
+        """
         if self._preview_tabs is None or not paths:
             return
         path = paths[0].expanduser().resolve()

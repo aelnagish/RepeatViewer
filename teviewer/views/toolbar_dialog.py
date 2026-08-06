@@ -54,6 +54,7 @@ TOOLS_TOOLBAR_IDS: tuple[str, ...] = (
     "align",
     "tree",
     "fastga",
+    "repeat_quantify",
     "extend",
     "tsd_search",
     "teaid",
@@ -86,6 +87,7 @@ DEFAULT_TOOLBAR_ORDER: list[str] = [
     "msa_clean",
     "extend",
     "consensus",
+    "repeat_quantify",
     "te_genome_map",
 ]
 
@@ -102,6 +104,7 @@ TOOLBAR_LABELS: dict[str, str] = {
     "align": "Align",
     "tree": "Tree",
     "fastga": "FastGA",
+    "repeat_quantify": "Repeat Quantify",
     "blast": "BLAST",
     "extend": "MSA Extend",
     "teaid": "TEAid",
