@@ -2363,7 +2363,7 @@ class MainWindow(QMainWindow):
         set_genome_path_provider(self._genome_path_resolved)
         set_igv_extra_annotations_provider(self._igv_extra_annotations_for_alignment)
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
-        self._preview_tabs.sequenceExtracted.connect(self._on_preview_annotations_saved)
+        self._preview_tabs.sequenceExtracted.connect(self._on_preview_sequence_extracted)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         preview_layout.addWidget(self._preview_tabs, stretch=1)
         self._preview_host.setMinimumHeight(120)
@@ -4939,13 +4939,22 @@ class MainWindow(QMainWindow):
             self._set_status_message("Select a folder first", 4000)
 
     def _on_preview_annotations_saved(self, path: object) -> None:
+        # Update/highlight the written GFF in Files, but keep the current FASTA
+        # selection so the Annotation preview tab stays open after edits/deletes.
+        self._sync_sidecar_in_file_list(path, select=False)
+
+    def _on_preview_sequence_extracted(self, path: object) -> None:
+        # Extracted FASTA is a new output the user usually wants to open.
+        self._sync_sidecar_in_file_list(path, select=True)
+
+    def _sync_sidecar_in_file_list(self, path: object, *, select: bool) -> None:
         if not isinstance(path, Path) or not self._current_folder:
             return
         resolved = path.expanduser().resolve()
         if resolved.parent != self._current_folder:
             return
 
-        selected_key = str(resolved)
+        sidecar_key = str(resolved)
         prev_key: str | None = None
         current = self._file_list.currentItem()
         if current is not None:
@@ -4963,18 +4972,36 @@ class MainWindow(QMainWindow):
 
         self._file_list.blockSignals(True)
         try:
-            reveal_item = _find_item_for_key(selected_key)
-            if reveal_item is None:
+            sidecar_item = _find_item_for_key(sidecar_key)
+            if sidecar_item is None:
                 self._populate_file_list(self._current_folder, open_preview=False)
-                reveal_item = _find_item_for_key(selected_key)
-            if reveal_item is None and prev_key is not None:
-                reveal_item = _find_item_for_key(prev_key)
-            if reveal_item is not None:
-                self._style_new_output_item(reveal_item)
-                self._reveal_file_list_item(
-                    reveal_item,
-                    scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
-                )
+                # _populate_file_list clears blockSignals; re-block for the rest.
+                self._file_list.blockSignals(True)
+                sidecar_item = _find_item_for_key(sidecar_key)
+
+            if select:
+                reveal_item = sidecar_item
+                if reveal_item is None and prev_key is not None:
+                    reveal_item = _find_item_for_key(prev_key)
+                if reveal_item is not None:
+                    self._style_new_output_item(reveal_item)
+                    self._reveal_file_list_item(
+                        reveal_item,
+                        scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
+                    )
+            else:
+                if sidecar_item is not None:
+                    self._style_new_output_item(sidecar_item)
+                    self._file_list.scrollToItem(
+                        sidecar_item,
+                        QAbstractItemView.ScrollHint.EnsureVisible,
+                    )
+                # After a list refresh, restore the previously selected FASTA.
+                if prev_key is not None:
+                    prev_item = _find_item_for_key(prev_key)
+                    if prev_item is not None:
+                        prev_item.setSelected(True)
+                        self._file_list.setCurrentItem(prev_item)
         finally:
             self._file_list.blockSignals(False)
 
