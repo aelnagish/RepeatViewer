@@ -1042,6 +1042,70 @@ def _plotly_interactive_controls_html(
   const PREFS_PATH = {prefs_path_js};
   let prefsSaveTimer = null;
 
+  // Plotly.js v3 may store large numeric arrays as binary objects
+  // ({{dtype, bdata, _inputArray}}) instead of plain Arrays. The panel must
+  // accept both forms or it never initializes on big TE density plots.
+  function traceNumericArray(v){{
+    if(v == null){{ return []; }}
+    if(Array.isArray(v)){{
+      return v.map((x) => Number(x || 0));
+    }}
+    if(typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(v)){{
+      return Array.from(v, (x) => Number(x || 0));
+    }}
+    if(typeof v === 'object'){{
+      if(v._inputArray != null){{
+        return traceNumericArray(v._inputArray);
+      }}
+      if(typeof v.length === 'number' && v.length > 0){{
+        const out = new Array(v.length);
+        for(let i = 0; i < v.length; i += 1){{
+          out[i] = Number(v[i] || 0);
+        }}
+        return out;
+      }}
+    }}
+    return [];
+  }}
+
+  function hasTraceValues(v){{
+    if(v == null){{ return false; }}
+    if(Array.isArray(v) || (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(v))){{
+      return v.length > 0;
+    }}
+    if(typeof v === 'object'){{
+      if(v._inputArray != null){{
+        return hasTraceValues(v._inputArray);
+      }}
+      if(typeof v.length === 'number'){{
+        return v.length > 0;
+      }}
+      if(v.dtype && v.bdata){{
+        return true;
+      }}
+    }}
+    return false;
+  }}
+
+  function traceArrayLength(v){{
+    if(v == null){{ return 0; }}
+    if(Array.isArray(v) || (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(v))){{
+      return v.length;
+    }}
+    if(typeof v === 'object'){{
+      if(v._inputArray != null){{
+        return traceArrayLength(v._inputArray);
+      }}
+      if(typeof v.length === 'number'){{
+        return v.length;
+      }}
+      if(v.dtype && v.bdata){{
+        return traceNumericArray(v).length;
+      }}
+    }}
+    return 0;
+  }}
+
   function collectPlotPrefs(){{
     const out = {{
       bar_scale: 1,
@@ -1317,11 +1381,11 @@ def _plotly_interactive_controls_html(
     const pointGround = new Map();
 
     function registerBarTraceFromGd(idx, tr){{
-      if(tr.type !== 'bar' || !Array.isArray(tr.y) || tr.y.length === 0){{ return; }}
+      if(tr.type !== 'bar' || !hasTraceValues(tr.y)){{ return; }}
       if(!barTraceIndices.includes(idx)){{ barTraceIndices.push(idx); }}
       if(!originalY.has(idx)){{
-        originalY.set(idx, tr.y.map((v) => Number(v || 0)));
-        originalBase.set(idx, Array.isArray(tr.base) ? tr.base.map((v) => Number(v || 0)) : []);
+        originalY.set(idx, traceNumericArray(tr.y));
+        originalBase.set(idx, hasTraceValues(tr.base) ? traceNumericArray(tr.base) : []);
       }}
       const g = tr.legendgroup || tr.name || '';
       const barTrackKind = barTrackKindFromTrace(tr);
@@ -1537,7 +1601,7 @@ def _plotly_interactive_controls_html(
         const sub = labelToSub.get(String(trackLabel || ''));
         if(!sub){{ return; }}
         const col = colors[sub] || colors.cg_total;
-        const n = Array.isArray(tr.y) ? tr.y.length : 0;
+        const n = originalY.has(idx) ? originalY.get(idx).length : traceArrayLength(tr.y);
         indices.push(idx);
         barColors.push(new Array(n).fill(col));
       }});
@@ -1552,7 +1616,7 @@ def _plotly_interactive_controls_html(
       const colors = [];
       gd.data.forEach((tr, idx) => {{
         if(tr.type !== 'bar' || tr.legendgroup !== '__te_diff__'){{ return; }}
-        const ys = originalY.get(idx) || tr.y || [];
+        const ys = originalY.get(idx) || traceNumericArray(tr.y);
         let isUp = true;
         for(let i = 0; i < ys.length; i += 1){{
           const y = Number(ys[i] || 0);
@@ -1573,7 +1637,7 @@ def _plotly_interactive_controls_html(
       const colors = [];
       gd.data.forEach((tr, idx) => {{
         if(tr.type !== 'bar' || tr.legendgroup !== '__meth_diff__'){{ return; }}
-        const ys = originalY.get(idx) || tr.y || [];
+        const ys = originalY.get(idx) || traceNumericArray(tr.y);
         let isUp = true;
         for(let i = 0; i < ys.length; i += 1){{
           const y = Number(ys[i] || 0);
@@ -3024,7 +3088,7 @@ def _plotly_interactive_controls_html(
         const ti = cl.scatterIdx[i];
         if(ti === undefined || !gd.data[ti]){{ return; }}
         const yc = trackYCenter(chrom, i, cl, rowMult);
-        const n = Array.isArray(gd.data[ti].y) ? gd.data[ti].y.length : 0;
+        const n = traceArrayLength(gd.data[ti].y);
         gd.data[ti].y = new Array(n).fill(yc);
       }});
     }}
@@ -3101,7 +3165,7 @@ def _plotly_interactive_controls_html(
         const ti = cl.scatterIdx[i];
         if(ti === undefined || !gd.data[ti]){{ return; }}
         const yc = trackYCenter(chrom, i, cl, rowMult);
-        const n = Array.isArray(gd.data[ti].y) ? gd.data[ti].y.length : 0;
+        const n = traceArrayLength(gd.data[ti].y);
         indices.push(ti);
         ys.push(new Array(n).fill(yc));
       }});
