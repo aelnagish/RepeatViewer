@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from teviewer.widgets.file_list_table import (
+from repeatviewer.widgets.file_list_table import (
     _COL_DESCRIPTION,
     _COL_GC,
     _COL_NAME,

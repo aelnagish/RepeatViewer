@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from teviewer.browser_file_metadata import (
+from repeatviewer.browser_file_metadata import (
     enrich_fasta_metadata,
     metadata_for_file,
     quick_metadata_for_file,

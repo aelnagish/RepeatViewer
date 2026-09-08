@@ -1,10 +1,10 @@
-# RepeatViewer (TEviewer)
+# RepeatViewer
 
 **RepeatViewer** is a desktop application for working with transposable element (TE) consensus sequences: browse folders of FASTA and tool outputs, run analyses from a toolbar, and inspect results in an integrated preview pane.
 
 Built with **PySide6**, it targets the manual curation workflow—proofreading consensus sequences, checking terminal repeats, comparing dotplots, running BLAST against a reference genome, and cleaning alignments before publication or database submission.
 
-The app name shown in the window is **RepeatViewer**. The installable Python package and command-line entry point are **`teviewer`**.
+The app name shown in the window is **RepeatViewer**. The installable Python package and command-line entry point are **`repeatviewer`**.
 
 ## What you can do
 
@@ -67,10 +67,10 @@ Bundled **BLAST+**, **MAFFT**, and **MUSCLE** binaries are included for macOS, L
 **Requirements:** Python 3.10+, conda or venv recommended.
 
 ```bash
-git clone https://github.com/qjiangzhao/TEviewer.git
-cd TEviewer
-conda create -n teviewer python=3.10 -y
-conda activate teviewer
+git clone https://github.com/qjiangzhao/RepeatViewer.git
+cd RepeatViewer
+conda create -n repeatviewer python=3.10 -y
+conda activate repeatviewer
 pip install -e .
 ```
 
@@ -86,19 +86,19 @@ Flexidot (with HTML output and RepeatViewer integration) is installed as a depen
 ## Run
 
 ```bash
-teviewer
+repeatviewer
 ```
 
 Or from the repository root:
 
 ```bash
-python TEviewer.py
+python RepeatViewer.py
 ```
 
 Open a folder and genome immediately:
 
 ```bash
-teviewer -i /path/to/consensus/folder -g /path/to/genome.fa
+repeatviewer -i /path/to/consensus/folder -g /path/to/genome.fa
 ```
 
 | Flag | Meaning |
@@ -119,9 +119,9 @@ Workspace roots, window layout, genomes, and preferences are saved between sessi
 ## Project structure
 
 ```
-TEviewer/
-  TEviewer.py              # entry script
-  teviewer/
+RepeatViewer/
+  RepeatViewer.py              # entry script
+  repeatviewer/
     main_window.py         # browser UI, menus, job runner
     project.py             # genome, pan-genome, database settings
     backends/              # analysis engines (BLAST, TEAid, Flexidot, …)
@@ -139,4 +139,4 @@ The two tools are independent applications; RepeatViewer does not require a TEtr
 
 ## Citation
 
-If RepeatViewer contributes to your work, cite **TEtrimmer** (*Nature Communications*, 2025) when applicable and mention **RepeatViewer (TEviewer)** for manual curation and visualization.
+If RepeatViewer contributes to your work, cite **TEtrimmer** (*Nature Communications*, 2025) when applicable and mention **RepeatViewer** for manual curation and visualization.

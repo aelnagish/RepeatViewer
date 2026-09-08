@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from teviewer.backends.separate_fasta import sanitize_name, separate_sequences
+from repeatviewer.backends.separate_fasta import sanitize_name, separate_sequences
 
 
 def test_sanitize_name_replaces_hash_with_underscore() -> None:

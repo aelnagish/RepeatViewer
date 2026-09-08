@@ -1,18 +1,18 @@
-# TEviewer plugins
+# RepeatViewer plugins
 
 Plugins add **new toolbar tools** that use the same file list and job flow as Blast, TEAid, Flexidot, etc.
 
-> **Note:** Plugin loading is enabled in the current build. The bundled **Minimap2** plugin ships with TEviewer (`pip install -e .`). Additional plugins can be installed with their own `pip install -e .` packages.
+> **Note:** Plugin loading is enabled in the current build. The bundled **Minimap2** plugin ships with RepeatViewer (`pip install -e .`). Additional plugins can be installed with their own `pip install -e .` packages.
 
 ## What plugins receive
 
 - **Selected files** from the Files panel (by default only FASTA; can opt into all file types).
-- **`TEviewerProject`** — genome path, input dir, BLAST settings, `batch_workers`, etc.
+- **`RepeatViewerProject`** — genome path, input dir, BLAST settings, `batch_workers`, etc.
 - Each file’s folder is the natural place for outputs (same rule as built-in tools).
 
 ## What plugins must provide
 
-Subclass `TEviewerPlugin` in `teviewer.plugins.api` and implement:
+Subclass `RepeatViewerPlugin` in `repeatviewer.plugins.api` and implement:
 
 | Member | Purpose |
 |--------|---------|
@@ -33,31 +33,31 @@ Optional:
 In your package `pyproject.toml`:
 
 ```toml
-[project.entry-points."teviewer.plugins"]
-my_tool = "my_package.teviewer_plugin:MyPlugin"
+[project.entry-points."repeatviewer.plugins"]
+my_tool = "my_package.repeatviewer_plugin:MyPlugin"
 ```
 
-Install the package in the same environment as TEviewer:
+Install the package in the same environment as RepeatViewer:
 
 ```bash
-pip install -e ./my-teviewer-plugin
+pip install -e ./my-repeatviewer-plugin
 ```
 
-Restart TEviewer. The plugin appears on the function toolbar after a separator.
+Restart RepeatViewer. The plugin appears on the function toolbar after a separator.
 
-Open **TEviewer → Setting → Toolbar** to choose visible tools and button order.
+Open **RepeatViewer → Setting → Toolbar** to choose visible tools and button order.
 
 ## Examples
 
 | Example | Purpose |
 |---------|---------|
-| `examples/teviewer_sequence_stats_plugin/` | Minimal plugin (sequence stats text file) |
-| `examples/teviewer_benchmark_plugin/` | **TEtrimmer TE benchmarking** (RepeatMasker `.out` vs reference) — see **[PLUGINS_TE_BENCHMARK.md](PLUGINS_TE_BENCHMARK.md)** |
+| `examples/repeatviewer_sequence_stats_plugin/` | Minimal plugin (sequence stats text file) |
+| `examples/repeatviewer_benchmark_plugin/` | **TEtrimmer TE benchmarking** (RepeatMasker `.out` vs reference) — see **[PLUGINS_TE_BENCHMARK.md](PLUGINS_TE_BENCHMARK.md)** |
 
 ```bash
-cd examples/teviewer_sequence_stats_plugin
+cd examples/repeatviewer_sequence_stats_plugin
 pip install -e .
-teviewer
+repeatviewer
 ```
 
 ## Result format
@@ -86,7 +86,7 @@ def validate(self, files, project):
 
 ## Versioning
 
-Pin a compatible TEviewer range in your plugin’s dependencies, e.g. `teviewer>=0.2.0,<0.3.0`.
+Pin a compatible RepeatViewer range in your plugin’s dependencies, e.g. `repeatviewer>=0.2.0,<0.3.0`.
 
 ## Future ideas (not implemented yet)
 

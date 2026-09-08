@@ -1,0 +1,118 @@
+"""Write genome-coordinate GFF3 from BLAST tabular output (*_blast.txt)."""
+
+from __future__ import annotations
+
+from operator import itemgetter
+from pathlib import Path
+
+from repeatviewer.backends.blast_genome_plot import read_blast_table
+from repeatviewer.backends.flexidot_gff import distinct_feature_color
+
+
+def blast_gff_output_path(blast_txt: Path) -> Path:
+    """``{query}_blast.txt`` → ``{query}_blast.gff`` (same pattern as manual m8 → gff)."""
+    blast_txt = blast_txt.expanduser().resolve()
+    name = blast_txt.name
+    if name.endswith("_blast.txt"):
+        return blast_txt.with_name(name[:-4] + ".gff")
+    if name.endswith(".txt"):
+        return blast_txt.with_suffix(".gff")
+    return blast_txt.parent / f"{blast_txt.name}.gff"
+
+
+def _normalize_strand(sstart: int, send: int, sstrand: str) -> tuple[int, int, str]:
+    strand_raw = str(sstrand).strip().lower()
+    if "minus" in strand_raw or strand_raw in {"-", "reverse", "rev"}:
+        return min(sstart, send), max(sstart, send), "-"
+    if "plus" in strand_raw or strand_raw in {"+", "forward", "fwd"}:
+        return min(sstart, send), max(sstart, send), "+"
+    if sstart < send:
+        return sstart, send, "+"
+    return send, sstart, "-"
+
+
+def _gff_escape_attr(value: str) -> str:
+    return str(value).replace(";", "%3B").replace("=", "%3D").replace("\t", " ")
+
+
+def _blast_gff_attributes(query: str, color: str) -> str:
+    safe_query = _gff_escape_attr(query)
+    return f"ID={safe_query};Name={safe_query};type={safe_query};color={color}"
+
+
+def blast_hits_to_gff_rows(
+    blast_txt: Path,
+    *,
+    minimum_bit_score: float = 0.0,
+    protein_coordinates: bool = False,
+) -> list[list[str]]:
+    """Convert BLAST hits to GFF rows (sorted by chromosome, start)."""
+    df = read_blast_table(blast_txt)
+    if df.empty:
+        return []
+
+    queries = sorted({str(q) for q in df["qseqid"].astype(str)})
+    color_by_query = {query: distinct_feature_color(query) for query in queries}
+
+    rows: list[list[str]] = []
+    for _, hit in df.iterrows():
+        bit_score = float(hit["bitscore"])
+        if bit_score < minimum_bit_score:
+            continue
+        query = str(hit["qseqid"])
+        chrom = str(hit["sseqid"])
+        sstart = int(hit["sstart"])
+        send = int(hit["send"])
+        start, end, strand = _normalize_strand(sstart, send, str(hit.get("sstrand", "")))
+        if protein_coordinates:
+            strand = "."
+        color = color_by_query[query]
+
+        rows.append(
+            [
+                chrom,
+                f"BLAST_{query}",
+                query,
+                str(start),
+                str(end),
+                str(bit_score),
+                strand,
+                ".",
+                _blast_gff_attributes(query, color),
+            ]
+        )
+
+    return sorted(rows, key=itemgetter(0, 3))
+
+
+def write_blast_gff(
+    blast_txt: Path,
+    *,
+    minimum_bit_score: float = 0.0,
+    output_path: Path | None = None,
+    protein_coordinates: bool = False,
+) -> Path:
+    """Write GFF3 next to a BLAST table using subject-sequence coordinates."""
+    blast_txt = blast_txt.expanduser().resolve()
+    out = (output_path or blast_gff_output_path(blast_txt)).expanduser().resolve()
+    gff_rows = blast_hits_to_gff_rows(
+        blast_txt,
+        minimum_bit_score=minimum_bit_score,
+        protein_coordinates=protein_coordinates,
+    )
+
+    lines = [
+        "##gff-version 3",
+        "",
+        (
+            "##coordinates refer to the original protein database FASTA"
+            if protein_coordinates
+            else "##this gff works with the original genome fasta"
+        ),
+        "",
+    ]
+    for gff_list in gff_rows:
+        lines.append("\t".join(gff_list))
+
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out

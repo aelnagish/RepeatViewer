@@ -6,22 +6,22 @@ from pathlib import Path
 
 import pytest
 
-from teviewer.backends.blast_gff import blast_gff_output_path
-from teviewer.backends.blast_genome_plot import (
+from repeatviewer.backends.blast_gff import blast_gff_output_path
+from repeatviewer.backends.blast_genome_plot import (
     blast_table_candidates_for_query,
     blast_txt_path_for_query,
 )
-from teviewer.backends.curation import (
+from repeatviewer.backends.curation import (
     cleanup_blast_scratch_files,
     cleanup_flexidot_intermediates,
     effective_batch_workers,
     flexidot_output_stem,
 )
-from teviewer.backends.flexidot_gff import (
+from repeatviewer.backends.flexidot_gff import (
     persistent_flexidot_color_config_path,
     persistent_flexidot_legend_path,
 )
-from teviewer.browser_file_filter import is_tool_output_file
+from repeatviewer.browser_file_filter import is_tool_output_file
 
 
 @pytest.mark.parametrize(
@@ -89,7 +89,7 @@ def test_cleanup_flexidot_intermediates(tmp_path: Path) -> None:
     scratch_dir = tmp_path / "flexidot_output-1"
     scratch_dir.mkdir()
     (scratch_dir / "plot.png").write_text("x")
-    temp_gff = tmp_path / ".teviewer_flexidot_reads_flexidot_1.gff3"
+    temp_gff = tmp_path / ".repeatviewer_flexidot_reads_flexidot_1.gff3"
     temp_gff.write_text("##gff")
     cleanup_flexidot_intermediates(tmp_path, [keep])
     assert keep.is_file()

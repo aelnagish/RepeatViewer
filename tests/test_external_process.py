@@ -6,14 +6,14 @@ import subprocess
 import pytest
 from pathlib import Path
 
-from teviewer.external_process import log_command, log_process_output, run_logged_process
+from repeatviewer.external_process import log_command, log_process_output, run_logged_process
 
 
 def test_command_and_terminal_output_are_logged(caplog, tmp_path: Path) -> None:
     fasta = tmp_path / "sequence with spaces.fa"
     command = ["external-tool", "--query", str(fasta), "--value", "a b"]
 
-    with caplog.at_level(logging.INFO, logger="teviewer.commands"):
+    with caplog.at_level(logging.INFO, logger="repeatviewer.commands"):
         log_command("ExternalTool", command, inputs=[fasta], cwd=tmp_path)
         log_process_output(
             "ExternalTool",
@@ -32,7 +32,7 @@ def test_command_and_terminal_output_are_logged(caplog, tmp_path: Path) -> None:
 
 
 def test_result_stdout_can_be_omitted_from_log(caplog) -> None:
-    with caplog.at_level(logging.INFO, logger="teviewer.commands"):
+    with caplog.at_level(logging.INFO, logger="repeatviewer.commands"):
         log_process_output(
             "MAFFT",
             stdout=">sequence\nACGT\n",
@@ -51,7 +51,7 @@ def test_run_logs_process_lifecycle_and_streams(caplog) -> None:
         "import sys; print('step one', flush=True); "
         "print('warning one', file=sys.stderr, flush=True)",
     ]
-    with caplog.at_level(logging.INFO, logger="teviewer.commands"):
+    with caplog.at_level(logging.INFO, logger="repeatviewer.commands"):
         result = run_logged_process(command, tool="demo", check=True)
 
     assert result.returncode == 0
@@ -69,7 +69,7 @@ def test_failed_run_logs_error_output_and_exit_code(caplog) -> None:
         "-c",
         "import sys; print('fatal detail', file=sys.stderr, flush=True); sys.exit(7)",
     ]
-    with caplog.at_level(logging.INFO, logger="teviewer.commands"):
+    with caplog.at_level(logging.INFO, logger="repeatviewer.commands"):
         with pytest.raises(subprocess.CalledProcessError) as caught:
             run_logged_process(command, tool="broken", check=True)
 

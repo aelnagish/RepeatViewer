@@ -1,4 +1,4 @@
-from teviewer.backends.flexidot_go_to import parse_dotplot_go_to_targets
+from repeatviewer.backends.flexidot_go_to import parse_dotplot_go_to_targets
 
 
 def test_previous_flexidot_x_axis_payload() -> None:

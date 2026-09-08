@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "teviewer"
+name = "repeatviewer"
 version = "0.2.0"
-description = "RepeatViewer (TEviewer): PySide6 desktop app for TE curation, annotation, and visualization"
+description = "RepeatViewer: PySide6 desktop app for TE curation, annotation, and visualization"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-  { name = "TEtrimmer / TEviewer contributors" },
+  { name = "TEtrimmer / RepeatViewer contributors" },
 ]
 dependencies = [
   "PySide6>=6.6",
@@ -31,19 +31,19 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
-# Flat Fusion theme (not default). Enable with: TEVIEWER_USE_QDARKTHEME=1
+# Flat Fusion theme (not default). Enable with: REPEATVIEWER_USE_QDARKTHEME=1
 theme-flat = ["pyqtdarktheme-fork>=2.3.2"]
 
 [project.scripts]
-teviewer = "teviewer.cli:main"
+repeatviewer = "repeatviewer.cli:main"
 
 [tool.setuptools.packages.find]
-where = [".", "examples/teviewer_minimap2_plugin/src"]
-include = ["teviewer*", "teviewer_minimap2*"]
+where = [".", "examples/repeatviewer_minimap2_plugin/src"]
+include = ["repeatviewer*", "repeatviewer_minimap2*"]
 
-[project.entry-points."teviewer.plugins"]
-minimap2 = "teviewer_minimap2.plugin:Minimap2Plugin"
+[project.entry-points."repeatviewer.plugins"]
+minimap2 = "repeatviewer_minimap2.plugin:Minimap2Plugin"
 
 [tool.setuptools.package-data]
-teviewer = ["backends/blast/*", "backends/mafft/**/*", "backends/muscle/**/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*", "assets/igv/*"]
-teviewer_minimap2 = ["binaries/**/*"]
+repeatviewer = ["backends/blast/*", "backends/mafft/**/*", "backends/muscle/**/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*", "assets/igv/*"]
+repeatviewer_minimap2 = ["binaries/**/*"]

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from teviewer.backends.te_abundance_plot import (
+from repeatviewer.backends.te_abundance_plot import (
     TE_ABUNDANCE_PERCENT,
     _merged_interval_bp,
     family_occupied_bp,

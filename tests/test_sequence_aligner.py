@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from teviewer.backends.sequence_aligner import (
+from repeatviewer.backends.sequence_aligner import (
     _fasta_sequence_count,
     _mafft_arguments,
     bundled_mafft_command,
     bundled_muscle_command,
     run_alignment,
 )
-from teviewer.job_options import (
+from repeatviewer.job_options import (
     ALIGNER_MAFFT,
     AlignOptions,
     MAFFT_SEQUENCE_NUCLEOTIDE,

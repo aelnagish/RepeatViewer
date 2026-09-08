@@ -2,9 +2,9 @@ from pathlib import Path
 
 from Bio import SeqIO
 
-from teviewer.backends.orf_detect import OrfDetectResult
-from teviewer.backends.sequence_features import SequenceFeature
-from teviewer.backends.sequence_operations import (
+from repeatviewer.backends.orf_detect import OrfDetectResult
+from repeatviewer.backends.sequence_features import SequenceFeature
+from repeatviewer.backends.sequence_operations import (
     write_predicted_orfs_fasta,
     write_reverse_complement_fasta,
     write_translated_orfs_fasta,
@@ -33,7 +33,7 @@ def test_orf_prediction_and_translation_use_detected_strand(
     _write_fasta(source, "ATGAAATAA")
     feature = SequenceFeature(1, 9, "ORF1", "ORF", color="#27ae60", strand="+")
     monkeypatch.setattr(
-        "teviewer.backends.sequence_operations.detect_orf_features",
+        "repeatviewer.backends.sequence_operations.detect_orf_features",
         lambda *_args, **_kwargs: OrfDetectResult((feature,), "Detected 1 ORF."),
     )
 

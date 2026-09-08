@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from teviewer.backends.repeat_quantify import (
+from repeatviewer.backends.repeat_quantify import (
     _aggregate_rm_rows,
     _fasta_lengths,
     _format_copy_number,

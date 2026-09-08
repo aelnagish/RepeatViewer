@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from teviewer.backends.blast_gff import blast_hits_to_gff_rows, write_blast_gff
+from repeatviewer.backends.blast_gff import blast_hits_to_gff_rows, write_blast_gff
 
 
 def _write_blast_table(path: Path) -> None:

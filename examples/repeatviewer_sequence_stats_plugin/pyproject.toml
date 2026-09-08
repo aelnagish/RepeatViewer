@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repeatviewer-sequence-stats"
+version = "0.1.0"
+description = "Example RepeatViewer plugin — sequence length report"
+requires-python = ">=3.10"
+dependencies = ["repeatviewer>=0.2.0", "biopython>=1.80"]
+
+[project.entry-points."repeatviewer.plugins"]
+sequence_stats = "repeatviewer_sequence_stats.plugin:SequenceStatsPlugin"
+
+[tool.setuptools.packages.find]
+where = ["src"]

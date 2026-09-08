@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RepeatViewer — alignment</title>
+  <script src="igv.min.js"></script>
+  <style>
+    html, body {
+      height: 100%;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: system-ui, sans-serif;
+    }
+    #igv-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      border-bottom: 1px solid #ccc;
+      background: #f5f5f5;
+      flex-shrink: 0;
+    }
+    #igv-toolbar button {
+      font-size: 13px;
+      padding: 4px 10px;
+    }
+    #igv-toolbar span {
+      color: #444;
+      font-size: 12px;
+    }
+    #igv-main {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+    #igv-container {
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    #error {
+      padding: 12px;
+      color: #a00;
+      white-space: pre-wrap;
+    }
+    #igv-file-input {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="igv-main">
+    <div id="igv-toolbar">
+      <button type="button" id="igv-add-track-btn">Add track…</button>
+      <span>GFF, GTF, BED, BAM, SAM</span>
+      <input type="file" id="igv-file-input" accept=".gff,.gff3,.gtf,.bed,.bam,.sam,application/gff,text/plain" multiple>
+    </div>
+    <div id="error" style="display:none;"></div>
+    <div id="igv-container"></div>
+  </div>
+  <script>
+    window.repeatviewerIgvBrowser = null;
+
+    function showError(msg) {
+      var el = document.getElementById("error");
+      el.style.display = "block";
+      el.textContent = msg;
+    }
+
+    window.repeatviewerIgvLoadTrack = function (config) {
+      if (!window.repeatviewerIgvBrowser) {
+        return Promise.reject(new Error("IGV browser is not ready yet"));
+      }
+      return window.repeatviewerIgvBrowser.loadTrack(config);
+    };
+
+    function uploadAndLoadTrack(file) {
+      var url = "upload?name=" + encodeURIComponent(file.name);
+      return fetch(url, {
+        method: "POST",
+        body: file,
+        headers: { "Content-Type": "application/octet-stream" },
+      })
+        .then(function (response) {
+          if (!response.ok) {
+            return response.text().then(function (text) {
+              throw new Error(text || ("Upload failed (" + response.status + ")"));
+            });
+          }
+          return response.json();
+        })
+        .then(function (payload) {
+          return window.repeatviewerIgvLoadTrack(payload.track);
+        });
+    }
+
+    document.getElementById("igv-add-track-btn").addEventListener("click", function () {
+      document.getElementById("igv-file-input").click();
+    });
+
+    document.getElementById("igv-file-input").addEventListener("change", function (event) {
+      var files = event.target.files;
+      if (!files || !files.length) {
+        return;
+      }
+      var chain = Promise.resolve();
+      for (var i = 0; i < files.length; i++) {
+        (function (file) {
+          chain = chain.then(function () {
+            return uploadAndLoadTrack(file);
+          });
+        })(files[i]);
+      }
+      chain.catch(function (err) {
+        showError("Add track failed:\n" + err);
+      });
+      event.target.value = "";
+    });
+
+    fetch("config.json", { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("config.json not found");
+        }
+        return response.json();
+      })
+      .then(function (config) {
+        return igv.createBrowser(document.getElementById("igv-container"), config);
+      })
+      .then(function (browser) {
+        window.repeatviewerIgvBrowser = browser;
+      })
+      .catch(function (err) {
+        showError("IGV preview failed:\n" + err);
+      });
+  </script>
+</body>
+</html>

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from teviewer.backends.blast_genome_plot import prepare_hits, read_repeatmasker_out
+from repeatviewer.backends.blast_genome_plot import prepare_hits, read_repeatmasker_out
 
 
 def test_blast_query_name_classification_levels() -> None:

@@ -1,4 +1,4 @@
-from teviewer.backends.blast_genome_plot import _plotly_interactive_controls_html
+from repeatviewer.backends.blast_genome_plot import _plotly_interactive_controls_html
 
 
 def test_plot_controls_offer_svg_and_pdf_exports() -> None:

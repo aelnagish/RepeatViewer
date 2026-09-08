@@ -1,4 +1,4 @@
-from teviewer.job_options import DEFAULT_MSA_CLEAN_ORDER, MsaCleanOptions
+from repeatviewer.job_options import DEFAULT_MSA_CLEAN_ORDER, MsaCleanOptions
 
 
 def test_msa_clean_defaults_to_gappy_columns_then_divergence() -> None:

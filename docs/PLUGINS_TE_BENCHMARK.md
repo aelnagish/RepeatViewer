@@ -6,7 +6,7 @@ It compares **query** RepeatMasker `.out` files to a **reference** `.out` (curat
 
 | Output | Description |
 |--------|-------------|
-| `{query}_sankey.html` | Interactive Sankey (open in TEviewer Preview) |
+| `{query}_sankey.html` | Interactive Sankey (open in RepeatViewer Preview) |
 | `{query}_heatmap_proportion_plot.pdf` | Heatmap |
 | `{query}_confusion_matrix.txt` | Confusion metrics |
 | `{query}_confusion_matrix_TP_TN_FP_FN.txt` | TP/TN/FP/FN |
@@ -19,13 +19,13 @@ Outputs are saved **next to each query `.out` file** (same folder as in the File
 
 1. **TEtrimmer repository** cloned locally (contains `tetrimmer/TE_anno_benchmarker.py`).
 2. **bedtools** on `PATH`.
-3. **Genome FASTA** set in TEviewer **File → Project settings** (same as Blast/TEAid).
+3. **Genome FASTA** set in RepeatViewer **File → Project settings** (same as Blast/TEAid).
 4. **Reference** RepeatMasker `.out` from your gold-standard TE library (set once in the plugin dialog).
 
 ## Install the plugin
 
 ```bash
-cd /path/to/TEviewer/examples/teviewer_benchmark_plugin
+cd /path/to/RepeatViewer/examples/repeatviewer_benchmark_plugin
 pip install -e .
 ```
 
@@ -35,9 +35,9 @@ Optional — point to TEtrimmer without using the dialog every time:
 export TETRIMMER_HOME=/path/to/TEtrimmer
 ```
 
-Restart TEviewer. A **TE benchmark** button appears on the toolbar (after built-in tools).
+Restart RepeatViewer. A **TE benchmark** button appears on the toolbar (after built-in tools).
 
-## How to run in TEviewer
+## How to run in RepeatViewer
 
 1. In **Files**, turn off **FASTA only** if needed (or keep it on and only select `.out` files).
 2. Select one or more **query** `.out` files (RepeatMasker output to evaluate).
@@ -63,10 +63,10 @@ python tetrimmer/TE_anno_benchmarker.py \
 ## Package layout
 
 ```
-examples/teviewer_benchmark_plugin/
-  pyproject.toml          # entry point: teviewer.plugins → te_benchmark
-  src/teviewer_benchmark/
-    plugin.py             # TEviewerPlugin subclass
+examples/repeatviewer_benchmark_plugin/
+  pyproject.toml          # entry point: repeatviewer.plugins → te_benchmark
+  src/repeatviewer_benchmark/
+    plugin.py             # RepeatViewerPlugin subclass
     dialog.py             # TEtrimmer path + reference .out
     tetrimmer_runner.py   # import TE_anno_benchmarker by file path
 ```
@@ -81,7 +81,7 @@ examples/teviewer_benchmark_plugin/
 
 | Problem | Fix |
 |---------|-----|
-| Plugin not listed | `pip install -e .` in the plugin folder; restart TEviewer |
+| Plugin not listed | `pip install -e .` in the plugin folder; restart RepeatViewer |
 | TEtrimmer not found | Set **TEtrimmer folder** in dialog or `TETRIMMER_HOME` |
 | bedtools missing | `conda install -c bioconda bedtools` or system package |
 | No genome | Project settings → Genome FASTA |

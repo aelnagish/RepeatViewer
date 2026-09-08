@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QUrl
 
-from teviewer.widgets.html_preview import _local_file_url, _webengine_safe_html_path
+from repeatviewer.widgets.html_preview import _local_file_url, _webengine_safe_html_path
 
 
 def test_local_file_url_encodes_hash_in_filename() -> None:

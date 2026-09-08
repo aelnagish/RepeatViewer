@@ -1,4 +1,4 @@
-from teviewer.job_options import (
+from repeatviewer.job_options import (
     FlexidotOptions,
     load_flexidot_options,
     normalize_flexidot_output_format,
@@ -22,8 +22,8 @@ def test_save_and_load_flexidot_output_format(monkeypatch) -> None:
     def _load(group):
         return saved.get(group, {})
 
-    monkeypatch.setattr("teviewer.job_options._save_settings_group", _save)
-    monkeypatch.setattr("teviewer.job_options._load_settings_group", _load)
+    monkeypatch.setattr("repeatviewer.job_options._save_settings_group", _save)
+    monkeypatch.setattr("repeatviewer.job_options._load_settings_group", _load)
 
     save_flexidot_options(
         FlexidotOptions(
