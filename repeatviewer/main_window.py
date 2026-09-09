@@ -676,88 +676,6 @@ class FastGaWorker(QObject):
             self.failed.emit(str(exc))
 
 
-class FlexidotClassifierWorker(QObject):
-    """Run the external Flexidot-Classifier off the UI thread.
-
-    Two modes:
-    * ``plot_files`` given → classify existing Flexidot PDF/PNG plots.
-    * ``seq_files`` given → generate self-mode (-m 0) PNG plots first, then
-      classify them (one-click flow).
-    Emits a ClassifierResult (per-class counts, indices, annotated images).
-    """
-
-    progress = Signal(int, str)
-    finished = Signal(object)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        *,
-        plot_files: list[Path] | None = None,
-        seq_files: list[Path] | None = None,
-        flexidot_options=None,
-        home=None,
-        cancel=None,
-    ) -> None:
-        super().__init__()
-        self._plot_files = list(plot_files) if plot_files else None
-        self._seq_files = list(seq_files) if seq_files else None
-        self._flexidot_options = flexidot_options
-        self._home = home
-        self._cancel = cancel
-
-    @Slot()
-    def run(self) -> None:
-        from repeatviewer.backends.flexidot_classifier import (
-            generate_and_classify,
-            run_flexidot_classifier,
-        )
-
-        try:
-            if self._seq_files is not None:
-                self.progress.emit(1, "Generating self-dotplots and classifying…")
-                result, _plots = generate_and_classify(
-                    self._seq_files,
-                    flexidot_options=self._flexidot_options,
-                    home=self._home,
-                    cancel=self._cancel,
-                )
-            else:
-                self.progress.emit(1, "Classifying dotplots…")
-                result = run_flexidot_classifier(self._plot_files, home=self._home)
-            self.finished.emit(result)
-        except Exception as exc:  # noqa: BLE001 - surface to the UI
-            self.failed.emit(str(exc))
-
-
-class FlexidotClassifierInstallWorker(QObject):
-    """Clone + provision the external Flexidot-Classifier off the UI thread."""
-
-    progress = Signal(int, str)
-    finished = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, dest=None, *, cancel=None) -> None:
-        super().__init__()
-        self._dest = dest
-        self._cancel = cancel
-
-    @Slot()
-    def run(self) -> None:
-        from repeatviewer.backends.flexidot_classifier import install_flexidot_classifier
-
-        try:
-            def _progress(message: str) -> None:
-                self.progress.emit(1, message)
-
-            home = install_flexidot_classifier(
-                self._dest, progress=_progress, cancel=self._cancel
-            )
-            self.finished.emit(str(home))
-        except Exception as exc:  # noqa: BLE001 - surface to the UI
-            self.failed.emit(str(exc))
-
-
 class RepeatQuantifyWorker(QObject):
     """Quantify a repeat library across target sequences off the UI thread."""
 
@@ -2664,102 +2582,6 @@ class MainWindow(QMainWindow):
             body += f"\n\n{install_hint()}"
         QMessageBox.warning(self, "FastGA failed", body)
 
-    def _open_flexidot_classifier(self) -> None:
-        """Classify existing Flexidot self-dotplot files (PDF/PNG).
-
-        Show-results only: opens the annotated image(s) and reports counts. It
-        does not (yet) write the suggested class back onto sequences — see the
-        TODO in repeatviewer/backends/flexidot_classifier.py.
-        """
-        home = self._flexidot_classifier_home_or_prompt()
-        if home is None:
-            return
-        start_dir = str(self._current_folder) if self._current_folder else ""
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select Flexidot self-dotplot files to classify (all PDF or all PNG)",
-            start_dir,
-            "Flexidot plots (*.pdf *.png)",
-        )
-        if not paths:
-            return
-        plot_files = [Path(p) for p in paths]
-        self._start_background_job(
-            FlexidotClassifierWorker(
-                plot_files=plot_files, home=home, cancel=self._job_cancel
-            ),
-            job_title="Flexidot-Classifier",
-            total_steps=1,
-            source_files=plot_files,
-            on_finished=self._on_flexidot_classifier_finished,
-            on_failed=self._on_flexidot_classifier_failed,
-        )
-
-    def _generate_and_classify_flexidot(self) -> None:
-        """One-click: make self-dotplots for the selection, then classify them."""
-        home = self._flexidot_classifier_home_or_prompt()
-        if home is None:
-            return
-        if flexidot_executable() is None:
-            QMessageBox.warning(
-                self,
-                "Flexidot not found",
-                "Flexidot is not on PATH.\n\nInstall with:\n  pip install flexidot",
-            )
-            return
-        selected = self._selected_files()
-        seq_files = [p for p in selected if p.suffix.lower() in _FASTA_SUFFIXES]
-        if not seq_files:
-            QMessageBox.information(
-                self,
-                "No sequence selected",
-                "Select one or more FASTA sequence files in the Files panel.",
-            )
-            return
-        self._start_background_job(
-            FlexidotClassifierWorker(
-                seq_files=seq_files,
-                flexidot_options=self._flexidot_options,
-                home=home,
-                cancel=self._job_cancel,
-            ),
-            job_title="Flexidot-Classifier (generate + classify)",
-            total_steps=1,
-            source_files=seq_files,
-            on_finished=self._on_flexidot_classifier_finished,
-            on_failed=self._on_flexidot_classifier_failed,
-        )
-
-    @Slot(object)
-    def _on_flexidot_classifier_finished(self, result) -> None:
-        counts = getattr(result, "counts", {}) or {}
-        summary = (
-            ", ".join(f"{k.upper()}: {v}" for k, v in counts.items())
-            or "no elements detected"
-        )
-        images = [
-            Path(p)
-            for p in getattr(result, "annotated_images", [])
-            if Path(p).is_file()
-        ]
-        for index, img in enumerate(images):
-            self._open_preview_tab(img, replace=(index == 0))
-        self._set_status_message(f"Flexidot-Classifier — {summary}", 15000)
-        QMessageBox.information(
-            self,
-            "Flexidot-Classifier",
-            f"Detected — {summary}.\n\n"
-            "These are image-based suggestions; confirm before curating. If the "
-            "boxes are misaligned, the tool's crop/threshold settings need "
-            "calibrating to RepeatViewer's Flexidot rendering.",
-        )
-
-    @Slot(str)
-    def _on_flexidot_classifier_failed(self, error: str) -> None:
-        QMessageBox.warning(
-            self, "Flexidot-Classifier failed", error.strip() or "Unknown error."
-        )
-
     def _repeat_quantify_candidates(self) -> list[Path]:
         """FASTA files to offer in the quantify dialog: selection first, then folder."""
         seen: dict[str, Path] = {}
@@ -2839,85 +2661,6 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(
             self, "Repeat quantify failed", error.strip() or "Unknown error."
         )
-
-    def _flexidot_classifier_home_or_prompt(self):
-        """Return the classifier home, or offer guided install and return None."""
-        from repeatviewer.backends.flexidot_classifier import (
-            default_flexidot_classifier_home,
-        )
-
-        home = default_flexidot_classifier_home()
-        if home is not None:
-            return home
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Flexidot Classifier not installed")
-        box.setText(
-            "The Flexidot Classifier tool isn't installed yet.\n\n"
-            "RepeatViewer can download and set it up for you (needs git, "
-            "Python 3.10+, and an internet connection), or you can install it "
-            "manually."
-        )
-        install_btn = box.addButton(
-            "Install automatically", QMessageBox.ButtonRole.AcceptRole
-        )
-        commands_btn = box.addButton(
-            "Show commands", QMessageBox.ButtonRole.ActionRole
-        )
-        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is install_btn:
-            self._start_flexidot_classifier_install()
-        elif clicked is commands_btn:
-            self._show_flexidot_classifier_commands()
-        return None
-
-    def _show_flexidot_classifier_commands(self) -> None:
-        from repeatviewer.backends.flexidot_classifier import MANUAL_INSTALL_COMMANDS
-
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setWindowTitle("Install Flexidot Classifier")
-        box.setText(
-            "Run these in a terminal, then click Flexidot Classifier again:"
-        )
-        box.setInformativeText(MANUAL_INSTALL_COMMANDS)
-        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        box.exec()
-
-    def _start_flexidot_classifier_install(self) -> None:
-        self._start_background_job(
-            FlexidotClassifierInstallWorker(cancel=self._job_cancel),
-            job_title="Flexidot Classifier setup",
-            total_steps=4,
-            source_files=[],
-            on_finished=self._on_flexidot_classifier_installed,
-            on_failed=self._on_flexidot_classifier_install_failed,
-        )
-
-    @Slot(object)
-    def _on_flexidot_classifier_installed(self, home) -> None:
-        QMessageBox.information(
-            self,
-            "Flexidot Classifier installed",
-            f"Installed to {home}.\n\nClick Flexidot Classifier again to run it.",
-        )
-
-    @Slot(str)
-    def _on_flexidot_classifier_install_failed(self, error: str) -> None:
-        from repeatviewer.backends.flexidot_classifier import MANUAL_INSTALL_COMMANDS
-
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Flexidot Classifier setup failed")
-        box.setText(
-            (error.strip() or "Automatic setup failed.")
-            + "\n\nYou can install it manually instead:"
-        )
-        box.setInformativeText(MANUAL_INSTALL_COMMANDS)
-        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        box.exec()
 
     def _populate_blast_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         menu.addAction(
@@ -3002,15 +2745,6 @@ class MainWindow(QMainWindow):
                 flexidot_combined=False,
                 flexidot_options=self._flexidot_options,
             ),
-        )
-        menu.addSeparator()
-        menu.addAction(
-            "Classify selection (generate self-dotplots + classify)",
-            self._generate_and_classify_flexidot,
-        )
-        menu.addAction(
-            "Classify existing plot files…",
-            self._open_flexidot_classifier,
         )
         menu.addSeparator()
         menu.addAction("Change Flexidot parameters", self._modify_flexidot_parameters)
@@ -3820,18 +3554,6 @@ class MainWindow(QMainWindow):
                     "Right-click: run with saved settings."
                 ),
                 right_click_slot=self._run_flexidot_saved,
-            )
-        elif tool_id == "flexidot_classifier":
-            self._add_toolbar_action_button(
-                bar,
-                "Flexidot Classifier",
-                self._generate_and_classify_flexidot,
-                tooltip=(
-                    "Classify selected sequences as LTR / tandem / satellite.\n"
-                    "Click: generate self-dotplots and classify.\n"
-                    "Right-click: classify existing plot files."
-                ),
-                right_click_slot=self._open_flexidot_classifier,
             )
         elif tool_id == "tsd_search":
             self._add_toolbar_text_menu_button(
