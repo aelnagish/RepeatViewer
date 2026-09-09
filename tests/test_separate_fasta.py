@@ -44,12 +44,12 @@ def test_separation_output_dir_uses_input_stem_suffix(tmp_path: Path) -> None:
     src = tmp_path / "my file.fa"
     src.write_text(">a\nAAAA\n", encoding="utf-8")
     out = separation_output_dir(src)
-    assert out.name == "my_file_separated"
+    assert out.name == "my_file_sep"
 
 
 def test_separation_output_dir_conflict_adds_number(tmp_path: Path) -> None:
     src = tmp_path / "multi.fa"
     src.write_text(">a\nAAAA\n", encoding="utf-8")
-    (tmp_path / "multi_separated").mkdir()
+    (tmp_path / "multi_sep").mkdir()
     out = separation_output_dir(src)
-    assert out.name == "multi_separated_2"
+    assert out.name == "multi_sep_2"

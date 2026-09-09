@@ -280,5 +280,5 @@ def default_group_name(files: list[Path]) -> str:
     if not files:
         return "grouped_sequences"
     if len(files) == 2:
-        return f"{files[0].stem}_and_{files[1].stem}_combined"
-    return f"{files[0].stem}_and_{len(files) - 1}_combined"
+        return f"{files[0].stem}_and_{files[1].stem}_comb"
+    return f"{files[0].stem}_and_{len(files) - 1}_comb"

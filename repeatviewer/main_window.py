@@ -2405,22 +2405,31 @@ class MainWindow(QMainWindow):
                 "Select two or more FASTA files to group into one list.",
             )
             return
-        name, ok = QInputDialog.getText(
-            self,
-            "Group sequences into a list",
-            f"Combine {len(files)} sequence to one file.\n\nName for the new file:",
-            text=default_group_name(files),
+        default_name = default_group_name(files)
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Combine sequence to one file")
+        dialog.setLabelText(
+            f"Combine {len(files)} sequence to one file.\n\nName for the new file:"
         )
-        if not ok or not name.strip():
+        dialog.setTextValue(default_name)
+        dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        # QInputDialog otherwise shrinks; pin a width that fits long default stems.
+        name_px = dialog.fontMetrics().horizontalAdvance(default_name) + 48
+        dialog.resize(max(640, name_px + 120), dialog.sizeHint().height())
+        dialog.setMinimumWidth(max(640, name_px + 120))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = dialog.textValue()
+        if not name.strip():
             return
         out_path = files[0].parent / f"{safe_file_stem(name)}.fasta"
         try:
             written, count = group_sequences(files, out_path)
         except SequenceComposeError as exc:
-            QMessageBox.warning(self, "Group sequences", str(exc))
+            QMessageBox.warning(self, "Combine sequences", str(exc))
             return
         self._refresh_after_compose(
-            [written], f"Grouped {count} sequences into {written.name}"
+            [written], f"Combined {count} sequences into {written.name}"
         )
 
     def _extract_sequences_from_list(self, source_path: object = None) -> None:

@@ -41,12 +41,12 @@ def separation_output_dir(input_file: Path) -> Path:
     Choose an output folder for a multi-FASTA split.
 
     Naming rule:
-    - Always based on the input file name (stem), e.g. ``myfile_separated``.
+    - Always based on the input file name (stem), e.g. ``myfile_sep``.
     - If the folder already exists, append ``_2``, ``_3``, ... to avoid conflicts.
     """
     input_file = input_file.expanduser().resolve()
     parent = input_file.parent
-    base = f"{sanitize_name(input_file.stem)}_separated"
+    base = f"{sanitize_name(input_file.stem)}_sep"
 
     candidate = parent / base
     if not candidate.exists():
