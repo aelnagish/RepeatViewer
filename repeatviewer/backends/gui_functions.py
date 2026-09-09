@@ -561,18 +561,13 @@ def extract_fasta_from_bed(genome_fasta, bed_file, output_fasta):
     return output_fasta
 
 
-def flexidot_executable(*, use_system_flexidot: bool = False) -> str | None:
-    """Resolve the Flexidot CLI (PATH, then common pip user ``bin`` locations).
-
-    When ``use_system_flexidot`` is True, only ``PATH`` (``shutil.which``) is used.
-    """
+def flexidot_executable() -> str | None:
+    """Resolve the Flexidot CLI (PATH, then common pip user ``bin`` locations)."""
     import glob
 
     found = shutil.which("flexidot")
     if found:
         return found
-    if use_system_flexidot:
-        return None
     candidates: list[str] = []
     for pattern in (
         os.path.expanduser("~/Library/Python/*/bin/flexidot"),
@@ -613,9 +608,7 @@ def _flexidot_help_text(exe: str) -> str:
     return text
 
 
-def flexidot_supports_html(
-    exe: str | None = None, *, use_system_flexidot: bool = False
-) -> bool:
+def flexidot_supports_html(exe: str | None = None) -> bool:
     """True if the installed Flexidot lists ``html`` among the ``-f`` choices.
 
     The stock PyPI Flexidot only offers png/pdf/svg; the forked build adds html
@@ -623,27 +616,23 @@ def flexidot_supports_html(
     the ``{...}`` list) rather than anywhere in the text, to avoid false matches.
     """
     if exe is None:
-        exe = flexidot_executable(use_system_flexidot=use_system_flexidot)
+        exe = flexidot_executable()
     if not exe:
         return False
     help_text = _flexidot_help_text(exe)
     return any(tok in help_text for tok in ("{html", "html}", ",html", "html,"))
 
 
-def flexidot_supports_repeatviewer_integration(
-    exe: str | None = None, *, use_system_flexidot: bool = False
-) -> bool:
+def flexidot_supports_repeatviewer_integration(exe: str | None = None) -> bool:
     """True if the forked Flexidot exposes the ``--teviewer-integration`` flag."""
     if exe is None:
-        exe = flexidot_executable(use_system_flexidot=use_system_flexidot)
+        exe = flexidot_executable()
     if not exe:
         return False
     return "teviewer-integration" in _flexidot_help_text(exe)
 
 
-def effective_flexidot_filetype(
-    requested: str, *, use_system_flexidot: bool = False
-) -> str:
+def effective_flexidot_filetype(requested: str) -> str:
     """Map a requested Flexidot output format to one the installed build supports.
 
     ``html`` requires the fork; if it is unavailable, fall back to ``png`` so the
@@ -652,9 +641,7 @@ def effective_flexidot_filetype(
     ft = str(requested).strip().lower()
     if ft not in {"html", "png", "pdf", "svg"}:
         ft = "html"
-    if ft == "html" and not flexidot_supports_html(
-        use_system_flexidot=use_system_flexidot
-    ):
+    if ft == "html" and not flexidot_supports_html():
         return "png"
     return ft
 
@@ -690,7 +677,6 @@ def run_flexidot(
     length_scaling: bool = False,
     gff_source_fastas: list[str | os.PathLike] | None = None,
     gff_output_stem: str | None = None,
-    use_system_flexidot: bool = False,
     cancel=None,
 ):
     """
@@ -713,7 +699,7 @@ def run_flexidot(
     run_path, temp_path = prepare_flexidot_input_fasta(input_file, out_dir)
     original_name = os.path.basename(os.path.abspath(str(input_file)))
 
-    exe = flexidot_executable(use_system_flexidot=use_system_flexidot)
+    exe = flexidot_executable()
     if not exe:
         raise FileNotFoundError(
             "Flexidot command not found. Install with: pip install flexidot "
@@ -741,9 +727,7 @@ def run_flexidot(
             out_dir,
         ]
     )
-    if filetype == "html" and flexidot_supports_repeatviewer_integration(
-        exe, use_system_flexidot=use_system_flexidot
-    ):
+    if filetype == "html" and flexidot_supports_repeatviewer_integration(exe):
         # Show "Go to <seq> <start>-<end>" buttons in the dotplot that jump the
         # Annotation view; only available in the forked Flexidot build.
         flexidot_cmd.append("--teviewer-integration")

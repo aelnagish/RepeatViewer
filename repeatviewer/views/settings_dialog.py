@@ -148,7 +148,6 @@ def save_workspace(
     s.setValue("use_system_blast", project.use_system_blast)
     s.setValue("use_system_mafft", project.use_system_mafft)
     s.setValue("use_system_muscle", project.use_system_muscle)
-    s.setValue("use_system_flexidot", project.use_system_flexidot)
     s.setValue("use_system_sequence_viewer", project.use_system_sequence_viewer)
     s.setValue("batch_workers", project.batch_workers)
     if root_folders is not None:
@@ -869,7 +868,6 @@ class SettingsDialog(QDialog):
             use_system_blast=bool(s.value("use_system_blast", False)),
             use_system_mafft=bool(s.value("use_system_mafft", False)),
             use_system_muscle=bool(s.value("use_system_muscle", False)),
-            use_system_flexidot=bool(s.value("use_system_flexidot", False)),
             use_system_sequence_viewer=bool(s.value("use_system_sequence_viewer", False)),
             batch_workers=int(s.value("batch_workers", 4)),
         )

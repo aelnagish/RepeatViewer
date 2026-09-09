@@ -517,15 +517,12 @@ def run_flexidot_combined(
     flexidot_options: FlexidotOptions | None = None,
     cancel: JobCancellation | None = None,
     genome_label: str = "",
-    use_system_flexidot: bool = False,
 ) -> list[str]:
     """Flexidot for 2+ inputs: mode 1 (paired) or 2 (poly)."""
     if len(seq_files) < 2:
         raise ValueError("Combined Flexidot requires at least two sequences.")
     flex_opts = flexidot_options or FlexidotOptions()
-    filetype = effective_flexidot_filetype(
-        flex_opts.output_format, use_system_flexidot=use_system_flexidot
-    )
+    filetype = effective_flexidot_filetype(flex_opts.output_format)
     out_dir = seq_files[0].parent.resolve()
     combined = out_dir / f"_flexidot_{len(seq_files)}seq.fa"
     records = []
@@ -567,7 +564,6 @@ def run_flexidot_combined(
                 length_scaling=flex_opts.length_scaling,
                 gff_source_fastas=[str(path) for path in seq_files],
                 gff_output_stem=flexidot_output_stem(seq_files, genome_label),
-                use_system_flexidot=use_system_flexidot,
                 cancel=cancel,
             )
         finally:
@@ -919,10 +915,7 @@ def run_on_sequence(
         if seq_count < 1:
             raise RuntimeError(f"No sequences in {seq_path.name} (Flexidot needs at least one).")
         out_path = Path(out_dir).resolve()
-        use_system = bool(project.use_system_flexidot)
-        flexidot_filetype = effective_flexidot_filetype(
-            flex_opts.output_format, use_system_flexidot=use_system
-        )
+        flexidot_filetype = effective_flexidot_filetype(flex_opts.output_format)
         if flex_opts.modes:
             mode: str | list[str] = list(flex_opts.modes)
         else:
@@ -946,7 +939,6 @@ def run_on_sequence(
                 length_scaling=flex_opts.length_scaling,
                 gff_source_fastas=[str(seq_path)],
                 gff_output_stem=flexidot_output_stem([seq_path.resolve()], genome_label),
-                use_system_flexidot=use_system,
                 cancel=cancel,
             )
             created.extend(
@@ -1075,7 +1067,6 @@ def run_batch(
                     flexidot_options=flexidot_options,
                     cancel=cancel,
                     genome_label=genome_label,
-                    use_system_flexidot=bool(project.use_system_flexidot),
                 )
                 created_outputs.extend(outs)
                 for seq_path in seq_list:

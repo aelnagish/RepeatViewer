@@ -109,7 +109,6 @@ class RepeatViewerProject:
     use_system_blast: bool = False
     use_system_mafft: bool = False
     use_system_muscle: bool = False
-    use_system_flexidot: bool = False
     use_system_sequence_viewer: bool = False
     # How many sequences to process at once in batch jobs (Blast, TEAid, etc.)
     batch_workers: int = 4

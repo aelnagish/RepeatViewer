@@ -123,6 +123,9 @@ from repeatviewer.job_options import (
     DEFAULT_FLEXIDOT_LCS_SHADING,
     DEFAULT_FLEXIDOT_OUTPUT_FORMAT,
     DEFAULT_FLEXIDOT_WORDSIZE,
+    DEFAULT_FLEXIDOT_MODES,
+    FLEXIDOT_RIGHT_CLICK_RUN,
+    FLEXIDOT_RIGHT_CLICK_DIALOG,
     FLEXIDOT_OUTPUT_HTML,
     FLEXIDOT_OUTPUT_PNG,
     FLEXIDOT_OUTPUT_PDF,
@@ -161,7 +164,6 @@ from repeatviewer.job_options import (
     MUSCLE_MODE_SUPER5,
     ExtendOptions,
     FlexidotOptions,
-    DEFAULT_FLEXIDOT_MODES,
     MAX_FLEXIDOT_WORDSIZE,
     MIN_FLEXIDOT_WORDSIZE,
     GapRowOptions,
@@ -2136,16 +2138,23 @@ class ConsensusParamsDialog(QDialog):
 
 
 class FlexidotParamsDialog(QDialog):
+    """Flexidot parameters.
+
+    Left-click the toolbar button opens this dialog. The Parameters tab holds
+    matching and output settings; the Options tab sets what right-clicking the
+    toolbar button does.
+    """
+
     def __init__(
         self,
         *,
         initial: FlexidotOptions | None = None,
-        use_system_flexidot: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Flexidot parameters")
         opts = initial or FlexidotOptions()
+        self._run_after = False
         # These supported settings remain persisted but are intentionally not
         # exposed in this compact dialog.
         self._lcs_shading = opts.lcs_shading
@@ -2255,64 +2264,88 @@ class FlexidotParamsDialog(QDialog):
             "each selected file is plotted separately."
         )
 
-        self._use_system_flexidot = QCheckBox(
-            "Use Flexidot from the system PATH", self
-        )
-        self._use_system_flexidot.setChecked(use_system_flexidot)
-        self._use_system_flexidot.setToolTip(
-            "Use only the flexidot command found on PATH. When unticked, "
-            "also search common pip user install locations."
-        )
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Run Flexidot with saved parameters", FLEXIDOT_RIGHT_CLICK_RUN),
+            ("Open this dialog", FLEXIDOT_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_action == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
 
-        tabs = QTabWidget()
-        flexidot_tab = QWidget()
-        flexidot_layout = QVBoxLayout(flexidot_tab)
-        flexidot_layout.setContentsMargins(16, 14, 16, 14)
-        flexidot_layout.setSpacing(12)
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-        form.addRow("Word size (k-mer, -k):", self._wordsize)
-        form.addRow("Output format (-f):", self._output_format)
-        form.addRow("Allowed substitutions (-S):", self._substitutions)
-        form.addRow("Maximum N content (--max_n):", self._max_n)
-        form.addRow("Match line thickness (-A / --line_width):", self._line_width)
-        form.addRow("", self._wobble)
-        form.addRow("", self._include_reverse)
-        form.addRow("", self._length_scaling)
-        form.addRow("", self._use_gff)
-        form.addRow("", self._combined)
-        flexidot_layout.addLayout(form)
-        flexidot_layout.addStretch(1)
-        tabs.addTab(flexidot_tab, "Flexidot")
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the Flexidot button does:", self)
+        )
+        for radio in self._right_click_buttons.values():
+            rc_box_layout.addWidget(radio)
 
-        options_tab = QWidget()
+        options_tab = QWidget(self)
         options_layout = QVBoxLayout(options_tab)
         options_layout.setContentsMargins(16, 14, 16, 14)
-        options_layout.setSpacing(12)
-        exe_box = QGroupBox("Executable", self)
-        exe_box_layout = QVBoxLayout(exe_box)
-        exe_box_layout.addWidget(self._use_system_flexidot)
-        options_layout.addWidget(exe_box)
+        options_layout.setSpacing(14)
+        options_layout.addWidget(rc_box)
         options_layout.addStretch(1)
-        tabs.addTab(options_tab, "Options")
+
+        self._tabs = QTabWidget(self)
+        params_tab = QWidget(self)
+        params_form = QFormLayout(params_tab)
+        params_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        params_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        params_form.setHorizontalSpacing(12)
+        params_form.setVerticalSpacing(10)
+        params_form.addRow("Word size (k-mer, -k):", self._wordsize)
+        params_form.addRow("Output format (-f):", self._output_format)
+        params_form.addRow("Allowed substitutions (-S):", self._substitutions)
+        params_form.addRow("Maximum N content (--max_n):", self._max_n)
+        params_form.addRow(
+            "Match line thickness (-A / --line_width):", self._line_width
+        )
+        params_form.addRow("", self._wobble)
+        params_form.addRow("", self._include_reverse)
+        params_form.addRow("", self._length_scaling)
+        params_form.addRow("", self._use_gff)
+        params_form.addRow("", self._combined)
+        self._tabs.addTab(params_tab, "Parameters")
+        self._tabs.addTab(options_tab, "Options")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Run")
+        self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._run_button.setText("Run")
         restore = buttons.addButton(
             "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
         )
         restore.clicked.connect(self._restore_defaults)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(tabs)
+        layout.addWidget(self._tabs)
         layout.addWidget(buttons)
+        self._tabs.currentChanged.connect(self._update_run_button)
+        self._update_run_button(self._tabs.currentIndex())
+
+    def _update_run_button(self, tab_index: int) -> None:
+        self._run_button.setText("Save" if tab_index == 1 else "Run")
+
+    def _on_accept(self) -> None:
+        self._run_after = self._tabs.currentIndex() != 1
+        self.accept()
+
+    def should_run(self) -> bool:
+        return self._run_after
 
     def _restore_defaults(self) -> None:
         defaults = FlexidotOptions()
@@ -2330,13 +2363,15 @@ class FlexidotParamsDialog(QDialog):
         self._line_width.setValue(defaults.line_width)
         self._length_scaling.setChecked(defaults.length_scaling)
         self._combined.setChecked(defaults.combined)
-        self._use_system_flexidot.setChecked(False)
-
-    def use_system_flexidot(self) -> bool:
-        return self._use_system_flexidot.isChecked()
+        self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
 
     def options(self) -> FlexidotOptions:
         fmt = self._output_format.currentData()
+        right_click_action = FLEXIDOT_RIGHT_CLICK_RUN
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                right_click_action = value
+                break
         return FlexidotOptions(
             wordsize=self._wordsize.value(),
             lcs_shading=self._lcs_shading,
@@ -2355,6 +2390,7 @@ class FlexidotParamsDialog(QDialog):
             # Comparison mode is automatic: self for one sequence,
             # pairwise/all-vs-all for multiple.
             modes=DEFAULT_FLEXIDOT_MODES,
+            right_click_action=right_click_action,
         )
 
 

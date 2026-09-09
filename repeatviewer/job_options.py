@@ -331,6 +331,9 @@ DEFAULT_FLEXIDOT_COMBINED = True
 # all-vs-all from sequence count). Not exposed in the Flexidot dialog.
 FLEXIDOT_MODE_CHOICES = ("0", "1", "2")
 DEFAULT_FLEXIDOT_MODES: tuple[str, ...] = ()
+FLEXIDOT_RIGHT_CLICK_RUN = "run"
+FLEXIDOT_RIGHT_CLICK_DIALOG = "dialog"
+FLEXIDOT_RIGHT_CLICK_ACTIONS = (FLEXIDOT_RIGHT_CLICK_RUN, FLEXIDOT_RIGHT_CLICK_DIALOG)
 
 
 def auto_flexidot_mode(sequence_count: int) -> str:
@@ -389,6 +392,7 @@ class FlexidotOptions:
     combined: bool = DEFAULT_FLEXIDOT_COMBINED
     # Explicit flexidot comparison modes (-m); empty tuple = auto (see above).
     modes: tuple[str, ...] = DEFAULT_FLEXIDOT_MODES
+    right_click_action: str = FLEXIDOT_RIGHT_CLICK_RUN
 
 
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
@@ -1085,6 +1089,9 @@ def load_flexidot_options() -> FlexidotOptions:
     v = _load_settings_group("flexidot")
     wordsize = int(v.get("wordsize", DEFAULT_FLEXIDOT_WORDSIZE))
     wordsize = max(MIN_FLEXIDOT_WORDSIZE, min(MAX_FLEXIDOT_WORDSIZE, wordsize))
+    right_click_action = str(v.get("right_click_action", FLEXIDOT_RIGHT_CLICK_RUN))
+    if right_click_action not in FLEXIDOT_RIGHT_CLICK_ACTIONS:
+        right_click_action = FLEXIDOT_RIGHT_CLICK_RUN
     return FlexidotOptions(
         wordsize=wordsize,
         lcs_shading=str(v.get("lcs_shading", "true")).lower() in {"1", "true", "yes"},
@@ -1106,6 +1113,7 @@ def load_flexidot_options() -> FlexidotOptions:
         combined=str(v.get("combined", "true")).lower() in {"1", "true", "yes"},
         # Comparison mode is always automatic (not exposed in the dialog).
         modes=DEFAULT_FLEXIDOT_MODES,
+        right_click_action=right_click_action,
     )
 
 
@@ -1126,6 +1134,11 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
             "length_scaling": opts.length_scaling,
             "combined": opts.combined,
             "modes": ",".join(opts.modes),
+            "right_click_action": (
+                opts.right_click_action
+                if opts.right_click_action in FLEXIDOT_RIGHT_CLICK_ACTIONS
+                else FLEXIDOT_RIGHT_CLICK_RUN
+            ),
         },
     )
 

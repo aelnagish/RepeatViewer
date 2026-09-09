@@ -305,6 +305,7 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_BLASTP,
     BLAST_PROGRAM_BLASTX,
     EXTEND_RIGHT_CLICK_DIALOG,
+    FLEXIDOT_RIGHT_CLICK_DIALOG,
     load_align_options,
     load_blast_options,
     load_consensus_options,
@@ -2738,16 +2739,8 @@ class MainWindow(QMainWindow):
     def _populate_flexidot_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Flexidot with default parameters", self._run_flexidot_combined)
-        menu.addAction(
-            "Run for each file separately",
-            lambda: self._apply_function(
-                "flexidot",
-                flexidot_combined=False,
-                flexidot_options=self._flexidot_options,
-            ),
-        )
         menu.addSeparator()
-        menu.addAction("Change Flexidot parameters", self._modify_flexidot_parameters)
+        menu.addAction("Change Flexidot parameters…", self._modify_flexidot_parameters)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -3551,9 +3544,9 @@ class MainWindow(QMainWindow):
                 self._open_flexidot_dialog,
                 tooltip=(
                     "Click: set parameters and run.\n"
-                    "Right-click: run with saved settings."
+                    "Right-click: run with saved settings (set in the Options tab)."
                 ),
-                right_click_slot=self._run_flexidot_saved,
+                right_click_slot=self._quick_flexidot_right_click,
             )
         elif tool_id == "tsd_search":
             self._add_toolbar_text_menu_button(
@@ -7059,22 +7052,31 @@ class MainWindow(QMainWindow):
         )
 
     def _open_flexidot_dialog(self) -> None:
-        """Click Flexidot: parameters dialog. Run uses the saved combine mode."""
+        """Click Flexidot: parameters dialog. Run runs; Save (Options tab) stores only."""
         dialog = FlexidotParamsDialog(
             initial=self._flexidot_options,
-            use_system_flexidot=self._project.use_system_flexidot,
             parent=self,
         )
         try:
             if not dialog.exec():
                 return
             self._flexidot_options = dialog.options()
-            self._project.use_system_flexidot = dialog.use_system_flexidot()
             save_flexidot_options(self._flexidot_options)
             self._persist_workspace()
+            run_after = dialog.should_run()
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
-        self._run_flexidot_saved()
+        if run_after:
+            self._run_flexidot_saved()
+        else:
+            self._set_status_message("Flexidot settings saved", 4000)
+
+    def _quick_flexidot_right_click(self) -> None:
+        """Right-click Flexidot: run with saved settings, or open the dialog."""
+        if self._flexidot_options.right_click_action == FLEXIDOT_RIGHT_CLICK_DIALOG:
+            self._open_flexidot_dialog()
+        else:
+            self._run_flexidot_saved()
 
     def _run_te_annotation(self) -> None:
         from repeatviewer.backends.te_annotation_batch import is_single_sequence_fasta
@@ -7134,12 +7136,10 @@ class MainWindow(QMainWindow):
     def _modify_flexidot_parameters(self) -> None:
         dialog = FlexidotParamsDialog(
             initial=self._flexidot_options,
-            use_system_flexidot=self._project.use_system_flexidot,
             parent=self,
         )
         if dialog.exec():
             self._flexidot_options = dialog.options()
-            self._project.use_system_flexidot = dialog.use_system_flexidot()
             save_flexidot_options(self._flexidot_options)
             self._persist_workspace()
             self._set_status_message(
@@ -7914,16 +7914,13 @@ class MainWindow(QMainWindow):
                 extend_opts = replace(extend_opts, pan_genome_name=names[0])
                 job_kwargs["extend"] = extend_opts
         if func_name == "flexidot":
-            if flexidot_executable(
-                use_system_flexidot=self._project.use_system_flexidot
-            ) is None:
+            if flexidot_executable() is None:
                 QMessageBox.warning(
                     self,
                     "Flexidot not found",
                     "Flexidot is not on PATH.\n\nInstall with:\n  pip install flexidot\n\n"
                     "If it is installed, add your Python scripts directory to PATH "
-                    "(e.g. ~/Library/Python/3.x/bin on macOS), or clear "
-                    "'Use Flexidot from the system PATH' in Flexidot → Options.",
+                    "(e.g. ~/Library/Python/3.x/bin on macOS).",
                 )
                 return
         if func_name == "tsd_search":
