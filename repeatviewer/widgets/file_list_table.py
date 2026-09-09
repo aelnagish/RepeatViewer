@@ -788,7 +788,7 @@ class FileListTableWidget(QTableWidget):
             if len(fasta_paths) > 1:
                 menu.addSeparator()
                 menu.addAction(
-                    f"Combine {len(fasta_paths)} sequences to a file",
+                    f"Combine {len(fasta_paths)} sequence to one file",
                     lambda ps=list(fasta_paths): self.group_sequences_requested.emit(ps),
                 )
             menu.exec(self.mapToGlobal(position))

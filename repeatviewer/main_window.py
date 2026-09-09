@@ -357,7 +357,6 @@ from repeatviewer.views.tool_dialogs import (
     exec_modal_dialog,
 )
 from repeatviewer.backends.separate_fasta import (
-    SEPARATED_TE_DIR,
     count_fasta_sequences,
     sanitize_name,
     separate_sequences,
@@ -2408,7 +2407,7 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(
             self,
             "Group sequences into a list",
-            f"Combine {len(files)} files into one FASTA.\n\nName for the new file:",
+            f"Combine {len(files)} sequence to one file.\n\nName for the new file:",
             text=default_group_name(files),
         )
         if not ok or not name.strip():
@@ -7543,9 +7542,7 @@ class MainWindow(QMainWindow):
 
         output_dir = separation_output_dir(path)
         mapping_note = (
-            "Sequence_name_mapping.txt will be written next to the input file."
-            if output_dir.name == SEPARATED_TE_DIR
-            else f"Sequence_name_mapping_{sanitize_name(path.stem)}.txt will be written next to the input file."
+            f"Sequence_name_mapping_{sanitize_name(path.stem)}.txt will be written next to the input file."
         )
         if subfolder_per_sequence:
             title = "Separate into subfolders"

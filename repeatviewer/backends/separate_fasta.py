@@ -9,8 +9,6 @@ from Bio import SeqIO
 
 logger = logging.getLogger(__name__)
 
-SEPARATED_TE_DIR = "Separated_TE_sequence"
-
 SPECIAL_CHARACTER = {
     "/": "__",
     "\\": "__",
@@ -42,22 +40,28 @@ def separation_output_dir(input_file: Path) -> Path:
     """
     Choose an output folder for a multi-FASTA split.
 
-    First split in a directory uses ``Separated_TE_sequence``.
-    If that folder already exists, use ``{input_stem}_Separated_TE_sequence`` so
-    splits from different source files do not collide.
+    Naming rule:
+    - Always based on the input file name (stem), e.g. ``myfile_separated``.
+    - If the folder already exists, append ``_2``, ``_3``, ... to avoid conflicts.
     """
     input_file = input_file.expanduser().resolve()
     parent = input_file.parent
-    shared = parent / SEPARATED_TE_DIR
-    if not shared.is_dir():
-        return shared
-    return parent / f"{sanitize_name(input_file.stem)}_{SEPARATED_TE_DIR}"
+    base = f"{sanitize_name(input_file.stem)}_separated"
+
+    candidate = parent / base
+    if not candidate.exists():
+        return candidate
+
+    index = 2
+    while True:
+        candidate = parent / f"{base}_{index}"
+        if not candidate.exists():
+            return candidate
+        index += 1
 
 
 def _mapping_path(input_file: Path, output_dir: Path) -> Path:
     parent = input_file.parent
-    if output_dir.name == SEPARATED_TE_DIR:
-        return parent / "Sequence_name_mapping.txt"
     return parent / f"Sequence_name_mapping_{sanitize_name(input_file.stem)}.txt"
 
 

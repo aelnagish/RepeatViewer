@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from repeatviewer.backends.separate_fasta import sanitize_name, separate_sequences
+from repeatviewer.backends.separate_fasta import (
+    sanitize_name,
+    separate_sequences,
+    separation_output_dir,
+)
 
 
 def test_sanitize_name_replaces_hash_with_underscore() -> None:
@@ -34,3 +38,18 @@ def test_separate_sequences_subfolder_sanitizes_hash(tmp_path: Path) -> None:
     assert created[0].name == "TE_LTR__Gypsy.fa"
     assert created[0].parent.name == "TE_LTR__Gypsy"
     assert "#" not in str(created[0])
+
+
+def test_separation_output_dir_uses_input_stem_suffix(tmp_path: Path) -> None:
+    src = tmp_path / "my file.fa"
+    src.write_text(">a\nAAAA\n", encoding="utf-8")
+    out = separation_output_dir(src)
+    assert out.name == "my_file_separated"
+
+
+def test_separation_output_dir_conflict_adds_number(tmp_path: Path) -> None:
+    src = tmp_path / "multi.fa"
+    src.write_text(">a\nAAAA\n", encoding="utf-8")
+    (tmp_path / "multi_separated").mkdir()
+    out = separation_output_dir(src)
+    assert out.name == "multi_separated_2"
