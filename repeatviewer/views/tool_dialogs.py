@@ -143,6 +143,7 @@ from repeatviewer.job_options import (
     MIN_TEAID_SELF_BLAST_WORD_SIZE,
     BlastOptions,
     ConsensusOptions,
+    normalize_consensus_ambiguous,
     configure_report_evalue_spinbox,
     DivergenceRowOptions,
     AlignOptions,
@@ -2251,11 +2252,13 @@ class ConsensusParamsDialog(QDialog):
         self._threshold.setValue(opts.threshold)
 
         self._ambiguous = QComboBox()
-        for base in ("N", "A", "C", "G", "T"):
+        for base in ("N", "X"):
             self._ambiguous.addItem(base)
         amb_index = self._ambiguous.findText(opts.ambiguous.upper()[:1])
         if amb_index >= 0:
             self._ambiguous.setCurrentIndex(amb_index)
+        else:
+            self._ambiguous.setCurrentIndex(0)
 
         form = QFormLayout()
         form.addRow("Majority threshold:", self._threshold)
@@ -2274,7 +2277,7 @@ class ConsensusParamsDialog(QDialog):
     def options(self) -> ConsensusOptions:
         return ConsensusOptions(
             threshold=self._threshold.value(),
-            ambiguous=self._ambiguous.currentText(),
+            ambiguous=normalize_consensus_ambiguous(self._ambiguous.currentText()),
         )
 
 

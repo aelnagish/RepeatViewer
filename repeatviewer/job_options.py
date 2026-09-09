@@ -316,12 +316,19 @@ class BlastOptions:
 
 DEFAULT_CONSENSUS_THRESHOLD = 0.8
 DEFAULT_CONSENSUS_AMBIGUOUS = "N"
+CONSENSUS_AMBIGUOUS_CHOICES = ("N", "X")
 
 
 @dataclass
 class ConsensusOptions:
     threshold: float = DEFAULT_CONSENSUS_THRESHOLD
     ambiguous: str = DEFAULT_CONSENSUS_AMBIGUOUS
+
+
+def normalize_consensus_ambiguous(raw: object) -> str:
+    """Return a supported ambiguous base (``N`` or ``X``)."""
+    amb = str(raw or DEFAULT_CONSENSUS_AMBIGUOUS).upper()[:1]
+    return amb if amb in CONSENSUS_AMBIGUOUS_CHOICES else DEFAULT_CONSENSUS_AMBIGUOUS
 
 
 DEFAULT_FLEXIDOT_WORDSIZE = 3
@@ -1069,17 +1076,19 @@ def save_te_divergence_plot_options(opts: TeDivergencePlotOptions) -> None:
 
 def load_consensus_options() -> ConsensusOptions:
     v = _load_settings_group("consensus")
-    amb = str(v.get("ambiguous", DEFAULT_CONSENSUS_AMBIGUOUS)).upper()[:1] or "N"
     return ConsensusOptions(
         threshold=float(v.get("threshold", DEFAULT_CONSENSUS_THRESHOLD)),
-        ambiguous=amb,
+        ambiguous=normalize_consensus_ambiguous(v.get("ambiguous", DEFAULT_CONSENSUS_AMBIGUOUS)),
     )
 
 
 def save_consensus_options(opts: ConsensusOptions) -> None:
     _save_settings_group(
         "consensus",
-        {"threshold": opts.threshold, "ambiguous": opts.ambiguous},
+        {
+            "threshold": opts.threshold,
+            "ambiguous": normalize_consensus_ambiguous(opts.ambiguous),
+        },
     )
 
 

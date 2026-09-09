@@ -473,7 +473,7 @@ _TOOLBAR_TOOLTIPS = {
     "teaid": "TEAid interactive HTML report using default parameters",
     "msa_clean": "Trim or clean MSA using default parameters",
     "flexidot": "Dotplot comparison of selected sequences using default parameters",
-    "consensus": "Build consensus from selected MSA using default parameters",
+    "consensus": "Click: set consensus parameters and run. Right-click: run with saved settings.",
     "tsd_search": "Search for target site duplications using default parameters",
     "te_annotation": "Run TE annotation on selected single-sequence FASTA files",
     "plugin:minimap2": "Map selected FASTA to reference with minimap2",
@@ -4020,12 +4020,15 @@ class MainWindow(QMainWindow):
                 show_default_action=False,
             )
         elif tool_id == "consensus":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "Consensus",
-                self._run_consensus,
-                self._populate_consensus_menu,
-                tooltip=tip,
+                self._open_consensus_dialog,
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: run with saved settings."
+                ),
+                right_click_slot=self._run_consensus,
             )
         elif tool_id == "flexidot":
             self._add_toolbar_action_button(
@@ -7511,6 +7514,22 @@ class MainWindow(QMainWindow):
             "consensus_generation",
             consensus_options=self._consensus_options,
         )
+
+    def _open_consensus_dialog(self) -> None:
+        """Toolbar Consensus click: show parameters, then run on OK."""
+        dialog = ConsensusParamsDialog(
+            initial=self._consensus_options,
+            parent=self,
+        )
+        try:
+            if not dialog.exec():
+                return
+            self._consensus_options = dialog.options()
+            save_consensus_options(self._consensus_options)
+            self._persist_workspace()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        self._run_consensus()
 
     def _modify_consensus_parameters(self) -> None:
         dialog = ConsensusParamsDialog(
