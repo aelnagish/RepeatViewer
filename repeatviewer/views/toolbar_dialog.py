@@ -52,7 +52,6 @@ TOOLS_TOOLBAR_IDS: tuple[str, ...] = (
     "aliview",
     "blast",
     "align",
-    "tree",
     "fastga",
     "repeat_quantify",
     "extend",
@@ -80,7 +79,6 @@ ALL_BUILTIN_TOOLBAR_IDS: tuple[str, ...] = (
 DEFAULT_TOOLBAR_ORDER: list[str] = [
     "blast",
     "align",
-    "tree",
     "flexidot",
     "flexidot_classifier",
     "teaid",
@@ -102,7 +100,6 @@ TOOLBAR_LABELS: dict[str, str] = {
     "aliview": "AliView",
     "_sep1": "— separator —",
     "align": "Align",
-    "tree": "Tree",
     "fastga": "FastGA",
     "repeat_quantify": "Repeat Quantify",
     "blast": "BLAST",

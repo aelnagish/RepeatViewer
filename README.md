@@ -53,7 +53,6 @@ Available from the toolbar and **Sequence** menu:
 | **Flexidot** | Self, paired, and multi-sequence dotplots; in-app HTML dotplots with **Go-to → Annotation** |
 | **Extend** | Extend alignment ends (preset or custom distances) |
 | **TE visualization** | Genome map and TE divergence plot |
-| **Tree** | Phylogenetic tree from alignment |
 | **FastGA** | FastGA alignment workflow |
 | **TSD search** | Target site duplication search |
 | **Minimap2** | Minimap2 alignment when available |

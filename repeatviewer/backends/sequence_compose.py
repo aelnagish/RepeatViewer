@@ -162,7 +162,7 @@ def group_sequences(
     """Concatenate FASTA files into one multi-record file.
 
     Duplicate record ids are disambiguated rather than silently written twice,
-    since most downstream tools (including BLAST and tree building) require
+    since most downstream tools (including BLAST) require
     unique names.
     """
     if len(files) < 2:
