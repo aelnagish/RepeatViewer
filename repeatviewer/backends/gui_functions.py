@@ -561,13 +561,18 @@ def extract_fasta_from_bed(genome_fasta, bed_file, output_fasta):
     return output_fasta
 
 
-def flexidot_executable() -> str | None:
-    """Resolve the Flexidot CLI (PATH, then common pip user ``bin`` locations)."""
+def flexidot_executable(*, use_system_flexidot: bool = False) -> str | None:
+    """Resolve the Flexidot CLI (PATH, then common pip user ``bin`` locations).
+
+    When ``use_system_flexidot`` is True, only ``PATH`` (``shutil.which``) is used.
+    """
     import glob
 
     found = shutil.which("flexidot")
     if found:
         return found
+    if use_system_flexidot:
+        return None
     candidates: list[str] = []
     for pattern in (
         os.path.expanduser("~/Library/Python/*/bin/flexidot"),
@@ -608,7 +613,9 @@ def _flexidot_help_text(exe: str) -> str:
     return text
 
 
-def flexidot_supports_html(exe: str | None = None) -> bool:
+def flexidot_supports_html(
+    exe: str | None = None, *, use_system_flexidot: bool = False
+) -> bool:
     """True if the installed Flexidot lists ``html`` among the ``-f`` choices.
 
     The stock PyPI Flexidot only offers png/pdf/svg; the forked build adds html
@@ -616,23 +623,27 @@ def flexidot_supports_html(exe: str | None = None) -> bool:
     the ``{...}`` list) rather than anywhere in the text, to avoid false matches.
     """
     if exe is None:
-        exe = flexidot_executable()
+        exe = flexidot_executable(use_system_flexidot=use_system_flexidot)
     if not exe:
         return False
     help_text = _flexidot_help_text(exe)
     return any(tok in help_text for tok in ("{html", "html}", ",html", "html,"))
 
 
-def flexidot_supports_repeatviewer_integration(exe: str | None = None) -> bool:
+def flexidot_supports_repeatviewer_integration(
+    exe: str | None = None, *, use_system_flexidot: bool = False
+) -> bool:
     """True if the forked Flexidot exposes the ``--teviewer-integration`` flag."""
     if exe is None:
-        exe = flexidot_executable()
+        exe = flexidot_executable(use_system_flexidot=use_system_flexidot)
     if not exe:
         return False
     return "teviewer-integration" in _flexidot_help_text(exe)
 
 
-def effective_flexidot_filetype(requested: str) -> str:
+def effective_flexidot_filetype(
+    requested: str, *, use_system_flexidot: bool = False
+) -> str:
     """Map a requested Flexidot output format to one the installed build supports.
 
     ``html`` requires the fork; if it is unavailable, fall back to ``png`` so the
@@ -641,9 +652,24 @@ def effective_flexidot_filetype(requested: str) -> str:
     ft = str(requested).strip().lower()
     if ft not in {"html", "png", "pdf", "svg"}:
         ft = "html"
-    if ft == "html" and not flexidot_supports_html():
+    if ft == "html" and not flexidot_supports_html(
+        use_system_flexidot=use_system_flexidot
+    ):
         return "png"
     return ft
+
+
+def _normalize_flexidot_modes(mode: str | list[str] | tuple[str, ...]) -> list[str]:
+    """Return ordered unique ``0/1/2`` mode tokens for Flexidot ``-m``."""
+    if isinstance(mode, (list, tuple)):
+        tokens = [str(m).strip() for m in mode]
+    else:
+        tokens = [t.strip() for t in str(mode or "").replace(" ", "").split(",")]
+    ordered: list[str] = []
+    for token in tokens:
+        if token in {"0", "1", "2"} and token not in ordered:
+            ordered.append(token)
+    return ordered or ["0"]
 
 
 def run_flexidot(
@@ -664,6 +690,7 @@ def run_flexidot(
     length_scaling: bool = False,
     gff_source_fastas: list[str | os.PathLike] | None = None,
     gff_output_stem: str | None = None,
+    use_system_flexidot: bool = False,
     cancel=None,
 ):
     """
@@ -672,7 +699,8 @@ def run_flexidot(
     :param input_file: str, path to the input FASTA file
     :param output_dir: str, directory where results will be saved
     :param wordsize: int, k-mer length (-k)
-    :param mode: str, plotting mode ('0'=self, '1'=paired, '2'=poly)
+    :param mode: str or sequence, plotting mode(s) ('0'=self, '1'=paired, '2'=poly).
+        Multiple modes are passed as repeated ``-m`` flags (Flexidot requirement).
     :param filetype: str, Flexidot output format (-f): 'html' (interactive,
         default), 'png', 'pdf', or 'svg'
     :param lcs_shading: bool, add -x (LCS shading) for multi-sequence plots
@@ -685,7 +713,7 @@ def run_flexidot(
     run_path, temp_path = prepare_flexidot_input_fasta(input_file, out_dir)
     original_name = os.path.basename(os.path.abspath(str(input_file)))
 
-    exe = flexidot_executable()
+    exe = flexidot_executable(use_system_flexidot=use_system_flexidot)
     if not exe:
         raise FileNotFoundError(
             "Flexidot command not found. Install with: pip install flexidot "
@@ -695,26 +723,31 @@ def run_flexidot(
 
     logging.info("FlexiDot is running for %s...", original_name)
 
+    modes = _normalize_flexidot_modes(mode)
     flexidot_cmd = [
         exe,
         "-i",
         run_path,
-        "-m",
-        str(mode),
-        "-k",
-        str(wordsize),
-        "-f",
-        filetype,
-        "--outdir",
-        out_dir,
     ]
-    if filetype == "html" and flexidot_supports_repeatviewer_integration(exe):
+    for mode_token in modes:
+        flexidot_cmd.extend(["-m", mode_token])
+    flexidot_cmd.extend(
+        [
+            "-k",
+            str(wordsize),
+            "-f",
+            filetype,
+            "--outdir",
+            out_dir,
+        ]
+    )
+    if filetype == "html" and flexidot_supports_repeatviewer_integration(
+        exe, use_system_flexidot=use_system_flexidot
+    ):
         # Show "Go to <seq> <start>-<end>" buttons in the dotplot that jump the
         # Annotation view; only available in the forked Flexidot build.
         flexidot_cmd.append("--teviewer-integration")
-    # ``mode`` may be a single value ("0") or a comma list ("0,1,2"); the
-    # mode-dependent flags below apply if any selected mode qualifies.
-    mode_set = {m for m in str(mode).replace(" ", "").split(",") if m}
+    mode_set = set(modes)
     if lcs_shading and mode_set & {"1", "2"}:
         flexidot_cmd.append("-x")
     if substitution_count > 0:

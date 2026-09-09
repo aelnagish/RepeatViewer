@@ -161,6 +161,7 @@ from repeatviewer.job_options import (
     MUSCLE_MODE_SUPER5,
     ExtendOptions,
     FlexidotOptions,
+    DEFAULT_FLEXIDOT_MODES,
     MAX_FLEXIDOT_WORDSIZE,
     MIN_FLEXIDOT_WORDSIZE,
     GapRowOptions,
@@ -2139,6 +2140,7 @@ class FlexidotParamsDialog(QDialog):
         self,
         *,
         initial: FlexidotOptions | None = None,
+        use_system_flexidot: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -2249,40 +2251,24 @@ class FlexidotParamsDialog(QDialog):
         self._combined = QCheckBox("Combine all selected files into one dotplot")
         self._combined.setChecked(opts.combined)
         self._combined.setToolTip(
-            "Draw a single dotplot comparing all selected files. Can be enabled "
-            "together with the per-file option below."
-        )
-        self._run_separately = QCheckBox("Also run each file separately")
-        self._run_separately.setChecked(opts.run_separately)
-        self._run_separately.setToolTip(
-            "Produce one dotplot per selected file. Enable this alongside "
-            "'Combine' to generate both the combined plot and per-file plots."
+            "Draw a single dotplot comparing all selected files. When unticked, "
+            "each selected file is plotted separately."
         )
 
-        # Flexidot comparison modes (-m). Multi-select: any ticked modes are
-        # passed together (e.g. -m 0,1,2). None ticked = automatic.
-        self._mode_self = QCheckBox("Self (-m 0): each sequence against itself")
-        self._mode_pairwise = QCheckBox("Pairwise (-m 1): every pair of sequences")
-        self._mode_allvsall = QCheckBox("All-vs-all (-m 2): full comparison matrix")
-        self._mode_self.setToolTip(
-            "Flexidot -m 0. Classic single-sequence dotplot for each sequence."
+        self._use_system_flexidot = QCheckBox(
+            "Use Flexidot from the system PATH", self
         )
-        self._mode_pairwise.setToolTip(
-            "Flexidot -m 1. One dotplot per pair of sequences."
+        self._use_system_flexidot.setChecked(use_system_flexidot)
+        self._use_system_flexidot.setToolTip(
+            "Use only the flexidot command found on PATH. When unticked, "
+            "also search common pip user install locations."
         )
-        self._mode_allvsall.setToolTip(
-            "Flexidot -m 2. A matrix of all sequences against all sequences."
-        )
-        for cb, val in (
-            (self._mode_self, "0"),
-            (self._mode_pairwise, "1"),
-            (self._mode_allvsall, "2"),
-        ):
-            cb.setChecked(val in opts.modes)
 
         tabs = QTabWidget()
         flexidot_tab = QWidget()
         flexidot_layout = QVBoxLayout(flexidot_tab)
+        flexidot_layout.setContentsMargins(16, 14, 16, 14)
+        flexidot_layout.setSpacing(12)
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
@@ -2296,41 +2282,20 @@ class FlexidotParamsDialog(QDialog):
         form.addRow("", self._wobble)
         form.addRow("", self._include_reverse)
         form.addRow("", self._length_scaling)
+        form.addRow("", self._use_gff)
+        form.addRow("", self._combined)
         flexidot_layout.addLayout(form)
-        flexidot_layout.addStretch()
+        flexidot_layout.addStretch(1)
         tabs.addTab(flexidot_tab, "Flexidot")
 
-        # --- Options: file handling and annotation shading ---
         options_tab = QWidget()
         options_layout = QVBoxLayout(options_tab)
         options_layout.setContentsMargins(16, 14, 16, 14)
         options_layout.setSpacing(12)
-
-        files_box = QGroupBox("File handling", self)
-        files_box_layout = QVBoxLayout(files_box)
-        files_box_layout.addWidget(self._combined)
-        files_box_layout.addWidget(self._run_separately)
-        options_layout.addWidget(files_box)
-
-        modes_box = QGroupBox("Comparison modes (-m)", self)
-        modes_box_layout = QVBoxLayout(modes_box)
-        modes_box_layout.addWidget(self._mode_self)
-        modes_box_layout.addWidget(self._mode_pairwise)
-        modes_box_layout.addWidget(self._mode_allvsall)
-        modes_hint = QLabel(
-            "Tick one or more. Leave all unticked for automatic "
-            "(self for a single file, all-vs-all when combining).",
-            self,
-        )
-        modes_hint.setWordWrap(True)
-        modes_hint.setStyleSheet("color: palette(mid);")
-        modes_box_layout.addWidget(modes_hint)
-        options_layout.addWidget(modes_box)
-
-        anno_box = QGroupBox("Annotation", self)
-        anno_box_layout = QVBoxLayout(anno_box)
-        anno_box_layout.addWidget(self._use_gff)
-        options_layout.addWidget(anno_box)
+        exe_box = QGroupBox("Executable", self)
+        exe_box_layout = QVBoxLayout(exe_box)
+        exe_box_layout.addWidget(self._use_system_flexidot)
+        options_layout.addWidget(exe_box)
         options_layout.addStretch(1)
         tabs.addTab(options_tab, "Options")
 
@@ -2365,21 +2330,10 @@ class FlexidotParamsDialog(QDialog):
         self._line_width.setValue(defaults.line_width)
         self._length_scaling.setChecked(defaults.length_scaling)
         self._combined.setChecked(defaults.combined)
-        self._run_separately.setChecked(defaults.run_separately)
-        self._mode_self.setChecked("0" in defaults.modes)
-        self._mode_pairwise.setChecked("1" in defaults.modes)
-        self._mode_allvsall.setChecked("2" in defaults.modes)
+        self._use_system_flexidot.setChecked(False)
 
-    def _selected_modes(self) -> tuple[str, ...]:
-        return tuple(
-            val
-            for cb, val in (
-                (self._mode_self, "0"),
-                (self._mode_pairwise, "1"),
-                (self._mode_allvsall, "2"),
-            )
-            if cb.isChecked()
-        )
+    def use_system_flexidot(self) -> bool:
+        return self._use_system_flexidot.isChecked()
 
     def options(self) -> FlexidotOptions:
         fmt = self._output_format.currentData()
@@ -2398,8 +2352,9 @@ class FlexidotParamsDialog(QDialog):
             line_width=self._line_width.value(),
             length_scaling=self._length_scaling.isChecked(),
             combined=self._combined.isChecked(),
-            run_separately=self._run_separately.isChecked(),
-            modes=self._selected_modes(),
+            # Comparison mode is automatic: self for one sequence,
+            # pairwise/all-vs-all for multiple.
+            modes=DEFAULT_FLEXIDOT_MODES,
         )
 
 

@@ -64,6 +64,7 @@ from repeatviewer.job_options import (
     MsaCleanOptions,
     TeaAidOptions,
     TsdSearchOptions,
+    auto_flexidot_mode,
 )
 from repeatviewer.pan_genome import genome_output_suffix
 from repeatviewer.backends.te_annotation_batch import TeAnnotationOptions, run_te_annotation_on_fasta
@@ -516,17 +517,15 @@ def run_flexidot_combined(
     flexidot_options: FlexidotOptions | None = None,
     cancel: JobCancellation | None = None,
     genome_label: str = "",
+    use_system_flexidot: bool = False,
 ) -> list[str]:
     """Flexidot for 2+ inputs: mode 1 (paired) or 2 (poly)."""
     if len(seq_files) < 2:
         raise ValueError("Combined Flexidot requires at least two sequences.")
     flex_opts = flexidot_options or FlexidotOptions()
-    filetype = effective_flexidot_filetype(flex_opts.output_format)
-    # Explicit modes win; otherwise auto (pairwise for 2, all-vs-all for 3+).
-    if flex_opts.modes:
-        mode = ",".join(flex_opts.modes)
-    else:
-        mode = "1" if len(seq_files) == 2 else "2"
+    filetype = effective_flexidot_filetype(
+        flex_opts.output_format, use_system_flexidot=use_system_flexidot
+    )
     out_dir = seq_files[0].parent.resolve()
     combined = out_dir / f"_flexidot_{len(seq_files)}seq.fa"
     records = []
@@ -534,6 +533,10 @@ def run_flexidot_combined(
         records.extend(SeqIO.parse(str(path.expanduser().resolve()), "fasta"))
     if not records:
         raise RuntimeError("No sequences found in selected FASTA files.")
+    # Explicit modes win; otherwise self / pairwise / all-vs-all from count.
+    mode: str | list[str] = (
+        list(flex_opts.modes) if flex_opts.modes else auto_flexidot_mode(len(records))
+    )
     seen: dict[str, int] = {}
     for record in records:
         safe = sanitize_name(record.id)
@@ -564,6 +567,7 @@ def run_flexidot_combined(
                 length_scaling=flex_opts.length_scaling,
                 gff_source_fastas=[str(path) for path in seq_files],
                 gff_output_stem=flexidot_output_stem(seq_files, genome_label),
+                use_system_flexidot=use_system_flexidot,
                 cancel=cancel,
             )
         finally:
@@ -915,14 +919,21 @@ def run_on_sequence(
         if seq_count < 1:
             raise RuntimeError(f"No sequences in {seq_path.name} (Flexidot needs at least one).")
         out_path = Path(out_dir).resolve()
-        flexidot_filetype = effective_flexidot_filetype(flex_opts.output_format)
+        use_system = bool(project.use_system_flexidot)
+        flexidot_filetype = effective_flexidot_filetype(
+            flex_opts.output_format, use_system_flexidot=use_system
+        )
+        if flex_opts.modes:
+            mode: str | list[str] = list(flex_opts.modes)
+        else:
+            mode = auto_flexidot_mode(seq_count)
         with _flexidot_dir_lock(out_path):
             before = _output_paths_in_dir(out_path, flexidot_filetype)
             run_flexidot(
                 str(seq_path),
                 str(out_path),
                 wordsize=flex_opts.wordsize,
-                mode=flexidot_mode,
+                mode=mode,
                 filetype=flexidot_filetype,
                 lcs_shading=flex_opts.lcs_shading,
                 use_gff=flex_opts.use_gff,
@@ -935,6 +946,7 @@ def run_on_sequence(
                 length_scaling=flex_opts.length_scaling,
                 gff_source_fastas=[str(seq_path)],
                 gff_output_stem=flexidot_output_stem([seq_path.resolve()], genome_label),
+                use_system_flexidot=use_system,
                 cancel=cancel,
             )
             created.extend(
@@ -1010,7 +1022,6 @@ def run_batch(
     tsd_search_options: TsdSearchOptions | None = None,
     max_workers: int = 4,
     flexidot_combined: bool = True,
-    flexidot_separate: bool = False,
     cancel: JobCancellation | None = None,
 ) -> dict:
     seq_list = list(seq_files)
@@ -1064,6 +1075,7 @@ def run_batch(
                     flexidot_options=flexidot_options,
                     cancel=cancel,
                     genome_label=genome_label,
+                    use_system_flexidot=bool(project.use_system_flexidot),
                 )
                 created_outputs.extend(outs)
                 for seq_path in seq_list:
@@ -1075,16 +1087,13 @@ def run_batch(
                 failures.append(f"batch{label}: {exc}")
             completed += 1
             progress_cb(completed, f"{display_name}: finished")
-        # Combined-only: return now. If the user also asked for per-file plots,
-        # fall through and run each file separately as well.
-        if not flexidot_separate:
-            return {
-                "func_name": func_name,
-                "total": total_steps,
-                "failures": failures,
-                "created_outputs": created_outputs,
-                "source_files": source_files,
-            }
+        return {
+            "func_name": func_name,
+            "total": total_steps,
+            "failures": failures,
+            "created_outputs": created_outputs,
+            "source_files": source_files,
+        }
 
     work_items: list[tuple[Path, str, Path | None]] = []
     if genome_dependent and genome_items:

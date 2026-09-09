@@ -284,6 +284,12 @@ class ScaledImagePreview(QWidget):
         self._zoom_percent = load_preview_zoom_percent()
         self._fit_mode = PreviewFitMode.FIT_WINDOW
         self._scale_pending = False
+        self._last_physical_w = 0
+        self._reset_scroll_on_refresh = True
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(50)
+        self._refresh_timer.timeout.connect(self._do_refresh_scale)
 
         self._scroll = QScrollArea(self)
         self._scroll.setObjectName("PreviewScrollArea")
@@ -315,9 +321,11 @@ class ScaledImagePreview(QWidget):
         if pix.isNull():
             self._original = None
             self._label.clear()
+            self._last_physical_w = 0
             return False
         self._original = pix
-        self.refresh_scale()
+        self._last_physical_w = 0
+        self.refresh_scale(immediate=True, reset_scroll=True)
         return True
 
     def reload_image_file(self, path: Path) -> bool:
@@ -325,22 +333,26 @@ class ScaledImagePreview(QWidget):
         return self.set_image_file(path)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
-        if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
-            self.refresh_scale()
+        try:
+            if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
+                self.refresh_scale(reset_scroll=False)
+        except KeyboardInterrupt:
+            # Ctrl+C during a heavy QPixmap scale must not tear down Qt's filter chain.
+            pass
         return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         super().resizeEvent(event)
-        self.refresh_scale()
+        self.refresh_scale(reset_scroll=False)
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
         super().showEvent(event)
         if self._scale_pending:
-            QTimer.singleShot(0, self.refresh_scale)
+            QTimer.singleShot(0, lambda: self.refresh_scale(immediate=True))
 
     def set_zoom_percent(self, percent: int) -> None:
         self._zoom_percent = max(25, min(200, int(percent)))
-        self.refresh_scale()
+        self.refresh_scale(immediate=True, reset_scroll=False)
 
     def set_fit_mode(self, mode: PreviewFitMode | str) -> None:
         if isinstance(mode, str):
@@ -349,9 +361,28 @@ class ScaledImagePreview(QWidget):
             except ValueError:
                 mode = PreviewFitMode.FIT_WINDOW
         self._fit_mode = mode
-        self.refresh_scale()
+        self.refresh_scale(immediate=True, reset_scroll=True)
 
-    def refresh_scale(self) -> None:
+    def refresh_scale(
+        self,
+        *,
+        immediate: bool = False,
+        reset_scroll: bool | None = None,
+    ) -> None:
+        """Rescale the pixmap to the viewport.
+
+        Resize storms debounce via a short timer so SmoothTransformation on large
+        Flexidot images does not block the UI (and so Ctrl+C mid-scale is rare).
+        """
+        if reset_scroll is not None:
+            self._reset_scroll_on_refresh = reset_scroll
+        if immediate:
+            self._refresh_timer.stop()
+            self._do_refresh_scale()
+            return
+        self._refresh_timer.start()
+
+    def _do_refresh_scale(self) -> None:
         if self._original is None or self._original.isNull():
             return
         viewport = self._scroll.viewport().size()
@@ -376,16 +407,29 @@ class ScaledImagePreview(QWidget):
         target_w = max(1, int(ow * scale))
         dpr = max(1.0, self.devicePixelRatioF())
         physical_w = max(1, int(target_w * dpr))
-        display = self._original.scaledToWidth(
-            physical_w,
-            Qt.TransformationMode.SmoothTransformation,
+        if physical_w == self._last_physical_w:
+            current = self._label.pixmap()
+            if current is not None and not current.isNull():
+                return
+        # Fast path while dragging/resizing large images; smooth once settled.
+        transform = (
+            Qt.TransformationMode.FastTransformation
+            if max(ow, oh) >= 2500
+            else Qt.TransformationMode.SmoothTransformation
         )
+        try:
+            display = self._original.scaledToWidth(physical_w, transform)
+        except KeyboardInterrupt:
+            return
         display.setDevicePixelRatio(dpr)
 
+        self._last_physical_w = physical_w
         self._label.setPixmap(display)
         self._label.setFixedSize(display.size())
-        self._scroll.horizontalScrollBar().setValue(0)
-        self._scroll.verticalScrollBar().setValue(0)
+        if self._reset_scroll_on_refresh:
+            self._scroll.horizontalScrollBar().setValue(0)
+            self._scroll.verticalScrollBar().setValue(0)
+            self._reset_scroll_on_refresh = False
 
 
 class PdfPreviewWidget(QWidget):

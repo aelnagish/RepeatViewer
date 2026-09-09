@@ -3628,8 +3628,7 @@ class MainWindow(QMainWindow):
             return n
         if not self._project.is_pan_genome_mode:
             if func_name == "flexidot" and n > 1 and job_kwargs.get("flexidot_combined", True):
-                # 1 combined plot, plus n per-file plots when "both" is chosen.
-                return 1 + n if job_kwargs.get("flexidot_separate", False) else 1
+                return 1
             if func_name.startswith("plugin:"):
                 plugin = self._plugin_registry.get(func_name[len("plugin:") :])
                 if plugin is not None and not plugin.supports_parallel:
@@ -3640,8 +3639,6 @@ class MainWindow(QMainWindow):
             return n * pan_n
         if func_name == "flexidot":
             if n > 1 and job_kwargs.get("flexidot_combined", True):
-                if job_kwargs.get("flexidot_separate", False):
-                    return pan_n + n * pan_n
                 return pan_n
             return n * pan_n
         if func_name.startswith("plugin:"):
@@ -7054,26 +7051,25 @@ class MainWindow(QMainWindow):
         )
 
     def _run_flexidot_saved(self) -> None:
-        """Run Flexidot with saved settings (combined and/or per-file)."""
-        combined = self._flexidot_options.combined
-        separate = self._flexidot_options.run_separately
-        if not combined and not separate:
-            # Clearing both is meaningless; fall back to a combined run.
-            combined = True
+        """Run Flexidot with saved settings (combined or per-file)."""
         self._apply_function(
             "flexidot",
-            flexidot_combined=combined,
-            flexidot_separate=separate,
+            flexidot_combined=self._flexidot_options.combined,
             flexidot_options=self._flexidot_options,
         )
 
     def _open_flexidot_dialog(self) -> None:
         """Click Flexidot: parameters dialog. Run uses the saved combine mode."""
-        dialog = FlexidotParamsDialog(initial=self._flexidot_options, parent=self)
+        dialog = FlexidotParamsDialog(
+            initial=self._flexidot_options,
+            use_system_flexidot=self._project.use_system_flexidot,
+            parent=self,
+        )
         try:
             if not dialog.exec():
                 return
             self._flexidot_options = dialog.options()
+            self._project.use_system_flexidot = dialog.use_system_flexidot()
             save_flexidot_options(self._flexidot_options)
             self._persist_workspace()
         finally:
@@ -7138,11 +7134,14 @@ class MainWindow(QMainWindow):
     def _modify_flexidot_parameters(self) -> None:
         dialog = FlexidotParamsDialog(
             initial=self._flexidot_options,
+            use_system_flexidot=self._project.use_system_flexidot,
             parent=self,
         )
         if dialog.exec():
             self._flexidot_options = dialog.options()
+            self._project.use_system_flexidot = dialog.use_system_flexidot()
             save_flexidot_options(self._flexidot_options)
+            self._persist_workspace()
             self._set_status_message(
                 f"Flexidot parameters updated "
                 f"(k={self._flexidot_options.wordsize}, "
@@ -7915,13 +7914,16 @@ class MainWindow(QMainWindow):
                 extend_opts = replace(extend_opts, pan_genome_name=names[0])
                 job_kwargs["extend"] = extend_opts
         if func_name == "flexidot":
-            if flexidot_executable() is None:
+            if flexidot_executable(
+                use_system_flexidot=self._project.use_system_flexidot
+            ) is None:
                 QMessageBox.warning(
                     self,
                     "Flexidot not found",
                     "Flexidot is not on PATH.\n\nInstall with:\n  pip install flexidot\n\n"
                     "If it is installed, add your Python scripts directory to PATH "
-                    "(e.g. ~/Library/Python/3.x/bin on macOS).",
+                    "(e.g. ~/Library/Python/3.x/bin on macOS), or clear "
+                    "'Use Flexidot from the system PATH' in Flexidot → Options.",
                 )
                 return
         if func_name == "tsd_search":
