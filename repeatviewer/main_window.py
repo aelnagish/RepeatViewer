@@ -306,6 +306,7 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_BLASTX,
     EXTEND_RIGHT_CLICK_DIALOG,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
+    CONSENSUS_RIGHT_CLICK_DIALOG,
     load_align_options,
     load_blast_options,
     load_consensus_options,
@@ -2733,7 +2734,7 @@ class MainWindow(QMainWindow):
         if not skip_default:
             menu.addAction("Consensus with default parameters", self._run_consensus)
         menu.addSeparator()
-        menu.addAction("Change consensus parameters", self._modify_consensus_parameters)
+        menu.addAction("Change consensus parameters…", self._modify_consensus_parameters)
 
     def _populate_flexidot_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -3532,9 +3533,9 @@ class MainWindow(QMainWindow):
                 self._open_consensus_dialog,
                 tooltip=(
                     "Click: set parameters and run.\n"
-                    "Right-click: run with saved settings."
+                    "Right-click: run with saved settings (set in the Options tab)."
                 ),
-                right_click_slot=self._run_consensus,
+                right_click_slot=self._quick_consensus_right_click,
             )
         elif tool_id == "flexidot":
             self._add_toolbar_action_button(
@@ -7007,7 +7008,7 @@ class MainWindow(QMainWindow):
         )
 
     def _open_consensus_dialog(self) -> None:
-        """Toolbar Consensus click: show parameters, then run on OK."""
+        """Click Consensus: parameters dialog. Run runs; Save (Options tab) stores only."""
         dialog = ConsensusParamsDialog(
             initial=self._consensus_options,
             parent=self,
@@ -7018,9 +7019,20 @@ class MainWindow(QMainWindow):
             self._consensus_options = dialog.options()
             save_consensus_options(self._consensus_options)
             self._persist_workspace()
+            run_after = dialog.should_run()
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
-        self._run_consensus()
+        if run_after:
+            self._run_consensus()
+        else:
+            self._set_status_message("Consensus settings saved", 4000)
+
+    def _quick_consensus_right_click(self) -> None:
+        """Right-click Consensus: run with saved settings, or open the dialog."""
+        if self._consensus_options.right_click_action == CONSENSUS_RIGHT_CLICK_DIALOG:
+            self._open_consensus_dialog()
+        else:
+            self._run_consensus()
 
     def _modify_consensus_parameters(self) -> None:
         dialog = ConsensusParamsDialog(
@@ -7030,6 +7042,7 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             self._consensus_options = dialog.options()
             save_consensus_options(self._consensus_options)
+            self._persist_workspace()
             self._set_status_message(
                 f"Consensus parameters updated (threshold={self._consensus_options.threshold})",
                 5000,

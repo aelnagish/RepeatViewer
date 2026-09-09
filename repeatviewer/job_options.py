@@ -300,12 +300,16 @@ class BlastOptions:
 DEFAULT_CONSENSUS_THRESHOLD = 0.8
 DEFAULT_CONSENSUS_AMBIGUOUS = "N"
 CONSENSUS_AMBIGUOUS_CHOICES = ("N", "X")
+CONSENSUS_RIGHT_CLICK_RUN = "run"
+CONSENSUS_RIGHT_CLICK_DIALOG = "dialog"
+CONSENSUS_RIGHT_CLICK_ACTIONS = (CONSENSUS_RIGHT_CLICK_RUN, CONSENSUS_RIGHT_CLICK_DIALOG)
 
 
 @dataclass
 class ConsensusOptions:
     threshold: float = DEFAULT_CONSENSUS_THRESHOLD
     ambiguous: str = DEFAULT_CONSENSUS_AMBIGUOUS
+    right_click_action: str = CONSENSUS_RIGHT_CLICK_RUN
 
 
 def normalize_consensus_ambiguous(raw: object) -> str:
@@ -1069,9 +1073,15 @@ def save_te_divergence_plot_options(opts: TeDivergencePlotOptions) -> None:
 
 def load_consensus_options() -> ConsensusOptions:
     v = _load_settings_group("consensus")
+    right_click_action = str(v.get("right_click_action", CONSENSUS_RIGHT_CLICK_RUN))
+    if right_click_action not in CONSENSUS_RIGHT_CLICK_ACTIONS:
+        right_click_action = CONSENSUS_RIGHT_CLICK_RUN
     return ConsensusOptions(
         threshold=float(v.get("threshold", DEFAULT_CONSENSUS_THRESHOLD)),
-        ambiguous=normalize_consensus_ambiguous(v.get("ambiguous", DEFAULT_CONSENSUS_AMBIGUOUS)),
+        ambiguous=normalize_consensus_ambiguous(
+            v.get("ambiguous", DEFAULT_CONSENSUS_AMBIGUOUS)
+        ),
+        right_click_action=right_click_action,
     )
 
 
@@ -1081,6 +1091,11 @@ def save_consensus_options(opts: ConsensusOptions) -> None:
         {
             "threshold": opts.threshold,
             "ambiguous": normalize_consensus_ambiguous(opts.ambiguous),
+            "right_click_action": (
+                opts.right_click_action
+                if opts.right_click_action in CONSENSUS_RIGHT_CLICK_ACTIONS
+                else CONSENSUS_RIGHT_CLICK_RUN
+            ),
         },
     )
 

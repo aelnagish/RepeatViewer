@@ -116,6 +116,8 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_BLASTX,
     DEFAULT_CONSENSUS_AMBIGUOUS,
     DEFAULT_CONSENSUS_THRESHOLD,
+    CONSENSUS_RIGHT_CLICK_RUN,
+    CONSENSUS_RIGHT_CLICK_DIALOG,
     DEFAULT_EXTEND_LEFT,
     DEFAULT_EXTEND_RIGHT,
     EXTEND_RIGHT_CLICK_RUN,
@@ -2092,6 +2094,13 @@ class BlastParamsDialog(QDialog):
 
 
 class ConsensusParamsDialog(QDialog):
+    """Consensus parameters.
+
+    Left-click the toolbar button opens this dialog. The Parameters tab holds
+    threshold and ambiguous base; the Options tab sets what right-clicking the
+    toolbar button does.
+    """
+
     def __init__(
         self,
         *,
@@ -2101,11 +2110,18 @@ class ConsensusParamsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Consensus parameters")
         opts = initial or ConsensusOptions()
+        self._run_after = False
+
         self._threshold = QDoubleSpinBox()
         self._threshold.setRange(0.0, 1.0)
         self._threshold.setDecimals(2)
         self._threshold.setSingleStep(0.05)
         self._threshold.setValue(opts.threshold)
+        self._threshold.setFixedWidth(260)
+        self._threshold.setToolTip(
+            "Minimum fraction of sequences that must share a base for it to "
+            "appear in the consensus (0–1)."
+        )
 
         self._ambiguous = QComboBox()
         for base in ("N", "X"):
@@ -2115,25 +2131,142 @@ class ConsensusParamsDialog(QDialog):
             self._ambiguous.setCurrentIndex(amb_index)
         else:
             self._ambiguous.setCurrentIndex(0)
+        self._ambiguous.setFixedWidth(260)
+        self._ambiguous.setToolTip(
+            "Character used when no base reaches the majority threshold."
+        )
 
-        form = QFormLayout()
-        form.addRow("Majority threshold:", self._threshold)
-        form.addRow("Ambiguous base:", self._ambiguous)
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Run Consensus with saved parameters", CONSENSUS_RIGHT_CLICK_RUN),
+            ("Open this dialog", CONSENSUS_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_action == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[CONSENSUS_RIGHT_CLICK_RUN].setChecked(True)
 
-        buttons = QDialogButtonBox(
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the Consensus button does:", self)
+        )
+        for radio in self._right_click_buttons.values():
+            rc_box_layout.addWidget(radio)
+
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(12, 10, 12, 10)
+        options_layout.setSpacing(8)
+        options_layout.addWidget(rc_box)
+
+        self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        params_tab = QWidget(self)
+        params_form = QFormLayout(params_tab)
+        params_form.setContentsMargins(12, 10, 12, 10)
+        params_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        params_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        params_form.setHorizontalSpacing(12)
+        params_form.setVerticalSpacing(8)
+        params_form.addRow("Majority threshold:", self._threshold)
+        params_form.addRow("Ambiguous base:", self._ambiguous)
+        self._tabs.addTab(params_tab, "Parameters")
+        self._tabs.addTab(options_tab, "Options")
+
+        self._button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
+        self._run_button.setText("Run")
+        restore = self._button_box.addButton(
+            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
+        )
+        restore.clicked.connect(self._restore_defaults)
+        self._button_box.accepted.connect(self._on_accept)
+        self._button_box.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        layout.addWidget(self._tabs)
+        layout.addWidget(self._button_box)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._on_tab_changed(self._tabs.currentIndex())
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # Dialog polish calls adjustSize() after Show; re-shrink once that runs.
+        QTimer.singleShot(0, self._fit_to_current_tab)
+
+    def _on_tab_changed(self, tab_index: int) -> None:
+        self._update_run_button(tab_index)
+        self._fit_to_current_tab()
+
+    def _fit_to_current_tab(self) -> None:
+        """Size the dialog to the active tab only (QTabWidget otherwise uses max of all)."""
+        page = self._tabs.currentWidget()
+        if page is None:
+            return
+        page.ensurePolished()
+        page.adjustSize()
+        page_hint = page.sizeHint()
+        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
+        # Frame/padding around the page inside QTabWidget.
+        tab_chrome = tab_bar_h + 8
+        buttons_h = self._button_box.sizeHint().height()
+        margins = self.layout().contentsMargins()
+        spacing = self.layout().spacing()
+        height = (
+            page_hint.height()
+            + tab_chrome
+            + buttons_h
+            + margins.top()
+            + margins.bottom()
+            + spacing
+            + 4
+        )
+        width = max(
+            420,
+            page_hint.width() + margins.left() + margins.right() + 24,
+            self._button_box.sizeHint().width() + margins.left() + margins.right(),
+        )
+        self.setFixedSize(width, height)
+
+    def _update_run_button(self, tab_index: int) -> None:
+        self._run_button.setText("Save" if tab_index == 1 else "Run")
+
+    def _on_accept(self) -> None:
+        self._run_after = self._tabs.currentIndex() != 1
+        self.accept()
+
+    def should_run(self) -> bool:
+        return self._run_after
+
+    def _restore_defaults(self) -> None:
+        self._threshold.setValue(DEFAULT_CONSENSUS_THRESHOLD)
+        amb_index = self._ambiguous.findText(DEFAULT_CONSENSUS_AMBIGUOUS)
+        self._ambiguous.setCurrentIndex(amb_index if amb_index >= 0 else 0)
+        self._right_click_buttons[CONSENSUS_RIGHT_CLICK_RUN].setChecked(True)
 
     def options(self) -> ConsensusOptions:
+        right_click_action = CONSENSUS_RIGHT_CLICK_RUN
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                right_click_action = value
+                break
         return ConsensusOptions(
             threshold=self._threshold.value(),
             ambiguous=normalize_consensus_ambiguous(self._ambiguous.currentText()),
+            right_click_action=right_click_action,
         )
 
 
