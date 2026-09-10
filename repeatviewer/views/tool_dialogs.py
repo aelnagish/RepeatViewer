@@ -72,6 +72,62 @@ def _prepare_option_dialog(dialog: QDialog) -> None:
     )
 
 
+def make_cancel_save_run_bar(
+    dialog: QDialog,
+    *,
+    left_widgets: list[QWidget] | None = None,
+    on_accept=None,
+    include_run: bool = True,
+) -> QWidget:
+    """Footer with optional left controls plus Cancel / Save [/ Run].
+
+    Sets ``dialog._close_action`` to ``\"save\"`` or ``\"run\"`` before closing.
+    ``dialog.should_run()`` should return ``dialog._close_action == \"run\"``.
+    Pass ``include_run=False`` for settings-only dialogs (Cancel / Save).
+    """
+    dialog._close_action = "cancel"
+    bar = QWidget(dialog)
+    row = QHBoxLayout(bar)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(8)
+    for widget in left_widgets or []:
+        row.addWidget(widget)
+    row.addStretch(1)
+    cancel_btn = QPushButton("Cancel", bar)
+    save_btn = QPushButton("Save", bar)
+    save_btn.setDefault(True)
+    dialog._save_button = save_btn
+    dialog._ok_button = save_btn
+
+    def _finish(action: str) -> None:
+        dialog._close_action = action
+        if on_accept is not None:
+            on_accept()
+        else:
+            dialog.accept()
+
+    cancel_btn.clicked.connect(dialog.reject)
+    save_btn.clicked.connect(lambda: _finish("save"))
+    row.addWidget(cancel_btn)
+    row.addWidget(save_btn)
+    if include_run:
+        run_btn = QPushButton("Run", bar)
+        run_btn.setDefault(True)
+        save_btn.setDefault(False)
+        dialog._run_button = run_btn
+        dialog._ok_button = run_btn
+        run_btn.clicked.connect(lambda: _finish("run"))
+        row.addWidget(run_btn)
+    else:
+        dialog._run_button = None
+    return bar
+
+
+def dialog_should_run(dialog: QDialog) -> bool:
+    """True when the dialog was closed with Run."""
+    return getattr(dialog, "_close_action", "") == "run"
+
+
 def _run_cancel_button_box(parent: QWidget) -> QDialogButtonBox:
     buttons = QDialogButtonBox(
         QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -831,38 +887,21 @@ class AlignParamsDialog(QDialog):
         self._aligner_tabs.addTab(options_tab, "Options")
         self._options_tab_index = self._aligner_tabs.count() - 1
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
+        self._close_action = "cancel"
+        self._button_box = make_cancel_save_run_bar(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
         layout.addWidget(self._aligner_tabs)
-        layout.addWidget(buttons)
+        layout.addWidget(self._button_box)
 
         self._strategy.currentIndexChanged.connect(self._sync_controls)
         self._sequence_type.currentIndexChanged.connect(self._sync_controls)
-        self._aligner_tabs.currentChanged.connect(self._update_run_button)
-        self._update_run_button(self._aligner_tabs.currentIndex())
         self._sync_controls()
 
-    def _update_run_button(self, tab_index: int) -> None:
-        """Run on an aligner tab; Save on the Options tab (nothing to run)."""
-        if not self._for_run:
-            self._run_button.setText("OK")
-            return
-        self._run_button.setText(
-            "Save" if tab_index == self._options_tab_index else "Run"
-        )
-
     def should_run(self) -> bool:
-        if not self._for_run:
-            return False
-        return self._aligner_tabs.currentIndex() != self._options_tab_index
+        """True when the dialog was closed with Run (not Save or Cancel)."""
+        return dialog_should_run(self)
 
     def selected_aligner(self) -> str:
         """The aligner of the active tab (MAFFT/MUSCLE); falls back to right-click."""
@@ -1254,18 +1293,17 @@ class FastGaParamsDialog(QDialog):
         form.addRow("", self._symmetric)
         form.addRow("", self._keep_index)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(self)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
         layout.addWidget(mode)
         layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.addWidget(self._button_box)
+
+    def should_run(self) -> bool:
+        return dialog_should_run(self)
 
     def options(self):
         from repeatviewer.job_options import FastGaOptions
@@ -1409,36 +1447,19 @@ class ExtendParamsDialog(QDialog):
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run" if self._for_run else "OK")
-        restore = buttons.addButton(
-            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
-        )
+        restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
-        layout.addWidget(buttons)
-        self._tabs.currentChanged.connect(self._update_run_button)
-        self._update_run_button(self._tabs.currentIndex())
-
-    def _update_run_button(self, tab_index: int) -> None:
-        if not self._for_run:
-            self._run_button.setText("OK")
-            return
-        self._run_button.setText("Save" if tab_index == 1 else "Run")
-
-    def _on_accept(self) -> None:
-        self._run_after = self._for_run and self._tabs.currentIndex() != 1
-        self.accept()
+        layout.addWidget(self._button_box)
 
     def should_run(self) -> bool:
-        return self._run_after
+        return dialog_should_run(self)
 
     def _restore_defaults(self) -> None:
         self._left.setValue(DEFAULT_EXTEND_LEFT)
@@ -1538,15 +1559,14 @@ class TsdSearchParamsDialog(QDialog):
         form.addRow("Poly-N threshold:", self._nt_threshold)
         form.addRow("Cluster distance (eps):", self._cluster_eps)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(self)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.addWidget(self._button_box)
+
+    def should_run(self) -> bool:
+        return dialog_should_run(self)
 
     def options(self) -> TsdSearchOptions:
         return TsdSearchOptions(
@@ -1888,42 +1908,22 @@ class BlastParamsDialog(QDialog):
         post_form.addRow("Minimum bit score (GFF):", self._min_bit_score)
         post_layout.addLayout(post_form)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        # BLAST runs straight from this dialog, and the button names which
-        # A program tab runs on accept; the Right Click tab only saves the
-        # preference, so the button and behaviour switch on that tab.
-        self._right_click_tab_index = self._tabs.count() - 1
-        self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        restore = buttons.addButton("Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole)
+        restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
         layout.addWidget(self._post_box)
-        layout.addWidget(buttons)
+        layout.addWidget(self._button_box)
         self._tabs.currentChanged.connect(self._update_postprocessing_visibility)
-        self._tabs.currentChanged.connect(self._update_run_button)
         self._update_postprocessing_visibility(self._tabs.currentIndex())
-        self._update_run_button(self._tabs.currentIndex())
-
-    def _update_run_button(self, tab_index: int) -> None:
-        """Run on a program tab; Save on the Right Click tab (nothing to run)."""
-        if not self._for_run:
-            self._run_button.setText("OK")
-            return
-        self._run_button.setText(
-            "Save" if tab_index == self._right_click_tab_index else "Run"
-        )
 
     def should_run(self) -> bool:
-        """False on the Right Click tab, where the button only saves the choice."""
-        if not self._for_run:
-            return False
-        return self._tabs.currentIndex() != self._right_click_tab_index
+        return dialog_should_run(self)
 
     @staticmethod
     def _parameter_form(parent: QWidget) -> QFormLayout:
@@ -2220,17 +2220,12 @@ class ConsensusParamsDialog(QDialog):
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
 
-        self._button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run" if for_run else "OK")
-        restore = self._button_box.addButton(
-            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
-        )
+        restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        self._button_box.accepted.connect(self._on_accept)
-        self._button_box.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -2246,7 +2241,6 @@ class ConsensusParamsDialog(QDialog):
         QTimer.singleShot(0, self._fit_to_current_tab)
 
     def _on_tab_changed(self, tab_index: int) -> None:
-        self._update_run_button(tab_index)
         self._fit_to_current_tab()
 
     def _fit_to_current_tab(self) -> None:
@@ -2279,18 +2273,8 @@ class ConsensusParamsDialog(QDialog):
         )
         self.setFixedSize(width, height)
 
-    def _update_run_button(self, tab_index: int) -> None:
-        if not self._for_run:
-            self._run_button.setText("OK")
-            return
-        self._run_button.setText("Save" if tab_index == 1 else "Run")
-
-    def _on_accept(self) -> None:
-        self._run_after = self._for_run and self._tabs.currentIndex() != 1
-        self.accept()
-
     def should_run(self) -> bool:
-        return self._run_after
+        return dialog_should_run(self)
 
     def _restore_defaults(self) -> None:
         self._threshold.setValue(DEFAULT_CONSENSUS_THRESHOLD)
@@ -2495,36 +2479,19 @@ class FlexidotParamsDialog(QDialog):
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run" if for_run else "OK")
-        restore = buttons.addButton(
-            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
-        )
+        restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
-        layout.addWidget(buttons)
-        self._tabs.currentChanged.connect(self._update_run_button)
-        self._update_run_button(self._tabs.currentIndex())
-
-    def _update_run_button(self, tab_index: int) -> None:
-        if not self._for_run:
-            self._run_button.setText("OK")
-            return
-        self._run_button.setText("Save" if tab_index == 1 else "Run")
-
-    def _on_accept(self) -> None:
-        self._run_after = self._for_run and self._tabs.currentIndex() != 1
-        self.accept()
+        layout.addWidget(self._button_box)
 
     def should_run(self) -> bool:
-        return self._run_after
+        return dialog_should_run(self)
 
     def _restore_defaults(self) -> None:
         defaults = FlexidotOptions()
@@ -2920,17 +2887,12 @@ class TeAnnotationDialog(QDialog):
         self._tabs.addTab(options_scroll, "Options")
         self._params_tab = params_tab
 
-        self._button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run" if for_run else "OK")
-        restore = self._button_box.addButton(
-            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
-        )
+        restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        self._button_box.accepted.connect(self._on_accept)
-        self._button_box.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -2945,7 +2907,6 @@ class TeAnnotationDialog(QDialog):
         QTimer.singleShot(0, self._fit_to_current_tab)
 
     def _on_tab_changed(self, tab_index: int) -> None:
-        self._update_run_button(tab_index)
         self._fit_to_current_tab()
 
     def _fit_to_current_tab(self) -> None:
@@ -2985,18 +2946,8 @@ class TeAnnotationDialog(QDialog):
         opt_w, opt_h = _TE_ANNOTATION_OPTIONS_SIZE
         self.setFixedSize(opt_w, opt_h)
 
-    def _update_run_button(self, tab_index: int) -> None:
-        if not self._for_run:
-            self._run_button.setText("OK")
-            return
-        self._run_button.setText("Save" if tab_index == 1 else "Run")
-
-    def _on_accept(self) -> None:
-        self._run_after = self._for_run and self._tabs.currentIndex() != 1
-        self.accept()
-
     def should_run(self) -> bool:
-        return self._run_after
+        return dialog_should_run(self)
 
     def _show_options_section(self, widget: QWidget) -> None:
         self._tabs.setCurrentIndex(1)
@@ -3273,30 +3224,21 @@ class OrfPredictionParamsDialog(QDialog):
         form.addRow("Max ORF length:", _bp_row(self._max_len))
         form.addRow("Add other start codons:", self._alt_starts)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self._ok_button.setText("Run" if for_run else "OK")
-        restore = buttons.addButton(
-            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
-        )
+        restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(10)
         layout.addLayout(form)
-        layout.addWidget(buttons)
-
-    def _on_accept(self) -> None:
-        self._run_after = self._for_run
-        self.accept()
+        layout.addWidget(self._button_box)
 
     def should_run(self) -> bool:
-        return self._run_after
+        return dialog_should_run(self)
 
     def _restore_defaults(self) -> None:
         defaults = self._OrfSettings()
@@ -3477,17 +3419,12 @@ class TeaAidParamsDialog(QDialog):
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
 
-        self._button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run" if for_run else "OK")
-        restore = self._button_box.addButton(
-            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
-        )
+        restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        self._button_box.accepted.connect(self._on_accept)
-        self._button_box.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -3502,7 +3439,6 @@ class TeaAidParamsDialog(QDialog):
         QTimer.singleShot(0, self._fit_to_current_tab)
 
     def _on_tab_changed(self, tab_index: int) -> None:
-        self._update_run_button(tab_index)
         self._fit_to_current_tab()
 
     def _fit_to_current_tab(self) -> None:
@@ -3533,18 +3469,8 @@ class TeaAidParamsDialog(QDialog):
         )
         self.setFixedSize(width, height)
 
-    def _update_run_button(self, tab_index: int) -> None:
-        if not self._for_run:
-            self._run_button.setText("OK")
-            return
-        self._run_button.setText("Save" if tab_index == 1 else "Run")
-
-    def _on_accept(self) -> None:
-        self._run_after = self._for_run and self._tabs.currentIndex() != 1
-        self.accept()
-
     def should_run(self) -> bool:
-        return self._run_after
+        return dialog_should_run(self)
 
     @staticmethod
     def _update_hit_color_button(button: QPushButton, color: str) -> None:
@@ -3846,17 +3772,14 @@ class MsaCleanParamsDialog(QDialog):
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
 
-        self._button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run" if for_run else "OK")
-        restore = self._button_box.addButton(
-            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
-        )
+        restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        self._button_box.accepted.connect(self._on_accept)
-        self._button_box.rejected.connect(self.reject)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+            on_accept=self._on_accept,
+            include_run=False,
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -3872,7 +3795,6 @@ class MsaCleanParamsDialog(QDialog):
         QTimer.singleShot(0, self._fit_to_current_tab)
 
     def _on_tab_changed(self, tab_index: int) -> None:
-        self._update_run_button(tab_index)
         self._fit_to_current_tab()
 
     def _fit_to_current_tab(self) -> None:
@@ -3903,12 +3825,6 @@ class MsaCleanParamsDialog(QDialog):
         )
         self.setFixedSize(width, height)
 
-    def _update_run_button(self, tab_index: int) -> None:
-        if not self._for_run:
-            self._run_button.setText("OK")
-            return
-        self._run_button.setText("Save" if tab_index == 1 else "Run")
-
     def _on_accept(self) -> None:
         if not self._checked_method_ids():
             QMessageBox.warning(
@@ -3918,11 +3834,10 @@ class MsaCleanParamsDialog(QDialog):
             )
             self._tabs.setCurrentIndex(0)
             return
-        self._run_after = self._for_run and self._tabs.currentIndex() != 1
         self.accept()
 
     def should_run(self) -> bool:
-        return self._run_after
+        return dialog_should_run(self)
 
     @staticmethod
     def _fill_labeled_grid(box, rows) -> None:

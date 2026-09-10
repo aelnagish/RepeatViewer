@@ -94,11 +94,18 @@ class _ToolbarPopup(QWidget):
     """
 
     closed = Signal()
+    # Side/bottom room for the drop shadow. Top stays tight so the menu does
+    # not sit on top of the toolbar button that opened it.
     _SHADOW = 12
+    _TOP_PAD = 2
 
     def __init__(self, actions: list[QAction], parent: QWidget | None = None) -> None:
+        # parent=None → true top-level window so move/setGeometry use global
+        # screen coordinates (matching mapToGlobal). A MainWindow parent can
+        # make macOS treat positions as parent-relative and shift the menu up.
+        del parent
         super().__init__(
-            parent,
+            None,
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.NoDropShadowWindowHint,
@@ -109,10 +116,11 @@ class _ToolbarPopup(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(self._SHADOW, self._SHADOW, self._SHADOW, self._SHADOW)
+        outer.setContentsMargins(self._SHADOW, self._TOP_PAD, self._SHADOW, self._SHADOW)
         outer.setSpacing(0)
 
         panel = QWidget(self)
+        self._panel = panel
         panel.setObjectName("ToolbarPopupPanel")
         panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(panel)
@@ -178,28 +186,44 @@ class _ToolbarPopup(QWidget):
         action.trigger()
 
     def show_below(self, widget: QWidget) -> None:
+        """Place the visible menu panel fully below ``widget`` (global coords)."""
         self.adjustSize()
-        # Align the visible panel (inside shadow padding) with the button.
-        pad = self._SHADOW
-        anchor = widget.mapToGlobal(QPoint(-pad, widget.height() + 1 - pad))
+        gap = 3
+        width = max(self.sizeHint().width(), 1)
+        height = max(self.sizeHint().height(), 1)
+
+        btn_top_left = widget.mapToGlobal(QPoint(0, 0))
+        btn_bottom = widget.mapToGlobal(QPoint(0, widget.height())).y()
+
+        # Window top-left in screen coordinates (top-level Tool window).
+        x = btn_top_left.x() - self._SHADOW
+        y = btn_bottom + gap - self._TOP_PAD
+
         screen = widget.screen()
         if screen is not None:
             available = screen.availableGeometry()
-            width = self.sizeHint().width()
-            height = self.sizeHint().height()
-            x = max(available.left(), min(anchor.x(), available.right() - width + 1))
-            y = anchor.y()
+            x = max(available.left(), min(x, available.right() - width + 1))
             if y + height > available.bottom():
-                y = max(
-                    available.top(),
-                    widget.mapToGlobal(QPoint(0, 0)).y() - height + pad - 1,
-                )
+                y = max(available.top(), btn_top_left.y() - gap - height)
             self.setGeometry(QRect(x, y, width, height))
         else:
-            self.move(anchor)
+            self.setGeometry(QRect(x, y, width, height))
+
         self.show()
         self.raise_()
+        # Snap again after show — macOS can adjust frameless tool windows.
+        self._snap_panel_below(widget, gap=gap)
         self.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def _snap_panel_below(self, widget: QWidget, *, gap: int = 3) -> None:
+        """If the opaque panel still overlaps the button, nudge the window down."""
+        panel = getattr(self, "_panel", None)
+        if panel is None or not widget.isVisible():
+            return
+        btn_bottom = widget.mapToGlobal(QPoint(0, widget.height())).y()
+        panel_top = panel.mapToGlobal(QPoint(0, 0)).y()
+        if panel_top < btn_bottom + gap:
+            self.move(self.x(), self.y() + (btn_bottom + gap - panel_top))
 
     def focusOutEvent(self, event) -> None:  # noqa: N802
         super().focusOutEvent(event)
@@ -2605,7 +2629,10 @@ class MainWindow(QMainWindow):
         dialog = FastGaParamsDialog(file_count=len(files), parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self._start_fastga_job(files, dialog.options())
+        if dialog.should_run():
+            self._start_fastga_job(files, dialog.options())
+        else:
+            self._set_status_message("FastGA settings noted (not persisted)", 4000)
 
     def _start_fastga_job(self, files: list[Path], options) -> None:
         title = (
@@ -3269,7 +3296,7 @@ class MainWindow(QMainWindow):
             if not actions:
                 return
 
-            popup = _ToolbarPopup(actions, parent=self)
+            popup = _ToolbarPopup(actions)
             self._active_toolbar_menu = popup
             self._active_toolbar_menu_button = btn
             btn.setDown(True)
@@ -5847,7 +5874,7 @@ class MainWindow(QMainWindow):
         return ALIGN_MODE_COMBINED if combined else "one_by_one"
 
     def _open_align_dialog(self) -> None:
-        """Click Align: parameters dialog. Run runs the active aligner tab."""
+        """Align parameters: Cancel / Save / Run (toolbar and menu use the same dialog)."""
         dialog = AlignParamsDialog(
             initial=self._align_options,
             use_system_mafft=self._project.use_system_mafft,
@@ -5881,26 +5908,8 @@ class MainWindow(QMainWindow):
         self._align_sequences(engine=aligner, mode=self._mode_for_aligner(aligner))
 
     def _modify_align_parameters(self) -> None:
-        # Kept for the menu-bar Align submenu: change parameters without running.
-        dialog = AlignParamsDialog(
-            initial=self._align_options,
-            use_system_mafft=self._project.use_system_mafft,
-            use_system_muscle=self._project.use_system_muscle,
-            for_run=False,
-            parent=self,
-        )
-        accepted = False
-        try:
-            accepted = bool(dialog.exec())
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
-        if accepted:
-            self._align_options = dialog.options()
-            save_align_options(self._align_options)
-            self._project.use_system_mafft = dialog.use_system_mafft()
-            self._project.use_system_muscle = dialog.use_system_muscle()
-            self._persist_workspace()
-            self._set_status_message("Alignment parameters updated", 4000)
+        """Menu: same Cancel / Save / Run dialog as the Align toolbar button."""
+        self._open_align_dialog()
 
     def _align_sequences(
         self,
@@ -6045,21 +6054,8 @@ class MainWindow(QMainWindow):
             self._set_status_message("BLAST settings saved", 4000)
 
     def _change_blast_parameters(self) -> None:
-        dialog = BlastParamsDialog(
-            project=self._project,
-            initial=self._blast_options,
-            for_run=False,
-            parent=self,
-        )
-        try:
-            if dialog.exec():
-                self._blast_options = dialog.options()
-                save_blast_options(self._blast_options)
-                self._project.use_system_blast = dialog.use_system_blast()
-                self._persist_workspace()
-                self._set_status_message("Blast parameters updated", 4000)
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
+        """Menu: same Cancel / Save / Run dialog as the BLAST toolbar button."""
+        self._open_blast_dialog()
 
     def _add_fasta_as_blast_database(self, path: Path) -> None:
         from repeatviewer.database_settings import save_blast_databases_to_settings
@@ -7108,18 +7104,35 @@ class MainWindow(QMainWindow):
             self._run_teaid()
 
     def _modify_teaid_parameters(self) -> None:
-        dialog = TeaAidParamsDialog(
-            initial=self._teaid_options,
-            for_run=False,
+        """Menu: same Cancel / Save / Run dialog as the TEAid toolbar button."""
+        self._open_teaid_dialog()
+
+    def _modify_extend_parameters(self) -> None:
+        """Menu: same Cancel / Save / Run dialog as the MSA Extend toolbar button."""
+        self._open_extend_dialog()
+
+    def _modify_tsd_search_parameters(self) -> None:
+        """Menu / change parameters: Cancel / Save / Run."""
+        dialog = TsdSearchParamsDialog(
+            initial=self._tsd_search_options,
             parent=self,
         )
-        if dialog.exec():
-            self._teaid_options = dialog.options()
-            save_teaid_options(self._teaid_options)
-            self._persist_workspace()
+        try:
+            if not dialog.exec():
+                return
+            self._tsd_search_options = dialog.options()
+            save_tsd_search_options(self._tsd_search_options)
+            run_after = dialog.should_run()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        if run_after:
+            self._run_tsd_search()
+        else:
             self._set_status_message(
-                f"TEAid defaults: genome E-value {self._teaid_options.e_value:.4f}, "
-                f"self BLAST word size {self._teaid_options.self_blast_word_size}",
+                "TSD search defaults: "
+                f"left {self._tsd_search_options.left_boundary}, "
+                f"right {self._tsd_search_options.right_boundary}, "
+                f"radius {self._tsd_search_options.nt_radius} nt",
                 5000,
             )
 
@@ -7172,43 +7185,6 @@ class MainWindow(QMainWindow):
             f"GFF map: {fasta_path.name} + {gff_path.name}",
             6000,
         )
-
-    def _modify_extend_parameters(self) -> None:
-        dialog = ExtendParamsDialog(
-            initial=self._extend_options,
-            pan_genome_names=self._pan_genome_names(),
-            project_genome=self._genome_path_resolved(),
-            genome_history=load_genome_history(),
-            for_run=False,
-            parent=self,
-        )
-        if dialog.exec():
-            self._extend_options = dialog.options()
-            save_extend_options(self._extend_options)
-            genome_note = ""
-            if self._extend_options.pan_genome_name:
-                genome_note = f", genome {self._extend_options.pan_genome_name}"
-            self._set_status_message(
-                f"MSA Extend defaults: {self._extend_options.left} bp left, "
-                f"{self._extend_options.right} bp right{genome_note}",
-                5000,
-            )
-
-    def _modify_tsd_search_parameters(self) -> None:
-        dialog = TsdSearchParamsDialog(
-            initial=self._tsd_search_options,
-            parent=self,
-        )
-        if dialog.exec():
-            self._tsd_search_options = dialog.options()
-            save_tsd_search_options(self._tsd_search_options)
-            self._set_status_message(
-                "TSD search defaults: "
-                f"left {self._tsd_search_options.left_boundary}, "
-                f"right {self._tsd_search_options.right_boundary}, "
-                f"radius {self._tsd_search_options.nt_radius} nt",
-                5000,
-            )
 
     def _extend_with_different_distances(self) -> None:
         if not self._project.has_genome_configured():
@@ -7285,19 +7261,8 @@ class MainWindow(QMainWindow):
             self._run_consensus()
 
     def _modify_consensus_parameters(self) -> None:
-        dialog = ConsensusParamsDialog(
-            initial=self._consensus_options,
-            for_run=False,
-            parent=self,
-        )
-        if dialog.exec():
-            self._consensus_options = dialog.options()
-            save_consensus_options(self._consensus_options)
-            self._persist_workspace()
-            self._set_status_message(
-                f"Consensus parameters updated (threshold={self._consensus_options.threshold})",
-                5000,
-            )
+        """Menu: same Cancel / Save / Run dialog as the Consensus toolbar button."""
+        self._open_consensus_dialog()
 
     def _run_flexidot_combined(self) -> None:
         self._apply_function(
@@ -7488,64 +7453,20 @@ class MainWindow(QMainWindow):
             self._set_status_message("ORF Prediction settings saved", 4000)
 
     def _modify_orf_prediction_parameters(self) -> None:
-        from repeatviewer.backends.auto_annotation_settings import (
-            save_orf_prediction_settings,
-        )
-
-        dialog = OrfPredictionParamsDialog(
-            initial=self._orf_prediction_settings,
-            for_run=False,
-            parent=self,
-        )
-        try:
-            if not exec_modal_dialog(dialog):
-                return
-            self._orf_prediction_settings = dialog.options()
-            save_orf_prediction_settings(self._orf_prediction_settings)
-            self._persist_workspace()
-            self._set_status_message("ORF Prediction parameters updated", 5000)
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
+        """Menu: same Cancel / Save / Run dialog as the ORF Prediction toolbar button."""
+        self._open_orf_prediction_dialog()
 
     def _run_te_annotation(self) -> None:
         """Tools menu default entry: run with saved selection."""
         self._run_te_annotation_saved()
 
     def _modify_te_annotation_parameters(self) -> None:
-        dialog = TeAnnotationDialog(
-            initial=self._te_annotation_options,
-            for_run=False,
-            parent=self,
-        )
-        try:
-            if not exec_modal_dialog(dialog):
-                return
-            dialog.apply_settings_panels()
-            self._te_annotation_options = dialog.job_options()
-            save_te_annotation_options(self._te_annotation_options)
-            self._persist_workspace()
-            self._reload_shared_annotation_settings()
-            self._set_status_message("TE annotation parameters updated", 5000)
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
+        """Menu: same Cancel / Save / Run dialog as the TE annotation toolbar button."""
+        self._open_te_annotation_dialog()
 
     def _modify_flexidot_parameters(self) -> None:
-        dialog = FlexidotParamsDialog(
-            initial=self._flexidot_options,
-            for_run=False,
-            parent=self,
-        )
-        if dialog.exec():
-            self._flexidot_options = dialog.options()
-            save_flexidot_options(self._flexidot_options)
-            self._persist_workspace()
-            self._set_status_message(
-                f"Flexidot parameters updated "
-                f"(k={self._flexidot_options.wordsize}, "
-                f"output={self._flexidot_options.output_format}"
-                f"{', GFF on' if self._flexidot_options.use_gff else ''})",
-                5000,
-            )
+        """Menu: same Cancel / Save / Run dialog as the Flexidot toolbar button."""
+        self._open_flexidot_dialog()
 
     def _add_msa_clean_menu_action(
         self,
@@ -7560,26 +7481,8 @@ class MainWindow(QMainWindow):
             action.setStatusTip(desc)
 
     def _modify_msa_clean_parameters(self) -> None:
-        dialog = MsaCleanParamsDialog(
-            initial=self._msa_clean_options,
-            for_run=False,
-            parent=self,
-        )
-        if dialog.exec():
-            self._msa_clean_options = dialog.options()
-            save_msa_clean_options(self._msa_clean_options)
-            self._persist_workspace()
-            labels = []
-            if self._msa_clean_options.use_divergence:
-                labels.append("divergence rows")
-            if self._msa_clean_options.use_gap_row:
-                labels.append("gap rows")
-            if self._msa_clean_options.use_gappy_columns:
-                labels.append("gappy columns")
-            self._set_status_message(
-                f"MSA clean methods updated: {', '.join(labels)}",
-                5000,
-            )
+        """Menu: Cancel / Save settings dialog (no Run — clean runs from the tool menu)."""
+        self._open_msa_clean_dialog()
 
     def _open_msa_clean_dialog(self) -> None:
         """Open MSA Clean parameters (from Options right-click or Change menu)."""
@@ -7593,13 +7496,9 @@ class MainWindow(QMainWindow):
             self._msa_clean_options = dialog.options()
             save_msa_clean_options(self._msa_clean_options)
             self._persist_workspace()
-            run_after = dialog.should_run()
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
-        if run_after:
-            self._run_default_msa_clean()
-        else:
-            self._set_status_message("MSA clean settings saved", 4000)
+        self._set_status_message("MSA clean settings saved", 4000)
 
     def _quick_msa_clean_right_click(self) -> None:
         """Right-click MSA Clean: run the action chosen in the Options tab."""
