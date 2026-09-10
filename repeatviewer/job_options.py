@@ -421,12 +421,20 @@ class TeAnnotationJobOptions:
 
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
 DEFAULT_TEAID_THREADS = 1
-DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 11
+DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 6
 # Text written on the consensus (x-)axis of the TEAid panels. Configurable so
 # non-TE users (e.g. tandem repeats) can relabel it.
 DEFAULT_TEAID_X_AXIS_LABEL = "TE consensus (bp)"
 MIN_TEAID_SELF_BLAST_WORD_SIZE = 4
 MAX_TEAID_SELF_BLAST_WORD_SIZE = 25
+# Genome-BLAST hit length bands (% of consensus / input length).
+DEFAULT_TEAID_HIT_LEN_HIGH_PCT = 80.0
+DEFAULT_TEAID_HIT_LEN_MID_PCT = 50.0
+DEFAULT_TEAID_HIT_COLOR_HIGH = "#ff0000"
+DEFAULT_TEAID_HIT_COLOR_MID = "#1f77b4"
+TEAID_RIGHT_CLICK_RUN = "run"
+TEAID_RIGHT_CLICK_DIALOG = "dialog"
+TEAID_RIGHT_CLICK_ACTIONS = (TEAID_RIGHT_CLICK_RUN, TEAID_RIGHT_CLICK_DIALOG)
 
 
 def clamp_teaid_self_blast_word_size(requested: int) -> int:
@@ -435,6 +443,15 @@ def clamp_teaid_self_blast_word_size(requested: int) -> int:
         MIN_TEAID_SELF_BLAST_WORD_SIZE,
         min(MAX_TEAID_SELF_BLAST_WORD_SIZE, int(requested)),
     )
+
+
+def clamp_teaid_hit_len_pct(high: float, mid: float) -> tuple[float, float]:
+    """Keep high/mid in 0–100 and ensure mid < high."""
+    high_pct = max(0.0, min(100.0, float(high)))
+    mid_pct = max(0.0, min(100.0, float(mid)))
+    if mid_pct >= high_pct:
+        mid_pct = max(0.0, high_pct - 1.0) if high_pct > 0 else 0.0
+    return high_pct, mid_pct
 
 
 def configure_report_evalue_spinbox(spin) -> None:
@@ -461,6 +478,12 @@ class TeaAidOptions:
     self_blast_word_size: int = DEFAULT_TEAID_SELF_BLAST_WORD_SIZE
     num_threads: int = DEFAULT_TEAID_THREADS
     x_axis_label: str = DEFAULT_TEAID_X_AXIS_LABEL
+    # Genome BLAST hit coloring by span as % of consensus length.
+    hit_len_high_pct: float = DEFAULT_TEAID_HIT_LEN_HIGH_PCT
+    hit_len_mid_pct: float = DEFAULT_TEAID_HIT_LEN_MID_PCT
+    hit_color_high: str = DEFAULT_TEAID_HIT_COLOR_HIGH
+    hit_color_mid: str = DEFAULT_TEAID_HIT_COLOR_MID
+    right_click_action: str = TEAID_RIGHT_CLICK_RUN
 
 
 # remove_gaps_with_similarity_check defaults (TEtrimmerGUI)
@@ -808,6 +831,13 @@ def load_teaid_options() -> TeaAidOptions:
         MIN_TEAID_SELF_BLAST_WORD_SIZE,
         min(MAX_TEAID_SELF_BLAST_WORD_SIZE, word_size),
     )
+    high_pct, mid_pct = clamp_teaid_hit_len_pct(
+        float(v.get("hit_len_high_pct", DEFAULT_TEAID_HIT_LEN_HIGH_PCT)),
+        float(v.get("hit_len_mid_pct", DEFAULT_TEAID_HIT_LEN_MID_PCT)),
+    )
+    right_click_action = str(v.get("right_click_action", TEAID_RIGHT_CLICK_RUN))
+    if right_click_action not in TEAID_RIGHT_CLICK_ACTIONS:
+        right_click_action = TEAID_RIGHT_CLICK_RUN
     return TeaAidOptions(
         e_value=normalize_blast_evalue(
             float(v.get("e_value", DEFAULT_TEAID_EVALUE)),
@@ -819,16 +849,39 @@ def load_teaid_options() -> TeaAidOptions:
             str(v.get("x_axis_label", DEFAULT_TEAID_X_AXIS_LABEL)).strip()
             or DEFAULT_TEAID_X_AXIS_LABEL
         ),
+        hit_len_high_pct=high_pct,
+        hit_len_mid_pct=mid_pct,
+        hit_color_high=(
+            str(v.get("hit_color_high", DEFAULT_TEAID_HIT_COLOR_HIGH)).strip()
+            or DEFAULT_TEAID_HIT_COLOR_HIGH
+        ),
+        hit_color_mid=(
+            str(v.get("hit_color_mid", DEFAULT_TEAID_HIT_COLOR_MID)).strip()
+            or DEFAULT_TEAID_HIT_COLOR_MID
+        ),
+        right_click_action=right_click_action,
     )
 
 
 def save_teaid_options(opts: TeaAidOptions) -> None:
+    high_pct, mid_pct = clamp_teaid_hit_len_pct(
+        opts.hit_len_high_pct, opts.hit_len_mid_pct
+    )
     _save_settings_group(
         "teaid",
         {
             "e_value": opts.e_value,
             "self_blast_word_size": opts.self_blast_word_size,
             "x_axis_label": opts.x_axis_label,
+            "hit_len_high_pct": high_pct,
+            "hit_len_mid_pct": mid_pct,
+            "hit_color_high": opts.hit_color_high,
+            "hit_color_mid": opts.hit_color_mid,
+            "right_click_action": (
+                opts.right_click_action
+                if opts.right_click_action in TEAID_RIGHT_CLICK_ACTIONS
+                else TEAID_RIGHT_CLICK_RUN
+            ),
         },
     )
 

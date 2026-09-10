@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QStandardItemModel
+from PySide6.QtGui import QColor, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QCompleter,
     QDialog,
@@ -147,8 +148,15 @@ from repeatviewer.job_options import (
     DEFAULT_TEAID_EVALUE,
     DEFAULT_TEAID_X_AXIS_LABEL,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
+    DEFAULT_TEAID_HIT_LEN_HIGH_PCT,
+    DEFAULT_TEAID_HIT_LEN_MID_PCT,
+    DEFAULT_TEAID_HIT_COLOR_HIGH,
+    DEFAULT_TEAID_HIT_COLOR_MID,
     MAX_TEAID_SELF_BLAST_WORD_SIZE,
     MIN_TEAID_SELF_BLAST_WORD_SIZE,
+    TEAID_RIGHT_CLICK_RUN,
+    TEAID_RIGHT_CLICK_DIALOG,
+    clamp_teaid_hit_len_pct,
     BlastOptions,
     ConsensusOptions,
     normalize_consensus_ambiguous,
@@ -3299,69 +3307,316 @@ class OrfPredictionParamsDialog(QDialog):
 
 
 class TeaAidParamsDialog(QDialog):
+    """TEAid parameters.
+
+    Left-click the toolbar button opens this dialog. The Parameters tab holds
+    BLAST settings and hit colors; the Options tab sets right-click behavior.
+    """
+
     def __init__(
         self,
         *,
         initial: TeaAidOptions | None = None,
+        for_run: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("TEAid parameters")
         opts = initial or TeaAidOptions()
+        self._for_run = for_run
+        self._run_after = False
+
+        high_pct, mid_pct = clamp_teaid_hit_len_pct(
+            opts.hit_len_high_pct, opts.hit_len_mid_pct
+        )
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
         self._evalue.setValue(
             normalize_blast_evalue(opts.e_value, default=DEFAULT_TEAID_EVALUE)
         )
+        self._evalue.setFixedWidth(120)
         self._evalue.setToolTip(
             "Reporting E-value for the TEAid genome BLAST search only."
         )
 
         self._word_size = QSpinBox()
-        self._word_size.setRange(MIN_TEAID_SELF_BLAST_WORD_SIZE, MAX_TEAID_SELF_BLAST_WORD_SIZE)
+        self._word_size.setRange(
+            MIN_TEAID_SELF_BLAST_WORD_SIZE, MAX_TEAID_SELF_BLAST_WORD_SIZE
+        )
         self._word_size.setValue(
             max(
                 MIN_TEAID_SELF_BLAST_WORD_SIZE,
                 min(MAX_TEAID_SELF_BLAST_WORD_SIZE, opts.self_blast_word_size),
             )
         )
+        self._word_size.setFixedWidth(120)
         self._word_size.setToolTip(
             "BLASTN word size (-word_size) for the TEAid self-BLAST dot plot only (4–25)."
         )
 
-        self._x_axis_label = QLineEdit()
-        self._x_axis_label.setText(opts.x_axis_label or DEFAULT_TEAID_X_AXIS_LABEL)
-        self._x_axis_label.setPlaceholderText(DEFAULT_TEAID_X_AXIS_LABEL)
-        self._x_axis_label.setToolTip(
-            "Text written on the consensus (x-)axis of the TEAid panels. Change it "
-            "when working with non-TE sequences, e.g. 'Tandem repeat (bp)' or "
-            "'Monomer (bp)'."
+        self._hit_high_pct = QDoubleSpinBox()
+        self._hit_high_pct.setRange(0.0, 100.0)
+        self._hit_high_pct.setDecimals(1)
+        self._hit_high_pct.setSingleStep(1.0)
+        self._hit_high_pct.setSuffix(" %")
+        self._hit_high_pct.setValue(high_pct)
+        self._hit_high_pct.setFixedWidth(100)
+        self._hit_high_pct.setToolTip(
+            "Hits at least this long (percent of the input / consensus length) "
+            "use the upper color."
         )
+        self._hit_color_high = opts.hit_color_high or DEFAULT_TEAID_HIT_COLOR_HIGH
+        self._hit_color_high_btn = QPushButton()
+        self._hit_color_high_btn.setFixedSize(56, 22)
+        self._hit_color_high_btn.setToolTip("Color for hits longer than the value above")
+        self._hit_color_high_btn.clicked.connect(self._pick_hit_color_high)
+        self._update_hit_color_button(self._hit_color_high_btn, self._hit_color_high)
 
-        form = QFormLayout()
-        form.addRow("Genome BLAST E-value:", self._evalue)
-        form.addRow("Self BLAST word size:", self._word_size)
-        form.addRow("Consensus axis label:", self._x_axis_label)
+        self._hit_mid_pct = QDoubleSpinBox()
+        self._hit_mid_pct.setRange(0.0, 100.0)
+        self._hit_mid_pct.setDecimals(1)
+        self._hit_mid_pct.setSingleStep(1.0)
+        self._hit_mid_pct.setSuffix(" %")
+        self._hit_mid_pct.setValue(mid_pct)
+        self._hit_mid_pct.setFixedWidth(100)
+        self._hit_mid_pct.setToolTip(
+            "Hits at least this long but shorter than the upper threshold use the "
+            "mid color. Cannot be greater than or equal to the upper threshold."
+        )
+        self._hit_color_mid = opts.hit_color_mid or DEFAULT_TEAID_HIT_COLOR_MID
+        self._hit_color_mid_btn = QPushButton()
+        self._hit_color_mid_btn.setFixedSize(56, 22)
+        self._hit_color_mid_btn.setToolTip(
+            "Color for hits longer than this value but below the upper threshold"
+        )
+        self._hit_color_mid_btn.clicked.connect(self._pick_hit_color_mid)
+        self._update_hit_color_button(self._hit_color_mid_btn, self._hit_color_mid)
 
-        buttons = QDialogButtonBox(
+        self._hit_high_pct.valueChanged.connect(self._on_hit_high_changed)
+        self._hit_mid_pct.valueChanged.connect(self._on_hit_mid_changed)
+
+        high_row = QWidget(self)
+        high_layout = QHBoxLayout(high_row)
+        high_layout.setContentsMargins(0, 0, 0, 0)
+        high_layout.setSpacing(8)
+        high_layout.addWidget(self._hit_color_high_btn)
+        high_layout.addWidget(QLabel("Hit longer than:", self))
+        high_layout.addWidget(self._hit_high_pct)
+        high_layout.addWidget(QLabel("of sequence length", self))
+        high_layout.addStretch(1)
+
+        mid_row = QWidget(self)
+        mid_layout = QHBoxLayout(mid_row)
+        mid_layout.setContentsMargins(0, 0, 0, 0)
+        mid_layout.setSpacing(8)
+        mid_layout.addWidget(self._hit_color_mid_btn)
+        mid_layout.addWidget(QLabel("Hit longer than:", self))
+        mid_layout.addWidget(self._hit_mid_pct)
+        mid_layout.addWidget(QLabel("but below the value above", self))
+        mid_layout.addStretch(1)
+
+        colors_box = QGroupBox("Genome BLAST hit colors", self)
+        colors_layout = QVBoxLayout(colors_box)
+        colors_layout.setContentsMargins(10, 8, 10, 8)
+        colors_layout.setSpacing(8)
+        colors_layout.addWidget(high_row)
+        colors_layout.addWidget(mid_row)
+
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Run TEAid with saved parameters", TEAID_RIGHT_CLICK_RUN),
+            ("Open this dialog", TEAID_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_action == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[TEAID_RIGHT_CLICK_RUN].setChecked(True)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(QLabel("Right-clicking the TEAid button does:", self))
+        for radio in self._right_click_buttons.values():
+            rc_box_layout.addWidget(radio)
+
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(12, 10, 12, 10)
+        options_layout.setSpacing(8)
+        options_layout.addWidget(rc_box)
+
+        self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        params_tab = QWidget(self)
+        params_layout = QVBoxLayout(params_tab)
+        params_layout.setContentsMargins(12, 10, 12, 10)
+        params_layout.setSpacing(10)
+        params_form = QFormLayout()
+        params_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        params_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        params_form.setHorizontalSpacing(12)
+        params_form.setVerticalSpacing(8)
+        params_form.addRow("Genome BLAST E-value:", self._evalue)
+        params_form.addRow("Self BLAST word size:", self._word_size)
+        params_layout.addLayout(params_form)
+        params_layout.addWidget(colors_box)
+        self._tabs.addTab(params_tab, "Parameters")
+        self._tabs.addTab(options_tab, "Options")
+
+        self._button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
+        self._run_button.setText("Run" if for_run else "OK")
+        restore = self._button_box.addButton(
+            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
+        )
+        restore.clicked.connect(self._restore_defaults)
+        self._button_box.accepted.connect(self._on_accept)
+        self._button_box.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        layout.addWidget(self._tabs)
+        layout.addWidget(self._button_box)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._on_tab_changed(self._tabs.currentIndex())
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_to_current_tab)
+
+    def _on_tab_changed(self, tab_index: int) -> None:
+        self._update_run_button(tab_index)
+        self._fit_to_current_tab()
+
+    def _fit_to_current_tab(self) -> None:
+        page = self._tabs.currentWidget()
+        if page is None:
+            return
+        page.ensurePolished()
+        page.adjustSize()
+        page_hint = page.sizeHint()
+        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
+        tab_chrome = tab_bar_h + 8
+        buttons_h = self._button_box.sizeHint().height()
+        margins = self.layout().contentsMargins()
+        spacing = self.layout().spacing()
+        height = (
+            page_hint.height()
+            + tab_chrome
+            + buttons_h
+            + margins.top()
+            + margins.bottom()
+            + spacing
+            + 4
+        )
+        width = max(
+            600,
+            page_hint.width() + margins.left() + margins.right() + 40,
+            self._button_box.sizeHint().width() + margins.left() + margins.right(),
+        )
+        self.setFixedSize(width, height)
+
+    def _update_run_button(self, tab_index: int) -> None:
+        if not self._for_run:
+            self._run_button.setText("OK")
+            return
+        self._run_button.setText("Save" if tab_index == 1 else "Run")
+
+    def _on_accept(self) -> None:
+        self._run_after = self._for_run and self._tabs.currentIndex() != 1
+        self.accept()
+
+    def should_run(self) -> bool:
+        return self._run_after
+
+    @staticmethod
+    def _update_hit_color_button(button: QPushButton, color: str) -> None:
+        hex_color = QColor(color).name(QColor.NameFormat.HexRgb)
+        button.setStyleSheet(f"background-color: {hex_color};")
+
+    def _pick_hit_color_high(self) -> None:
+        chosen = QColorDialog.getColor(
+            QColor(self._hit_color_high), self, "Hit color (upper band)"
+        )
+        if not chosen.isValid():
+            return
+        self._hit_color_high = chosen.name(QColor.NameFormat.HexRgb)
+        self._update_hit_color_button(self._hit_color_high_btn, self._hit_color_high)
+
+    def _pick_hit_color_mid(self) -> None:
+        chosen = QColorDialog.getColor(
+            QColor(self._hit_color_mid), self, "Hit color (mid band)"
+        )
+        if not chosen.isValid():
+            return
+        self._hit_color_mid = chosen.name(QColor.NameFormat.HexRgb)
+        self._update_hit_color_button(self._hit_color_mid_btn, self._hit_color_mid)
+
+    def _on_hit_high_changed(self, value: float) -> None:
+        high_pct, mid_pct = clamp_teaid_hit_len_pct(value, self._hit_mid_pct.value())
+        if abs(self._hit_mid_pct.value() - mid_pct) > 1e-9:
+            self._hit_mid_pct.blockSignals(True)
+            self._hit_mid_pct.setValue(mid_pct)
+            self._hit_mid_pct.blockSignals(False)
+        if abs(self._hit_high_pct.value() - high_pct) > 1e-9:
+            self._hit_high_pct.blockSignals(True)
+            self._hit_high_pct.setValue(high_pct)
+            self._hit_high_pct.blockSignals(False)
+
+    def _on_hit_mid_changed(self, value: float) -> None:
+        high_pct, mid_pct = clamp_teaid_hit_len_pct(self._hit_high_pct.value(), value)
+        if abs(self._hit_mid_pct.value() - mid_pct) > 1e-9:
+            self._hit_mid_pct.blockSignals(True)
+            self._hit_mid_pct.setValue(mid_pct)
+            self._hit_mid_pct.blockSignals(False)
+
+    def _restore_defaults(self) -> None:
+        self._evalue.setValue(DEFAULT_TEAID_EVALUE)
+        self._word_size.setValue(DEFAULT_TEAID_SELF_BLAST_WORD_SIZE)
+        self._hit_high_pct.blockSignals(True)
+        self._hit_mid_pct.blockSignals(True)
+        self._hit_high_pct.setValue(DEFAULT_TEAID_HIT_LEN_HIGH_PCT)
+        self._hit_mid_pct.setValue(DEFAULT_TEAID_HIT_LEN_MID_PCT)
+        self._hit_high_pct.blockSignals(False)
+        self._hit_mid_pct.blockSignals(False)
+        self._hit_color_high = DEFAULT_TEAID_HIT_COLOR_HIGH
+        self._hit_color_mid = DEFAULT_TEAID_HIT_COLOR_MID
+        self._update_hit_color_button(self._hit_color_high_btn, self._hit_color_high)
+        self._update_hit_color_button(self._hit_color_mid_btn, self._hit_color_mid)
+        self._right_click_buttons[TEAID_RIGHT_CLICK_RUN].setChecked(True)
 
     def options(self) -> TeaAidOptions:
+        high_pct, mid_pct = clamp_teaid_hit_len_pct(
+            self._hit_high_pct.value(), self._hit_mid_pct.value()
+        )
+        right_click_action = TEAID_RIGHT_CLICK_RUN
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                right_click_action = value
+                break
         return TeaAidOptions(
             e_value=normalize_blast_evalue(
                 self._evalue.value(),
                 default=DEFAULT_TEAID_EVALUE,
             ),
             self_blast_word_size=self._word_size.value(),
-            x_axis_label=self._x_axis_label.text().strip() or DEFAULT_TEAID_X_AXIS_LABEL,
+            x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
+            hit_len_high_pct=high_pct,
+            hit_len_mid_pct=mid_pct,
+            hit_color_high=self._hit_color_high or DEFAULT_TEAID_HIT_COLOR_HIGH,
+            hit_color_mid=self._hit_color_mid or DEFAULT_TEAID_HIT_COLOR_MID,
+            right_click_action=right_click_action,
         )
 
 

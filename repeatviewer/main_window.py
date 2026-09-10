@@ -307,6 +307,7 @@ from repeatviewer.job_options import (
     EXTEND_RIGHT_CLICK_DIALOG,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     CONSENSUS_RIGHT_CLICK_DIALOG,
+    TEAID_RIGHT_CLICK_DIALOG,
     TE_ANNOTATION_RIGHT_CLICK_DIALOG,
     load_align_options,
     load_blast_options,
@@ -3567,12 +3568,12 @@ class MainWindow(QMainWindow):
             self._add_toolbar_action_button(
                 bar,
                 "TEAid",
-                self._run_teaid,
+                self._open_teaid_dialog,
                 tooltip=(
-                    "Click: run TEAid with saved parameters.\n"
-                    "Right-click: change parameters."
+                    "Click: set parameters and run.\n"
+                    "Right-click: run with saved settings (set in the Options tab)."
                 ),
-                right_click_slot=self._modify_teaid_parameters,
+                right_click_slot=self._quick_teaid_right_click,
             )
         elif tool_id == "msa_clean":
             self._add_toolbar_text_menu_button(
@@ -6952,11 +6953,43 @@ class MainWindow(QMainWindow):
     def _run_teaid(self) -> None:
         self._apply_function("teaid", teaid_options=self._teaid_options)
 
+    def _open_teaid_dialog(self) -> None:
+        """Click TEAid: parameters dialog. Run runs; Save (Options tab) stores only."""
+        dialog = TeaAidParamsDialog(
+            initial=self._teaid_options,
+            parent=self,
+        )
+        try:
+            if not dialog.exec():
+                return
+            self._teaid_options = dialog.options()
+            save_teaid_options(self._teaid_options)
+            self._persist_workspace()
+            run_after = dialog.should_run()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        if run_after:
+            self._run_teaid()
+        else:
+            self._set_status_message("TEAid settings saved", 4000)
+
+    def _quick_teaid_right_click(self) -> None:
+        """Right-click TEAid: run with saved settings, or open the dialog."""
+        if self._teaid_options.right_click_action == TEAID_RIGHT_CLICK_DIALOG:
+            self._open_teaid_dialog()
+        else:
+            self._run_teaid()
+
     def _modify_teaid_parameters(self) -> None:
-        dialog = TeaAidParamsDialog(initial=self._teaid_options, parent=self)
+        dialog = TeaAidParamsDialog(
+            initial=self._teaid_options,
+            for_run=False,
+            parent=self,
+        )
         if dialog.exec():
             self._teaid_options = dialog.options()
             save_teaid_options(self._teaid_options)
+            self._persist_workspace()
             self._set_status_message(
                 f"TEAid defaults: genome E-value {self._teaid_options.e_value:.4f}, "
                 f"self BLAST word size {self._teaid_options.self_blast_word_size}",

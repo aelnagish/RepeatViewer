@@ -764,6 +764,10 @@ def run_on_sequence(
                     use_system_blast=project.use_system_blast,
                     self_blast_word_size=teaid_opts.self_blast_word_size,
                     x_axis_label=teaid_opts.x_axis_label,
+                    hit_len_high_pct=teaid_opts.hit_len_high_pct,
+                    hit_len_mid_pct=teaid_opts.hit_len_mid_pct,
+                    hit_color_high=teaid_opts.hit_color_high,
+                    hit_color_mid=teaid_opts.hit_color_mid,
                 )
             else:
                 run_ok = teaid_plotter(
@@ -777,6 +781,10 @@ def run_on_sequence(
                     self_blast_word_size=teaid_opts.self_blast_word_size,
                     output_name_tag=genome_label or None,
                     x_axis_label=teaid_opts.x_axis_label,
+                    hit_len_high_pct=teaid_opts.hit_len_high_pct,
+                    hit_len_mid_pct=teaid_opts.hit_len_mid_pct,
+                    hit_color_high=teaid_opts.hit_color_high,
+                    hit_color_mid=teaid_opts.hit_color_mid,
                 )
         except TeaidInputError as exc:
             if scratch_dir is not None:

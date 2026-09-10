@@ -18,6 +18,7 @@ from plotly.subplots import make_subplots
 from repeatviewer.backends.gui_functions import blast, check_database
 from repeatviewer.job_options import (
     DEFAULT_TE_DIVERGENCE_BIN_WIDTH,
+    DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
     clamp_teaid_self_blast_word_size,
 )
 
@@ -359,9 +360,20 @@ def create_hovertext(row):
     return f'Start: {row["V7"]}<br>End: {row["V8"]}<br>Divergence: {divergence:.2f}%'
 
 
-def blast_plot(df, cons_len, full_len_thr=0.8):
-    # Calculate full matches based on the threshold and consensus length
-    full = df[(abs(df['V7'] - df['V8']) >= full_len_thr * cons_len)]
+def blast_plot(
+    df,
+    cons_len,
+    full_len_thr=0.8,
+    mid_len_thr=0.5,
+    full_color='red',
+    mid_color='#1f77b4',
+):
+    # Length bands as fractions of consensus / input length.
+    hit_len = (df['V7'] - df['V8']).abs()
+    full = df[hit_len >= full_len_thr * cons_len]
+    mid = df[
+        (hit_len >= mid_len_thr * cons_len) & (hit_len < full_len_thr * cons_len)
+    ]
 
     # Calculate the max number of divergence for the y-axis range
     y_max = max(100 - df['V3'])
@@ -383,14 +395,28 @@ def blast_plot(df, cons_len, full_len_thr=0.8):
             )
         )
 
-    # Add segments for full matches
+    # Mid-length hits (between mid and full thresholds)
+    for i in mid.index:
+        fig.add_trace(
+            go.Scatter(
+                x=[mid.loc[i, 'V7'], mid.loc[i, 'V8']],
+                y=[100 - mid.loc[i, 'V3'], 100 - mid.loc[i, 'V3']],
+                mode='lines',
+                line={'color': mid_color, 'width': 2},
+                hoverinfo='text',
+                text=create_hovertext(mid.loc[i]),
+                showlegend=False,
+            )
+        )
+
+    # Full-length hits (at or above the upper threshold)
     for i in full.index:
         fig.add_trace(
             go.Scatter(
                 x=[full.loc[i, 'V7'], full.loc[i, 'V8']],
                 y=[100 - full.loc[i, 'V3'], 100 - full.loc[i, 'V3']],
                 mode='lines',
-                line={'color': 'red', 'width': 3},
+                line={'color': full_color, 'width': 3},
                 hoverinfo='text',
                 text=create_hovertext(full.loc[i]),
                 showlegend=False,
@@ -398,7 +424,13 @@ def blast_plot(df, cons_len, full_len_thr=0.8):
         )
 
     # Define plot title
-    plot_title = f'Fragments number: {len(df)}; full length: {len(full)} (>={int(full_len_thr * cons_len)}bp)'
+    full_bp = int(full_len_thr * cons_len)
+    mid_bp = int(mid_len_thr * cons_len)
+    plot_title = (
+        f'Fragments number: {len(df)}; '
+        f'full length: {len(full)} (>={full_bp}bp); '
+        f'mid length: {len(mid)} (>={mid_bp}bp)'
+    )
 
     # Update the layout to add titles and labels with adjusted axis ranges
     fig.update_layout(
@@ -884,6 +916,10 @@ def _build_genome_teaid_panels(
     num_threads=5,
     use_system_blast=False,
     output_label=None,
+    hit_len_high_pct=80.0,
+    hit_len_mid_pct=50.0,
+    hit_color_high='red',
+    hit_color_mid='#1f77b4',
 ):
     """BLAST hits, coverage, and divergence panels for one genome."""
     genome_blast_out = teaid_genome_blast(
@@ -910,8 +946,17 @@ def _build_genome_teaid_panels(
             )
         else:
             df_genome_blast_out = pd.read_csv(genome_blast_out)
+            full_thr = max(0.0, min(1.0, float(hit_len_high_pct) / 100.0))
+            mid_thr = max(0.0, min(full_thr, float(hit_len_mid_pct) / 100.0))
+            if mid_thr >= full_thr and full_thr > 0:
+                mid_thr = max(0.0, full_thr - 0.01)
             fig_blast, divergence_max, blast_plot_title = blast_plot(
-                df_genome_blast_out, cons_len
+                df_genome_blast_out,
+                cons_len,
+                full_len_thr=full_thr,
+                mid_len_thr=mid_thr,
+                full_color=hit_color_high,
+                mid_color=hit_color_mid,
             )
             fig_coverage, coverage_max = coverage_plot(df_genome_blast_out, cons_len)
             fig_div_hist, div_hist_max = divergence_histogram_plot(df_genome_blast_out)
@@ -946,7 +991,7 @@ def _build_self_dot_figure(
     cons_len,
     *,
     use_system_blast=False,
-    self_blast_word_size=11,
+    self_blast_word_size=DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
 ):
     self_word_size = clamp_teaid_self_blast_word_size(self_blast_word_size)
     dotplot_blast, work_dir = self_blast(
@@ -1444,8 +1489,12 @@ def teaid_pan_genome_plotter(
     e_value=1e-40,
     num_threads=5,
     use_system_blast=False,
-    self_blast_word_size=11,
+    self_blast_word_size=DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
     x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
+    hit_len_high_pct=80.0,
+    hit_len_mid_pct=50.0,
+    hit_color_high='red',
+    hit_color_mid='#1f77b4',
 ):
     """
     Combined TEAid report for pan-genome mode.
@@ -1482,6 +1531,10 @@ def teaid_pan_genome_plotter(
             num_threads=num_threads,
             use_system_blast=use_system_blast,
             output_label=name,
+            hit_len_high_pct=hit_len_high_pct,
+            hit_len_mid_pct=hit_len_mid_pct,
+            hit_color_high=hit_color_high,
+            hit_color_mid=hit_color_mid,
         )
         genome_panels.append((name, panels))
 
@@ -1512,11 +1565,15 @@ def teaid_plotter(
     e_value=1e-40,
     num_threads=5,
     use_system_blast=False,
-    self_blast_word_size=11,
+    self_blast_word_size=DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
     conduct_cdd=False,
     prepared_cdd=None,
     output_name_tag=None,
     x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
+    hit_len_high_pct=80.0,
+    hit_len_mid_pct=50.0,
+    hit_color_high='red',
+    hit_color_mid='#1f77b4',
 ):
     # Used global variable: os_type
 
@@ -1555,6 +1612,10 @@ def teaid_plotter(
         num_threads=num_threads,
         use_system_blast=use_system_blast,
         output_label=output_name_tag,
+        hit_len_high_pct=hit_len_high_pct,
+        hit_len_mid_pct=hit_len_mid_pct,
+        hit_color_high=hit_color_high,
+        hit_color_mid=hit_color_mid,
     )
     fig_dot = _build_self_dot_figure(
         con_seq,
