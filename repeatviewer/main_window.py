@@ -1682,7 +1682,13 @@ class MainWindow(QMainWindow):
         refreshed = False
 
         if changed.is_dir():
-            refreshed = self._refresh_subfolders_under(changed) is not None
+            refreshed = (
+                self._refresh_subfolders_under(
+                    changed,
+                    keep_folder=self._current_folder,
+                )
+                is not None
+            )
 
         if not refreshed:
             self._refresh_tree()
@@ -4365,25 +4371,47 @@ class MainWindow(QMainWindow):
                 return found
         return None
 
-    def _refresh_subfolders_under(self, parent_folder: Path) -> QTreeWidgetItem | None:
+    def _refresh_subfolders_under(
+        self,
+        parent_folder: Path,
+        *,
+        keep_folder: Path | None = None,
+    ) -> QTreeWidgetItem | None:
         parent_folder = parent_folder.expanduser().resolve()
         item = self._find_tree_item_for_path(parent_folder)
         if item is None:
             return None
-        keep_folder = (
-            self._current_folder.expanduser().resolve()
-            if self._current_folder is not None
-            else None
-        )
-        while item.childCount():
-            item.removeChild(item.child(0))
-        self._populate_subfolders(parent_folder, item)
-        item.setExpanded(True)
-        self._sync_folder_tree_placeholders()
-        if keep_folder is not None:
-            keep_item = self._find_tree_item_for_path(keep_folder)
-            if keep_item is not None:
-                self._folder_tree.select_folder_item(keep_item)
+        if keep_folder is None:
+            keep_folder = (
+                self._current_folder.expanduser().resolve()
+                if self._current_folder is not None
+                else None
+            )
+        else:
+            keep_folder = keep_folder.expanduser().resolve()
+        # Removing the selected child makes Qt select the next sibling and fire
+        # folder_selected — suppress that so we do not jump to the folder below.
+        self._folder_tree._suppress_current_changed = True
+        try:
+            while item.childCount():
+                item.removeChild(item.child(0))
+            self._populate_subfolders(parent_folder, item)
+            item.setExpanded(True)
+            self._sync_folder_tree_placeholders()
+            if keep_folder is not None:
+                keep_item = self._find_tree_item_for_path(keep_folder)
+                if keep_item is not None:
+                    self._folder_tree.selectionModel().select(
+                        self._folder_tree.indexFromItem(keep_item),
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect
+                        | QItemSelectionModel.SelectionFlag.Current,
+                    )
+                    self._folder_tree.scrollToItem(keep_item)
+        finally:
+            QTimer.singleShot(
+                0,
+                lambda: setattr(self._folder_tree, "_suppress_current_changed", False),
+            )
         return item
 
     def _ensure_folder_visible_in_tree(self, folder: Path) -> QTreeWidgetItem | None:
@@ -7600,7 +7628,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Separate FASTA failed", str(exc))
             return
 
-        self._refresh_subfolders_under(path.parent)
+        # New folder creation also triggers the FS watcher; suppress it briefly so
+        # a rebuild cannot steal selection to the next sibling folder.
+        self._watcher_refresh_suppressed_until = time.monotonic() + 3.0
+        self._refresh_subfolders_under(path.parent, keep_folder=output_dir)
         self._navigate_to_folder(
             output_dir,
             new_outputs=created,
