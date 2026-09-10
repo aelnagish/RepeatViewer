@@ -85,7 +85,6 @@ DEFAULT_TOOLBAR_ORDER: list[str] = [
     "msa_clean",
     "extend",
     "consensus",
-    "repeat_quantify",
     "te_genome_map",
 ]
 
@@ -226,7 +225,14 @@ def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
     )
     while visible and is_toolbar_separator(visible[0]):
         visible.pop(0)
-    return normalize_toolbar_order(visible, known=known)
+    visible = normalize_toolbar_order(visible, known=known)
+    # Migrate users still on the previous default (which included Repeat Quantify).
+    if "repeat_quantify" in visible:
+        stripped = [tool_id for tool_id in visible if tool_id != "repeat_quantify"]
+        if stripped == list(default_order):
+            save_toolbar_order(stripped, registry)
+            return stripped
+    return visible
 
 
 def save_toolbar_order(

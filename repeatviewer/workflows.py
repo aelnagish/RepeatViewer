@@ -276,13 +276,20 @@ def filter_chainable_fasta(
 @dataclass
 class WorkflowStep:
     tool_id: str
+    keep_output: bool = True
 
     def to_json(self) -> dict:
-        return {"tool_id": self.tool_id}
+        return {
+            "tool_id": self.tool_id,
+            "keep_output": bool(self.keep_output),
+        }
 
     @staticmethod
     def from_json(raw: dict) -> "WorkflowStep":
-        return WorkflowStep(tool_id=str(raw.get("tool_id", "")).strip())
+        return WorkflowStep(
+            tool_id=str(raw.get("tool_id", "")).strip(),
+            keep_output=bool(raw.get("keep_output", True)),
+        )
 
 
 @dataclass
@@ -458,10 +465,48 @@ def duplicate_workflow_spec(workflow_id: str) -> WorkflowSpec | None:
     copy = WorkflowSpec(
         id=candidate,
         name=base_name,
-        steps=[WorkflowStep(tool_id=step.tool_id) for step in source.steps],
+        steps=[
+            WorkflowStep(tool_id=step.tool_id, keep_output=step.keep_output)
+            for step in source.steps
+        ],
     )
     save_workflow_spec(copy)
     return copy
+
+
+def _finalize_workflow_outputs(
+    step_results: list[tuple[WorkflowStep, list[str]]],
+    *,
+    source_files: list[str],
+) -> list[str]:
+    """Keep checked step outputs (and always the last step); delete the rest."""
+    if not step_results:
+        return []
+    source_keys = {
+        str(Path(path).expanduser().resolve())
+        for path in source_files
+    }
+    kept: list[str] = []
+    last_index = len(step_results) - 1
+    for index, (step, outs) in enumerate(step_results):
+        keep = bool(step.keep_output) or index == last_index
+        for out in outs:
+            path = Path(out)
+            try:
+                resolved = str(path.expanduser().resolve())
+            except OSError:
+                resolved = str(path)
+            if keep:
+                kept.append(str(path))
+                continue
+            if resolved in source_keys:
+                continue
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                continue
+    return kept
 
 
 def run_workflow(
@@ -498,9 +543,11 @@ def run_workflow(
 
     n_steps = len(spec.steps)
     inputs = [Path(p).expanduser().resolve() for p in seq_files]
-    created_outputs: list[str] = []
+    n_seq = len(inputs)
+    multi_sequence = n_seq > 1
     source_files: list[str] = [str(p) for p in inputs]
     failures: list[str] = []
+    step_results: list[tuple[WorkflowStep, list[str]]] = []
     genome_exclude: set[Path] = set()
     try:
         for _label, genome_path in project.genome_targets():
@@ -518,9 +565,61 @@ def run_workflow(
         except Exception:  # noqa: BLE001
             pass
 
-    def _step_progress(completed: int, label: str, *, step_index: int, tool_name: str) -> None:
-        # Report overall step index; detail includes tool + file.
-        progress_cb(step_index, f"{spec.name}: {step_index + 1}/{n_steps} {tool_name} — {label}")
+    def _progress_value(step_index: int, seq_index: int = 0) -> int:
+        if multi_sequence:
+            return step_index * n_seq + max(0, min(seq_index, n_seq))
+        return step_index
+
+    def _step_message(
+        step_index: int,
+        tool_name: str,
+        *,
+        seq_index: int | None = None,
+        seq_total: int | None = None,
+        detail: str = "",
+    ) -> str:
+        if multi_sequence:
+            total = max(1, seq_total if seq_total is not None else n_seq)
+            current = 1 if seq_index is None else max(1, min(total, seq_index + 1))
+            base = f"{spec.name}: sequence {current}/{total} — {tool_name}"
+        else:
+            remaining = n_steps - step_index - 1
+            if remaining <= 0:
+                left = "last operation"
+            elif remaining == 1:
+                left = "1 operation left"
+            else:
+                left = f"{remaining} operations left"
+            base = f"{spec.name}: {tool_name} — {left}"
+        if detail:
+            return f"{base} — {detail}"
+        return base
+
+    def _step_progress(
+        completed: int,
+        label: str,
+        *,
+        step_index: int,
+        tool_name: str,
+        seq_total: int,
+    ) -> None:
+        # ``completed`` from run_batch is 0-based finished index, or seq_total at end.
+        if completed >= seq_total:
+            seq_index = max(0, seq_total - 1)
+            value = _progress_value(step_index + 1, 0) if multi_sequence else step_index + 1
+        else:
+            seq_index = completed
+            value = _progress_value(step_index, seq_index)
+        progress_cb(
+            value,
+            _step_message(
+                step_index,
+                tool_name,
+                seq_index=seq_index,
+                seq_total=seq_total,
+                detail=label if not multi_sequence else "",
+            ),
+        )
 
     for step_index, step in enumerate(spec.steps):
         check_cancelled(cancel)
@@ -528,7 +627,11 @@ def run_workflow(
         if info is None:
             raise RuntimeError(f"Unknown tool: {step.tool_id}")
         tool_name = info.display_name
-        progress_cb(step_index, f"{spec.name}: {step_index + 1}/{n_steps} {tool_name}…")
+        seq_total = max(1, len(inputs))
+        progress_cb(
+            _progress_value(step_index, 0),
+            _step_message(step_index, tool_name, seq_index=0, seq_total=seq_total),
+        )
 
         step_outs: list[str] = []
         if is_plugin_tool_id(step.tool_id):
@@ -543,9 +646,18 @@ def run_workflow(
                 runtime_values = {
                     d.name: d.value for d in getattr(spec_obj, "var_defs", [])
                 }
-            for path in inputs:
+            for seq_index, path in enumerate(inputs):
                 check_cancelled(cancel)
-                _step_progress(0, path.name, step_index=step_index, tool_name=tool_name)
+                progress_cb(
+                    _progress_value(step_index, seq_index),
+                    _step_message(
+                        step_index,
+                        tool_name,
+                        seq_index=seq_index,
+                        seq_total=seq_total,
+                        detail=path.name if not multi_sequence else "",
+                    ),
+                )
                 try:
                     outs = plugin.run(
                         path, project, runtime_values=runtime_values
@@ -573,9 +685,18 @@ def run_workflow(
                 "muscle_mode": options.muscle_mode,
                 "muscle_num_threads": options.muscle_num_threads,
             }
-            for path in inputs:
+            for seq_index, path in enumerate(inputs):
                 check_cancelled(cancel)
-                _step_progress(0, path.name, step_index=step_index, tool_name=tool_name)
+                progress_cb(
+                    _progress_value(step_index, seq_index),
+                    _step_message(
+                        step_index,
+                        tool_name,
+                        seq_index=seq_index,
+                        seq_total=seq_total,
+                        detail=path.name if not multi_sequence else "",
+                    ),
+                )
                 try:
                     output = run_alignment(
                         path,
@@ -607,8 +728,21 @@ def run_workflow(
             if orf_prediction_settings is not None:
                 batch_kwargs["orf_prediction_settings"] = orf_prediction_settings
 
-            def _nested(completed: int, label: str, *, idx=step_index, name=tool_name) -> None:
-                _step_progress(completed, label, step_index=idx, tool_name=name)
+            def _nested(
+                completed: int,
+                label: str,
+                *,
+                idx=step_index,
+                name=tool_name,
+                total=seq_total,
+            ) -> None:
+                _step_progress(
+                    completed,
+                    label,
+                    step_index=idx,
+                    tool_name=name,
+                    seq_total=total,
+                )
 
             result = run_batch(
                 step.tool_id,
@@ -621,7 +755,7 @@ def run_workflow(
             for fail in result.get("failures") or []:
                 failures.append(f"{tool_name}: {fail}")
 
-        created_outputs.extend(step_outs)
+        step_results.append((step, list(step_outs)))
 
         if step_index < n_steps - 1:
             next_inputs = filter_chainable_fasta(step_outs, exclude=genome_exclude)
@@ -631,10 +765,16 @@ def run_workflow(
                 )
             inputs = next_inputs
 
-    progress_cb(n_steps, f"{spec.name}: finished")
+    created_outputs = _finalize_workflow_outputs(
+        step_results,
+        source_files=source_files,
+    )
+
+    finish_value = n_steps * n_seq if multi_sequence else n_steps
+    progress_cb(finish_value, f"{spec.name}: finished")
     return {
         "func_name": f"workflow:{spec.id}",
-        "total": n_steps,
+        "total": finish_value,
         "failures": failures,
         "created_outputs": created_outputs,
         "source_files": source_files,

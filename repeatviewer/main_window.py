@@ -8654,7 +8654,11 @@ class MainWindow(QMainWindow):
         self._start_background_job(
             WorkflowWorker(_run, job_kwargs),
             job_title=f"workflow:{spec.id}",
-            total_steps=len(spec.steps),
+            total_steps=(
+                len(spec.steps) * len(seq_files)
+                if len(seq_files) > 1
+                else len(spec.steps)
+            ),
             source_files=seq_files,
             on_finished=self._on_worker_finished,
             on_failed=self._on_worker_failed,

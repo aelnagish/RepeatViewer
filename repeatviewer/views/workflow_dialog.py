@@ -39,6 +39,8 @@ from repeatviewer.workflows import (
 
 _ROLE_WORKFLOW_ID = Qt.ItemDataRole.UserRole
 _ROLE_WORKFLOW_NAME = Qt.ItemDataRole.UserRole + 1
+_ROLE_STEP_TOOL_ID = Qt.ItemDataRole.UserRole
+_ROLE_STEP_KEEP = Qt.ItemDataRole.UserRole + 1
 
 
 class WorkflowDesignerDialog(QDialog):
@@ -67,12 +69,14 @@ class WorkflowDesignerDialog(QDialog):
         self._steps_list = QListWidget(self)
         self._steps_list.setToolTip(
             "Ordered pipeline. Drag to reorder. "
-            "Each step’s output format must match the next step’s input."
+            "Tick Keep to retain that step’s output files after the run "
+            "(the last step is always kept)."
         )
         self._steps_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._steps_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._steps_list.currentRowChanged.connect(lambda _r: self._update_controls())
         self._steps_list.model().rowsMoved.connect(self._on_steps_reordered)
+        self._steps_list.itemChanged.connect(self._on_step_item_changed)
 
         # One column each so the Workflows list and Delete share the same width.
         self._new_btn = QPushButton("New", self)
@@ -123,6 +127,9 @@ class WorkflowDesignerDialog(QDialog):
         right_col = QVBoxLayout()
         right_col.setSpacing(6)
         right_col.addWidget(QLabel("Steps (run in order)", self))
+        right_col.addWidget(
+            QLabel("Tick a step to keep its output files after the workflow finishes.", self)
+        )
         right_col.addWidget(self._steps_list, 1)
         right_col.addLayout(right_btns)
 
@@ -137,7 +144,9 @@ class WorkflowDesignerDialog(QDialog):
 
         hint = QLabel(
             "Steps use each tool’s currently saved parameters. "
-            "Only tools whose input format matches the previous output can be added.",
+            "Only tools whose input format matches the previous output can be added. "
+            "Unticked intermediate outputs are deleted after a successful run; "
+            "the final step is always kept.",
             self,
         )
         hint.setWordWrap(True)
@@ -165,11 +174,56 @@ class WorkflowDesignerDialog(QDialog):
         if self._steps_list.count() == 0:
             return None
         return str(
-            self._steps_list.item(self._steps_list.count() - 1).data(
-                Qt.ItemDataRole.UserRole
-            )
+            self._steps_list.item(self._steps_list.count() - 1).data(_ROLE_STEP_TOOL_ID)
             or ""
         ) or None
+
+    def _make_step_item(
+        self,
+        tool_id: str,
+        *,
+        keep_output: bool = True,
+        label: str | None = None,
+    ) -> QListWidgetItem:
+        info = resolve_tool_info(tool_id)
+        text = label or (info.display_name if info else tool_id)
+        item = QListWidgetItem(text)
+        item.setFlags(
+            item.flags()
+            | Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsDragEnabled
+        )
+        item.setData(_ROLE_STEP_TOOL_ID, tool_id)
+        item.setData(_ROLE_STEP_KEEP, bool(keep_output))
+        item.setCheckState(
+            Qt.CheckState.Checked if keep_output else Qt.CheckState.Unchecked
+        )
+        item.setToolTip(
+            "Keep this step’s output files after the workflow finishes. "
+            "The last step is always kept."
+        )
+        return item
+
+    def _on_step_item_changed(self, item: QListWidgetItem) -> None:
+        if self._updating_steps:
+            return
+        row = self._steps_list.row(item)
+        last = self._steps_list.count() - 1
+        keep = item.checkState() == Qt.CheckState.Checked
+        if row == last and not keep:
+            self._updating_steps = True
+            try:
+                item.setCheckState(Qt.CheckState.Checked)
+                item.setData(_ROLE_STEP_KEEP, True)
+            finally:
+                self._updating_steps = False
+            self._renumber_steps()
+            return
+        item.setData(_ROLE_STEP_KEEP, keep)
+        self._renumber_steps()
+        self._mark_dirty()
 
     def _rebuild_category_menus(self) -> None:
         after = self._last_step_tool_id()
@@ -287,31 +341,59 @@ class WorkflowDesignerDialog(QDialog):
         steps = []
         for row in range(self._steps_list.count()):
             item = self._steps_list.item(row)
-            tool_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
-            if tool_id:
-                steps.append(WorkflowStep(tool_id=tool_id))
+            tool_id = str(item.data(_ROLE_STEP_TOOL_ID) or "")
+            if not tool_id:
+                continue
+            keep = item.checkState() == Qt.CheckState.Checked
+            # Final step is always retained on disk.
+            if row == self._steps_list.count() - 1:
+                keep = True
+            steps.append(WorkflowStep(tool_id=tool_id, keep_output=keep))
         return WorkflowSpec(id=self._current_id, name=name, steps=steps)
 
     def _renumber_steps(self) -> None:
         self._updating_steps = True
         try:
-            for row in range(self._steps_list.count()):
+            count = self._steps_list.count()
+            for row in range(count):
                 item = self._steps_list.item(row)
-                tool_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+                tool_id = str(item.data(_ROLE_STEP_TOOL_ID) or "")
                 info = resolve_tool_info(tool_id)
                 label = info.display_name if info else tool_id
-                item.setText(f"{row + 1}. {label}")
+                keep = bool(item.data(_ROLE_STEP_KEEP))
+                if row == count - 1:
+                    keep = True
+                    item.setData(_ROLE_STEP_KEEP, True)
+                    item.setCheckState(Qt.CheckState.Checked)
+                    suffix = " — keep (final)"
+                elif keep:
+                    item.setCheckState(Qt.CheckState.Checked)
+                    suffix = " — keep"
+                else:
+                    item.setCheckState(Qt.CheckState.Unchecked)
+                    suffix = ""
+                item.setText(f"{row + 1}. {label}{suffix}")
+                item.setFlags(
+                    Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsDragEnabled
+                )
         finally:
             self._updating_steps = False
 
     def _load_steps_for(self, spec: WorkflowSpec) -> None:
         self._steps_list.clear()
-        for step in spec.steps:
-            info = resolve_tool_info(step.tool_id)
-            label = info.display_name if info else step.tool_id
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, step.tool_id)
-            self._steps_list.addItem(item)
+        self._updating_steps = True
+        try:
+            for step in spec.steps:
+                item = self._make_step_item(
+                    step.tool_id,
+                    keep_output=step.keep_output,
+                )
+                self._steps_list.addItem(item)
+        finally:
+            self._updating_steps = False
         self._renumber_steps()
         self._validate_inline()
 
@@ -386,7 +468,7 @@ class WorkflowDesignerDialog(QDialog):
 
     def _validate_inline(self) -> None:
         tool_ids = [
-            str(self._steps_list.item(i).data(Qt.ItemDataRole.UserRole) or "")
+            str(self._steps_list.item(i).data(_ROLE_STEP_TOOL_ID) or "")
             for i in range(self._steps_list.count())
         ]
         error = validate_workflow_steps(tool_ids) if tool_ids else "Add at least one step."
@@ -527,8 +609,7 @@ class WorkflowDesignerDialog(QDialog):
                     f"Cannot add {info.display_name} after the previous step.",
                 )
                 return
-        item = QListWidgetItem(info.display_name)
-        item.setData(Qt.ItemDataRole.UserRole, info.tool_id)
+        item = self._make_step_item(info.tool_id, keep_output=True)
         self._steps_list.addItem(item)
         self._steps_list.setCurrentItem(item)
         self._renumber_steps()
