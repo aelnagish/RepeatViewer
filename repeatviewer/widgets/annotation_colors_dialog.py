@@ -5,11 +5,16 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -18,14 +23,18 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends.annotation_colors import (
-    ANNOTATION_FEATURE_TYPE_LABELS,
+    DEFAULT_ADD_FEATURE_BUTTONS,
+    annotation_feature_type_labels_for_colors,
     default_feature_type_colors,
     feature_type_color,
+    load_add_feature_buttons,
     load_feature_type_colors,
+    save_add_feature_buttons,
     save_feature_type_colors,
     save_similarity_database_colors,
     similarity_database_color,
     snapshot_similarity_database_colors,
+    slug_feature_type,
 )
 from repeatviewer.backends.similarity_annotation import SIMILARITY_DB_COLORS
 from repeatviewer.database_settings import load_similarity_annotation_databases
@@ -93,7 +102,7 @@ class AnnotationElementColorsPanel(QWidget):
         body_layout.addWidget(self._section_label("Feature types"))
         feature_form = QFormLayout()
         feature_form.setSpacing(8)
-        for display_label, feature_type in ANNOTATION_FEATURE_TYPE_LABELS:
+        for display_label, feature_type in annotation_feature_type_labels_for_colors():
             row = _ColorPickerRow(display_label, feature_type_color(feature_type), self)
             self._feature_rows[feature_type] = row
             feature_form.addRow(row)
@@ -291,4 +300,175 @@ class SimilarityDatabaseColorsDialog(QDialog):
     def accept(self) -> None:
         if self._database_rows:
             save_similarity_database_colors(self.new_database_colors())
+        super().accept()
+
+
+class AddFeatureButtonsDialog(QDialog):
+    """Create, delete, and reorder buttons on the Add feature row."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Manage feature buttons")
+        self.resize(420, 380)
+
+        self._list = QListWidget(self)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._list.model().rowsMoved.connect(self._renumber_items)
+
+        add_btn = QPushButton("Add…", self)
+        add_btn.clicked.connect(self._add_button)
+        delete_btn = QPushButton("Delete", self)
+        delete_btn.clicked.connect(self._delete_selected)
+        up_btn = QPushButton("Move up", self)
+        up_btn.clicked.connect(lambda: self._move_selected(-1))
+        down_btn = QPushButton("Move down", self)
+        down_btn.clicked.connect(lambda: self._move_selected(1))
+
+        side = QVBoxLayout()
+        side.setSpacing(6)
+        for btn in (add_btn, delete_btn, up_btn, down_btn):
+            side.addWidget(btn)
+        side.addStretch(1)
+
+        body = QHBoxLayout()
+        body.addWidget(self._list, stretch=1)
+        body.addLayout(side)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.RestoreDefaults,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        restore = buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults)
+        restore.setText("Restore")
+        restore.clicked.connect(self._restore_defaults)
+
+        root = QVBoxLayout(self)
+        root.addLayout(body, stretch=1)
+        root.addWidget(buttons)
+
+        self._set_buttons(load_add_feature_buttons())
+
+    def _item_text(self, index: int, label: str, feature_type: str) -> str:
+        return f"{index}. {label}  ({feature_type})"
+
+    def _renumber_items(self, *_args) -> None:
+        for index in range(self._list.count()):
+            item = self._list.item(index)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(data, (list, tuple)) or len(data) < 2:
+                continue
+            label, feature_type = str(data[0]), str(data[1])
+            item.setText(self._item_text(index + 1, label, feature_type))
+
+    def _set_buttons(self, buttons: list[tuple[str, str]]) -> None:
+        self._list.clear()
+        for index, (label, feature_type) in enumerate(buttons, start=1):
+            item = QListWidgetItem(self._item_text(index, label, feature_type))
+            item.setData(Qt.ItemDataRole.UserRole, (label, feature_type))
+            self._list.addItem(item)
+
+    def _current_buttons(self) -> list[tuple[str, str]]:
+        buttons: list[tuple[str, str]] = []
+        for index in range(self._list.count()):
+            item = self._list.item(index)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, (list, tuple)) and len(data) >= 2:
+                buttons.append((str(data[0]), str(data[1])))
+        return buttons
+
+    def _add_button(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add feature button")
+        label_edit = QLineEdit(dialog)
+        name_edit = QLineEdit(dialog)
+
+        def _sync_name_from_label(text: str) -> None:
+            if name_edit.isModified():
+                return
+            name_edit.blockSignals(True)
+            name_edit.setText(slug_feature_type(text))
+            name_edit.blockSignals(False)
+
+        label_edit.textChanged.connect(_sync_name_from_label)
+        form = QFormLayout()
+        form.addRow("Button label:", label_edit)
+        form.addRow("Names stored in GFF file:", name_edit)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        root = QVBoxLayout(dialog)
+        root.addLayout(form)
+        root.addWidget(buttons)
+        label_edit.setFocus()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        label = label_edit.text().strip()
+        if not label:
+            QMessageBox.warning(self, "Add feature button", "Enter a button label.")
+            return
+        feature_type = name_edit.text().strip() or slug_feature_type(label)
+        existing = {ftype.lower() for _label, ftype in self._current_buttons()}
+        if feature_type.lower() in existing:
+            QMessageBox.warning(
+                self,
+                "Add feature button",
+                f"A button for “{feature_type}” already exists.",
+            )
+            return
+        index = self._list.count() + 1
+        item = QListWidgetItem(self._item_text(index, label, feature_type))
+        item.setData(Qt.ItemDataRole.UserRole, (label, feature_type))
+        self._list.addItem(item)
+        self._list.setCurrentItem(item)
+
+    def _delete_selected(self) -> None:
+        row = self._list.currentRow()
+        if row < 0:
+            return
+        if self._list.count() <= 1:
+            QMessageBox.warning(
+                self,
+                "Delete feature button",
+                "Keep at least one Add feature button.",
+            )
+            return
+        self._list.takeItem(row)
+        self._renumber_items()
+
+    def _move_selected(self, delta: int) -> None:
+        row = self._list.currentRow()
+        if row < 0:
+            return
+        target = row + delta
+        if target < 0 or target >= self._list.count():
+            return
+        item = self._list.takeItem(row)
+        self._list.insertItem(target, item)
+        self._list.setCurrentRow(target)
+        self._renumber_items()
+
+    def _restore_defaults(self) -> None:
+        self._set_buttons(list(DEFAULT_ADD_FEATURE_BUTTONS))
+
+    def buttons(self) -> list[tuple[str, str]]:
+        return self._current_buttons()
+
+    def accept(self) -> None:
+        buttons = self._current_buttons()
+        if not buttons:
+            QMessageBox.warning(
+                self,
+                "Manage feature buttons",
+                "Keep at least one Add feature button.",
+            )
+            return
+        save_add_feature_buttons(buttons)
         super().accept()

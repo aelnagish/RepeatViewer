@@ -89,7 +89,12 @@ from repeatviewer.backends.auto_annotation_settings import (
 )
 from repeatviewer.branding import APP_DISPLAY_NAME
 from repeatviewer.backends.job_cancel import JobCancellation
-from repeatviewer.backends.annotation_colors import feature_type_color, similarity_database_color
+from repeatviewer.backends.annotation_colors import (
+    DEFAULT_ADD_FEATURE_BUTTONS,
+    feature_type_color,
+    load_add_feature_buttons,
+    similarity_database_color,
+)
 from repeatviewer.backends.database_prepare import database_search_readiness
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
@@ -122,7 +127,10 @@ from repeatviewer.backends.similarity_annotation import (
 )
 from repeatviewer.project import UserDatabase
 from repeatviewer.workers.base import Worker
-from repeatviewer.widgets.annotation_colors_dialog import AnnotationElementColorsDialog
+from repeatviewer.widgets.annotation_colors_dialog import (
+    AddFeatureButtonsDialog,
+    AnnotationElementColorsDialog,
+)
 from repeatviewer.widgets.preview_controls import (
     ANNOTATION_ZOOM_SLIDER_WIDTH,
     ZOOM_SLIDER_HEIGHT,
@@ -148,15 +156,7 @@ def _configure_annotation_controls_panel(panel: QWidget) -> None:
     panel.setAutoFillBackground(True)
 
 
-_ADD_FEATURE_BUTTONS: tuple[tuple[str, str], ...] = (
-    ("LTR", "LTR"),
-    ("TIR", "TIR"),
-    ("ORF", "ORF"),
-    ("Tandem", "tandem repeat"),
-    ("PBS", "PBS"),
-    ("PPT", "PPT"),
-    ("Others", "others"),
-)
+_ADD_FEATURE_BUTTONS: tuple[tuple[str, str], ...] = DEFAULT_ADD_FEATURE_BUTTONS
 _AUTO_ANNOTATION_MODES: tuple[tuple[str, AutoAnnotationMode], ...] = (
     ("LTR", AutoAnnotationMode.LTR),
     ("TIR", AutoAnnotationMode.TIR),
@@ -265,20 +265,31 @@ def _toolbar_stat_separator(parent: QWidget) -> QLabel:
 
 
 def _annotation_run_settings_box(
-    run_btn: QPushButton,
+    run_btn: QPushButton | None,
     settings_btn: QPushButton,
     parent: QWidget,
 ) -> QWidget:
-    """Fixed-width Run/Setting column shared by auto and similarity rows."""
+    """Fixed-width Run/Setting column shared by annotation control rows.
+
+    Pass ``run_btn=None`` to keep Setting aligned with rows that have Run.
+    """
     box = QWidget(parent)
     box.setObjectName("annotationRunSettingsBox")
     box.setFixedWidth(_ANNOTATION_RUN_SETTINGS_WIDTH)
     layout = QHBoxLayout(box)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(14)
-    layout.addWidget(run_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+    run_spacer: QWidget | None = None
+    if run_btn is not None:
+        layout.addWidget(run_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+    else:
+        run_spacer = QWidget(box)
+        run_spacer.setObjectName("annotationRunSettingsSpacer")
+        run_spacer.setFixedWidth(1)
+        layout.addWidget(run_spacer, 0, Qt.AlignmentFlag.AlignVCenter)
     layout.addWidget(settings_btn, 0, Qt.AlignmentFlag.AlignVCenter)
     layout.addStretch()
+    box._run_spacer = run_spacer  # type: ignore[attr-defined]
     return box
 
 
@@ -355,6 +366,19 @@ class _FeatureColumnRow(QWidget):
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             )
         cell.set_widget(widget)
+        self._column_count = max(self._column_count, column + 1)
+
+    def clear(self) -> None:
+        for cell in list(self._cells.values()):
+            self._grid.removeWidget(cell)
+            cell.setParent(None)
+            cell.deleteLater()
+        self._cells.clear()
+        self._column_count = 0
+        self.setFixedWidth(0)
+
+    def set_column_count(self, count: int) -> None:
+        self._column_count = max(0, int(count))
 
     def sync_column_widths(self, widths: list[int]) -> None:
         spacing = _AUTO_ANN_CHECK_EXTRA_SPACING
@@ -373,9 +397,55 @@ def _column_content_width(widget: QWidget) -> int:
     return max(_MIN_FEATURE_COLUMN_WIDTH, widget.sizeHint().width())
 
 
-def _add_feature_column_width(control: _AddFeatureControl) -> int:
-    offset = control.label_offset_width()
-    return max(_MIN_FEATURE_COLUMN_WIDTH, offset + control.button().sizeHint().width())
+class _AddFeatureButtonsRow(QWidget):
+    """Horizontally spaced Add feature buttons with uniform gaps."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("addFeatureButtonsRow")
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(6)
+        self._layout.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._controls: list[_AddFeatureControl] = []
+
+    def set_controls(self, controls: list[_AddFeatureControl]) -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        self._controls = list(controls)
+        for control in self._controls:
+            control.setParent(self)
+            control.set_label_offset(0)
+            self._layout.addWidget(
+                control, 0, Qt.AlignmentFlag.AlignVCenter
+            )
+        self._update_size()
+
+    def clear(self) -> None:
+        self.set_controls([])
+
+    def _update_size(self) -> None:
+        if not self._controls:
+            self.setFixedWidth(0)
+            self.setFixedHeight(_CONTROL_BAND_HEIGHT)
+            return
+        width = sum(control.sizeHint().width() for control in self._controls)
+        width += self._layout.spacing() * max(0, len(self._controls) - 1)
+        height = max(
+            _CONTROL_BAND_HEIGHT,
+            max(control.sizeHint().height() for control in self._controls),
+        )
+        self.setFixedWidth(max(0, width))
+        self.setFixedHeight(height)
+
+    def content_width(self) -> int:
+        return self.width() if self._controls else 0
 
 
 class _AddFeatureControl(QWidget):
@@ -1931,7 +2001,7 @@ class SequenceMapCanvas(QWidget):
         menu.setToolTipsVisible(False)
 
         add_menu = menu.addMenu("Add annotation")
-        for label, feature_type in _ADD_FEATURE_BUTTONS:
+        for label, feature_type in load_add_feature_buttons():
             action = add_menu.addAction(label)
             action.triggered.connect(
                 lambda _checked=False, ft=feature_type, bl=label: self.addFeatureRequested.emit(
@@ -3047,7 +3117,7 @@ class AddFeatureDialog(QDialog):
         start_pos, end_pos = sorted((int(start), int(end)))
 
         self._type = QComboBox(self)
-        for label, ftype in _ADD_FEATURE_BUTTONS:
+        for label, ftype in load_add_feature_buttons():
             self._type.addItem(label, ftype)
         if feature_type is not None:
             index = self._type.findData(feature_type)
@@ -3523,31 +3593,32 @@ class SequenceMapPanel(QWidget):
         self._auto_all_updating = False
         self._similarity_all_updating = False
         self._add_feature_buttons: list[_AddFeatureControl] = []
+        self._add_feature_button_defs: list[tuple[str, str]] = []
 
         self._add_row_container, add_row = _control_band(controls)
         self._add_feature_label = _annotation_row_label("Add feature:", self._add_row_container)
         add_row.addWidget(self._add_feature_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._add_feature_columns = _FeatureColumnRow(self._add_row_container)
-        for label, feature_type in _ADD_FEATURE_BUTTONS:
-            control = _AddFeatureControl(label, self._add_feature_columns)
-            control.setToolTip(f"Add a {label} feature for the selected region")
-            control.clicked.connect(
-                lambda _checked=False, ft=feature_type, bl=label: self._add_feature_of_type(
-                    ft, feature_label=bl
-                )
-            )
-            self._add_feature_buttons.append(control)
-            self._add_feature_columns.place(_ANNOTATION_FEATURE_COLUMN.get(label, 0), control)
-        add_row.addWidget(self._add_feature_columns, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._add_feature_buttons_row = _AddFeatureButtonsRow(self._add_row_container)
         self._add_feature_overflow = QComboBox(self._add_row_container)
-        for label, feature_type in _ADD_FEATURE_BUTTONS:
-            self._add_feature_overflow.addItem(label, feature_type)
         self._add_feature_overflow.setMinimumWidth(110)
         self._add_feature_overflow.activated.connect(self._on_add_feature_overflow_activated)
         self._add_feature_overflow.hide()
+        add_row.addWidget(self._add_feature_buttons_row, 0, Qt.AlignmentFlag.AlignVCenter)
         add_row.addWidget(self._add_feature_overflow, 0, Qt.AlignmentFlag.AlignVCenter)
         add_row.addStretch(1)
+        self._add_feature_settings_btn = QPushButton("Setting", self._add_row_container)
+        self._add_feature_settings_btn.setToolTip(
+            "Create, delete, or reorder Add feature buttons"
+        )
+        self._add_feature_settings_btn.clicked.connect(self._open_add_feature_buttons_settings)
+        self._add_run_settings_box = _annotation_run_settings_box(
+            None,
+            self._add_feature_settings_btn,
+            self._add_row_container,
+        )
+        add_row.addWidget(self._add_run_settings_box, 0, Qt.AlignmentFlag.AlignVCenter)
         controls_layout.addWidget(self._add_row_container)
+        self._rebuild_add_feature_buttons(load_add_feature_buttons())
 
         self._auto_row_container, auto_row = _control_band(controls)
         self._auto_ann_label = _annotation_row_label("Auto annotation:", self._auto_row_container)
@@ -3754,13 +3825,24 @@ class SequenceMapPanel(QWidget):
             self, "_similarity_run_settings_box"
         ):
             return
+        run_width = max(
+            self._auto_ann_run_btn.sizeHint().width(),
+            self._similarity_ann_run_btn.sizeHint().width(),
+        )
+        add_spacer = getattr(self._add_run_settings_box, "_run_spacer", None)
+        if isinstance(add_spacer, QWidget):
+            add_spacer.setFixedWidth(max(1, run_width))
+        boxes = (
+            self._add_run_settings_box,
+            self._auto_run_settings_box,
+            self._similarity_run_settings_box,
+        )
         width = max(
             _ANNOTATION_RUN_SETTINGS_WIDTH,
-            self._auto_run_settings_box.sizeHint().width(),
-            self._similarity_run_settings_box.sizeHint().width(),
+            *(box.sizeHint().width() for box in boxes),
         )
-        self._auto_run_settings_box.setFixedWidth(width)
-        self._similarity_run_settings_box.setFixedWidth(width)
+        for box in boxes:
+            box.setFixedWidth(width)
 
     def _sync_similarity_row_layout(self) -> None:
         if not hasattr(self, "_similarity_db_flow"):
@@ -3771,54 +3853,78 @@ class SequenceMapPanel(QWidget):
     def _sync_add_feature_row(self) -> None:
         if not self._add_feature_buttons:
             return
+        self._add_feature_buttons_row._update_size()
         available = max(
             self._add_row_container.width(),
             self._auto_row_container.width(),
             max(0, self.width() - 24),
         )
         label_width = _ANNOTATION_ROW_LABEL_WIDTH + 12
-        auto_trailing = self._auto_run_settings_box.width() + 18
-        all_width = self._auto_ann_all_check.sizeHint().width() + 6
-        grid_budget = max(
-            120,
-            available - label_width - auto_trailing - all_width,
-        )
-        widths = [0] * _ANNOTATION_FEATURE_COLUMN_COUNT
-        for control, (label, _feature_type) in zip(self._add_feature_buttons, _ADD_FEATURE_BUTTONS):
-            # Align the button's left edge with the checkbox indicator below,
-            # rather than aligning its text with the checkbox label.
-            control.set_label_offset(0)
-            column = _ANNOTATION_FEATURE_COLUMN.get(label, 0)
-            widths[column] = max(widths[column], _add_feature_column_width(control))
+        trailing = self._add_run_settings_box.width() + 8
+        budget = max(120, available - label_width - trailing)
+        buttons_width = self._add_feature_buttons_row.content_width()
+        if buttons_width <= budget:
+            self._add_feature_buttons_row.show()
+            for control in self._add_feature_buttons:
+                control.show()
+            self._add_feature_overflow.hide()
+        else:
+            self._add_feature_buttons_row.hide()
+            for control in self._add_feature_buttons:
+                control.hide()
+            self._add_feature_overflow.show()
+        self._sync_auto_feature_columns()
+        self._add_feature_buttons_row.updateGeometry()
+        self._add_row_container.updateGeometry()
+        self._auto_row_container.updateGeometry()
+
+    def _sync_auto_feature_columns(self) -> None:
+        if not hasattr(self, "_auto_feature_columns"):
+            return
+        column_count = max(_AUTO_CHECK_COLUMN.values(), default=0) + 1
+        widths = [0] * column_count
         for mode, check in self._auto_ann_checks.items():
             column = _AUTO_CHECK_COLUMN[mode]
             widths[column] = max(widths[column], _column_content_width(check))
-        spacing = _AUTO_ANN_CHECK_EXTRA_SPACING
-        add_total = sum(widths) + spacing * max(0, _ANNOTATION_FEATURE_COLUMN_COUNT - 1)
-        if add_total <= grid_budget:
-            for control in self._add_feature_buttons:
-                control.show()
-            for check in self._auto_ann_checks.values():
-                check.show()
-            self._add_feature_columns.show()
-            self._auto_feature_columns.show()
-            self._add_feature_overflow.hide()
-            self._add_feature_columns.sync_column_widths(widths)
-            self._auto_feature_columns.sync_column_widths(widths)
-        else:
-            for control in self._add_feature_buttons:
-                control.hide()
-            for check in self._auto_ann_checks.values():
-                check.show()
-            self._add_feature_columns.show()
-            self._auto_feature_columns.show()
-            self._add_feature_overflow.show()
-            self._add_feature_columns.sync_column_widths(widths)
-            self._auto_feature_columns.sync_column_widths(widths)
-        self._add_feature_columns.updateGeometry()
+            check.show()
+        self._auto_feature_columns.show()
+        self._auto_feature_columns.sync_column_widths(widths)
         self._auto_feature_columns.updateGeometry()
-        self._add_row_container.updateGeometry()
-        self._auto_row_container.updateGeometry()
+
+    def _rebuild_add_feature_buttons(
+        self, buttons: list[tuple[str, str]] | None = None
+    ) -> None:
+        defs = list(buttons if buttons is not None else load_add_feature_buttons())
+        if not defs:
+            defs = list(DEFAULT_ADD_FEATURE_BUTTONS)
+        self._add_feature_button_defs = defs
+        self._add_feature_buttons.clear()
+        self._add_feature_overflow.blockSignals(True)
+        self._add_feature_overflow.clear()
+        rebuilt: list[_AddFeatureControl] = []
+        for label, feature_type in defs:
+            control = _AddFeatureControl(label, self._add_feature_buttons_row)
+            control.setToolTip(f"Add a {label} feature for the selected region")
+            control.clicked.connect(
+                lambda _checked=False, ft=feature_type, bl=label: self._add_feature_of_type(
+                    ft, feature_label=bl
+                )
+            )
+            rebuilt.append(control)
+            self._add_feature_overflow.addItem(label, feature_type)
+        self._add_feature_buttons = rebuilt
+        self._add_feature_buttons_row.set_controls(rebuilt)
+        self._add_feature_overflow.blockSignals(False)
+        if hasattr(self, "_auto_feature_columns"):
+            self._sync_add_feature_row()
+
+    def _open_add_feature_buttons_settings(self) -> None:
+        dialog = AddFeatureButtonsDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._rebuild_add_feature_buttons(dialog.buttons())
+        self._broadcast_shared_annotation_settings_changed()
+        self.statusMessage.emit("Add feature buttons updated.")
 
     def _sync_auto_annotation_row_alignment(self) -> None:
         self._sync_add_feature_row()
@@ -4091,6 +4197,7 @@ class SequenceMapPanel(QWidget):
         self._map.set_show_similarity_database_name(
             self._similarity_ann_settings.show_database_name_on_track
         )
+        self._rebuild_add_feature_buttons()
         self.refresh_similarity_databases()
         self.refresh_nucleotide_colors()
         self._map.update()
