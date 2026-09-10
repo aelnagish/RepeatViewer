@@ -32,8 +32,8 @@ Restart RepeatViewer. **Minimap2** appears on the function toolbar after the plu
 1. Set **Project genome** (File → Project settings), or choose a reference FASTA in the Minimap2 dialog.
 2. Select one or more **FASTA** files in the Files panel.
 3. Click **Minimap2** on the toolbar.
-4. Choose preset (`map-ont`, `map-hifi`, …), threads, and output format (PAF or SAM).
-5. Output is written next to each input: `{name}.minimap2.paf` (or `.sam`).
+4. Choose preset (`map-ont`, `map-hifi`, …) and threads.
+5. Output is written next to each input: `{name}.minimap2.paf`.
 
 ## Replace bundled binaries
 

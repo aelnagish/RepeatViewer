@@ -9,17 +9,15 @@ from repeatviewer_minimap2.options import Minimap2Options
 
 def build_command(query: Path, reference: Path, opts: Minimap2Options) -> list[str]:
     exe = minimap2_executable()
-    cmd = [
+    return [
         exe,
         "-t",
         str(max(1, int(opts.threads))),
         "-x",
         opts.preset,
+        str(reference),
+        str(query),
     ]
-    if opts.output_format == "sam":
-        cmd.append("-a")
-    cmd.extend([str(reference), str(query)])
-    return cmd
 
 
 def run_minimap2(
@@ -34,8 +32,7 @@ def run_minimap2(
     if not reference.is_file():
         raise FileNotFoundError(reference)
 
-    suffix = "sam" if opts.output_format == "sam" else "paf"
-    out_path = query.parent / f"{query.stem}.minimap2.{suffix}"
+    out_path = query.parent / f"{query.stem}.minimap2.paf"
     cmd = build_command(query, reference, opts)
 
     with out_path.open("w", encoding="utf-8") as handle:
@@ -48,10 +45,7 @@ def run_minimap2(
         )
     if completed.returncode != 0:
         detail = (completed.stderr or "").strip()
-        raise RuntimeError(
-            f"minimap2 failed (exit {completed.returncode})"
-            + (f":\n{detail}" if detail else "")
-        )
+        raise RuntimeError(detail or f"minimap2 exited with code {completed.returncode}")
     if not out_path.is_file() or out_path.stat().st_size == 0:
-        raise RuntimeError("minimap2 finished but produced no output.")
+        raise RuntimeError(f"minimap2 produced no output at {out_path}")
     return [out_path]

@@ -89,15 +89,10 @@ class Minimap2ParamsDialog(QDialog):
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 128)
 
-        self._format = QComboBox(self)
-        self._format.addItem("PAF", "paf")
-        self._format.addItem("SAM", "sam")
-
         params_group = QGroupBox("Parameters", self)
         params_form = QFormLayout(params_group)
         params_form.addRow("Preset (-x):", self._preset)
         params_form.addRow("Threads:", self._threads)
-        params_form.addRow("Output:", self._format)
 
         self._load_saved()
 
@@ -146,10 +141,6 @@ class Minimap2ParamsDialog(QDialog):
         if idx >= 0:
             self._preset.setCurrentIndex(idx)
         self._threads.setValue(int(self._settings.value("threads", 4)))
-        fmt = str(self._settings.value("output_format", "paf"))
-        fmt_idx = self._format.findData(fmt)
-        if fmt_idx >= 0:
-            self._format.setCurrentIndex(fmt_idx)
         saved_ref = str(self._settings.value("reference_fasta", "")).strip()
         if saved_ref and not self._reference.text().strip():
             self._reference.setText(saved_ref)
@@ -159,7 +150,6 @@ class Minimap2ParamsDialog(QDialog):
         self._settings.beginGroup(SETTINGS_GROUP)
         self._settings.setValue("preset", str(self._preset.currentData()))
         self._settings.setValue("threads", int(self._threads.value()))
-        self._settings.setValue("output_format", str(self._format.currentData()))
         self._settings.setValue("reference_fasta", self._reference.text().strip())
         self._settings.endGroup()
 
@@ -206,7 +196,6 @@ class Minimap2ParamsDialog(QDialog):
         return Minimap2Options(
             preset=str(self._preset.currentData()),
             threads=max(1, int(self._threads.value())),
-            output_format=str(self._format.currentData()),
             reference_fasta=self._reference.text().strip(),
         )
 

@@ -8,6 +8,8 @@ version = "0.2.0"
 description = "RepeatViewer: PySide6 desktop app for TE curation, annotation, and visualization"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "GPL-3.0"
+license-files = ["LICENSE"]
 authors = [
   { name = "TEtrimmer / RepeatViewer contributors" },
 ]
@@ -25,7 +27,6 @@ dependencies = [
   # (interactive Go-to dotplots). Stock PyPI flexidot only supports png/pdf/svg.
   "flexidot @ git+https://github.com/qjiangzhao/flexidot.git@Jiangzhao",
   "pytrf>=1.4",
-  "pysam>=0.22",
   "scikit-learn>=1.3",
 ]
 
@@ -45,5 +46,5 @@ include = ["repeatviewer*", "repeatviewer_minimap2*"]
 minimap2 = "repeatviewer_minimap2.plugin:Minimap2Plugin"
 
 [tool.setuptools.package-data]
-repeatviewer = ["backends/blast/*", "backends/mafft/**/*", "backends/muscle/**/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*", "assets/igv/*"]
+repeatviewer = ["backends/blast/*", "backends/mafft/**/*", "backends/muscle/**/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*"]
 repeatviewer_minimap2 = ["binaries/**/*"]

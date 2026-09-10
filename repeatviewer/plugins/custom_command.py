@@ -409,8 +409,6 @@ _COMMON_OUTPUT_SUFFIXES = (
     ".1aln",
     ".paf",
     ".psl",
-    ".sam",
-    ".bam",
     ".out",
     ".txt",
     ".gff",

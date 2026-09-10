@@ -266,11 +266,6 @@ from repeatviewer.backends.blast_genome_plot import (
     TE_INPUT_KIND_MASKING,
 )
 from repeatviewer.backends.te_abundance_plot import write_te_abundance_plot_html
-from repeatviewer.backends.igv_viewer import (
-    discover_igv_annotations,
-    is_alignment_preview_file,
-    set_igv_extra_annotations_provider,
-)
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE, JobCancellation, JobCancelledError
 
 logger = logging.getLogger(__name__)
@@ -444,7 +439,7 @@ from repeatviewer.widgets.file_sort import (
     sort_file_paths,
 )
 from repeatviewer.widgets.file_list_table import FileListRow, FileListTableWidget
-from repeatviewer.widgets.preview_tabs import PreviewTabWidget, is_previewable_file, preview_path_priority, set_genome_path_provider
+from repeatviewer.widgets.preview_tabs import PreviewTabWidget, is_previewable_file, preview_path_priority
 from repeatviewer.widgets.task_progress import TaskProgressPanel
 from repeatviewer.widgets.database_index_runner import DatabaseIndexRunner
 
@@ -2242,8 +2237,6 @@ class MainWindow(QMainWindow):
             annotation_zoom_bar=self._annotation_zoom_bar,
         )
         self._preview_tabs.setObjectName("PreviewTabs")
-        set_genome_path_provider(self._genome_path_resolved)
-        set_igv_extra_annotations_provider(self._igv_extra_annotations_for_alignment)
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
         self._preview_tabs.sequenceExtracted.connect(self._on_preview_sequence_extracted)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
@@ -5288,15 +5281,6 @@ class MainWindow(QMainWindow):
             return None
         path = Path(str(raw))
         return path if path.is_file() else None
-
-    def _igv_extra_annotations_for_alignment(self, _alignment: Path) -> list[Path]:
-        """GFF/GTF files explicitly selected in the Files panel."""
-        gff_suffixes = {".gff", ".gff3", ".gtf"}
-        paths: list[Path] = []
-        for path in self._selected_files():
-            if path.suffix.lower() in gff_suffixes and path.is_file():
-                paths.append(path.expanduser().resolve())
-        return paths
 
     def _open_file_in_preview(self, path: Path) -> None:
         self._open_preview_tab(path, replace=True)

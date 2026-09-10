@@ -252,8 +252,6 @@ def _molecule_type(path: Path) -> str:
         return "HTML"
     if suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf"}:
         return "Image" if suffix != ".pdf" else "PDF"
-    if suffix in {".bam", ".sam", ".cram"}:
-        return "Alignment"
     if suffix in {".out"}:
         return "Table"
     if suffix in {".txt", ".log", ".md"} or name.endswith("_blast.txt"):

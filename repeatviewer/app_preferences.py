@@ -119,8 +119,7 @@ def cache_dir() -> Path:
 
 def cache_dirs() -> list[Path]:
     """All on-disk cache locations the app writes to."""
-    tmp = Path(tempfile.gettempdir())
-    return [tmp / "repeatviewer", tmp / "repeatviewer-igv-sessions"]
+    return [cache_dir()]
 
 
 def log_file_path() -> Path:

@@ -19,5 +19,4 @@ MINIMAP2_PRESETS = (
 class Minimap2Options:
     preset: str = "map-ont"
     threads: int = 4
-    output_format: str = "paf"
     reference_fasta: str = ""

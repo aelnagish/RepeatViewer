@@ -34,12 +34,6 @@ from repeatviewer.backends.html_preview_policy import (
     should_use_webengine_for_html,
     use_embedded_html_preview,
 )
-from repeatviewer.backends.igv_viewer import (
-    IgvPreviewError,
-    add_track_to_igv_session,
-    is_igv_view_url,
-    parse_igv_session_id,
-)
 from repeatviewer.plot_preferences import save_view_state, sidecar_prefs_path, view_state_from_dict
 from repeatviewer.widgets.preview_zoom import (
     PreviewFitMode,
@@ -271,7 +265,7 @@ class LazyHtmlPreview(QWidget):
             QTimer.singleShot(150, lambda p=path: open_html_in_browser(p))
 
     def load_url(self, url: str) -> None:
-        """Load an http(s) page (for example igv.js served on localhost)."""
+        """Load an http(s) page."""
         if not use_embedded_html_preview():
             if self._inner is None:
                 self._inner = HtmlFallbackPreview(
@@ -368,13 +362,6 @@ class HtmlWebEnginePreview(QWidget):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(4, 1, 4, 1)
         toolbar_layout.setSpacing(4)
-        self._add_igv_track_btn = QPushButton("Add track…")
-        self._add_igv_track_btn.setToolTip(
-            "Add GFF, GTF, BED, BAM, or SAM track to the igv.js viewer"
-        )
-        self._add_igv_track_btn.clicked.connect(self._add_igv_track)
-        self._add_igv_track_btn.hide()
-        toolbar_layout.addWidget(self._add_igv_track_btn)
         toolbar_layout.addStretch()
         open_browser = QPushButton("Open in browser")
         open_browser.clicked.connect(self._open_in_browser)
@@ -674,7 +661,6 @@ class HtmlWebEnginePreview(QWidget):
             self._view.load(_local_file_url(load_path))
         except RuntimeError:
             return
-        self._sync_igv_toolbar()
 
     def _load_html_via_set_html(self, resolved: Path) -> None:
         # Only for small files — large TEAid reports must use file:// loading.
@@ -688,7 +674,6 @@ class HtmlWebEnginePreview(QWidget):
                 self._view.load(_local_file_url(load_path))
             except RuntimeError:
                 return
-            self._sync_igv_toolbar()
             return
         try:
             html = resolved.read_text(encoding="utf-8", errors="replace")
@@ -703,7 +688,6 @@ class HtmlWebEnginePreview(QWidget):
             self._view.setHtml(html, base_url)
         except RuntimeError:
             return
-        self._sync_igv_toolbar()
         # setHtml() sometimes does not emit a reliable loadFinished on macOS.
         # Mark as OK and apply zoom now so the plot does not stay blank.
         self._last_load_ok = True
@@ -750,49 +734,6 @@ class HtmlWebEnginePreview(QWidget):
             self._view.load(QUrl(url))
         except RuntimeError:
             return
-        self._sync_igv_toolbar()
-
-    def _sync_igv_toolbar(self) -> None:
-        show = is_igv_view_url(self._current_url)
-        self._add_igv_track_btn.setVisible(show)
-
-    def _add_igv_track(self) -> None:
-        session_id = parse_igv_session_id(self._current_url or "")
-        if not session_id:
-            return
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Add track to igv.js",
-            "",
-            "Tracks (*.gff *.gff3 *.gtf *.bed *.bam *.sam);;All files (*)",
-        )
-        if not paths:
-            return
-        errors: list[str] = []
-        for raw in paths:
-            try:
-                track = add_track_to_igv_session(session_id, Path(raw))
-            except IgvPreviewError as exc:
-                errors.append(f"{Path(raw).name}: {exc}")
-                continue
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{Path(raw).name}: {exc}")
-                continue
-            script = (
-                "window.repeatviewerIgvLoadTrack("
-                + json.dumps(track)
-                + ").catch(function(err){"
-                + 'alert("Add track failed:\\n" + err);'
-                + "});"
-            )
-            if self._view_active():
-                self._view.page().runJavaScript(script)
-        if errors:
-            QMessageBox.warning(
-                self,
-                "Add track",
-                "Some tracks could not be added:\n\n" + "\n".join(errors),
-            )
 
     def _on_load_finished(self, ok: bool) -> None:
         if not self._view_active():
