@@ -4625,8 +4625,8 @@ class MainWindow(QMainWindow):
         self._sync_sidecar_in_file_list(path, select=False)
 
     def _on_preview_sequence_extracted(self, path: object) -> None:
-        # Extracted FASTA is a new output the user usually wants to open.
-        self._sync_sidecar_in_file_list(path, select=True)
+        # Show the new FASTA in Files, but keep the current file selected/previewed.
+        self._sync_sidecar_in_file_list(path, select=False)
 
     def _sync_sidecar_in_file_list(self, path: object, *, select: bool) -> None:
         if not isinstance(path, Path) or not self._current_folder:
@@ -4653,36 +4653,38 @@ class MainWindow(QMainWindow):
 
         self._file_list.blockSignals(True)
         try:
+            # Keep the green “new output” tint even when we do not switch selection.
+            self._highlight_output_keys.add(sidecar_key)
+
             sidecar_item = _find_item_for_key(sidecar_key)
             if sidecar_item is None:
                 self._populate_file_list(self._current_folder, open_preview=False)
                 # _populate_file_list clears blockSignals; re-block for the rest.
                 self._file_list.blockSignals(True)
+                # Populate without new_outputs preserves existing highlight keys;
+                # re-assert this path so metadata refresh keeps the green style.
+                self._highlight_output_keys.add(sidecar_key)
                 sidecar_item = _find_item_for_key(sidecar_key)
 
+            if sidecar_item is not None:
+                self._style_new_output_item(sidecar_item)
+                self._file_list.scrollToItem(
+                    sidecar_item,
+                    QAbstractItemView.ScrollHint.EnsureVisible,
+                )
+
             if select:
-                reveal_item = sidecar_item
-                if reveal_item is None and prev_key is not None:
-                    reveal_item = _find_item_for_key(prev_key)
-                if reveal_item is not None:
-                    self._style_new_output_item(reveal_item)
+                if sidecar_item is not None:
                     self._reveal_file_list_item(
-                        reveal_item,
+                        sidecar_item,
                         scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
                     )
-            else:
-                if sidecar_item is not None:
-                    self._style_new_output_item(sidecar_item)
-                    self._file_list.scrollToItem(
-                        sidecar_item,
-                        QAbstractItemView.ScrollHint.EnsureVisible,
-                    )
-                # After a list refresh, restore the previously selected FASTA.
-                if prev_key is not None:
-                    prev_item = _find_item_for_key(prev_key)
-                    if prev_item is not None:
-                        prev_item.setSelected(True)
-                        self._file_list.setCurrentItem(prev_item)
+            elif prev_key is not None:
+                # Keep the previously selected FASTA / preview after a list refresh.
+                prev_item = _find_item_for_key(prev_key)
+                if prev_item is not None:
+                    prev_item.setSelected(True)
+                    self._file_list.setCurrentItem(prev_item)
         finally:
             self._file_list.blockSignals(False)
 

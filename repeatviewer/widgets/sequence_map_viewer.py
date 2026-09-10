@@ -39,6 +39,7 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -96,6 +97,7 @@ from repeatviewer.backends.annotation_colors import (
     similarity_database_color,
 )
 from repeatviewer.backends.database_prepare import database_search_readiness
+from repeatviewer.backends.dotplot import reverse_complement
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
     SequenceMapData,
@@ -903,11 +905,63 @@ def _is_delete_key(key: int) -> bool:
     return key in (int(Qt.Key.Key_Delete), int(Qt.Key.Key_Backspace))
 
 
+def _safe_filename_part(text: str) -> str:
+    cleaned = "".join(
+        ch if ch.isalnum() or ch in "-_." else "_" for ch in str(text or "").strip()
+    )
+    return cleaned.strip("._") or ""
+
+
+def _feature_export_tag(feat: SequenceFeature) -> str:
+    """Type/database tag used in extracted FASTA names (``seq_LTR.fa``)."""
+    if feat.feature_type == "domain":
+        database, sep, _rest = str(feat.name or "").partition(": ")
+        if sep and database.strip():
+            return _safe_filename_part(database.strip()) or "domain"
+        return "domain"
+    for label, feature_type in DEFAULT_ADD_FEATURE_BUTTONS:
+        if feature_type == feat.feature_type:
+            return _safe_filename_part(label) or "feature"
+    return _safe_filename_part(feat.feature_type.replace(" ", "_")) or "feature"
+
+
+def _feature_export_stem(sequence_id: str, feat: SequenceFeature) -> str:
+    base = _safe_filename_part(sequence_id) or "sequence"
+    return f"{base}_{_feature_export_tag(feat)}"
+
+
+def _unique_feature_fa_path(directory: Path, sequence_id: str, feat: SequenceFeature) -> Path:
+    """``name_LTR.fa``, then ``name_LTR2.fa``, ``name_LTR3.fa``, …"""
+    stem = _feature_export_stem(sequence_id, feat)
+    candidate = directory / f"{stem}.fa"
+    if not candidate.exists():
+        return candidate
+    index = 2
+    while True:
+        candidate = directory / f"{stem}{index}.fa"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _feature_sequence_fragment(sequence: str, feat: SequenceFeature) -> str:
+    lo = max(1, min(int(feat.start), int(feat.end)))
+    hi = min(len(sequence), max(int(feat.start), int(feat.end)))
+    if hi < lo:
+        return ""
+    fragment = sequence[lo - 1 : hi]
+    if not feat.is_forward():
+        fragment = reverse_complement(fragment)
+    return fragment
+
+
 class AnnotationTrackWidget(QWidget):
     """Feature annotations below the sequence; stacked rows for overlaps."""
 
     selectionChanged = Signal(object)  # frozenset[int]
     deleteRequested = Signal()
+    copySequenceRequested = Signal()
+    extractSequenceRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1216,6 +1270,27 @@ class AnnotationTrackWidget(QWidget):
             return
         super().keyPressEvent(event)
 
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
+        if not self._features:
+            return
+        hit = self._hit_test_feature(QPointF(event.pos()))
+        if hit is None:
+            return
+        if hit not in self._selected_indices:
+            self._selected_indices = {hit}
+            self._emit_selection()
+            self.update()
+        menu = QMenu(self)
+        menu.setObjectName("AnnotationFeatureMenu")
+        delete_action = menu.addAction("Delete")
+        delete_action.triggered.connect(self.deleteRequested.emit)
+        copy_action = menu.addAction("Copy sequence")
+        copy_action.triggered.connect(self.copySequenceRequested.emit)
+        extract_action = menu.addAction("Extract Sequence")
+        extract_action.triggered.connect(self.extractSequenceRequested.emit)
+        menu.exec(event.globalPos())
+        event.accept()
+
 
 class SequenceMapCanvas(QWidget):
     """Paints sequence + feature tracks; supports wrap and stacked feature rows."""
@@ -1224,6 +1299,7 @@ class SequenceMapCanvas(QWidget):
     featureClicked = Signal(int)  # index in features list
     addFeatureRequested = Signal(str, str)  # feature_type, label
     extractSequenceRequested = Signal(int, int)  # 1-based inclusive range
+    featureActionRequested = Signal(str)  # delete | copy | extract
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1985,8 +2061,15 @@ class SequenceMapCanvas(QWidget):
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
-        if self.selection_range() is None:
-            pos = event.position()
+        pos = QPointF(event.pos())
+        feat_idx = self._feature_at(pos) if self.uses_wrap() else None
+        if feat_idx is not None:
+            self._selected_indices = {feat_idx}
+            self._select_start_bp = None
+            self._select_end_bp = None
+            self.featureClicked.emit(feat_idx)
+            self.update()
+        elif self.selection_range() is None:
             bp = self._bp_at_pos(pos.x(), pos.y())
             if bp is None:
                 return
@@ -2000,6 +2083,18 @@ class SequenceMapCanvas(QWidget):
         menu.setObjectName("SequenceMapMenu")
         menu.setToolTipsVisible(False)
 
+        if feat_idx is not None:
+            menu.addAction("Delete").triggered.connect(
+                lambda _checked=False: self.featureActionRequested.emit("delete")
+            )
+            menu.addAction("Copy sequence").triggered.connect(
+                lambda _checked=False: self.featureActionRequested.emit("copy")
+            )
+            menu.addAction("Extract Sequence").triggered.connect(
+                lambda _checked=False: self.featureActionRequested.emit("extract")
+            )
+            menu.addSeparator()
+
         add_menu = menu.addMenu("Add annotation")
         for label, feature_type in load_add_feature_buttons():
             action = add_menu.addAction(label)
@@ -2011,7 +2106,7 @@ class SequenceMapCanvas(QWidget):
 
         menu.addSeparator()
         selection = self.selection_range()
-        extract = menu.addAction("Extract Sequence…")
+        extract = menu.addAction("Extract Sequence")
         if selection is None:
             extract.setEnabled(False)
         else:
@@ -2039,10 +2134,11 @@ class _ExtractSequenceDialog(QDialog):
         start: int,
         end: int,
         default_name: str,
+        reverse: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Extract sequence")
+        self.setWindowTitle("Extract Sequence")
         self._sequence_length = max(1, int(sequence_length))
 
         self._start = QSpinBox(self)
@@ -2057,6 +2153,15 @@ class _ExtractSequenceDialog(QDialog):
 
         for box in (self._start, self._end):
             box.setFixedWidth(160)
+
+        self._strand = QComboBox(self)
+        self._strand.addItem("Forward", False)
+        self._strand.addItem("Reverse", True)
+        self._strand.setCurrentIndex(1 if reverse else 0)
+        self._strand.setFixedWidth(160)
+        self._strand.setToolTip(
+            "Reverse reverse-complements the extracted bases before writing the file"
+        )
 
         self._name = QLineEdit(default_name, self)
         self._name.setFixedWidth(260)
@@ -2077,6 +2182,7 @@ class _ExtractSequenceDialog(QDialog):
         form.setVerticalSpacing(10)
         form.addRow("Start:", self._start)
         form.addRow("End:", self._end)
+        form.addRow("Strand:", self._strand)
         form.addRow("Name:", self._name)
 
         self._buttons = QDialogButtonBox(
@@ -2095,6 +2201,7 @@ class _ExtractSequenceDialog(QDialog):
 
         self._start.valueChanged.connect(self._sync)
         self._end.valueChanged.connect(self._sync)
+        self._strand.currentIndexChanged.connect(self._sync)
         self._name.textChanged.connect(self._sync)
         self._sync()
 
@@ -2104,15 +2211,23 @@ class _ExtractSequenceDialog(QDialog):
         valid_range = end >= start
         has_name = bool(self._name.text().strip())
         if valid_range:
-            self._summary.setText(f"{end - start + 1:,} bp will be extracted.")
+            strand = "reverse" if bool(self._strand.currentData()) else "forward"
+            self._summary.setText(
+                f"{end - start + 1:,} bp will be extracted ({strand})."
+            )
         else:
             self._summary.setText("End must not be before start.")
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             valid_range and has_name
         )
 
-    def values(self) -> tuple[int, int, str]:
-        return self._start.value(), self._end.value(), self._name.text().strip()
+    def values(self) -> tuple[int, int, str, bool]:
+        return (
+            self._start.value(),
+            self._end.value(),
+            self._name.text().strip(),
+            bool(self._strand.currentData()),
+        )
 
 
 class SequenceMapWidget(QWidget):
@@ -2121,6 +2236,8 @@ class SequenceMapWidget(QWidget):
     featuresChanged = Signal()
     statusMessage = Signal(str)
     deleteFeaturesRequested = Signal()
+    copyFeatureSequencesRequested = Signal()
+    extractFeatureSequencesRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None, *, embedded: bool = False) -> None:
         super().__init__(parent)
@@ -2325,11 +2442,16 @@ class SequenceMapWidget(QWidget):
         self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._canvas.selectionChanged.connect(self._on_selection_changed)
         self._canvas.featureClicked.connect(self._on_canvas_feature_clicked)
+        self._canvas.featureActionRequested.connect(self._on_canvas_feature_action)
 
         self._ruler = ViewportRulerWidget(self)
         self._annot_track = AnnotationTrackWidget(self)
         self._annot_track.selectionChanged.connect(self._on_annot_track_selection_changed)
         self._annot_track.deleteRequested.connect(self._request_delete_features)
+        self._annot_track.copySequenceRequested.connect(self._request_copy_feature_sequences)
+        self._annot_track.extractSequenceRequested.connect(
+            self._request_extract_feature_sequences
+        )
         self._overview = OverviewWidget(self)
         self._overview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._overview.viewportChanged.connect(self._scroll_to_fraction)
@@ -3027,6 +3149,25 @@ class SequenceMapWidget(QWidget):
         if self._selected_feature_indices:
             self.deleteFeaturesRequested.emit()
 
+    def _request_copy_feature_sequences(self) -> None:
+        self._sync_feature_selection_from_annot_track()
+        if self._selected_feature_indices:
+            self.copyFeatureSequencesRequested.emit()
+
+    def _request_extract_feature_sequences(self) -> None:
+        self._sync_feature_selection_from_annot_track()
+        if self._selected_feature_indices:
+            self.extractFeatureSequencesRequested.emit()
+
+    def _on_canvas_feature_action(self, action: str) -> None:
+        kind = str(action or "").strip().lower()
+        if kind == "delete":
+            self._request_delete_features()
+        elif kind == "copy":
+            self.copyFeatureSequencesRequested.emit()
+        elif kind == "extract":
+            self.extractFeatureSequencesRequested.emit()
+
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if _is_delete_key(event.key()):
             self._sync_feature_selection_from_annot_track()
@@ -3565,6 +3706,10 @@ class SequenceMapPanel(QWidget):
         self._map.deleteFeaturesRequested.connect(
             lambda: self._delete_feature(confirm_empty=False)
         )
+        self._map.copyFeatureSequencesRequested.connect(self._copy_selected_feature_sequences)
+        self._map.extractFeatureSequencesRequested.connect(
+            self._extract_selected_feature_sequences
+        )
         self.annotationJobProgress.connect(self._set_annotation_job_status)
         self._auto_ann_thread: QThread | None = None
         self._auto_ann_worker: Worker | None = None
@@ -4093,15 +4238,77 @@ class SequenceMapPanel(QWidget):
             index += 1
         return f"{base}_extraction_{index}"
 
+    def _next_feature_extraction_name(self, seq_id: str, feat: SequenceFeature) -> str:
+        """Default name: <seq>_<type>, then <seq>_<type>2, …"""
+        stem = _feature_export_stem(seq_id, feat)
+        parent = self._path.parent
+        if not (parent / f"{stem}.fasta").exists() and not (parent / f"{stem}.fa").exists():
+            return stem
+        index = 2
+        while True:
+            candidate = f"{stem}{index}"
+            if (
+                not (parent / f"{candidate}.fasta").exists()
+                and not (parent / f"{candidate}.fa").exists()
+            ):
+                return candidate
+            index += 1
+
+    def _write_extracted_fasta(
+        self,
+        *,
+        sequence: str,
+        sequence_id: str,
+        start: int,
+        end: int,
+        name: str,
+        reverse: bool = False,
+    ) -> Path | None:
+        lo = max(1, min(int(start), int(end)))
+        hi = min(len(sequence), max(int(start), int(end)))
+        fragment = sequence[lo - 1 : hi]
+        if not fragment:
+            QMessageBox.warning(self, "Extract Sequence", "The selection is empty.")
+            return None
+        if reverse:
+            fragment = reverse_complement(fragment)
+        safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
+        out_path = self._path.parent / f"{safe}.fasta"
+        if out_path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Extract Sequence",
+                f"{out_path.name} already exists. Overwrite it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return None
+        strand = "-" if reverse else "+"
+        header = f">{name} {sequence_id}:{lo}-{hi}({strand})"
+        try:
+            with out_path.open("w", encoding="utf-8") as handle:
+                handle.write(header + "\n")
+                for offset in range(0, len(fragment), 60):
+                    handle.write(fragment[offset : offset + 60] + "\n")
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Extract Sequence", f"Could not write {out_path.name}:\n{exc}"
+            )
+            return None
+        self.statusMessage.emit(
+            f"Extracted {lo:,}-{hi:,} ({len(fragment):,} bp) to {out_path.name}"
+        )
+        self.sequenceExtracted.emit(out_path)
+        return out_path
+
     @Slot(int, int)
     def _on_extract_sequence(self, start: int, end: int) -> None:
         """Write the selected range out as a new single-record FASTA."""
-        from PySide6.QtWidgets import QMessageBox
-
         data = self._loaded_data
         if data is None or not getattr(data, "sequence", ""):
             QMessageBox.warning(
-                self, "Extract sequence", "The sequence is not loaded yet."
+                self, "Extract Sequence", "The sequence is not loaded yet."
             )
             return
 
@@ -4112,49 +4319,20 @@ class SequenceMapPanel(QWidget):
             start=min(int(start), int(end)),
             end=max(int(start), int(end)),
             default_name=self._next_extraction_name(data.sequence_id),
+            reverse=False,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        chosen_start, chosen_end, name = dialog.values()
-
-        lo = max(1, min(chosen_start, chosen_end))
-        hi = min(len(sequence), max(chosen_start, chosen_end))
-        fragment = sequence[lo - 1 : hi]
-        if not fragment:
-            QMessageBox.warning(self, "Extract sequence", "The selection is empty.")
-            return
-
-        # Keep the file name filesystem-safe without silently renaming the record.
-        safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
-        out_path = self._path.parent / f"{safe}.fasta"
-        if out_path.exists():
-            answer = QMessageBox.question(
-                self,
-                "Extract sequence",
-                f"{out_path.name} already exists. Overwrite it?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-
-        header = f">{name} {data.sequence_id}:{lo}-{hi}"
-        try:
-            with out_path.open("w", encoding="utf-8") as handle:
-                handle.write(header + "\n")
-                for offset in range(0, len(fragment), 60):
-                    handle.write(fragment[offset : offset + 60] + "\n")
-        except OSError as exc:
-            QMessageBox.warning(
-                self, "Extract sequence", f"Could not write {out_path.name}:\n{exc}"
-            )
-            return
-
-        self.statusMessage.emit(
-            f"Extracted {lo:,}-{hi:,} ({len(fragment):,} bp) to {out_path.name}"
+        chosen_start, chosen_end, name, reverse = dialog.values()
+        self._write_extracted_fasta(
+            sequence=sequence,
+            sequence_id=data.sequence_id,
+            start=chosen_start,
+            end=chosen_end,
+            name=name,
+            reverse=reverse,
         )
-        self.sequenceExtracted.emit(out_path)
 
     def select_by_position(self, start: int, end: int) -> None:
         """Select a 1-based inclusive range (delegates to the map widget)."""
@@ -4327,6 +4505,91 @@ class SequenceMapPanel(QWidget):
             return
         self._persist_annotations()
         self.statusMessage.emit(f"Deleted {removed} feature(s).")
+
+    def _selected_features(self) -> list[SequenceFeature]:
+        self._map._sync_feature_selection_from_annot_track()
+        features = self._map.features()
+        indices = sorted(self._map.selected_feature_indices())
+        return [features[index] for index in indices if 0 <= index < len(features)]
+
+    def _copy_selected_feature_sequences(self) -> None:
+        data = self._loaded_data
+        if data is None or not getattr(data, "sequence", ""):
+            QMessageBox.warning(
+                self, "Copy sequence", "The sequence is not loaded yet."
+            )
+            return
+        selected = self._selected_features()
+        if not selected:
+            QMessageBox.information(
+                self, "Copy sequence", "Select a feature first."
+            )
+            return
+        blocks: list[str] = []
+        for feat in selected:
+            fragment = _feature_sequence_fragment(data.sequence, feat)
+            if not fragment:
+                continue
+            strand = "-" if not feat.is_forward() else "+"
+            header = (
+                f">{feat.name or feat.feature_type} "
+                f"{data.sequence_id}:{feat.start}-{feat.end}({strand})"
+            )
+            if len(selected) == 1:
+                blocks.append(fragment)
+            else:
+                lines = [header]
+                for offset in range(0, len(fragment), 60):
+                    lines.append(fragment[offset : offset + 60])
+                blocks.append("\n".join(lines))
+        if not blocks:
+            QMessageBox.warning(self, "Copy sequence", "The selection is empty.")
+            return
+        QApplication.clipboard().setText("\n\n".join(blocks))
+        total_bp = sum(
+            len(_feature_sequence_fragment(data.sequence, feat)) for feat in selected
+        )
+        self.statusMessage.emit(
+            f"Copied {len(selected)} feature sequence(s) ({total_bp:,} bp) to the clipboard"
+        )
+
+    def _extract_selected_feature_sequences(self) -> None:
+        data = self._loaded_data
+        if data is None or not getattr(data, "sequence", ""):
+            QMessageBox.warning(
+                self, "Extract Sequence", "The sequence is not loaded yet."
+            )
+            return
+        selected = self._selected_features()
+        if not selected:
+            QMessageBox.information(
+                self, "Extract Sequence", "Select a feature first."
+            )
+            return
+        sequence = data.sequence
+        for feat in selected:
+            dialog = _ExtractSequenceDialog(
+                sequence_id=data.sequence_id,
+                sequence_length=len(sequence),
+                start=int(feat.start),
+                end=int(feat.end),
+                default_name=self._next_feature_extraction_name(
+                    data.sequence_id, feat
+                ),
+                reverse=not feat.is_forward(),
+                parent=self,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                continue
+            chosen_start, chosen_end, name, reverse = dialog.values()
+            self._write_extracted_fasta(
+                sequence=sequence,
+                sequence_id=data.sequence_id,
+                start=chosen_start,
+                end=chosen_end,
+                name=name,
+                reverse=reverse,
+            )
 
     def _restore_features(self) -> None:
         if not self._feature_undo_stack:

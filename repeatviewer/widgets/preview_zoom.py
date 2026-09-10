@@ -33,7 +33,7 @@ class DefaultFastaPreviewTab(str, Enum):
     DOTPLOT = "dotplot"
 
 
-DEFAULT_FASTA_PREVIEW_TAB = DefaultFastaPreviewTab.TEXT
+DEFAULT_FASTA_PREVIEW_TAB = DefaultFastaPreviewTab.ANNOTATION
 
 
 def load_preview_zoom_percent() -> int:
