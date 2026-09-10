@@ -529,6 +529,18 @@ DEFAULT_MSA_CLEAN_ORDER = (
     "msa_clean_div",
     "msa_clean_gap",
 )
+MSA_CLEAN_RIGHT_CLICK_COMBINED = "msa_clean"
+MSA_CLEAN_RIGHT_CLICK_GAPPY = "msa_clean_gappy"
+MSA_CLEAN_RIGHT_CLICK_DIV = "msa_clean_div"
+MSA_CLEAN_RIGHT_CLICK_GAP = "msa_clean_gap"
+MSA_CLEAN_RIGHT_CLICK_DIALOG = "dialog"
+MSA_CLEAN_RIGHT_CLICK_ACTIONS = (
+    MSA_CLEAN_RIGHT_CLICK_COMBINED,
+    MSA_CLEAN_RIGHT_CLICK_GAPPY,
+    MSA_CLEAN_RIGHT_CLICK_DIV,
+    MSA_CLEAN_RIGHT_CLICK_GAP,
+    MSA_CLEAN_RIGHT_CLICK_DIALOG,
+)
 
 MSA_CLEAN_METHOD_DESCRIPTIONS: dict[str, str] = {
     "msa_clean_gappy": "Remove columns that are mostly gaps (uses the gappy-column parameters below).",
@@ -560,6 +572,7 @@ class MsaCleanOptions:
     gappy: GappyColumnOptions = field(default_factory=GappyColumnOptions)
     divergence: DivergenceRowOptions = field(default_factory=DivergenceRowOptions)
     gap_row: GapRowOptions = field(default_factory=GapRowOptions)
+    right_click_action: str = MSA_CLEAN_RIGHT_CLICK_COMBINED
 
     def __post_init__(self) -> None:
         valid = [method for method in self.method_order if method in DEFAULT_MSA_CLEAN_ORDER]
@@ -567,6 +580,8 @@ class MsaCleanOptions:
         self.method_order = tuple(valid)
         if not (self.use_divergence or self.use_gap_row or self.use_gappy_columns):
             self.use_gappy_columns = True
+        if self.right_click_action not in MSA_CLEAN_RIGHT_CLICK_ACTIONS:
+            self.right_click_action = MSA_CLEAN_RIGHT_CLICK_COMBINED
 
 
 def load_msa_clean_options() -> MsaCleanOptions:
@@ -593,6 +608,11 @@ def load_msa_clean_options() -> MsaCleanOptions:
     stored_order = s.value("method_order", list(DEFAULT_MSA_CLEAN_ORDER))
     if isinstance(stored_order, str):
         stored_order = [stored_order]
+    right_click_action = str(
+        s.value("right_click_action", MSA_CLEAN_RIGHT_CLICK_COMBINED)
+    )
+    if right_click_action not in MSA_CLEAN_RIGHT_CLICK_ACTIONS:
+        right_click_action = MSA_CLEAN_RIGHT_CLICK_COMBINED
     opts = MsaCleanOptions(
         use_divergence=use_divergence,
         use_gap_row=use_gap_row,
@@ -616,6 +636,7 @@ def load_msa_clean_options() -> MsaCleanOptions:
             gap_threshold=float(s.value("gap_row_gap_threshold", DEFAULT_GAP_ROW_GAP_THRESHOLD)),
             window_size=int(s.value("gap_row_window_size", DEFAULT_GAP_ROW_WINDOW_SIZE)),
         ),
+        right_click_action=right_click_action,
     )
     s.endGroup()
     return opts
@@ -1345,6 +1366,14 @@ def save_msa_clean_options(opts: MsaCleanOptions) -> None:
     s.setValue("use_gap_row", opts.use_gap_row)
     s.setValue("use_gappy_columns", opts.use_gappy_columns)
     s.setValue("method_order", list(opts.method_order))
+    s.setValue(
+        "right_click_action",
+        (
+            opts.right_click_action
+            if opts.right_click_action in MSA_CLEAN_RIGHT_CLICK_ACTIONS
+            else MSA_CLEAN_RIGHT_CLICK_COMBINED
+        ),
+    )
     g = opts.gappy
     s.setValue("gappy_gap_threshold", g.gap_threshold)
     s.setValue("gappy_simi_check_gap_thr", g.simi_check_gap_thr)

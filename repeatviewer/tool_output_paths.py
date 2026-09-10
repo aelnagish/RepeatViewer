@@ -12,7 +12,11 @@ def write_genome_reference_link(
     *,
     genome_label: str = "",
 ) -> Path:
-    """Symlink to the BLAST database FASTA for Flexidot multi-select in the output folder."""
+    """Symlink to the BLAST database FASTA for Flexidot multi-select in the output folder.
+
+    Returns the link/copy path beside the outputs (not the resolved genome target),
+    so downstream tools do not treat the genome as a BLAST-hit FASTA.
+    """
     from repeatviewer.pan_genome import genome_output_suffix
 
     genome_fasta = genome_fasta.expanduser().resolve()
@@ -39,4 +43,5 @@ def write_genome_reference_link(
             import shutil
 
             shutil.copy2(genome_fasta, link_path)
-    return link_path.resolve()
+    # Do not Path.resolve() here — that follows the symlink to the genome FASTA.
+    return link_path

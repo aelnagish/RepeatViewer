@@ -716,7 +716,7 @@ class FileListTableWidget(QTableWidget):
                                 lambda: self.separate_fasta_subfolders_requested.emit(path),
                             )
                             menu.addAction(
-                                "Extract Sequences from File…",
+                                "Extract Sequences from File",
                                 lambda p=path: self.extract_sequences_requested.emit(p),
                             )
                         blast_txt = find_blast_table_for_query(path)

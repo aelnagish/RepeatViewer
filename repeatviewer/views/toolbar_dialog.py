@@ -91,7 +91,7 @@ DEFAULT_TOOLBAR_ORDER: list[str] = [
 
 TOOLBAR_LABELS: dict[str, str] = {
     "define_genome": "Define genome",
-    "new_sequence": "New Sequence…",
+    "new_sequence": "New Sequence",
     "group_sequences": "Combine Sequences to One File",
     "extract_sequences": "Extract Sequences from File",
     "reverse_complement": "Reverse Complement",
@@ -114,6 +114,7 @@ TOOLBAR_LABELS: dict[str, str] = {
     "te_divergence_plot": "TE divergence",
     "tsd_search": "TSD search",
     "plugin:minimap2": "Minimap2",
+    "workflows_manage": "Design and manage workflows",
 }
 
 
@@ -141,11 +142,22 @@ def plugin_tool_id(plugin_id: str) -> str:
     return f"plugin:{plugin_id}"
 
 
+def workflow_tool_id(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}"
+
+
 def toolbar_labels_for(registry: PluginRegistry | None = None) -> dict[str, str]:
     labels = dict(TOOLBAR_LABELS)
     if registry is not None:
         for plugin in registry.all_plugins():
             labels[plugin_tool_id(plugin.id)] = plugin.label
+    try:
+        from repeatviewer.workflows import load_workflow_specs
+
+        for spec in load_workflow_specs():
+            labels[workflow_tool_id(spec.id)] = spec.name
+    except Exception:  # noqa: BLE001
+        pass
     return labels
 
 
@@ -469,9 +481,9 @@ class ToolbarCustomizeWidget(QWidget):
         button_row.setContentsMargins(0, 4, 0, 0)
         button_row.setSpacing(8)
 
-        self._add_btn = QPushButton("Add button…")
+        self._add_btn = QPushButton("Add button")
         self._add_btn.setToolTip(
-            "Add File, Sequence, Tools, or Plugins items, or a separator"
+            "Add File, Sequence, Tools, Plugins, or Workflows items, or a separator"
         )
         self._add_menu = QMenu(self)
         self._add_btn.clicked.connect(self._show_add_menu)
@@ -568,6 +580,32 @@ class ToolbarCustomizeWidget(QWidget):
                 plugins_added += 1
         if plugins_added == 0:
             empty = plugins_menu.addAction("(all plugins listed)")
+            empty.setEnabled(False)
+
+        workflows_menu = self._add_menu.addMenu("Workflows")
+        workflows_added = 0
+        if "workflows_manage" not in current_ids:
+            workflows_menu.addAction(
+                toolbar_item_label("workflows_manage", self._labels),
+                lambda: self._add_tool("workflows_manage"),
+            )
+            workflows_added += 1
+        try:
+            from repeatviewer.workflows import load_workflow_specs
+
+            for spec in load_workflow_specs():
+                tool_id = workflow_tool_id(spec.id)
+                if tool_id in current_ids:
+                    continue
+                workflows_menu.addAction(
+                    spec.name,
+                    lambda checked=False, tid=tool_id: self._add_tool(tid),
+                )
+                workflows_added += 1
+        except Exception:  # noqa: BLE001
+            pass
+        if workflows_added == 0:
+            empty = workflows_menu.addAction("(all workflows listed)")
             empty.setEnabled(False)
 
         self._add_menu.addSeparator()

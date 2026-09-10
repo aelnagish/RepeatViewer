@@ -308,6 +308,7 @@ from repeatviewer.job_options import (
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     CONSENSUS_RIGHT_CLICK_DIALOG,
     TEAID_RIGHT_CLICK_DIALOG,
+    MSA_CLEAN_RIGHT_CLICK_DIALOG,
     TE_ANNOTATION_RIGHT_CLICK_DIALOG,
     load_align_options,
     load_blast_options,
@@ -502,6 +503,7 @@ _JOB_DISPLAY_TITLES = {
     "dna_translation": "DNA translation",
     "te_confusion_benchmark": "Confusion matrix benchmark",
     "te_library_benchmark": "TE library benchmark",
+    "te_abundance_plot": "TE abundance plot",
 }
 
 
@@ -918,6 +920,29 @@ class FunctionWorker(QObject):
                 self.progress.emit,
                 **self._job_kwargs,
             )
+            self.finished.emit(result)
+        except JobCancelledError:
+            self.failed.emit(CANCELLED_MESSAGE)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class WorkflowWorker(QObject):
+    """Run a multi-step tool workflow on a background thread."""
+
+    progress = Signal(int, str)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, run_func, job_kwargs: dict | None = None):
+        super().__init__()
+        self._run_func = run_func
+        self._job_kwargs = job_kwargs or {}
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = self._run_func(self.progress.emit, **self._job_kwargs)
             self.finished.emit(result)
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
@@ -1458,7 +1483,7 @@ class MainWindow(QMainWindow):
         self._current_folder: Path | None = None
         self._saved_last_folder: Path | None = None
         self._worker_thread: QThread | None = None
-        self._worker: FunctionWorker | AlignWorker | None = None
+        self._worker: FunctionWorker | AlignWorker | WorkflowWorker | None = None
         self._task_progress: TaskProgressPanel | None = None
         self._metadata_enrich_thread: QThread | None = None
         self._metadata_enrich_worker: _MetadataEnrichWorker | None = None
@@ -1501,6 +1526,7 @@ class MainWindow(QMainWindow):
         self.database_index_runner = DatabaseIndexRunner(self)
         self._plugin_registry = load_plugins()
         self._plugins_menu: QMenu | None = None
+        self._workflows_menu: QMenu | None = None
         self._toolbar_order = load_toolbar_order(self._plugin_registry)
         self._browser_panel: QWidget | None = None
         self._dock_folders: QDockWidget | None = None
@@ -1960,6 +1986,13 @@ class MainWindow(QMainWindow):
             plugin = get_registry().get(job_title[len("plugin:") :])
             if plugin is not None:
                 return plugin.label
+        if job_title.startswith("workflow:"):
+            from repeatviewer.workflows import get_workflow_spec
+
+            spec = get_workflow_spec(job_title[len("workflow:") :])
+            if spec is not None:
+                return f"Workflow {spec.name}"
+            return "Workflow"
         key = job_title.strip().lower().replace(" ", "_")
         return _JOB_DISPLAY_TITLES.get(key, job_title)
 
@@ -2816,9 +2849,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction("&Quit", self.close, "Ctrl+Q")
 
         seq_menu = self.menuBar().addMenu("&Sequence")
-        seq_menu.addAction("New Sequence…", self._new_sequence)
-        seq_menu.addAction("Combine Sequences to One File…", self._group_sequences)
-        seq_menu.addAction("Extract Sequences from File…", self._extract_sequences_from_list)
+        seq_menu.addAction("New Sequence", self._new_sequence)
+        seq_menu.addAction("Combine Sequences to One File", self._group_sequences)
+        seq_menu.addAction("Extract Sequences from File", self._extract_sequences_from_list)
         seq_menu.addSeparator()
         seq_menu.addAction(
             "Reverse Complement",
@@ -2852,10 +2885,15 @@ class MainWindow(QMainWindow):
 
         plugins_menu = self.menuBar().addMenu("&Plugins")
         self._plugins_menu = plugins_menu
-        plugins_menu.addAction("Manage plugins…", self._open_plugin_manager)
-        plugins_menu.addAction("Design your plugin…", self._open_command_plugin_designer)
+        plugins_menu.addAction("Manage plugins", self._open_plugin_manager)
+        plugins_menu.addAction("Design your plugin", self._open_command_plugin_designer)
         plugins_menu.addSeparator()
         self._populate_plugins_menu_actions()
+
+        workflows_menu = QMenu("&Workflows", self)
+        self.menuBar().addMenu(workflows_menu)
+        self._workflows_menu = workflows_menu
+        self._rebuild_workflows_menu()
 
         view_menu = self.menuBar().addMenu("&View")
         if self._dock_folders is not None:
@@ -3196,9 +3234,15 @@ class MainWindow(QMainWindow):
         tooltip: str = "",
         run_label: str | None = None,
         show_default_action: bool = True,
+        right_click_slot=None,
     ) -> QToolButton:
-        """Text-only toolbar button; click opens its actions and optional default action."""
-        btn = QToolButton(self._toolbar_container)
+        """Text-only toolbar button; click opens its actions and optional default action.
+
+        ``right_click_slot`` runs a second action on right-click (same pattern as
+        ``_add_toolbar_action_button``).
+        """
+        del bar
+        btn = _ToolbarActionButton(self._toolbar_container)
         btn.setText(text)
         if tooltip:
             btn.setToolTip(tooltip)
@@ -3241,6 +3285,12 @@ class MainWindow(QMainWindow):
 
         btn._repeatviewer_open_menu = _show_menu_on_click  # type: ignore[attr-defined]
         btn.clicked.connect(_show_menu_on_click)
+
+        if right_click_slot is not None:
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+            btn.rightClicked.connect(
+                lambda s=right_click_slot: QTimer.singleShot(0, s)
+            )
 
         self._toolbar_hbox.addWidget(btn)
         self._job_toolbar_actions.append(btn)
@@ -3430,7 +3480,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "new_sequence":
             self._add_toolbar_text_action(
                 bar,
-                "New Sequence…",
+                "New Sequence",
                 self._new_sequence,
                 job_action=False,
                 tooltip=tip,
@@ -3438,7 +3488,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "group_sequences":
             self._add_toolbar_text_action(
                 bar,
-                "Combine Sequences…",
+                "Combine Sequences",
                 self._group_sequences,
                 job_action=False,
                 tooltip=tip,
@@ -3446,7 +3496,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "extract_sequences":
             self._add_toolbar_text_action(
                 bar,
-                "Extract Sequences…",
+                "Extract Sequences",
                 self._extract_sequences_from_list,
                 job_action=False,
                 tooltip=tip,
@@ -3581,8 +3631,12 @@ class MainWindow(QMainWindow):
                 "MSA Clean",
                 self._run_default_msa_clean,
                 self._populate_msa_clean_menu,
-                tooltip=tip,
+                tooltip=(
+                    "Click: choose Combined or a single clean step.\n"
+                    "Right-click: run the action chosen in the Options tab."
+                ),
                 show_default_action=False,
+                right_click_slot=self._quick_msa_clean_right_click,
             )
         elif tool_id == "consensus":
             self._add_toolbar_action_button(
@@ -3635,6 +3689,27 @@ class MainWindow(QMainWindow):
                 plugin.label,
                 lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
                 tooltip=plugin.tooltip or tip,
+            )
+        elif tool_id.startswith("workflow:"):
+            workflow_id = tool_id[len("workflow:") :]
+            from repeatviewer.workflows import get_workflow_spec
+
+            spec = get_workflow_spec(workflow_id)
+            if spec is None:
+                return
+            self._add_toolbar_text_action(
+                bar,
+                spec.name,
+                lambda checked=False, wid=spec.id: self._run_workflow(wid),
+                tooltip=tip or f"Run workflow {spec.name}",
+            )
+        elif tool_id == "workflows_manage":
+            self._add_toolbar_text_action(
+                bar,
+                "Design and manage workflows",
+                self._open_workflow_designer,
+                job_action=False,
+                tooltip="Design and manage your workflows",
             )
 
     def _select_all_fasta_in_folder(self) -> None:
@@ -6522,30 +6597,82 @@ class MainWindow(QMainWindow):
                         f"Select only valid RepeatMasker .out files.\n\nInvalid: {source}",
                     )
                     return
-            self._set_status_message("Building TE abundance plot…", 0)
-            try:
-                html_path = write_te_abundance_plot_html(
-                    sources,
-                    metric=dialog.y_axis_metric(),
-                    top_n=dialog.top_n(),
-                )
-            except Exception as exc:  # noqa: BLE001
-                QMessageBox.critical(self, "TE abundance plot failed", str(exc))
-                return
-            self._open_divergence_in_preview(html_path)
-            outputs = [html_path.resolve()]
-            if self._current_folder and self._current_folder.resolve() == html_path.parent.resolve():
-                self._populate_file_list(
-                    html_path.parent.resolve(), new_outputs=outputs, source_files=sources
-                )
-            else:
-                self._navigate_to_folder(
-                    html_path.parent.resolve(), new_outputs=outputs, source_files=sources
-                )
-            self._set_status_message(f"TE abundance plot: {html_path.name}", 8000)
+            self._start_te_abundance_plot(
+                sources,
+                metric=dialog.y_axis_metric(),
+                top_n=dialog.top_n(),
+            )
 
         dialog = TeAbundancePlotDialog(input_files=initial_files or None, parent=self)
         self._present_te_viz_dialog(dialog, _on_accept)
+
+    def _start_te_abundance_plot(
+        self,
+        sources: list[Path],
+        *,
+        metric: str,
+        top_n: int,
+    ) -> None:
+        self._start_background_job(
+            FunctionWorker(
+                self._run_te_abundance_plot_job,
+                "te_abundance_plot",
+                sources,
+                {"metric": metric, "top_n": top_n},
+            ),
+            job_title="te_abundance_plot",
+            total_steps=max(1, len(sources)),
+            source_files=sources,
+            on_finished=self._on_te_abundance_plot_finished,
+            on_failed=self._on_worker_failed,
+        )
+
+    def _run_te_abundance_plot_job(
+        self,
+        func_name: str,
+        sources: list[Path],
+        progress,
+        *,
+        metric: str,
+        top_n: int,
+    ) -> dict:
+        progress(0, "Building TE abundance plot…")
+        if self._job_cancel.requested:
+            raise JobCancelledError()
+        html_path = write_te_abundance_plot_html(
+            sources,
+            metric=metric,
+            top_n=top_n,
+        )
+        if self._job_cancel.requested:
+            raise JobCancelledError()
+        progress(max(1, len(sources)), f"Finished: {html_path.name}")
+        return {
+            "func_name": func_name,
+            "created_outputs": [str(html_path.resolve())],
+            "source_files": [str(p.resolve()) for p in sources],
+            "total": len(sources),
+            "failures": [],
+        }
+
+    @Slot(dict)
+    def _on_te_abundance_plot_finished(self, result: dict) -> None:
+        created = [
+            Path(str(raw)).expanduser().resolve()
+            for raw in result.get("created_outputs", [])
+        ]
+        created = [p for p in created if p.is_file()]
+        sources = [
+            Path(str(raw)).expanduser().resolve()
+            for raw in result.get("source_files", [])
+        ]
+        if not created:
+            self._set_status_message("TE abundance plot finished", 8000)
+            return
+        html_path = created[0]
+        self._open_divergence_in_preview(html_path)
+        self._refresh_folders_after_job(created, sources)
+        self._set_status_message(f"TE abundance plot: {html_path.name}", 8000)
 
     def _warm_genome_chromosome_cache(self) -> None:
         """Pre-read genome FASTA metadata so TE genome map dialogs open quickly."""
@@ -7435,11 +7562,13 @@ class MainWindow(QMainWindow):
     def _modify_msa_clean_parameters(self) -> None:
         dialog = MsaCleanParamsDialog(
             initial=self._msa_clean_options,
+            for_run=False,
             parent=self,
         )
         if dialog.exec():
             self._msa_clean_options = dialog.options()
             save_msa_clean_options(self._msa_clean_options)
+            self._persist_workspace()
             labels = []
             if self._msa_clean_options.use_divergence:
                 labels.append("divergence rows")
@@ -7451,6 +7580,34 @@ class MainWindow(QMainWindow):
                 f"MSA clean methods updated: {', '.join(labels)}",
                 5000,
             )
+
+    def _open_msa_clean_dialog(self) -> None:
+        """Open MSA Clean parameters (from Options right-click or Change menu)."""
+        dialog = MsaCleanParamsDialog(
+            initial=self._msa_clean_options,
+            parent=self,
+        )
+        try:
+            if not dialog.exec():
+                return
+            self._msa_clean_options = dialog.options()
+            save_msa_clean_options(self._msa_clean_options)
+            self._persist_workspace()
+            run_after = dialog.should_run()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        if run_after:
+            self._run_default_msa_clean()
+        else:
+            self._set_status_message("MSA clean settings saved", 4000)
+
+    def _quick_msa_clean_right_click(self) -> None:
+        """Right-click MSA Clean: run the action chosen in the Options tab."""
+        action = self._msa_clean_options.right_click_action
+        if action == MSA_CLEAN_RIGHT_CLICK_DIALOG:
+            self._open_msa_clean_dialog()
+        else:
+            self._apply_msa_clean(action)
 
     def _run_default_msa_clean(self) -> None:
         self._apply_msa_clean("msa_clean")
@@ -8381,11 +8538,226 @@ class MainWindow(QMainWindow):
         if self._plugins_menu is None:
             return
         self._plugins_menu.clear()
-        self._plugins_menu.addAction("Manage plugins…", self._open_plugin_manager)
-        self._plugins_menu.addAction("Design your plugin…", self._open_command_plugin_designer)
+        self._plugins_menu.addAction("Manage plugins", self._open_plugin_manager)
+        self._plugins_menu.addAction("Design your plugin", self._open_command_plugin_designer)
         self._plugins_menu.addSeparator()
         self._populate_plugins_menu_actions()
         self._connect_menu_operation_logging()
+
+    def _menu_object_alive(self, obj) -> bool:
+        if obj is None:
+            return False
+        try:
+            from shiboken6 import isValid
+
+            return bool(isValid(obj))
+        except Exception:  # noqa: BLE001
+            try:
+                _ = obj.objectName()
+                return True
+            except RuntimeError:
+                return False
+
+    def _remove_menubar_menus_named(self, title: str) -> None:
+        """Drop menubar entries whose label matches ``title`` (including dead menus)."""
+        wanted = title.strip().lower()
+        for action in list(self.menuBar().actions()):
+            label = self._clean_menu_label(action.text()).lower()
+            menu = action.menu()
+            menu_label = ""
+            if self._menu_object_alive(menu):
+                menu_label = self._clean_menu_label(menu.title()).lower()
+            if label == wanted or menu_label == wanted:
+                self.menuBar().removeAction(action)
+
+    def _ensure_workflows_menu(self) -> QMenu | None:
+        """Return a live Workflows menu, recreating it if the cached one was deleted."""
+        if self._menu_object_alive(self._workflows_menu):
+            return self._workflows_menu
+
+        self._workflows_menu = None
+        for action in list(self.menuBar().actions()):
+            candidate = action.menu()
+            if not self._menu_object_alive(candidate):
+                if self._clean_menu_label(action.text()).lower() == "workflows":
+                    self.menuBar().removeAction(action)
+                continue
+            if self._clean_menu_label(candidate.title()).lower() == "workflows":
+                self._workflows_menu = candidate
+                return candidate
+
+        # Own the QMenu from the main window so macOS native menubar sync
+        # cannot leave us holding a deleted temporary menu.
+        menu = QMenu("&Workflows", self)
+        self._workflows_menu = menu
+        insert_before = None
+        for action in self.menuBar().actions():
+            if self._clean_menu_label(action.text()) in {"View", "Help"}:
+                insert_before = action
+                break
+        if insert_before is not None:
+            self.menuBar().insertMenu(insert_before, menu)
+        else:
+            self.menuBar().addMenu(menu)
+        return menu
+
+    def _rebuild_workflows_menu(self) -> None:
+        from repeatviewer.workflows import ensure_default_workflows
+
+        specs = ensure_default_workflows()
+
+        def _fill(menu: QMenu) -> None:
+            menu.clear()
+            menu.addAction(
+                "Design and manage your workflows",
+                self._open_workflow_designer,
+            )
+            menu.addSeparator()
+            if specs:
+                for spec in specs:
+                    menu.addAction(
+                        spec.name,
+                        lambda checked=False, wid=spec.id: self._run_workflow(wid),
+                    )
+            else:
+                none_action = menu.addAction("(No workflows yet)")
+                none_action.setEnabled(False)
+
+        menu = self._ensure_workflows_menu()
+        if menu is None:
+            return
+        try:
+            _fill(menu)
+        except RuntimeError:
+            # Menu died mid-rebuild (common when triggered from the menu itself
+            # on macOS). Tear down and recreate after that stack unwinds.
+            self._workflows_menu = None
+            self._remove_menubar_menus_named("Workflows")
+            menu = self._ensure_workflows_menu()
+            if menu is None:
+                return
+            try:
+                _fill(menu)
+            except RuntimeError:
+                return
+        self._connect_menu_operation_logging()
+
+    def _schedule_workflows_menu_rebuild(self) -> None:
+        """Defer rebuild until after the triggering menu action fully unwinds."""
+        QTimer.singleShot(0, self._on_workflows_catalog_changed)
+
+    def _on_workflows_catalog_changed(self) -> None:
+        """Refresh Workflows menu and toolbar after save/rename/delete/reorder."""
+        from repeatviewer.views.toolbar_dialog import workflow_tool_id
+        from repeatviewer.workflows import load_workflow_specs
+
+        valid_workflow_tools = {
+            workflow_tool_id(spec.id) for spec in load_workflow_specs()
+        }
+        pruned = [
+            tool_id
+            for tool_id in self._toolbar_order
+            if not str(tool_id).startswith("workflow:")
+            or tool_id in valid_workflow_tools
+        ]
+        if pruned != list(self._toolbar_order):
+            self._toolbar_order = pruned
+            try:
+                from repeatviewer.views.toolbar_dialog import save_toolbar_order
+
+                save_toolbar_order(self._toolbar_order)
+            except Exception:  # noqa: BLE001
+                pass
+        self._rebuild_workflows_menu()
+        self._rebuild_top_toolbar()
+
+    def _open_workflow_designer(self) -> None:
+        from repeatviewer.views.workflow_dialog import WorkflowDesignerDialog
+
+        dialog = WorkflowDesignerDialog(parent=self)
+        # Live updates while the designer is open (deferred — safe on macOS).
+        dialog.workflows_changed.connect(self._schedule_workflows_menu_rebuild)
+        dialog.exec()
+        # Final sync after close in case the last action did not emit.
+        self._schedule_workflows_menu_rebuild()
+
+    def _run_workflow(self, workflow_id: str) -> None:
+        from repeatviewer.job_options import ALIGNER_MAFFT
+        from repeatviewer.workflows import get_workflow_spec, run_workflow, validate_workflow_steps
+
+        spec = get_workflow_spec(workflow_id)
+        if spec is None:
+            QMessageBox.warning(self, "Workflow", "That workflow was not found.")
+            self._schedule_workflows_menu_rebuild()
+            return
+        error = validate_workflow_steps(spec.tool_ids())
+        if error:
+            QMessageBox.warning(self, "Workflow", error)
+            return
+        selected = self._selected_files()
+        seq_files = [p for p in selected if p.suffix.lower() in _FASTA_SUFFIXES]
+        if not seq_files:
+            QMessageBox.information(
+                self,
+                "No sequence selected",
+                "Select one or more FASTA files in the Files panel before running a workflow.",
+            )
+            return
+        if spec.needs_genome() and not self._project.has_genome_configured():
+            from repeatviewer.workflows import resolve_tool_info
+
+            needing = []
+            for s in spec.steps:
+                info = resolve_tool_info(s.tool_id)
+                if info is not None and info.needs_genome:
+                    needing.append(s.tool_id)
+            only_blast = set(needing) == {"blast"}
+            if not (only_blast and self._blast_options.active_database_name):
+                QMessageBox.warning(
+                    self,
+                    "Genome required",
+                    f"Define genome under {self._genome_menu_hint()} before running this workflow.",
+                )
+                return
+        if any(s.tool_id == "flexidot" for s in spec.steps) and flexidot_executable() is None:
+            QMessageBox.warning(
+                self,
+                "Flexidot not found",
+                "Flexidot is not on PATH.\n\nInstall with:\n  pip install flexidot",
+            )
+            return
+
+        job_kwargs = {
+            "spec": spec,
+            "seq_files": seq_files,
+            "project": self._project,
+            "cancel": self._job_cancel,
+            "max_workers": self._project.batch_workers,
+            "blast_options": self._blast_options,
+            "extend": self._extend_options,
+            "teaid_options": self._teaid_options,
+            "msa_clean_options": self._msa_clean_options,
+            "consensus_options": self._consensus_options,
+            "flexidot_options": self._flexidot_options,
+            "orf_prediction_settings": self._orf_prediction_settings,
+            "align_options": self._align_options,
+            "use_system_mafft": self._project.use_system_mafft,
+            "use_system_muscle": self._project.use_system_muscle,
+            "align_engine": getattr(self._align_options, "right_click_aligner", None)
+            or ALIGNER_MAFFT,
+        }
+
+        def _run(progress_cb, **kwargs):
+            return run_workflow(progress_cb=progress_cb, **kwargs)
+
+        self._start_background_job(
+            WorkflowWorker(_run, job_kwargs),
+            job_title=f"workflow:{spec.id}",
+            total_steps=len(spec.steps),
+            source_files=seq_files,
+            on_finished=self._on_worker_finished,
+            on_failed=self._on_worker_failed,
+        )
 
     def _open_plugin_manager(self) -> None:
         dialog = PluginManageDialog(
@@ -8478,7 +8850,7 @@ class MainWindow(QMainWindow):
 
     def _start_background_job(
         self,
-        worker: FunctionWorker | AlignWorker,
+        worker: FunctionWorker | AlignWorker | WorkflowWorker,
         *,
         job_title: str,
         total_steps: int,
@@ -8667,9 +9039,14 @@ class MainWindow(QMainWindow):
             self._open_te_genome_map_after_blast(pending_fastas, pending_map_opts, result)
 
         failures = result.get("failures", [])
-        done_n = result["total"] - len(failures)
-        title = MainWindow._job_display_title(func_name)
-        summary = f"{title} finished — {done_n}/{result['total']} sequence(s)"
+        done_n = max(0, result["total"] - len(failures))
+        if result.get("workflow_name"):
+            title = f"Workflow {result['workflow_name']}"
+            unit = "step(s)"
+        else:
+            title = MainWindow._job_display_title(func_name or "")
+            unit = "sequence(s)"
+        summary = f"{title} finished — {done_n}/{result['total']} {unit}"
         if created_paths:
             names = ", ".join(p.name for p in created_paths[:4])
             if len(created_paths) > 4:

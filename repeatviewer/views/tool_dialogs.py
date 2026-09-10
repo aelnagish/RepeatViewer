@@ -145,6 +145,12 @@ from repeatviewer.job_options import (
     DEFAULT_GAP_COL_SIMILARITY_THR,
     DEFAULT_GAP_ROW_GAP_THRESHOLD,
     DEFAULT_GAP_ROW_WINDOW_SIZE,
+    DEFAULT_MSA_CLEAN_ORDER,
+    MSA_CLEAN_RIGHT_CLICK_COMBINED,
+    MSA_CLEAN_RIGHT_CLICK_GAPPY,
+    MSA_CLEAN_RIGHT_CLICK_DIV,
+    MSA_CLEAN_RIGHT_CLICK_GAP,
+    MSA_CLEAN_RIGHT_CLICK_DIALOG,
     DEFAULT_TEAID_EVALUE,
     DEFAULT_TEAID_X_AXIS_LABEL,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
@@ -3621,24 +3627,26 @@ class TeaAidParamsDialog(QDialog):
 
 
 class MsaCleanParamsDialog(QDialog):
-    """Edit parameters for all MSA clean steps."""
+    """MSA clean parameters.
+
+    Opened from the MSA Clean drop menu / Tools menu. Parameters holds the
+    Combined pipeline and step thresholds; Options sets right-click behavior
+    when wired on the toolbar.
+    """
 
     def __init__(
         self,
         *,
         initial: MsaCleanOptions | None = None,
+        for_run: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("MSA clean parameters")
-        self.setMinimumWidth(420)
-        self.setMaximumWidth(520)
         opts = initial or MsaCleanOptions()
+        self._for_run = for_run
+        self._run_after = False
 
-        self._method_order = QListWidget()
-        self._method_order.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self._method_order.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self._method_order.setMaximumHeight(100)
         self._method_labels = {
             "msa_clean_div": "Clean rows with divergence",
             "msa_clean_gap": "Clean rows with gaps",
@@ -3649,25 +3657,69 @@ class MsaCleanParamsDialog(QDialog):
             "msa_clean_gap": opts.use_gap_row,
             "msa_clean_gappy": opts.use_gappy_columns,
         }
+
+        self._method_order = QListWidget()
+        self._method_order.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._method_order.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._method_order.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._method_order.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._method_order.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._method_order.setStyleSheet(
+            "QListWidget { padding-top: 4px; padding-bottom: 4px; }"
+        )
+        self._method_order.setToolTip(
+            "Check steps to include in Combined MSA clean. Drag to set execution order."
+        )
         for method_id in opts.method_order:
-            if not enabled_methods[method_id]:
+            item = QListWidgetItem(self._method_labels[method_id])
+            item.setData(Qt.ItemDataRole.UserRole, method_id)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsDragEnabled
+            )
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if enabled_methods.get(method_id, False)
+                else Qt.CheckState.Unchecked
+            )
+            self._method_order.addItem(item)
+        # Ensure every known method appears (in case order was incomplete).
+        listed = {str(self._method_order.item(i).data(Qt.ItemDataRole.UserRole))
+                  for i in range(self._method_order.count())}
+        for method_id in DEFAULT_MSA_CLEAN_ORDER:
+            if method_id in listed:
                 continue
             item = QListWidgetItem(self._method_labels[method_id])
             item.setData(Qt.ItemDataRole.UserRole, method_id)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsDragEnabled
+            )
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if enabled_methods.get(method_id, False)
+                else Qt.CheckState.Unchecked
+            )
             self._method_order.addItem(item)
-        self._method_order.setToolTip(
-            "Only methods in this list are used. Drag them to change the execution order."
-        )
-        self._available_method = QComboBox()
-        self._add_method_button = QPushButton("Add")
-        self._remove_method_button = QPushButton("Remove")
-        for btn in (self._add_method_button, self._remove_method_button):
-            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            btn.setFixedWidth(btn.sizeHint().width())
-        self._add_method_button.clicked.connect(self._add_selected_method)
-        self._remove_method_button.clicked.connect(self._remove_selected_method)
-        self._method_order.currentRowChanged.connect(self._sync_method_controls)
-        self._refresh_available_methods()
+        self._method_order.itemChanged.connect(self._on_method_item_changed)
+        self._fit_method_list_height()
+
+        combined_box = QGroupBox("Combined MSA clean", self)
+        combined_layout = QVBoxLayout(combined_box)
+        combined_layout.setContentsMargins(10, 8, 10, 8)
+        combined_layout.setSpacing(6)
+        hint = QLabel("Check steps to include. Drag to set order.", combined_box)
+        hint.setWordWrap(True)
+        combined_layout.addWidget(hint)
+        combined_layout.addWidget(self._method_order)
 
         spin_width = 90
 
@@ -3750,27 +3802,127 @@ class MsaCleanParamsDialog(QDialog):
             ],
         )
 
-        buttons = QDialogButtonBox(
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Run Combined MSA clean", MSA_CLEAN_RIGHT_CLICK_COMBINED),
+            ("Run Remove gappy columns", MSA_CLEAN_RIGHT_CLICK_GAPPY),
+            ("Run Clean rows with divergence", MSA_CLEAN_RIGHT_CLICK_DIV),
+            ("Run Clean rows with gaps", MSA_CLEAN_RIGHT_CLICK_GAP),
+            ("Open this dialog", MSA_CLEAN_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_action == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[MSA_CLEAN_RIGHT_CLICK_COMBINED].setChecked(True)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the MSA Clean button does:", self)
+        )
+        for radio in self._right_click_buttons.values():
+            rc_box_layout.addWidget(radio)
+
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(12, 10, 12, 10)
+        options_layout.setSpacing(8)
+        options_layout.addWidget(rc_box)
+
+        self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        params_tab = QWidget(self)
+        params_layout = QVBoxLayout(params_tab)
+        params_layout.setContentsMargins(12, 10, 12, 10)
+        params_layout.setSpacing(10)
+        params_layout.addWidget(combined_box)
+        params_layout.addWidget(div_box)
+        params_layout.addWidget(gap_box)
+        params_layout.addWidget(gappy_box)
+        self._tabs.addTab(params_tab, "Parameters")
+        self._tabs.addTab(options_tab, "Options")
+
+        self._button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
+        self._run_button.setText("Run" if for_run else "OK")
+        restore = self._button_box.addButton(
+            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
+        )
+        restore.clicked.connect(self._restore_defaults)
+        self._button_box.accepted.connect(self._on_accept)
+        self._button_box.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(div_box)
-        layout.addWidget(gap_box)
-        layout.addWidget(gappy_box)
-        order_label = QLabel("Combined MSA clean")
-        layout.addWidget(order_label)
-        layout.addWidget(self._method_order)
-        method_controls = QHBoxLayout()
-        method_controls.setSpacing(6)
-        method_controls.addWidget(self._available_method, 1)
-        method_controls.addWidget(self._add_method_button, 0)
-        method_controls.addWidget(self._remove_method_button, 0)
-        layout.addLayout(method_controls)
-        layout.addWidget(buttons)
-        self.adjustSize()
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        layout.addWidget(self._tabs)
+        layout.addWidget(self._button_box)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._on_tab_changed(self._tabs.currentIndex())
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._fit_method_list_height()
+        QTimer.singleShot(0, self._fit_to_current_tab)
+
+    def _on_tab_changed(self, tab_index: int) -> None:
+        self._update_run_button(tab_index)
+        self._fit_to_current_tab()
+
+    def _fit_to_current_tab(self) -> None:
+        page = self._tabs.currentWidget()
+        if page is None:
+            return
+        page.ensurePolished()
+        page.adjustSize()
+        page_hint = page.sizeHint()
+        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
+        tab_chrome = tab_bar_h + 8
+        buttons_h = self._button_box.sizeHint().height()
+        margins = self.layout().contentsMargins()
+        spacing = self.layout().spacing()
+        height = (
+            page_hint.height()
+            + tab_chrome
+            + buttons_h
+            + margins.top()
+            + margins.bottom()
+            + spacing
+            + 4
+        )
+        width = max(
+            480,
+            page_hint.width() + margins.left() + margins.right() + 24,
+            self._button_box.sizeHint().width() + margins.left() + margins.right(),
+        )
+        self.setFixedSize(width, height)
+
+    def _update_run_button(self, tab_index: int) -> None:
+        if not self._for_run:
+            self._run_button.setText("OK")
+            return
+        self._run_button.setText("Save" if tab_index == 1 else "Run")
+
+    def _on_accept(self) -> None:
+        if not self._checked_method_ids():
+            QMessageBox.warning(
+                self,
+                "MSA clean",
+                "Enable at least one step in Combined MSA clean.",
+            )
+            self._tabs.setCurrentIndex(0)
+            return
+        self._run_after = self._for_run and self._tabs.currentIndex() != 1
+        self.accept()
+
+    def should_run(self) -> bool:
+        return self._run_after
 
     @staticmethod
     def _fill_labeled_grid(box, rows) -> None:
@@ -3796,49 +3948,91 @@ class MsaCleanParamsDialog(QDialog):
             )
             grid.addWidget(widget, row, 1)
 
-    def _listed_method_ids(self) -> list[str]:
+    def _fit_method_list_height(self) -> None:
+        """Keep the Combined list only as tall as its rows, with a little padding."""
+        count = max(1, self._method_order.count())
+        row_h = self._method_order.sizeHintForRow(0)
+        if row_h <= 0:
+            row_h = 22
+        frame = 2 * self._method_order.frameWidth()
+        # Extra space above the first row and below the last so the list
+        # does not feel flush against the frame (matches stylesheet padding).
+        padding = 16
+        self._method_order.setFixedHeight(row_h * count + frame + padding)
+
+    def _on_method_item_changed(self, item: QListWidgetItem) -> None:
+        # Keep at least one step checked.
+        if item.checkState() == Qt.CheckState.Checked:
+            return
+        if self._checked_method_ids():
+            return
+        self._method_order.blockSignals(True)
+        item.setCheckState(Qt.CheckState.Checked)
+        self._method_order.blockSignals(False)
+
+    def _checked_method_ids(self) -> list[str]:
+        checked: list[str] = []
+        for index in range(self._method_order.count()):
+            item = self._method_order.item(index)
+            if item.checkState() == Qt.CheckState.Checked:
+                checked.append(str(item.data(Qt.ItemDataRole.UserRole)))
+        return checked
+
+    def _all_method_ids_in_order(self) -> list[str]:
         return [
             str(self._method_order.item(index).data(Qt.ItemDataRole.UserRole))
             for index in range(self._method_order.count())
         ]
 
-    def _refresh_available_methods(self) -> None:
-        listed = set(self._listed_method_ids())
-        self._available_method.clear()
-        for method_id, label in self._method_labels.items():
-            if method_id not in listed:
-                self._available_method.addItem(label, method_id)
-        self._sync_method_controls()
-
-    def _sync_method_controls(self, _row: int | None = None) -> None:
-        self._add_method_button.setEnabled(self._available_method.count() > 0)
-        self._remove_method_button.setEnabled(
-            self._method_order.count() > 1 and self._method_order.currentRow() >= 0
-        )
-
-    def _add_selected_method(self) -> None:
-        method_id = self._available_method.currentData()
-        if method_id is None:
-            return
-        item = QListWidgetItem(self._method_labels[str(method_id)])
-        item.setData(Qt.ItemDataRole.UserRole, method_id)
-        self._method_order.addItem(item)
-        self._method_order.setCurrentItem(item)
-        self._refresh_available_methods()
-
-    def _remove_selected_method(self) -> None:
-        row = self._method_order.currentRow()
-        if row < 0 or self._method_order.count() <= 1:
-            return
-        self._method_order.takeItem(row)
-        self._refresh_available_methods()
+    def _restore_defaults(self) -> None:
+        defaults = MsaCleanOptions()
+        self._div_threshold.setValue(defaults.divergence.threshold)
+        self._div_window.setValue(defaults.divergence.window_size)
+        self._row_gap_threshold.setValue(defaults.gap_row.gap_threshold)
+        self._row_gap_window.setValue(defaults.gap_row.window_size)
+        self._gap_threshold.setValue(defaults.gappy.gap_threshold)
+        self._simi_gap.setValue(defaults.gappy.simi_check_gap_thr)
+        self._similarity.setValue(defaults.gappy.similarity_thr)
+        self._min_nt.setValue(defaults.gappy.min_nucleotide)
+        enabled = {
+            "msa_clean_div": defaults.use_divergence,
+            "msa_clean_gap": defaults.use_gap_row,
+            "msa_clean_gappy": defaults.use_gappy_columns,
+        }
+        self._method_order.blockSignals(True)
+        self._method_order.clear()
+        for method_id in defaults.method_order:
+            item = QListWidgetItem(self._method_labels[method_id])
+            item.setData(Qt.ItemDataRole.UserRole, method_id)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsDragEnabled
+            )
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if enabled.get(method_id, False)
+                else Qt.CheckState.Unchecked
+            )
+            self._method_order.addItem(item)
+        self._method_order.blockSignals(False)
+        self._fit_method_list_height()
+        self._right_click_buttons[MSA_CLEAN_RIGHT_CLICK_COMBINED].setChecked(True)
 
     def options(self) -> MsaCleanOptions:
-        method_order = tuple(self._listed_method_ids())
+        method_order = tuple(self._all_method_ids_in_order())
+        checked = set(self._checked_method_ids())
+        right_click_action = MSA_CLEAN_RIGHT_CLICK_COMBINED
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                right_click_action = value
+                break
         return MsaCleanOptions(
-            use_divergence="msa_clean_div" in method_order,
-            use_gap_row="msa_clean_gap" in method_order,
-            use_gappy_columns="msa_clean_gappy" in method_order,
+            use_divergence="msa_clean_div" in checked,
+            use_gap_row="msa_clean_gap" in checked,
+            use_gappy_columns="msa_clean_gappy" in checked,
             method_order=method_order,
             gappy=GappyColumnOptions(
                 gap_threshold=self._gap_threshold.value(),
@@ -3854,6 +4048,7 @@ class MsaCleanParamsDialog(QDialog):
                 gap_threshold=self._row_gap_threshold.value(),
                 window_size=self._row_gap_window.value(),
             ),
+            right_click_action=right_click_action,
         )
 
 
