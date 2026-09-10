@@ -113,6 +113,9 @@ def run_app(argv: list[str] | None = None) -> int:
             window.setWindowIcon(icon)
         window.show()
         app.processEvents()
+        from repeatviewer.ui.window_geometry import fit_widget_to_available_screen
+
+        fit_widget_to_available_screen(window)
         splash.finish(window)
 
         from repeatviewer.backends.webengine_probe import warmup_webengine_probe

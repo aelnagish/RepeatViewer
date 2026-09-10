@@ -1470,6 +1470,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_DISPLAY_NAME)
         self.resize(1680, 980)
         self.setMinimumSize(900, 700)
+        # Cap default size / minimum to the usable screen so Windows title bar
+        # (close) and status bar (Stop) are not pushed off-screen.
+        from repeatviewer.ui.window_geometry import fit_widget_to_available_screen
+
+        fit_widget_to_available_screen(self)
         self._toolbar_font_size = load_toolbar_font_size()
         self._browser_panel_font_size = load_browser_panel_font_size()
         self._functions_toolbar = None
@@ -1691,9 +1696,13 @@ class MainWindow(QMainWindow):
             self._apply_default_browser_layout(force=True)
         else:
             self._apply_default_browser_layout()
-        from repeatviewer.ui.window_geometry import ensure_floating_docks_on_screen
+        from repeatviewer.ui.window_geometry import (
+            ensure_floating_docks_on_screen,
+            fit_widget_to_available_screen,
+        )
 
         ensure_floating_docks_on_screen(self)
+        fit_widget_to_available_screen(self)
         self._repair_browser_chrome()
 
     def _normalize_folder_tree_selection(self) -> None:
@@ -1881,7 +1890,10 @@ class MainWindow(QMainWindow):
                 settings.beginGroup("mainwindow")
                 settings.remove("toolbar_state_v5")
                 settings.endGroup()
-        from repeatviewer.ui.window_geometry import ensure_floating_docks_on_screen
+        from repeatviewer.ui.window_geometry import (
+            ensure_floating_docks_on_screen,
+            fit_widget_to_available_screen,
+        )
 
         self._purge_legacy_docks()
         if self._browser_layout_needs_repair():
@@ -1889,8 +1901,14 @@ class MainWindow(QMainWindow):
         else:
             self._apply_default_browser_layout()
         self._ensure_preview_visible()
+        fit_widget_to_available_screen(self)
         ensure_floating_docks_on_screen(self)
+        QTimer.singleShot(0, lambda: fit_widget_to_available_screen(self))
         QTimer.singleShot(0, lambda: ensure_floating_docks_on_screen(self))
+        # restoreState can hide the status bar; Stop lives there.
+        status = self.statusBar()
+        if status is not None:
+            status.show()
         self._rebuild_top_toolbar()
         self._repair_browser_chrome()
 

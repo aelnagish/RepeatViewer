@@ -27,6 +27,16 @@ def configure_qt_runtime() -> None:
     On macOS, harmless TSM/IMK stderr lines are filtered by default; set
     REPEATVIEWER_FILTER_STDERR_FD=0 if the HTML preview (TEAid / genome map) misbehaves.
     """
+    # Windows/Python 3.12: pandas → python-dateutil → six.moves can trip
+    # Shiboken's import hook if PySide6 loaded first
+    # (AttributeError: '_SixMetaPathImporter' object has no attribute '_path').
+    # Preload pandas before any PySide6 import.
+    if sys.platform == "win32":
+        try:
+            import pandas  # noqa: F401
+        except ImportError:
+            pass
+
     _configure_macos_app_name()
     # Must run even when Qt quieting is disabled -- it prevents hard crashes.
     _configure_matplotlib_backend()

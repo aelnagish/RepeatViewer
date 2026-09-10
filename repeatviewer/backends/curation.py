@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
 import shutil
 import tempfile
@@ -604,7 +605,9 @@ def run_on_sequence(
     seq_path = seq_path.expanduser().resolve()
     out_dir = seq_path.parent
     created: list[str] = []
-    os_type = os.uname().sysname if hasattr(os, "uname") else "Darwin"
+    # Windows has no os.uname(); the old fallback defaulted to "Darwin" and
+    # launched blastn_mac → WinError 193. Always use platform.system().
+    os_type = platform.system()
     active_genome = genome_path or project.genome_file
     label_suffix = genome_output_suffix(genome_label)
 
@@ -1034,7 +1037,7 @@ def run_batch(
     failures: list[str] = []
     created_outputs: list[str] = []
     source_files: list[str] = []
-    os_type = os.uname().sysname if hasattr(os, "uname") else "Darwin"
+    os_type = platform.system()
 
     genome_dependent = func_name in {"blast", "extend", "teaid", "flexidot"}
     genome_items: list[tuple[str, Path]] = []

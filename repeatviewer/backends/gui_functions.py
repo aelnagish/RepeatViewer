@@ -239,6 +239,19 @@ def blast(
         else:
             blast_executable = os.path.join(blast_dir, f"{program}.exe")
 
+    if sys.platform == "win32" and os.path.isfile(blast_executable):
+        # Guard against accidentally selecting a Linux/macOS binary (WinError 193).
+        try:
+            with open(blast_executable, "rb") as handle:
+                magic = handle.read(2)
+            if magic != b"MZ":
+                raise RuntimeError(
+                    f"Bundled BLAST binary is not a Windows executable: {blast_executable}. "
+                    "Install BLAST+ for Windows, or enable 'Use system BLAST' in Settings."
+                )
+        except OSError as exc:
+            raise RuntimeError(f"Cannot read BLAST binary {blast_executable}: {exc}") from exc
+
     # -outfmt 6 use "\t" as deliminator. -outfmt 10 use "," as deliminator
     blast_cmd = [
         str(blast_executable),
