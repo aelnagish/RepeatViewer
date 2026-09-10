@@ -73,7 +73,6 @@ ALL_BUILTIN_TOOLBAR_IDS: tuple[str, ...] = (
     *SEQUENCE_TOOLBAR_IDS,
     *TOOLS_TOOLBAR_IDS,
     "_sep1",
-    "plugin:minimap2",
 )
 
 # Default visible toolbar (Settings → Toolbar → Reset to default).
@@ -112,7 +111,6 @@ TOOLBAR_LABELS: dict[str, str] = {
     "te_benchmark": "Benchmarking",
     "te_divergence_plot": "TE divergence",
     "tsd_search": "TSD search",
-    "plugin:minimap2": "Minimap2",
     "workflows_manage": "Design and manage workflows",
 }
 

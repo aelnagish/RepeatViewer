@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 license = "GPL-3.0"
 license-files = ["LICENSE"]
 authors = [
-  { name = "TEtrimmer / RepeatViewer contributors" },
+  { name = "Jiangzhao Qian" },
 ]
 dependencies = [
   "PySide6>=6.6",
@@ -39,12 +39,8 @@ theme-flat = ["pyqtdarktheme-fork>=2.3.2"]
 repeatviewer = "repeatviewer.cli:main"
 
 [tool.setuptools.packages.find]
-where = [".", "examples/repeatviewer_minimap2_plugin/src"]
-include = ["repeatviewer*", "repeatviewer_minimap2*"]
-
-[project.entry-points."repeatviewer.plugins"]
-minimap2 = "repeatviewer_minimap2.plugin:Minimap2Plugin"
+where = ["."]
+include = ["repeatviewer*"]
 
 [tool.setuptools.package-data]
 repeatviewer = ["backends/blast/*", "backends/mafft/**/*", "backends/muscle/**/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*"]
-repeatviewer_minimap2 = ["binaries/**/*"]

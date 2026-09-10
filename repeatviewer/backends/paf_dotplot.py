@@ -2,7 +2,7 @@
 
 The dotplot canvas takes a ``DotplotResult`` full of segments, so anything that
 can be turned into segments can be plotted. PAF is a natural fit: it is the
-output of FastGA, minimap2 and many other aligners, so reading it means a long
+output of FastGA and many other aligners, so reading it means a long
 alignment can be computed once and viewed instantly afterwards, as often as
 wanted.
 

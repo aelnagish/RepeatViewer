@@ -55,7 +55,6 @@ Available from the toolbar and **Sequence** menu:
 | **TE visualization** | Genome map and TE divergence plot |
 | **FastGA** | FastGA alignment workflow |
 | **TSD search** | Target site duplication search |
-| **Minimap2** | Minimap2 alignment when available |
 | **Benchmarking** | Confusion-matrix benchmark against reference classification tables |
 | **Plugins** | Install custom command plugins (**Plugins** menu) |
 

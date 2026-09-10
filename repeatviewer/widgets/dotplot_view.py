@@ -1460,7 +1460,7 @@ class DotplotPanel(QWidget):
         if result.word_size:
             engine = f"word {result.word_size}"
         elif self._mode == "alignment":
-            # The file may come from FastGA, minimap2 or anything else -- do
+            # The file may come from FastGA or any other PAF producer -- do
             # not claim to know which.
             engine = self._path.suffix.lstrip(".").upper() or "alignments"
         else:

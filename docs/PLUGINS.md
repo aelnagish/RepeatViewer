@@ -2,7 +2,7 @@
 
 Plugins add **new toolbar tools** that use the same file list and job flow as Blast, TEAid, Flexidot, etc.
 
-> **Note:** Plugin loading is enabled in the current build. The bundled **Minimap2** plugin ships with RepeatViewer (`pip install -e .`). Additional plugins can be installed with their own `pip install -e .` packages.
+> **Note:** Plugin loading is enabled in the current build. Install additional plugins with their own `pip install -e .` packages (see examples below).
 
 ## What plugins receive
 

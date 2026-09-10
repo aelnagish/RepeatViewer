@@ -502,7 +502,6 @@ _TOOLBAR_TOOLTIPS = {
     "consensus": "Click: set consensus parameters and run. Right-click: run with saved settings.",
     "tsd_search": "Search for target site duplications using default parameters",
     "te_annotation": "Run TE annotation on selected single-sequence FASTA files",
-    "plugin:minimap2": "Map selected FASTA to reference with minimap2",
 }
 
 _JOB_DISPLAY_TITLES = {
