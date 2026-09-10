@@ -307,12 +307,14 @@ from repeatviewer.job_options import (
     EXTEND_RIGHT_CLICK_DIALOG,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     CONSENSUS_RIGHT_CLICK_DIALOG,
+    TE_ANNOTATION_RIGHT_CLICK_DIALOG,
     load_align_options,
     load_blast_options,
     load_consensus_options,
     load_extend_options,
     load_flexidot_options,
     load_msa_clean_options,
+    load_te_annotation_options,
     load_teaid_options,
     load_te_genome_map_options,
     load_te_divergence_plot_options,
@@ -326,6 +328,7 @@ from repeatviewer.job_options import (
     save_extend_options,
     save_flexidot_options,
     save_msa_clean_options,
+    save_te_annotation_options,
     save_teaid_options,
     save_te_genome_map_options,
     save_te_divergence_plot_options,
@@ -345,6 +348,7 @@ from repeatviewer.views.tool_dialogs import (
     ExtendParamsDialog,
     FlexidotParamsDialog,
     TeAnnotationDialog,
+    batch_options_from_te_annotation_job,
     MsaCleanParamsDialog,
     TeaAidParamsDialog,
     TsdSearchParamsDialog,
@@ -1484,6 +1488,7 @@ class MainWindow(QMainWindow):
         self._te_divergence_plot_options = load_te_divergence_plot_options()
         self._consensus_options = load_consensus_options()
         self._flexidot_options = load_flexidot_options()
+        self._te_annotation_options = load_te_annotation_options()
         self._te_confusion_benchmark_options = load_te_confusion_matrix_benchmark_options()
         self._te_library_benchmark_options = load_te_library_benchmark_options()
         self.database_index_runner = DatabaseIndexRunner(self)
@@ -2757,6 +2762,18 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Change Flexidot parameters…", self._modify_flexidot_parameters)
 
+    def _populate_te_annotation_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction(
+                "TE annotation with default parameters",
+                self._run_te_annotation_saved,
+            )
+        menu.addSeparator()
+        menu.addAction(
+            "Change TE annotation parameters…",
+            self._modify_te_annotation_parameters,
+        )
+
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
         genome_action = file_menu.addAction("Define &genome", self._open_set_genome)
@@ -2809,7 +2826,7 @@ class MainWindow(QMainWindow):
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &clean"))
         self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
         self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
-        tools_menu.addAction("TE &annotation", self._run_te_annotation)
+        self._populate_te_annotation_menu(tools_menu.addMenu("TE &annotation"))
         tools_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
         self._populate_te_visualization_menu(tools_menu.addMenu("TE &visualization"))
         self._populate_benchmarking_menu(tools_menu.addMenu("&Benchmarking"))
@@ -3572,11 +3589,15 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
             )
         elif tool_id == "te_annotation":
-            self._add_toolbar_text_action(
+            self._add_toolbar_action_button(
                 bar,
                 "TE annotation",
-                self._run_te_annotation,
-                tooltip=tip,
+                self._open_te_annotation_dialog,
+                tooltip=(
+                    "Click: set modules and run.\n"
+                    "Right-click: run with saved selection (set in the Options tab)."
+                ),
+                right_click_slot=self._quick_te_annotation_right_click,
             )
         elif tool_id.startswith("plugin:"):
             plugin_id = tool_id[len("plugin:") :]
@@ -7127,7 +7148,15 @@ class MainWindow(QMainWindow):
         else:
             self._run_flexidot_saved()
 
-    def _run_te_annotation(self) -> None:
+    def _reload_shared_annotation_settings(self) -> None:
+        """Reload TE/annotation settings into every open sequence-map panel."""
+        from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
+
+        for panel in self.findChildren(SequenceMapPanel):
+            panel.reload_shared_annotation_settings()
+
+    def _te_annotation_fasta_selection(self) -> list[Path] | None:
+        """Validate selected single-sequence FASTAs for TE annotation, or None."""
         from repeatviewer.backends.te_annotation_batch import is_single_sequence_fasta
 
         selected = self._selected_files()
@@ -7137,7 +7166,7 @@ class MainWindow(QMainWindow):
                 "No sequence selected",
                 "Select one or more single-sequence FASTA files in the Files panel.",
             )
-            return
+            return None
         seq_files = [p for p in selected if p.suffix.lower() in _FASTA_SUFFIXES]
         if not seq_files:
             QMessageBox.warning(
@@ -7145,7 +7174,7 @@ class MainWindow(QMainWindow):
                 "Invalid selection",
                 "Selected files do not include FASTA sequence files.",
             )
-            return
+            return None
         single = [p for p in seq_files if is_single_sequence_fasta(p)]
         skipped = [p for p in seq_files if p not in single]
         if skipped:
@@ -7164,16 +7193,20 @@ class MainWindow(QMainWindow):
                 "No valid files",
                 "Select at least one single-sequence FASTA file for TE annotation.",
             )
+            return None
+        return single
+
+    def _run_te_annotation_saved(self) -> None:
+        single = self._te_annotation_fasta_selection()
+        if single is None:
             return
-        dialog = TeAnnotationDialog(parent=self)
-        if not exec_modal_dialog(dialog):
-            return
-        opts = dialog.options()
+        opts = batch_options_from_te_annotation_job(self._te_annotation_options)
         if not opts.auto_modes and not opts.similarity_databases:
             QMessageBox.information(
                 self,
                 "Nothing selected",
-                "Select at least one auto-annotation module or similarity database.",
+                "No annotation modules are saved. Open TE annotation and choose "
+                "at least one auto-annotation module or similarity database.",
             )
             return
         self._apply_function(
@@ -7181,6 +7214,75 @@ class MainWindow(QMainWindow):
             preselected=single,
             te_annotation_options=opts,
         )
+
+    def _open_te_annotation_dialog(self) -> None:
+        """Click TE annotation: dialog. Run runs; Save (Options tab) stores only."""
+        dialog = TeAnnotationDialog(
+            initial=self._te_annotation_options,
+            parent=self,
+        )
+        run_after = False
+        opts = None
+        try:
+            if not exec_modal_dialog(dialog):
+                return
+            dialog.apply_settings_panels()
+            self._te_annotation_options = dialog.job_options()
+            save_te_annotation_options(self._te_annotation_options)
+            self._persist_workspace()
+            self._reload_shared_annotation_settings()
+            run_after = dialog.should_run()
+            opts = dialog.options()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        if not run_after:
+            self._set_status_message("TE annotation settings saved", 4000)
+            return
+        if opts is None:
+            return
+        if not opts.auto_modes and not opts.similarity_databases:
+            QMessageBox.information(
+                self,
+                "Nothing selected",
+                "Select at least one auto-annotation module or similarity database.",
+            )
+            return
+        single = self._te_annotation_fasta_selection()
+        if single is None:
+            return
+        self._apply_function(
+            "te_annotation",
+            preselected=single,
+            te_annotation_options=opts,
+        )
+
+    def _quick_te_annotation_right_click(self) -> None:
+        """Right-click TE annotation: run with saved selection, or open the dialog."""
+        if self._te_annotation_options.right_click_action == TE_ANNOTATION_RIGHT_CLICK_DIALOG:
+            self._open_te_annotation_dialog()
+        else:
+            self._run_te_annotation_saved()
+
+    def _run_te_annotation(self) -> None:
+        """Tools menu default entry: run with saved selection."""
+        self._run_te_annotation_saved()
+
+    def _modify_te_annotation_parameters(self) -> None:
+        dialog = TeAnnotationDialog(
+            initial=self._te_annotation_options,
+            parent=self,
+        )
+        try:
+            if not exec_modal_dialog(dialog):
+                return
+            dialog.apply_settings_panels()
+            self._te_annotation_options = dialog.job_options()
+            save_te_annotation_options(self._te_annotation_options)
+            self._persist_workspace()
+            self._reload_shared_annotation_settings()
+            self._set_status_message("TE annotation parameters updated", 5000)
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
 
     def _modify_flexidot_parameters(self) -> None:
         dialog = FlexidotParamsDialog(

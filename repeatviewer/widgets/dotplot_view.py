@@ -23,17 +23,20 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QGraphicsItem,
     QGraphicsScene,
     QGraphicsView,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
-    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
+)
+
+from repeatviewer.widgets.spin_boxes import (
+    NoWheelDoubleSpinBox as QDoubleSpinBox,
+    NoWheelSpinBox as QSpinBox,
 )
 
 from repeatviewer.backends.dotplot import (

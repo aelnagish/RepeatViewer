@@ -44,7 +44,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -61,10 +60,14 @@ from PySide6.QtWidgets import (
     QScrollBar,
     QSizePolicy,
     QSlider,
-    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
+)
+
+from repeatviewer.widgets.spin_boxes import (
+    NoWheelDoubleSpinBox as QDoubleSpinBox,
+    NoWheelSpinBox as QSpinBox,
 )
 
 from repeatviewer.backends.auto_annotation import (
@@ -3120,8 +3123,8 @@ class AddFeatureDialog(QDialog):
         )
 
 
-class AutoAnnotationSettingsDialog(QDialog):
-    """Configure LTR, TIR, tandem-repeat, and ORF auto-annotation parameters."""
+class AutoAnnotationSettingsPanel(QWidget):
+    """Embeddable LTR / TIR / tandem / ORF auto-annotation parameters."""
 
     def __init__(
         self,
@@ -3129,10 +3132,10 @@ class AutoAnnotationSettingsDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Auto annotation settings")
         self._settings = settings
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
         layout.addWidget(self._section_title("LTR"))
@@ -3159,13 +3162,6 @@ class AutoAnnotationSettingsDialog(QDialog):
 
         layout.addWidget(self._section_title("ORF"))
         layout.addLayout(self._orf_form(settings.orf or OrfSettings()))
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
 
         self._ltr_fields = self._terminal_fields[0]
         self._tir_fields = self._terminal_fields[1]
@@ -3335,8 +3331,33 @@ class AutoAnnotationSettingsDialog(QDialog):
         )
 
 
-class SimilarityAnnotationSettingsDialog(QDialog):
-    """Configure similarity-annotation search thresholds."""
+class AutoAnnotationSettingsDialog(QDialog):
+    """Configure LTR, TIR, tandem-repeat, and ORF auto-annotation parameters."""
+
+    def __init__(
+        self,
+        settings: AutoAnnotationSettings,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Auto annotation settings")
+        self._panel = AutoAnnotationSettingsPanel(settings, self)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.addWidget(self._panel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def settings(self) -> AutoAnnotationSettings:
+        return self._panel.settings()
+
+
+class SimilarityAnnotationSettingsPanel(QWidget):
+    """Embeddable similarity-annotation search thresholds."""
 
     def __init__(
         self,
@@ -3344,12 +3365,12 @@ class SimilarityAnnotationSettingsDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Similarity annotation settings")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
         intro = QLabel(
-            "These E-value and output limits apply only to Similarity annotation on this tab. "
+            "These E-value and output limits apply only to Similarity annotation. "
             "They do not change TEAid, genome BLAST, or other tools in RepeatViewer.",
             self,
         )
@@ -3407,13 +3428,6 @@ class SimilarityAnnotationSettingsDialog(QDialog):
         form.addRow("Show info window after run:", self._show_info_dialog)
         layout.addLayout(form)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
     def settings(self) -> SimilarityAnnotationSettings:
         return SimilarityAnnotationSettings(
             blast_evalue=self._blast_evalue.value(),
@@ -3423,6 +3437,31 @@ class SimilarityAnnotationSettingsDialog(QDialog):
             show_database_name_on_track=self._show_db_name.isChecked(),
             show_info_window_after_run=self._show_info_dialog.isChecked(),
         )
+
+
+class SimilarityAnnotationSettingsDialog(QDialog):
+    """Configure similarity-annotation search thresholds."""
+
+    def __init__(
+        self,
+        settings: SimilarityAnnotationSettings,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Similarity annotation settings")
+        self._panel = SimilarityAnnotationSettingsPanel(settings, self)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.addWidget(self._panel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def settings(self) -> SimilarityAnnotationSettings:
+        return self._panel.settings()
 
 
 class SequenceMapPanel(QWidget):
@@ -3854,6 +3893,7 @@ class SequenceMapPanel(QWidget):
         self._refresh_similarity_database_rows()
         self._map.refresh_nucleotide_colors()
         self._map.update()
+        self._broadcast_shared_annotation_settings_changed()
         self.statusMessage.emit("Element colors updated.")
 
     def _apply_element_colors_to_map(
@@ -4043,6 +4083,27 @@ class SequenceMapPanel(QWidget):
     def reload_annotations(self) -> None:
         """Reload features from the companion GFF3 on disk (Annotation tab open)."""
         self.open_annotation_tab(reload=True)
+
+    def reload_shared_annotation_settings(self) -> None:
+        """Reload auto/similarity settings and colors shared with TE annotation."""
+        self._auto_ann_settings = load_auto_annotation_settings()
+        self._similarity_ann_settings = load_similarity_annotation_settings()
+        self._map.set_show_similarity_database_name(
+            self._similarity_ann_settings.show_database_name_on_track
+        )
+        self.refresh_similarity_databases()
+        self.refresh_nucleotide_colors()
+        self._map.update()
+
+    def _broadcast_shared_annotation_settings_changed(self) -> None:
+        """Push disk settings into other open annotation panels."""
+        window = self.window()
+        if window is None:
+            return
+        for panel in window.findChildren(SequenceMapPanel):
+            if panel is self:
+                continue
+            panel.reload_shared_annotation_settings()
 
     def save_annotations(self, *, silent: bool = False) -> bool:
         return self._save_annotations(silent=silent)
@@ -4237,17 +4298,20 @@ class SequenceMapPanel(QWidget):
         self._set_auto_run_button_running(not enabled)
 
     def _open_auto_annotation_settings(self) -> None:
+        self._auto_ann_settings = load_auto_annotation_settings()
         dialog = AutoAnnotationSettingsDialog(self._auto_ann_settings, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._auto_ann_settings = dialog.settings()
         save_auto_annotation_settings(self._auto_ann_settings)
+        self._broadcast_shared_annotation_settings_changed()
         self.statusMessage.emit("Auto annotation settings saved.")
 
     def _selected_auto_annotation_modes(self) -> list[AutoAnnotationMode]:
         return [mode for mode, check in self._auto_ann_checks.items() if check.isChecked()]
 
     def _open_similarity_annotation_settings(self) -> None:
+        self._similarity_ann_settings = load_similarity_annotation_settings()
         dialog = SimilarityAnnotationSettingsDialog(self._similarity_ann_settings, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -4256,6 +4320,7 @@ class SequenceMapPanel(QWidget):
         self._map.set_show_similarity_database_name(
             self._similarity_ann_settings.show_database_name_on_track
         )
+        self._broadcast_shared_annotation_settings_changed()
         self.statusMessage.emit("Similarity annotation settings saved.")
 
     def _current_similarity_annotation_settings(self) -> SimilarityAnnotationSettings:

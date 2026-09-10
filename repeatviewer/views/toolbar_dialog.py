@@ -18,10 +18,12 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
+
+from repeatviewer.widgets.spin_boxes import NoWheelSpinBox as QSpinBox
+
 
 if TYPE_CHECKING:
     from repeatviewer.plugins.registry import PluginRegistry

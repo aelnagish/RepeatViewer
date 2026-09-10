@@ -128,6 +128,9 @@ from repeatviewer.job_options import (
     DEFAULT_FLEXIDOT_MODES,
     FLEXIDOT_RIGHT_CLICK_RUN,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
+    TE_ANNOTATION_RIGHT_CLICK_RUN,
+    TE_ANNOTATION_RIGHT_CLICK_DIALOG,
+    TeAnnotationJobOptions,
     FLEXIDOT_OUTPUT_HTML,
     FLEXIDOT_OUTPUT_PNG,
     FLEXIDOT_OUTPUT_PDF,
@@ -2527,7 +2530,8 @@ class FlexidotParamsDialog(QDialog):
         )
 
 
-_TE_ANNOTATION_SIMILARITY_DBS_PER_ROW = 8
+_TE_ANNOTATION_PARAMS_WIDTH = 580
+_TE_ANNOTATION_OPTIONS_SIZE = (640, 560)
 
 
 def _section_title_label(text: str, parent: QWidget | None = None) -> QLabel:
@@ -2538,25 +2542,165 @@ def _section_title_label(text: str, parent: QWidget | None = None) -> QLabel:
     return label
 
 
-class TeAnnotationDialog(QDialog):
-    """Select auto- and similarity-annotation modules for batch GFF generation."""
+class _CheckboxFlowWidget(QWidget):
+    """Lay out checkboxes in wrapping rows within a fixed content width."""
 
-    def __init__(self, *, parent=None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        spacing: int = 10,
+        row_spacing: int = 4,
+        content_width: int = _TE_ANNOTATION_PARAMS_WIDTH - 40,
+    ) -> None:
+        super().__init__(parent)
+        self._spacing = spacing
+        self._row_spacing = row_spacing
+        self._content_width = max(200, content_width)
+        self._items: list[QWidget] = []
+        self._last_flow_width = -1
+        self._rows_layout = QVBoxLayout(self)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(self._row_spacing)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+
+    def set_items(self, items: list[QWidget]) -> None:
+        self._items = list(items)
+        for item in self._items:
+            item.setParent(self)
+        self._last_flow_width = -1
+        self._reflow()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._reflow()
+
+    def sizeHint(self):  # noqa: N802
+        from PySide6.QtCore import QSize
+
+        return self._size_for_width(self._content_width)
+
+    def minimumSizeHint(self):  # noqa: N802
+        return self.sizeHint()
+
+    def _available_width(self) -> int:
+        width = self.width()
+        if width > 40:
+            return width
+        return self._content_width
+
+    def _pack_rows(self, available: int) -> list[list[QWidget]]:
+        rows: list[list[QWidget]] = []
+        current: list[QWidget] = []
+        current_w = 0
+        for item in self._items:
+            item_w = max(1, item.sizeHint().width())
+            need = item_w if not current else item_w + self._spacing
+            if current and current_w + need > available:
+                rows.append(current)
+                current = [item]
+                current_w = item_w
+            else:
+                current.append(item)
+                current_w += need
+        if current:
+            rows.append(current)
+        return rows
+
+    def _size_for_width(self, available: int):
+        from PySide6.QtCore import QSize
+
+        if not self._items:
+            return QSize(available, 0)
+        rows = self._pack_rows(available)
+        height = 0
+        for index, row in enumerate(rows):
+            height += max(chip.sizeHint().height() for chip in row)
+            if index:
+                height += self._row_spacing
+        return QSize(available, height)
+
+    def _reflow(self) -> None:
+        available = self._available_width()
+        if available == self._last_flow_width and self._rows_layout.count() > 0:
+            return
+        self._last_flow_width = available
+        while self._rows_layout.count():
+            item = self._rows_layout.takeAt(0)
+            row_widget = item.widget()
+            if row_widget is not None:
+                row_layout = row_widget.layout()
+                if row_layout is not None:
+                    while row_layout.count():
+                        child = row_layout.takeAt(0)
+                        child_widget = child.widget()
+                        if child_widget is not None:
+                            child_widget.setParent(self)
+                row_widget.deleteLater()
+
+        if not self._items:
+            self.updateGeometry()
+            return
+
+        available = self._available_width()
+        for row_items in self._pack_rows(available):
+            row_widget = QWidget(self)
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(self._spacing)
+            for chip in row_items:
+                chip.setParent(row_widget)
+                row_layout.addWidget(chip, 0, Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addStretch(1)
+            self._rows_layout.addWidget(row_widget)
+        self.updateGeometry()
+
+
+class TeAnnotationDialog(QDialog):
+    """Batch TE annotation: Parameters select modules; Options holds settings/colors.
+
+    Left-click the toolbar button opens this dialog. Setting / Color buttons stay
+    on Parameters but jump to the Options tab, where the same content is expanded.
+    """
+
+    def __init__(
+        self,
+        *,
+        initial: TeAnnotationJobOptions | None = None,
+        parent=None,
+    ) -> None:
         from repeatviewer.backends.auto_annotation import AutoAnnotationMode
         from repeatviewer.backends.annotation_colors import similarity_database_color
+        from repeatviewer.backends.auto_annotation_settings import (
+            load_auto_annotation_settings,
+        )
         from repeatviewer.backends.similarity_annotation import SimilarityDatabaseRun
+        from repeatviewer.backends.similarity_annotation_settings import (
+            load_similarity_annotation_settings,
+        )
         from repeatviewer.backends.te_annotation_batch import TeAnnotationOptions
         from repeatviewer.database_settings import load_similarity_annotation_databases
+        from repeatviewer.widgets.annotation_colors_dialog import (
+            AnnotationElementColorsPanel,
+        )
+        from repeatviewer.widgets.sequence_map_viewer import (
+            AutoAnnotationSettingsPanel,
+            SimilarityAnnotationSettingsPanel,
+        )
 
         super().__init__(parent)
         self.setWindowTitle("TE annotation")
-        self.setMinimumWidth(580)
+        opts = initial or TeAnnotationJobOptions()
+        self._run_after = False
 
         self._TeAnnotationOptions = TeAnnotationOptions
         self._SimilarityDatabaseRun = SimilarityDatabaseRun
         self._similarity_database_color = similarity_database_color
+        self._AutoAnnotationMode = AutoAnnotationMode
         self._auto_all_updating = False
         self._similarity_all_updating = False
+
+        selected_modes = set(opts.auto_modes)
 
         auto_section = QWidget(self)
         auto_outer = QVBoxLayout(auto_section)
@@ -2567,14 +2711,16 @@ class TeAnnotationDialog(QDialog):
         auto_title = _section_title_label("Auto annotation", auto_section)
         auto_header.addWidget(auto_title, 0, Qt.AlignmentFlag.AlignVCenter)
         auto_settings_btn = QPushButton("Setting", auto_section)
-        auto_settings_btn.setToolTip("Configure LTR, TIR, tandem, and ORF detection")
-        auto_settings_btn.clicked.connect(self._open_auto_annotation_settings)
+        auto_settings_btn.setToolTip(
+            "Open the Options tab for LTR, TIR, tandem, and ORF detection settings"
+        )
+        auto_settings_btn.clicked.connect(self._show_auto_settings_on_options)
         auto_header.addWidget(auto_settings_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         auto_color_btn = QPushButton("Color", auto_section)
         auto_color_btn.setToolTip(
-            "Set colors for feature types (LTR, TIR, ORF, …) and similarity databases"
+            "Open the Options tab for feature-type and database colors"
         )
-        auto_color_btn.clicked.connect(self._open_annotation_colors)
+        auto_color_btn.clicked.connect(self._show_colors_on_options)
         auto_header.addWidget(auto_color_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         auto_header.addStretch(1)
         auto_outer.addLayout(auto_header)
@@ -2589,7 +2735,7 @@ class TeAnnotationDialog(QDialog):
             ("ORF", AutoAnnotationMode.ORF),
         ):
             check = QCheckBox(label, auto_section)
-            check.setChecked(True)
+            check.setChecked(mode.value in selected_modes)
             check.toggled.connect(self._on_auto_check_toggled)
             self._auto_ann_checks[mode] = check
             auto_checks_row.addWidget(check)
@@ -2611,8 +2757,10 @@ class TeAnnotationDialog(QDialog):
         sim_title = _section_title_label("Similarity annotation", sim_section)
         sim_header.addWidget(sim_title, 0, Qt.AlignmentFlag.AlignVCenter)
         sim_settings_btn = QPushButton("Setting", sim_section)
-        sim_settings_btn.setToolTip("Configure similarity search parameters")
-        sim_settings_btn.clicked.connect(self._open_similarity_annotation_settings)
+        sim_settings_btn.setToolTip(
+            "Open the Options tab for similarity search parameters"
+        )
+        sim_settings_btn.clicked.connect(self._show_similarity_settings_on_options)
         sim_header.addWidget(sim_settings_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         sim_header.addStretch(1)
         sim_outer.addLayout(sim_header)
@@ -2621,69 +2769,212 @@ class TeAnnotationDialog(QDialog):
         self._similarity_ann_all_check.setToolTip("Select or clear all similarity databases")
         self._similarity_ann_all_check.toggled.connect(self._on_similarity_all_toggled)
 
-        sim_checks_host = QWidget(sim_section)
-        sim_checks_host.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Maximum,
-        )
-        sim_checks_layout = QVBoxLayout(sim_checks_host)
-        sim_checks_layout.setContentsMargins(0, 0, 0, 0)
-        sim_checks_layout.setSpacing(4)
         self._similarity_db_rows: list[tuple] = []
+        self._db_flow = _CheckboxFlowWidget(sim_section)
 
         databases = load_similarity_annotation_databases()
+        select_all_dbs = opts.similarity_database_names is None
+        selected_dbs = set(opts.similarity_database_names or ())
         if not databases:
             empty = QLabel(
                 "No databases defined. Add them in File → Define database.",
-                sim_checks_host,
+                sim_section,
             )
             empty.setWordWrap(True)
-            sim_checks_layout.addWidget(empty)
-            self._similarity_ann_all_check.setEnabled(False)
+            sim_outer.addWidget(empty)
+            self._similarity_ann_all_check.hide()
+            self._db_flow.hide()
         else:
-            db_checks: list[QCheckBox] = []
+            flow_items: list[QWidget] = []
             for index, entry in enumerate(databases):
-                check = self._make_similarity_db_check(entry, index, sim_checks_host)
+                check = self._make_similarity_db_check(
+                    entry,
+                    index,
+                    self._db_flow,
+                    checked=select_all_dbs or entry.name in selected_dbs,
+                )
                 self._similarity_db_rows.append((entry, check))
-                db_checks.append(check)
-
-            for row_start in range(0, len(db_checks), _TE_ANNOTATION_SIMILARITY_DBS_PER_ROW):
-                row_checks = db_checks[row_start : row_start + _TE_ANNOTATION_SIMILARITY_DBS_PER_ROW]
-                is_last_row = row_start + _TE_ANNOTATION_SIMILARITY_DBS_PER_ROW >= len(db_checks)
-                row_widget = QWidget(sim_checks_host)
-                row_layout = QHBoxLayout(row_widget)
-                row_layout.setContentsMargins(0, 0, 0, 0)
-                row_layout.setSpacing(10)
-                for check in row_checks:
-                    row_layout.addWidget(check, 0, Qt.AlignmentFlag.AlignVCenter)
-                if is_last_row:
-                    row_layout.addWidget(
-                        self._similarity_ann_all_check,
-                        0,
-                        Qt.AlignmentFlag.AlignVCenter,
-                    )
-                row_layout.addStretch(1)
-                sim_checks_layout.addWidget(row_widget)
-        sim_outer.addWidget(sim_checks_host)
+                flow_items.append(check)
+            flow_items.append(self._similarity_ann_all_check)
+            self._db_flow.set_items(flow_items)
+            sim_outer.addWidget(self._db_flow)
         self._sync_similarity_all_check()
 
-        buttons = QDialogButtonBox(
+        params_tab = QWidget(self)
+        params_layout = QVBoxLayout(params_tab)
+        params_layout.setContentsMargins(12, 10, 12, 10)
+        params_layout.setSpacing(12)
+        params_layout.addWidget(auto_section)
+        params_layout.addWidget(sim_section)
+
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Run TE annotation with saved selection", TE_ANNOTATION_RIGHT_CLICK_RUN),
+            ("Open this dialog", TE_ANNOTATION_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_action == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[TE_ANNOTATION_RIGHT_CLICK_RUN].setChecked(True)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the TE annotation button does:", self)
+        )
+        for radio in self._right_click_buttons.values():
+            rc_box_layout.addWidget(radio)
+
+        self._auto_settings_panel = AutoAnnotationSettingsPanel(
+            load_auto_annotation_settings(), self
+        )
+        self._similarity_settings_panel = SimilarityAnnotationSettingsPanel(
+            load_similarity_annotation_settings(), self
+        )
+        self._colors_panel = AnnotationElementColorsPanel(self)
+
+        auto_box = QGroupBox("Auto annotation settings", self)
+        auto_box_layout = QVBoxLayout(auto_box)
+        auto_box_layout.addWidget(self._auto_settings_panel)
+        self._auto_settings_anchor = auto_box
+
+        sim_box = QGroupBox("Similarity annotation settings", self)
+        sim_box_layout = QVBoxLayout(sim_box)
+        sim_box_layout.addWidget(self._similarity_settings_panel)
+        self._similarity_settings_anchor = sim_box
+
+        color_box = QGroupBox("Element colors", self)
+        color_box_layout = QVBoxLayout(color_box)
+        color_box_layout.addWidget(self._colors_panel)
+        self._colors_anchor = color_box
+
+        options_body = QWidget(self)
+        options_layout = QVBoxLayout(options_body)
+        options_layout.setContentsMargins(12, 10, 12, 10)
+        options_layout.setSpacing(12)
+        options_layout.addWidget(rc_box)
+        options_layout.addWidget(auto_box)
+        options_layout.addWidget(sim_box)
+        options_layout.addWidget(color_box)
+        options_layout.addStretch(1)
+
+        options_scroll = QScrollArea(self)
+        options_scroll.setWidgetResizable(True)
+        options_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        options_scroll.setWidget(options_body)
+        self._options_scroll = options_scroll
+
+        self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        self._tabs.addTab(params_tab, "Parameters")
+        self._tabs.addTab(options_scroll, "Options")
+        self._params_tab = params_tab
+
+        self._button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
+        self._run_button.setText("Run")
+        restore = self._button_box.addButton(
+            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
+        )
+        restore.clicked.connect(self._restore_defaults)
+        self._button_box.accepted.connect(self._on_accept)
+        self._button_box.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.addWidget(auto_section)
-        layout.addWidget(sim_section)
-        layout.addWidget(buttons)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        layout.addWidget(self._tabs)
+        layout.addWidget(self._button_box)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._on_tab_changed(self._tabs.currentIndex())
 
-    def _make_similarity_db_check(self, entry, index: int, parent: QWidget) -> QCheckBox:
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_to_current_tab)
+
+    def _on_tab_changed(self, tab_index: int) -> None:
+        self._update_run_button(tab_index)
+        self._fit_to_current_tab()
+
+    def _fit_to_current_tab(self) -> None:
+        """Size the dialog to the active tab (Parameters compact; Options scrollable)."""
+        margins = self.layout().contentsMargins()
+        spacing = self.layout().spacing()
+        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
+        tab_chrome = tab_bar_h + 8
+        buttons_h = self._button_box.sizeHint().height()
+        chrome = (
+            tab_chrome
+            + buttons_h
+            + margins.top()
+            + margins.bottom()
+            + spacing
+            + 4
+        )
+        if self._tabs.currentIndex() == 0:
+            page = self._params_tab
+            page.ensurePolished()
+            if hasattr(self, "_db_flow") and self._db_flow.isVisible():
+                self._db_flow._last_flow_width = -1
+                self._db_flow.setFixedWidth(
+                    max(200, _TE_ANNOTATION_PARAMS_WIDTH - 40)
+                )
+                self._db_flow._reflow()
+            page.adjustSize()
+            hint = page.sizeHint()
+            width = max(
+                _TE_ANNOTATION_PARAMS_WIDTH,
+                hint.width() + margins.left() + margins.right() + 24,
+                self._button_box.sizeHint().width() + margins.left() + margins.right(),
+            )
+            height = hint.height() + chrome
+            self.setFixedSize(width, height)
+            return
+        opt_w, opt_h = _TE_ANNOTATION_OPTIONS_SIZE
+        self.setFixedSize(opt_w, opt_h)
+
+    def _update_run_button(self, tab_index: int) -> None:
+        self._run_button.setText("Save" if tab_index == 1 else "Run")
+
+    def _on_accept(self) -> None:
+        self._run_after = self._tabs.currentIndex() != 1
+        self.accept()
+
+    def should_run(self) -> bool:
+        return self._run_after
+
+    def _show_options_section(self, widget: QWidget) -> None:
+        self._tabs.setCurrentIndex(1)
+        QTimer.singleShot(0, lambda: self._options_scroll.ensureWidgetVisible(widget))
+
+    def _show_auto_settings_on_options(self) -> None:
+        self._show_options_section(self._auto_settings_anchor)
+
+    def _show_similarity_settings_on_options(self) -> None:
+        self._show_options_section(self._similarity_settings_anchor)
+
+    def _show_colors_on_options(self) -> None:
+        self._show_options_section(self._colors_anchor)
+
+    def _make_similarity_db_check(
+        self,
+        entry,
+        index: int,
+        parent: QWidget,
+        *,
+        checked: bool = True,
+    ) -> QCheckBox:
         color = self._similarity_database_color(entry.name, index)
         check = QCheckBox(entry.name, parent)
         check.setToolTip(f"{entry.display_type_label}\n{entry.path}")
-        check.setChecked(True)
+        check.setChecked(checked)
         check.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
         check.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         check.toggled.connect(self._on_similarity_check_toggled)
@@ -2693,40 +2984,6 @@ class TeAnnotationDialog(QDialog):
         for index, (entry, check) in enumerate(self._similarity_db_rows):
             color = self._similarity_database_color(entry.name, index)
             check.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
-
-    def _open_auto_annotation_settings(self) -> None:
-        from repeatviewer.backends.auto_annotation_settings import (
-            load_auto_annotation_settings,
-            save_auto_annotation_settings,
-        )
-        from repeatviewer.widgets.sequence_map_viewer import AutoAnnotationSettingsDialog
-
-        settings = load_auto_annotation_settings()
-        dialog = AutoAnnotationSettingsDialog(settings, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        save_auto_annotation_settings(dialog.settings())
-
-    def _open_similarity_annotation_settings(self) -> None:
-        from repeatviewer.backends.similarity_annotation_settings import (
-            load_similarity_annotation_settings,
-            save_similarity_annotation_settings,
-        )
-        from repeatviewer.widgets.sequence_map_viewer import SimilarityAnnotationSettingsDialog
-
-        settings = load_similarity_annotation_settings()
-        dialog = SimilarityAnnotationSettingsDialog(settings, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        save_similarity_annotation_settings(dialog.settings())
-
-    def _open_annotation_colors(self) -> None:
-        from repeatviewer.widgets.annotation_colors_dialog import AnnotationElementColorsDialog
-
-        dialog = AnnotationElementColorsDialog(parent=self, show_apply_to_sequence=False)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._refresh_similarity_db_checkbox_colors()
 
     def _on_auto_check_toggled(self, _checked: bool) -> None:
         if self._auto_all_updating:
@@ -2775,7 +3032,98 @@ class TeAnnotationDialog(QDialog):
             check.setChecked(checked)
         self._similarity_all_updating = False
 
+    def _restore_defaults(self) -> None:
+        from repeatviewer.backends.auto_annotation_settings import AutoAnnotationSettings
+        from repeatviewer.backends.similarity_annotation_settings import (
+            SimilarityAnnotationSettings,
+        )
+
+        defaults = TeAnnotationJobOptions()
+        selected = set(defaults.auto_modes)
+        self._auto_all_updating = True
+        for mode, check in self._auto_ann_checks.items():
+            check.setChecked(mode.value in selected)
+        self._auto_all_updating = False
+        self._sync_auto_all_check()
+
+        self._similarity_all_updating = True
+        for _entry, check in self._similarity_db_rows:
+            check.setChecked(True)
+        self._similarity_all_updating = False
+        self._sync_similarity_all_check()
+
+        # Rebuild settings panels from defaults by replacing child widgets.
+        parent_auto = self._auto_settings_panel.parentWidget()
+        parent_sim = self._similarity_settings_panel.parentWidget()
+        from repeatviewer.widgets.sequence_map_viewer import (
+            AutoAnnotationSettingsPanel,
+            SimilarityAnnotationSettingsPanel,
+        )
+
+        new_auto = AutoAnnotationSettingsPanel(AutoAnnotationSettings(), parent_auto)
+        new_sim = SimilarityAnnotationSettingsPanel(
+            SimilarityAnnotationSettings(), parent_sim
+        )
+        if parent_auto is not None:
+            layout = parent_auto.layout()
+            if layout is not None:
+                layout.replaceWidget(self._auto_settings_panel, new_auto)
+        self._auto_settings_panel.deleteLater()
+        self._auto_settings_panel = new_auto
+        if parent_sim is not None:
+            layout = parent_sim.layout()
+            if layout is not None:
+                layout.replaceWidget(self._similarity_settings_panel, new_sim)
+        self._similarity_settings_panel.deleteLater()
+        self._similarity_settings_panel = new_sim
+        self._colors_panel.restore_defaults()
+        self._right_click_buttons[TE_ANNOTATION_RIGHT_CLICK_RUN].setChecked(True)
+
+    def apply_settings_panels(self) -> None:
+        """Persist Options-tab auto/similarity settings and colors."""
+        from repeatviewer.backends.auto_annotation_settings import (
+            save_auto_annotation_settings,
+        )
+        from repeatviewer.backends.similarity_annotation_settings import (
+            save_similarity_annotation_settings,
+        )
+
+        save_auto_annotation_settings(self._auto_settings_panel.settings())
+        save_similarity_annotation_settings(self._similarity_settings_panel.settings())
+        self._colors_panel.save()
+        self._refresh_similarity_db_checkbox_colors()
+
+    def job_options(self) -> TeAnnotationJobOptions:
+        auto_modes = tuple(
+            mode.value
+            for mode, check in self._auto_ann_checks.items()
+            if check.isChecked()
+        )
+        selected_dbs = tuple(
+            entry.name
+            for entry, check in self._similarity_db_rows
+            if check.isChecked()
+        )
+        all_dbs = tuple(entry.name for entry, _check in self._similarity_db_rows)
+        similarity_database_names: tuple[str, ...] | None
+        if not all_dbs or selected_dbs == all_dbs:
+            similarity_database_names = None
+        else:
+            similarity_database_names = selected_dbs
+
+        right_click_action = TE_ANNOTATION_RIGHT_CLICK_RUN
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                right_click_action = value
+                break
+        return TeAnnotationJobOptions(
+            auto_modes=auto_modes,
+            similarity_database_names=similarity_database_names,
+            right_click_action=right_click_action,
+        )
+
     def options(self):
+        """Runtime batch options for ``run_te_annotation_on_fasta``."""
         auto_modes = tuple(
             mode for mode, check in self._auto_ann_checks.items() if check.isChecked()
         )
@@ -2792,6 +3140,40 @@ class TeAnnotationDialog(QDialog):
             auto_modes=auto_modes,
             similarity_databases=tuple(similarity_databases),
         )
+
+
+def batch_options_from_te_annotation_job(
+    job: TeAnnotationJobOptions,
+):
+    """Build runtime ``TeAnnotationOptions`` from saved job options."""
+    from repeatviewer.backends.auto_annotation import AutoAnnotationMode
+    from repeatviewer.backends.annotation_colors import similarity_database_color
+    from repeatviewer.backends.similarity_annotation import SimilarityDatabaseRun
+    from repeatviewer.backends.te_annotation_batch import TeAnnotationOptions
+    from repeatviewer.database_settings import load_similarity_annotation_databases
+
+    modes: list[AutoAnnotationMode] = []
+    for raw in job.auto_modes:
+        try:
+            modes.append(AutoAnnotationMode(raw))
+        except ValueError:
+            continue
+    databases = load_similarity_annotation_databases()
+    select_all = job.similarity_database_names is None
+    selected = set(job.similarity_database_names or ())
+    runs: list[SimilarityDatabaseRun] = []
+    for index, entry in enumerate(databases):
+        if select_all or entry.name in selected:
+            runs.append(
+                SimilarityDatabaseRun(
+                    database=entry,
+                    color=similarity_database_color(entry.name, index),
+                )
+            )
+    return TeAnnotationOptions(
+        auto_modes=tuple(modes),
+        similarity_databases=tuple(runs),
+    )
 
 
 class TeaAidParamsDialog(QDialog):

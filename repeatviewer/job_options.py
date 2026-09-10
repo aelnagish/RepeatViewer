@@ -399,6 +399,26 @@ class FlexidotOptions:
     right_click_action: str = FLEXIDOT_RIGHT_CLICK_RUN
 
 
+TE_ANNOTATION_RIGHT_CLICK_RUN = "run"
+TE_ANNOTATION_RIGHT_CLICK_DIALOG = "dialog"
+TE_ANNOTATION_RIGHT_CLICK_ACTIONS = (
+    TE_ANNOTATION_RIGHT_CLICK_RUN,
+    TE_ANNOTATION_RIGHT_CLICK_DIALOG,
+)
+DEFAULT_TE_ANNOTATION_AUTO_MODES = ("LTR", "TIR", "tandem repeat", "ORF")
+
+
+@dataclass
+class TeAnnotationJobOptions:
+    """Saved module selection and toolbar right-click behaviour for TE annotation."""
+
+    # AutoAnnotationMode.value strings; empty means none selected.
+    auto_modes: tuple[str, ...] = DEFAULT_TE_ANNOTATION_AUTO_MODES
+    # Selected similarity database names. None means “all currently defined”.
+    similarity_database_names: tuple[str, ...] | None = None
+    right_click_action: str = TE_ANNOTATION_RIGHT_CLICK_RUN
+
+
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
 DEFAULT_TEAID_THREADS = 1
 DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 11
@@ -1156,6 +1176,56 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
             ),
         },
     )
+
+
+def load_te_annotation_options() -> TeAnnotationJobOptions:
+    v = _load_settings_group("te_annotation")
+    right_click_action = str(v.get("right_click_action", TE_ANNOTATION_RIGHT_CLICK_RUN))
+    if right_click_action not in TE_ANNOTATION_RIGHT_CLICK_ACTIONS:
+        right_click_action = TE_ANNOTATION_RIGHT_CLICK_RUN
+    raw_modes = str(v.get("auto_modes", "")).strip()
+    if "auto_modes" not in v:
+        auto_modes = DEFAULT_TE_ANNOTATION_AUTO_MODES
+    elif not raw_modes:
+        auto_modes = ()
+    else:
+        auto_modes = tuple(part.strip() for part in raw_modes.split(",") if part.strip())
+    if "similarity_database_names" not in v:
+        similarity_database_names: tuple[str, ...] | None = None
+    else:
+        raw_dbs = str(v.get("similarity_database_names", "")).strip()
+        similarity_database_names = tuple(
+            part.strip() for part in raw_dbs.split(",") if part.strip()
+        )
+    return TeAnnotationJobOptions(
+        auto_modes=auto_modes,
+        similarity_database_names=similarity_database_names,
+        right_click_action=right_click_action,
+    )
+
+
+def save_te_annotation_options(opts: TeAnnotationJobOptions) -> None:
+    from PySide6.QtCore import QSettings
+
+    s = QSettings()
+    s.beginGroup("te_annotation")
+    s.setValue("auto_modes", ",".join(opts.auto_modes))
+    s.setValue(
+        "right_click_action",
+        (
+            opts.right_click_action
+            if opts.right_click_action in TE_ANNOTATION_RIGHT_CLICK_ACTIONS
+            else TE_ANNOTATION_RIGHT_CLICK_RUN
+        ),
+    )
+    if opts.similarity_database_names is None:
+        s.remove("similarity_database_names")
+    else:
+        s.setValue(
+            "similarity_database_names",
+            ",".join(opts.similarity_database_names),
+        )
+    s.endGroup()
 
 
 def load_te_confusion_matrix_benchmark_options() -> TeConfusionMatrixBenchmarkOptions:

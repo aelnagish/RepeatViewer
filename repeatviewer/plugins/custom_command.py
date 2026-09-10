@@ -13,7 +13,6 @@ from PySide6.QtCore import QEvent, QEventLoop, QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -25,6 +24,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox as QDoubleSpinBox
+
 
 from repeatviewer.plugins.api import RepeatViewerPlugin
 from repeatviewer.project import RepeatViewerProject

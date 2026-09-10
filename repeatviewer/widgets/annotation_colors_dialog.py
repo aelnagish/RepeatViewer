@@ -76,37 +76,25 @@ class _ColorPickerRow(QWidget):
         return self._color.name(QColor.NameFormat.HexRgb)
 
 
-class AnnotationElementColorsDialog(QDialog):
-    """Edit colors for manual/auto feature types and similarity databases."""
+class AnnotationElementColorsPanel(QWidget):
+    """Embeddable colors for feature types, nucleotides, and similarity databases."""
 
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        *,
-        show_apply_to_sequence: bool = True,
-    ) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Element colors")
-        self.resize(420, 520)
-
         self._feature_rows: dict[str, _ColorPickerRow] = {}
         self._nucleotide_rows: dict[str, _ColorPickerRow] = {}
         self._database_rows: dict[str, _ColorPickerRow] = {}
         databases = load_similarity_annotation_databases()
 
-        root = QVBoxLayout(self)
-
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        body = QWidget(scroll)
-        body_layout = QVBoxLayout(body)
+        body_layout = QVBoxLayout(self)
+        body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(10)
 
         body_layout.addWidget(self._section_label("Feature types"))
         feature_form = QFormLayout()
         feature_form.setSpacing(8)
         for display_label, feature_type in ANNOTATION_FEATURE_TYPE_LABELS:
-            row = _ColorPickerRow(display_label, feature_type_color(feature_type), body)
+            row = _ColorPickerRow(display_label, feature_type_color(feature_type), self)
             self._feature_rows[feature_type] = row
             feature_form.addRow(row)
         body_layout.addLayout(feature_form)
@@ -118,7 +106,7 @@ class AnnotationElementColorsDialog(QDialog):
         scheme_nucleotide = default_nucleotide_backgrounds()
         for base in ("A", "C", "G", "T"):
             color = custom_nucleotide.get(base, scheme_nucleotide[base])
-            row = _ColorPickerRow(base, color, body)
+            row = _ColorPickerRow(base, color, self)
             self._nucleotide_rows[base] = row
             nucleotide_form.addRow(row)
         body_layout.addLayout(nucleotide_form)
@@ -131,34 +119,15 @@ class AnnotationElementColorsDialog(QDialog):
                 row = _ColorPickerRow(
                     entry.name,
                     similarity_database_color(entry.name, index),
-                    body,
+                    self,
                 )
                 self._database_rows[entry.name] = row
                 database_form.addRow(row)
         else:
             database_form.addRow(
-                QLabel("No databases defined. Add them in File → Define database.", body)
+                QLabel("No databases defined. Add them in File → Define database.", self)
             )
         body_layout.addLayout(database_form)
-        body_layout.addStretch(1)
-        scroll.setWidget(body)
-        root.addWidget(scroll, stretch=1)
-
-        # Kept for compatibility with older call sites; this dialog no longer
-        # exposes a per-sequence apply toggle and always applies to current sequence.
-        _ = show_apply_to_sequence
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel
-            | QDialogButtonBox.StandardButton.RestoreDefaults,
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(
-            self._restore_defaults
-        )
-        root.addWidget(buttons)
 
         self._old_feature_colors = load_feature_type_colors()
         self._old_database_colors = snapshot_similarity_database_colors(
@@ -170,7 +139,7 @@ class AnnotationElementColorsDialog(QDialog):
         label.setTextFormat(Qt.TextFormat.RichText)
         return label
 
-    def _restore_defaults(self) -> None:
+    def restore_defaults(self) -> None:
         defaults = default_feature_type_colors()
         for feature_type, row in self._feature_rows.items():
             row.set_color_hex(defaults.get(feature_type, "#7f8c8d"))
@@ -179,9 +148,6 @@ class AnnotationElementColorsDialog(QDialog):
             row.set_color_hex(SIMILARITY_DB_COLORS[index % len(SIMILARITY_DB_COLORS)])
         for base, row in self._nucleotide_rows.items():
             row.set_color_hex(default_nucleotide_backgrounds()[base])
-
-    def apply_to_current_sequence(self) -> bool:
-        return True
 
     def new_feature_type_colors(self) -> dict[str, str]:
         return {key: row.color_hex() for key, row in self._feature_rows.items()}
@@ -198,10 +164,68 @@ class AnnotationElementColorsDialog(QDialog):
     def old_database_colors(self) -> dict[str, str]:
         return dict(self._old_database_colors)
 
-    def accept(self) -> None:
+    def save(self) -> None:
         save_feature_type_colors(self.new_feature_type_colors())
         save_similarity_database_colors(self.new_database_colors())
         save_custom_nucleotide_backgrounds(self.new_nucleotide_backgrounds())
+
+
+class AnnotationElementColorsDialog(QDialog):
+    """Edit colors for manual/auto feature types and similarity databases."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        show_apply_to_sequence: bool = True,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Element colors")
+        self.resize(420, 520)
+
+        # Kept for compatibility with older call sites; this dialog no longer
+        # exposes a per-sequence apply toggle and always applies to current sequence.
+        _ = show_apply_to_sequence
+
+        root = QVBoxLayout(self)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        self._panel = AnnotationElementColorsPanel(scroll)
+        scroll.setWidget(self._panel)
+        root.addWidget(scroll, stretch=1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.RestoreDefaults,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(
+            self._panel.restore_defaults
+        )
+        root.addWidget(buttons)
+
+    def apply_to_current_sequence(self) -> bool:
+        return True
+
+    def new_feature_type_colors(self) -> dict[str, str]:
+        return self._panel.new_feature_type_colors()
+
+    def new_database_colors(self) -> dict[str, str]:
+        return self._panel.new_database_colors()
+
+    def new_nucleotide_backgrounds(self) -> dict[str, str]:
+        return self._panel.new_nucleotide_backgrounds()
+
+    def old_feature_type_colors(self) -> dict[str, str]:
+        return self._panel.old_feature_type_colors()
+
+    def old_database_colors(self) -> dict[str, str]:
+        return self._panel.old_database_colors()
+
+    def accept(self) -> None:
+        self._panel.save()
         super().accept()
 
 
