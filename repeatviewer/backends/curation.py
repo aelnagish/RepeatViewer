@@ -76,7 +76,7 @@ ProgressCallback = Callable[[int, str], None]
 _DISPLAY_NAMES = {
     "teaid": "TEAid",
     "blast": "Blast",
-    "extend": "Extend",
+    "extend": "MSA Extend",
     "msa_clean": "MSA clean",
     "msa_clean_gappy": "MSA remove gappy columns",
     "msa_clean_div": "Clean row with divergence",
@@ -597,6 +597,7 @@ def run_on_sequence(
     consensus_options: ConsensusOptions | None = None,
     te_annotation_options: TeAnnotationOptions | None = None,
     tsd_search_options: TsdSearchOptions | None = None,
+    orf_prediction_settings=None,
     cancel: JobCancellation | None = None,
 ) -> list[str]:
     """Run one tool on one FASTA. Returns list of created output paths (strings)."""
@@ -965,10 +966,14 @@ def run_on_sequence(
         created.append(str(write_reverse_complement_fasta(seq_path)))
 
     elif func_name == "orf_prediction":
-        created.append(str(write_predicted_orfs_fasta(seq_path)))
+        created.append(
+            str(write_predicted_orfs_fasta(seq_path, settings=orf_prediction_settings))
+        )
 
     elif func_name == "dna_translation":
-        created.append(str(write_translated_orfs_fasta(seq_path)))
+        created.append(
+            str(write_translated_orfs_fasta(seq_path, settings=orf_prediction_settings))
+        )
 
     elif func_name == "tsd_search":
         tsd_opts = tsd_search_options or TsdSearchOptions()
@@ -1012,6 +1017,7 @@ def run_batch(
     consensus_options: ConsensusOptions | None = None,
     te_annotation_options: TeAnnotationOptions | None = None,
     tsd_search_options: TsdSearchOptions | None = None,
+    orf_prediction_settings=None,
     max_workers: int = 4,
     flexidot_combined: bool = True,
     cancel: JobCancellation | None = None,
@@ -1137,6 +1143,7 @@ def run_batch(
                 consensus_options=consensus_options,
                 te_annotation_options=te_annotation_options,
                 tsd_search_options=tsd_search_options,
+                orf_prediction_settings=orf_prediction_settings,
                 cancel=cancel,
             )
             return seq_path, genome_label, outs, None

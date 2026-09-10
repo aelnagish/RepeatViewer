@@ -8,7 +8,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
-from repeatviewer.backends.auto_annotation_settings import load_auto_annotation_settings
+from repeatviewer.backends.auto_annotation_settings import OrfSettings
 from repeatviewer.backends.orf_detect import detect_orf_features
 
 
@@ -22,7 +22,7 @@ def _records(path: Path) -> list[SeqRecord]:
 def write_reverse_complement_fasta(path: Path) -> Path:
     """Reverse-complement every FASTA record and preserve its identifier."""
     source = path.expanduser().resolve()
-    output = source.with_name(f"{source.stem}_reverse_complement.fa")
+    output = source.with_name(f"{source.stem}_rc.fa")
     transformed = [
         SeqRecord(
             record.seq.reverse_complement(),
@@ -35,14 +35,19 @@ def write_reverse_complement_fasta(path: Path) -> Path:
     return output
 
 
-def predicted_orf_records(path: Path, *, translate: bool = False) -> list[SeqRecord]:
-    """Predict ORFs with the Annotation panel settings and return FASTA records."""
+def predicted_orf_records(
+    path: Path,
+    *,
+    translate: bool = False,
+    settings: OrfSettings | None = None,
+) -> list[SeqRecord]:
+    """Predict ORFs with Sequence → ORF Prediction settings and return FASTA records."""
     source = path.expanduser().resolve()
-    settings = load_auto_annotation_settings().orf
+    orf_settings = settings or OrfSettings()
     output_records: list[SeqRecord] = []
     for record in _records(source):
         sequence = str(record.seq).upper()
-        result = detect_orf_features(record.id, sequence, settings=settings)
+        result = detect_orf_features(record.id, sequence, settings=orf_settings)
         for feature in result.features:
             dna = Seq(sequence[feature.start - 1 : feature.end])
             if feature.strand == "-":
@@ -65,17 +70,29 @@ def predicted_orf_records(path: Path, *, translate: bool = False) -> list[SeqRec
     return output_records
 
 
-def write_predicted_orfs_fasta(path: Path) -> Path:
+def write_predicted_orfs_fasta(
+    path: Path,
+    *,
+    settings: OrfSettings | None = None,
+) -> Path:
     """Write predicted ORF nucleotide sequences to a FASTA file."""
     source = path.expanduser().resolve()
     output = source.with_name(f"{source.stem}_orfs.fa")
-    SeqIO.write(predicted_orf_records(source), str(output), "fasta")
+    SeqIO.write(predicted_orf_records(source, settings=settings), str(output), "fasta")
     return output
 
 
-def write_translated_orfs_fasta(path: Path) -> Path:
+def write_translated_orfs_fasta(
+    path: Path,
+    *,
+    settings: OrfSettings | None = None,
+) -> Path:
     """Predict ORFs, then translate them with Biopython into protein FASTA."""
     source = path.expanduser().resolve()
     output = source.with_name(f"{source.stem}_translated.faa")
-    SeqIO.write(predicted_orf_records(source, translate=True), str(output), "fasta")
+    SeqIO.write(
+        predicted_orf_records(source, translate=True, settings=settings),
+        str(output),
+        "fasta",
+    )
     return output

@@ -622,10 +622,12 @@ class AlignParamsDialog(QDialog):
         use_system_mafft: bool = False,
         use_system_muscle: bool = False,
         title: str = "Alignment parameters",
+        for_run: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
+        self._for_run = for_run
         opts = initial or AlignOptions()
 
         self._strategy = QComboBox(self)
@@ -836,11 +838,16 @@ class AlignParamsDialog(QDialog):
 
     def _update_run_button(self, tab_index: int) -> None:
         """Run on an aligner tab; Save on the Options tab (nothing to run)."""
+        if not self._for_run:
+            self._run_button.setText("OK")
+            return
         self._run_button.setText(
             "Save" if tab_index == self._options_tab_index else "Run"
         )
 
     def should_run(self) -> bool:
+        if not self._for_run:
+            return False
         return self._aligner_tabs.currentIndex() != self._options_tab_index
 
     def selected_aligner(self) -> str:
@@ -1052,7 +1059,7 @@ class ExtractSequencesDialog(QDialog):
 
     def __init__(self, *, records: list[tuple[str, str, int]], source_name: str, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Extract sequences")
+        self.setWindowTitle("Extract Sequences from File")
         self.resize(560, 460)
 
         self._list = QListWidget(self)
@@ -1274,15 +1281,17 @@ class ExtendParamsDialog(QDialog):
         self,
         *,
         initial: ExtendOptions | None = None,
-        title: str = "Extend with different parameters",
+        title: str = "MSA Extend parameters",
         pan_genome_names: list[str] | None = None,
         project_genome: Path | None = None,
         genome_history: list[Path] | None = None,
+        for_run: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         opts = initial or ExtendOptions()
+        self._for_run = for_run
         self._run_after = False
 
         self._left = QSpinBox()
@@ -1344,7 +1353,7 @@ class ExtendParamsDialog(QDialog):
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
-            ("Run Extend with saved parameters", EXTEND_RIGHT_CLICK_RUN),
+            ("Run MSA Extend with saved parameters", EXTEND_RIGHT_CLICK_RUN),
             ("Open this dialog", EXTEND_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
@@ -1390,7 +1399,7 @@ class ExtendParamsDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run")
+        self._run_button.setText("Run" if self._for_run else "OK")
         restore = buttons.addButton(
             "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
         )
@@ -1405,10 +1414,13 @@ class ExtendParamsDialog(QDialog):
         self._update_run_button(self._tabs.currentIndex())
 
     def _update_run_button(self, tab_index: int) -> None:
+        if not self._for_run:
+            self._run_button.setText("OK")
+            return
         self._run_button.setText("Save" if tab_index == 1 else "Run")
 
     def _on_accept(self) -> None:
-        self._run_after = self._tabs.currentIndex() != 1
+        self._run_after = self._for_run and self._tabs.currentIndex() != 1
         self.accept()
 
     def should_run(self) -> bool:
@@ -1542,11 +1554,13 @@ class BlastParamsDialog(QDialog):
         *,
         project: RepeatViewerProject,
         initial: BlastOptions | None = None,
+        for_run: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Blast parameters")
         self._project = project
+        self._for_run = for_run
         opts = initial or BlastOptions()
         self._initial_program = opts.program
 
@@ -1884,12 +1898,17 @@ class BlastParamsDialog(QDialog):
 
     def _update_run_button(self, tab_index: int) -> None:
         """Run on a program tab; Save on the Right Click tab (nothing to run)."""
+        if not self._for_run:
+            self._run_button.setText("OK")
+            return
         self._run_button.setText(
             "Save" if tab_index == self._right_click_tab_index else "Run"
         )
 
     def should_run(self) -> bool:
         """False on the Right Click tab, where the button only saves the choice."""
+        if not self._for_run:
+            return False
         return self._tabs.currentIndex() != self._right_click_tab_index
 
     @staticmethod
@@ -2108,11 +2127,13 @@ class ConsensusParamsDialog(QDialog):
         self,
         *,
         initial: ConsensusOptions | None = None,
+        for_run: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Consensus parameters")
         opts = initial or ConsensusOptions()
+        self._for_run = for_run
         self._run_after = False
 
         self._threshold = QDoubleSpinBox()
@@ -2189,7 +2210,7 @@ class ConsensusParamsDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run")
+        self._run_button.setText("Run" if for_run else "OK")
         restore = self._button_box.addButton(
             "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
         )
@@ -2245,10 +2266,13 @@ class ConsensusParamsDialog(QDialog):
         self.setFixedSize(width, height)
 
     def _update_run_button(self, tab_index: int) -> None:
+        if not self._for_run:
+            self._run_button.setText("OK")
+            return
         self._run_button.setText("Save" if tab_index == 1 else "Run")
 
     def _on_accept(self) -> None:
-        self._run_after = self._tabs.currentIndex() != 1
+        self._run_after = self._for_run and self._tabs.currentIndex() != 1
         self.accept()
 
     def should_run(self) -> bool:
@@ -2285,11 +2309,13 @@ class FlexidotParamsDialog(QDialog):
         self,
         *,
         initial: FlexidotOptions | None = None,
+        for_run: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Flexidot parameters")
         opts = initial or FlexidotOptions()
+        self._for_run = for_run
         self._run_after = False
         # These supported settings remain persisted but are intentionally not
         # exposed in this compact dialog.
@@ -2459,7 +2485,7 @@ class FlexidotParamsDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         self._run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run")
+        self._run_button.setText("Run" if for_run else "OK")
         restore = buttons.addButton(
             "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
         )
@@ -2474,10 +2500,13 @@ class FlexidotParamsDialog(QDialog):
         self._update_run_button(self._tabs.currentIndex())
 
     def _update_run_button(self, tab_index: int) -> None:
+        if not self._for_run:
+            self._run_button.setText("OK")
+            return
         self._run_button.setText("Save" if tab_index == 1 else "Run")
 
     def _on_accept(self) -> None:
-        self._run_after = self._tabs.currentIndex() != 1
+        self._run_after = self._for_run and self._tabs.currentIndex() != 1
         self.accept()
 
     def should_run(self) -> bool:
@@ -2667,6 +2696,7 @@ class TeAnnotationDialog(QDialog):
         self,
         *,
         initial: TeAnnotationJobOptions | None = None,
+        for_run: bool = True,
         parent=None,
     ) -> None:
         from repeatviewer.backends.auto_annotation import AutoAnnotationMode
@@ -2691,6 +2721,7 @@ class TeAnnotationDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("TE annotation")
         opts = initial or TeAnnotationJobOptions()
+        self._for_run = for_run
         self._run_after = False
 
         self._TeAnnotationOptions = TeAnnotationOptions
@@ -2879,7 +2910,7 @@ class TeAnnotationDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         self._run_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
-        self._run_button.setText("Run")
+        self._run_button.setText("Run" if for_run else "OK")
         restore = self._button_box.addButton(
             "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
         )
@@ -2941,10 +2972,13 @@ class TeAnnotationDialog(QDialog):
         self.setFixedSize(opt_w, opt_h)
 
     def _update_run_button(self, tab_index: int) -> None:
+        if not self._for_run:
+            self._run_button.setText("OK")
+            return
         self._run_button.setText("Save" if tab_index == 1 else "Run")
 
     def _on_accept(self) -> None:
-        self._run_after = self._tabs.currentIndex() != 1
+        self._run_after = self._for_run and self._tabs.currentIndex() != 1
         self.accept()
 
     def should_run(self) -> bool:
@@ -3174,6 +3208,94 @@ def batch_options_from_te_annotation_job(
         auto_modes=tuple(modes),
         similarity_databases=tuple(runs),
     )
+
+
+class OrfPredictionParamsDialog(QDialog):
+    """ORF Prediction settings for Sequence menu / toolbar (not TE annotation)."""
+
+    def __init__(
+        self,
+        *,
+        initial=None,
+        for_run: bool = True,
+        parent=None,
+    ) -> None:
+        from repeatviewer.backends.auto_annotation_settings import OrfSettings as _OrfSettings
+
+        super().__init__(parent)
+        self.setWindowTitle("ORF Prediction settings")
+        self.setMinimumWidth(420)
+        opts = initial or _OrfSettings()
+        self._OrfSettings = _OrfSettings
+        self._for_run = for_run
+        self._run_after = False
+
+        self._min_len = QSpinBox(self)
+        self._min_len.setRange(3, 1_000_000)
+        self._min_len.setValue(opts.min_length)
+        self._max_len = QSpinBox(self)
+        self._max_len.setRange(3, 1_000_000)
+        self._max_len.setValue(opts.max_length)
+        self._alt_starts = QLineEdit(self)
+        self._alt_starts.setPlaceholderText("e.g. TTG, CTG")
+        self._alt_starts.setText(opts.alternative_start_codons)
+        self._alt_starts.setToolTip("Optional extra start codons (comma- or space-separated).")
+
+        def _bp_row(spin: QSpinBox) -> QWidget:
+            row = QWidget(self)
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+            layout.addWidget(spin)
+            layout.addWidget(QLabel("bp", row))
+            layout.addStretch()
+            return row
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        form.addRow("Min ORF length:", _bp_row(self._min_len))
+        form.addRow("Max ORF length:", _bp_row(self._max_len))
+        form.addRow("Add other start codons:", self._alt_starts)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._ok_button.setText("Run" if for_run else "OK")
+        restore = buttons.addButton(
+            "Restore Defaults", QDialogButtonBox.ButtonRole.ResetRole
+        )
+        restore.clicked.connect(self._restore_defaults)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        self._run_after = self._for_run
+        self.accept()
+
+    def should_run(self) -> bool:
+        return self._run_after
+
+    def _restore_defaults(self) -> None:
+        defaults = self._OrfSettings()
+        self._min_len.setValue(defaults.min_length)
+        self._max_len.setValue(defaults.max_length)
+        self._alt_starts.setText(defaults.alternative_start_codons)
+
+    def options(self):
+        return self._OrfSettings(
+            min_length=self._min_len.value(),
+            max_length=max(self._max_len.value(), self._min_len.value()),
+            alternative_start_codons=self._alt_starts.text().strip(),
+        )
 
 
 class TeaAidParamsDialog(QDialog):
@@ -4150,7 +4272,7 @@ class TeDensityPlotDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("TE visualization")
+        self.setWindowTitle("Visualization")
         self.setMinimumWidth(720)
         self._opts = initial or TeGenomeMapOptions()
 

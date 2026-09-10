@@ -383,7 +383,7 @@ class GenomeDialog(QDialog):
         self._mode_single = QRadioButton("Single genome mode")
         self._mode_pan = QRadioButton("Pan-genome mode")
         self._mode_single.setToolTip(
-            "One reference genome for Blast, Extend, TEAid, Flexidot, and TE visualization."
+            "One reference genome for Blast, MSA Extend, TEAid, Flexidot, and Visualization."
         )
         self._mode_pan.setToolTip(
             "Several genomes with short names (max 10 characters). "
@@ -561,7 +561,7 @@ class GenomeDialog(QDialog):
                 "Click in a Genome FASTA field, then click a file in the Files panel, or drag "
                 "FASTA files onto a path field or browse. "
                 "Blast, TEAid, and Flexidot run against every genome; Extend uses the genome you pick. "
-                "TE visualization is available only in single-genome mode."
+                "Visualization is available only in single-genome mode."
             )
         else:
             self._hint.setText(

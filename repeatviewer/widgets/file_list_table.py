@@ -716,7 +716,7 @@ class FileListTableWidget(QTableWidget):
                                 lambda: self.separate_fasta_subfolders_requested.emit(path),
                             )
                             menu.addAction(
-                                "Extract sequences from list…",
+                                "Extract Sequences from File…",
                                 lambda p=path: self.extract_sequences_requested.emit(p),
                             )
                         blast_txt = find_blast_table_for_query(path)
@@ -788,7 +788,7 @@ class FileListTableWidget(QTableWidget):
             if len(fasta_paths) > 1:
                 menu.addSeparator()
                 menu.addAction(
-                    f"Combine {len(fasta_paths)} sequence to one file",
+                    f"Combine {len(fasta_paths)} Sequences to One File",
                     lambda ps=list(fasta_paths): self.group_sequences_requested.emit(ps),
                 )
             menu.exec(self.mapToGlobal(position))

@@ -166,3 +166,22 @@ def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
     s.setValue(f"{prefix}orf_min_length", orf.min_length)
     s.setValue(f"{prefix}orf_max_length", orf.max_length)
     s.setValue(f"{prefix}orf_alt_starts", orf.alternative_start_codons.strip())
+
+
+def load_orf_prediction_settings() -> OrfSettings:
+    """ORF settings for Sequence → ORF Prediction (separate from TE annotation)."""
+    s = QSettings()
+    prefix = "orf_prediction/"
+    return OrfSettings(
+        min_length=_get_int(s, f"{prefix}min_length", 30),
+        max_length=_get_int(s, f"{prefix}max_length", 10_000),
+        alternative_start_codons=str(s.value(f"{prefix}alt_starts", "") or ""),
+    )
+
+
+def save_orf_prediction_settings(settings: OrfSettings) -> None:
+    s = QSettings()
+    prefix = "orf_prediction/"
+    s.setValue(f"{prefix}min_length", settings.min_length)
+    s.setValue(f"{prefix}max_length", settings.max_length)
+    s.setValue(f"{prefix}alt_starts", settings.alternative_start_codons.strip())

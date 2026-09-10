@@ -92,8 +92,8 @@ DEFAULT_TOOLBAR_ORDER: list[str] = [
 TOOLBAR_LABELS: dict[str, str] = {
     "define_genome": "Define genome",
     "new_sequence": "New Sequence…",
-    "group_sequences": "Group Sequences into a List…",
-    "extract_sequences": "Extract Sequences from List…",
+    "group_sequences": "Combine Sequences to One File",
+    "extract_sequences": "Extract Sequences from File",
     "reverse_complement": "Reverse Complement",
     "orf_prediction": "ORF Prediction",
     "translate": "Translate",

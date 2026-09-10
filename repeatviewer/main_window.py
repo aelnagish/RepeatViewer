@@ -349,6 +349,7 @@ from repeatviewer.views.tool_dialogs import (
     FlexidotParamsDialog,
     TeAnnotationDialog,
     batch_options_from_te_annotation_job,
+    OrfPredictionParamsDialog,
     MsaCleanParamsDialog,
     TeaAidParamsDialog,
     TsdSearchParamsDialog,
@@ -461,8 +462,8 @@ _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 _TOOLBAR_TOOLTIPS = {
     "define_genome": "Set or change the project reference genome FASTA",
     "new_sequence": "Create a new empty sequence FASTA",
-    "group_sequences": "Combine selected sequences into one list FASTA",
-    "extract_sequences": "Extract selected records from a list FASTA",
+    "group_sequences": "Combine selected sequences into one FASTA file",
+    "extract_sequences": "Extract selected records from a FASTA file",
     "reverse_complement": "Reverse-complement selected FASTA sequences",
     "orf_prediction": "Predict ORFs in selected FASTA sequences",
     "translate": "Translate selected DNA FASTA to protein",
@@ -486,7 +487,7 @@ _TOOLBAR_TOOLTIPS = {
 _JOB_DISPLAY_TITLES = {
     "teaid": "TEAid",
     "blast": "Blast",
-    "extend": "Extend",
+    "extend": "MSA Extend",
     "msa_clean": "MSA clean",
     "msa_clean_gappy": "MSA remove gappy columns",
     "msa_clean_div": "Clean row with divergence",
@@ -1489,6 +1490,11 @@ class MainWindow(QMainWindow):
         self._consensus_options = load_consensus_options()
         self._flexidot_options = load_flexidot_options()
         self._te_annotation_options = load_te_annotation_options()
+        from repeatviewer.backends.auto_annotation_settings import (
+            load_orf_prediction_settings,
+        )
+
+        self._orf_prediction_settings = load_orf_prediction_settings()
         self._te_confusion_benchmark_options = load_te_confusion_matrix_benchmark_options()
         self._te_library_benchmark_options = load_te_library_benchmark_options()
         self.database_index_runner = DatabaseIndexRunner(self)
@@ -2412,15 +2418,15 @@ class MainWindow(QMainWindow):
         if len(files) < 2:
             QMessageBox.information(
                 self,
-                "Group sequences",
-                "Select two or more FASTA files to group into one list.",
+                "Combine Sequences to One File",
+                "Select two or more FASTA files to combine into one file.",
             )
             return
         default_name = default_group_name(files)
         dialog = QInputDialog(self)
-        dialog.setWindowTitle("Combine sequence to one file")
+        dialog.setWindowTitle("Combine Sequences to One File")
         dialog.setLabelText(
-            f"Combine {len(files)} sequence to one file.\n\nName for the new file:"
+            f"Combine {len(files)} sequences to one file.\n\nName for the new file:"
         )
         dialog.setTextValue(default_name)
         dialog.setInputMode(QInputDialog.InputMode.TextInput)
@@ -2437,7 +2443,7 @@ class MainWindow(QMainWindow):
         try:
             written, count = group_sequences(files, out_path)
         except SequenceComposeError as exc:
-            QMessageBox.warning(self, "Combine sequences", str(exc))
+            QMessageBox.warning(self, "Combine Sequences to One File", str(exc))
             return
         self._refresh_after_compose(
             [written], f"Combined {count} sequences into {written.name}"
@@ -2466,7 +2472,7 @@ class MainWindow(QMainWindow):
         if len(files) != 1:
             QMessageBox.information(
                 self,
-                "Extract sequences",
+                "Extract Sequences from File",
                 "Select one FASTA file containing several sequences.",
             )
             return
@@ -2474,12 +2480,12 @@ class MainWindow(QMainWindow):
         try:
             records = list_records(source)
         except SequenceComposeError as exc:
-            QMessageBox.warning(self, "Extract sequences", str(exc))
+            QMessageBox.warning(self, "Extract Sequences from File", str(exc))
             return
         if len(records) < 2:
             QMessageBox.information(
                 self,
-                "Extract sequences",
+                "Extract Sequences from File",
                 f"{source.name} contains a single sequence; there is nothing to extract.",
             )
             return
@@ -2498,7 +2504,7 @@ class MainWindow(QMainWindow):
                 combined_name=f"{source.stem}_extracted",
             )
         except SequenceComposeError as exc:
-            QMessageBox.warning(self, "Extract sequences", str(exc))
+            QMessageBox.warning(self, "Extract Sequences from File", str(exc))
             return
         names = ", ".join(p.name for p in written[:4])
         if len(written) > 4:
@@ -2514,7 +2520,7 @@ class MainWindow(QMainWindow):
         if not skip_default:
             menu.addAction("Run FastGA with default parameters", self._run_fastga_default)
         menu.addSeparator()
-        menu.addAction("Change FastGA parameters…", self._open_fastga_dialog)
+        menu.addAction("Change FastGA parameters", self._open_fastga_dialog)
 
     def _selected_files_for_fastga(self) -> list[Path]:
         from repeatviewer.backends.fastga_dotplot import fastga_available, install_hint
@@ -2712,9 +2718,9 @@ class MainWindow(QMainWindow):
 
     def _populate_extend_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("Extend with default parameters", self._run_extend)
+            menu.addAction("MSA Extend with default parameters", self._run_extend)
         menu.addSeparator()
-        menu.addAction("Change extension parameters…", self._modify_extend_parameters)
+        menu.addAction("Change MSA Extend parameters", self._modify_extend_parameters)
 
     def _populate_tsd_search_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -2754,13 +2760,25 @@ class MainWindow(QMainWindow):
         if not skip_default:
             menu.addAction("Consensus with default parameters", self._run_consensus)
         menu.addSeparator()
-        menu.addAction("Change consensus parameters…", self._modify_consensus_parameters)
+        menu.addAction("Change consensus parameters", self._modify_consensus_parameters)
 
     def _populate_flexidot_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("Flexidot with default parameters", self._run_flexidot_combined)
         menu.addSeparator()
-        menu.addAction("Change Flexidot parameters…", self._modify_flexidot_parameters)
+        menu.addAction("Change Flexidot parameters", self._modify_flexidot_parameters)
+
+    def _populate_orf_prediction_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction(
+                "ORF Prediction with default parameters",
+                self._run_orf_prediction,
+            )
+        menu.addSeparator()
+        menu.addAction(
+            "Change ORF Prediction parameters",
+            self._modify_orf_prediction_parameters,
+        )
 
     def _populate_te_annotation_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -2770,7 +2788,7 @@ class MainWindow(QMainWindow):
             )
         menu.addSeparator()
         menu.addAction(
-            "Change TE annotation parameters…",
+            "Change TE annotation parameters",
             self._modify_te_annotation_parameters,
         )
 
@@ -2798,20 +2816,20 @@ class MainWindow(QMainWindow):
 
         seq_menu = self.menuBar().addMenu("&Sequence")
         seq_menu.addAction("New Sequence…", self._new_sequence)
-        seq_menu.addAction("Group Sequences into a List…", self._group_sequences)
-        seq_menu.addAction("Extract Sequences from List…", self._extract_sequences_from_list)
+        seq_menu.addAction("Combine Sequences to One File…", self._group_sequences)
+        seq_menu.addAction("Extract Sequences from File…", self._extract_sequences_from_list)
         seq_menu.addSeparator()
         seq_menu.addAction(
             "Reverse Complement",
             lambda: self._apply_function("reverse_complement"),
         )
-        seq_menu.addAction(
-            "ORF Prediction",
-            lambda: self._apply_function("orf_prediction"),
-        )
+        self._populate_orf_prediction_menu(seq_menu.addMenu("ORF &Prediction"))
         seq_menu.addAction(
             "Translate",
-            lambda: self._apply_function("dna_translation"),
+            lambda: self._apply_function(
+                "dna_translation",
+                orf_prediction_settings=self._orf_prediction_settings,
+            ),
         )
 
         tools_menu = self.menuBar().addMenu("&Tools")
@@ -2820,7 +2838,7 @@ class MainWindow(QMainWindow):
         self._populate_blast_menu(tools_menu.addMenu("&Blast"))
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_fastga_menu(tools_menu.addMenu("Fast&GA"))
-        self._populate_extend_menu(tools_menu.addMenu("&Extend"))
+        self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(tools_menu.addMenu("&TEAid"))
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &clean"))
@@ -2828,7 +2846,7 @@ class MainWindow(QMainWindow):
         self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
         self._populate_te_annotation_menu(tools_menu.addMenu("TE &annotation"))
         tools_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
-        self._populate_te_visualization_menu(tools_menu.addMenu("TE &visualization"))
+        self._populate_te_visualization_menu(tools_menu.addMenu("&Visualization"))
         self._populate_benchmarking_menu(tools_menu.addMenu("&Benchmarking"))
 
         plugins_menu = self.menuBar().addMenu("&Plugins")
@@ -3419,7 +3437,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "group_sequences":
             self._add_toolbar_text_action(
                 bar,
-                "Group Sequences…",
+                "Combine Sequences…",
                 self._group_sequences,
                 job_action=False,
                 tooltip=tip,
@@ -3440,17 +3458,24 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
             )
         elif tool_id == "orf_prediction":
-            self._add_toolbar_text_action(
+            self._add_toolbar_action_button(
                 bar,
                 "ORF Prediction",
-                lambda: self._apply_function("orf_prediction"),
-                tooltip=tip,
+                self._open_orf_prediction_dialog,
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: run with saved parameters."
+                ),
+                right_click_slot=self._run_orf_prediction,
             )
         elif tool_id == "translate":
             self._add_toolbar_text_action(
                 bar,
                 "Translate",
-                lambda: self._apply_function("dna_translation"),
+                lambda: self._apply_function(
+                    "dna_translation",
+                    orf_prediction_settings=self._orf_prediction_settings,
+                ),
                 tooltip=tip,
             )
         elif tool_id == "aliview":
@@ -5441,14 +5466,14 @@ class MainWindow(QMainWindow):
             if not fasta_path.is_file():
                 QMessageBox.warning(
                     self,
-                    "TE visualization",
+                    "Visualization",
                     f"TE consensus file not found:\n{fasta_path}",
                 )
                 return None
             if not self._is_fasta_file(fasta_path):
                 QMessageBox.warning(
                     self,
-                    "TE visualization",
+                    "Visualization",
                     "Each TE consensus input must be a FASTA file (.fasta / .fa / .fna).",
                 )
                 return None
@@ -5476,14 +5501,14 @@ class MainWindow(QMainWindow):
             if meth_path is None or not meth_path.is_file():
                 QMessageBox.warning(
                     self,
-                    "TE visualization",
+                    "Visualization",
                     f"DNA methylation file not found:\n{meth_path}",
                 )
                 return None
             if not is_bismark_cov_file(meth_path):
                 QMessageBox.warning(
                     self,
-                    "TE visualization",
+                    "Visualization",
                     "Each DNA methylation input must be a Bismark coverage file "
                     "(*.cov or *.cov.gz).",
                 )
@@ -5561,7 +5586,7 @@ class MainWindow(QMainWindow):
         if not hit_paths:
             QMessageBox.warning(
                 self,
-                "TE visualization",
+                "Visualization",
                 "Select at least one RepeatMasker .out or BLAST hit table.",
             )
             return None
@@ -5570,14 +5595,14 @@ class MainWindow(QMainWindow):
             if hit_path is None or not hit_path.is_file():
                 QMessageBox.warning(
                     self,
-                    "TE visualization",
+                    "Visualization",
                     f"TE input file not found:\n{hit_path}",
                 )
                 return None
             if not is_te_hit_table_file(hit_path):
                 QMessageBox.warning(
                     self,
-                    "TE visualization",
+                    "Visualization",
                     "Each TE input must be a RepeatMasker .out file or BLAST hit table (*_blast.txt).",
                 )
                 return None
@@ -5591,14 +5616,14 @@ class MainWindow(QMainWindow):
         if not gene_path.is_file():
             QMessageBox.warning(
                 self,
-                "TE visualization",
+                "Visualization",
                 f"Annotation file not found:\n{gene_path}",
             )
             return None
         if not is_gene_annotation_file(gene_path):
             QMessageBox.warning(
                 self,
-                "TE visualization",
+                "Visualization",
                 "Annotation input must be a GFF, GFF3, GTF, BED, or VCF file.",
             )
             return None
@@ -5608,14 +5633,14 @@ class MainWindow(QMainWindow):
         if hit_path is None or not hit_path.is_file():
             QMessageBox.warning(
                 self,
-                "TE visualization",
+                "Visualization",
                 "Select a RepeatMasker .out or BLAST hit table.",
             )
             return None
         if not is_te_hit_table_file(hit_path):
             QMessageBox.warning(
                 self,
-                "TE visualization",
+                "Visualization",
                 "Input must be a RepeatMasker .out file or BLAST hit table (*_blast.txt).",
             )
             return None
@@ -5785,6 +5810,7 @@ class MainWindow(QMainWindow):
             initial=self._align_options,
             use_system_mafft=self._project.use_system_mafft,
             use_system_muscle=self._project.use_system_muscle,
+            for_run=False,
             parent=self,
         )
         accepted = False
@@ -5943,7 +5969,12 @@ class MainWindow(QMainWindow):
             self._set_status_message("BLAST settings saved", 4000)
 
     def _change_blast_parameters(self) -> None:
-        dialog = BlastParamsDialog(project=self._project, initial=self._blast_options, parent=self)
+        dialog = BlastParamsDialog(
+            project=self._project,
+            initial=self._blast_options,
+            for_run=False,
+            parent=self,
+        )
         try:
             if dialog.exec():
                 self._blast_options = dialog.options()
@@ -6373,15 +6404,15 @@ class MainWindow(QMainWindow):
         if self._project.is_pan_genome_mode:
             QMessageBox.information(
                 self,
-                "TE visualization",
-                "TE visualization is available only in single-genome mode.\n\n"
+                "Visualization",
+                "Visualization is available only in single-genome mode.\n\n"
                 f"Switch to single genome under {self._genome_menu_hint()}.",
             )
             return
         if not self._project.genome_file or not self._project.genome_file.is_file():
             QMessageBox.warning(
                 self,
-                "TE visualization",
+                "Visualization",
                 f"Set the genome FASTA under {self._genome_menu_hint()} first.",
             )
             return
@@ -6390,7 +6421,7 @@ class MainWindow(QMainWindow):
         if not chrom_names:
             QMessageBox.warning(
                 self,
-                "TE visualization",
+                "Visualization",
                 "Could not read chromosome names from the genome FASTA.",
             )
             return
@@ -6428,7 +6459,7 @@ class MainWindow(QMainWindow):
             if not masking_files and not consensus_files and not gene_files and not methylation_files:
                 QMessageBox.warning(
                     self,
-                    "TE visualization",
+                    "Visualization",
                     "Provide at least one TE masking file, TE consensus FASTA, gene annotation, "
                     "or DNA methylation file.",
                 )
@@ -6906,7 +6937,7 @@ class MainWindow(QMainWindow):
         if run_after:
             self._run_extend()
         else:
-            self._set_status_message("Extend settings saved", 4000)
+            self._set_status_message("MSA Extend settings saved", 4000)
 
     def _quick_extend_right_click(self) -> None:
         """Right-click MSA Extend: run with saved settings, or open the dialog."""
@@ -6988,6 +7019,7 @@ class MainWindow(QMainWindow):
             pan_genome_names=self._pan_genome_names(),
             project_genome=self._genome_path_resolved(),
             genome_history=load_genome_history(),
+            for_run=False,
             parent=self,
         )
         if dialog.exec():
@@ -6997,7 +7029,7 @@ class MainWindow(QMainWindow):
             if self._extend_options.pan_genome_name:
                 genome_note = f", genome {self._extend_options.pan_genome_name}"
             self._set_status_message(
-                f"Extend defaults: {self._extend_options.left} bp left, "
+                f"MSA Extend defaults: {self._extend_options.left} bp left, "
                 f"{self._extend_options.right} bp right{genome_note}",
                 5000,
             )
@@ -7023,7 +7055,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Genome required",
-                f"Define genome FASTA under {self._genome_menu_hint()} before running Extend.",
+                f"Define genome FASTA under {self._genome_menu_hint()} before running MSA Extend.",
             )
             return
         seq_files = [
@@ -7048,7 +7080,7 @@ class MainWindow(QMainWindow):
         opts = dialog.options()
         answer = QMessageBox.question(
             self,
-            "Confirm Extend",
+            "Confirm MSA Extend",
             f"Extend {len(seq_files)} sequence file(s) by {opts.left} bp (left) "
             f"and {opts.right} bp (right)?\n\n"
             f"Output names will include _L{opts.left}_R{opts.right}.",
@@ -7095,6 +7127,7 @@ class MainWindow(QMainWindow):
     def _modify_consensus_parameters(self) -> None:
         dialog = ConsensusParamsDialog(
             initial=self._consensus_options,
+            for_run=False,
             parent=self,
         )
         if dialog.exec():
@@ -7263,6 +7296,57 @@ class MainWindow(QMainWindow):
         else:
             self._run_te_annotation_saved()
 
+    def _run_orf_prediction(self) -> None:
+        self._apply_function(
+            "orf_prediction",
+            orf_prediction_settings=self._orf_prediction_settings,
+        )
+
+    def _open_orf_prediction_dialog(self) -> None:
+        """Toolbar left-click: settings with Run."""
+        from repeatviewer.backends.auto_annotation_settings import (
+            save_orf_prediction_settings,
+        )
+
+        dialog = OrfPredictionParamsDialog(
+            initial=self._orf_prediction_settings,
+            for_run=True,
+            parent=self,
+        )
+        try:
+            if not exec_modal_dialog(dialog):
+                return
+            self._orf_prediction_settings = dialog.options()
+            save_orf_prediction_settings(self._orf_prediction_settings)
+            self._persist_workspace()
+            run_after = dialog.should_run()
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+        if run_after:
+            self._run_orf_prediction()
+        else:
+            self._set_status_message("ORF Prediction settings saved", 4000)
+
+    def _modify_orf_prediction_parameters(self) -> None:
+        from repeatviewer.backends.auto_annotation_settings import (
+            save_orf_prediction_settings,
+        )
+
+        dialog = OrfPredictionParamsDialog(
+            initial=self._orf_prediction_settings,
+            for_run=False,
+            parent=self,
+        )
+        try:
+            if not exec_modal_dialog(dialog):
+                return
+            self._orf_prediction_settings = dialog.options()
+            save_orf_prediction_settings(self._orf_prediction_settings)
+            self._persist_workspace()
+            self._set_status_message("ORF Prediction parameters updated", 5000)
+        finally:
+            QTimer.singleShot(0, self._repair_browser_chrome)
+
     def _run_te_annotation(self) -> None:
         """Tools menu default entry: run with saved selection."""
         self._run_te_annotation_saved()
@@ -7270,6 +7354,7 @@ class MainWindow(QMainWindow):
     def _modify_te_annotation_parameters(self) -> None:
         dialog = TeAnnotationDialog(
             initial=self._te_annotation_options,
+            for_run=False,
             parent=self,
         )
         try:
@@ -7287,6 +7372,7 @@ class MainWindow(QMainWindow):
     def _modify_flexidot_parameters(self) -> None:
         dialog = FlexidotParamsDialog(
             initial=self._flexidot_options,
+            for_run=False,
             parent=self,
         )
         if dialog.exec():

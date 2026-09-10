@@ -22,7 +22,7 @@ def test_reverse_complement_fasta(tmp_path: Path) -> None:
     output = write_reverse_complement_fasta(source)
 
     record = next(SeqIO.parse(output, "fasta"))
-    assert output.name == "input_reverse_complement.fa"
+    assert output.name == "input_rc.fa"
     assert str(record.seq) == "GCAT"
 
 
