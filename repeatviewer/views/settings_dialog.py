@@ -115,6 +115,19 @@ def _path_from_settings(value) -> Path | None:
     return Path(text).expanduser()
 
 
+def _bool_from_settings(value, default: bool = False) -> bool:
+    """Parse QSettings bools; string \"false\" must not become True via bool()."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _path_list_from_settings(value) -> list[str]:
     if value is None:
         return []
@@ -865,10 +878,12 @@ class SettingsDialog(QDialog):
             cdd_dirs=load_cdd_dirs_from_settings(s),
             user_databases=load_user_databases_from_settings(),
             blast_databases=load_blast_databases_from_settings(),
-            use_system_blast=bool(s.value("use_system_blast", False)),
-            use_system_mafft=bool(s.value("use_system_mafft", False)),
-            use_system_muscle=bool(s.value("use_system_muscle", False)),
-            use_system_sequence_viewer=bool(s.value("use_system_sequence_viewer", False)),
+            use_system_blast=_bool_from_settings(s.value("use_system_blast", False)),
+            use_system_mafft=_bool_from_settings(s.value("use_system_mafft", False)),
+            use_system_muscle=_bool_from_settings(s.value("use_system_muscle", False)),
+            use_system_sequence_viewer=_bool_from_settings(
+                s.value("use_system_sequence_viewer", False)
+            ),
             batch_workers=int(s.value("batch_workers", 4)),
         )
         s.endGroup()

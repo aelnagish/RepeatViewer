@@ -888,7 +888,12 @@ class AlignParamsDialog(QDialog):
         self._options_tab_index = self._aligner_tabs.count() - 1
 
         self._close_action = "cancel"
-        self._button_box = make_cancel_save_run_bar(self)
+        restore = QPushButton("Restore Defaults", self)
+        restore.clicked.connect(self._restore_defaults)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
@@ -998,7 +1003,40 @@ class AlignParamsDialog(QDialog):
         return self._use_system_mafft.isChecked()
 
     def use_system_muscle(self) -> bool:
-        return self._use_system_muscle.isChecked(        )
+        return self._use_system_muscle.isChecked()
+
+    def _restore_defaults(self) -> None:
+        """Reset MAFFT/MUSCLE options and use bundled binaries (not system PATH)."""
+        defaults = AlignOptions()
+        strategy_idx = self._strategy.findData(defaults.strategy)
+        if strategy_idx >= 0:
+            self._strategy.setCurrentIndex(strategy_idx)
+        seq_idx = self._sequence_type.findData(defaults.sequence_type)
+        if seq_idx >= 0:
+            self._sequence_type.setCurrentIndex(seq_idx)
+        self._threads.setValue(max(1, defaults.num_threads))
+        self._custom_retree = defaults.retree
+        self._custom_max_iterate = defaults.max_iterate
+        self._retree.setValue(defaults.retree)
+        self._max_iterate.setValue(defaults.max_iterate)
+        self._gap_open.setValue(defaults.gap_open_penalty)
+        self._offset.setValue(defaults.offset)
+        self._reorder.setChecked(defaults.reorder)
+        self._adjust_direction.setChecked(defaults.adjust_direction)
+        self._mafft_combined.setChecked(defaults.mafft_combined)
+
+        muscle_idx = self._muscle_mode.findData(defaults.muscle_mode)
+        if muscle_idx >= 0:
+            self._muscle_mode.setCurrentIndex(muscle_idx)
+        self._muscle_threads.setValue(max(1, defaults.muscle_num_threads))
+        self._muscle_combined.setChecked(defaults.muscle_combined)
+
+        for value, radio in self._right_click_buttons.items():
+            radio.setChecked(value == defaults.right_click_aligner)
+        # Default: bundled MAFFT / MUSCLE binaries, not system PATH.
+        self._use_system_mafft.setChecked(False)
+        self._use_system_muscle.setChecked(False)
+        self._sync_controls()
 
 
 class NewSequenceDialog(QDialog):
