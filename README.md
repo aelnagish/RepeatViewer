@@ -119,6 +119,16 @@ powershell -ExecutionPolicy Bypass -File packaging/windows/build_windows.ps1
 
 See [packaging/windows/README.md](packaging/windows/README.md). End users unzip and run **RepeatViewer.exe**. For RepeatMasker / FastGA, install them in a WSL2 conda env and set that env under **File → Setting → External tools (conda / WSL2)**.
 
+### Linux tarball
+
+Build on a **Linux** machine (matching target arch: `x86_64` or `aarch64`):
+
+```bash
+bash packaging/linux/build_linux.sh
+```
+
+See [packaging/linux/README.md](packaging/linux/README.md). End users unpack the `.tar.gz` and run `./RepeatViewer`. Optional conda tools: **File → Setting → External tools (conda)**.
+
 Open a folder and genome immediately:
 
 ```bash
