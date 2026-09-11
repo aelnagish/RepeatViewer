@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -520,13 +521,28 @@ class SettingsDialog(QDialog):
         # External tools via conda (RepeatMasker, FastGA, bedtools, …)
         self._conda_tools_env = QLineEdit(load_conda_tools_env())
         self._conda_tools_env.setMinimumWidth(_PATH_FIELD_MIN_WIDTH)
-        self._conda_tools_env.setPlaceholderText("env name or path, e.g. tetrimmer")
-        self._conda_tools_env.setToolTip(
-            "Conda/mamba environment that provides external CLI tools "
-            "(RepeatMasker, FastGA, bedtools, …).\n"
-            "Enter the env name, or browse to the env folder "
-            "(…/envs/your_env). Leave empty to use only the system PATH."
-        )
+        if sys.platform == "win32":
+            self._conda_tools_env.setPlaceholderText(
+                "WSL2 env name or path, e.g. tetrimmer"
+            )
+            self._conda_tools_env.setToolTip(
+                "Conda/mamba environment inside WSL2 that provides external CLI tools "
+                "(RepeatMasker, FastGA, bedtools, …).\n"
+                "Enter the env name (e.g. tetrimmer), a Linux path "
+                "(~/miniconda3/envs/tetrimmer), or Browse under \\\\wsl$\\…\n"
+                "Leave empty to use only the Windows PATH. Bundled BLAST/MAFFT/MUSCLE "
+                "stay on Windows; only Linux conda tools go through WSL."
+            )
+            conda_browse_title = "Choose WSL conda env (\\\\wsl$\\…) or Windows conda folder"
+        else:
+            self._conda_tools_env.setPlaceholderText("env name or path, e.g. tetrimmer")
+            self._conda_tools_env.setToolTip(
+                "Conda/mamba environment that provides external CLI tools "
+                "(RepeatMasker, FastGA, bedtools, …).\n"
+                "Enter the env name, or browse to the env folder "
+                "(…/envs/your_env). Leave empty to use only the system PATH."
+            )
+            conda_browse_title = "Choose conda environment folder"
         self._conda_tools_env.textChanged.connect(self._refresh_conda_tools_status)
         self._conda_tools_status = QLabel()
         self._conda_tools_status.setWordWrap(True)
@@ -627,14 +643,17 @@ class SettingsDialog(QDialog):
             self._conda_tools_env,
             parent=self,
             is_dir=True,
-            browse_title="Choose conda environment folder",
+            browse_title=conda_browse_title,
             on_changed=self._refresh_conda_tools_status,
         )
-        conda_tools = _group("External tools (conda)", [
-            ("Conda env name or path:", conda_tools_field),
-            ("", self._conda_tools_status),
-            ("", self._conda_test_btn),
-        ])
+        conda_tools = _group(
+            "External tools (conda / WSL2)" if sys.platform == "win32" else "External tools (conda)",
+            [
+                ("Conda env name or path:", conda_tools_field),
+                ("", self._conda_tools_status),
+                ("", self._conda_test_btn),
+            ],
+        )
         diagnostics = _group("Diagnostics", [
             ("Verbose logging:", self._verbose_logging),
             ("", self._open_log_btn),

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import shutil
 from pathlib import Path
 from typing import Callable
 
@@ -45,7 +44,9 @@ def load_calculate_overlap(tetrimmer_home: Path) -> Callable:
 
 
 def require_bedtools() -> None:
-    if not shutil.which("bedtools"):
+    from repeatviewer.conda_tools import which_tool
+
+    if not which_tool("bedtools"):
         raise RuntimeError(
             "bedtools is not on PATH. Install BEDtools (required by TE_anno_benchmarker)."
         )

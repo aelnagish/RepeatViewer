@@ -21,8 +21,8 @@ with FastGA's ``ALNtoPAF`` first.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
+import sys
 from repeatviewer.external_process import run_logged_process
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,7 +91,9 @@ def is_aln_file(path: Path) -> bool:
 
 
 def alntopaf_executable() -> str | None:
-    return shutil.which("ALNtoPAF")
+    from repeatviewer.conda_tools import which_tool
+
+    return which_tool("ALNtoPAF")
 
 
 def convert_aln_to_paf(path: Path, out_path: Path | None = None) -> Path:
@@ -101,6 +103,7 @@ def convert_aln_to_paf(path: Path, out_path: Path | None = None) -> Path:
         raise PafError(
             ".1aln is a binary format and needs FastGA's ALNtoPAF to read.\n\n"
             "Install FastGA with:  conda install -c bioconda fastga"
+            + (" (in WSL2 on Windows)" if sys.platform == "win32" else "")
         )
     source = path.expanduser().resolve()
     target = out_path or source.with_suffix(".paf")

@@ -6,6 +6,7 @@ import subprocess
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Iterable
 
 from repeatviewer.external_process import log_command
@@ -96,8 +97,13 @@ def run_subprocess_with_cancel(
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess, polling for user cancellation and terminating it on stop."""
-    command = list(cmd)
-    tool = command[0].rsplit("/", 1)[-1] if command else "external"
+    from repeatviewer.conda_tools import prepare_command
+
+    command = prepare_command(list(cmd))
+    tool = Path(command[0]).name if command else "external"
+    # Prefer the real tool name when wrapped as wsl … bash -lc '… exec Tool …'
+    if tool in {"bash", "wsl"} and len(command) >= 2:
+        tool = Path(str(list(cmd)[0])).name if list(cmd) else tool
     log_command(tool, command)
     proc = subprocess.Popen(
         command,
