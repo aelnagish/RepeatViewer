@@ -78,6 +78,9 @@ pip install -e .
 |---------|------|
 | Reference **genome FASTA** | BLAST, extend, genome maps, TEAid genome tracks |
 | **AliView** | Open selected FASTA externally (**Sequence → Open in AliView**) |
+| **RepeatMasker / FastGA / bedtools** | Optional CLIs from a conda env |
+
+For conda-installed tools, set **File → Setting → External tools (conda)** to an env name (e.g. `tetrimmer`) or the env folder path. RepeatViewer prepends that env’s `bin` to `PATH` (useful for the packed `.app`, which otherwise misses conda).
 
 Flexidot (with HTML output and RepeatViewer integration) is installed as a dependency of `pip install -e .`.
 
@@ -92,6 +95,16 @@ Or from the repository root:
 ```bash
 python RepeatViewer.py
 ```
+
+### macOS DMG (double-click app)
+
+Build a `RepeatViewer.app` and `.dmg` (Apple Silicon or Intel, matching the build Mac):
+
+```bash
+bash packaging/macos/build_macos_dmg.sh
+```
+
+See [packaging/macos/README.md](packaging/macos/README.md). End users open the DMG and drag **RepeatViewer** to Applications. Unsigned builds may need **right-click → Open** the first time.
 
 Open a folder and genome immediately:
 

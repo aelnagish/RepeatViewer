@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -63,6 +64,12 @@ from repeatviewer.app_preferences import (
     save_restore_geometry,
     save_ui_thread_reserve,
     save_verbose_logging,
+)
+from repeatviewer.conda_tools import (
+    apply_conda_tools_path,
+    describe_conda_tools_status,
+    load_conda_tools_env,
+    save_conda_tools_env,
 )
 from repeatviewer.ui.theme_mode import (
     DEFAULT_ACCENT_COLOR,
@@ -322,9 +329,17 @@ def _path_browse_row(
     on_changed=None,
 ) -> QWidget:
     container = QWidget(parent)
+    container.setSizePolicy(
+        QSizePolicy.Policy.Expanding,
+        QSizePolicy.Policy.Fixed,
+    )
     layout = QHBoxLayout(container)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(6)
+    line_edit.setSizePolicy(
+        QSizePolicy.Policy.Expanding,
+        QSizePolicy.Policy.Fixed,
+    )
     layout.addWidget(line_edit, stretch=1)
 
     def browse() -> None:
@@ -348,6 +363,10 @@ def _path_browse_row(
                     on_changed()
 
     browse_btn = QPushButton("Browse", container)
+    browse_btn.setSizePolicy(
+        QSizePolicy.Policy.Fixed,
+        QSizePolicy.Policy.Fixed,
+    )
     browse_btn.clicked.connect(browse)
     layout.addWidget(browse_btn)
     return container
@@ -363,6 +382,7 @@ def _section_label(text: str, parent: QWidget) -> QLabel:
 
 # Uniform column sizing so every field lines up across all groups.
 _FIELD_WIDTH = 170
+_PATH_FIELD_MIN_WIDTH = 320
 _LABEL_WIDTH = 200
 
 
@@ -379,7 +399,7 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(720)
         self.setMinimumHeight(420)
         self._project = project
         self._settings = QSettings()
@@ -493,8 +513,28 @@ class SettingsDialog(QDialog):
 
         # BLAST databases
         self._blast_db_base_dir = QLineEdit(str(load_blast_db_base_dir()))
+        self._blast_db_base_dir.setMinimumWidth(_PATH_FIELD_MIN_WIDTH)
         self._open_blast_db_btn = QPushButton("Open BLAST databases folder")
         self._open_blast_db_btn.clicked.connect(self._open_blast_db_folder)
+
+        # External tools via conda (RepeatMasker, FastGA, bedtools, …)
+        self._conda_tools_env = QLineEdit(load_conda_tools_env())
+        self._conda_tools_env.setMinimumWidth(_PATH_FIELD_MIN_WIDTH)
+        self._conda_tools_env.setPlaceholderText("env name or path, e.g. tetrimmer")
+        self._conda_tools_env.setToolTip(
+            "Conda/mamba environment that provides external CLI tools "
+            "(RepeatMasker, FastGA, bedtools, …).\n"
+            "Enter the env name, or browse to the env folder "
+            "(…/envs/your_env). Leave empty to use only the system PATH."
+        )
+        self._conda_tools_env.textChanged.connect(self._refresh_conda_tools_status)
+        self._conda_tools_status = QLabel()
+        self._conda_tools_status.setWordWrap(True)
+        self._conda_tools_status.setStyleSheet("color: palette(mid);")
+        self._conda_test_btn = QPushButton("Test")
+        self._conda_test_btn.setToolTip("Check whether the env resolves and which tools are visible.")
+        self._conda_test_btn.clicked.connect(self._on_test_conda_tools)
+        self._refresh_conda_tools_status()
 
         # Diagnostics
         self._verbose_logging = QCheckBox()
@@ -529,7 +569,7 @@ class SettingsDialog(QDialog):
             box = QGroupBox(title)
             f = QFormLayout(box)
             f.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+            f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
             f.setHorizontalSpacing(10)
             f.setVerticalSpacing(8)
             for label, widget in rows:
@@ -541,27 +581,6 @@ class SettingsDialog(QDialog):
                     lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     f.addRow(lbl, widget)
             return box
-
-        def _row(*widgets: QWidget) -> QWidget:
-            holder = QWidget()
-            h = QHBoxLayout(holder)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(6)
-            for w in widgets:
-                h.addWidget(w)
-            h.addStretch()
-            return holder
-
-        def _center_row(*widgets: QWidget) -> QWidget:
-            holder = QWidget()
-            h = QHBoxLayout(holder)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(8)
-            h.addStretch()
-            for w in widgets:
-                h.addWidget(w)
-            h.addStretch()
-            return holder
 
         # Accent swatch + Reset together fill exactly one field width, so Reset's
         # right edge lines up with the combos above/below.
@@ -581,7 +600,7 @@ class SettingsDialog(QDialog):
             ("Use system sequence viewer:", self._system_viewer),
             ("Color-blind nucleotide:", self._color_blind_scheme),
         ])
-        files_preview = _group("Files & preview", [
+        files_preview = _group("Files && preview", [
             ("Folders / Files font:", self._browser_panel_font),
             ("Default preview zoom:", self._preview_zoom),
             ("Default preview fit:", self._preview_fit),
@@ -602,20 +621,26 @@ class SettingsDialog(QDialog):
                 is_dir=True,
                 browse_title="Choose BLAST databases folder",
             )),
-            (None, _center_row(self._open_blast_db_btn)),
+            ("", self._open_blast_db_btn),
         ])
-        # 2x2 grid keeps the four buttons compact so the dialog stays narrow.
-        for _btn in (
-            self._clear_cache_btn,
-            self._open_log_btn,
-            self._open_config_btn,
-            self._copy_diag_btn,
-        ):
-            _btn.setFixedWidth(150)
+        conda_tools_field = _path_browse_row(
+            self._conda_tools_env,
+            parent=self,
+            is_dir=True,
+            browse_title="Choose conda environment folder",
+            on_changed=self._refresh_conda_tools_status,
+        )
+        conda_tools = _group("External tools (conda)", [
+            ("Conda env name or path:", conda_tools_field),
+            ("", self._conda_tools_status),
+            ("", self._conda_test_btn),
+        ])
         diagnostics = _group("Diagnostics", [
             ("Verbose logging:", self._verbose_logging),
-            (None, _center_row(self._clear_cache_btn, self._open_log_btn)),
-            (None, _center_row(self._open_config_btn, self._copy_diag_btn)),
+            ("", self._open_log_btn),
+            ("", self._copy_diag_btn),
+            ("", self._clear_cache_btn),
+            ("", self._open_config_btn),
         ])
 
         content = QWidget()
@@ -629,6 +654,7 @@ class SettingsDialog(QDialog):
             performance,
             startup,
             blast_databases,
+            conda_tools,
             diagnostics,
         ):
             content_v.addWidget(box)
@@ -731,6 +757,9 @@ class SettingsDialog(QDialog):
         base_dir_text = self._blast_db_base_dir.text().strip()
         if base_dir_text:
             save_blast_db_base_dir(Path(base_dir_text))
+        conda_spec = self._conda_tools_env.text().strip()
+        save_conda_tools_env(conda_spec)
+        apply_conda_tools_path(conda_spec)
         self._save_settings()
         return self._project
 
@@ -798,6 +827,16 @@ class SettingsDialog(QDialog):
         folder = Path(text).expanduser() if text else load_blast_db_base_dir()
         folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _refresh_conda_tools_status(self) -> None:
+        self._conda_tools_status.setText(
+            describe_conda_tools_status(self._conda_tools_env.text())
+        )
+
+    def _on_test_conda_tools(self) -> None:
+        status = describe_conda_tools_status(self._conda_tools_env.text())
+        self._conda_tools_status.setText(status)
+        QMessageBox.information(self, "Conda tools", status)
 
     def _copy_diagnostics(self) -> None:
         import platform
