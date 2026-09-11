@@ -18,3 +18,4 @@ packaging/macos/*.iconset/
 .icon_test/
 tmp_icons/
 basics_github
+RM_*/
