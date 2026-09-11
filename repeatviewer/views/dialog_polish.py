@@ -34,14 +34,23 @@ _installed = False
 
 
 def polish_form_dialog(dialog: QDialog) -> None:
-    fields = list(dialog.findChildren(QComboBox)) + list(dialog.findChildren(QAbstractSpinBox))
-    if not fields:
-        return
+    def _explicitly_fixed(widget) -> bool:
+        # Honor widths already pinned by the dialog (e.g. Blast spin boxes at 150).
+        return widget.minimumWidth() > 0 and widget.minimumWidth() == widget.maximumWidth()
 
-    field_width = max([_MIN_FIELD_WIDTH] + [f.sizeHint().width() for f in fields])
-    field_width = min(field_width, _MAX_FIELD_WIDTH)
-    for field in fields:
-        field.setFixedWidth(field_width)
+    fields = [
+        widget
+        for widget in (
+            list(dialog.findChildren(QComboBox))
+            + list(dialog.findChildren(QAbstractSpinBox))
+        )
+        if not _explicitly_fixed(widget)
+    ]
+    if fields:
+        field_width = max([_MIN_FIELD_WIDTH] + [f.sizeHint().width() for f in fields])
+        field_width = min(field_width, _MAX_FIELD_WIDTH)
+        for field in fields:
+            field.setFixedWidth(field_width)
 
     labels: list[QLabel] = []
     for form in dialog.findChildren(QFormLayout):

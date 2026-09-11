@@ -259,7 +259,7 @@ def _find_blast_database(
                 raise RuntimeError(
                     f"BLAST database '{name}' is missing its index files "
                     f"(expected at {db.db_prefix_path}). Rebuild it in "
-                    "Add/Manage databases…."
+                    "Add/Manage databases."
                 )
             if molecule_type is not None and db.molecule_type != molecule_type:
                 expected = "protein" if molecule_type == "prot" else "nucleotide"

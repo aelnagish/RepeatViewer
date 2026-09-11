@@ -1816,7 +1816,11 @@ class BlastParamsDialog(QDialog):
         self._blastn_database = QComboBox()
         self._blastp_database = QComboBox()
         for combo in (self._blastn_database, self._blastp_database):
-            combo.setMinimumWidth(220)
+            combo.setMinimumWidth(260)
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(28)
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
@@ -1915,7 +1919,11 @@ class BlastParamsDialog(QDialog):
 
         # --- blastx: nucleotide query translated against a protein database ---
         self._blastx_database = QComboBox()
-        self._blastx_database.setMinimumWidth(220)
+        self._blastx_database.setMinimumWidth(260)
+        self._blastx_database.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._blastx_database.setMinimumContentsLength(28)
 
         self._blastx_evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._blastx_evalue)
@@ -2002,11 +2010,17 @@ class BlastParamsDialog(QDialog):
             self._blastp_gap_open,
             self._blastp_gap_extend,
             self._blastp_query_coverage,
+            self._blastx_evalue,
+            self._blastx_threads,
+            self._blastx_word_size,
+            self._blastx_gap_open,
+            self._blastx_gap_extend,
+            self._blastx_query_coverage,
             self._max_msa,
             self._top_msa,
             self._min_bit_score,
         ):
-            field.setFixedWidth(150)
+            field.setFixedWidth(260)
             field.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         blastn_tab = QWidget()
@@ -2066,9 +2080,11 @@ class BlastParamsDialog(QDialog):
         rc_box = QGroupBox("Right-click action", self)
         rc_box_layout = QVBoxLayout(rc_box)
         rc_box_layout.setSpacing(6)
-        rc_box_layout.addWidget(
-            QLabel("Right-clicking the BLAST button runs, with saved settings:", self)
+        rc_label = QLabel(
+            "Right-clicking the BLAST button runs, with saved settings:", self
         )
+        rc_label.setWordWrap(True)
+        rc_box_layout.addWidget(rc_label)
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
@@ -2143,6 +2159,12 @@ class BlastParamsDialog(QDialog):
         self._tabs.currentChanged.connect(self._update_postprocessing_visibility)
         self._update_postprocessing_visibility(self._tabs.currentIndex())
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # After dialog polish's adjustSize(), shrink to the active tab so the
+        # wider Options page does not leave blank space on BLASTn/p/x.
+        QTimer.singleShot(0, self._fit_to_content)
+
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
@@ -2156,7 +2178,7 @@ class BlastParamsDialog(QDialog):
         return form
 
     def _database_row(self, combo: QComboBox) -> QWidget:
-        manage = QPushButton("Add/Manage databases…")
+        manage = QPushButton("Add/Manage databases")
         manage.clicked.connect(self._manage_databases)
         row = QWidget()
         layout = QHBoxLayout(row)
@@ -2198,7 +2220,41 @@ class BlastParamsDialog(QDialog):
     def _update_postprocessing_visibility(self, tab_index: int) -> None:
         self._post_box.setVisible(tab_index == 0)
         if self.isVisible():
-            self.adjustSize()
+            QTimer.singleShot(0, self._fit_to_content)
+
+    def _fit_to_content(self) -> None:
+        """Size width/height to the active tab (not the widest tab page)."""
+        page = self._tabs.currentWidget()
+        if page is None or self.layout() is None:
+            return
+        page.ensurePolished()
+        page.adjustSize()
+        page_hint = page.sizeHint()
+        post_w = self._post_box.sizeHint().width() if self._post_box.isVisible() else 0
+        post_h = self._post_box.sizeHint().height() if self._post_box.isVisible() else 0
+        tab_chrome = max(24, self._tabs.tabBar().sizeHint().height()) + 8
+        buttons_h = self._button_box.sizeHint().height()
+        buttons_w = self._button_box.sizeHint().width()
+        margins = self.layout().contentsMargins()
+        spacing = max(0, self.layout().spacing())
+        gaps = 2 if self._post_box.isVisible() else 1
+        width = max(
+            420,
+            page_hint.width() + margins.left() + margins.right() + 24,
+            post_w + margins.left() + margins.right() + 24,
+            buttons_w + margins.left() + margins.right(),
+        )
+        height = (
+            page_hint.height()
+            + tab_chrome
+            + post_h
+            + buttons_h
+            + margins.top()
+            + margins.bottom()
+            + spacing * gaps
+            + 4
+        )
+        self.resize(width, height)
 
     def _populate_database_combo(
         self,
