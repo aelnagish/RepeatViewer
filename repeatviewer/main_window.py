@@ -390,6 +390,11 @@ from repeatviewer.backends.separate_fasta import (
     separation_output_dir,
 )
 from repeatviewer.views.genome_dialog import GenomeDialog, is_genome_fasta
+from repeatviewer.views.create_folder_dialog import (
+    DEFAULT_FOLDER_NAME,
+    CreateFolderDialog,
+    common_prefix_name,
+)
 from repeatviewer.views.define_database_dialog import DefineDatabaseDialog, resolve_panel_database_path
 from repeatviewer.views.settings_dialog import (
     SettingsDialog,
@@ -979,7 +984,7 @@ class FolderTreeWidget(QTreeWidget):
     clear_root_folders_requested = Signal(list)
     paste_to_folder_requested = Signal(Path)
     add_folder_requested = Signal()
-    create_folder_requested = Signal(Path)
+    create_folder_requested = Signal(object)  # Path | None
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1233,19 +1238,18 @@ class FolderTreeWidget(QTreeWidget):
 
         menu.addAction("Add Folder…", self.add_folder_requested.emit)
         if len(folders) == 1:
-            parent = folders[0]
-            menu.addAction(
-                "Create Folder…",
-                lambda f=parent: self.create_folder_requested.emit(f),
-            )
-        elif not folders:
+            suggested = folders[0]
+        else:
             window = self.window()
             current = getattr(window, "_current_folder", None)
-            if isinstance(current, Path) and current.is_dir():
-                menu.addAction(
-                    "Create Folder…",
-                    lambda f=current: self.create_folder_requested.emit(f),
-                )
+            suggested = current if isinstance(current, Path) and current.is_dir() else None
+        if len(folders) <= 1:
+            # The dialog picks the destination, so this is offered even with nothing
+            # selected — it falls back to the workspace roots.
+            menu.addAction(
+                "Create Folder…",
+                lambda f=suggested: self.create_folder_requested.emit(f),
+            )
 
         if folders:
             menu.addSeparator()
@@ -1612,6 +1616,9 @@ class MainWindow(QMainWindow):
             self._extract_sequences_from_list
         )
         self._file_list.group_sequences_requested.connect(self._group_sequences)
+        self._file_list.new_folder_with_files_requested.connect(
+            self._create_folder_with_files
+        )
         self._file_list.separate_fasta_requested.connect(self._separate_fasta_file)
         self._file_list.separate_fasta_subfolders_requested.connect(
             self._separate_fasta_to_subfolders_file,
@@ -2881,6 +2888,9 @@ class MainWindow(QMainWindow):
         add_folder_action = file_menu.addAction("Add &Folder…", self._pick_and_add_folder)
         add_folder_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
         add_folder_action.setStatusTip("Add a folder as a workspace root in the Folders panel")
+        new_folder_action = file_menu.addAction("New &Folder…", lambda: self._create_folder(None))
+        new_folder_action.setShortcut(QKeySequence("Ctrl+Shift+N"))
+        new_folder_action.setStatusTip("Create a folder inside the current workspace folder")
         file_menu.addSeparator()
         genome_action = file_menu.addAction("Define &genome", self._open_set_genome)
         genome_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
@@ -8051,28 +8061,95 @@ class MainWindow(QMainWindow):
         else:
             self._set_status_message(f"Opened {len(paths)} files in Preview", 5000)
 
-    def _create_folder(self, parent: Path | None = None) -> None:
-        parent_dir = parent.expanduser().resolve() if parent is not None else None
-        if parent_dir is None or not parent_dir.is_dir():
-            parent_dir = self._current_folder
-        if parent_dir is None or not parent_dir.is_dir():
+    def _folder_destination_candidates(self, preferred: Path | None) -> list[Path]:
+        """Destinations offered by the create-folder dialog, best guess first."""
+        candidates: list[Path | None] = [preferred, self._current_folder]
+        candidates.extend(self._workspace_root_folders())
+        out: list[Path] = []
+        for raw in candidates:
+            if not isinstance(raw, Path):
+                continue
+            folder = raw.expanduser()
+            try:
+                folder = folder.resolve()
+            except OSError:
+                continue
+            if folder.is_dir():
+                out.append(folder)
+        return out
+
+    def _create_folder(
+        self,
+        parent: Path | None = None,
+        *,
+        files: list[Path] | None = None,
+    ) -> None:
+        """Create a folder, optionally moving the selected files into it."""
+        if not isinstance(parent, Path):
+            parent = None
+        move_files = [p for p in (files or []) if isinstance(p, Path) and p.is_file()]
+        destinations = self._folder_destination_candidates(parent)
+        if not destinations:
             QMessageBox.warning(
                 self,
-                "Select folder",
-                "Right-click a parent folder in the Folders panel first.",
+                "No folder available",
+                "Add a folder to the Folders panel first (File → Add Folder).",
             )
             return
-        name, ok = QInputDialog.getText(self, "Create folder", "Folder name:")
-        if not ok or not name.strip():
+
+        default_name = common_prefix_name(move_files) if move_files else ""
+        dialog = CreateFolderDialog(
+            self,
+            destinations=destinations,
+            default_name=default_name or DEFAULT_FOLDER_NAME,
+            move_count=len(move_files),
+        )
+        if not exec_modal_dialog(dialog):
             return
-        new_dir = parent_dir / name.strip()
+        new_dir = dialog.target_path()
+        if new_dir is None:
+            return
+
         try:
-            new_dir.mkdir(parents=False, exist_ok=False)
-        except Exception as exc:  # noqa: BLE001
+            new_dir.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
             QMessageBox.critical(self, "Create folder failed", str(exc))
             return
-        self._refresh_tree()
-        self._on_folder_selected(parent_dir)
+
+        if move_files:
+            self._transfer_files(move_files, new_dir, mode="cut")
+
+        self._reveal_new_folder(new_dir)
+        if move_files:
+            noun = "file" if len(move_files) == 1 else "files"
+            self._set_status_message(
+                f"Created {new_dir.name} with {len(move_files)} {noun}",
+                7000,
+            )
+        else:
+            self._set_status_message(f"Created folder {new_dir.name}", 5000)
+
+    def _create_folder_with_files(self, files: list[Path]) -> None:
+        """Files-panel entry point: create a folder and move the selection into it."""
+        self._create_folder(self._current_folder, files=list(files))
+
+    def _reveal_new_folder(self, new_dir: Path) -> None:
+        """Select the folder that was just created, not its parent."""
+        # With a nested name (run3/monomers) the immediate parent is new too, so
+        # refresh from the nearest ancestor the tree actually knows about.
+        anchor: Path | None = None
+        for ancestor in new_dir.parents:
+            if self._find_tree_item_for_path(ancestor) is not None:
+                anchor = ancestor
+                break
+        if anchor is None:
+            # Created outside every workspace root — adopt it as one so it is reachable.
+            if self._find_tree_item_for_path(new_dir) is None:
+                self._add_root_folder(new_dir, unhide=True)
+            return
+        # Targeted refresh; a full _refresh_tree() rebuilds every root.
+        self._refresh_subfolders_under(anchor, keep_folder=new_dir)
+        self._navigate_to_folder(new_dir)
 
     def _copy_files_to_folder(self, target_dir: Path, files: list[Path]) -> None:
         self._transfer_files(files, target_dir, mode="copy")
