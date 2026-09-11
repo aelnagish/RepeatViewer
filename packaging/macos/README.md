@@ -26,10 +26,9 @@ Unsigned builds: first launch may require **right-click → Open**.
 ## What’s included
 
 - PySide6 UI + Qt WebEngine (HTML previews)
-- Bundled macOS BLAST+, MAFFT, MUSCLE
+- Bundled **macOS-only** BLAST+, MAFFT, MUSCLE (linux/windows tool trees are not packed)
 - Flexidot (via the frozen app re-entry flag)
-
-Linux/Windows tool binaries are omitted from the macOS DMG to save space.
+- AliView runtime (`aliview.jar` + launcher); installer scripts are omitted
 
 ## Signing / notarization (optional)
 

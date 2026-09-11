@@ -27,8 +27,9 @@ SmartScreen may warn on unsigned builds: **More info → Run anyway**.
 ## What’s included
 
 - PySide6 UI + Qt WebEngine (HTML previews)
-- Bundled Windows BLAST+, MAFFT, MUSCLE
+- Bundled **Windows-only** BLAST+, MAFFT, MUSCLE (mac/linux tool trees are not packed)
 - Flexidot (via the frozen app re-entry flag)
+- AliView runtime (`aliview.jar`); installer scripts are omitted
 
 macOS/Linux tool binaries are omitted from the Windows zip to save space.
 

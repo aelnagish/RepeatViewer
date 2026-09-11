@@ -30,12 +30,13 @@ Optional: edit `RepeatViewer.desktop` (`Exec=` / `Icon=` absolute paths) and cop
 ## What’s included
 
 - PySide6 UI + Qt WebEngine (HTML previews)
-- Bundled Linux BLAST+, MAFFT, MUSCLE
+- Bundled **Linux-only** tools for the **build CPU**:
+  - BLAST+ and MAFFT: packed on **x86_64** only (no aarch64 builds in-repo)
+  - MUSCLE: only `linux/<arch>/` for the host (`x86_64` or `aarch64`)
 - Flexidot (via the frozen app re-entry flag)
+- AliView runtime (`aliview.jar` + launcher); installer scripts are omitted
 
-macOS/Windows tool binaries are omitted to save space.
-
-**Note:** Bundled MAFFT is x86_64-oriented; MUSCLE ships both `x86_64` and `aarch64`. Build on the arch you intend to ship.
+macOS/Windows tool binaries are never packed.
 
 ## Optional conda tools
 

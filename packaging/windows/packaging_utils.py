@@ -8,67 +8,23 @@ import struct
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-PKG = ROOT / "repeatviewer"
-BACKENDS = PKG / "backends"
-ASSETS = PKG / "assets" / "icons"
 PACKAGING = Path(__file__).resolve().parent
+sys.path.insert(0, str(PACKAGING.parent))
 
+from bundle_datas import app_version, collect_datas_for  # noqa: E402
 
-def app_version() -> str:
-    init = (PKG / "__init__.py").read_text(encoding="utf-8")
-    for line in init.splitlines():
-        if line.startswith("__version__"):
-            return line.split("=", 1)[1].strip().strip("\"'")
-    return "0.0.0"
+PKG = Path(__file__).resolve().parents[2] / "repeatviewer"
+ASSETS = PKG / "assets" / "icons"
 
 
 def collect_datas() -> list[tuple[str, str]]:
-    """Datas for PyInstaller: Windows tools + icons (skip mac/linux binaries)."""
-    datas: list[tuple[str, str]] = []
-
-    blast_dst = "repeatviewer/backends/blast"
-    for name in (
-        "NOTICE.md",
-        "blastn.exe",
-        "blastp.exe",
-        "blastx.exe",
-        "makeblastdb.exe",
-        "makeprofiledb.exe",
-        "rpstblastn.exe",
-    ):
-        path = BACKENDS / "blast" / name
-        if path.is_file():
-            datas.append((str(path), blast_dst))
-
-    mafft_windows = BACKENDS / "mafft" / "windows"
-    if mafft_windows.is_dir():
-        datas.append((str(mafft_windows), "repeatviewer/backends/mafft/windows"))
-    mafft_notice = BACKENDS / "mafft" / "NOTICE.md"
-    if mafft_notice.is_file():
-        datas.append((str(mafft_notice), "repeatviewer/backends/mafft"))
-
-    muscle_windows = BACKENDS / "muscle" / "windows"
-    if muscle_windows.is_dir():
-        datas.append((str(muscle_windows), "repeatviewer/backends/muscle/windows"))
-    muscle_notice = BACKENDS / "muscle" / "NOTICE.md"
-    if muscle_notice.is_file():
-        datas.append((str(muscle_notice), "repeatviewer/backends/muscle"))
-
-    aliview = BACKENDS / "aliview"
-    if aliview.is_dir():
-        datas.append((str(aliview), "repeatviewer/backends/aliview"))
-
-    icons = ASSETS
-    if icons.is_dir():
-        datas.append((str(icons), "repeatviewer/assets/icons"))
-
-    return datas
+    """Datas for PyInstaller: Windows tools only (no mac/linux binaries)."""
+    return collect_datas_for("windows")
 
 
 def _png_to_ico(png_bytes: bytes, out_ico: Path, sizes: tuple[int, ...] = (16, 32, 48, 256)) -> None:
     """Write a multi-size .ico from a square RGBA PNG (Qt-rendered)."""
-    from PySide6.QtCore import QBuffer, QIODevice, QByteArray
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice
     from PySide6.QtGui import QImage
 
     images: list[tuple[int, bytes]] = []
@@ -83,7 +39,6 @@ def _png_to_ico(png_bytes: bytes, out_ico: Path, sizes: tuple[int, ...] = (16, 3
         scaled.save(buf, "PNG")
         images.append((size, bytes(buf.data())))
 
-    # ICONDIR + ICONDIRENTRY*n + image data
     count = len(images)
     offset = 6 + 16 * count
     entries = bytearray()
@@ -107,15 +62,14 @@ def make_ico(out_ico: Path) -> Path | None:
     if not svg.is_file():
         return None
 
-    from PySide6.QtCore import QByteArray, QRectF, Qt
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, Qt
     from PySide6.QtGui import QGuiApplication, QPainter, QPixmap
     from PySide6.QtSvg import QSvgRenderer
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QGuiApplication.instance() or QGuiApplication([])
 
-    svg_bytes = QByteArray(svg.read_bytes())
-    renderer = QSvgRenderer(svg_bytes)
+    renderer = QSvgRenderer(QByteArray(svg.read_bytes()))
     if not renderer.isValid():
         return None
 
@@ -131,8 +85,6 @@ def make_ico(out_ico: Path) -> Path | None:
     painter.end()
 
     buf_bytes = QByteArray()
-    from PySide6.QtCore import QBuffer, QIODevice
-
     buffer = QBuffer(buf_bytes)
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     pixmap.save(buffer, "PNG")

@@ -446,7 +446,7 @@ def apply_conda_tools_path(spec: str | None = None) -> Path | str | None:
 
 
 def describe_conda_tools_status(spec: str | None = None) -> str:
-    """Short status string for the Preferences UI."""
+    """Status string for the Preferences UI (full paths; UI wraps/scrolls)."""
     text = (spec if spec is not None else load_conda_tools_env()).strip()
     if not text:
         if sys.platform == "win32":

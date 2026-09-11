@@ -8,9 +8,10 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QSettings, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtCore import QRect, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QDialog,
@@ -385,6 +386,46 @@ def _section_label(text: str, parent: QWidget) -> QLabel:
 _FIELD_WIDTH = 170
 _PATH_FIELD_MIN_WIDTH = 320
 _LABEL_WIDTH = 200
+_CONDA_STATUS_MAX_LINES = 4
+
+
+class _CondaStatusLabel(QLabel):
+    """Word-wrapped status that never expands the dialog to the unwrapped text width."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._wrap_width = _PATH_FIELD_MIN_WIDTH
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+
+    def set_wrap_width(self, width: int) -> None:
+        width = max(80, width)
+        if width == self._wrap_width:
+            return
+        self._wrap_width = width
+        self.updateGeometry()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        w = width if width > 0 else self._wrap_width
+        fm = self.fontMetrics()
+        bounds = fm.boundingRect(
+            QRect(0, 0, w, 0),
+            int(Qt.TextFlag.TextWordWrap),
+            self.text() or " ",
+        )
+        return max(bounds.height() + 2, fm.lineSpacing())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        # Critical: do NOT use the unwrapped string width (that forces a horizontal scrollbar).
+        return QSize(80, self.fontMetrics().lineSpacing())
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self._wrap_width, self.heightForWidth(self._wrap_width))
 
 
 class SettingsDialog(QDialog):
@@ -544,13 +585,36 @@ class SettingsDialog(QDialog):
             )
             conda_browse_title = "Choose conda environment folder"
         self._conda_tools_env.textChanged.connect(self._refresh_conda_tools_status)
-        self._conda_tools_status = QLabel()
-        self._conda_tools_status.setWordWrap(True)
-        self._conda_tools_status.setStyleSheet("color: palette(mid);")
+        # Full status text; wraps within the path field; at most 4 lines (scroll if longer).
+        self._conda_tools_status = _CondaStatusLabel()
+        status_pal = self._conda_tools_status.palette()
+        muted = status_pal.color(QPalette.ColorRole.PlaceholderText)
+        if not muted.isValid() or muted.alpha() == 0:
+            muted = status_pal.color(QPalette.ColorRole.WindowText)
+            muted.setAlpha(180)
+        status_pal.setColor(QPalette.ColorRole.WindowText, muted)
+        self._conda_tools_status.setPalette(status_pal)
+
+        self._conda_tools_status_scroll = QScrollArea()
+        self._conda_tools_status_scroll.setWidget(self._conda_tools_status)
+        self._conda_tools_status_scroll.setWidgetResizable(False)
+        self._conda_tools_status_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._conda_tools_status_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._conda_tools_status_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._conda_tools_status_scroll.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+        _line = max(self._conda_tools_status.fontMetrics().lineSpacing(), 1)
+        self._conda_tools_status_scroll.setFixedSize(_PATH_FIELD_MIN_WIDTH, _line * 2 + 4)
+
         self._conda_test_btn = QPushButton("Test")
         self._conda_test_btn.setToolTip("Check whether the env resolves and which tools are visible.")
         self._conda_test_btn.clicked.connect(self._on_test_conda_tools)
-        self._refresh_conda_tools_status()
 
         # Diagnostics
         self._verbose_logging = QCheckBox()
@@ -646,11 +710,13 @@ class SettingsDialog(QDialog):
             browse_title=conda_browse_title,
             on_changed=self._refresh_conda_tools_status,
         )
+        # Status sits under the path text box (form field column), wraps to that
+        # field's right edge, max 4 lines.
         conda_tools = _group(
             "External tools (conda / WSL2)" if sys.platform == "win32" else "External tools (conda)",
             [
                 ("Conda env name or path:", conda_tools_field),
-                ("", self._conda_tools_status),
+                ("", self._conda_tools_status_scroll),
                 ("", self._conda_test_btn),
             ],
         )
@@ -682,6 +748,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(content)
 
         self._reset_btn = QPushButton("Restore defaults…")
@@ -848,14 +915,63 @@ class SettingsDialog(QDialog):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def _refresh_conda_tools_status(self) -> None:
-        self._conda_tools_status.setText(
-            describe_conda_tools_status(self._conda_tools_env.text())
-        )
-
-    def _on_test_conda_tools(self) -> None:
         status = describe_conda_tools_status(self._conda_tools_env.text())
         self._conda_tools_status.setText(status)
-        QMessageBox.information(self, "Conda tools", status)
+        self._conda_tools_status.setToolTip(status)
+        QTimer.singleShot(0, self._fit_conda_tools_status_height)
+
+    def _on_test_conda_tools(self) -> None:
+        self._refresh_conda_tools_status()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._refresh_conda_tools_status()
+        QTimer.singleShot(0, self._fit_conda_tools_status_height)
+        QTimer.singleShot(50, self._fit_conda_tools_status_height)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "_conda_tools_status_scroll"):
+            self._fit_conda_tools_status_height()
+
+    def _conda_status_wrap_width(self) -> int:
+        """Width of the path QLineEdit, capped so the dialog never grows horizontally."""
+        path_w = self._conda_tools_env.width()
+        if path_w < 80:
+            parent = self._conda_tools_env.parentWidget()
+            if parent is not None and parent.width() >= 120:
+                browse = None
+                for child in parent.findChildren(QPushButton):
+                    if child.text() == "Browse":
+                        browse = child
+                        break
+                if browse is not None:
+                    path_w = parent.width() - browse.width() - 6
+                else:
+                    path_w = parent.width() - 80
+            else:
+                path_w = _PATH_FIELD_MIN_WIDTH
+        # Cap to dialog client width minus label column / margins.
+        dialog_cap = max(160, self.width() - _LABEL_WIDTH - 64)
+        return max(120, min(path_w, dialog_cap))
+
+    def _fit_conda_tools_status_height(self) -> None:
+        """Wrap inside the path field width; show up to 4 lines (scroll after that)."""
+        if not hasattr(self, "_conda_tools_status_scroll"):
+            return
+        label = self._conda_tools_status
+        scroll = self._conda_tools_status_scroll
+        wrap_w = self._conda_status_wrap_width()
+        label.set_wrap_width(wrap_w)
+        label.setFixedWidth(wrap_w)
+
+        line_h = max(label.fontMetrics().lineSpacing(), 1)
+        max_h = line_h * _CONDA_STATUS_MAX_LINES + 6
+        needed = label.heightForWidth(wrap_w)
+        height = min(max(needed, line_h), max_h)
+        label.setFixedHeight(needed)  # full text height inside scroll area
+        scroll.setFixedSize(wrap_w, height)
+        scroll.updateGeometry()
 
     def _copy_diagnostics(self) -> None:
         import platform

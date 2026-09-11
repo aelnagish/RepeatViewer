@@ -7,62 +7,18 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-PKG = ROOT / "repeatviewer"
-BACKENDS = PKG / "backends"
-ASSETS = PKG / "assets" / "icons"
 PACKAGING = Path(__file__).resolve().parent
+sys.path.insert(0, str(PACKAGING.parent))
 
+from bundle_datas import app_version, collect_datas_for  # noqa: E402
 
-def app_version() -> str:
-    init = (PKG / "__init__.py").read_text(encoding="utf-8")
-    for line in init.splitlines():
-        if line.startswith("__version__"):
-            return line.split("=", 1)[1].strip().strip("\"'")
-    return "0.0.0"
+PKG = Path(__file__).resolve().parents[2] / "repeatviewer"
+ASSETS = PKG / "assets" / "icons"
 
 
 def collect_datas() -> list[tuple[str, str]]:
-    """Datas for PyInstaller: Linux tools + icons (skip mac/windows binaries)."""
-    datas: list[tuple[str, str]] = []
-
-    blast_dst = "repeatviewer/backends/blast"
-    for name in (
-        "NOTICE.md",
-        "blastn_linux",
-        "blastp_linux",
-        "blastx_linux",
-        "makeblastdb_linux",
-        "makeprofiledb_linux",
-        "rpstblastn_linux",
-    ):
-        path = BACKENDS / "blast" / name
-        if path.is_file():
-            datas.append((str(path), blast_dst))
-
-    mafft_linux = BACKENDS / "mafft" / "linux"
-    if mafft_linux.is_dir():
-        datas.append((str(mafft_linux), "repeatviewer/backends/mafft/linux"))
-    mafft_notice = BACKENDS / "mafft" / "NOTICE.md"
-    if mafft_notice.is_file():
-        datas.append((str(mafft_notice), "repeatviewer/backends/mafft"))
-
-    muscle_linux = BACKENDS / "muscle" / "linux"
-    if muscle_linux.is_dir():
-        datas.append((str(muscle_linux), "repeatviewer/backends/muscle/linux"))
-    muscle_notice = BACKENDS / "muscle" / "NOTICE.md"
-    if muscle_notice.is_file():
-        datas.append((str(muscle_notice), "repeatviewer/backends/muscle"))
-
-    aliview = BACKENDS / "aliview"
-    if aliview.is_dir():
-        datas.append((str(aliview), "repeatviewer/backends/aliview"))
-
-    icons = ASSETS
-    if icons.is_dir():
-        datas.append((str(icons), "repeatviewer/assets/icons"))
-
-    return datas
+    """Datas for PyInstaller: Linux tools only (no mac/windows binaries)."""
+    return collect_datas_for("linux")
 
 
 def make_png_icon(out_png: Path, size: int = 256) -> Path | None:

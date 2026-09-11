@@ -18,8 +18,10 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_sub
 SPECDIR = Path(SPEC).resolve().parent  # noqa: F821 — injected by PyInstaller
 ROOT = SPECDIR.parents[1]
 sys.path.insert(0, str(SPECDIR))
+sys.path.insert(0, str(SPECDIR.parent))
 
-from packaging_utils import app_version, collect_datas  # noqa: E402
+from packaging_utils import collect_datas  # noqa: E402
+from bundle_datas import app_version  # noqa: E402
 
 block_cipher = None
 version = app_version()
