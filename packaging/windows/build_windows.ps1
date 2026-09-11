@@ -37,7 +37,10 @@ Write-Host "==> Using Python: $Python"
 Write-Host "==> Version: $Version"
 
 Write-Host "==> Ensuring build tools (pyinstaller)…"
-& $Python -m pip install -q "pyinstaller>=6.3"
+# NumPy 2.4+ raises "cannot load module more than once per process" when a
+# frozen app loads _multiarray_umath twice. Keep numpy <2.4 for Windows packs
+# and use a PyInstaller with the updated numpy hook.
+& $Python -m pip install -q --upgrade "pyinstaller>=6.14.1" "numpy>=1.24,<2.4"
 
 Write-Host "==> Building app icon (.ico)…"
 & $Python "packaging\windows\packaging_utils.py"
