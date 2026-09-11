@@ -118,7 +118,7 @@ def application_stylesheet(
     QLineEdit#FileFilter:focus, QLineEdit#FolderFilter:focus {{
         border-color: {accent};
     }}
-    QWidget#FolderNavigationBar QToolButton {{
+    QWidget#FolderNavigationBar QToolButton, QToolButton#FolderAddButton {{
         border: none;
         background: transparent;
         border-radius: {radius_sm}px;
@@ -130,7 +130,12 @@ def application_stylesheet(
         max-height: 18px;
         padding: 0px;
     }}
-    QWidget#FolderNavigationBar QToolButton:hover {{
+    QToolButton#FolderAddButton {{
+        font-size: 14px;
+        font-weight: 600;
+        padding-bottom: 2px;
+    }}
+    QWidget#FolderNavigationBar QToolButton:hover, QToolButton#FolderAddButton:hover {{
         background: palette(alternate-base);
     }}
     QWidget#FolderNavigationBar QToolButton:disabled {{

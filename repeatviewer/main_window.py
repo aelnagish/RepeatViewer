@@ -2147,6 +2147,19 @@ class MainWindow(QMainWindow):
         folders_trailing_layout.setContentsMargins(0, 0, 0, 0)
         folders_trailing_layout.setSpacing(6)
         folders_trailing_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._folder_add_btn = QToolButton()
+        self._folder_add_btn.setObjectName("FolderAddButton")
+        self._folder_add_btn.setText("+")
+        self._folder_add_btn.setToolTip("Add folder…")
+        self._folder_add_btn.setAutoRaise(True)
+        self._folder_add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._folder_add_btn.setFixedSize(18, 18)
+        self._folder_add_btn.clicked.connect(self._pick_and_add_folder)
+        folders_trailing_layout.addWidget(
+            self._folder_add_btn,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
         folders_trailing_layout.addWidget(self._folder_nav, 0, Qt.AlignmentFlag.AlignVCenter)
         self._folder_filter = QLineEdit()
         self._folder_filter.setObjectName("FolderFilter")
@@ -2865,6 +2878,10 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
+        add_folder_action = file_menu.addAction("Add &Folder…", self._pick_and_add_folder)
+        add_folder_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        add_folder_action.setStatusTip("Add a folder as a workspace root in the Folders panel")
+        file_menu.addSeparator()
         genome_action = file_menu.addAction("Define &genome", self._open_set_genome)
         genome_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
         genome_action.setStatusTip("Set reference or pan-genome FASTA files")
