@@ -15,21 +15,25 @@ This is *quantification against a known library* — not de-novo discovery.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import platform
 import shutil
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from Bio import SeqIO
 
+from repeatviewer.app_preferences import cache_dir
 from repeatviewer.backends.gui_functions import (
     blast_database_basename,
     check_database,
     get_original_file_path,
 )
 from repeatviewer.backends.job_cancel import run_subprocess_with_cancel
+
+logger = logging.getLogger(__name__)
 
 # blastn tabular fields we request (outfmt 6 + qlen/slen).
 _BLAST_FIELDS = (
@@ -296,6 +300,35 @@ def _write_arrays_gff(tab_path: Path, path: Path) -> Path:
     return path
 
 
+def _blast_db_cache_dir(target_fasta: Path) -> Path:
+    """Per-genome folder for the BLAST index, keyed by path, size and mtime.
+
+    Indexing a large genome is the slowest part of a BLASTn quantify run and the
+    result is identical every time, so it is kept instead of rebuilt. The key
+    includes size and mtime, so an edited genome lands in a new folder rather
+    than silently reusing a stale index. Lives under the app cache directory,
+    which "Clear cache" in Settings already removes.
+    """
+    target_fasta = Path(target_fasta).expanduser().resolve()
+    try:
+        stat = target_fasta.stat()
+        fingerprint = f"{target_fasta}|{stat.st_size}|{stat.st_mtime_ns}"
+    except OSError:
+        fingerprint = str(target_fasta)
+    digest = hashlib.sha1(fingerprint.encode("utf-8", "replace")).hexdigest()[:16]
+    safe_stem = blast_database_basename(target_fasta.name)
+    return cache_dir() / "blast_db" / f"{safe_stem}-{digest}"
+
+
+def _blast_index_present(db_path: str) -> bool:
+    """True when makeblastdb output for ``db_path`` is already on disk.
+
+    ``.nin`` is a single-volume index; ``.nal`` is the alias file written for
+    genomes large enough to be split across volumes.
+    """
+    return os.path.isfile(f"{db_path}.nin") or os.path.isfile(f"{db_path}.nal")
+
+
 def quantify_library_blastn(
     library_fasta: Path,
     target_fasta: Path,
@@ -311,9 +344,10 @@ def quantify_library_blastn(
 ) -> QuantifyResult:
     """Quantify ``library_fasta`` occurrences across ``target_fasta`` via blastn.
 
-    Builds a nucleotide DB from the target, searches the library against it,
-    then aggregates per family. Returns a QuantifyResult and writes a summary
-    TSV and an arrays GFF into ``out_dir``.
+    Builds a nucleotide DB from the target (cached between runs, see
+    ``_blast_db_cache_dir``), searches the library against it, then aggregates
+    per family. Returns a QuantifyResult and writes a summary TSV and an arrays
+    GFF into ``out_dir``.
     """
     library_fasta = Path(library_fasta).expanduser().resolve()
     target_fasta = Path(target_fasta).expanduser().resolve()
@@ -324,44 +358,50 @@ def quantify_library_blastn(
             raise FileNotFoundError(f"FASTA not found: {path}")
 
     os_type = platform.system()
-    # Build the BLAST database in a throwaway scratch dir so the ~8 index files
-    # don't clutter the results folder; removed after the search.
-    scratch = Path(tempfile.mkdtemp(prefix="repeat_quant_db_", dir=str(out_dir)))
+    # The index lives in the app cache, not the results folder: it keeps the ~8
+    # index files out of the way (the reason this used to be a scratch dir) and
+    # lets repeat runs against the same genome skip makeblastdb entirely.
+    db_dir = _blast_db_cache_dir(target_fasta)
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = os.path.join(str(db_dir), blast_database_basename(str(target_fasta)))
+    reused = _blast_index_present(db_path)
+    logger.info(
+        "repeat quantify blastn: %s BLAST index for %s (%s)",
+        "reusing cached" if reused else "building",
+        target_fasta.name,
+        db_dir,
+    )
     tab_path = out_dir / f"{target_fasta.stem}_vs_{library_fasta.stem}.blastn.tsv"
-    try:
-        db = check_database(
-            str(target_fasta),
-            str(scratch),
-            os_type=os_type,
-            use_system_blast=use_system_blast,
+    db = check_database(
+        str(target_fasta),
+        str(db_dir),
+        os_type=os_type,
+        use_system_blast=use_system_blast,
+    )
+    if db in {"makeblastdb_not_found", "makeblastdb_got_error"}:
+        raise RuntimeError(
+            "Could not build a BLAST database for the target sequences "
+            f"({db}). Check that makeblastdb is available."
         )
-        if db in {"makeblastdb_not_found", "makeblastdb_got_error"}:
-            raise RuntimeError(
-                "Could not build a BLAST database for the target sequences "
-                f"({db}). Check that makeblastdb is available."
-            )
-        db_path = os.path.join(str(scratch), blast_database_basename(str(target_fasta)))
 
-        cmd = [
-            _blastn_executable(use_system_blast),
-            "-task", "blastn",
-            "-query", str(library_fasta),
-            "-db", db_path,
-            "-evalue", str(e_value),
-            "-word_size", str(int(word_size)),
-            "-num_threads", str(max(1, int(threads))),
-            "-dust", "no",
-            "-outfmt", f"6 {_BLAST_FIELDS}",
-            "-out", str(tab_path),
-        ]
-        if min_identity and min_identity > 0:
-            cmd.extend(["-perc_identity", str(float(min_identity))])
-        if min_coverage and min_coverage > 0:
-            cmd.extend(["-qcov_hsp_perc", str(float(min_coverage))])
-        # Cancellable runner so Stop actually terminates BLASTn on big inputs.
-        run_subprocess_with_cancel(cmd, cancel=cancel, check=True)
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+    cmd = [
+        _blastn_executable(use_system_blast),
+        "-task", "blastn",
+        "-query", str(library_fasta),
+        "-db", db_path,
+        "-evalue", str(e_value),
+        "-word_size", str(int(word_size)),
+        "-num_threads", str(max(1, int(threads))),
+        "-dust", "no",
+        "-outfmt", f"6 {_BLAST_FIELDS}",
+        "-out", str(tab_path),
+    ]
+    if min_identity and min_identity > 0:
+        cmd.extend(["-perc_identity", str(float(min_identity))])
+    if min_coverage and min_coverage > 0:
+        cmd.extend(["-qcov_hsp_perc", str(float(min_coverage))])
+    # Cancellable runner so Stop actually terminates BLASTn on big inputs.
+    run_subprocess_with_cancel(cmd, cancel=cancel, check=True)
 
     target_length = _fasta_total_length(target_fasta)
     result = QuantifyResult(

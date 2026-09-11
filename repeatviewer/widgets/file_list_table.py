@@ -154,6 +154,7 @@ class FileListTableWidget(QTableWidget):
     separate_fasta_subfolders_requested = Signal(Path)
     extract_sequences_requested = Signal(Path)      # pick records out of one file
     group_sequences_requested = Signal(list)        # combine several files
+    new_folder_with_files_requested = Signal(list)  # move selection into a new folder
     blast_genome_map_requested = Signal(Path)
     blast_divergence_requested = Signal(Path)
     add_blast_database_requested = Signal(Path)
@@ -747,6 +748,15 @@ class FileListTableWidget(QTableWidget):
                         f"Open {len(paths)} files in text editor",
                         lambda: self.open_in_text_editor_requested.emit(paths),
                     )
+                menu.addSeparator()
+                if len(paths) == 1:
+                    new_folder_label = "New Folder with Selection"
+                else:
+                    new_folder_label = f"New Folder with {len(paths)} Selected Items"
+                menu.addAction(
+                    new_folder_label,
+                    lambda ps=list(paths): self.new_folder_with_files_requested.emit(ps),
+                )
                 menu.addSeparator()
                 menu.addAction("Cut", lambda: self.cut_files_requested.emit(paths))
                 menu.addAction("Copy", lambda: self.copy_files_requested.emit(paths))
