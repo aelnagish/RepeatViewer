@@ -20,7 +20,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QPalette
 from PySide6.QtWidgets import QApplication, QStyleFactory
 
 THEME_SETTINGS_GROUP = "appearance"
-DEFAULT_THEME_MODE = "dark"
+DEFAULT_THEME_MODE = "auto"
 THEME_MODES = ("auto", "light", "dark")
 THEME_LABELS = (("Auto (follow system)", "auto"), ("Light", "light"), ("Dark", "dark"))
 
