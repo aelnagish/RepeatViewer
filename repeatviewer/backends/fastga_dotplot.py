@@ -24,9 +24,10 @@ which the current viewer does not do.
 
 from __future__ import annotations
 
-import shutil
 import logging
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -104,8 +105,10 @@ def _scratch_dir(near: Path, explicit: Path | None = None):
 
 
 def fastga_executable() -> str | None:
+    from repeatviewer.conda_tools import which_tool
+
     for name in _FASTGA_NAMES:
-        found = shutil.which(name)
+        found = which_tool(name)
         if found:
             return found
     return None
@@ -116,6 +119,12 @@ def fastga_available() -> bool:
 
 
 def install_hint() -> str:
+    if sys.platform == "win32":
+        return (
+            "Install FastGA in a WSL2 conda env, then set "
+            "File → Setting → External tools (conda) to that env name "
+            "(e.g. tetrimmer). Example: conda install -c bioconda fastga"
+        )
     return "Install FastGA with:  conda install -c bioconda fastga"
 
 
@@ -299,18 +308,21 @@ def run_fastga_alignment(
         stream_to_file = fmt != FORMAT_ALN
         handle = out_path.open("w", encoding="utf-8") if stream_to_file else None
         try:
+            from repeatviewer.conda_tools import prepare_command, uses_wsl_conda
+
+            launch_cmd = prepare_command(cmd)
             log_command(
                 "FastGA",
-                cmd,
+                launch_cmd,
                 inputs=[p for p in (source1, source2) if p is not None],
                 cwd=source1.parent,
             )
             proc = subprocess.Popen(
-                cmd,
+                launch_cmd,
                 stdout=subprocess.PIPE if stream_to_file else subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=str(source1.parent),
+                cwd=None if uses_wsl_conda() else str(source1.parent),
             )
             process_started = time.monotonic()
             process_logger.info("START tool=FastGA pid=%s", proc.pid)
@@ -404,13 +416,16 @@ def run_fastga_self_dotplot(
             progress("Running FastGA (indexing on first run may take a while)…")
 
         try:
-            log_command("FastGA", cmd, inputs=[fasta], cwd=fasta.parent)
+            from repeatviewer.conda_tools import prepare_command, uses_wsl_conda
+
+            launch_cmd = prepare_command(cmd)
+            log_command("FastGA", launch_cmd, inputs=[fasta], cwd=fasta.parent)
             proc = subprocess.Popen(
-                cmd,
+                launch_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=str(fasta.parent),
+                cwd=None if uses_wsl_conda() else str(fasta.parent),
             )
             process_started = time.monotonic()
             process_logger.info("START tool=FastGA pid=%s", proc.pid)

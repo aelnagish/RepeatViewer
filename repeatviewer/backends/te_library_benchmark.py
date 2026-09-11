@@ -6,7 +6,6 @@ Python port of the RepeatModeler2-style ``get_family_summary_paper.sh`` workflow
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 from repeatviewer.external_process import run_logged_process
 from dataclasses import dataclass
@@ -289,7 +288,9 @@ def write_library_benchmark_plot_html(
 
 
 def repeatmasker_executable() -> str | None:
-    return shutil.which("RepeatMasker")
+    from repeatviewer.conda_tools import which_tool
+
+    return which_tool("RepeatMasker")
 
 
 def run_repeatmasker_lib_benchmark(

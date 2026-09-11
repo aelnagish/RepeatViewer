@@ -2,6 +2,24 @@
 
 from __future__ import annotations
 
+import sys
+
+
+def _maybe_run_flexidot_entrypoint() -> None:
+    """Frozen-app helper: ``RepeatViewer.app --repeatviewer-flexidot …`` → Flexidot."""
+    marker = "--repeatviewer-flexidot"
+    if marker not in sys.argv:
+        return
+    # Drop the marker (and anything before it that is the app path already in argv[0]).
+    idx = sys.argv.index(marker)
+    sys.argv = [sys.argv[0], *sys.argv[idx + 1 :]]
+    from flexidot.app import main as flexidot_main
+
+    raise SystemExit(flexidot_main())
+
+
+_maybe_run_flexidot_entrypoint()
+
 from repeatviewer.qt_runtime import configure_qt_runtime
 
 configure_qt_runtime()

@@ -818,9 +818,9 @@ def write_landscape_html(
 
 def repeatmasker_executable_available() -> bool:
     """True if RepeatMasker is on PATH (needed for the RepeatMasker engine)."""
-    import shutil
+    from repeatviewer.conda_tools import which_tool
 
-    return shutil.which("RepeatMasker") is not None
+    return which_tool("RepeatMasker") is not None
 
 
 def quantify_library(

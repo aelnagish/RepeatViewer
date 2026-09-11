@@ -73,6 +73,10 @@ def run_logged_process(
     progress_file: str | os.PathLike[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command while streaming its terminal output into the log."""
+    if not isinstance(command, str):
+        from repeatviewer.conda_tools import prepare_command
+
+        command = prepare_command(command)
     display_command = (
         ["shell", "-c", command] if isinstance(command, str) else list(command)
     )

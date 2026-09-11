@@ -78,6 +78,12 @@ pip install -e .
 |---------|------|
 | Reference **genome FASTA** | BLAST, extend, genome maps, TEAid genome tracks |
 | **AliView** | Open selected FASTA externally (**Sequence → Open in AliView**) |
+| **RepeatMasker / FastGA / bedtools** | Optional CLIs from a conda env |
+
+For conda-installed tools, set **File → Setting → External tools (conda)** to an env name (e.g. `tetrimmer`) or the env folder path.
+
+- **macOS / Linux:** RepeatViewer prepends that env’s `bin` to `PATH` (useful for the packed `.app`, which otherwise misses conda).
+- **Windows:** the same preference targets **conda inside WSL2**. Linux CLIs (RepeatMasker, FastGA, …) are launched via `wsl`; bundled BLAST/MAFFT/MUSCLE stay native on Windows. See [packaging/windows/README.md](packaging/windows/README.md).
 
 Flexidot (with HTML output and RepeatViewer integration) is installed as a dependency of `pip install -e .`.
 
@@ -92,6 +98,36 @@ Or from the repository root:
 ```bash
 python RepeatViewer.py
 ```
+
+### macOS DMG (double-click app)
+
+Build a `RepeatViewer.app` and `.dmg` (Apple Silicon or Intel, matching the build Mac):
+
+```bash
+bash packaging/macos/build_macos_dmg.sh
+```
+
+See [packaging/macos/README.md](packaging/macos/README.md). End users open the DMG and drag **RepeatViewer** to Applications. Unsigned builds may need **right-click → Open** the first time.
+
+### Windows zip (double-click exe)
+
+Build on a **Windows** machine (cannot cross-compile from macOS):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging/windows/build_windows.ps1
+```
+
+See [packaging/windows/README.md](packaging/windows/README.md). End users unzip and run **RepeatViewer.exe**. For RepeatMasker / FastGA, install them in a WSL2 conda env and set that env under **File → Setting → External tools (conda / WSL2)**.
+
+### Linux tarball
+
+Build on a **Linux** machine (matching target arch: `x86_64` or `aarch64`):
+
+```bash
+bash packaging/linux/build_linux.sh
+```
+
+See [packaging/linux/README.md](packaging/linux/README.md). End users unpack the `.tar.gz` and run `./RepeatViewer`. Optional conda tools: **File → Setting → External tools (conda)**.
 
 Open a folder and genome immediately:
 
