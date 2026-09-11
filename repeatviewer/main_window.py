@@ -498,7 +498,7 @@ _TOOLBAR_TOOLTIPS = {
     "translate": "Translate selected DNA FASTA to protein",
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
-    "fastga": "FastGA whole-genome alignment (one genome vs itself, or two genomes)",
+    "fastga": "FastGA whole-genome alignment (self-comparison by default; optional pairwise)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_benchmark": "TE benchmarking (confusion matrix and library comparison)",
@@ -551,6 +551,7 @@ def _mafft_option_kwargs(options) -> dict[str, Any]:
 
 class AlignWorker(QObject):
     progress = Signal(int, str)
+    log_line = Signal(str)
     finished = Signal(list)
     failed = Signal(str)
 
@@ -564,6 +565,7 @@ class AlignWorker(QObject):
         use_system_mafft: bool = False,
         use_system_muscle: bool = False,
         engine: str = "mafft",
+        stream_log: bool = False,
     ):
         super().__init__()
         self._seq_files = seq_files
@@ -573,22 +575,35 @@ class AlignWorker(QObject):
         self._use_system_mafft = use_system_mafft
         self._use_system_muscle = use_system_muscle
         self._engine = engine
+        self._stream_log = bool(stream_log)
 
     @Slot()
     def run(self) -> None:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
+        sink = _log if self._stream_log else None
+
         if self._mode == ALIGN_MODE_COMBINED:
             try:
-                self.progress.emit(0, "Aligning combined MSA…")
-                output = run_alignment_combined(
-                    self._seq_files,
-                    **_mafft_option_kwargs(self._options),
-                    use_system_mafft=self._use_system_mafft,
-                    use_system_muscle=self._use_system_muscle,
-                    engine=self._engine,
-                )
-                self.progress.emit(1, "Alignment finished.")
+                with process_log_sink(sink):
+                    self.progress.emit(0, "Aligning combined MSA…")
+                    if sink is not None:
+                        _log("Aligning combined MSA…")
+                    output = run_alignment_combined(
+                        self._seq_files,
+                        **_mafft_option_kwargs(self._options),
+                        use_system_mafft=self._use_system_mafft,
+                        use_system_muscle=self._use_system_muscle,
+                        engine=self._engine,
+                    )
+                    self.progress.emit(1, "Alignment finished.")
+                    if sink is not None:
+                        _log("Alignment finished.")
                 self.finished.emit([str(output)])
             except Exception as exc:  # noqa: BLE001
                 self.failed.emit(str(exc))
@@ -602,13 +617,14 @@ class AlignWorker(QObject):
 
         def _align_one(seq_path: Path) -> tuple[Path, str | None, str | None]:
             try:
-                output = run_alignment(
-                    seq_path,
-                    **_mafft_option_kwargs(self._options),
-                    use_system_mafft=self._use_system_mafft,
-                    use_system_muscle=self._use_system_muscle,
-                    engine=self._engine,
-                )
+                with process_log_sink(sink):
+                    output = run_alignment(
+                        seq_path,
+                        **_mafft_option_kwargs(self._options),
+                        use_system_mafft=self._use_system_mafft,
+                        use_system_muscle=self._use_system_muscle,
+                        engine=self._engine,
+                    )
                 return seq_path, str(output), None
             except Exception as exc:  # noqa: BLE001
                 return seq_path, None, str(exc)
@@ -617,6 +633,8 @@ class AlignWorker(QObject):
             if workers == 1:
                 for seq_path in self._seq_files:
                     self.progress.emit(completed, f"Aligning {seq_path.name}…")
+                    if sink is not None:
+                        _log(f"—— Aligning {seq_path.name} ——")
                     _, out_path, err = _align_one(seq_path)
                     completed += 1
                     if err:
@@ -629,12 +647,16 @@ class AlignWorker(QObject):
                     for future in as_completed(futures):
                         seq_path, out_path, err = future.result()
                         self.progress.emit(completed, f"Aligning {seq_path.name}…")
+                        if sink is not None:
+                            _log(f"Finished {seq_path.name}")
                         completed += 1
                         if err:
                             failures.append(f"{seq_path.name}: {err}")
                         elif out_path:
                             created.append(out_path)
             self.progress.emit(total, "Alignment finished.")
+            if sink is not None:
+                _log("Alignment finished.")
             if failures and not created:
                 self.failed.emit("\n".join(failures[:8]))
                 return
@@ -647,11 +669,11 @@ class AlignWorker(QObject):
 
 
 class FastGaWorker(QObject):
-    """Run a FastGA alignment off the UI thread.
+    """Run FastGA alignment(s) off the UI thread.
 
-    One file is compared against itself (repetitive regions); two files are
-    compared against each other. Indexing a large genome takes minutes, so
-    progress is reported and cancellation is polled throughout.
+    Default: self-compare each selected FASTA. Pairwise mode with two files
+    compares them against each other. Indexing a large genome takes minutes,
+    so progress is reported and cancellation is polled throughout.
     """
 
     progress = Signal(int, str)
@@ -683,23 +705,13 @@ class FastGaWorker(QObject):
         )
 
         try:
-            source1 = self._seq_files[0]
-            source2 = self._seq_files[1] if len(self._seq_files) > 1 else None
-            suffix = output_suffix_for_format(self._options.output_format)
-            if source2 is None:
-                stem = f"{source1.stem}_self"
-            else:
-                stem = f"{source1.stem}_vs_{source2.stem}"
-            out_path = source1.parent / f"{stem}{suffix}"
-
             def _progress(message: str) -> None:
-                self.progress.emit(1, message)
+                self.progress.emit(max(1, getattr(self, "_step", 1)), message)
 
             def _log(message: str) -> None:
                 self.log_line.emit(str(message))
 
             def _cancelled() -> bool:
-                # JobCancellation.requested is a @property, not a method.
                 return bool(self._cancel is not None and self._cancel.requested)
 
             temp_raw = str(getattr(self._options, "temp_dir", "") or "").strip()
@@ -707,26 +719,46 @@ class FastGaWorker(QObject):
             if temp_dir is not None:
                 temp_dir.mkdir(parents=True, exist_ok=True)
 
-            written = run_fastga_alignment(
-                source1,
-                source2,
-                out_path,
-                fmt=self._options.output_format,
-                threads=self._options.threads,
-                min_identity=self._options.min_identity,
-                min_length=self._options.min_length,
-                seed_freq=getattr(self._options, "seed_freq", 200),
-                chain_coverage=getattr(self._options, "chain_coverage", 85),
-                chain_gap=getattr(self._options, "chain_gap", 1000),
-                symmetric=self._options.symmetric,
-                keep_index=self._options.keep_index,
-                no_soft_mask=getattr(self._options, "no_soft_mask", False),
-                temp_dir=temp_dir,
-                progress=_progress,
-                on_log=_log if self._stream_log else None,
-                is_cancelled=_cancelled,
-            )
-            self.finished.emit([str(written)])
+            pairwise = bool(getattr(self._options, "pairwise", False))
+            suffix = output_suffix_for_format(self._options.output_format)
+            created: list[str] = []
+
+            if pairwise and len(self._seq_files) >= 2:
+                jobs = [(self._seq_files[0], self._seq_files[1])]
+            else:
+                jobs = [(path, None) for path in self._seq_files]
+
+            for index, (source1, source2) in enumerate(jobs, start=1):
+                self._step = index
+                if source2 is None:
+                    stem = f"{source1.stem}_self"
+                else:
+                    stem = f"{source1.stem}_vs_{source2.stem}"
+                out_path = source1.parent / f"{stem}{suffix}"
+                if self._stream_log and len(jobs) > 1:
+                    _log(f"—— Job {index}/{len(jobs)}: {stem} ——")
+                written = run_fastga_alignment(
+                    source1,
+                    source2,
+                    out_path,
+                    fmt=self._options.output_format,
+                    threads=self._options.threads,
+                    min_identity=self._options.min_identity,
+                    min_length=self._options.min_length,
+                    seed_freq=getattr(self._options, "seed_freq", 200),
+                    chain_coverage=getattr(self._options, "chain_coverage", 85),
+                    chain_gap=getattr(self._options, "chain_gap", 1000),
+                    symmetric=self._options.symmetric,
+                    keep_index=self._options.keep_index,
+                    no_soft_mask=getattr(self._options, "no_soft_mask", False),
+                    temp_dir=temp_dir,
+                    progress=_progress,
+                    on_log=_log if self._stream_log else None,
+                    is_cancelled=_cancelled,
+                )
+                created.append(str(written))
+
+            self.finished.emit(created)
         except Exception as exc:  # noqa: BLE001 - surface to the UI
             self.failed.emit(str(exc))
 
@@ -941,6 +973,7 @@ class TeLibraryBenchmarkWorker(QObject):
 
 class FunctionWorker(QObject):
     progress = Signal(int, str)
+    log_line = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
 
@@ -950,22 +983,31 @@ class FunctionWorker(QObject):
         func_name: str,
         seq_files: list[Path],
         job_kwargs: dict | None = None,
+        *,
+        stream_log: bool = False,
     ):
         super().__init__()
         self._run_func = run_func
         self._func_name = func_name
         self._seq_files = seq_files
         self._job_kwargs = job_kwargs or {}
+        self._stream_log = bool(stream_log)
 
     @Slot()
     def run(self) -> None:
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
         try:
-            result = self._run_func(
-                self._func_name,
-                self._seq_files,
-                self.progress.emit,
-                **self._job_kwargs,
-            )
+            with process_log_sink(_log if self._stream_log else None):
+                result = self._run_func(
+                    self._func_name,
+                    self._seq_files,
+                    self.progress.emit,
+                    **self._job_kwargs,
+                )
             self.finished.emit(result)
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
@@ -2664,7 +2706,7 @@ class MainWindow(QMainWindow):
             if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
         ]
 
-    def _selected_files_for_fastga(self) -> list[Path]:
+    def _selected_files_for_fastga(self, options=None) -> list[Path]:
         from repeatviewer.backends.fastga_dotplot import fastga_available, install_hint
 
         if not fastga_available():
@@ -2674,27 +2716,29 @@ class MainWindow(QMainWindow):
                 f"FastGA is not installed or not on PATH.\n\n{install_hint()}",
             )
             return []
+        opts = options if options is not None else self._fastga_options
+        pairwise = bool(getattr(opts, "pairwise", False))
         files = self._fastga_candidate_files()
         if not files:
             QMessageBox.information(
                 self,
                 "FastGA",
-                "Select one FASTA to compare against itself, or two FASTA files "
-                "to compare against each other.",
+                "Select one or more FASTA files for self-comparison, or enable "
+                "Do pairwise comparison and select one or two FASTA files.",
             )
             return []
-        if len(files) > 2:
+        if pairwise and len(files) > 2:
             QMessageBox.information(
                 self,
                 "FastGA",
-                f"{len(files)} files selected. FastGA compares one genome "
-                "against itself, or exactly two against each other.",
+                f"{len(files)} files selected. Pairwise comparison allows only "
+                "one or two FASTA files.",
             )
             return []
         return files
 
     def _run_fastga_default(self) -> None:
-        files = self._selected_files_for_fastga()
+        files = self._selected_files_for_fastga(self._fastga_options)
         if files:
             self._start_fastga_job(files, self._fastga_options)
 
@@ -2710,13 +2754,9 @@ class MainWindow(QMainWindow):
         from repeatviewer.views.tool_dialogs import FastGaParamsDialog
 
         candidates = self._fastga_candidate_files()
-        if 1 <= len(candidates) <= 2:
-            file_count = len(candidates)
-        else:
-            file_count = 0
         dialog = FastGaParamsDialog(
             initial=self._fastga_options,
-            file_count=file_count,
+            file_count=len(candidates),
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -2724,20 +2764,55 @@ class MainWindow(QMainWindow):
         self._fastga_options = dialog.options()
         save_fastga_options(self._fastga_options)
         if dialog.should_run():
-            files = self._selected_files_for_fastga()
+            files = self._selected_files_for_fastga(self._fastga_options)
             if files:
                 self._start_fastga_job(files, self._fastga_options)
         else:
             self._set_status_message("FastGA settings saved", 4000)
 
-    def _start_fastga_job(self, files: list[Path], options) -> None:
+    def _attach_process_monitor(
+        self,
+        worker,
+        *,
+        title: str,
+        enabled: bool,
+        tool_key: str,
+        mirror_progress: bool = True,
+    ) -> None:
+        """Open FastGA-style process window when the tool option is enabled."""
+        if not enabled:
+            return
         from repeatviewer.widgets.process_monitor_dialog import ProcessMonitorDialog
 
-        title = (
-            f"FastGA ({files[0].name} self)"
-            if len(files) == 1
-            else f"FastGA ({files[0].name} vs {files[1].name})"
+        attr = f"_{tool_key}_process_dialog"
+        dialog = getattr(self, attr, None)
+        if dialog is None:
+            short = title.split("(")[0].strip() or tool_key
+            dialog = ProcessMonitorDialog(short, parent=self)
+            setattr(self, attr, dialog)
+        dialog.prepare(title)
+        if hasattr(worker, "log_line"):
+            worker.log_line.connect(dialog.append_line)
+        if mirror_progress:
+            worker.progress.connect(
+                lambda _value, label, d=dialog: d.append_line(label) if label else None
+            )
+        worker.finished.connect(lambda *_args, d=dialog: d.mark_finished(True))
+        worker.failed.connect(
+            lambda error, d=dialog: d.mark_finished(False, str(error))
         )
+
+    def _start_fastga_job(self, files: list[Path], options) -> None:
+        pairwise = bool(getattr(options, "pairwise", False))
+        if pairwise and len(files) >= 2:
+            title = f"FastGA ({files[0].name} vs {files[1].name})"
+            total_steps = 1
+        elif len(files) == 1:
+            title = f"FastGA ({files[0].name} self)"
+            total_steps = 1
+        else:
+            title = f"FastGA ({len(files)} self-comparisons)"
+            total_steps = len(files)
         show_log = bool(getattr(options, "show_process_window", False))
         worker = FastGaWorker(
             files,
@@ -2745,23 +2820,17 @@ class MainWindow(QMainWindow):
             cancel=self._job_cancel,
             stream_log=show_log,
         )
-        if show_log:
-            dialog = getattr(self, "_fastga_process_dialog", None)
-            if dialog is None:
-                dialog = ProcessMonitorDialog("FastGA", parent=self)
-                self._fastga_process_dialog = dialog
-            dialog.prepare(title)
-            worker.log_line.connect(dialog.append_line)
-            worker.finished.connect(
-                lambda _paths, d=dialog: d.mark_finished(True)
-            )
-            worker.failed.connect(
-                lambda error, d=dialog: d.mark_finished(False, str(error))
-            )
+        self._attach_process_monitor(
+            worker,
+            title=title,
+            enabled=show_log,
+            tool_key="fastga",
+            mirror_progress=False,
+        )
         self._start_background_job(
             worker,
             job_title=title,
-            total_steps=1,
+            total_steps=total_steps,
             source_files=files,
             on_finished=self._on_fastga_finished,
             on_failed=self._on_fastga_failed,
@@ -6095,16 +6164,20 @@ class MainWindow(QMainWindow):
         if mode == ALIGN_MODE_COMBINED:
             title = f"{title} (combined)"
         total_steps = 1 if mode == ALIGN_MODE_COMBINED else len(seq_files)
+        show_log = bool(getattr(opts, "show_process_window", False))
+        worker = AlignWorker(
+            seq_files,
+            options=opts,
+            mode=mode,
+            max_workers=self._project.batch_workers,
+            use_system_mafft=self._project.use_system_mafft,
+            use_system_muscle=self._project.use_system_muscle,
+            engine=engine,
+            stream_log=show_log,
+        )
+        self._attach_process_monitor(worker, title=title, enabled=show_log, tool_key="align")
         self._start_background_job(
-            AlignWorker(
-                seq_files,
-                options=opts,
-                mode=mode,
-                max_workers=self._project.batch_workers,
-                use_system_mafft=self._project.use_system_mafft,
-                use_system_muscle=self._project.use_system_muscle,
-                engine=engine,
-            ),
+            worker,
             job_title=title,
             total_steps=total_steps,
             source_files=seq_files,
@@ -8461,8 +8534,28 @@ class MainWindow(QMainWindow):
                     "Left boundary must be less than the right boundary.",
                 )
                 return
+        show_log = False
+        if func_name == "blast":
+            blast_opts = job_kwargs.get("blast_options") or self._blast_options
+            show_log = bool(getattr(blast_opts, "show_process_window", False))
+        elif func_name == "flexidot":
+            flex_opts = job_kwargs.get("flexidot_options") or self._flexidot_options
+            show_log = bool(getattr(flex_opts, "show_process_window", False))
+        worker = FunctionWorker(
+            self._run_function_job,
+            func_name,
+            seq_files,
+            job_kwargs,
+            stream_log=show_log,
+        )
+        self._attach_process_monitor(
+            worker,
+            title=func_name,
+            enabled=show_log,
+            tool_key=func_name,
+        )
         self._start_background_job(
-            FunctionWorker(self._run_function_job, func_name, seq_files, job_kwargs),
+            worker,
             job_title=func_name,
             total_steps=self._job_total_steps(func_name, seq_files, job_kwargs),
             source_files=seq_files,

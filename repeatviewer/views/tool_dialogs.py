@@ -72,6 +72,25 @@ def _prepare_option_dialog(dialog: QDialog) -> None:
     )
 
 
+def make_process_output_box(
+    parent: QWidget,
+    *,
+    tool_name: str,
+    checked: bool = False,
+) -> tuple[QGroupBox, QCheckBox]:
+    """FastGA-style Options-tab group for the live process monitor window."""
+    checkbox = QCheckBox(f"Show process window while {tool_name} runs", parent)
+    checkbox.setChecked(bool(checked))
+    checkbox.setToolTip(
+        f"Open a window that first shows the {tool_name} command line, then "
+        "streams progress and tool messages. Useful for long runs."
+    )
+    box = QGroupBox("Process output", parent)
+    layout = QVBoxLayout(box)
+    layout.addWidget(checkbox)
+    return box, checkbox
+
+
 def make_cancel_save_run_bar(
     dialog: QDialog,
     *,
@@ -881,6 +900,13 @@ class AlignParamsDialog(QDialog):
         exe_box_layout.addWidget(self._use_system_mafft)
         exe_box_layout.addWidget(self._use_system_muscle)
         options_layout.addWidget(exe_box)
+
+        process_box, self._show_process_window = make_process_output_box(
+            self,
+            tool_name="Align",
+            checked=bool(getattr(opts, "show_process_window", False)),
+        )
+        options_layout.addWidget(process_box)
         options_layout.addStretch(1)
 
         self._aligner_tabs = QTabWidget(self)
@@ -999,6 +1025,7 @@ class AlignParamsDialog(QDialog):
             mafft_combined=self._mafft_combined.isChecked(),
             muscle_combined=self._muscle_combined.isChecked(),
             right_click_aligner=self.right_click_aligner(),
+            show_process_window=self._show_process_window.isChecked(),
         )
 
     def use_system_mafft(self) -> bool:
@@ -1035,6 +1062,7 @@ class AlignParamsDialog(QDialog):
 
         for value, radio in self._right_click_buttons.items():
             radio.setChecked(value == defaults.right_click_aligner)
+        self._show_process_window.setChecked(defaults.show_process_window)
         # Default: bundled MAFFT / MUSCLE binaries, not system PATH.
         self._use_system_mafft.setChecked(False)
         self._use_system_muscle.setChecked(False)
@@ -1324,6 +1352,14 @@ class FastGaParamsDialog(QDialog):
         self._no_soft_mask.setChecked(opts.no_soft_mask)
         self._no_soft_mask.setToolTip("FastGA -N: do not soft mask.")
 
+        self._pairwise = QCheckBox("Do pairwise comparison", self)
+        self._pairwise.setChecked(bool(getattr(opts, "pairwise", False)))
+        self._pairwise.setToolTip(
+            "Off (default): each selected FASTA is compared against itself.\n"
+            "On: allow one or two FASTA files; with two files, compare them "
+            "against each other."
+        )
+
         for field in (
             self._format,
             self._threads,
@@ -1335,23 +1371,12 @@ class FastGaParamsDialog(QDialog):
         ):
             field.setFixedWidth(280)
 
-        mode = QLabel(self)
-        mode.setWordWrap(True)
-        mode.setStyleSheet("color: palette(mid);")
-        if file_count >= 2:
-            mode.setText(
-                "Two files selected: they will be compared against each other."
-            )
-        elif file_count == 1:
-            mode.setText(
-                "One file selected: it will be compared against itself, which "
-                "finds repetitive regions. Self matches are excluded."
-            )
-        else:
-            mode.setText(
-                "Select one FASTA (self-comparison) or two FASTA files "
-                "(pairwise) before Run."
-            )
+        self._file_count = int(file_count)
+        self._mode = QLabel(self)
+        self._mode.setWordWrap(True)
+        self._mode.setStyleSheet("color: palette(mid);")
+        self._pairwise.toggled.connect(self._update_mode_text)
+        self._update_mode_text()
 
         params_tab = QWidget(self)
         form = QFormLayout(params_tab)
@@ -1360,7 +1385,7 @@ class FastGaParamsDialog(QDialog):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
-        form.addRow(mode)
+        form.addRow(self._mode)
         form.addRow("Output format:", self._format)
         form.addRow("-T (threads):", self._threads)
         form.addRow("-i (min identity):", self._identity)
@@ -1371,6 +1396,7 @@ class FastGaParamsDialog(QDialog):
         form.addRow("", self._symmetric)
         form.addRow("", self._keep_index)
         form.addRow("", self._no_soft_mask)
+        form.addRow("", self._pairwise)
 
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
@@ -1394,19 +1420,11 @@ class FastGaParamsDialog(QDialog):
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 
-        self._show_process_window = QCheckBox(
-            "Show process window while FastGA runs", self
+        process_box, self._show_process_window = make_process_output_box(
+            self,
+            tool_name="FastGA",
+            checked=bool(getattr(opts, "show_process_window", False)),
         )
-        self._show_process_window.setChecked(
-            bool(getattr(opts, "show_process_window", False))
-        )
-        self._show_process_window.setToolTip(
-            "Open a window that first shows the command line, then streams "
-            "progress and FastGA messages. Useful for long runs."
-        )
-        process_box = QGroupBox("Process output", self)
-        process_layout = QVBoxLayout(process_box)
-        process_layout.addWidget(self._show_process_window)
 
         options_tab = QWidget(self)
         options_layout = QVBoxLayout(options_tab)
@@ -1433,6 +1451,37 @@ class FastGaParamsDialog(QDialog):
         layout.addWidget(self._tabs)
         layout.addWidget(self._button_box)
 
+    def _update_mode_text(self) -> None:
+        pairwise = self._pairwise.isChecked()
+        n = self._file_count
+        if pairwise:
+            if n == 2:
+                text = (
+                    "Two files selected: they will be compared against each other."
+                )
+            elif n == 1:
+                text = (
+                    "One file selected: it will be compared against itself. "
+                    "Select a second FASTA for A vs B."
+                )
+            else:
+                text = (
+                    "Pairwise comparison: select one or two FASTA files "
+                    "(two files for A vs B)."
+                )
+        elif n >= 1:
+            text = (
+                f"{n} file(s) selected: each will be compared against itself "
+                "(self-comparison). Self matches are excluded."
+            )
+        else:
+            text = (
+                "Self-comparison (default): select one or more FASTA files. "
+                "Each is compared against itself. Enable Do pairwise comparison "
+                "to compare two genomes."
+            )
+        self._mode.setText(text)
+
     def _restore_defaults(self) -> None:
         from repeatviewer.job_options import FastGaOptions
 
@@ -1449,8 +1498,10 @@ class FastGaParamsDialog(QDialog):
         self._symmetric.setChecked(opts.symmetric)
         self._keep_index.setChecked(opts.keep_index)
         self._no_soft_mask.setChecked(opts.no_soft_mask)
+        self._pairwise.setChecked(opts.pairwise)
         self._show_process_window.setChecked(opts.show_process_window)
         self._right_click_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
+        self._update_mode_text()
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -1475,6 +1526,7 @@ class FastGaParamsDialog(QDialog):
             symmetric=self._symmetric.isChecked(),
             keep_index=self._keep_index.isChecked(),
             no_soft_mask=self._no_soft_mask.isChecked(),
+            pairwise=self._pairwise.isChecked(),
             temp_dir="",
             right_click_action=right_click_action,
             show_process_window=self._show_process_window.isChecked(),
@@ -2038,6 +2090,13 @@ class BlastParamsDialog(QDialog):
         exe_box_layout.addWidget(self._use_system_blast)
         options_layout.addWidget(exe_box)
 
+        process_box, self._show_process_window = make_process_output_box(
+            self,
+            tool_name="BLAST",
+            checked=bool(getattr(opts, "show_process_window", False)),
+        )
+        options_layout.addWidget(process_box)
+
         options_layout.addStretch(1)
         self._tabs.addTab(options_tab, "Options")
 
@@ -2237,6 +2296,8 @@ class BlastParamsDialog(QDialog):
         self._blastp_database.setCurrentIndex(0)
         self._blastx_database.setCurrentIndex(0)
         self._use_system_blast.setChecked(False)
+        self._show_process_window.setChecked(defaults.show_process_window)
+        self._right_click_buttons[BLAST_PROGRAM_BLASTN].setChecked(True)
 
     def use_system_blast(self) -> bool:
         return self._use_system_blast.isChecked()
@@ -2282,6 +2343,7 @@ class BlastParamsDialog(QDialog):
             blastx_write_text=self._blastx_write_text.isChecked(),
             blastx_write_gff=self._blastx_write_gff.isChecked(),
             right_click_program=self._selected_right_click_program(),
+            show_process_window=self._show_process_window.isChecked(),
         )
 
     def _selected_right_click_program(self) -> str:
@@ -2608,11 +2670,18 @@ class FlexidotParamsDialog(QDialog):
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 
+        process_box, self._show_process_window = make_process_output_box(
+            self,
+            tool_name="Flexidot",
+            checked=bool(getattr(opts, "show_process_window", False)),
+        )
+
         options_tab = QWidget(self)
         options_layout = QVBoxLayout(options_tab)
         options_layout.setContentsMargins(16, 14, 16, 14)
         options_layout.setSpacing(14)
         options_layout.addWidget(rc_box)
+        options_layout.addWidget(process_box)
         options_layout.addStretch(1)
 
         self._tabs = QTabWidget(self)
@@ -2671,6 +2740,7 @@ class FlexidotParamsDialog(QDialog):
         self._line_width.setValue(defaults.line_width)
         self._length_scaling.setChecked(defaults.length_scaling)
         self._combined.setChecked(defaults.combined)
+        self._show_process_window.setChecked(defaults.show_process_window)
         self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
 
     def options(self) -> FlexidotOptions:
@@ -2699,6 +2769,7 @@ class FlexidotParamsDialog(QDialog):
             # pairwise/all-vs-all for multiple.
             modes=DEFAULT_FLEXIDOT_MODES,
             right_click_action=right_click_action,
+            show_process_window=self._show_process_window.isChecked(),
         )
 
 

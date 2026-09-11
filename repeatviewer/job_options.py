@@ -231,6 +231,7 @@ class AlignOptions:
     muscle_combined: bool = False
     # Which aligner a right-click on the Align toolbar button runs.
     right_click_aligner: str = ALIGNER_MAFFT
+    show_process_window: bool = False
 
 
 # FastGA output formats (CLI streaming flags, except 1aln which uses -1:file).
@@ -264,14 +265,15 @@ DEFAULT_FASTGA_SYMMETRIC = True
 DEFAULT_FASTGA_KEEP_INDEX = True
 DEFAULT_FASTGA_NO_SOFT_MASK = False
 DEFAULT_FASTGA_SHOW_PROCESS_WINDOW = False
+DEFAULT_FASTGA_PAIRWISE = False
 
 
 @dataclass
 class FastGaOptions:
     """FastGA whole-genome alignment.
 
-    One selected file is compared against itself (finds repetitive regions);
-    two files are compared against each other.
+    By default each selected FASTA is self-compared. Pairwise mode compares
+    two selected genomes against each other (one or two files allowed).
     """
 
     output_format: str = FASTGA_FORMAT_PAF
@@ -284,6 +286,7 @@ class FastGaOptions:
     symmetric: bool = DEFAULT_FASTGA_SYMMETRIC
     keep_index: bool = DEFAULT_FASTGA_KEEP_INDEX
     no_soft_mask: bool = DEFAULT_FASTGA_NO_SOFT_MASK
+    pairwise: bool = DEFAULT_FASTGA_PAIRWISE
     temp_dir: str = ""
     right_click_action: str = FASTGA_RIGHT_CLICK_RUN
     show_process_window: bool = DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
@@ -313,6 +316,7 @@ def load_fastga_options() -> FastGaOptions:
         symmetric=_to_bool(v.get("symmetric"), DEFAULT_FASTGA_SYMMETRIC),
         keep_index=_to_bool(v.get("keep_index"), DEFAULT_FASTGA_KEEP_INDEX),
         no_soft_mask=_to_bool(v.get("no_soft_mask"), DEFAULT_FASTGA_NO_SOFT_MASK),
+        pairwise=_to_bool(v.get("pairwise"), DEFAULT_FASTGA_PAIRWISE),
         temp_dir=str(v.get("temp_dir", "") or ""),
         right_click_action=right_click_action,
         show_process_window=_to_bool(
@@ -335,6 +339,7 @@ def save_fastga_options(opts: FastGaOptions) -> None:
             "symmetric": opts.symmetric,
             "keep_index": opts.keep_index,
             "no_soft_mask": opts.no_soft_mask,
+            "pairwise": opts.pairwise,
             "temp_dir": opts.temp_dir,
             "right_click_action": opts.right_click_action,
             "show_process_window": opts.show_process_window,
@@ -379,6 +384,7 @@ class BlastOptions:
     blastx_num_threads: int = field(default_factory=_default_tool_threads)
     # Which program a right-click on the BLAST toolbar button runs.
     right_click_program: str = BLAST_PROGRAM_BLASTN
+    show_process_window: bool = False
 
     @property
     def active_database_name(self) -> str | None:
@@ -489,6 +495,7 @@ class FlexidotOptions:
     # Explicit flexidot comparison modes (-m); empty tuple = auto (see above).
     modes: tuple[str, ...] = DEFAULT_FLEXIDOT_MODES
     right_click_action: str = FLEXIDOT_RIGHT_CLICK_RUN
+    show_process_window: bool = False
 
 
 TE_ANNOTATION_RIGHT_CLICK_RUN = "run"
@@ -835,6 +842,7 @@ def load_blast_options() -> BlastOptions:
             if str(v.get("right_click_program", BLAST_PROGRAM_BLASTN)) in BLAST_PROGRAMS
             else BLAST_PROGRAM_BLASTN
         ),
+        show_process_window=_to_bool(v.get("show_process_window"), False),
     )
 
 
@@ -876,6 +884,7 @@ def save_blast_options(opts: BlastOptions) -> None:
             "blastx_write_gff": opts.blastx_write_gff,
             "blastx_num_threads": opts.blastx_num_threads,
             "right_click_program": opts.right_click_program,
+            "show_process_window": opts.show_process_window,
         },
     )
 
@@ -1040,6 +1049,7 @@ def load_align_options() -> AlignOptions:
         mafft_combined=_flag("mafft_combined"),
         muscle_combined=_flag("muscle_combined"),
         right_click_aligner=right_click_aligner,
+        show_process_window=_flag("show_process_window"),
     )
 
 
@@ -1062,6 +1072,7 @@ def save_align_options(opts: AlignOptions) -> None:
             "mafft_combined": opts.mafft_combined,
             "muscle_combined": opts.muscle_combined,
             "right_click_aligner": opts.right_click_aligner,
+            "show_process_window": opts.show_process_window,
         },
     )
 
@@ -1315,6 +1326,8 @@ def load_flexidot_options() -> FlexidotOptions:
         # Comparison mode is always automatic (not exposed in the dialog).
         modes=DEFAULT_FLEXIDOT_MODES,
         right_click_action=right_click_action,
+        show_process_window=str(v.get("show_process_window", "false")).lower()
+        in {"1", "true", "yes"},
     )
 
 
@@ -1340,6 +1353,7 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
                 if opts.right_click_action in FLEXIDOT_RIGHT_CLICK_ACTIONS
                 else FLEXIDOT_RIGHT_CLICK_RUN
             ),
+            "show_process_window": opts.show_process_window,
         },
     )
 

@@ -798,7 +798,7 @@ def run_flexidot(
             temp_gff_paths = [str(path) for path in temp_gff_files]
 
     env = os.environ.copy()
-    exe_dir = os.path.dirname(exe)
+    exe_dir = os.path.dirname(str(cmd_prefix[0]))
     if exe_dir:
         env["PATH"] = exe_dir + os.pathsep + env.get("PATH", "")
 

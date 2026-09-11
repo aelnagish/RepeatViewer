@@ -121,7 +121,12 @@ def run_subprocess_with_cancel(
             return
         for line in iter(stream.readline, ""):
             captured[name].append(line)
-            process_logger.info("%s %s | %s", tool, name, line.rstrip("\r\n"))
+            text = line.rstrip("\r\n")
+            process_logger.info("%s %s | %s", tool, name, text)
+            if text:
+                from repeatviewer.external_process import emit_process_log
+
+                emit_process_log(text)
 
     readers = [
         threading.Thread(target=_drain, args=("stdout", proc.stdout), daemon=True),

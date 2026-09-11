@@ -1121,6 +1121,9 @@ def run_batch(
     )
     progress_lock = threading.Lock()
     completed_count = 0
+    from repeatviewer.external_process import current_process_log_sink, process_log_sink
+
+    log_sink = current_process_log_sink()
 
     def _run_single(
         seq_path: Path,
@@ -1128,35 +1131,36 @@ def run_batch(
         genome_path: Path | None,
     ) -> tuple[Path, str, list[str], str | None]:
         try:
-            check_cancelled(cancel)
-            outs = run_on_sequence(
-                func_name,
-                seq_path,
-                project,
-                genome_path=genome_path,
-                genome_label=genome_label,
-                genome_db=db_cache.get(genome_path) if genome_path else None,
-                chrom_sizes=chrom_cache.get(genome_path) if genome_path else None,
-                flexidot_options=flexidot_options,
-                flexidot_mode=(
-                    ",".join(flexidot_options.modes)
-                    if func_name == "flexidot"
-                    and flexidot_options is not None
-                    and flexidot_options.modes
-                    else "0"
-                    if func_name == "flexidot"
-                    else flexidot_mode
-                ),
-                extend=extend,
-                blast_options=blast_options,
-                teaid_options=teaid_options,
-                msa_clean_options=msa_clean_options,
-                consensus_options=consensus_options,
-                te_annotation_options=te_annotation_options,
-                tsd_search_options=tsd_search_options,
-                orf_prediction_settings=orf_prediction_settings,
-                cancel=cancel,
-            )
+            with process_log_sink(log_sink):
+                check_cancelled(cancel)
+                outs = run_on_sequence(
+                    func_name,
+                    seq_path,
+                    project,
+                    genome_path=genome_path,
+                    genome_label=genome_label,
+                    genome_db=db_cache.get(genome_path) if genome_path else None,
+                    chrom_sizes=chrom_cache.get(genome_path) if genome_path else None,
+                    flexidot_options=flexidot_options,
+                    flexidot_mode=(
+                        ",".join(flexidot_options.modes)
+                        if func_name == "flexidot"
+                        and flexidot_options is not None
+                        and flexidot_options.modes
+                        else "0"
+                        if func_name == "flexidot"
+                        else flexidot_mode
+                    ),
+                    extend=extend,
+                    blast_options=blast_options,
+                    teaid_options=teaid_options,
+                    msa_clean_options=msa_clean_options,
+                    consensus_options=consensus_options,
+                    te_annotation_options=te_annotation_options,
+                    tsd_search_options=tsd_search_options,
+                    orf_prediction_settings=orf_prediction_settings,
+                    cancel=cancel,
+                )
             return seq_path, genome_label, outs, None
         except JobCancelledError:
             raise
