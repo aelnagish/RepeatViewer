@@ -104,6 +104,10 @@ def run_subprocess_with_cancel(
     # Prefer the real tool name when wrapped as wsl … bash -lc '… exec Tool …'
     if tool in {"bash", "wsl"} and len(command) >= 2:
         tool = Path(str(list(cmd)[0])).name if list(cmd) else tool
+    # Capture before spawn: drain threads do not inherit ContextVars.
+    from repeatviewer.external_process import current_process_log_sink, emit_process_log
+
+    sink = current_process_log_sink()
     log_command(tool, command)
     proc = subprocess.Popen(
         command,
@@ -114,6 +118,7 @@ def run_subprocess_with_cancel(
     )
     started = time.monotonic()
     process_logger.info("START tool=%s pid=%s", tool, proc.pid)
+    emit_process_log(f"START pid={proc.pid}", sink=sink)
     captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
 
     def _drain(name: str, stream) -> None:
@@ -124,9 +129,7 @@ def run_subprocess_with_cancel(
             text = line.rstrip("\r\n")
             process_logger.info("%s %s | %s", tool, name, text)
             if text:
-                from repeatviewer.external_process import emit_process_log
-
-                emit_process_log(text)
+                emit_process_log(text, sink=sink)
 
     readers = [
         threading.Thread(target=_drain, args=("stdout", proc.stdout), daemon=True),
@@ -149,6 +152,11 @@ def run_subprocess_with_cancel(
                     proc.returncode,
                     time.monotonic() - started,
                 )
+                emit_process_log(
+                    f"CANCELLED exit={proc.returncode} "
+                    f"elapsed={time.monotonic() - started:.3f}s",
+                    sink=sink,
+                )
                 raise JobCancelledError("Job stopped by user")
             if proc.poll() is not None:
                 break
@@ -163,13 +171,18 @@ def run_subprocess_with_cancel(
             stdout,
             stderr,
         )
+        elapsed = time.monotonic() - started
         process_logger.log(
             logging.INFO if proc.returncode == 0 else logging.ERROR,
             "FINISH tool=%s pid=%s exit=%s elapsed=%.3fs",
             tool,
             proc.pid,
             proc.returncode,
-            time.monotonic() - started,
+            elapsed,
+        )
+        emit_process_log(
+            f"FINISH exit={proc.returncode} elapsed={elapsed:.3f}s",
+            sink=sink,
         )
         if check and result.returncode != 0:
             raise subprocess.CalledProcessError(

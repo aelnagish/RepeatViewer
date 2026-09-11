@@ -400,6 +400,7 @@ def run_fastga_alignment(
             on_log(f"Working directory: {source1.parent}")
             on_log(f"Output: {out_path}")
             on_log("")
+            on_log("—— program output ——")
 
         label = (
             source1.name if source2 is None
@@ -426,7 +427,7 @@ def run_fastga_alignment(
             process_started = time.monotonic()
             process_logger.info("START tool=FastGA pid=%s", proc.pid)
             if on_log is not None:
-                on_log(f"Started (pid {proc.pid})")
+                on_log(f"START pid={proc.pid}")
             stderr_lines, stderr_thread = _stream_stderr(
                 proc, "FastGA", on_line=on_log
             )
@@ -460,13 +461,16 @@ def run_fastga_alignment(
             stderr_thread.join()
             stderr = "".join(stderr_lines)
 
+    elapsed = time.monotonic() - process_started
     process_logger.log(
         logging.INFO if proc.returncode == 0 else logging.ERROR,
         "FINISH tool=FastGA pid=%s exit=%s elapsed=%.3fs",
         proc.pid,
         proc.returncode,
-        time.monotonic() - process_started,
+        elapsed,
     )
+    if on_log is not None:
+        on_log(f"FINISH exit={proc.returncode} elapsed={elapsed:.3f}s")
 
     log_process_output("FastGA", output_path=out_path)
 

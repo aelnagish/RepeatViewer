@@ -32,8 +32,8 @@ def process_log_sink(callback: _ProcessLogCallback | None) -> Iterator[None]:
         _process_log_sink.reset(token)
 
 
-def emit_process_log(message: str) -> None:
-    callback = _process_log_sink.get()
+def emit_process_log(message: str, *, sink: _ProcessLogCallback | None = None) -> None:
+    callback = sink if sink is not None else _process_log_sink.get()
     if callback is None:
         return
     try:
@@ -75,6 +75,7 @@ def log_command(
         if input_text:
             emit_process_log(f"Inputs: {input_text}")
         emit_process_log("")
+        emit_process_log("—— program output ——")
 
 
 def log_process_output(
@@ -86,6 +87,7 @@ def log_process_output(
     output_path: str | os.PathLike[str] | None = None,
 ) -> None:
     """Copy terminal-style process output into the application log."""
+    sink = current_process_log_sink()
     for stream_name, content in (("stdout", stdout), ("stderr", stderr)):
         if not content:
             continue
@@ -95,8 +97,10 @@ def log_process_output(
             content = content.decode("utf-8", errors="replace")
         for line in content.rstrip().splitlines():
             logger.info("%s %s | %s", tool, stream_name, line)
+            emit_process_log(line, sink=sink)
     if output_path is not None:
         logger.info("%s output | %s", tool, output_path)
+        emit_process_log(f"output: {output_path}", sink=sink)
 
 
 def run_logged_process(
@@ -121,6 +125,8 @@ def run_logged_process(
     display_command = (
         ["shell", "-c", command] if isinstance(command, str) else list(command)
     )
+    # Capture before spawn: drain threads do not inherit ContextVars.
+    sink = current_process_log_sink()
     log_command(tool, display_command, inputs=inputs, cwd=cwd)
     started = time.monotonic()
     try:
@@ -136,8 +142,10 @@ def run_logged_process(
         )
     except OSError:
         logger.exception("LAUNCH FAILED tool=%s", tool)
+        emit_process_log(f"LAUNCH FAILED tool={tool}", sink=sink)
         raise
     logger.info("START tool=%s pid=%s", tool, proc.pid)
+    emit_process_log(f"START pid={proc.pid}", sink=sink)
     captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
 
     def _drain(name: str, stream, *, write_lines: bool) -> None:
@@ -149,7 +157,7 @@ def run_logged_process(
                 text = line.rstrip("\r\n")
                 logger.info("%s %s | %s", tool, name, text)
                 if text:
-                    emit_process_log(text)
+                    emit_process_log(text, sink=sink)
         stream.close()
 
     stdout_thread = threading.Thread(
@@ -188,7 +196,7 @@ def run_logged_process(
                             text = line.rstrip("\r\n")
                             logger.info("%s progress | %s", tool, text)
                             if text:
-                                emit_process_log(text)
+                                emit_process_log(text, sink=sink)
                         position = handle.tell()
                 except OSError:
                     pass
@@ -202,6 +210,10 @@ def run_logged_process(
         proc.kill()
         proc.wait()
         logger.error("TIMEOUT tool=%s pid=%s timeout=%ss", tool, proc.pid, timeout)
+        emit_process_log(
+            f"TIMEOUT tool={tool} pid={proc.pid} timeout={timeout}s",
+            sink=sink,
+        )
         raise
     finally:
         stdout_thread.join()
@@ -221,8 +233,18 @@ def run_logged_process(
         returncode,
         elapsed,
     )
+    emit_process_log(
+        f"FINISH exit={returncode} elapsed={elapsed:.3f}s",
+        sink=sink,
+    )
+    if stdout_is_result and stdout.strip():
+        emit_process_log(
+            f"(stdout captured as result, {len(stdout)} characters not shown)",
+            sink=sink,
+        )
     if output_path is not None:
         logger.info("%s output | %s", tool, output_path)
+        emit_process_log(f"output: {output_path}", sink=sink)
     result = subprocess.CompletedProcess(display_command, returncode, stdout, stderr)
     if check and returncode != 0:
         raise subprocess.CalledProcessError(

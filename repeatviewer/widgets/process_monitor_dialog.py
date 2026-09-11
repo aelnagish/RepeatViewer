@@ -29,7 +29,7 @@ class ProcessMonitorDialog(QDialog):
 
         self._log = QPlainTextEdit(self)
         self._log.setReadOnly(True)
-        self._log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._log.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         font = QFont("Menlo")
         if not font.exactMatch():
             font = QFont("Consolas")
