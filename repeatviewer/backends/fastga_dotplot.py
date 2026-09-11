@@ -24,10 +24,9 @@ which the current viewer does not do.
 
 from __future__ import annotations
 
-import logging
 import shutil
+import logging
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -37,7 +36,12 @@ from repeatviewer.external_process import log_command, log_process_output
 process_logger = logging.getLogger("repeatviewer.commands")
 
 
-def _stream_stderr(proc: subprocess.Popen, tool: str) -> tuple[list[str], threading.Thread]:
+def _stream_stderr(
+    proc: subprocess.Popen,
+    tool: str,
+    *,
+    on_line=None,
+) -> tuple[list[str], threading.Thread]:
     lines: list[str] = []
 
     def _read() -> None:
@@ -45,11 +49,26 @@ def _stream_stderr(proc: subprocess.Popen, tool: str) -> tuple[list[str], thread
             return
         for line in iter(proc.stderr.readline, ""):
             lines.append(line)
-            process_logger.info("%s stderr | %s", tool, line.rstrip("\r\n"))
+            text = line.rstrip("\r\n")
+            process_logger.info("%s stderr | %s", tool, text)
+            if on_line is not None and text:
+                try:
+                    on_line(text)
+                except Exception:  # noqa: BLE001 - never break the reader
+                    pass
 
     thread = threading.Thread(target=_read, daemon=True)
     thread.start()
     return lines, thread
+
+
+def _format_command_line(cmd: list[str]) -> str:
+    import shlex
+
+    try:
+        return shlex.join(str(part) for part in cmd)
+    except Exception:  # noqa: BLE001
+        return " ".join(str(part) for part in cmd)
 from pathlib import Path
 
 from repeatviewer.backends.dotplot import (
@@ -64,6 +83,9 @@ _FASTGA_NAMES = ("FastGA", "fastga")
 DEFAULT_THREADS = 8
 DEFAULT_MIN_IDENTITY = 0.7
 DEFAULT_MIN_LENGTH = 100
+# FastGA chaining defaults from the tool itself (-c 85, -s 1000).
+DEFAULT_CHAIN_COVERAGE = 85
+DEFAULT_CHAIN_GAP = 1000
 
 # FastGA's -f: a seed occurring more than this many times is deemed
 # "repetitive" and discarded before alignment. FastGA's own default is 10,
@@ -105,10 +127,8 @@ def _scratch_dir(near: Path, explicit: Path | None = None):
 
 
 def fastga_executable() -> str | None:
-    from repeatviewer.conda_tools import which_tool
-
     for name in _FASTGA_NAMES:
-        found = which_tool(name)
+        found = shutil.which(name)
         if found:
             return found
     return None
@@ -119,12 +139,6 @@ def fastga_available() -> bool:
 
 
 def install_hint() -> str:
-    if sys.platform == "win32":
-        return (
-            "Install FastGA in a WSL2 conda env, then set "
-            "File → Setting → External tools (conda) to that env name "
-            "(e.g. tetrimmer). Example: conda install -c bioconda fastga"
-        )
     return "Install FastGA with:  conda install -c bioconda fastga"
 
 
@@ -194,6 +208,36 @@ def parse_paf_segments(
     return segments, seq_length, seq_name
 
 
+def _append_core_flags(
+    cmd: list[str],
+    *,
+    threads: int,
+    min_identity: float,
+    min_length: int,
+    seed_freq: int,
+    chain_coverage: int,
+    chain_gap: int,
+    symmetric: bool,
+    keep_index: bool,
+    no_soft_mask: bool,
+    temp_dir: Path | None,
+) -> None:
+    cmd.append(f"-T{max(1, int(threads))}")
+    if temp_dir is not None:
+        cmd.append(f"-P{temp_dir}")
+    if symmetric:
+        cmd.append("-S")
+    if keep_index:
+        cmd.append("-k")
+    if no_soft_mask:
+        cmd.append("-N")
+    cmd.append(f"-i{float(min_identity):.3f}")
+    cmd.append(f"-l{max(1, int(min_length))}")
+    cmd.append(f"-f{max(1, int(seed_freq))}")
+    cmd.append(f"-c{max(1, int(chain_coverage))}")
+    cmd.append(f"-s{max(1, int(chain_gap))}")
+
+
 def build_fastga_command(
     fasta: Path,
     *,
@@ -201,8 +245,11 @@ def build_fastga_command(
     min_identity: float = DEFAULT_MIN_IDENTITY,
     min_length: int = DEFAULT_MIN_LENGTH,
     seed_freq: int = DEFAULT_SEED_FREQ,
+    chain_coverage: int = DEFAULT_CHAIN_COVERAGE,
+    chain_gap: int = DEFAULT_CHAIN_GAP,
     symmetric: bool = True,
     keep_index: bool = True,
+    no_soft_mask: bool = False,
     temp_dir: Path | None = None,
 ) -> list[str]:
     """Command line for a FastGA self-comparison streaming PAF to stdout.
@@ -216,29 +263,68 @@ def build_fastga_command(
     if not exe:
         raise FastgaError(f"FastGA is not installed.\n\n{install_hint()}")
 
-    cmd = [exe, f"-T{max(1, int(threads))}"]
-    if symmetric:
-        cmd.append("-S")
-    if keep_index:
-        cmd.append("-k")
-    if temp_dir is not None:
-        cmd.append(f"-P{temp_dir}")
-    cmd.append(f"-i{float(min_identity):.3f}")
-    cmd.append(f"-l{max(1, int(min_length))}")
-    cmd.append(f"-f{max(1, int(seed_freq))}")
+    cmd = [exe]
+    _append_core_flags(
+        cmd,
+        threads=threads,
+        min_identity=min_identity,
+        min_length=min_length,
+        seed_freq=seed_freq,
+        chain_coverage=chain_coverage,
+        chain_gap=chain_gap,
+        symmetric=symmetric,
+        keep_index=keep_index,
+        no_soft_mask=no_soft_mask,
+        temp_dir=temp_dir,
+    )
+    cmd.append("-paf")
     cmd.append(str(fasta))
     return cmd
 
 
 FORMAT_PAF = "paf"
+FORMAT_PAFX = "pafx"
+FORMAT_PAFM = "pafm"
+FORMAT_PAFS = "pafs"
+FORMAT_PAFS_LONG = "pafS"
 FORMAT_PSL = "psl"
 FORMAT_ALN = "1aln"
 
+# Streaming output flags FastGA accepts (excluding -v / -L).
+FORMAT_STREAM_FLAGS: dict[str, str] = {
+    FORMAT_PAF: "-paf",
+    FORMAT_PAFX: "-pafx",
+    FORMAT_PAFM: "-pafm",
+    FORMAT_PAFS: "-pafs",
+    FORMAT_PAFS_LONG: "-pafS",
+    FORMAT_PSL: "-psl",
+}
+
 FORMAT_LABELS = (
-    ("PAF (pairwise mapping format)", FORMAT_PAF),
-    ("PSL (BLAT format)", FORMAT_PSL),
-    ("ALN (.1aln, compact ONEcode)", FORMAT_ALN),
+    ("-paf: PAF text file", FORMAT_PAF),
+    ("-pafx: PAF text with CIGAR (X mismatches)", FORMAT_PAFX),
+    ("-pafm: PAF text with CIGAR (= matches)", FORMAT_PAFM),
+    ("-pafs: PAF text with CS string (short)", FORMAT_PAFS),
+    ("-pafS: PAF text with CS string (long)", FORMAT_PAFS_LONG),
+    ("-psl: PSL text file", FORMAT_PSL),
+    ("-1: .1aln binary (ONEcode)", FORMAT_ALN),
 )
+
+
+def output_suffix_for_format(fmt: str) -> str:
+    if fmt == FORMAT_ALN:
+        return ".1aln"
+    if fmt == FORMAT_PSL:
+        return ".psl"
+    return ".paf"
+
+
+def append_output_format_flag(cmd: list[str], fmt: str, out_path: Path) -> None:
+    if fmt == FORMAT_ALN:
+        cmd.append(f"-1:{out_path}")
+        return
+    flag = FORMAT_STREAM_FLAGS.get(fmt, "-paf")
+    cmd.append(flag)
 
 
 def run_fastga_alignment(
@@ -251,10 +337,14 @@ def run_fastga_alignment(
     min_identity: float = DEFAULT_MIN_IDENTITY,
     min_length: int = DEFAULT_MIN_LENGTH,
     seed_freq: int = DEFAULT_SEED_FREQ,
+    chain_coverage: int = DEFAULT_CHAIN_COVERAGE,
+    chain_gap: int = DEFAULT_CHAIN_GAP,
     symmetric: bool = True,
     keep_index: bool = True,
+    no_soft_mask: bool = False,
     temp_dir: Path | None = None,
     progress=None,
+    on_log=None,
     is_cancelled=None,
 ) -> Path:
     """Align two genomes, or one against itself, writing ``out_path``.
@@ -277,56 +367,69 @@ def run_fastga_alignment(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with _scratch_dir(source1.parent, temp_dir) as scratch:
-        cmd = [exe, f"-T{max(1, int(threads))}", f"-P{scratch}"]
-        if symmetric:
-            cmd.append("-S")
-        if keep_index:
-            cmd.append("-k")
-        cmd.append(f"-i{float(min_identity):.3f}")
-        cmd.append(f"-l{max(1, int(min_length))}")
-        cmd.append(f"-f{max(1, int(seed_freq))}")
+    def _emit(message: str) -> None:
+        if progress is not None:
+            progress(message)
+        if on_log is not None:
+            on_log(message)
 
-        if fmt == FORMAT_ALN:
-            cmd.append(f"-1:{out_path}")
-        elif fmt == FORMAT_PSL:
-            cmd.append("-psl")
-        else:
-            cmd.append("-paf")
+    with _scratch_dir(source1.parent, temp_dir) as scratch:
+        cmd = [exe]
+        _append_core_flags(
+            cmd,
+            threads=threads,
+            min_identity=min_identity,
+            min_length=min_length,
+            seed_freq=seed_freq,
+            chain_coverage=chain_coverage,
+            chain_gap=chain_gap,
+            symmetric=symmetric,
+            keep_index=keep_index,
+            no_soft_mask=no_soft_mask,
+            temp_dir=scratch,
+        )
+        append_output_format_flag(cmd, fmt, out_path)
 
         cmd.append(str(source1))
         if source2 is not None:
             cmd.append(str(source2))
 
-        if progress is not None:
-            label = (
-                source1.name if source2 is None
-                else f"{source1.name} vs {source2.name}"
-            )
-            progress(f"FastGA: {label} (indexing on first run may take a while)…")
+        if on_log is not None:
+            on_log("Command:")
+            on_log(_format_command_line(cmd))
+            on_log(f"Working directory: {source1.parent}")
+            on_log(f"Output: {out_path}")
+            on_log("")
+
+        label = (
+            source1.name if source2 is None
+            else f"{source1.name} vs {source2.name}"
+        )
+        _emit(f"FastGA: {label} (indexing on first run may take a while)…")
 
         stream_to_file = fmt != FORMAT_ALN
         handle = out_path.open("w", encoding="utf-8") if stream_to_file else None
         try:
-            from repeatviewer.conda_tools import prepare_command, uses_wsl_conda
-
-            launch_cmd = prepare_command(cmd)
             log_command(
                 "FastGA",
-                launch_cmd,
+                cmd,
                 inputs=[p for p in (source1, source2) if p is not None],
                 cwd=source1.parent,
             )
             proc = subprocess.Popen(
-                launch_cmd,
+                cmd,
                 stdout=subprocess.PIPE if stream_to_file else subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=None if uses_wsl_conda() else str(source1.parent),
+                cwd=str(source1.parent),
             )
             process_started = time.monotonic()
             process_logger.info("START tool=FastGA pid=%s", proc.pid)
-            stderr_lines, stderr_thread = _stream_stderr(proc, "FastGA")
+            if on_log is not None:
+                on_log(f"Started (pid {proc.pid})")
+            stderr_lines, stderr_thread = _stream_stderr(
+                proc, "FastGA", on_line=on_log
+            )
         except OSError as exc:
             if handle is not None:
                 handle.close()
@@ -336,8 +439,8 @@ def run_fastga_alignment(
             if stream_to_file and proc.stdout is not None and handle is not None:
                 for count, line in enumerate(proc.stdout, 1):
                     handle.write(line)
-                    if progress is not None and count % 50_000 == 0:
-                        progress(f"FastGA: {count:,} alignments…")
+                    if count % 50_000 == 0:
+                        _emit(f"FastGA: {count:,} alignments…")
                     if is_cancelled is not None and is_cancelled():
                         proc.terminate()
                         raise FastgaError("Cancelled.")
@@ -383,8 +486,11 @@ def run_fastga_self_dotplot(
     min_identity: float = DEFAULT_MIN_IDENTITY,
     min_length: int = DEFAULT_MIN_LENGTH,
     seed_freq: int = DEFAULT_SEED_FREQ,
+    chain_coverage: int = DEFAULT_CHAIN_COVERAGE,
+    chain_gap: int = DEFAULT_CHAIN_GAP,
     symmetric: bool = True,
     keep_index: bool = True,
+    no_soft_mask: bool = False,
     temp_dir: Path | None = None,
     progress=None,
     is_cancelled=None,
@@ -407,8 +513,11 @@ def run_fastga_self_dotplot(
             min_identity=min_identity,
             min_length=min_length,
             seed_freq=seed_freq,
+            chain_coverage=chain_coverage,
+            chain_gap=chain_gap,
             symmetric=symmetric,
             keep_index=keep_index,
+            no_soft_mask=no_soft_mask,
             temp_dir=scratch,
         )
 
@@ -416,16 +525,13 @@ def run_fastga_self_dotplot(
             progress("Running FastGA (indexing on first run may take a while)…")
 
         try:
-            from repeatviewer.conda_tools import prepare_command, uses_wsl_conda
-
-            launch_cmd = prepare_command(cmd)
-            log_command("FastGA", launch_cmd, inputs=[fasta], cwd=fasta.parent)
+            log_command("FastGA", cmd, inputs=[fasta], cwd=fasta.parent)
             proc = subprocess.Popen(
-                launch_cmd,
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=None if uses_wsl_conda() else str(fasta.parent),
+                cwd=str(fasta.parent),
             )
             process_started = time.monotonic()
             process_logger.info("START tool=FastGA pid=%s", proc.pid)

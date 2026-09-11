@@ -324,6 +324,7 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_BLASTP,
     BLAST_PROGRAM_BLASTX,
     EXTEND_RIGHT_CLICK_DIALOG,
+    FASTGA_RIGHT_CLICK_DIALOG,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     CONSENSUS_RIGHT_CLICK_DIALOG,
     TEAID_RIGHT_CLICK_DIALOG,
@@ -333,6 +334,7 @@ from repeatviewer.job_options import (
     load_blast_options,
     load_consensus_options,
     load_extend_options,
+    load_fastga_options,
     load_flexidot_options,
     load_msa_clean_options,
     load_te_annotation_options,
@@ -347,6 +349,7 @@ from repeatviewer.job_options import (
     save_blast_options,
     save_consensus_options,
     save_extend_options,
+    save_fastga_options,
     save_flexidot_options,
     save_msa_clean_options,
     save_te_annotation_options,
@@ -652,30 +655,37 @@ class FastGaWorker(QObject):
     """
 
     progress = Signal(int, str)
+    log_line = Signal(str)
     finished = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, seq_files: list[Path], options, *, cancel=None) -> None:
+    def __init__(
+        self,
+        seq_files: list[Path],
+        options,
+        *,
+        cancel=None,
+        stream_log: bool = False,
+    ) -> None:
         super().__init__()
         self._seq_files = list(seq_files)
         self._options = options
         self._cancel = cancel
+        self._stream_log = bool(stream_log)
 
     @Slot()
     def run(self) -> None:
+        from pathlib import Path as _Path
+
         from repeatviewer.backends.fastga_dotplot import (
-            FORMAT_ALN,
-            FORMAT_PSL,
+            output_suffix_for_format,
             run_fastga_alignment,
         )
 
         try:
             source1 = self._seq_files[0]
             source2 = self._seq_files[1] if len(self._seq_files) > 1 else None
-            suffix = {
-                FORMAT_ALN: ".1aln",
-                FORMAT_PSL: ".psl",
-            }.get(self._options.output_format, ".paf")
+            suffix = output_suffix_for_format(self._options.output_format)
             if source2 is None:
                 stem = f"{source1.stem}_self"
             else:
@@ -685,9 +695,17 @@ class FastGaWorker(QObject):
             def _progress(message: str) -> None:
                 self.progress.emit(1, message)
 
+            def _log(message: str) -> None:
+                self.log_line.emit(str(message))
+
             def _cancelled() -> bool:
                 # JobCancellation.requested is a @property, not a method.
                 return bool(self._cancel is not None and self._cancel.requested)
+
+            temp_raw = str(getattr(self._options, "temp_dir", "") or "").strip()
+            temp_dir = _Path(temp_raw).expanduser() if temp_raw else None
+            if temp_dir is not None:
+                temp_dir.mkdir(parents=True, exist_ok=True)
 
             written = run_fastga_alignment(
                 source1,
@@ -698,9 +716,14 @@ class FastGaWorker(QObject):
                 min_identity=self._options.min_identity,
                 min_length=self._options.min_length,
                 seed_freq=getattr(self._options, "seed_freq", 200),
+                chain_coverage=getattr(self._options, "chain_coverage", 85),
+                chain_gap=getattr(self._options, "chain_gap", 1000),
                 symmetric=self._options.symmetric,
                 keep_index=self._options.keep_index,
+                no_soft_mask=getattr(self._options, "no_soft_mask", False),
+                temp_dir=temp_dir,
                 progress=_progress,
+                on_log=_log if self._stream_log else None,
                 is_cancelled=_cancelled,
             )
             self.finished.emit([str(written)])
@@ -1532,6 +1555,7 @@ class MainWindow(QMainWindow):
         self._plugin_run_dialog: UserCommandRunDialog | None = None
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
+        self._fastga_options = load_fastga_options()
         self._extend_options = load_extend_options()
         self._tsd_search_options = load_tsd_search_options()
         self._teaid_options = load_teaid_options()
@@ -2628,9 +2652,17 @@ class MainWindow(QMainWindow):
 
     def _populate_fastga_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("Run FastGA with default parameters", self._run_fastga_default)
+            menu.addAction("Run FastGA with saved parameters", self._run_fastga_default)
         menu.addSeparator()
         menu.addAction("Change FastGA parameters", self._open_fastga_dialog)
+
+    def _fastga_candidate_files(self) -> list[Path]:
+        """Selected FASTA files suitable for FastGA (0, 1, or 2+). No UI."""
+        selected = self._selected_files()
+        return [
+            p for p in selected
+            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
 
     def _selected_files_for_fastga(self) -> list[Path]:
         from repeatviewer.backends.fastga_dotplot import fastga_available, install_hint
@@ -2642,11 +2674,7 @@ class MainWindow(QMainWindow):
                 f"FastGA is not installed or not on PATH.\n\n{install_hint()}",
             )
             return []
-        selected = self._selected_files()
-        files = [
-            p for p in selected
-            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
-        ]
+        files = self._fastga_candidate_files()
         if not files:
             QMessageBox.information(
                 self,
@@ -2666,34 +2694,72 @@ class MainWindow(QMainWindow):
         return files
 
     def _run_fastga_default(self) -> None:
-        from repeatviewer.job_options import FastGaOptions
-
         files = self._selected_files_for_fastga()
         if files:
-            self._start_fastga_job(files, FastGaOptions())
+            self._start_fastga_job(files, self._fastga_options)
+
+    def _quick_fastga_right_click(self) -> None:
+        """Right-click FastGA: run or reopen dialog per Options tab."""
+        if self._fastga_options.right_click_action == FASTGA_RIGHT_CLICK_DIALOG:
+            self._open_fastga_dialog()
+            return
+        self._run_fastga_default()
 
     def _open_fastga_dialog(self) -> None:
+        """Click FastGA → parameters dialog (same Cancel / Save / Run pattern as BLAST)."""
         from repeatviewer.views.tool_dialogs import FastGaParamsDialog
 
-        files = self._selected_files_for_fastga()
-        if not files:
-            return
-        dialog = FastGaParamsDialog(file_count=len(files), parent=self)
+        candidates = self._fastga_candidate_files()
+        if 1 <= len(candidates) <= 2:
+            file_count = len(candidates)
+        else:
+            file_count = 0
+        dialog = FastGaParamsDialog(
+            initial=self._fastga_options,
+            file_count=file_count,
+            parent=self,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._fastga_options = dialog.options()
+        save_fastga_options(self._fastga_options)
         if dialog.should_run():
-            self._start_fastga_job(files, dialog.options())
+            files = self._selected_files_for_fastga()
+            if files:
+                self._start_fastga_job(files, self._fastga_options)
         else:
-            self._set_status_message("FastGA settings noted (not persisted)", 4000)
+            self._set_status_message("FastGA settings saved", 4000)
 
     def _start_fastga_job(self, files: list[Path], options) -> None:
+        from repeatviewer.widgets.process_monitor_dialog import ProcessMonitorDialog
+
         title = (
             f"FastGA ({files[0].name} self)"
             if len(files) == 1
             else f"FastGA ({files[0].name} vs {files[1].name})"
         )
+        show_log = bool(getattr(options, "show_process_window", False))
+        worker = FastGaWorker(
+            files,
+            options,
+            cancel=self._job_cancel,
+            stream_log=show_log,
+        )
+        if show_log:
+            dialog = getattr(self, "_fastga_process_dialog", None)
+            if dialog is None:
+                dialog = ProcessMonitorDialog("FastGA", parent=self)
+                self._fastga_process_dialog = dialog
+            dialog.prepare(title)
+            worker.log_line.connect(dialog.append_line)
+            worker.finished.connect(
+                lambda _paths, d=dialog: d.mark_finished(True)
+            )
+            worker.failed.connect(
+                lambda error, d=dialog: d.mark_finished(False, str(error))
+            )
         self._start_background_job(
-            FastGaWorker(files, options, cancel=self._job_cancel),
+            worker,
             job_title=title,
             total_steps=1,
             source_files=files,
@@ -3643,12 +3709,12 @@ class MainWindow(QMainWindow):
             self._add_toolbar_action_button(
                 bar,
                 "FastGA",
-                self._run_fastga_default,
+                self._open_fastga_dialog,
                 tooltip=(
-                    "Click: run FastGA with default parameters.\n"
-                    "Right-click: change parameters."
+                    "Click: set parameters and run.\n"
+                    "Right-click: action chosen in the Options tab."
                 ),
-                right_click_slot=self._open_fastga_dialog,
+                right_click_slot=self._quick_fastga_right_click,
             )
         elif tool_id == "repeat_quantify":
             self._add_toolbar_text_action(

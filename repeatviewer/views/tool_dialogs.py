@@ -179,6 +179,8 @@ from repeatviewer.job_options import (
     DEFAULT_EXTEND_RIGHT,
     EXTEND_RIGHT_CLICK_RUN,
     EXTEND_RIGHT_CLICK_DIALOG,
+    FASTGA_RIGHT_CLICK_RUN,
+    FASTGA_RIGHT_CLICK_DIALOG,
     DEFAULT_FLEXIDOT_LCS_SHADING,
     DEFAULT_FLEXIDOT_OUTPUT_FORMAT,
     DEFAULT_FLEXIDOT_WORDSIZE,
@@ -1222,14 +1224,14 @@ class ExtractSequencesDialog(QDialog):
 
 
 class FastGaParamsDialog(QDialog):
-    """FastGA whole-genome alignment parameters."""
+    """FastGA whole-genome alignment parameters (BLAST-style form)."""
 
     def __init__(
         self,
         *,
         initial=None,
         file_count: int = 1,
-        title: str = "FastGA",
+        title: str = "FastGA parameters",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -1245,16 +1247,23 @@ class FastGaParamsDialog(QDialog):
         idx = self._format.findData(opts.output_format)
         if idx >= 0:
             self._format.setCurrentIndex(idx)
+        self._format.setToolTip(
+            "Output format: PAF and PSL are text files streamed by FastGA "
+            "(-paf / -pafx / -pafm / -pafs / -pafS / -psl); -1 writes a binary "
+            ".1aln (ONEcode) file."
+        )
 
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 128)
         self._threads.setValue(max(1, opts.threads))
+        self._threads.setToolTip("FastGA -T: number of threads to use.")
 
         self._identity = QDoubleSpinBox(self)
         self._identity.setRange(0.5, 1.0)
         self._identity.setSingleStep(0.05)
         self._identity.setDecimals(2)
         self._identity.setValue(opts.min_identity)
+        self._identity.setToolTip("FastGA -i: minimum alignment identity.")
 
         self._min_length = QSpinBox(self)
         # Below ~100 FastGA fails: an alignment must contain a 40 bp seed and
@@ -1263,8 +1272,8 @@ class FastGaParamsDialog(QDialog):
         self._min_length.setSingleStep(50)
         self._min_length.setValue(max(100, opts.min_length))
         self._min_length.setToolTip(
-            "Shortest alignment to report, in bp. Cannot go below 100 -- "
-            "FastGA rejects limits shorter than its seed length.\n"
+            "FastGA -l: shortest alignment to report, in bp. Cannot go below 100 "
+            "-- FastGA rejects limits shorter than its seed length.\n"
             "Raise this on satellite arrays, where short matches can swamp "
             "the output."
         )
@@ -1272,29 +1281,48 @@ class FastGaParamsDialog(QDialog):
         self._seed_freq = QSpinBox(self)
         self._seed_freq.setRange(1, 100_000)
         self._seed_freq.setSingleStep(50)
-        self._seed_freq.setValue(getattr(opts, "seed_freq", 200))
+        self._seed_freq.setValue(max(1, opts.seed_freq))
         self._seed_freq.setToolTip(
-            "FastGA's -f: seeds occurring more often than this are discarded as "
-            "'repetitive' before alignment.\n"
+            "FastGA -f: adaptive seed count cutoff. Seeds occurring more often "
+            "than this are discarded as repetitive before alignment.\n"
             "FastGA's own default is 10, which removes satellite arrays "
-            "entirely, since every monomer k-mer occurs far more than 10 times.\n"
-            "Raise it to see repeat structure; higher values are slower."
+            "entirely. Raise it to see repeat structure; higher values are slower."
+        )
+
+        self._chain_coverage = QSpinBox(self)
+        self._chain_coverage.setRange(1, 1_000_000)
+        self._chain_coverage.setValue(max(1, opts.chain_coverage))
+        self._chain_coverage.setToolTip(
+            "FastGA -c: minimum seed chain coverage (bases) in both genomes. "
+            "FastGA default: 85."
+        )
+
+        self._chain_gap = QSpinBox(self)
+        self._chain_gap.setRange(1, 10_000_000)
+        self._chain_gap.setSingleStep(100)
+        self._chain_gap.setValue(max(1, opts.chain_gap))
+        self._chain_gap.setToolTip(
+            "FastGA -s: maximum spacing between consecutive seeds when starting "
+            "a new seed chain. FastGA default: 1000."
         )
 
         self._symmetric = QCheckBox("Symmetric seeding (-S)", self)
         self._symmetric.setChecked(opts.symmetric)
         self._symmetric.setToolTip(
-            "Uses the seeds of both genomes so the result does not depend on "
-            "argument order. Recommended when the repeat structure is the "
-            "point; slower, and not needed when looking for synteny."
+            "FastGA -S: seed adaptamers from both genomes so the result does "
+            "not depend on argument order. Useful for repeat structure; slower."
         )
 
-        self._keep_index = QCheckBox("Keep genome index for reuse (-k)", self)
+        self._keep_index = QCheckBox("Keep genome index (-k)", self)
         self._keep_index.setChecked(opts.keep_index)
         self._keep_index.setToolTip(
-            "Keeps the .1gdb / .gidx files beside the FASTA so later runs skip "
-            "the index build, which is the slow part of a first run."
+            "FastGA -k: keep generated .1gdb / .gix files beside the FASTA so "
+            "later runs skip the index build."
         )
+
+        self._no_soft_mask = QCheckBox("Do not soft mask (-N)", self)
+        self._no_soft_mask.setChecked(opts.no_soft_mask)
+        self._no_soft_mask.setToolTip("FastGA -N: do not soft mask.")
 
         for field in (
             self._format,
@@ -1302,8 +1330,10 @@ class FastGaParamsDialog(QDialog):
             self._identity,
             self._min_length,
             self._seed_freq,
+            self._chain_coverage,
+            self._chain_gap,
         ):
-            field.setFixedWidth(240)
+            field.setFixedWidth(280)
 
         mode = QLabel(self)
         mode.setWordWrap(True)
@@ -1312,33 +1342,115 @@ class FastGaParamsDialog(QDialog):
             mode.setText(
                 "Two files selected: they will be compared against each other."
             )
-        else:
+        elif file_count == 1:
             mode.setText(
                 "One file selected: it will be compared against itself, which "
                 "finds repetitive regions. Self matches are excluded."
             )
+        else:
+            mode.setText(
+                "Select one FASTA (self-comparison) or two FASTA files "
+                "(pairwise) before Run."
+            )
 
-        form = QFormLayout()
+        params_tab = QWidget(self)
+        form = QFormLayout(params_tab)
+        form.setContentsMargins(16, 14, 16, 14)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
+        form.addRow(mode)
         form.addRow("Output format:", self._format)
-        form.addRow("Min identity:", self._identity)
-        form.addRow("Min alignment length:", self._min_length)
-        form.addRow("Repeat cutoff (-f):", self._seed_freq)
-        form.addRow("Threads:", self._threads)
+        form.addRow("-T (threads):", self._threads)
+        form.addRow("-i (min identity):", self._identity)
+        form.addRow("-l (min length):", self._min_length)
+        form.addRow("-f (seed cutoff):", self._seed_freq)
+        form.addRow("-c (chain coverage):", self._chain_coverage)
+        form.addRow("-s (chain gap):", self._chain_gap)
         form.addRow("", self._symmetric)
         form.addRow("", self._keep_index)
+        form.addRow("", self._no_soft_mask)
 
-        self._button_box = make_cancel_save_run_bar(self)
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Run FastGA with saved parameters", FASTGA_RIGHT_CLICK_RUN),
+            ("Open this dialog", FASTGA_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_action == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the FastGA button does:", self)
+        )
+        for radio in self._right_click_buttons.values():
+            rc_box_layout.addWidget(radio)
+
+        self._show_process_window = QCheckBox(
+            "Show process window while FastGA runs", self
+        )
+        self._show_process_window.setChecked(
+            bool(getattr(opts, "show_process_window", False))
+        )
+        self._show_process_window.setToolTip(
+            "Open a window that first shows the command line, then streams "
+            "progress and FastGA messages. Useful for long runs."
+        )
+        process_box = QGroupBox("Process output", self)
+        process_layout = QVBoxLayout(process_box)
+        process_layout.addWidget(self._show_process_window)
+
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+        options_layout.addWidget(rc_box)
+        options_layout.addWidget(process_box)
+        options_layout.addStretch(1)
+
+        self._tabs = QTabWidget(self)
+        self._tabs.addTab(params_tab, "Parameters")
+        self._tabs.addTab(options_tab, "Options")
+
+        restore = QPushButton("Restore Defaults", self)
+        restore.clicked.connect(self._restore_defaults)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
-        layout.addWidget(mode)
-        layout.addLayout(form)
+        layout.addWidget(self._tabs)
         layout.addWidget(self._button_box)
+
+    def _restore_defaults(self) -> None:
+        from repeatviewer.job_options import FastGaOptions
+
+        opts = FastGaOptions()
+        idx = self._format.findData(opts.output_format)
+        if idx >= 0:
+            self._format.setCurrentIndex(idx)
+        self._threads.setValue(max(1, opts.threads))
+        self._identity.setValue(opts.min_identity)
+        self._min_length.setValue(max(100, opts.min_length))
+        self._seed_freq.setValue(opts.seed_freq)
+        self._chain_coverage.setValue(opts.chain_coverage)
+        self._chain_gap.setValue(opts.chain_gap)
+        self._symmetric.setChecked(opts.symmetric)
+        self._keep_index.setChecked(opts.keep_index)
+        self._no_soft_mask.setChecked(opts.no_soft_mask)
+        self._show_process_window.setChecked(opts.show_process_window)
+        self._right_click_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -1346,14 +1458,26 @@ class FastGaParamsDialog(QDialog):
     def options(self):
         from repeatviewer.job_options import FastGaOptions
 
+        right_click_action = FASTGA_RIGHT_CLICK_RUN
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                right_click_action = value
+                break
+
         return FastGaOptions(
             output_format=str(self._format.currentData()),
             threads=int(self._threads.value()),
             min_identity=float(self._identity.value()),
             min_length=int(self._min_length.value()),
             seed_freq=int(self._seed_freq.value()),
+            chain_coverage=int(self._chain_coverage.value()),
+            chain_gap=int(self._chain_gap.value()),
             symmetric=self._symmetric.isChecked(),
             keep_index=self._keep_index.isChecked(),
+            no_soft_mask=self._no_soft_mask.isChecked(),
+            temp_dir="",
+            right_click_action=right_click_action,
+            show_process_window=self._show_process_window.isChecked(),
         )
 
 

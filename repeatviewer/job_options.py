@@ -233,6 +233,39 @@ class AlignOptions:
     right_click_aligner: str = ALIGNER_MAFFT
 
 
+# FastGA output formats (CLI streaming flags, except 1aln which uses -1:file).
+FASTGA_FORMAT_PAF = "paf"
+FASTGA_FORMAT_PAFX = "pafx"
+FASTGA_FORMAT_PAFM = "pafm"
+FASTGA_FORMAT_PAFS = "pafs"
+FASTGA_FORMAT_PAFS_LONG = "pafS"
+FASTGA_FORMAT_PSL = "psl"
+FASTGA_FORMAT_ALN = "1aln"
+FASTGA_OUTPUT_FORMATS = (
+    FASTGA_FORMAT_PAF,
+    FASTGA_FORMAT_PAFX,
+    FASTGA_FORMAT_PAFM,
+    FASTGA_FORMAT_PAFS,
+    FASTGA_FORMAT_PAFS_LONG,
+    FASTGA_FORMAT_PSL,
+    FASTGA_FORMAT_ALN,
+)
+
+FASTGA_RIGHT_CLICK_RUN = "run"
+FASTGA_RIGHT_CLICK_DIALOG = "dialog"
+FASTGA_RIGHT_CLICK_ACTIONS = (FASTGA_RIGHT_CLICK_RUN, FASTGA_RIGHT_CLICK_DIALOG)
+
+DEFAULT_FASTGA_MIN_IDENTITY = 0.7
+DEFAULT_FASTGA_MIN_LENGTH = 100
+DEFAULT_FASTGA_SEED_FREQ = 200
+DEFAULT_FASTGA_CHAIN_COVERAGE = 85
+DEFAULT_FASTGA_CHAIN_GAP = 1000
+DEFAULT_FASTGA_SYMMETRIC = True
+DEFAULT_FASTGA_KEEP_INDEX = True
+DEFAULT_FASTGA_NO_SOFT_MASK = False
+DEFAULT_FASTGA_SHOW_PROCESS_WINDOW = False
+
+
 @dataclass
 class FastGaOptions:
     """FastGA whole-genome alignment.
@@ -241,13 +274,72 @@ class FastGaOptions:
     two files are compared against each other.
     """
 
-    output_format: str = "paf"
+    output_format: str = FASTGA_FORMAT_PAF
     threads: int = field(default_factory=_default_tool_threads)
-    min_identity: float = 0.7
-    min_length: int = 100
-    seed_freq: int = 200
-    symmetric: bool = True
-    keep_index: bool = True
+    min_identity: float = DEFAULT_FASTGA_MIN_IDENTITY
+    min_length: int = DEFAULT_FASTGA_MIN_LENGTH
+    seed_freq: int = DEFAULT_FASTGA_SEED_FREQ
+    chain_coverage: int = DEFAULT_FASTGA_CHAIN_COVERAGE
+    chain_gap: int = DEFAULT_FASTGA_CHAIN_GAP
+    symmetric: bool = DEFAULT_FASTGA_SYMMETRIC
+    keep_index: bool = DEFAULT_FASTGA_KEEP_INDEX
+    no_soft_mask: bool = DEFAULT_FASTGA_NO_SOFT_MASK
+    temp_dir: str = ""
+    right_click_action: str = FASTGA_RIGHT_CLICK_RUN
+    show_process_window: bool = DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
+
+
+def load_fastga_options() -> FastGaOptions:
+    v = _load_settings_group("fastga")
+    fmt = str(v.get("output_format", FASTGA_FORMAT_PAF))
+    if fmt not in FASTGA_OUTPUT_FORMATS:
+        fmt = FASTGA_FORMAT_PAF
+    right_click_action = str(v.get("right_click_action", FASTGA_RIGHT_CLICK_RUN))
+    if right_click_action not in FASTGA_RIGHT_CLICK_ACTIONS:
+        right_click_action = FASTGA_RIGHT_CLICK_RUN
+    return FastGaOptions(
+        output_format=fmt,
+        threads=max(1, int(v.get("threads", _default_tool_threads()))),
+        min_identity=max(
+            0.0,
+            min(1.0, float(v.get("min_identity", DEFAULT_FASTGA_MIN_IDENTITY))),
+        ),
+        min_length=max(1, int(v.get("min_length", DEFAULT_FASTGA_MIN_LENGTH))),
+        seed_freq=max(1, int(v.get("seed_freq", DEFAULT_FASTGA_SEED_FREQ))),
+        chain_coverage=max(
+            1, int(v.get("chain_coverage", DEFAULT_FASTGA_CHAIN_COVERAGE))
+        ),
+        chain_gap=max(1, int(v.get("chain_gap", DEFAULT_FASTGA_CHAIN_GAP))),
+        symmetric=_to_bool(v.get("symmetric"), DEFAULT_FASTGA_SYMMETRIC),
+        keep_index=_to_bool(v.get("keep_index"), DEFAULT_FASTGA_KEEP_INDEX),
+        no_soft_mask=_to_bool(v.get("no_soft_mask"), DEFAULT_FASTGA_NO_SOFT_MASK),
+        temp_dir=str(v.get("temp_dir", "") or ""),
+        right_click_action=right_click_action,
+        show_process_window=_to_bool(
+            v.get("show_process_window"), DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
+        ),
+    )
+
+
+def save_fastga_options(opts: FastGaOptions) -> None:
+    _save_settings_group(
+        "fastga",
+        {
+            "output_format": opts.output_format,
+            "threads": opts.threads,
+            "min_identity": opts.min_identity,
+            "min_length": opts.min_length,
+            "seed_freq": opts.seed_freq,
+            "chain_coverage": opts.chain_coverage,
+            "chain_gap": opts.chain_gap,
+            "symmetric": opts.symmetric,
+            "keep_index": opts.keep_index,
+            "no_soft_mask": opts.no_soft_mask,
+            "temp_dir": opts.temp_dir,
+            "right_click_action": opts.right_click_action,
+            "show_process_window": opts.show_process_window,
+        },
+    )
 
 
 @dataclass
