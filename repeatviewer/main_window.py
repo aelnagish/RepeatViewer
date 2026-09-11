@@ -1565,8 +1565,14 @@ class MainWindow(QMainWindow):
         self._pending_te_genome_map: TeGenomeMapOptions | None = None
         self._pending_te_genome_map_fastas: list[Path] = []
         self._pending_te_viz: _PendingTeVizBuild | None = None
+        # Also holds RepeatQuantifyDialog: any non-modal dialog that implements
+        # apply_path_from_panel is driven through this one slot.
         self._te_viz_input_dialog: (
-            TeDensityPlotDialog | TeDivergencePlotDialog | TeAbundancePlotDialog | None
+            TeDensityPlotDialog
+            | TeDivergencePlotDialog
+            | TeAbundancePlotDialog
+            | RepeatQuantifyDialog
+            | None
         ) = None
         self._genome_chrom_names_cache: list[str] = []
         self._genome_chrom_sizes_cache: dict[str, int] = {}
@@ -2096,17 +2102,33 @@ class MainWindow(QMainWindow):
         safe_name = resolved.name.replace("&", "&amp;").replace("<", "&lt;")
         self._status_file_link.setText(f'<a href="reveal">{safe_name}</a>')
         self._status_file_link.setToolTip(f"Show in file manager\n{resolved}")
-        self.statusBar().clearMessage()
+        # Deliberately no clearMessage() here. Previewing an output is queued on a
+        # QTimer right after a job posts its result, so clearing would cut that
+        # result short. Qt keeps a widget added with addWidget() hidden while a
+        # message is showing and reveals it once the message expires.
         self._status_file_link.show()
 
     def _on_status_file_link_activated(self, _href: str) -> None:
         if self._status_linked_file is not None:
             reveal_in_file_manager(self._status_linked_file)
 
-    def _set_status_message(self, message: str, timeout: int = 0) -> None:
+    def _set_status_message(
+        self,
+        message: str,
+        timeout: int = 0,
+        *,
+        override_file_link: bool = False,
+    ) -> None:
+        """Show a status message.
+
+        A visible file link normally wins, so routine chatter cannot clobber the
+        "reveal in file manager" link. Job results pass ``override_file_link`` —
+        Qt hides the link label for the message's lifetime and restores it after,
+        so the result is always seen and the link is not lost.
+        """
         if self._job_running:
             return
-        if self._status_linked_file is not None:
+        if self._status_linked_file is not None and not override_file_link:
             return
         self.statusBar().showMessage(message, timeout)
 
@@ -2689,7 +2711,7 @@ class MainWindow(QMainWindow):
                 source_files=getattr(self, "_last_job_source_files", []),
             )
         names = ", ".join(p.name for p in created_paths)
-        self._set_status_message(f"FastGA completed — {names}", 12000)
+        self._set_status_message(f"FastGA completed — {names}", 12000, override_file_link=True)
 
     @Slot(str)
     def _on_fastga_failed(self, error: str) -> None:
@@ -2718,46 +2740,49 @@ class MainWindow(QMainWindow):
 
         candidates = self._repeat_quantify_candidates()
         start_dir = str(self._current_folder) if self._current_folder else ""
+
+        def _on_accept(dialog: RepeatQuantifyDialog) -> None:
+            library = dialog.library()
+            targets = dialog.targets()
+            engine = dialog.engine()
+            params = dialog.params()
+            if library is None or not targets:
+                return
+            if engine in ("both", "repeatmasker"):
+                from repeatviewer.backends.repeat_quantify import (
+                    repeatmasker_executable_available,
+                )
+
+                if not repeatmasker_executable_available():
+                    QMessageBox.warning(
+                        self,
+                        "RepeatMasker not found",
+                        "RepeatMasker is not on PATH. Install it, or choose the "
+                        "BLASTn engine instead.",
+                    )
+                    return
+            self._start_background_job(
+                RepeatQuantifyWorker(
+                    Path(library),
+                    targets,
+                    engine=engine,
+                    threads=self._project.batch_workers,
+                    params=params,
+                    cancel=self._job_cancel,
+                ),
+                job_title="Repeat quantify",
+                total_steps=len(targets),
+                source_files=targets,
+                on_finished=self._on_repeat_quantify_finished,
+                on_failed=self._on_repeat_quantify_failed,
+            )
+
         dialog = RepeatQuantifyDialog(
             candidates=candidates, start_dir=start_dir, parent=self
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        target = dialog.target()
-        library = dialog.library()
-        engine = dialog.engine()
-        params = dialog.params()
-        if target is None or library is None:
-            return
-        targets = [target]
-        if engine in ("both", "repeatmasker"):
-            from repeatviewer.backends.repeat_quantify import (
-                repeatmasker_executable_available,
-            )
-
-            if not repeatmasker_executable_available():
-                QMessageBox.warning(
-                    self,
-                    "RepeatMasker not found",
-                    "RepeatMasker is not on PATH. Install it, or choose the "
-                    "BLASTn engine instead.",
-                )
-                return
-        self._start_background_job(
-            RepeatQuantifyWorker(
-                Path(library),
-                targets,
-                engine=engine,
-                threads=self._project.batch_workers,
-                params=params,
-                cancel=self._job_cancel,
-            ),
-            job_title="Repeat quantify",
-            total_steps=len(targets),
-            source_files=targets,
-            on_finished=self._on_repeat_quantify_finished,
-            on_failed=self._on_repeat_quantify_failed,
-        )
+        # Same non-modal presentation as the TE visualization dialogs, so the
+        # Folders and Files panels stay clickable while it is open.
+        self._present_te_viz_dialog(dialog, _on_accept)
 
     @Slot(object)
     def _on_repeat_quantify_finished(self, outputs) -> None:
@@ -2771,7 +2796,9 @@ class MainWindow(QMainWindow):
         for index, path in enumerate(paths):
             self._open_preview_tab(path, replace=(index == 0))
         self._set_status_message(
-            f"Repeat quantify — {len(paths)} report(s) written", 12000
+            f"Repeat quantify — {len(paths)} report(s) written",
+            12000,
+            override_file_link=True,
         )
 
     @Slot(str)
@@ -5108,7 +5135,7 @@ class MainWindow(QMainWindow):
             msg = f"Highlighted {n_out} new output(s) and {n_src} input(s)"
             if names:
                 msg += f" (e.g. {names})"
-            self._set_status_message(msg, 12000)
+            self._set_status_message(msg, 12000, override_file_link=True)
             self._file_list.blockSignals(False)
             if open_preview:
                 self._open_best_preview_path(highlight_paths)
@@ -5157,7 +5184,7 @@ class MainWindow(QMainWindow):
             msg = f"Highlighted {n_out} new output(s) and {n_src} input(s)"
             if names:
                 msg += f" (e.g. {names})"
-            self._set_status_message(msg, 12000)
+            self._set_status_message(msg, 12000, override_file_link=True)
         else:
             self._sync_files_status(
                 len(self._cached_folder_files),
@@ -6036,6 +6063,7 @@ class MainWindow(QMainWindow):
         self._set_status_message(
             f"Alignment completed — {len(created_paths)} file(s): {names}",
             12000,
+            override_file_link=True,
         )
 
     @Slot(str)
@@ -6254,7 +6282,7 @@ class MainWindow(QMainWindow):
             self._populate_file_list(html_path.parent.resolve(), new_outputs=outputs, source_files=[source])
         else:
             self._navigate_to_folder(html_path.parent.resolve(), new_outputs=outputs, source_files=[source])
-        self._set_status_message(f"TE divergence plot: {html_path.name}", 8000)
+        self._set_status_message(f"TE divergence plot: {html_path.name}", 8000, override_file_link=True)
 
     def _open_divergence_in_preview(self, html_path: Path) -> None:
         """Open divergence HTML in Preview with delayed reload for reliability."""
@@ -6482,16 +6510,16 @@ class MainWindow(QMainWindow):
             if len(paths) > 4:
                 names += ", …"
             summary += f" — created: {names}"
-        self._set_status_message(summary, 12000)
+        self._set_status_message(summary, 12000, override_file_link=True)
 
     @Slot(str)
     def _on_te_benchmark_failed(self, error: str) -> None:
         self._hide_job_progress()
         self._set_job_actions_enabled(True)
         if error == CANCELLED_MESSAGE:
-            self._set_status_message("Stopped benchmark", 6000)
+            self._set_status_message("Stopped benchmark", 6000, override_file_link=True)
             return
-        self._set_status_message("Benchmark failed", 8000)
+        self._set_status_message("Benchmark failed", 8000, override_file_link=True)
         QMessageBox.critical(self, "Benchmark failed", error)
 
     def _cleanup_benchmark_worker(self) -> None:
@@ -6693,12 +6721,12 @@ class MainWindow(QMainWindow):
             for raw in result.get("source_files", [])
         ]
         if not created:
-            self._set_status_message("TE abundance plot finished", 8000)
+            self._set_status_message("TE abundance plot finished", 8000, override_file_link=True)
             return
         html_path = created[0]
         self._open_divergence_in_preview(html_path)
         self._refresh_folders_after_job(created, sources)
-        self._set_status_message(f"TE abundance plot: {html_path.name}", 8000)
+        self._set_status_message(f"TE abundance plot: {html_path.name}", 8000, override_file_link=True)
 
     def _warm_genome_chromosome_cache(self) -> None:
         """Pre-read genome FASTA metadata so TE genome map dialogs open quickly."""
@@ -6940,7 +6968,7 @@ class MainWindow(QMainWindow):
             self._task_progress.update(6, Path(str(blast_txt)).name if blast_txt else "")
         if html_path is None or not Path(html_path).is_file():
             QMessageBox.warning(self, "TE genome map", "Could not build the genome map.")
-            self._set_status_message("TE genome map failed", 6000)
+            self._set_status_message("TE genome map failed", 6000, override_file_link=True)
             return
         path = Path(html_path).resolve()
         if blast_txt is not None:
@@ -6957,6 +6985,7 @@ class MainWindow(QMainWindow):
         self._set_status_message(
             f"Genome map opened: {path.name} ({detail})",
             12000,
+            override_file_link=True,
         )
 
     @Slot(int, str)
@@ -6969,14 +6998,14 @@ class MainWindow(QMainWindow):
         if self._task_progress is not None:
             self._task_progress.reset()
         if error == CANCELLED_MESSAGE:
-            self._set_status_message("Stopped TE genome map", 6000)
+            self._set_status_message("Stopped TE genome map", 6000, override_file_link=True)
             return
         if error.startswith("There is nothing to plot"):
             QMessageBox.information(self, "TE density plot", error)
-            self._set_status_message("TE density plot: nothing to plot", 8000)
+            self._set_status_message("TE density plot: nothing to plot", 8000, override_file_link=True)
             return
         QMessageBox.critical(self, "TE genome map failed", error)
-        self._set_status_message("TE genome map failed", 6000)
+        self._set_status_message("TE genome map failed", 6000, override_file_link=True)
 
     def _cleanup_genome_map_worker(self) -> None:
         cancelled = self._job_cancel.requested
@@ -9052,7 +9081,7 @@ class MainWindow(QMainWindow):
             if len(created_paths) > 4:
                 names += ", …"
             summary += f" — created: {names}"
-        self._set_status_message(summary, 12000)
+        self._set_status_message(summary, 12000, override_file_link=True)
 
         if failures:
             msg = summary + "\n\nFailures:\n" + "\n".join(failures[:8])
@@ -9200,6 +9229,11 @@ class MainWindow(QMainWindow):
 
     def _update_status(self) -> None:
         if self._job_running:
+            return
+        if self.statusBar().currentMessage():
+            # A timed message (usually a job result) is on screen. Leave it alone;
+            # _cleanup_worker runs here once the job thread ends, and clearing
+            # would cut the result short. Qt restores the file link on expiry.
             return
         if self._status_linked_file is not None:
             self.statusBar().clearMessage()

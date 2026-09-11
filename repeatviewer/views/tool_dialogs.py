@@ -4216,10 +4216,12 @@ class _TeInputFileRow(QWidget):
         placeholder: str = "RepeatMasker .out or BLAST hit table",
         browse_title: str = "Select RepeatMasker .out or BLAST hit table",
         file_filter: str = "TE hit tables (*.out *_blast.txt);;RepeatMasker (*.out);;All files (*)",
+        start_dir: str = "",
     ) -> None:
         super().__init__(parent)
         self._browse_title = browse_title
         self._file_filter = file_filter
+        self._start_dir = start_dir
         self._path = QLineEdit(self)
         self._path.setPlaceholderText(placeholder)
         self._path.setMinimumWidth(280)
@@ -4266,7 +4268,7 @@ class _TeInputFileRow(QWidget):
         return Path(text).expanduser()
 
     def _browse(self) -> None:
-        start = self._path.text().strip() or str(Path.home())
+        start = self._path.text().strip() or self._start_dir or str(Path.home())
         picked, _ = QFileDialog.getOpenFileName(
             self,
             self._browse_title,
@@ -4298,12 +4300,16 @@ class TeMultiInputFilesWidget(QWidget):
             "Add another RepeatMasker .out or BLAST hit table. "
             "Track order in the plot matches file order: first row = top track."
         ),
+        allow_multiple: bool = True,
+        start_dir: str = "",
     ) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._placeholder = placeholder
         self._browse_title = browse_title
         self._file_filter = file_filter
+        self._allow_multiple = allow_multiple
+        self._start_dir = start_dir
 
         self._rows_layout = QVBoxLayout()
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -4314,6 +4320,8 @@ class TeMultiInputFilesWidget(QWidget):
         self._add_btn = QPushButton(add_button_label, self)
         self._add_btn.setToolTip(add_button_tooltip)
         self._add_btn.clicked.connect(self._on_add_clicked)
+        # Single-value fields (one TE library) hide the add control entirely.
+        self._add_btn.setVisible(allow_multiple)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
@@ -4345,6 +4353,7 @@ class TeMultiInputFilesWidget(QWidget):
             placeholder=self._placeholder,
             browse_title=self._browse_title,
             file_filter=self._file_filter,
+            start_dir=self._start_dir,
         )
         row.remove_requested.connect(lambda r=row: self._remove_row(r))
         row.activated.connect(self._on_row_activated)
@@ -4375,7 +4384,7 @@ class TeMultiInputFilesWidget(QWidget):
         self.paths_changed.emit()
 
     def _refresh_remove_buttons(self) -> None:
-        removable = len(self._rows) > 1
+        removable = self._allow_multiple and len(self._rows) > 1
         for row in self._rows:
             row.set_removable(removable)
 
@@ -5289,54 +5298,61 @@ TeGenomeMapDefaultsDialog = TeDensityPlotDialog
 
 
 class RepeatQuantifyDialog(QDialog):
-    """Choose a target (database) and a library FASTA, plus the engine.
+    """Choose a library FASTA, one or more genome FASTAs, and the engine.
 
-    Both fields are pre-populated with the FASTA files already available (the
-    current selection / folder) so they can be picked directly, and each has a
-    Browse button for files elsewhere.
+    Both fields are path inputs pre-filled from the current selection / folder.
+    The dialog is shown non-modally, so the Folders and Files panels stay live:
+    clicking a FASTA there drops it into whichever field last had focus
+    (``apply_path_from_panel``), and Browse covers files elsewhere.
     """
 
     _FASTA_FILTER = "FASTA (*.fa *.fasta *.fna *.fas);;All files (*)"
+    # Mirrors _FASTA_FILTER: what a Files-panel click may drop into a field.
+    _FASTA_SUFFIXES = frozenset({".fa", ".fasta", ".fna", ".fas"})
 
     def __init__(self, *, candidates, start_dir: str = "", parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Repeat quantify")
+        # Path fields need more room than the fixed-width combos they replaced.
+        self.setMinimumWidth(620)
         self._start_dir = start_dir
         cand = [Path(p) for p in candidates]
 
-        self._genome_combo = QComboBox()
-        self._library_combo = QComboBox()
-        for combo in (self._genome_combo, self._library_combo):
-            # Fixed width: compact, symmetric, and never collapses/jumps.
-            combo.setFixedWidth(320)
-            for path in cand:
-                combo.addItem(path.name, str(path.expanduser().resolve()))
-            combo.currentIndexChanged.connect(lambda _i, c=combo: self._sync_tooltip(c))
-            self._sync_tooltip(combo)
-        # Sensible default: library defaults to the 2nd candidate if distinct.
-        if self._library_combo.count() > 1:
-            self._library_combo.setCurrentIndex(1)
-
-        genome_browse = QPushButton("Browse…")
-        library_browse = QPushButton("Browse…")
-        for browse in (genome_browse, library_browse):
-            browse.setFixedWidth(88)  # short + symmetric
-        genome_browse.clicked.connect(lambda: self._browse(self._genome_combo))
-        library_browse.clicked.connect(lambda: self._browse(self._library_combo))
+        # Path fields rather than dropdowns, so the dialog can stay non-modal and
+        # be filled by clicking files in the Files panel (see apply_path_from_panel).
+        self._library_input = TeMultiInputFilesWidget(
+            self,
+            initial=[cand[1]] if len(cand) > 1 else None,
+            allow_multiple=False,
+            start_dir=start_dir,
+            placeholder="TE library FASTA (monomers / satellites)",
+            browse_title="Select TE library FASTA",
+            file_filter=self._FASTA_FILTER,
+        )
+        self._genome_input = TeMultiInputFilesWidget(
+            self,
+            initial=[cand[0]] if cand else None,
+            start_dir=start_dir,
+            placeholder="Genome FASTA (scaffolds / assembly)",
+            browse_title="Select genome FASTA",
+            file_filter=self._FASTA_FILTER,
+            add_button_label="Add another genome",
+            add_button_tooltip=(
+                "Quantify the same library against another genome. "
+                "Each genome produces its own report."
+            ),
+        )
+        self._focused_file_input: TeMultiInputFilesWidget | None = None
+        for widget in (self._library_input, self._genome_input):
+            widget.field_activated.connect(self._on_file_input_field_activated)
 
         inputs_box = QGroupBox("Inputs", self)
         form = QFormLayout(inputs_box)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
-        form.addRow(
-            "Library (monomers / satellites):",
-            self._field_row(self._library_combo, library_browse),
-        )
-        form.addRow(
-            "Genome (scaffolds / assembly):",
-            self._field_row(self._genome_combo, genome_browse),
-        )
+        form.addRow("Library (monomers / satellites):", self._library_input)
+        form.addRow("Genome (scaffolds / assembly):", self._genome_input)
 
         # Tabs are the engine choice; each tab holds that engine's parameters.
         self._tabs = QTabWidget(self)
@@ -5459,60 +5475,61 @@ class RepeatQuantifyDialog(QDialog):
                 form.addRow(label, widget)
         return tab
 
-    @staticmethod
-    def _field_row(combo: QComboBox, browse: QPushButton) -> QWidget:
-        row = QWidget()
-        hbox = QHBoxLayout(row)
-        hbox.setContentsMargins(0, 0, 0, 0)
-        hbox.setSpacing(8)
-        hbox.addWidget(combo)
-        hbox.addWidget(browse)
-        hbox.addStretch(1)
-        return row
+    def _on_file_input_field_activated(self) -> None:
+        sender = self.sender()
+        if isinstance(sender, TeMultiInputFilesWidget):
+            self._focused_file_input = sender
 
-    @staticmethod
-    def _sync_tooltip(combo: QComboBox) -> None:
-        data = combo.currentData()
-        combo.setToolTip(str(data) if data else "")
-
-    def _browse(self, combo: QComboBox) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select FASTA", self._start_dir, self._FASTA_FILTER
-        )
-        if not path:
-            return
-        resolved = str(Path(path).expanduser().resolve())
-        index = combo.findData(resolved)
-        if index < 0:
-            combo.addItem(Path(path).name, resolved)
-            index = combo.count() - 1
-        combo.setCurrentIndex(index)
+    def apply_path_from_panel(self, path: Path) -> bool:
+        """Fill the last-focused path field from a Files-panel click."""
+        if self._focused_file_input is None:
+            return False
+        if path.suffix.lower() not in self._FASTA_SUFFIXES:
+            return False
+        return self._focused_file_input.set_path_at_focus(path)
 
     def _try_accept(self) -> None:
-        target = self.target()
         library = self.library()
-        if target is None or library is None:
+        targets = self.targets()
+        if library is None or not targets:
             QMessageBox.information(
                 self, "Repeat quantify",
-                "Choose both a target FASTA and a library FASTA "
-                "(pick from the list or Browse).",
+                "Choose both a library FASTA and at least one genome FASTA "
+                "(click a file in the Files panel, or use Browse).",
             )
             return
-        if target == library:
+        missing = [p for p in [library, *targets] if not p.is_file()]
+        if missing:
             QMessageBox.warning(
                 self, "Repeat quantify",
-                "Target and library must be different files.",
+                "File not found:\n" + "\n".join(str(p) for p in missing[:5]),
+            )
+            return
+        if library in targets:
+            QMessageBox.warning(
+                self, "Repeat quantify",
+                "Genome and library must be different files.",
+            )
+            return
+        if len(set(targets)) != len(targets):
+            QMessageBox.warning(
+                self, "Repeat quantify",
+                "The same genome is listed more than once.",
             )
             return
         self.accept()
 
+    def targets(self) -> list[Path]:
+        """Genome FASTAs to quantify against — one report per genome."""
+        return self._genome_input.paths()
+
     def target(self) -> Path | None:
-        data = self._genome_combo.currentData()
-        return Path(data) if data else None
+        targets = self.targets()
+        return targets[0] if targets else None
 
     def library(self) -> Path | None:
-        data = self._library_combo.currentData()
-        return Path(data) if data else None
+        paths = self._library_input.paths()
+        return paths[0] if paths else None
 
     def engine(self) -> str:
         return ("blastn", "repeatmasker", "both")[self._tabs.currentIndex()]
