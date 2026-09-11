@@ -4,6 +4,8 @@ __pycache__/
 .eggs/
 dist/
 build/
+packaging/macos/RepeatViewer.icns
+packaging/macos/*.iconset/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

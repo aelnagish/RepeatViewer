@@ -35,15 +35,9 @@ _GENOME_FASTA_CACHE: dict[str, tuple[float, dict[str, SeqRecord]]] = {}
 _GENOME_FASTA_CACHE_LOCK = threading.Lock()
 
 def check_cmd_in_path(cmd):
-    cmd_path = shutil.which(cmd)
-    if cmd_path:
-        #logging.info(f"{cmd} is available at: {cmd_path}")
-        return True
-    else:
-        #logging.error(f"{cmd} is not available in the system's PATH")
-        # Raise error if tool is not available
-        #raise FileNotFoundError
-        return False
+    from repeatviewer.conda_tools import which_tool
+
+    return which_tool(cmd) is not None
 
 
 def get_original_file_path():
@@ -574,9 +568,23 @@ def extract_fasta_from_bed(genome_fasta, bed_file, output_fasta):
     return output_fasta
 
 
+def flexidot_command() -> list[str] | None:
+    """Return argv prefix to launch Flexidot (works in frozen macOS apps too)."""
+    # PyInstaller / frozen app: re-enter this binary in Flexidot mode.
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--repeatviewer-flexidot"]
+
+    exe = flexidot_executable()
+    return [exe] if exe else None
+
+
 def flexidot_executable() -> str | None:
     """Resolve the Flexidot CLI (PATH, then common pip user ``bin`` locations)."""
     import glob
+
+    if getattr(sys, "frozen", False):
+        # Prefer the frozen re-entry command; string form is only for help probes.
+        return sys.executable
 
     found = shutil.which("flexidot")
     if found:
@@ -607,17 +615,21 @@ def flexidot_executable() -> str | None:
 _flexidot_help_cache: dict[str, str] = {}
 
 
-def _flexidot_help_text(exe: str) -> str:
-    if exe in _flexidot_help_cache:
-        return _flexidot_help_cache[exe]
+def _flexidot_help_text(exe: str | None = None) -> str:
+    cache_key = "frozen" if getattr(sys, "frozen", False) else (exe or "")
+    if cache_key in _flexidot_help_cache:
+        return _flexidot_help_cache[cache_key]
     text = ""
     try:
-        cmd = [exe, "-h"]
-        result = run_logged_process(cmd, tool="Flexidot", timeout=20)
+        cmd = flexidot_command()
+        if not cmd:
+            _flexidot_help_cache[cache_key] = ""
+            return ""
+        result = run_logged_process([*cmd, "-h"], tool="Flexidot", timeout=20)
         text = ((result.stdout or "") + (result.stderr or "")).lower()
     except Exception:  # noqa: BLE001
         text = ""
-    _flexidot_help_cache[exe] = text
+    _flexidot_help_cache[cache_key] = text
     return text
 
 
@@ -628,21 +640,19 @@ def flexidot_supports_html(exe: str | None = None) -> bool:
     (interactive dotplot with Go-to). We look for html as a filetype choice (in
     the ``{...}`` list) rather than anywhere in the text, to avoid false matches.
     """
-    if exe is None:
-        exe = flexidot_executable()
-    if not exe:
+    del exe  # kept for call-site compatibility
+    if not flexidot_command():
         return False
-    help_text = _flexidot_help_text(exe)
+    help_text = _flexidot_help_text()
     return any(tok in help_text for tok in ("{html", "html}", ",html", "html,"))
 
 
 def flexidot_supports_repeatviewer_integration(exe: str | None = None) -> bool:
     """True if the forked Flexidot exposes the ``--teviewer-integration`` flag."""
-    if exe is None:
-        exe = flexidot_executable()
-    if not exe:
+    del exe  # kept for call-site compatibility
+    if not flexidot_command():
         return False
-    return "teviewer-integration" in _flexidot_help_text(exe)
+    return "teviewer-integration" in _flexidot_help_text()
 
 
 def effective_flexidot_filetype(requested: str) -> str:
@@ -712,8 +722,8 @@ def run_flexidot(
     run_path, temp_path = prepare_flexidot_input_fasta(input_file, out_dir)
     original_name = os.path.basename(os.path.abspath(str(input_file)))
 
-    exe = flexidot_executable()
-    if not exe:
+    cmd_prefix = flexidot_command()
+    if not cmd_prefix:
         raise FileNotFoundError(
             "Flexidot command not found. Install with: pip install flexidot "
             "(ensure the Python scripts directory is on PATH, e.g. "
@@ -724,7 +734,7 @@ def run_flexidot(
 
     modes = _normalize_flexidot_modes(mode)
     flexidot_cmd = [
-        exe,
+        *cmd_prefix,
         "-i",
         run_path,
     ]
@@ -740,7 +750,7 @@ def run_flexidot(
             out_dir,
         ]
     )
-    if filetype == "html" and flexidot_supports_repeatviewer_integration(exe):
+    if filetype == "html" and flexidot_supports_repeatviewer_integration():
         # Show "Go to <seq> <start>-<end>" buttons in the dotplot that jump the
         # Annotation view; only available in the forked Flexidot build.
         flexidot_cmd.append("--teviewer-integration")

@@ -73,6 +73,10 @@ def run_app(argv: list[str] | None = None) -> int:
         apply_log_level()
         install_exception_logging_hooks()
 
+        from repeatviewer.conda_tools import apply_conda_tools_path
+
+        apply_conda_tools_path()
+
         global _FAULT_HANDLER_FILE
         try:
             crash_dir = crash_reports_dir()

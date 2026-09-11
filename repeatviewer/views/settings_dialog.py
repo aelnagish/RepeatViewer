@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QSettings, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtCore import QRect, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QDialog,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -63,6 +66,12 @@ from repeatviewer.app_preferences import (
     save_restore_geometry,
     save_ui_thread_reserve,
     save_verbose_logging,
+)
+from repeatviewer.conda_tools import (
+    apply_conda_tools_path,
+    describe_conda_tools_status,
+    load_conda_tools_env,
+    save_conda_tools_env,
 )
 from repeatviewer.ui.theme_mode import (
     DEFAULT_ACCENT_COLOR,
@@ -322,9 +331,17 @@ def _path_browse_row(
     on_changed=None,
 ) -> QWidget:
     container = QWidget(parent)
+    container.setSizePolicy(
+        QSizePolicy.Policy.Expanding,
+        QSizePolicy.Policy.Fixed,
+    )
     layout = QHBoxLayout(container)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(6)
+    line_edit.setSizePolicy(
+        QSizePolicy.Policy.Expanding,
+        QSizePolicy.Policy.Fixed,
+    )
     layout.addWidget(line_edit, stretch=1)
 
     def browse() -> None:
@@ -348,6 +365,10 @@ def _path_browse_row(
                     on_changed()
 
     browse_btn = QPushButton("Browse", container)
+    browse_btn.setSizePolicy(
+        QSizePolicy.Policy.Fixed,
+        QSizePolicy.Policy.Fixed,
+    )
     browse_btn.clicked.connect(browse)
     layout.addWidget(browse_btn)
     return container
@@ -363,7 +384,48 @@ def _section_label(text: str, parent: QWidget) -> QLabel:
 
 # Uniform column sizing so every field lines up across all groups.
 _FIELD_WIDTH = 170
+_PATH_FIELD_MIN_WIDTH = 320
 _LABEL_WIDTH = 200
+_CONDA_STATUS_MAX_LINES = 4
+
+
+class _CondaStatusLabel(QLabel):
+    """Word-wrapped status that never expands the dialog to the unwrapped text width."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._wrap_width = _PATH_FIELD_MIN_WIDTH
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+
+    def set_wrap_width(self, width: int) -> None:
+        width = max(80, width)
+        if width == self._wrap_width:
+            return
+        self._wrap_width = width
+        self.updateGeometry()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        w = width if width > 0 else self._wrap_width
+        fm = self.fontMetrics()
+        bounds = fm.boundingRect(
+            QRect(0, 0, w, 0),
+            int(Qt.TextFlag.TextWordWrap),
+            self.text() or " ",
+        )
+        return max(bounds.height() + 2, fm.lineSpacing())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        # Critical: do NOT use the unwrapped string width (that forces a horizontal scrollbar).
+        return QSize(80, self.fontMetrics().lineSpacing())
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self._wrap_width, self.heightForWidth(self._wrap_width))
 
 
 class SettingsDialog(QDialog):
@@ -379,7 +441,7 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(720)
         self.setMinimumHeight(420)
         self._project = project
         self._settings = QSettings()
@@ -493,8 +555,66 @@ class SettingsDialog(QDialog):
 
         # BLAST databases
         self._blast_db_base_dir = QLineEdit(str(load_blast_db_base_dir()))
+        self._blast_db_base_dir.setMinimumWidth(_PATH_FIELD_MIN_WIDTH)
         self._open_blast_db_btn = QPushButton("Open BLAST databases folder")
         self._open_blast_db_btn.clicked.connect(self._open_blast_db_folder)
+
+        # External tools via conda (RepeatMasker, FastGA, bedtools, …)
+        self._conda_tools_env = QLineEdit(load_conda_tools_env())
+        self._conda_tools_env.setMinimumWidth(_PATH_FIELD_MIN_WIDTH)
+        if sys.platform == "win32":
+            self._conda_tools_env.setPlaceholderText(
+                "WSL2 env name or path, e.g. tetrimmer"
+            )
+            self._conda_tools_env.setToolTip(
+                "Conda/mamba environment inside WSL2 that provides external CLI tools "
+                "(RepeatMasker, FastGA, bedtools, …).\n"
+                "Enter the env name (e.g. tetrimmer), a Linux path "
+                "(~/miniconda3/envs/tetrimmer), or Browse under \\\\wsl$\\…\n"
+                "Leave empty to use only the Windows PATH. Bundled BLAST/MAFFT/MUSCLE "
+                "stay on Windows; only Linux conda tools go through WSL."
+            )
+            conda_browse_title = "Choose WSL conda env (\\\\wsl$\\…) or Windows conda folder"
+        else:
+            self._conda_tools_env.setPlaceholderText("env name or path, e.g. tetrimmer")
+            self._conda_tools_env.setToolTip(
+                "Conda/mamba environment that provides external CLI tools "
+                "(RepeatMasker, FastGA, bedtools, …).\n"
+                "Enter the env name, or browse to the env folder "
+                "(…/envs/your_env). Leave empty to use only the system PATH."
+            )
+            conda_browse_title = "Choose conda environment folder"
+        self._conda_tools_env.textChanged.connect(self._refresh_conda_tools_status)
+        # Full status text; wraps within the path field; at most 4 lines (scroll if longer).
+        self._conda_tools_status = _CondaStatusLabel()
+        status_pal = self._conda_tools_status.palette()
+        muted = status_pal.color(QPalette.ColorRole.PlaceholderText)
+        if not muted.isValid() or muted.alpha() == 0:
+            muted = status_pal.color(QPalette.ColorRole.WindowText)
+            muted.setAlpha(180)
+        status_pal.setColor(QPalette.ColorRole.WindowText, muted)
+        self._conda_tools_status.setPalette(status_pal)
+
+        self._conda_tools_status_scroll = QScrollArea()
+        self._conda_tools_status_scroll.setWidget(self._conda_tools_status)
+        self._conda_tools_status_scroll.setWidgetResizable(False)
+        self._conda_tools_status_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._conda_tools_status_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._conda_tools_status_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._conda_tools_status_scroll.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+        _line = max(self._conda_tools_status.fontMetrics().lineSpacing(), 1)
+        self._conda_tools_status_scroll.setFixedSize(_PATH_FIELD_MIN_WIDTH, _line * 2 + 4)
+
+        self._conda_test_btn = QPushButton("Test")
+        self._conda_test_btn.setToolTip("Check whether the env resolves and which tools are visible.")
+        self._conda_test_btn.clicked.connect(self._on_test_conda_tools)
 
         # Diagnostics
         self._verbose_logging = QCheckBox()
@@ -529,7 +649,7 @@ class SettingsDialog(QDialog):
             box = QGroupBox(title)
             f = QFormLayout(box)
             f.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+            f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
             f.setHorizontalSpacing(10)
             f.setVerticalSpacing(8)
             for label, widget in rows:
@@ -541,27 +661,6 @@ class SettingsDialog(QDialog):
                     lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     f.addRow(lbl, widget)
             return box
-
-        def _row(*widgets: QWidget) -> QWidget:
-            holder = QWidget()
-            h = QHBoxLayout(holder)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(6)
-            for w in widgets:
-                h.addWidget(w)
-            h.addStretch()
-            return holder
-
-        def _center_row(*widgets: QWidget) -> QWidget:
-            holder = QWidget()
-            h = QHBoxLayout(holder)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(8)
-            h.addStretch()
-            for w in widgets:
-                h.addWidget(w)
-            h.addStretch()
-            return holder
 
         # Accent swatch + Reset together fill exactly one field width, so Reset's
         # right edge lines up with the combos above/below.
@@ -581,7 +680,7 @@ class SettingsDialog(QDialog):
             ("Use system sequence viewer:", self._system_viewer),
             ("Color-blind nucleotide:", self._color_blind_scheme),
         ])
-        files_preview = _group("Files & preview", [
+        files_preview = _group("Files && preview", [
             ("Folders / Files font:", self._browser_panel_font),
             ("Default preview zoom:", self._preview_zoom),
             ("Default preview fit:", self._preview_fit),
@@ -602,20 +701,31 @@ class SettingsDialog(QDialog):
                 is_dir=True,
                 browse_title="Choose BLAST databases folder",
             )),
-            (None, _center_row(self._open_blast_db_btn)),
+            ("", self._open_blast_db_btn),
         ])
-        # 2x2 grid keeps the four buttons compact so the dialog stays narrow.
-        for _btn in (
-            self._clear_cache_btn,
-            self._open_log_btn,
-            self._open_config_btn,
-            self._copy_diag_btn,
-        ):
-            _btn.setFixedWidth(150)
+        conda_tools_field = _path_browse_row(
+            self._conda_tools_env,
+            parent=self,
+            is_dir=True,
+            browse_title=conda_browse_title,
+            on_changed=self._refresh_conda_tools_status,
+        )
+        # Status sits under the path text box (form field column), wraps to that
+        # field's right edge, max 4 lines.
+        conda_tools = _group(
+            "External tools (conda / WSL2)" if sys.platform == "win32" else "External tools (conda)",
+            [
+                ("Conda env name or path:", conda_tools_field),
+                ("", self._conda_tools_status_scroll),
+                ("", self._conda_test_btn),
+            ],
+        )
         diagnostics = _group("Diagnostics", [
             ("Verbose logging:", self._verbose_logging),
-            (None, _center_row(self._clear_cache_btn, self._open_log_btn)),
-            (None, _center_row(self._open_config_btn, self._copy_diag_btn)),
+            ("", self._open_log_btn),
+            ("", self._copy_diag_btn),
+            ("", self._clear_cache_btn),
+            ("", self._open_config_btn),
         ])
 
         content = QWidget()
@@ -629,6 +739,7 @@ class SettingsDialog(QDialog):
             performance,
             startup,
             blast_databases,
+            conda_tools,
             diagnostics,
         ):
             content_v.addWidget(box)
@@ -637,6 +748,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(content)
 
         self._reset_btn = QPushButton("Restore defaults…")
@@ -731,6 +843,9 @@ class SettingsDialog(QDialog):
         base_dir_text = self._blast_db_base_dir.text().strip()
         if base_dir_text:
             save_blast_db_base_dir(Path(base_dir_text))
+        conda_spec = self._conda_tools_env.text().strip()
+        save_conda_tools_env(conda_spec)
+        apply_conda_tools_path(conda_spec)
         self._save_settings()
         return self._project
 
@@ -798,6 +913,65 @@ class SettingsDialog(QDialog):
         folder = Path(text).expanduser() if text else load_blast_db_base_dir()
         folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _refresh_conda_tools_status(self) -> None:
+        status = describe_conda_tools_status(self._conda_tools_env.text())
+        self._conda_tools_status.setText(status)
+        self._conda_tools_status.setToolTip(status)
+        QTimer.singleShot(0, self._fit_conda_tools_status_height)
+
+    def _on_test_conda_tools(self) -> None:
+        self._refresh_conda_tools_status()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._refresh_conda_tools_status()
+        QTimer.singleShot(0, self._fit_conda_tools_status_height)
+        QTimer.singleShot(50, self._fit_conda_tools_status_height)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "_conda_tools_status_scroll"):
+            self._fit_conda_tools_status_height()
+
+    def _conda_status_wrap_width(self) -> int:
+        """Width of the path QLineEdit, capped so the dialog never grows horizontally."""
+        path_w = self._conda_tools_env.width()
+        if path_w < 80:
+            parent = self._conda_tools_env.parentWidget()
+            if parent is not None and parent.width() >= 120:
+                browse = None
+                for child in parent.findChildren(QPushButton):
+                    if child.text() == "Browse":
+                        browse = child
+                        break
+                if browse is not None:
+                    path_w = parent.width() - browse.width() - 6
+                else:
+                    path_w = parent.width() - 80
+            else:
+                path_w = _PATH_FIELD_MIN_WIDTH
+        # Cap to dialog client width minus label column / margins.
+        dialog_cap = max(160, self.width() - _LABEL_WIDTH - 64)
+        return max(120, min(path_w, dialog_cap))
+
+    def _fit_conda_tools_status_height(self) -> None:
+        """Wrap inside the path field width; show up to 4 lines (scroll after that)."""
+        if not hasattr(self, "_conda_tools_status_scroll"):
+            return
+        label = self._conda_tools_status
+        scroll = self._conda_tools_status_scroll
+        wrap_w = self._conda_status_wrap_width()
+        label.set_wrap_width(wrap_w)
+        label.setFixedWidth(wrap_w)
+
+        line_h = max(label.fontMetrics().lineSpacing(), 1)
+        max_h = line_h * _CONDA_STATUS_MAX_LINES + 6
+        needed = label.heightForWidth(wrap_w)
+        height = min(max(needed, line_h), max_h)
+        label.setFixedHeight(needed)  # full text height inside scroll area
+        scroll.setFixedSize(wrap_w, height)
+        scroll.updateGeometry()
 
     def _copy_diagnostics(self) -> None:
         import platform

@@ -9256,13 +9256,37 @@ class MainWindow(QMainWindow):
         self._set_status_message(" · ".join(parts))
 
     def _show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            f"About {APP_DISPLAY_NAME}",
-            f"<b>{APP_DISPLAY_NAME}</b> {__version__}<br>"
-            "Free, TE-focused sequence workspace — a folder-based desktop app for "
-            "annotating, aligning and curating transposable elements.<br>"
-            "BLAST · extend · align · MSA clean · consensus · TEAid · dotplots<br>"
-            "PySide6 · built on "
-            "<a href='https://github.com/qjiangzhao/TEtrimmer'>TEtrimmer</a>",
+        from repeatviewer.widgets.app_icon import app_icon
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"About {APP_DISPLAY_NAME}")
+        dialog.setModal(True)
+
+        icon_label = QLabel()
+        icon_pix = app_icon().pixmap(QSize(64, 64))
+        icon_label.setPixmap(icon_pix)
+        icon_label.setFixedSize(64, 64)
+
+        text_label = QLabel(f"<b>{APP_DISPLAY_NAME}</b> {__version__}")
+        text_label.setTextFormat(Qt.TextFormat.RichText)
+        text_label.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
         )
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(16)
+        row.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(text_label, stretch=1, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(dialog.accept)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(16)
+        layout.addLayout(row)
+        layout.addWidget(buttons, alignment=Qt.AlignmentFlag.AlignRight)
+
+        dialog.setFixedWidth(max(320, dialog.sizeHint().width()))
+        dialog.exec()

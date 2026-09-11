@@ -318,10 +318,10 @@ def normalize_consensus_ambiguous(raw: object) -> str:
     return amb if amb in CONSENSUS_AMBIGUOUS_CHOICES else DEFAULT_CONSENSUS_AMBIGUOUS
 
 
-DEFAULT_FLEXIDOT_WORDSIZE = 3
+DEFAULT_FLEXIDOT_WORDSIZE = 5
 DEFAULT_FLEXIDOT_LCS_SHADING = True
 DEFAULT_FLEXIDOT_USE_GFF = False
-DEFAULT_FLEXIDOT_OUTPUT_FORMAT = "html"
+DEFAULT_FLEXIDOT_OUTPUT_FORMAT = "png"
 DEFAULT_FLEXIDOT_SUBSTITUTIONS = 0
 DEFAULT_FLEXIDOT_WOBBLE_CONVERSION = False
 DEFAULT_FLEXIDOT_MAX_N_PERCENTAGE = 10.0
@@ -368,11 +368,11 @@ MAX_FLEXIDOT_WORDSIZE = 100
 
 
 def normalize_flexidot_output_format(value: str) -> str:
-    """Return one of html / png / pdf / svg for Flexidot ``-f`` (default html)."""
+    """Return one of html / png / pdf / svg for Flexidot ``-f``."""
     v = str(value).strip().lower()
     if v in FLEXIDOT_OUTPUT_FORMATS:
         return v
-    return FLEXIDOT_OUTPUT_HTML
+    return DEFAULT_FLEXIDOT_OUTPUT_FORMAT
 
 
 @dataclass
