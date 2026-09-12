@@ -381,7 +381,7 @@ class GenomeDialog(QDialog):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
 
         self._mode_single = QRadioButton("Single genome mode")
-        self._mode_pan = QRadioButton("Pan-genome mode")
+        self._mode_pan = QRadioButton("Pan-genome mode (Beta)")
         self._mode_single.setToolTip(
             "One reference genome for Blast, MSA Extend, TEAid, Flexidot, and Visualization."
         )

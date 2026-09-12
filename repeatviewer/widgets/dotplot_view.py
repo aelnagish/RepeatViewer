@@ -1109,7 +1109,7 @@ class DotplotPanel(QWidget):
         self._filter_len.setValue(0)
         self._filter_len.setSingleStep(100)
         self._filter_len.setGroupSeparatorShown(True)
-        self._filter_len.setFixedWidth(110)
+        self._filter_len.setFixedWidth(72)
         self._filter_len.setToolTip(
             "Hide alignments shorter than this, in bp.\n"
             "0 shows everything. Raise it to strip short, noisy matches the "
@@ -1165,6 +1165,8 @@ class DotplotPanel(QWidget):
         self._pending_key = None
         # Last drag-box as 1-based inclusive (x1, x2, y1, y2), if any.
         self._selection_xy: tuple[int, int, int, int] | None = None
+        # Status line without the appended x/y readout (alignment mode).
+        self._status_base = ""
 
         self._status = QLabel("", self)
         self._status.setStyleSheet("color: palette(mid);")
@@ -1415,17 +1417,14 @@ class DotplotPanel(QWidget):
             self._pair_combo.setVisible(multi)
             self._filter_len_label.setVisible(True)
             self._filter_len.setVisible(True)
-            # A window only makes sense on one pair: with sequences laid end to
-            # end there is no single coordinate space to window into.
-            showing_all = (
-                self._pair_combo.currentData() is None
-                or self._pair_combo.currentData()[0] == "__all__"
-            )
+            # FastGA / PAF previews: no From/Window; View select stays hidden
+            # (x/y is appended to the status line for self / pair compares).
             for widget in (
                 self._region_start_label, self._region_start,
                 self._region_size_label, self._region_size,
             ):
-                widget.setVisible(not showing_all)
+                widget.setVisible(False)
+            self._sel_row.hide()
             return
 
         self._pair_label.setVisible(False)
@@ -1722,9 +1721,12 @@ class DotplotPanel(QWidget):
         self._sel_x.clear()
         self._sel_y.clear()
         self._sel_row.hide()
+        if self._mode == "alignment" and self._status_base:
+            self._status.setText(self._status_base)
 
     def _set_status_text(self, text: str, *, tooltip: str = "") -> None:
         """Show a plain status message in the title row (does not clear x/y select)."""
+        self._status_base = text
         self._status.show()
         self._status.setText(text)
         self._status.setToolTip(tooltip)
@@ -1733,11 +1735,30 @@ class DotplotPanel(QWidget):
         """Plain-text status for PDF captions / tooltips."""
         if self._selection_xy is not None:
             x1, x2, y1, y2 = self._selection_xy
-            return f"x {x1:,}-{x2:,}  ·  y {y1:,}-{y2:,}"
+            base = self._status_base or self._status.text()
+            return f"{base} · x {x1:,}-{x2:,} · y {y1:,}-{y2:,}"
         return self._status.text()
+
+    def _alignment_shows_xy_readout(self) -> bool:
+        """True for self / two-sequence compares (not 'All sequences')."""
+        if self._mode != "alignment" or self._alignments is None:
+            return False
+        if self._alignments.is_single_pair():
+            return True
+        data = self._pair_combo.currentData()
+        return bool(data) and data[0] != "__all__"
 
     def _show_selection_status(self, x1: int, x2: int, y1: int, y2: int) -> None:
         self._selection_xy = (int(x1), int(x2), int(y1), int(y2))
+        if self._mode == "alignment":
+            # No View select buttons; append coords after the segment count.
+            self._sel_row.hide()
+            if self._alignment_shows_xy_readout():
+                base = self._status_base or self._status.text()
+                self._status.setText(
+                    f"{base} · x {x1:,}-{x2:,} · y {y1:,}-{y2:,}"
+                )
+            return
         self._sel_x.setText(f"x {x1:,}-{x2:,}")
         self._sel_y.setText(f"y {y1:,}-{y2:,}")
         self._sel_row.show()
@@ -1748,6 +1769,8 @@ class DotplotPanel(QWidget):
         self._set_status_text("Select a region on the plot first (drag a rectangle).")
 
     def _view_axis_in_annotation(self, axis: str) -> None:
+        if self._mode == "alignment":
+            return
         coords = self._selection_xy or self._canvas.selection_sequence_coords()
         if coords is None:
             self._set_status_text("Select a region on the plot first (drag a rectangle).")
@@ -1792,7 +1815,8 @@ class DotplotPanel(QWidget):
 
     def _on_rect_selected(self, x1: int, x2: int, y1: int, y2: int) -> None:
         self._show_selection_status(x1, x2, y1, y2)
-        self.rangeSelected.emit(x1, x2, y1, y2)
+        if self._mode != "alignment":
+            self.rangeSelected.emit(x1, x2, y1, y2)
 
     def _on_position(self, x: int, y: int) -> None:
         self.statusMessage.emit(f"x: {x:,}  y: {y:,}")

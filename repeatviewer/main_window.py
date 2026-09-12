@@ -730,13 +730,15 @@ class FastGaWorker(QObject):
 
             for index, (source1, source2) in enumerate(jobs, start=1):
                 self._step = index
+                # Keep the full FASTA name (including .fa); append FastGA before
+                # the alignment suffix so outputs stay easy to match to inputs.
                 if source2 is None:
-                    stem = f"{source1.stem}_self"
+                    base = f"{source1.name}_FastGA"
                 else:
-                    stem = f"{source1.stem}_vs_{source2.stem}"
-                out_path = source1.parent / f"{stem}{suffix}"
+                    base = f"{source1.name}_vs_{source2.name}_FastGA"
+                out_path = source1.parent / f"{base}{suffix}"
                 if self._stream_log and len(jobs) > 1:
-                    _log(f"—— Job {index}/{len(jobs)}: {stem} ——")
+                    _log(f"—— Job {index}/{len(jobs)}: {base} ——")
                 written = run_fastga_alignment(
                     source1,
                     source2,
