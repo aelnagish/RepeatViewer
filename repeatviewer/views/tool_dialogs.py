@@ -1352,12 +1352,14 @@ class FastGaParamsDialog(QDialog):
         self._no_soft_mask.setChecked(opts.no_soft_mask)
         self._no_soft_mask.setToolTip("FastGA -N: do not soft mask.")
 
-        self._pairwise = QCheckBox("Do pairwise comparison", self)
+        self._pairwise = QCheckBox("Do each pair comparison", self)
         self._pairwise.setChecked(bool(getattr(opts, "pairwise", False)))
         self._pairwise.setToolTip(
-            "Off (default): each selected FASTA is compared against itself.\n"
-            "On: allow one or two FASTA files; with two files, compare them "
-            "against each other."
+            "Off (default): each selected FASTA is compared against itself, "
+            "one file at a time.\n"
+            "On: compare every unique pair among the selected files and write "
+            "all alignments into one file named "
+            "<first_selected>_multi_FastGA.<ext>."
         )
 
         for field in (
@@ -1455,30 +1457,26 @@ class FastGaParamsDialog(QDialog):
         pairwise = self._pairwise.isChecked()
         n = self._file_count
         if pairwise:
-            if n == 2:
+            if n >= 2:
+                pair_count = n * (n - 1) // 2
                 text = (
-                    "Two files selected: they will be compared against each other."
-                )
-            elif n == 1:
-                text = (
-                    "One file selected: it will be compared against itself. "
-                    "Select a second FASTA for A vs B."
+                    f"{n} files selected: every unique pair will be compared "
+                    f"({pair_count} pair(s)). Results are merged into one file "
+                    "named after the first selection with _multi_FastGA."
                 )
             else:
-                text = (
-                    "Pairwise comparison: select one or two FASTA files "
-                    "(two files for A vs B)."
-                )
+                text = ""
         elif n >= 1:
             text = (
                 f"{n} file(s) selected: each will be compared against itself "
-                "(self-comparison). Self matches are excluded."
+                "one by one (self-comparison)."
             )
         else:
             text = (
                 "Self-comparison (default): select one or more FASTA files. "
-                "Each is compared against itself. Enable Do pairwise comparison "
-                "to compare two genomes."
+                "Each is compared against itself, one by one. Enable "
+                "Do each pair comparison to compare every unique pair among "
+                "the selected files."
             )
         self._mode.setText(text)
 

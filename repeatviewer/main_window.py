@@ -498,7 +498,7 @@ _TOOLBAR_TOOLTIPS = {
     "translate": "Translate selected DNA FASTA to protein",
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
-    "fastga": "FastGA whole-genome alignment (self-comparison by default; optional pairwise)",
+    "fastga": "FastGA whole-genome alignment (self-comparison one-by-one by default; optional all-pairs)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_benchmark": "TE benchmarking (confusion matrix and library comparison)",
@@ -697,9 +697,13 @@ class FastGaWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        from itertools import combinations
+        import tempfile
         from pathlib import Path as _Path
 
         from repeatviewer.backends.fastga_dotplot import (
+            FORMAT_ALN,
+            FORMAT_PAF,
             output_suffix_for_format,
             run_fastga_alignment,
         )
@@ -720,45 +724,97 @@ class FastGaWorker(QObject):
                 temp_dir.mkdir(parents=True, exist_ok=True)
 
             pairwise = bool(getattr(self._options, "pairwise", False))
-            suffix = output_suffix_for_format(self._options.output_format)
+            fmt = self._options.output_format
+            suffix = output_suffix_for_format(fmt)
             created: list[str] = []
 
             if pairwise and len(self._seq_files) >= 2:
-                jobs = [(self._seq_files[0], self._seq_files[1])]
+                # All unique unordered pairs → one combined alignment file.
+                # Binary .1aln cannot be concatenated; stream PAF instead.
+                pair_jobs = list(combinations(self._seq_files, 2))
+                combine_fmt = FORMAT_PAF if fmt == FORMAT_ALN else fmt
+                combine_suffix = output_suffix_for_format(combine_fmt)
+                first = self._seq_files[0]
+                out_path = first.parent / f"{first.name}_multi_FastGA{combine_suffix}"
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                chunks: list[str] = []
+                for index, (source1, source2) in enumerate(pair_jobs, start=1):
+                    self._step = index
+                    label = f"{source1.name} vs {source2.name}"
+                    if self._stream_log:
+                        _log(f"—— Pair {index}/{len(pair_jobs)}: {label} ——")
+                    with tempfile.NamedTemporaryFile(
+                        prefix=".repeatviewer_fastga_pair_",
+                        suffix=combine_suffix,
+                        dir=str(first.parent),
+                        delete=False,
+                    ) as tmp:
+                        tmp_path = _Path(tmp.name)
+                    try:
+                        written = run_fastga_alignment(
+                            source1,
+                            source2,
+                            tmp_path,
+                            fmt=combine_fmt,
+                            threads=self._options.threads,
+                            min_identity=self._options.min_identity,
+                            min_length=self._options.min_length,
+                            seed_freq=getattr(self._options, "seed_freq", 200),
+                            chain_coverage=getattr(
+                                self._options, "chain_coverage", 85
+                            ),
+                            chain_gap=getattr(self._options, "chain_gap", 1000),
+                            symmetric=self._options.symmetric,
+                            keep_index=self._options.keep_index,
+                            no_soft_mask=getattr(
+                                self._options, "no_soft_mask", False
+                            ),
+                            temp_dir=temp_dir,
+                            progress=_progress,
+                            on_log=_log if self._stream_log else None,
+                            is_cancelled=_cancelled,
+                        )
+                        text = written.read_text(encoding="utf-8")
+                        if text and not text.endswith("\n"):
+                            text += "\n"
+                        if text:
+                            chunks.append(text)
+                    finally:
+                        try:
+                            tmp_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                out_path.write_text("".join(chunks), encoding="utf-8")
+                created.append(str(out_path))
             else:
+                # Default: self-compare each selected FASTA one by one.
                 jobs = [(path, None) for path in self._seq_files]
-
-            for index, (source1, source2) in enumerate(jobs, start=1):
-                self._step = index
-                # Keep the full FASTA name (including .fa); append FastGA before
-                # the alignment suffix so outputs stay easy to match to inputs.
-                if source2 is None:
+                for index, (source1, source2) in enumerate(jobs, start=1):
+                    self._step = index
                     base = f"{source1.name}_FastGA"
-                else:
-                    base = f"{source1.name}_vs_{source2.name}_FastGA"
-                out_path = source1.parent / f"{base}{suffix}"
-                if self._stream_log and len(jobs) > 1:
-                    _log(f"—— Job {index}/{len(jobs)}: {base} ——")
-                written = run_fastga_alignment(
-                    source1,
-                    source2,
-                    out_path,
-                    fmt=self._options.output_format,
-                    threads=self._options.threads,
-                    min_identity=self._options.min_identity,
-                    min_length=self._options.min_length,
-                    seed_freq=getattr(self._options, "seed_freq", 200),
-                    chain_coverage=getattr(self._options, "chain_coverage", 85),
-                    chain_gap=getattr(self._options, "chain_gap", 1000),
-                    symmetric=self._options.symmetric,
-                    keep_index=self._options.keep_index,
-                    no_soft_mask=getattr(self._options, "no_soft_mask", False),
-                    temp_dir=temp_dir,
-                    progress=_progress,
-                    on_log=_log if self._stream_log else None,
-                    is_cancelled=_cancelled,
-                )
-                created.append(str(written))
+                    out_path = source1.parent / f"{base}{suffix}"
+                    if self._stream_log and len(jobs) > 1:
+                        _log(f"—— Job {index}/{len(jobs)}: {base} ——")
+                    written = run_fastga_alignment(
+                        source1,
+                        source2,
+                        out_path,
+                        fmt=fmt,
+                        threads=self._options.threads,
+                        min_identity=self._options.min_identity,
+                        min_length=self._options.min_length,
+                        seed_freq=getattr(self._options, "seed_freq", 200),
+                        chain_coverage=getattr(self._options, "chain_coverage", 85),
+                        chain_gap=getattr(self._options, "chain_gap", 1000),
+                        symmetric=self._options.symmetric,
+                        keep_index=self._options.keep_index,
+                        no_soft_mask=getattr(self._options, "no_soft_mask", False),
+                        temp_dir=temp_dir,
+                        progress=_progress,
+                        on_log=_log if self._stream_log else None,
+                        is_cancelled=_cancelled,
+                    )
+                    created.append(str(written))
 
             self.finished.emit(created)
         except Exception as exc:  # noqa: BLE001 - surface to the UI
@@ -2725,16 +2781,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "FastGA",
-                "Select one or more FASTA files for self-comparison, or enable "
-                "Do pairwise comparison and select one or two FASTA files.",
+                "Select one or more FASTA files for self-comparison (one by one), "
+                "or enable Do each pair comparison and select two or more FASTA files.",
             )
             return []
-        if pairwise and len(files) > 2:
+        if pairwise and len(files) < 2:
             QMessageBox.information(
                 self,
                 "FastGA",
-                f"{len(files)} files selected. Pairwise comparison allows only "
-                "one or two FASTA files.",
+                "Do each pair comparison needs at least two FASTA files.\n"
+                "Select more files, or turn the option off for self-comparison.",
             )
             return []
         return files
@@ -2807,8 +2863,9 @@ class MainWindow(QMainWindow):
     def _start_fastga_job(self, files: list[Path], options) -> None:
         pairwise = bool(getattr(options, "pairwise", False))
         if pairwise and len(files) >= 2:
-            title = f"FastGA ({files[0].name} vs {files[1].name})"
-            total_steps = 1
+            pair_count = len(files) * (len(files) - 1) // 2
+            title = f"FastGA ({pair_count} pair(s) → multi)"
+            total_steps = max(1, pair_count)
         elif len(files) == 1:
             title = f"FastGA ({files[0].name} self)"
             total_steps = 1

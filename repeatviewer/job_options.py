@@ -272,8 +272,9 @@ DEFAULT_FASTGA_PAIRWISE = False
 class FastGaOptions:
     """FastGA whole-genome alignment.
 
-    By default each selected FASTA is self-compared. Pairwise mode compares
-    two selected genomes against each other (one or two files allowed).
+    By default each selected FASTA is self-compared one by one. Pairwise mode
+    ("Do each pair comparison") compares every unique pair among the selected
+    files and writes one combined alignment file.
     """
 
     output_format: str = FASTGA_FORMAT_PAF

@@ -1095,7 +1095,12 @@ class DotplotPanel(QWidget):
         self._region_size_label = QLabel("Window:", self)
 
         self._pair_combo = QComboBox(self)
-        self._pair_combo.setMinimumWidth(260)
+        # Long pair labels live in the popup; keep the closed control compact.
+        self._pair_combo.setFixedWidth(180)
+        self._pair_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._pair_combo.setMinimumContentsLength(8)
         self._pair_combo.setToolTip(
             "Which sequence pair to plot. 'All sequences' lays every query and "
             "target end to end, with separators between them."
