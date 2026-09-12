@@ -47,6 +47,8 @@ hiddenimports: list[str] = [
     "numpy",
     "numpy._core",
     "numpy._core._multiarray_umath",
+    "six",
+    "six.moves",
 ]
 
 for pkg in ("flexidot",):
@@ -94,9 +96,13 @@ a = Analysis(  # noqa: F821
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[str(SPECDIR / "hooks")],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[
+        str(SPECDIR / "pyi_rth_six_importer.py"),
+        str(SPECDIR / "pyi_rth_numpy_guard.py"),
+        str(SPECDIR / "pyi_rth_scipy_distn.py"),
+    ],
     excludes=[
         "tkinter",
         "PyQt5",
