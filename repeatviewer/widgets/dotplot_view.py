@@ -129,9 +129,11 @@ _DIAGONAL_COLOR = QColor(230, 120, 40)
 # Zoom limits are relative to the scale that fits the whole plot, not absolute.
 # A 190 kb window fits at ~0.004 px/base, so an absolute lower bound of 0.02
 # silently blocked every zoom attempt.
-_ZOOM_OUT_LIMIT = 0.5    # allow zooming out past fit for context
+_ZOOM_OUT_LIMIT = 1.0    # never smaller than fit → no empty margins from zoom-out
 _MAX_PIXELS_PER_BASE = 40.0
-_ZOOM_STEP = 1.15        # gentler than 1.25 so +/- / wheel feel controllable
+_ZOOM_STEP = 1.12        # +/- button step
+# Trackpad: factor = TRACKPAD_ZOOM_BASE ** pixel_delta_y (smooth continuous zoom).
+_TRACKPAD_ZOOM_BASE = 1.0022
 
 _RULER_TOP = 18
 # Wide enough for the tick labels plus the rotated sequence name beside them.
@@ -182,6 +184,9 @@ class _SegmentsItem(QGraphicsItem):
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        # White plot face; viewport outside the square uses the ruler grey so
+        # there is no framed "box" around the data.
+        painter.fillRect(self.boundingRect(), QColor(255, 255, 255))
         scale = painter.transform().m11() or 1.0
         min_length = 0.0 if scale >= 1.0 else (1.0 / scale)
         visible = option.exposedRect if option is not None else self.boundingRect()
@@ -371,7 +376,7 @@ class DotplotCanvas(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setMouseTracking(True)
-        self.setBackgroundBrush(QColor(255, 255, 255))
+        self.setBackgroundBrush(_RULER_BG)
         self._item: _SegmentsItem | None = None
         self._length = 0
         # Plot coordinates are 0..length; add this to show real positions when
@@ -523,8 +528,35 @@ class DotplotCanvas(QGraphicsView):
         n = float(self._length)
         self.fitInView(QRectF(0, 0, n, n), Qt.AspectRatioMode.KeepAspectRatio)
         self._fit_scale = self.transform().m11() or 0.0
+        self._clamp_scroll_to_plot()
         self.viewport().update()
         self._refresh_rulers()
+
+    def zoom_to_selection(self) -> bool:
+        """Fit the current selection into the view. Returns False if none."""
+        rect = self._selection
+        if rect is None or not self._length:
+            return False
+        if rect.width() < 1.0 or rect.height() < 1.0:
+            return False
+        pad = max(rect.width(), rect.height()) * 0.05
+        target = rect.adjusted(-pad, -pad, pad, pad).intersected(
+            QRectF(0, 0, float(self._length), float(self._length))
+        )
+        if target.width() < 1.0 or target.height() < 1.0:
+            return False
+        self.fitInView(target, Qt.AspectRatioMode.KeepAspectRatio)
+        current = self.transform().m11() or 1.0
+        if current > _MAX_PIXELS_PER_BASE:
+            self.scale(_MAX_PIXELS_PER_BASE / current, _MAX_PIXELS_PER_BASE / current)
+        self._clamp_scroll_to_plot()
+        self.viewport().update()
+        self._refresh_rulers()
+        return True
+
+    def has_selection(self) -> bool:
+        rect = self._selection
+        return rect is not None and rect.width() >= 1.0 and rect.height() >= 1.0
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -569,7 +601,7 @@ class DotplotCanvas(QGraphicsView):
     # ------------------------------------------------------------------
 
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: N802
-        """Scene-space overlays only: selection, plot border, crosshair lines.
+        """Scene-space overlays only: selection and crosshair lines.
 
         Anything that belongs in the ruler margins is painted in paintEvent
         instead, because the margins are outside this viewport.
@@ -602,12 +634,6 @@ class DotplotCanvas(QGraphicsView):
                     QPointF(0, entry.offset), QPointF(self._length, entry.offset)
                 )
 
-        border = QPen(QColor(120, 120, 120))
-        border.setCosmetic(True)
-        painter.setPen(border)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(QRectF(0, 0, self._length, self._length))
-
         if self._cursor_pos is not None:
             cross = QPen(QColor(90, 140, 220, 150))
             cross.setCosmetic(True)
@@ -621,34 +647,79 @@ class DotplotCanvas(QGraphicsView):
         floor = (self._fit_scale or target) * _ZOOM_OUT_LIMIT
         return floor <= target <= _MAX_PIXELS_PER_BASE
 
-    def zoom_by(self, factor: float) -> None:
-        """Zoom about the centre of the view (used by the +/- buttons)."""
-        if self._item is None:
+    def _clamp_scroll_to_plot(self) -> None:
+        """Keep empty scene space out of the viewport (pin plot to top-left)."""
+        if not self._length:
             return
-        target = self.transform().m11() * factor
-        if not self._zoom_allowed(target):
+        n = float(self._length)
+        vis = self.mapToScene(self.viewport().rect()).boundingRect()
+        dx = dy = 0.0
+        if vis.width() <= n + 1e-6:
+            if vis.left() < 0:
+                dx = -vis.left()
+            elif vis.right() > n:
+                dx = n - vis.right()
+        else:
+            # Viewport wider than the plot: keep x=0 on the left edge.
+            dx = -vis.left()
+        if vis.height() <= n + 1e-6:
+            if vis.top() < 0:
+                dy = -vis.top()
+            elif vis.bottom() > n:
+                dy = n - vis.bottom()
+        else:
+            dy = -vis.top()
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
             return
-        anchor = self.transformationAnchor()
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
-        self.scale(factor, factor)
-        self.setTransformationAnchor(anchor)
+        origin = self.mapFromScene(QPointF(0, 0))
+        shifted = self.mapFromScene(QPointF(dx, dy))
+        self.horizontalScrollBar().setValue(
+            self.horizontalScrollBar().value() + int(round(shifted.x() - origin.x()))
+        )
+        self.verticalScrollBar().setValue(
+            self.verticalScrollBar().value() + int(round(shifted.y() - origin.y()))
+        )
+
+    def _apply_zoom(self, factor: float, anchor: QPoint | None = None) -> None:
+        """Zoom by ``factor`` about ``anchor`` (viewport coords), then clamp."""
+        if self._item is None or not self._length:
+            return
+        current = self.transform().m11() or 1.0
+        floor = (self._fit_scale or current) * _ZOOM_OUT_LIMIT
+        target = min(_MAX_PIXELS_PER_BASE, max(floor, current * factor))
+        actual = target / current
+        if abs(actual - 1.0) < 1e-9:
+            return
+
+        if anchor is None:
+            anchor = self.viewport().rect().center()
+
+        # Manual under-cursor zoom. Do not combine with AnchorUnderMouse —
+        # that double-applies the correction and drifts the plot, leaving a
+        # blank band at the top/left (especially with a Mac trackpad).
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        scene_pt = self.mapToScene(anchor)
+        self.scale(actual, actual)
+        offset = self.mapFromScene(scene_pt) - anchor
+        self.horizontalScrollBar().setValue(
+            self.horizontalScrollBar().value() + int(round(offset.x()))
+        )
+        self.verticalScrollBar().setValue(
+            self.verticalScrollBar().value() + int(round(offset.y()))
+        )
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self._clamp_scroll_to_plot()
         self.viewport().update()
         self._refresh_rulers()
 
+    def zoom_by(self, factor: float) -> None:
+        """Zoom about the centre of the view (used by the +/- buttons)."""
+        self._apply_zoom(factor, self.viewport().rect().center())
+
     def zoom_at(self, factor: float, view_pos) -> None:
-        """Zoom keeping the scene point under ``view_pos`` fixed (mouse wheel)."""
-        if self._item is None:
-            return
-        target = self.transform().m11() * factor
-        if not self._zoom_allowed(target):
-            return
-        before = self.mapToScene(view_pos)
-        self.scale(factor, factor)
-        after = self.mapToScene(view_pos)
-        delta = after - before
-        self.translate(delta.x(), delta.y())
-        self.viewport().update()
-        self._refresh_rulers()
+        """Zoom keeping the scene point under ``view_pos`` fixed."""
+        self._apply_zoom(factor, view_pos)
 
     def render_to_pdf(self, path: Path, *, title: str = "", subtitle: str = "") -> None:
         """Write the plot to a PDF with axes, labels and a legend.
@@ -703,10 +774,6 @@ class DotplotCanvas(QGraphicsView):
             painter.setClipRect(plot)
             self.scene().render(painter, plot, self.sceneRect())
             painter.restore()
-
-            painter.setPen(QPen(QColor(80, 80, 80)))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(plot)
 
             # --- axes, matching the on-screen rulers ---
             length = max(self._length, 1)
@@ -776,8 +843,17 @@ class DotplotCanvas(QGraphicsView):
     def wheelEvent(self, event) -> None:  # noqa: N802
         if self._item is None:
             return
-        factor = _ZOOM_STEP if event.angleDelta().y() > 0 else 1 / _ZOOM_STEP
-        self.zoom_at(factor, event.position().toPoint())
+        # Mac trackpads send smooth pixelDelta; mouse wheels use angleDelta notches.
+        pixel = event.pixelDelta()
+        angle = event.angleDelta()
+        if not pixel.isNull() and (pixel.y() != 0 or pixel.x() != 0):
+            dy = float(pixel.y() if pixel.y() != 0 else pixel.x())
+            factor = _TRACKPAD_ZOOM_BASE ** dy
+        elif angle.y() != 0:
+            factor = _ZOOM_STEP ** (angle.y() / 120.0)
+        else:
+            return
+        self._apply_zoom(factor, event.position().toPoint())
         event.accept()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -811,6 +887,7 @@ class DotplotCanvas(QGraphicsView):
             v = self.verticalScrollBar()
             h.setValue(h.value() - delta.x())
             v.setValue(v.value() - delta.y())
+            self._clamp_scroll_to_plot()
             self.viewport().update()
             self._refresh_rulers()
             return
@@ -901,11 +978,11 @@ class DotplotPanel(QWidget):
         )
         self._word.setFixedWidth(70)
 
-        self._reverse = QCheckBox("Reverse complement", self)
+        self._reverse = QCheckBox("Show reverse", self)
         self._reverse.setChecked(True)
         self._reverse.setToolTip(
-            "Show inverted repeats (terminal inverted repeats, hairpins) as "
-            "anti-diagonal lines."
+            "Show reverse-strand hits (inverted repeats, TIRs, hairpins) "
+            "as anti-diagonal lines."
         )
 
         # FastGA controls: only meaningful for the large-sequence engine.
@@ -1008,6 +1085,14 @@ class DotplotPanel(QWidget):
         self._reset_btn = QToolButton(self)
         self._reset_btn.setText("Reset zoom")
         self._reset_btn.setAutoRaise(True)
+        self._reset_btn.setToolTip("Fit the whole plot in the view")
+
+        self._zoom_select_btn = QToolButton(self)
+        self._zoom_select_btn.setText("Zoom select")
+        self._zoom_select_btn.setAutoRaise(True)
+        self._zoom_select_btn.setToolTip(
+            "Zoom to the selected region (drag a rectangle on the plot first)"
+        )
 
         self._pdf_btn = QToolButton(self)
         self._pdf_btn.setText("Save PDF")
@@ -1057,6 +1142,7 @@ class DotplotPanel(QWidget):
         bar.addWidget(self._zoom_out_btn)
         bar.addWidget(self._zoom_in_btn)
         bar.addWidget(self._reset_btn)
+        bar.addWidget(self._zoom_select_btn)
         bar.addWidget(self._pdf_btn)
         bar.addWidget(self._compute_btn)
         bar.addWidget(self._cancel_btn)
@@ -1096,6 +1182,7 @@ class DotplotPanel(QWidget):
         self._pair_combo.currentIndexChanged.connect(self._show_selected_pair)
         self._filter_len.valueChanged.connect(self._recompute)
         self._reset_btn.clicked.connect(self._canvas.reset_zoom)
+        self._zoom_select_btn.clicked.connect(self._zoom_to_selection)
         self._zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_by(_ZOOM_STEP))
         self._zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_by(1 / _ZOOM_STEP))
         self._pdf_btn.clicked.connect(self._save_pdf)
@@ -1541,6 +1628,11 @@ class DotplotPanel(QWidget):
 
     def clear_selection(self) -> None:
         self._canvas.clear_selection()
+
+    def _zoom_to_selection(self) -> None:
+        if self._canvas.zoom_to_selection():
+            return
+        self._status.setText("Select a region on the plot first (drag a rectangle).")
 
     def _save_pdf(self) -> None:
         from PySide6.QtWidgets import QFileDialog, QMessageBox
