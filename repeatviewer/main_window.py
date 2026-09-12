@@ -312,6 +312,7 @@ from repeatviewer.plugins.custom_command import (
     is_file_var_mode,
     is_folder_var_mode,
     is_path_var_mode,
+    load_user_command_plugin_specs,
     normalize_var_mode,
     save_user_command_plugin_spec,
 )
@@ -383,6 +384,7 @@ from repeatviewer.views.tool_dialogs import (
     ConfusionMatrixBenchmarkDialog,
     TeLibraryBenchmarkDialog,
     CommandPluginDesignerDialog,
+    WrapperManageDialog,
     PluginManageDialog,
     exec_modal_dialog,
 )
@@ -1677,6 +1679,7 @@ class MainWindow(QMainWindow):
         self.database_index_runner = DatabaseIndexRunner(self)
         self._plugin_registry = load_plugins()
         self._plugins_menu: QMenu | None = None
+        self._others_menu: QMenu | None = None
         self._workflows_menu: QMenu | None = None
         self._toolbar_order = load_toolbar_order(self._plugin_registry)
         self._browser_panel: QWidget | None = None
@@ -3168,17 +3171,16 @@ class MainWindow(QMainWindow):
         self._populate_te_visualization_menu(tools_menu.addMenu("&Visualization"))
         self._populate_benchmarking_menu(tools_menu.addMenu("&Benchmarking"))
 
-        plugins_menu = self.menuBar().addMenu("&Plugins")
-        self._plugins_menu = plugins_menu
-        plugins_menu.addAction("Manage plugins", self._open_plugin_manager)
-        plugins_menu.addAction("Design your plugin", self._open_command_plugin_designer)
-        plugins_menu.addSeparator()
-        self._populate_plugins_menu_actions()
-
         workflows_menu = QMenu("&Workflows", self)
         self.menuBar().addMenu(workflows_menu)
         self._workflows_menu = workflows_menu
         self._rebuild_workflows_menu()
+
+        others_menu = QMenu("&Others", self)
+        self.menuBar().addMenu(others_menu)
+        self._others_menu = others_menu
+        self._plugins_menu = others_menu  # rebuild helpers refresh Others
+        self._rebuild_others_menu()
 
         view_menu = self.menuBar().addMenu("&View")
         if self._dock_folders is not None:
@@ -8622,27 +8624,26 @@ class MainWindow(QMainWindow):
             on_failed=self._on_worker_failed,
         )
 
-    def _plugin_job_source_files(self, plugin: UserCommandPlugin, work_dir: Path) -> list[Path]:
-        runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
-        sources: list[Path] = []
-        for name, defn in plugin._defs.items():
-            if name in plugin.spec.output_vars:
-                continue
-            if not is_file_var_mode(defn.mode):
-                continue
-            raw = str(runtime.get(name, "")).strip()
-            if not raw:
-                continue
-            path = Path(raw).expanduser()
-            if path.is_file():
-                sources.append(path.resolve())
-        resolved_work_dir = work_dir.expanduser().resolve()
-        if resolved_work_dir.is_dir():
-            sources.append(resolved_work_dir)
-        return sources
-
     def _command_plugin_work_dir(self, plugin: UserCommandPlugin) -> Path:
         runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
+        outdir = str(runtime.get("RV_OUTDIR", "")).strip()
+        if outdir:
+            path = Path(outdir).expanduser()
+            if path.is_dir():
+                return path.resolve()
+            if path.parent.exists():
+                return path.parent.resolve()
+        for key in ("RV_INPUT", "RV_GENOME"):
+            raw = str(runtime.get(key, "")).strip()
+            if not raw:
+                continue
+            path = Path(raw.split()[0]).expanduser()
+            if path.is_file():
+                return path.parent.resolve()
+            if path.is_dir():
+                return path.resolve()
+            if path.parent.exists():
+                return path.parent.resolve()
         for name, defn in plugin._defs.items():
             if not is_path_var_mode(defn.mode):
                 continue
@@ -8661,6 +8662,45 @@ class MainWindow(QMainWindow):
         if self._project.input_dir and self._project.input_dir.is_dir():
             return self._project.input_dir.expanduser().resolve()
         return Path.cwd()
+
+    def _plugin_job_source_files(self, plugin: UserCommandPlugin, work_dir: Path) -> list[Path]:
+        runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
+        sources: list[Path] = []
+        for key in ("RV_INPUT", "RV_GENOME"):
+            raw = str(runtime.get(key, "")).strip()
+            if not raw:
+                continue
+            path = Path(raw.split()[0]).expanduser()
+            if path.is_file():
+                sources.append(path.resolve())
+        for raw in str(runtime.get("RV_INPUTS", "")).split():
+            path = Path(raw).expanduser()
+            if path.is_file():
+                sources.append(path.resolve())
+        for name, defn in plugin._defs.items():
+            if name in plugin.spec.output_vars:
+                continue
+            if not is_file_var_mode(defn.mode):
+                continue
+            raw = str(runtime.get(name, "")).strip()
+            if not raw:
+                continue
+            path = Path(raw).expanduser()
+            if path.is_file():
+                sources.append(path.resolve())
+        resolved_work_dir = work_dir.expanduser().resolve()
+        if resolved_work_dir.is_dir():
+            sources.append(resolved_work_dir)
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for path in sources:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+        return unique
 
     def _apply_plugin(self, plugin_id: str, *, preselected: list[Path] | None = None) -> None:
         plugin = self._plugin_registry.get(plugin_id)
@@ -8764,28 +8804,109 @@ class MainWindow(QMainWindow):
         )
 
     def _populate_plugins_menu_actions(self) -> None:
-        if self._plugins_menu is None:
-            return
-        loaded_plugins = self._plugin_registry.all_plugins()
-        if loaded_plugins:
-            for plugin in loaded_plugins:
-                self._plugins_menu.addAction(
-                    plugin.label,
-                    lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
-                )
+        """Deprecated path — use ``_rebuild_others_menu``."""
+        self._rebuild_others_menu()
+
+    def _ensure_others_menu(self) -> QMenu | None:
+        """Return a live Others menu, recreating it if the cached one was deleted."""
+        if self._menu_object_alive(self._others_menu):
+            return self._others_menu
+
+        self._others_menu = None
+        self._plugins_menu = None
+        for action in list(self.menuBar().actions()):
+            candidate = action.menu()
+            if not self._menu_object_alive(candidate):
+                label = self._clean_menu_label(action.text()).lower()
+                if label in {"others", "plugins"}:
+                    self.menuBar().removeAction(action)
+                continue
+            title = self._clean_menu_label(candidate.title()).lower()
+            if title in {"others", "plugins"}:
+                # Migrate old Plugins title to Others.
+                candidate.setTitle("&Others")
+                self._others_menu = candidate
+                self._plugins_menu = candidate
+                return candidate
+
+        self._remove_menubar_menus_named("Others")
+        self._remove_menubar_menus_named("Plugins")
+        menu = QMenu("&Others", self)
+        self._others_menu = menu
+        self._plugins_menu = menu
+        insert_before = None
+        for action in self.menuBar().actions():
+            label = self._clean_menu_label(action.text())
+            if label in {"View", "Help"}:
+                insert_before = action
+                break
+        if insert_before is not None:
+            self.menuBar().insertMenu(insert_before, menu)
         else:
-            none_action = self._plugins_menu.addAction("(No plugins loaded)")
-            none_action.setEnabled(False)
+            self.menuBar().addMenu(menu)
+        return menu
+
+    def _ensure_plugins_menu(self) -> QMenu | None:
+        return self._ensure_others_menu()
+
+    def _rebuild_others_menu(self) -> None:
+        def _fill(menu: QMenu) -> None:
+            menu.clear()
+            plugin_menu = menu.addMenu("Plugin")
+            wrapper_menu = menu.addMenu("Command wrapper")
+
+            installed = [
+                plugin
+                for plugin in self._plugin_registry.all_plugins()
+                if not isinstance(plugin, UserCommandPlugin)
+            ]
+            if installed:
+                for plugin in installed:
+                    plugin_menu.addAction(
+                        plugin.label,
+                        lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
+                    )
+            else:
+                none_action = plugin_menu.addAction("(No installed plugins)")
+                none_action.setEnabled(False)
+
+            wrapper_menu.addAction("Manage wrapper", self._open_wrapper_manager)
+            wrapper_menu.addSeparator()
+            specs = load_user_command_plugin_specs()
+            if specs:
+                for spec in specs:
+                    wrapper_menu.addAction(
+                        spec.label,
+                        lambda checked=False, pid=spec.id: self._apply_plugin(pid),
+                    )
+            else:
+                empty = wrapper_menu.addAction("(No wrappers yet)")
+                empty.setEnabled(False)
+
+            self._others_menu = menu
+            self._plugins_menu = menu
+
+        menu = self._ensure_others_menu()
+        if menu is None:
+            return
+        try:
+            _fill(menu)
+        except RuntimeError:
+            self._others_menu = None
+            self._plugins_menu = None
+            self._remove_menubar_menus_named("Others")
+            self._remove_menubar_menus_named("Plugins")
+            menu = self._ensure_others_menu()
+            if menu is None:
+                return
+            try:
+                _fill(menu)
+            except RuntimeError:
+                return
+        self._connect_menu_operation_logging()
 
     def _rebuild_plugins_menu(self) -> None:
-        if self._plugins_menu is None:
-            return
-        self._plugins_menu.clear()
-        self._plugins_menu.addAction("Manage plugins", self._open_plugin_manager)
-        self._plugins_menu.addAction("Design your plugin", self._open_command_plugin_designer)
-        self._plugins_menu.addSeparator()
-        self._populate_plugins_menu_actions()
-        self._connect_menu_operation_logging()
+        self._rebuild_others_menu()
 
     def _menu_object_alive(self, obj) -> bool:
         if obj is None:
@@ -8835,7 +8956,12 @@ class MainWindow(QMainWindow):
         self._workflows_menu = menu
         insert_before = None
         for action in self.menuBar().actions():
-            if self._clean_menu_label(action.text()) in {"View", "Help"}:
+            if self._clean_menu_label(action.text()) in {
+                "Others",
+                "Plugins",
+                "View",
+                "Help",
+            }:
                 insert_before = action
                 break
         if insert_before is not None:
@@ -9006,23 +9132,17 @@ class MainWindow(QMainWindow):
             on_failed=self._on_worker_failed,
         )
 
-    def _open_plugin_manager(self) -> None:
-        dialog = PluginManageDialog(
-            self._plugin_registry,
+    def _open_wrapper_manager(self) -> None:
+        dialog = WrapperManageDialog(
             on_save=self._save_designed_plugin,
             on_delete=self._delete_custom_plugin,
             parent=self,
         )
         exec_modal_dialog(dialog)
 
-    def _delete_custom_plugin(self, plugin_id: str) -> bool:
-        if not delete_user_command_plugin_spec(plugin_id):
-            return False
-        self._plugin_registry.unregister(plugin_id)
-        self._rebuild_plugins_menu()
-        self._rebuild_top_toolbar()
-        self._set_status_message(f"Deleted plugin {plugin_id}", 5000)
-        return True
+    def _open_plugin_manager(self) -> None:
+        # Legacy name — command wrappers are managed here.
+        self._open_wrapper_manager()
 
     def _open_command_plugin_designer(self) -> None:
         if self._command_plugin_dialog is not None and self._command_plugin_dialog.isVisible():
@@ -9044,6 +9164,22 @@ class MainWindow(QMainWindow):
             self._command_plugin_dialog.deleteLater()
             self._command_plugin_dialog = None
 
+    def _ensure_wrapper_on_toolbar(self, plugin_id: str, *, enabled: bool) -> None:
+        from repeatviewer.views.toolbar_dialog import plugin_tool_id, save_toolbar_order
+
+        tool_id = plugin_tool_id(plugin_id)
+        order = list(self._toolbar_order)
+        if enabled:
+            if tool_id not in order:
+                order.append(tool_id)
+                self._toolbar_order = order
+                save_toolbar_order(self._toolbar_order, self._plugin_registry)
+        else:
+            if tool_id in order:
+                order = [item for item in order if item != tool_id]
+                self._toolbar_order = order
+                save_toolbar_order(self._toolbar_order, self._plugin_registry)
+
     def _save_designed_plugin(self, spec, *, previous_id: str | None = None) -> None:
         plugin = UserCommandPlugin(spec)
         try:
@@ -9053,14 +9189,27 @@ class MainWindow(QMainWindow):
             was_existing = self._plugin_registry.get(spec.id) is not None
             save_user_command_plugin_spec(spec)
             self._plugin_registry.register_or_replace(plugin)
-            self._rebuild_plugins_menu()
-            self._rebuild_top_toolbar()
+            # Defer menubar/toolbar refresh until after modal dialogs fully close
+            # (macOS can otherwise hit a deleted QMenu during clear/rebuild).
+            QTimer.singleShot(0, self._rebuild_others_menu)
+            QTimer.singleShot(0, self._rebuild_top_toolbar)
             if was_existing or (previous_id and previous_id != spec.id):
-                self._set_status_message(f"Updated plugin {spec.label}", 5000)
+                self._set_status_message(f"Updated wrapper {spec.label}", 5000)
             else:
-                self._set_status_message(f"Added plugin {spec.label}", 5000)
+                self._set_status_message(f"Added wrapper {spec.label}", 5000)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Design your plugin", str(exc))
+            QMessageBox.warning(self, "Design command wrapper", str(exc))
+
+    def _delete_custom_plugin(self, plugin_id: str) -> bool:
+        if not delete_user_command_plugin_spec(plugin_id):
+            return False
+        self._plugin_registry.unregister(plugin_id)
+        # Drop from toolbar if the user had added it via Setting → Toolbar.
+        self._ensure_wrapper_on_toolbar(plugin_id, enabled=False)
+        QTimer.singleShot(0, self._rebuild_others_menu)
+        QTimer.singleShot(0, self._rebuild_top_toolbar)
+        self._set_status_message(f"Deleted wrapper {plugin_id}", 5000)
+        return True
 
     def _run_plugin_job(
         self,

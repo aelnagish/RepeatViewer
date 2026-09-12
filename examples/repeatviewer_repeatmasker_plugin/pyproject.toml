@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repeatviewer-repeatmasker"
+version = "0.1.0"
+description = "RepeatViewer plugin — run RepeatMasker (-lib or -species) on selected FASTA or the defined genome"
+requires-python = ">=3.10"
+dependencies = [
+  "repeatviewer>=0.2.0",
+  "PySide6>=6.6",
+]
+
+[project.entry-points."repeatviewer.plugins"]
+repeatmasker = "repeatviewer_repeatmasker.plugin:RepeatMaskerPlugin"
+
+[tool.setuptools.packages.find]
+where = ["src"]

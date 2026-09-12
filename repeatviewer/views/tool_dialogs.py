@@ -273,54 +273,110 @@ from repeatviewer.job_options import (
 from repeatviewer.plugins.custom_command import (
     CommandVarDef,
     UserCommandPluginSpec,
+    display_var_name,
     get_user_command_plugin_spec,
+    is_affixed_variable,
+    is_special_variable,
     load_user_command_plugin_specs,
     normalize_var_mode,
+    normalize_var_name,
     plugin_id_from_label,
+    special_variable_mode,
+    special_variables_help_text,
+    template_affixed_variables,
     template_variables,
-    user_command_plugin_ids,
+    user_template_variables,
 )
 
 
 class _CommandVarRow(QWidget):
+    """One variable row; fixed-width type / Output / Remove keep columns aligned."""
+
     remove_requested = Signal(object)
     output_toggled = Signal(object, bool)
 
-    def __init__(self, initial: CommandVarDef | None = None, *, is_output: bool = False, parent=None) -> None:
+    _NAME_MIN_WIDTH = 120
+    _DEFAULT_MIN_WIDTH = 160
+    _MODE_WIDTH = 96
+    _OUTPUT_WIDTH = 72
+    _REMOVE_WIDTH = 80
+
+    def __init__(
+        self,
+        initial: CommandVarDef | None = None,
+        *,
+        is_output: bool = False,
+        special: bool = False,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         var = initial or CommandVarDef(name="", mode="file", value="")
-        self._name = QLineEdit(var.name, self)
-        self._name.setPlaceholderText("variable_name")
+        self._special = bool(special) or (
+            is_special_variable(var.name) and not is_affixed_variable(var.name)
+        )
+        name_key = normalize_var_name(var.name)
+        self._affixed = is_affixed_variable(name_key)
+        self._name = QLineEdit(display_var_name(name_key) if name_key else "", self)
+        self._name.setPlaceholderText("${variable_name} or ${RV_INPUT}_b.text")
+        self._name.setMinimumWidth(self._NAME_MIN_WIDTH)
         self._mode = QComboBox(self)
         self._mode.addItem("File", "file")
         self._mode.addItem("Folder", "folder")
         self._mode.addItem("Text", "text")
         self._mode.addItem("Number", "number")
-        self._mode.setMinimumWidth(76)
-        mode_key = normalize_var_mode(var.mode)
+        self._mode.setFixedWidth(self._MODE_WIDTH)
+        self._mode.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        if self._special and name_key:
+            mode_key = special_variable_mode(name_key)
+        elif self._affixed:
+            mode_key = normalize_var_mode(var.mode) or special_variable_mode(name_key)
+        else:
+            mode_key = normalize_var_mode(var.mode)
         index = self._mode.findData(mode_key)
         if index >= 0:
             self._mode.setCurrentIndex(index)
         self._default = QLineEdit(var.value, self)
-        self._default.setPlaceholderText("Default value (optional)")
+        self._default.setPlaceholderText(
+            "Default, e.g. ${RV_OUTDIR}/${RV_STEM}_B.txt"
+        )
+        self._default.setMinimumWidth(self._DEFAULT_MIN_WIDTH)
         self._is_output = QCheckBox("Output", self)
-        self._is_output.setChecked(is_output)
-        self._is_output.setMinimumWidth(self._is_output.fontMetrics().horizontalAdvance("Output") + 28)
+        self._is_output.setChecked(is_output and not self._special)
+        self._is_output.setFixedWidth(self._OUTPUT_WIDTH)
+        self._is_output.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._is_output.toggled.connect(self._on_output_toggled)
         self._is_output.toggled.connect(self._refresh_output_fields)
         remove_btn = QPushButton("Remove", self)
         remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
         self._remove_btn = remove_btn
-        remove_btn.setMinimumWidth(72)
+        remove_btn.setFixedWidth(self._REMOVE_WIDTH)
+        remove_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
-        row.addWidget(self._name, 1)
+        row.addWidget(self._name, 2)
         row.addWidget(self._mode, 0)
-        row.addWidget(self._default, 1)
+        row.addWidget(self._default, 3)
         row.addWidget(self._is_output, 0)
         row.addWidget(remove_btn, 0)
+        if self._special:
+            self._name.setReadOnly(True)
+            self._mode.setEnabled(False)
+            self._default.setEnabled(False)
+            self._default.setPlaceholderText("Filled at run from selection / genome")
+            self._is_output.setEnabled(False)
+            self._is_output.setChecked(False)
+            self._name.setToolTip("Special variable filled at run.")
+        elif self._affixed:
+            self._name.setReadOnly(True)
+            self._default.setPlaceholderText(
+                "Leave empty to auto-fill as base path + suffix at run"
+            )
+            self._name.setToolTip(
+                "Separate parameter from the glued suffix in the command "
+                "(e.g. ${RV_INPUT}_b.text). Editable at run; default = base + suffix."
+            )
         self._refresh_output_fields()
 
     def _on_output_toggled(self, checked: bool) -> None:
@@ -343,19 +399,46 @@ class _CommandVarRow(QWidget):
                     self._mode.setCurrentIndex(index)
 
     def definition(self) -> tuple[CommandVarDef | None, bool]:
-        name = self._name.text().strip()
+        name = normalize_var_name(self._name.text())
         if not name:
             return None, False
+        shown = display_var_name(name)
+        if self._name.text().strip() != shown:
+            self._name.blockSignals(True)
+            self._name.setText(shown)
+            self._name.blockSignals(False)
+        if is_special_variable(name) and not is_affixed_variable(name):
+            return (
+                CommandVarDef(
+                    name=name,
+                    mode=special_variable_mode(name),
+                    value="",
+                ),
+                False,
+            )
         is_output = self._is_output.isChecked()
+        mode = str(self._mode.currentData())
+        if is_affixed_variable(name) and not mode:
+            mode = special_variable_mode(name)
         var = CommandVarDef(
             name=name,
-            mode=str(self._mode.currentData()),
+            mode=mode,
             value=self._default.text().strip(),
         )
         return var, is_output
 
     def mark_removable(self, removable: bool) -> None:
-        self._remove_btn.setVisible(removable)
+        # Keep the button's slot so columns stay aligned; disable when not removable.
+        if self._special:
+            self._remove_btn.setEnabled(False)
+            self._remove_btn.setVisible(True)
+            return
+        self._remove_btn.setEnabled(removable)
+        self._remove_btn.setVisible(True)
+
+    @property
+    def is_special(self) -> bool:
+        return self._special
 
 
 class CommandPluginDesignerDialog(QDialog):
@@ -368,8 +451,8 @@ class CommandPluginDesignerDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Design your plugin")
-        self.setMinimumWidth(760)
+        self.setWindowTitle("Design command wrapper")
+        self.setMinimumWidth(700)
         spec = initial or UserCommandPluginSpec(
             id="",
             label="",
@@ -382,26 +465,90 @@ class CommandPluginDesignerDialog(QDialog):
         self._initial_id = spec.id
         self._rebuilding_rows = False
         self._label = QLineEdit(spec.label, self)
-        self._label.setPlaceholderText("Plugin name (must be unique)")
+        self._label.setPlaceholderText("Wrapper name (must be unique)")
         self._tooltip = QTextEdit(self)
-        self._tooltip.setPlaceholderText("Short description (optional)")
+        self._tooltip.setPlaceholderText(
+            "Optional. Shown as the toolbar / menu tooltip, e.g. "
+            "Run blastn of the selected FASTA against the defined genome."
+        )
         self._tooltip.setPlainText(spec.tooltip)
         self._tooltip.setFixedHeight(52)
         self._tooltip.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._command = QTextEdit(self)
-        self._command.setFixedHeight(120)
+        self._command.setFixedHeight(140)
         self._command.setPlaceholderText(
-            "Example:\nFastGA ${genome1} ${genome2} -1:${output}"
+            "blastn -query ${RV_INPUT} -db ${RV_GENOME} "
+            "-out ${RV_OUTDIR}/${RV_STEM}_b.txt "
+            "-evalue 1e-5 -outfmt 6 -num_threads 4\n"
+            "\n"
+            "Glue a fixed suffix after a variable: ${RV_STEM}_b.txt\n"
+            "Use ${RV_STEM} (name without extension), not ${RV_INPUT}_b.txt."
         )
         self._command.setPlainText(spec.command_template)
+
+        special_hint = QLabel(
+            "Special (auto-filled): ${RV_INPUT}, ${RV_INPUTS}, ${RV_GENOME}, "
+            "${RV_FOLDER}, ${RV_OUTDIR}, ${RV_STEM}, ${RV_NAME}",
+            self,
+        )
+        special_hint.setWordWrap(True)
+        special_hint.setStyleSheet("color: #666666;")
+        help_text = special_variables_help_text()
+        help_btn = QToolButton(self)
+        help_btn.setText("?")
+        help_btn.setToolTip(help_text)
+        help_btn.setAutoRaise(False)
+        help_btn.setFixedSize(22, 22)
+        help_btn.setStyleSheet(
+            "QToolButton {"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 10px;"
+            "  background: palette(base);"
+            "  font-weight: 600;"
+            "  padding: 0px;"
+            "}"
+            "QToolButton:hover { background: palette(alternate-base); }"
+        )
+        help_btn.clicked.connect(
+            lambda checked=False, text=help_text: QMessageBox.information(
+                self, "Special variables", text
+            )
+        )
+        special_row = QWidget(self)
+        special_layout = QHBoxLayout(special_row)
+        special_layout.setContentsMargins(0, 0, 0, 0)
+        special_layout.setSpacing(6)
+        special_layout.addWidget(special_hint, 1)
+        special_layout.addWidget(help_btn, 0)
+
         self._rows_host = QWidget(self)
         self._rows_layout = QVBoxLayout(self._rows_host)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.setSpacing(6)
         self._rows: list[_CommandVarRow] = []
-        out_set = set(spec.output_vars)
-        for var in spec.var_defs:
-            self._add_var_row(var, is_output=var.name in out_set)
+        out_set = {normalize_var_name(v) for v in spec.output_vars}
+        saved: dict[str, CommandVarDef] = {
+            normalize_var_name(v.name): v
+            for v in spec.var_defs
+            if normalize_var_name(v.name) and not is_special_variable(v.name)
+        }
+        # Show specials used in the command first (read-only).
+        for name in template_variables(spec.command_template):
+            if is_special_variable(name):
+                self._add_var_row(
+                    CommandVarDef(name=name, mode=special_variable_mode(name), value=""),
+                    special=True,
+                )
+        # Affixed tokens like ${RV_INPUT}_b.text are separate editable parameters.
+        for name in template_affixed_variables(spec.command_template):
+            existing = saved.pop(name, None)
+            self._add_var_row(
+                existing
+                or CommandVarDef(name=name, mode=special_variable_mode(name), value=""),
+                is_output=name in out_set,
+            )
+        for name, var in saved.items():
+            self._add_var_row(var, is_output=name in out_set)
         if not self._rows:
             self._add_var_row()
 
@@ -414,9 +561,10 @@ class CommandPluginDesignerDialog(QDialog):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
-        form.addRow("Plugin name:", self._label)
+        form.addRow("Wrapper name:", self._label)
         form.addRow("Description:", self._tooltip)
         form.addRow("Command template:", self._command)
+        form.addRow("", special_row)
         btn_row = QWidget(self)
         btn_layout = QHBoxLayout(btn_row)
         btn_layout.setContentsMargins(0, 0, 0, 0)
@@ -445,10 +593,21 @@ class CommandPluginDesignerDialog(QDialog):
         super().showEvent(event)
         QTimer.singleShot(0, self._label.setFocus)
 
-    def _add_var_row(self, var: CommandVarDef | None = None, *, is_output: bool = False) -> None:
+    def _add_var_row(
+        self,
+        var: CommandVarDef | None = None,
+        *,
+        is_output: bool = False,
+        special: bool = False,
+    ) -> None:
         if not hasattr(self, "_rows_host"):
             return
-        row = _CommandVarRow(var, is_output=is_output, parent=self._rows_host)
+        row = _CommandVarRow(
+            var,
+            is_output=is_output,
+            special=special,
+            parent=self._rows_host,
+        )
         row.remove_requested.connect(self._remove_var_row)
         row.output_toggled.connect(self._on_output_toggled)
         self._rows.append(row)
@@ -456,9 +615,10 @@ class CommandPluginDesignerDialog(QDialog):
         self._refresh_remove_buttons()
 
     def _remove_var_row(self, row: _CommandVarRow) -> None:
-        if row not in self._rows:
+        if row not in self._rows or row.is_special:
             return
-        if len(self._rows) <= 1:
+        user_rows = [r for r in self._rows if not r.is_special]
+        if len(user_rows) <= 1 and row in user_rows:
             row._name.clear()
             row._default.clear()
             row._is_output.setChecked(False)
@@ -472,7 +632,8 @@ class CommandPluginDesignerDialog(QDialog):
         self._refresh_remove_buttons()
 
     def _refresh_remove_buttons(self) -> None:
-        removable = len(self._rows) > 1
+        user_rows = [r for r in self._rows if not r.is_special]
+        removable = len(user_rows) > 1
         for row in self._rows:
             row.mark_removable(removable)
 
@@ -484,19 +645,32 @@ class CommandPluginDesignerDialog(QDialog):
                 row.set_output_checked(False)
 
     def _detect_variables(self) -> None:
-        current_defs = {}
-        outputs = set()
+        current_defs: dict[str, CommandVarDef] = {}
+        outputs: set[str] = set()
         for row in self._rows:
             var, is_output = row.definition()
-            if var is None:
+            if var is None or is_special_variable(var.name):
                 continue
             current_defs[var.name] = var
             if is_output:
                 outputs.add(var.name)
-        vars_in_cmd = template_variables(self._command.toPlainText())
-        for name in vars_in_cmd:
+        cmd = self._command.toPlainText()
+        names_in_cmd = template_variables(cmd)
+        specials = [n for n in names_in_cmd if is_special_variable(n)]
+        affixed = template_affixed_variables(cmd)
+        for name in affixed:
+            if name not in current_defs:
+                current_defs[name] = CommandVarDef(
+                    name=name, mode=special_variable_mode(name), value=""
+                )
+        for name in names_in_cmd:
+            if is_special_variable(name):
+                continue
             if name not in current_defs:
                 current_defs[name] = CommandVarDef(name=name, mode="file", value="")
+        # Keep affixed after specials, then other user vars.
+        affixed_set = set(affixed)
+        other_names = [n for n in sorted(current_defs) if n not in affixed_set]
         self._rebuilding_rows = True
         try:
             for row in list(self._rows):
@@ -504,7 +678,16 @@ class CommandPluginDesignerDialog(QDialog):
                 row.setParent(None)
                 row.deleteLater()
             self._rows = []
-            for name in sorted(current_defs):
+            for name in specials:
+                self._add_var_row(
+                    CommandVarDef(name=name, mode=special_variable_mode(name), value=""),
+                    special=True,
+                )
+            for name in affixed:
+                self._add_var_row(
+                    current_defs[name], is_output=name in outputs
+                )
+            for name in other_names:
                 self._add_var_row(current_defs[name], is_output=name in outputs)
         finally:
             self._rebuilding_rows = False
@@ -516,7 +699,7 @@ class CommandPluginDesignerDialog(QDialog):
         var_defs: list[CommandVarDef] = []
         for row in self._rows:
             var, is_output = row.definition()
-            if var is None:
+            if var is None or is_special_variable(var.name):
                 continue
             var_defs.append(var)
             if is_output:
@@ -529,12 +712,13 @@ class CommandPluginDesignerDialog(QDialog):
             var_defs=var_defs,
             fasta_only=self._initial_fasta_only,
             tooltip=self._tooltip.toPlainText().strip(),
+            show_on_toolbar=False,
         )
 
     def accept(self) -> None:
         spec = self.spec()
         if not spec.label:
-            QMessageBox.warning(self, "Design your plugin", "Plugin name is required.")
+            QMessageBox.warning(self, "Design command wrapper", "Wrapper name is required.")
             return
         label_key = spec.label.strip().lower()
         for existing in load_user_command_plugin_specs():
@@ -543,12 +727,14 @@ class CommandPluginDesignerDialog(QDialog):
             if existing.label.strip().lower() == label_key:
                 QMessageBox.warning(
                     self,
-                    "Design your plugin",
-                    f"A plugin named “{spec.label}” already exists. Choose a different name.",
+                    "Design command wrapper",
+                    f"A wrapper named “{spec.label}” already exists. Choose a different name.",
                 )
                 return
         if not spec.command_template:
-            QMessageBox.warning(self, "Design your plugin", "Command template is required.")
+            QMessageBox.warning(
+                self, "Design command wrapper", "Command template is required."
+            )
             return
         output_count = 0
         for row in self._rows:
@@ -560,49 +746,47 @@ class CommandPluginDesignerDialog(QDialog):
                 if normalize_var_mode(var.mode) not in {"file", "folder"}:
                     QMessageBox.warning(
                         self,
-                        "Design your plugin",
+                        "Design command wrapper",
                         f"Output variable “{var.name}” must use type File or Folder.",
                     )
                     return
         if output_count > 1:
             QMessageBox.warning(
                 self,
-                "Design your plugin",
+                "Design command wrapper",
                 "Only one variable can be marked as Output.",
             )
             return
         super().accept()
 
 
-class PluginManageDialog(QDialog):
-    """List installed plugins; add, edit, or delete user-designed command plugins."""
+class WrapperManageDialog(QDialog):
+    """List, create, edit, or delete command wrappers."""
 
     def __init__(
         self,
-        plugin_registry,
         *,
         on_save,
         on_delete,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Manage plugins")
-        self.setMinimumWidth(720)
-        self.setMinimumHeight(420)
-        self._registry = plugin_registry
+        self.setWindowTitle("Manage wrapper")
+        self.setMinimumWidth(640)
+        self.setMinimumHeight(400)
         self._on_save = on_save
         self._on_delete = on_delete
 
         self._list = QListWidget(self)
         self._list.currentItemChanged.connect(self._update_buttons)
 
-        self._add_btn = QPushButton("Add…", self)
+        self._add_btn = QPushButton("New…", self)
         self._edit_btn = QPushButton("Edit…", self)
         self._delete_btn = QPushButton("Delete…", self)
-        self._add_btn.clicked.connect(self._add_plugin)
-        self._edit_btn.clicked.connect(self._edit_plugin)
-        self._delete_btn.clicked.connect(self._delete_plugin)
-        self._list.itemDoubleClicked.connect(lambda _item: self._edit_plugin())
+        self._add_btn.clicked.connect(self._add_wrapper)
+        self._edit_btn.clicked.connect(self._edit_wrapper)
+        self._delete_btn.clicked.connect(self._delete_wrapper)
+        self._list.itemDoubleClicked.connect(lambda _item: self._edit_wrapper())
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._add_btn)
@@ -626,55 +810,45 @@ class PluginManageDialog(QDialog):
 
     def _populate(self) -> None:
         self._list.clear()
-        custom_ids = user_command_plugin_ids()
-        plugins = self._registry.all_plugins()
-        if not plugins:
-            item = QListWidgetItem("(No plugins loaded)")
+        specs = load_user_command_plugin_specs()
+        if not specs:
+            item = QListWidgetItem("(No command wrappers yet — click New…)")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._list.addItem(item)
             return
-        for plugin in plugins:
-            kind = "Custom" if plugin.id in custom_ids else "Installed"
-            tooltip = (plugin.tooltip or "").strip()
-            text = f"{plugin.label} — {kind}"
-            item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, plugin.id)
-            item.setData(Qt.ItemDataRole.UserRole + 1, plugin.id in custom_ids)
-            if tooltip:
-                item.setToolTip(tooltip)
+        for index, spec in enumerate(specs, start=1):
+            item = QListWidgetItem(f"{index}. {spec.label}")
+            item.setData(Qt.ItemDataRole.UserRole, spec.id)
+            if spec.tooltip:
+                item.setToolTip(spec.tooltip)
             self._list.addItem(item)
 
-    def _selected(self) -> tuple[str, bool] | None:
+    def _selected_id(self) -> str | None:
         item = self._list.currentItem()
         if item is None:
             return None
         plugin_id = item.data(Qt.ItemDataRole.UserRole)
-        is_custom = bool(item.data(Qt.ItemDataRole.UserRole + 1))
-        if not plugin_id:
-            return None
-        return str(plugin_id), is_custom
+        return str(plugin_id) if plugin_id else None
 
     def _update_buttons(self) -> None:
-        selected = self._selected()
-        has_custom = selected is not None and selected[1]
-        self._edit_btn.setEnabled(has_custom)
-        self._delete_btn.setEnabled(has_custom)
+        has = self._selected_id() is not None
+        self._edit_btn.setEnabled(has)
+        self._delete_btn.setEnabled(has)
 
-    def _add_plugin(self) -> None:
+    def _add_wrapper(self) -> None:
         dialog = CommandPluginDesignerDialog(parent=self)
         if not exec_modal_dialog(dialog):
             return
         self._on_save(dialog.spec())
         self._populate()
 
-    def _edit_plugin(self) -> None:
-        selected = self._selected()
-        if selected is None or not selected[1]:
+    def _edit_wrapper(self) -> None:
+        plugin_id = self._selected_id()
+        if not plugin_id:
             return
-        plugin_id = selected[0]
         spec = get_user_command_plugin_spec(plugin_id)
         if spec is None:
-            QMessageBox.warning(self, "Manage plugins", f"Could not load plugin {plugin_id!r}.")
+            QMessageBox.warning(self, "Manage wrapper", f"Could not load wrapper {plugin_id!r}.")
             return
         dialog = CommandPluginDesignerDialog(initial=spec, parent=self)
         if not exec_modal_dialog(dialog):
@@ -682,27 +856,30 @@ class PluginManageDialog(QDialog):
         self._on_save(dialog.spec(), previous_id=plugin_id)
         self._populate()
 
-    def _delete_plugin(self) -> None:
-        selected = self._selected()
-        if selected is None or not selected[1]:
+    def _delete_wrapper(self) -> None:
+        plugin_id = self._selected_id()
+        if not plugin_id:
             return
-        plugin_id = selected[0]
         spec = get_user_command_plugin_spec(plugin_id)
         label = spec.label if spec is not None else plugin_id
         answer = QMessageBox.question(
             self,
-            "Manage plugins",
-            f"Delete custom plugin “{label}” ({plugin_id})?",
+            "Manage wrapper",
+            f"Delete command wrapper “{label}”?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         if not self._on_delete(plugin_id):
-            QMessageBox.warning(self, "Manage plugins", f"Could not delete plugin {plugin_id!r}.")
+            QMessageBox.warning(self, "Manage wrapper", f"Could not delete wrapper {plugin_id!r}.")
             return
         self._populate()
         self._update_buttons()
+
+
+# Backward-compatible alias (older call sites / docs).
+PluginManageDialog = WrapperManageDialog
 
 
 class AlignParamsDialog(QDialog):

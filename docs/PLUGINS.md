@@ -52,11 +52,13 @@ Open **RepeatViewer → Setting → Toolbar** to choose visible tools and button
 | Example | Purpose |
 |---------|---------|
 | `examples/repeatviewer_sequence_stats_plugin/` | Minimal plugin (sequence stats text file) |
+| `examples/repeatviewer_repeatmasker_plugin/` | **Run RepeatMasker** (`-lib` or `-species`; mask selection or defined genome) |
 | `examples/repeatviewer_benchmark_plugin/` | **TEtrimmer TE benchmarking** (RepeatMasker `.out` vs reference) — see **[PLUGINS_TE_BENCHMARK.md](PLUGINS_TE_BENCHMARK.md)** |
 
 ```bash
 cd examples/repeatviewer_sequence_stats_plugin
 pip install -e .
+# or: cd examples/repeatviewer_repeatmasker_plugin && pip install -e .
 repeatviewer
 ```
 

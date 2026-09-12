@@ -572,18 +572,32 @@ class ToolbarCustomizeWidget(QWidget):
 
         plugins_menu = self._add_menu.addMenu("Plugins")
         plugins_added = 0
+        wrappers_menu = self._add_menu.addMenu("Command wrappers")
+        wrappers_added = 0
         if self._registry is not None:
+            from repeatviewer.plugins.custom_command import UserCommandPlugin
+
             for plugin in self._registry.all_plugins():
                 tool_id = plugin_tool_id(plugin.id)
                 if tool_id in current_ids:
                     continue
-                plugins_menu.addAction(
-                    plugin.label,
-                    lambda checked=False, tid=tool_id: self._add_tool(tid),
-                )
-                plugins_added += 1
+                if isinstance(plugin, UserCommandPlugin):
+                    wrappers_menu.addAction(
+                        plugin.label,
+                        lambda checked=False, tid=tool_id: self._add_tool(tid),
+                    )
+                    wrappers_added += 1
+                else:
+                    plugins_menu.addAction(
+                        plugin.label,
+                        lambda checked=False, tid=tool_id: self._add_tool(tid),
+                    )
+                    plugins_added += 1
         if plugins_added == 0:
             empty = plugins_menu.addAction("(all plugins listed)")
+            empty.setEnabled(False)
+        if wrappers_added == 0:
+            empty = wrappers_menu.addAction("(all wrappers listed)")
             empty.setEnabled(False)
 
         workflows_menu = self._add_menu.addMenu("Workflows")
