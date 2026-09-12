@@ -32,6 +32,16 @@ _PATH_MARKER = "REPEATVIEWER_CONDA_BIN"
 _WSL_BIN_ENV = "REPEATVIEWER_WSL_CONDA_BIN"
 _original_path: str | None = None
 _wsl_bin_cache: str | None | object = object()  # sentinel = unset
+_wsl_resolve_cache: dict[str, str | None] = {}
+_wsl_which_cache: dict[tuple[str, str], str | None] = {}
+
+# Login shells inherit Windows HOME/PATH and conda hook noise. Always start a
+# clean bash and restore the Linux home from passwd (Windows HOME is often
+# C:\Users\… which becomes C:Users… inside bash).
+_WSL_HOME_PREAMBLE = (
+    'linux_home=$(getent passwd "$(id -un)" | cut -d: -f6 2>/dev/null || true); '
+    '[ -n "$linux_home" ] && export HOME="$linux_home"; '
+)
 
 
 def load_conda_tools_env() -> str:
@@ -62,13 +72,23 @@ def wsl_available() -> bool:
     return shutil.which("wsl") is not None
 
 
+def _normalize_linux_script(script: str) -> str:
+    """Drop CR so Windows-sourced multiline bash is valid in WSL."""
+    return script.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _wsl_bash_argv(linux_command: str) -> list[str]:
+    wrapped = _WSL_HOME_PREAMBLE + _normalize_linux_script(linux_command)
+    return ["wsl", "-e", "bash", "--noprofile", "--norc", "-c", wrapped]
+
+
 def _wsl_run(
     linux_command: str,
     *,
     timeout: float = 20,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["wsl", "-e", "bash", "-lc", linux_command],
+        _wsl_bash_argv(linux_command),
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -76,6 +96,24 @@ def _wsl_run(
         encoding="utf-8",
         errors="replace",
     )
+
+
+def _wsl_first_line(result: subprocess.CompletedProcess[str]) -> str | None:
+    """First nonempty stdout line. Do not require exit 0 — ``wsl``/bash -c
+    sometimes still prints the path then exits 1 (``set -e``, trailing
+    ``exit 1``, login-shell rc)."""
+    for raw in (result.stdout or "").splitlines():
+        line = raw.strip()
+        if line:
+            return line
+    return None
+
+
+def _clear_wsl_caches() -> None:
+    global _wsl_bin_cache
+    _wsl_bin_cache = object()
+    _wsl_resolve_cache.clear()
+    _wsl_which_cache.clear()
 
 
 def _candidate_conda_roots() -> list[Path]:
@@ -208,54 +246,58 @@ def resolve_wsl_conda_bin(spec: str | None = None) -> str | None:
     text = (spec if spec is not None else load_conda_tools_env()).strip()
     if not text:
         return None
+    if text in _wsl_resolve_cache:
+        return _wsl_resolve_cache[text]
+    found = _resolve_wsl_conda_bin_uncached(text)
+    _wsl_resolve_cache[text] = found
+    return found
 
+
+def _resolve_wsl_conda_bin_uncached(text: str) -> str | None:
     unc_linux = _unc_wsl_path_to_linux(text)
     if unc_linux is not None:
         text = unc_linux
 
     # Explicit Linux path (or Windows path into \\wsl$\… converted by user as Linux).
     if text.startswith("/") or text.startswith("~"):
-        linux = text
         if text.startswith("~"):
-            # Expand ~ inside WSL.
-            cmd = f'bin=$(eval echo {shlex.quote(text)}/bin); [ -d "$bin" ] && echo "$bin"'
+            # Expand ~ inside WSL (HOME already restored by _wsl_run).
+            cmd = f'bin=$(eval echo {shlex.quote(text)}/bin); [ -d "$bin" ] && printf "%s\\n" "$bin"'
         else:
             cmd = (
-                f'if [ -d {shlex.quote(text + "/bin")} ]; then echo {shlex.quote(text + "/bin")}; '
+                f'if [ -d {shlex.quote(text + "/bin")} ]; then printf "%s\\n" {shlex.quote(text + "/bin")}; '
                 f'elif [ -d {shlex.quote(text)} ] && [ "$(basename {shlex.quote(text)})" = bin ]; '
-                f"then echo {shlex.quote(text)}; fi"
+                f"then printf '%s\\n' {shlex.quote(text)}; fi"
             )
         try:
             result = _wsl_run(cmd, timeout=15)
         except (OSError, subprocess.SubprocessError):
             return None
-        line = (result.stdout or "").strip().splitlines()
-        return line[0] if line and result.returncode == 0 else None
+        return _wsl_first_line(result)
 
-    # Env name: search common conda roots inside the default WSL distro.
+    # Env name: one-liner (no bash line-continuation), search common roots.
+    # Also glob /home/*/miniconda3 in case Windows HOME leaked before preamble.
     name = shlex.quote(text)
-    script = f"""
-set -e
-name={name}
-for root in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/mambaforge" "$HOME/miniforge3" \\
-            "$HOME/micromamba" /opt/conda /opt/miniconda3 /opt/anaconda3; do
-  if [ -d "$root/envs/$name/bin" ]; then echo "$root/envs/$name/bin"; exit 0; fi
-done
-if command -v conda >/dev/null 2>&1; then
-  base=$(conda info --base 2>/dev/null || true)
-  if [ -n "$base" ] && [ -d "$base/envs/$name/bin" ]; then
-    echo "$base/envs/$name/bin"
-    exit 0
-  fi
-fi
-exit 1
-"""
+    script = (
+        f"name={name}; "
+        'for root in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/mambaforge" '
+        '"$HOME/miniforge3" "$HOME/micromamba" /opt/conda /opt/miniconda3 /opt/anaconda3 '
+        "/home/*/miniconda3 /home/*/anaconda3 /home/*/mambaforge /home/*/miniforge3; do "
+        'if [ -d "$root/envs/$name/bin" ]; then printf "%s\\n" "$root/envs/$name/bin"; exit 0; fi; '
+        "done; "
+        "if command -v conda >/dev/null 2>&1; then "
+        "  base=$(conda info --base 2>/dev/null || true); "
+        '  if [ -n "$base" ] && [ -d "$base/envs/$name/bin" ]; then '
+        '    printf "%s\\n" "$base/envs/$name/bin"; exit 0; '
+        "  fi; "
+        "fi; "
+        "exit 1"
+    )
     try:
         result = _wsl_run(script, timeout=25)
     except (OSError, subprocess.SubprocessError):
         return None
-    line = (result.stdout or "").strip().splitlines()
-    return line[0] if line and result.returncode == 0 else None
+    return _wsl_first_line(result)
 
 
 def uses_wsl_conda(spec: str | None = None) -> bool:
@@ -307,6 +349,9 @@ def _wsl_which(cmd: str, *, bin_dir: str | None = None) -> str | None:
     bin_dir = bin_dir or _active_wsl_bin()
     if not bin_dir:
         return None
+    key = (bin_dir, cmd)
+    if key in _wsl_which_cache:
+        return _wsl_which_cache[key]
     script = (
         f'export PATH={shlex.quote(bin_dir)}:$PATH; '
         f'command -v {shlex.quote(cmd)} 2>/dev/null'
@@ -314,13 +359,20 @@ def _wsl_which(cmd: str, *, bin_dir: str | None = None) -> str | None:
     try:
         result = _wsl_run(script, timeout=12)
     except (OSError, subprocess.SubprocessError):
+        _wsl_which_cache[key] = None
         return None
-    line = (result.stdout or "").strip().splitlines()
-    return line[0] if line and result.returncode == 0 else None
+    found = _wsl_first_line(result)
+    _wsl_which_cache[key] = found
+    return found
 
 
 def which_tool(cmd: str, *, spec: str | None = None) -> str | None:
     """Like ``shutil.which``, preferring the configured conda env (native or WSL)."""
+    if spec is None and sys.platform == "win32":
+        active = _active_wsl_bin()
+        if active:
+            found = _wsl_which(cmd, bin_dir=active)
+            return cmd if found else None
     if uses_wsl_conda(spec):
         found = _wsl_which(cmd, bin_dir=resolve_wsl_conda_bin(spec))
         # Return the bare command name; prepare_command() wraps via wsl.
@@ -329,6 +381,7 @@ def which_tool(cmd: str, *, spec: str | None = None) -> str | None:
 
 
 _WIN_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_EMBEDDED_WIN_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s]*")
 
 
 def _looks_like_windows_path(value: str) -> bool:
@@ -339,12 +392,36 @@ def _looks_like_windows_path(value: str) -> bool:
     return False
 
 
+def _windows_drive_to_wsl(value: str) -> str | None:
+    """Map ``C:\\Users\\…`` / ``C:/Users/…`` to ``/mnt/c/Users/…`` without calling wsl.
+
+    ``wsl wslpath C:\\Users`` (no ``-e``) eats backslashes and becomes ``C:Users``.
+    """
+    if not _WIN_PATH_RE.match(value):
+        return None
+    drive = value[0].lower()
+    rest = value[2:].replace("\\", "/").lstrip("/")
+    return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
+
+
+def _map_windows_path_to_linux(value: str) -> str | None:
+    unc = _unc_wsl_path_to_linux(value)
+    if unc is not None:
+        return unc
+    return _windows_drive_to_wsl(value)
+
+
 def _to_wsl_path(value: str) -> str:
+    mapped = _map_windows_path_to_linux(value)
+    if mapped:
+        return mapped
     if not _looks_like_windows_path(value):
         return value
+    # Last resort: wslpath with -e so backslashes survive argv.
+    posixish = value.replace("\\", "/")
     try:
         result = subprocess.run(
-            ["wsl", "wslpath", "-a", "-u", value],
+            ["wsl", "-e", "wslpath", "-a", "-u", posixish],
             capture_output=True,
             text=True,
             timeout=8,
@@ -354,16 +431,37 @@ def _to_wsl_path(value: str) -> str:
         )
     except (OSError, subprocess.SubprocessError):
         return value
-    line = (result.stdout or "").strip().splitlines()
-    return line[0] if line and result.returncode == 0 else value
+    line = _wsl_first_line(result)
+    return line if line else value
+
+
+def _rewrite_arg_for_wsl(value: str) -> str:
+    """Convert a whole Windows path, or one glued into a flag (``-PC:\\…``)."""
+    mapped = _map_windows_path_to_linux(value)
+    if mapped:
+        return mapped
+
+    def _replace(match: re.Match[str]) -> str:
+        converted = _map_windows_path_to_linux(match.group(0))
+        return converted if converted else match.group(0)
+
+    return _EMBEDDED_WIN_PATH_RE.sub(_replace, value)
+
+
+def _conda_lib_dir(bin_dir: str) -> str:
+    if bin_dir.endswith("/bin"):
+        return bin_dir[:-3] + "lib"
+    return bin_dir.rstrip("/") + "/lib"
 
 
 def prepare_command(command: Sequence[object]) -> list[str]:
     """Rewrite an external command for WSL conda when needed; otherwise unchanged."""
     cmd = [str(part) for part in command]
-    if not cmd or not uses_wsl_conda():
+    if not cmd or sys.platform != "win32" or not wsl_available():
         return cmd
-    bin_dir = _active_wsl_bin() or resolve_wsl_conda_bin()
+    bin_dir = _active_wsl_bin()
+    if not bin_dir and uses_wsl_conda():
+        bin_dir = resolve_wsl_conda_bin()
     if not bin_dir:
         return cmd
 
@@ -374,12 +472,15 @@ def prepare_command(command: Sequence[object]) -> list[str]:
     if not _wsl_which(tool, bin_dir=bin_dir):
         return cmd
 
-    args: list[str] = []
-    for arg in cmd[1:]:
-        args.append(_to_wsl_path(arg) if _looks_like_windows_path(arg) else arg)
+    args = [_rewrite_arg_for_wsl(arg) for arg in cmd[1:]]
     inner = shlex.join([tool, *args])
-    script = f"export PATH={shlex.quote(bin_dir)}:$PATH; exec {inner}"
-    return ["wsl", "-e", "bash", "-lc", script]
+    lib_dir = _conda_lib_dir(bin_dir)
+    script = (
+        f"export PATH={shlex.quote(bin_dir)}:$PATH; "
+        f"export LD_LIBRARY_PATH={shlex.quote(lib_dir)}:${{LD_LIBRARY_PATH:-}}; "
+        f"exec {inner}"
+    )
+    return _wsl_bash_argv(script)
 
 
 def apply_conda_tools_path(spec: str | None = None) -> Path | str | None:
@@ -393,7 +494,7 @@ def apply_conda_tools_path(spec: str | None = None) -> Path | str | None:
     global _original_path, _wsl_bin_cache
     if _original_path is None:
         _original_path = os.environ.get("PATH", "")
-    _wsl_bin_cache = object()  # reset cache
+    _clear_wsl_caches()
 
     base_parts = [p for p in _original_path.split(os.pathsep) if p]
     text = (spec if spec is not None else load_conda_tools_env()).strip()

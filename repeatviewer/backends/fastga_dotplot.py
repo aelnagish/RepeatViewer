@@ -27,6 +27,7 @@ from __future__ import annotations
 import shutil
 import logging
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -127,8 +128,10 @@ def _scratch_dir(near: Path, explicit: Path | None = None):
 
 
 def fastga_executable() -> str | None:
+    from repeatviewer.conda_tools import which_tool
+
     for name in _FASTGA_NAMES:
-        found = shutil.which(name)
+        found = which_tool(name)
         if found:
             return found
     return None
@@ -139,6 +142,13 @@ def fastga_available() -> bool:
 
 
 def install_hint() -> str:
+    if sys.platform == "win32":
+        return (
+            "Install FastGA in the WSL2 conda env, then bind it in RepeatViewer:\n"
+            "  conda install -c bioconda fastga\n\n"
+            "File → Setting → External tools (conda / WSL2) → env name or "
+            "Linux path (e.g. /home/qian/miniconda3/envs/TETrimmer)."
+        )
     return "Install FastGA with:  conda install -c bioconda fastga"
 
 
@@ -394,9 +404,13 @@ def run_fastga_alignment(
         if source2 is not None:
             cmd.append(str(source2))
 
+        from repeatviewer.conda_tools import prepare_command
+
+        launch_cmd = prepare_command(cmd)
+
         if on_log is not None:
             on_log("Command:")
-            on_log(_format_command_line(cmd))
+            on_log(_format_command_line(launch_cmd))
             on_log(f"Working directory: {source1.parent}")
             on_log(f"Output: {out_path}")
             on_log("")
@@ -413,12 +427,12 @@ def run_fastga_alignment(
         try:
             log_command(
                 "FastGA",
-                cmd,
+                launch_cmd,
                 inputs=[p for p in (source1, source2) if p is not None],
                 cwd=source1.parent,
             )
             proc = subprocess.Popen(
-                cmd,
+                launch_cmd,
                 stdout=subprocess.PIPE if stream_to_file else subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -529,9 +543,12 @@ def run_fastga_self_dotplot(
             progress("Running FastGA (indexing on first run may take a while)…")
 
         try:
-            log_command("FastGA", cmd, inputs=[fasta], cwd=fasta.parent)
+            from repeatviewer.conda_tools import prepare_command
+
+            launch_cmd = prepare_command(cmd)
+            log_command("FastGA", launch_cmd, inputs=[fasta], cwd=fasta.parent)
             proc = subprocess.Popen(
-                cmd,
+                launch_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
