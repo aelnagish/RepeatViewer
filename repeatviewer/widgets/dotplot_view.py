@@ -129,8 +129,9 @@ _DIAGONAL_COLOR = QColor(230, 120, 40)
 # Zoom limits are relative to the scale that fits the whole plot, not absolute.
 # A 190 kb window fits at ~0.004 px/base, so an absolute lower bound of 0.02
 # silently blocked every zoom attempt.
-_ZOOM_OUT_LIMIT = 0.9    # never zoom out much past "whole plot visible"
+_ZOOM_OUT_LIMIT = 0.5    # allow zooming out past fit for context
 _MAX_PIXELS_PER_BASE = 40.0
+_ZOOM_STEP = 1.15        # gentler than 1.25 so +/- / wheel feel controllable
 
 _RULER_TOP = 18
 # Wide enough for the tick labels plus the rotated sequence name beside them.
@@ -453,7 +454,21 @@ class DotplotCanvas(QGraphicsView):
     # content
     # ------------------------------------------------------------------
 
-    def show_result(self, result: DotplotResult) -> None:
+    def show_result(self, result: DotplotResult, *, preserve_view: bool = False) -> None:
+        same_length = (
+            preserve_view
+            and self._length == result.sequence_length
+            and self._length > 0
+            and self._item is not None
+        )
+        saved_transform = self.transform() if same_length else None
+        saved_fit = self._fit_scale if same_length else 0.0
+        saved_center = (
+            self.mapToScene(self.viewport().rect().center())
+            if same_length
+            else None
+        )
+
         scene = self.scene()
         scene.clear()
         self._item = _SegmentsItem(result)
@@ -462,6 +477,17 @@ class DotplotCanvas(QGraphicsView):
         self._selection = None
         scene.addItem(self._item)
         scene.setSceneRect(0, 0, result.sequence_length, result.sequence_length)
+
+        if saved_transform is not None and saved_center is not None:
+            # Keep pan/zoom when only word size / reverse-complement toggled.
+            self.setTransform(saved_transform)
+            self._fit_scale = saved_fit
+            self.centerOn(saved_center)
+            self._needs_fit = False
+            self.viewport().update()
+            self._refresh_rulers()
+            return
+
         # The tab is often still hidden here, so the viewport has no usable size
         # yet and fitInView() would scale to almost nothing. Defer until we are
         # actually shown or resized.
@@ -609,6 +635,21 @@ class DotplotCanvas(QGraphicsView):
         self.viewport().update()
         self._refresh_rulers()
 
+    def zoom_at(self, factor: float, view_pos) -> None:
+        """Zoom keeping the scene point under ``view_pos`` fixed (mouse wheel)."""
+        if self._item is None:
+            return
+        target = self.transform().m11() * factor
+        if not self._zoom_allowed(target):
+            return
+        before = self.mapToScene(view_pos)
+        self.scale(factor, factor)
+        after = self.mapToScene(view_pos)
+        delta = after - before
+        self.translate(delta.x(), delta.y())
+        self.viewport().update()
+        self._refresh_rulers()
+
     def render_to_pdf(self, path: Path, *, title: str = "", subtitle: str = "") -> None:
         """Write the plot to a PDF with axes, labels and a legend.
 
@@ -735,12 +776,9 @@ class DotplotCanvas(QGraphicsView):
     def wheelEvent(self, event) -> None:  # noqa: N802
         if self._item is None:
             return
-        factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
-        target = self.transform().m11() * factor
-        if not self._zoom_allowed(target):
-            return
-        self.scale(factor, factor)
-        self.viewport().update()
+        factor = _ZOOM_STEP if event.angleDelta().y() > 0 else 1 / _ZOOM_STEP
+        self.zoom_at(factor, event.position().toPoint())
+        event.accept()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         pos = event.position().toPoint()
@@ -1058,8 +1096,8 @@ class DotplotPanel(QWidget):
         self._pair_combo.currentIndexChanged.connect(self._show_selected_pair)
         self._filter_len.valueChanged.connect(self._recompute)
         self._reset_btn.clicked.connect(self._canvas.reset_zoom)
-        self._zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_by(1.25))
-        self._zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_by(1 / 1.25))
+        self._zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_by(_ZOOM_STEP))
+        self._zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_by(1 / _ZOOM_STEP))
         self._pdf_btn.clicked.connect(self._save_pdf)
         self._cancel_btn.clicked.connect(self._cancel_running)
         self._compute_btn.clicked.connect(self._start_requested_compute)
@@ -1449,6 +1487,8 @@ class DotplotPanel(QWidget):
         self.statusMessage.emit(message)
 
     def _apply_result(self, key, result: DotplotResult) -> None:
+        previous_length = self._sequence_length
+        had_plot = self._loaded_for is not None
         self._loaded_for = key
         self._sequence_id = result.sequence_id
         self._sequence_length = result.sequence_length
@@ -1456,7 +1496,10 @@ class DotplotPanel(QWidget):
         self._title.setText(name)
         self._title.setVisible(bool(name))
         self._canvas.set_title(name)
-        self._canvas.show_result(result)
+        # Keep pan/zoom when recomputing the same-length sequence (word size /
+        # reverse complement). New files / region sizes still fit to view.
+        preserve = had_plot and previous_length == result.sequence_length
+        self._canvas.show_result(result, preserve_view=preserve)
         if result.word_size:
             engine = f"word {result.word_size}"
         elif self._mode == "alignment":
