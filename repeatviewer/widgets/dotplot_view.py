@@ -170,6 +170,22 @@ def _format_bp(value: int) -> str:
     return f"{value:,}"
 
 
+def _scene_to_bp(scene_coord: float | int, *, length: int, offset: int) -> int:
+    """Map a scene coordinate in ``[0, length]`` to a 1-based sequence position.
+
+    The plot square is 0-based internally; sequence positions are 1-based, so
+    scene 0 is base ``1 + offset`` and scene ``length`` is the last base
+    (``length + offset``). Interior ticks keep ``tick + offset`` so round
+    labels like 2k stay on the nice step values.
+    """
+    tick = int(scene_coord)
+    if tick <= 0:
+        return 1 + offset
+    if length > 0 and tick >= length:
+        return length + offset
+    return tick + offset
+
+
 class _SegmentsItem(QGraphicsItem):
     """Paints every dotplot segment in one pass."""
 
@@ -297,17 +313,19 @@ class _Ruler(QWidget):
         hi = visible.right() if self._horizontal else visible.bottom()
 
         painter.setPen(QPen(_RULER_FG))
+        offset = view.coordinate_offset()
         tick = int(lo // step) * step
         while tick <= hi:
             if 0 <= tick <= length:
                 pos = view.scene_to_ruler(tick, self._horizontal)
+                label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
                 if self._horizontal:
                     if 0 <= pos <= self.width():
                         painter.drawLine(int(pos), self.height() - 4, int(pos), self.height())
                         painter.drawText(
                             int(pos) + 2,
                             self.height() - 6,
-                            _format_bp(int(tick) + view.coordinate_offset()),
+                            label,
                         )
                 else:
                     if 0 <= pos <= self.height():
@@ -315,7 +333,7 @@ class _Ruler(QWidget):
                         painter.drawText(
                             _Y_LABEL_STRIP,
                             int(pos) - 2,
-                            _format_bp(int(tick) + view.coordinate_offset()),
+                            label,
                         )
             tick += step
 
@@ -324,7 +342,7 @@ class _Ruler(QWidget):
             painter.setPen(QPen(QColor(40, 90, 180)))
             value = cursor.x() if self._horizontal else cursor.y()
             pos = view.scene_to_ruler(value, self._horizontal)
-            real = int(value) + view.coordinate_offset()
+            real = _scene_to_bp(value, length=length, offset=offset)
             if self._horizontal and 0 <= pos <= self.width():
                 painter.drawText(int(pos) + 2, self.height() - 6, f"{real:,}")
             elif not self._horizontal and 0 <= pos <= self.height():
@@ -608,6 +626,20 @@ class DotplotCanvas(QGraphicsView):
         self._drag_start = self._drag_now = None
         self.viewport().update()
 
+    def selection_sequence_coords(self) -> tuple[int, int, int, int] | None:
+        """Return the current drag-box as 1-based inclusive (x1, x2, y1, y2), or None."""
+        if self._selection is None or self._length <= 0:
+            return None
+        rect = self._selection
+        if rect.width() < 1.0 or rect.height() < 1.0:
+            return None
+        return (
+            int(rect.left()) + 1 + self._offset,
+            int(rect.right()) + self._offset,
+            int(rect.top()) + 1 + self._offset,
+            int(rect.bottom()) + self._offset,
+        )
+
     # ------------------------------------------------------------------
     # painting
     # ------------------------------------------------------------------
@@ -800,7 +832,7 @@ class DotplotCanvas(QGraphicsView):
             tick = 0
             while tick <= length:
                 frac = tick / length
-                label = _format_bp(int(tick) + offset)
+                label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
 
                 x = plot.left() + frac * plot.width()
                 painter.drawLine(int(x), int(plot.top() - tick_len), int(x), int(plot.top()))
@@ -914,7 +946,10 @@ class DotplotCanvas(QGraphicsView):
         self._refresh_rulers()
         x, y = int(point.x()), int(point.y())
         if 0 <= x <= self._length and 0 <= y <= self._length:
-            self.positionChanged.emit(x + self._offset, y + self._offset)
+            self.positionChanged.emit(
+                _scene_to_bp(x, length=self._length, offset=self._offset),
+                _scene_to_bp(y, length=self._length, offset=self._offset),
+            )
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if self._panning:
@@ -966,6 +1001,8 @@ class DotplotPanel(QWidget):
     statusMessage = Signal(str)
     # Rectangular drag-selection, 1-based inclusive on each axis.
     rangeSelected = Signal(int, int, int, int)
+    # "View select": 1-based inclusive (start, end) = min/max of x and y coords.
+    viewInAnnotationRequested = Signal(int, int)
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1106,6 +1143,14 @@ class DotplotPanel(QWidget):
             "Zoom to the selected region (drag a rectangle on the plot first)"
         )
 
+        self._view_select_btn = QToolButton(self)
+        self._view_select_btn.setText("View select")
+        self._view_select_btn.setAutoRaise(True)
+        self._view_select_btn.setToolTip(
+            "Open the Annotation tab and highlight the selected region "
+            "(start = min of x/y, end = max of x/y)"
+        )
+
         self._pdf_btn = QToolButton(self)
         self._pdf_btn.setText("Save PDF")
         self._pdf_btn.setAutoRaise(True)
@@ -1155,6 +1200,7 @@ class DotplotPanel(QWidget):
         bar.addWidget(self._zoom_in_btn)
         bar.addWidget(self._reset_btn)
         bar.addWidget(self._zoom_select_btn)
+        bar.addWidget(self._view_select_btn)
         bar.addWidget(self._pdf_btn)
         bar.addWidget(self._compute_btn)
         bar.addWidget(self._cancel_btn)
@@ -1195,6 +1241,7 @@ class DotplotPanel(QWidget):
         self._filter_len.valueChanged.connect(self._recompute)
         self._reset_btn.clicked.connect(self._canvas.reset_zoom)
         self._zoom_select_btn.clicked.connect(self._zoom_to_selection)
+        self._view_select_btn.clicked.connect(self._view_selection_in_annotation)
         self._zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_by(_ZOOM_STEP))
         self._zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_by(1 / _ZOOM_STEP))
         self._pdf_btn.clicked.connect(self._save_pdf)
@@ -1645,6 +1692,19 @@ class DotplotPanel(QWidget):
         if self._canvas.zoom_to_selection():
             return
         self._status.setText("Select a region on the plot first (drag a rectangle).")
+
+    def _view_selection_in_annotation(self) -> None:
+        coords = self._canvas.selection_sequence_coords()
+        if coords is None:
+            self._status.setText("Select a region on the plot first (drag a rectangle).")
+            return
+        x1, x2, y1, y2 = coords
+        start = min(x1, x2, y1, y2)
+        end = max(x1, x2, y1, y2)
+        if end < start:
+            self._status.setText("Select a region on the plot first (drag a rectangle).")
+            return
+        self.viewInAnnotationRequested.emit(int(start), int(end))
 
     def _save_pdf(self) -> None:
         from PySide6.QtWidgets import QFileDialog, QMessageBox

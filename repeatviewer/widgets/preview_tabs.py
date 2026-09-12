@@ -931,6 +931,9 @@ class FilePreviewPage(QWidget):
             # Selection is shared with the Annotation tab, but switching tabs
             # is left to the user -- clicking the plot never navigates.
             self._dotplot_panel.rangeSelected.connect(self._on_dotplot_range_selected)
+            self._dotplot_panel.viewInAnnotationRequested.connect(
+                self._on_dotplot_view_in_annotation
+            )
             holder_layout = self._fasta_dotplot_holder.layout()
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_dotplot_holder)
@@ -975,6 +978,11 @@ class FilePreviewPage(QWidget):
         # otherwise it is applied when that tab is opened.
         if self._fasta_stack.currentIndex() == 1:
             self._apply_pending_annotation_selection()
+
+    def _on_dotplot_view_in_annotation(self, start: int, end: int) -> None:
+        """Switch to Annotation and highlight the span covering the drag box."""
+        self._pending_annotation_selection = (int(start), int(end))
+        self._activate_fasta_tab(DefaultFastaPreviewTab.ANNOTATION)
 
     def _apply_pending_annotation_selection(self) -> None:
         pending = self._pending_annotation_selection
