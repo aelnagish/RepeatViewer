@@ -1001,7 +1001,7 @@ class DotplotPanel(QWidget):
     statusMessage = Signal(str)
     # Rectangular drag-selection, 1-based inclusive on each axis.
     rangeSelected = Signal(int, int, int, int)
-    # "View select": 1-based inclusive (start, end) = min/max of x and y coords.
+    # "View select" on x or y: 1-based inclusive (start, end) for that axis.
     viewInAnnotationRequested = Signal(int, int)
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
@@ -1143,14 +1143,6 @@ class DotplotPanel(QWidget):
             "Zoom to the selected region (drag a rectangle on the plot first)"
         )
 
-        self._view_select_btn = QToolButton(self)
-        self._view_select_btn.setText("View select")
-        self._view_select_btn.setAutoRaise(True)
-        self._view_select_btn.setToolTip(
-            "Open the Annotation tab and highlight the selected region "
-            "(start = min of x/y, end = max of x/y)"
-        )
-
         self._pdf_btn = QToolButton(self)
         self._pdf_btn.setText("Save PDF")
         self._pdf_btn.setAutoRaise(True)
@@ -1171,9 +1163,40 @@ class DotplotPanel(QWidget):
         self._thread: QThread | None = None
         self._worker: _FastgaWorker | None = None
         self._pending_key = None
+        # Last drag-box as 1-based inclusive (x1, x2, y1, y2), if any.
+        self._selection_xy: tuple[int, int, int, int] | None = None
 
         self._status = QLabel("", self)
         self._status.setStyleSheet("color: palette(mid);")
+
+        self._sel_row = QWidget(self)
+        sel_layout = QHBoxLayout(self._sel_row)
+        sel_layout.setContentsMargins(0, 0, 0, 0)
+        sel_layout.setSpacing(4)
+        self._sel_x = QLabel("", self._sel_row)
+        self._sel_x.setStyleSheet("color: palette(mid);")
+        self._view_x_btn = QToolButton(self._sel_row)
+        self._view_x_btn.setText("View select")
+        self._view_x_btn.setAutoRaise(True)
+        self._view_x_btn.setToolTip(
+            "Open Annotation and highlight the selected x (horizontal) range"
+        )
+        self._sel_sep = QLabel("·", self._sel_row)
+        self._sel_sep.setStyleSheet("color: palette(mid);")
+        self._sel_y = QLabel("", self._sel_row)
+        self._sel_y.setStyleSheet("color: palette(mid);")
+        self._view_y_btn = QToolButton(self._sel_row)
+        self._view_y_btn.setText("View select")
+        self._view_y_btn.setAutoRaise(True)
+        self._view_y_btn.setToolTip(
+            "Open Annotation and highlight the selected y (vertical) range"
+        )
+        sel_layout.addWidget(self._sel_x)
+        sel_layout.addWidget(self._view_x_btn)
+        sel_layout.addWidget(self._sel_sep)
+        sel_layout.addWidget(self._sel_y)
+        sel_layout.addWidget(self._view_y_btn)
+        self._sel_row.hide()
 
         bar = QHBoxLayout()
         bar.setContentsMargins(6, 4, 6, 4)
@@ -1200,8 +1223,9 @@ class DotplotPanel(QWidget):
         bar.addWidget(self._zoom_in_btn)
         bar.addWidget(self._reset_btn)
         bar.addWidget(self._zoom_select_btn)
-        bar.addWidget(self._view_select_btn)
         bar.addWidget(self._pdf_btn)
+        # Selection readout stays after Save PDF (not in the title row).
+        bar.addWidget(self._sel_row)
         bar.addWidget(self._compute_btn)
         bar.addWidget(self._cancel_btn)
         bar.addStretch(1)
@@ -1241,7 +1265,8 @@ class DotplotPanel(QWidget):
         self._filter_len.valueChanged.connect(self._recompute)
         self._reset_btn.clicked.connect(self._canvas.reset_zoom)
         self._zoom_select_btn.clicked.connect(self._zoom_to_selection)
-        self._view_select_btn.clicked.connect(self._view_selection_in_annotation)
+        self._view_x_btn.clicked.connect(lambda: self._view_axis_in_annotation("x"))
+        self._view_y_btn.clicked.connect(lambda: self._view_axis_in_annotation("y"))
         self._zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_by(_ZOOM_STEP))
         self._zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_by(1 / _ZOOM_STEP))
         self._pdf_btn.clicked.connect(self._save_pdf)
@@ -1267,7 +1292,8 @@ class DotplotPanel(QWidget):
         self._canvas.set_title("")
         self._title.clear()
         self._title.hide()
-        self._status.clear()
+        self.clear_selection()
+        self._set_status_text("")
         self._compute_btn.hide()
 
     def _is_large(self) -> bool:
@@ -1281,7 +1307,7 @@ class DotplotPanel(QWidget):
         self._mode = "alignment"
         self._path = path.expanduser().resolve()
         self._loaded_for = None
-        self._status.setText("Reading alignments…")
+        self._set_status_text("Reading alignments…")
         try:
             alignments, source = load_alignment_file(self._path)
         except PafError as exc:
@@ -1476,12 +1502,13 @@ class DotplotPanel(QWidget):
         """Show what it will cost and wait for the user to ask for it."""
         self._pending_key = key
         self._canvas.clear_plot()
+        self._clear_selection_chrome()
         try:
             mb = self._path.stat().st_size / 1024 / 1024
         except OSError:
             mb = 0
         self._compute_btn.show()
-        self._status.setText(
+        self._set_status_text(
             f"{mb:,.0f} MB — too large for the instant engine. "
             "FastGA can plot it, but takes minutes on a genome this size."
         )
@@ -1508,7 +1535,7 @@ class DotplotPanel(QWidget):
 
     def _compute_region(self, key) -> None:
         """Plot one window of a large sequence with the instant engine."""
-        self._status.setText("Reading region…")
+        self._set_status_text("Reading region…")
         start = int(self._region_start.value())
         size = int(self._region_size.value())
         try:
@@ -1535,7 +1562,7 @@ class DotplotPanel(QWidget):
     # -- built-in k-mer engine (fast, synchronous) -------------------------
 
     def _compute_kmer(self, key) -> None:
-        self._status.setText("Computing…")
+        self._set_status_text("Computing…")
         try:
             result = compute_self_dotplot_for_fasta(
                 self._path,
@@ -1559,7 +1586,7 @@ class DotplotPanel(QWidget):
 
     def _compute_fastga(self, key) -> None:
         self._pending_key = key
-        self._status.setText("Starting FastGA…")
+        self._set_status_text("Starting FastGA…")
         self._cancel_btn.show()
 
         thread = QThread(self)
@@ -1572,7 +1599,7 @@ class DotplotPanel(QWidget):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.progress.connect(self._status.setText)
+        worker.progress.connect(self._set_status_text)
         worker.finished.connect(self._on_fastga_finished)
         worker.failed.connect(self._on_fastga_failed)
         # Tear the thread down from either outcome, and only delete the worker
@@ -1588,7 +1615,7 @@ class DotplotPanel(QWidget):
     def _cancel_running(self) -> None:
         if self._worker is not None:
             self._worker.cancel()
-            self._status.setText("Cancelling…")
+            self._set_status_text("Cancelling…")
 
     @Slot()
     def _on_thread_finished(self) -> None:
@@ -1627,9 +1654,8 @@ class DotplotPanel(QWidget):
     def _fail(self, message: str) -> None:
         self._canvas.clear_plot()
         self._loaded_for = None
-        self._status.setText(self._condense_error(message))
-        # Full text on hover: the condensed line cannot carry everything.
-        self._status.setToolTip(message)
+        self._clear_selection_chrome()
+        self._set_status_text(self._condense_error(message), tooltip=message)
         self.statusMessage.emit(message)
 
     def _apply_result(self, key, result: DotplotResult) -> None:
@@ -1665,7 +1691,9 @@ class DotplotPanel(QWidget):
         else:
             where = f"{result.sequence_length:,} bp"
         suffix = f" — {result.note}" if result.note else ""
-        self._status.setText(
+        # New plot data clears any previous drag box; chrome follows.
+        self._clear_selection_chrome()
+        self._set_status_text(
             f"{where} · {engine} · {result.segment_count:,} segments{suffix}"
         )
 
@@ -1679,31 +1707,56 @@ class DotplotPanel(QWidget):
         self._word.blockSignals(False)
 
     def show_selection(self, start: int, end: int) -> None:
-        """Mirror a selection made in the Annotation tab onto the plot."""
-        self._canvas.set_range(start, end)
-        self._status.setText(
-            f"Selected {start:,}-{end:,} ({end - start + 1:,} bp)"
-        )
+        """Mirror a 1-D Annotation selection onto the plot as an x/y box."""
+        lo, hi = (int(start), int(end)) if start <= end else (int(end), int(start))
+        self._canvas.set_range(lo, hi)
+        # Same range on both axes — show x and y explicitly (not "Selected N bp").
+        self._show_selection_status(lo, hi, lo, hi)
 
     def clear_selection(self) -> None:
         self._canvas.clear_selection()
+        self._clear_selection_chrome()
+
+    def _clear_selection_chrome(self) -> None:
+        self._selection_xy = None
+        self._sel_x.clear()
+        self._sel_y.clear()
+        self._sel_row.hide()
+
+    def _set_status_text(self, text: str, *, tooltip: str = "") -> None:
+        """Show a plain status message in the title row (does not clear x/y select)."""
+        self._status.show()
+        self._status.setText(text)
+        self._status.setToolTip(tooltip)
+
+    def _status_caption(self) -> str:
+        """Plain-text status for PDF captions / tooltips."""
+        if self._selection_xy is not None:
+            x1, x2, y1, y2 = self._selection_xy
+            return f"x {x1:,}-{x2:,}  ·  y {y1:,}-{y2:,}"
+        return self._status.text()
+
+    def _show_selection_status(self, x1: int, x2: int, y1: int, y2: int) -> None:
+        self._selection_xy = (int(x1), int(x2), int(y1), int(y2))
+        self._sel_x.setText(f"x {x1:,}-{x2:,}")
+        self._sel_y.setText(f"y {y1:,}-{y2:,}")
+        self._sel_row.show()
 
     def _zoom_to_selection(self) -> None:
         if self._canvas.zoom_to_selection():
             return
-        self._status.setText("Select a region on the plot first (drag a rectangle).")
+        self._set_status_text("Select a region on the plot first (drag a rectangle).")
 
-    def _view_selection_in_annotation(self) -> None:
-        coords = self._canvas.selection_sequence_coords()
+    def _view_axis_in_annotation(self, axis: str) -> None:
+        coords = self._selection_xy or self._canvas.selection_sequence_coords()
         if coords is None:
-            self._status.setText("Select a region on the plot first (drag a rectangle).")
+            self._set_status_text("Select a region on the plot first (drag a rectangle).")
             return
         x1, x2, y1, y2 = coords
-        start = min(x1, x2, y1, y2)
-        end = max(x1, x2, y1, y2)
-        if end < start:
-            self._status.setText("Select a region on the plot first (drag a rectangle).")
-            return
+        if axis == "y":
+            start, end = (y1, y2) if y1 <= y2 else (y2, y1)
+        else:
+            start, end = (x1, x2) if x1 <= x2 else (x2, x1)
         self.viewInAnnotationRequested.emit(int(start), int(end))
 
     def _save_pdf(self) -> None:
@@ -1727,7 +1780,7 @@ class DotplotPanel(QWidget):
                 title=self._title.text() or self._path.stem,
                 # The status line already says range, word size and segment
                 # count -- exactly what a figure caption needs.
-                subtitle=self._status.text(),
+                subtitle=self._status_caption(),
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Save PDF", f"Could not write {out.name}:\n{exc}")
@@ -1738,9 +1791,7 @@ class DotplotPanel(QWidget):
         return self._sequence_id
 
     def _on_rect_selected(self, x1: int, x2: int, y1: int, y2: int) -> None:
-        self._status.setText(
-            f"x {x1:,}-{x2:,}  ·  y {y1:,}-{y2:,}"
-        )
+        self._show_selection_status(x1, x2, y1, y2)
         self.rangeSelected.emit(x1, x2, y1, y2)
 
     def _on_position(self, x: int, y: int) -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QAction, QFont, QFontMetrics, QWheelEvent
+from PySide6.QtGui import QAction, QActionGroup, QFont, QFontMetrics, QWheelEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -23,13 +23,54 @@ from repeatviewer.widgets.preview_zoom import (
     MAX_PREVIEW_ZOOM_PERCENT,
     MIN_PREVIEW_ZOOM_PERCENT,
     PREVIEW_WHEEL_ZOOM_STEP_PERCENT,
+    DefaultFastaPreviewTab,
     PreviewFitMode,
+    load_default_fasta_preview_tab,
     load_preview_fit_mode,
     load_preview_zoom_percent,
+    save_default_fasta_preview_tab,
     save_preview_zoom_percent,
     wheel_zoom_steps_from_event,
 )
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
+
+_FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
+    ("Text", DefaultFastaPreviewTab.TEXT),
+    ("Annotation", DefaultFastaPreviewTab.ANNOTATION),
+    ("Dotplot (Self)", DefaultFastaPreviewTab.DOTPLOT),
+)
+
+
+def _add_default_fasta_tab_menu(parent_menu: QMenu) -> None:
+    """Add Settings-equivalent default FASTA sub-tab chooser to an Actions menu."""
+    submenu = parent_menu.addMenu("Default FASTA preview tab")
+    submenu.setToolTip(
+        "Sub-tab shown when you single-click a single-sequence FASTA file."
+    )
+    group = QActionGroup(submenu)
+    group.setExclusive(True)
+    for label, tab in _FASTA_DEFAULT_TAB_CHOICES:
+        action = QAction(label, submenu)
+        action.setCheckable(True)
+        action.setData(tab.value)
+        group.addAction(action)
+        submenu.addAction(action)
+
+    def _sync_checks() -> None:
+        current = load_default_fasta_preview_tab().value
+        for action in group.actions():
+            action.setChecked(action.data() == current)
+
+    def _on_chosen(action: QAction) -> None:
+        try:
+            tab = DefaultFastaPreviewTab(str(action.data()))
+        except ValueError:
+            return
+        save_default_fasta_preview_tab(tab)
+
+    submenu.aboutToShow.connect(_sync_checks)
+    group.triggered.connect(_on_chosen)
+    _sync_checks()
 
 ZOOM_BAR_HEIGHT = 18
 ZOOM_CONTROL_HEIGHT = 18
@@ -163,6 +204,8 @@ class PreviewZoomBar(QWidget):
         self._actions_menu.addSeparator()
         self._actions_menu.addAction(self._edit_text_action)
         self._actions_menu.addAction(self._save_text_action)
+        self._actions_menu.addSeparator()
+        _add_default_fasta_tab_menu(self._actions_menu)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
 
@@ -239,6 +282,8 @@ class AnnotationZoomBar(QWidget):
         self._reset_scale_action.setToolTip("Fit the full sequence in the window")
         self._reset_scale_action.triggered.connect(self.reset_requested.emit)
         self._actions_menu.addAction(self._reset_scale_action)
+        self._actions_menu.addSeparator()
+        _add_default_fasta_tab_menu(self._actions_menu)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
 
