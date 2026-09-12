@@ -236,8 +236,11 @@ def compute_self_dotplot(
                 continue
             for i in positions:
                 for j in rc_positions:
-                    # rc[j:j+k] is the reverse complement of seq[n-j-k : n-j]
-                    y = n - j - word_size
+                    # rc[j:j+k] == RC of seq[n-j-k : n-j]. Draw reverse
+                    # segments from (x, tend) down to (x+len, tstart) — the
+                    # same convention as PAF/FastGA — so Y does not drift
+                    # when word size changes.
+                    y = n - j
                     anti[i + y].append(i)
                     raw += 1
             if raw > max_matches:
