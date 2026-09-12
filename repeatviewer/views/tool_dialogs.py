@@ -290,22 +290,22 @@ from repeatviewer.plugins.custom_command import (
 
 
 class _CommandVarRow(QWidget):
-    """One variable row; fixed-width type / Output / Remove keep columns aligned."""
+    """One variable row; fixed-width type / role / Remove keep columns aligned."""
 
     remove_requested = Signal(object)
-    output_toggled = Signal(object, bool)
+    role_changed = Signal(object, str)
 
-    _NAME_MIN_WIDTH = 120
-    _DEFAULT_MIN_WIDTH = 160
-    _MODE_WIDTH = 96
-    _OUTPUT_WIDTH = 72
+    _NAME_MIN_WIDTH = 200
+    _DEFAULT_WIDTH = 110
+    _MODE_WIDTH = 104
+    _ROLE_WIDTH = 88
     _REMOVE_WIDTH = 80
 
     def __init__(
         self,
         initial: CommandVarDef | None = None,
         *,
-        is_output: bool = False,
+        role: str = "",
         special: bool = False,
         parent=None,
     ) -> None:
@@ -319,11 +319,13 @@ class _CommandVarRow(QWidget):
         self._name = QLineEdit(display_var_name(name_key) if name_key else "", self)
         self._name.setPlaceholderText("${variable_name} or ${RV_INPUT}_b.text")
         self._name.setMinimumWidth(self._NAME_MIN_WIDTH)
+        self._name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._mode = QComboBox(self)
         self._mode.addItem("File", "file")
         self._mode.addItem("Folder", "folder")
         self._mode.addItem("Text", "text")
-        self._mode.addItem("Number", "number")
+        self._mode.addItem("Integer", "integer")
+        self._mode.addItem("Float", "float")
         self._mode.setFixedWidth(self._MODE_WIDTH)
         self._mode.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         if self._special and name_key:
@@ -336,16 +338,26 @@ class _CommandVarRow(QWidget):
         if index >= 0:
             self._mode.setCurrentIndex(index)
         self._default = QLineEdit(var.value, self)
-        self._default.setPlaceholderText(
-            "Default, e.g. ${RV_OUTDIR}/${RV_STEM}_B.txt"
+        self._default.setPlaceholderText("Default variable")
+        self._default.setFixedWidth(self._DEFAULT_WIDTH)
+        self._default.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._role = QComboBox(self)
+        self._role.addItem("—", "")
+        self._role.addItem("Input", "input")
+        self._role.addItem("Output", "output")
+        self._role.setFixedWidth(self._ROLE_WIDTH)
+        self._role.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._role.setToolTip(
+            "Input / Output mark this variable for workflow chaining "
+            "(FASTA in → FASTA out)."
         )
-        self._default.setMinimumWidth(self._DEFAULT_MIN_WIDTH)
-        self._is_output = QCheckBox("Output", self)
-        self._is_output.setChecked(is_output and not self._special)
-        self._is_output.setFixedWidth(self._OUTPUT_WIDTH)
-        self._is_output.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._is_output.toggled.connect(self._on_output_toggled)
-        self._is_output.toggled.connect(self._refresh_output_fields)
+        role_key = str(role or "").strip().lower()
+        if role_key not in {"input", "output"}:
+            role_key = ""
+        role_index = self._role.findData(role_key)
+        if role_index >= 0:
+            self._role.setCurrentIndex(role_index)
+        self._role.currentIndexChanged.connect(self._on_role_changed)
         remove_btn = QPushButton("Remove", self)
         remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
         self._remove_btn = remove_btn
@@ -355,18 +367,18 @@ class _CommandVarRow(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
-        row.addWidget(self._name, 2)
+        row.addWidget(self._name, 4)
         row.addWidget(self._mode, 0)
-        row.addWidget(self._default, 3)
-        row.addWidget(self._is_output, 0)
+        row.addWidget(self._default, 0)
+        row.addWidget(self._role, 0)
         row.addWidget(remove_btn, 0)
         if self._special:
             self._name.setReadOnly(True)
             self._mode.setEnabled(False)
             self._default.setEnabled(False)
             self._default.setPlaceholderText("Filled at run from selection / genome")
-            self._is_output.setEnabled(False)
-            self._is_output.setChecked(False)
+            self._role.setEnabled(False)
+            self._role.setCurrentIndex(self._role.findData(""))
             self._name.setToolTip("Special variable filled at run.")
         elif self._affixed:
             self._name.setReadOnly(True)
@@ -377,31 +389,39 @@ class _CommandVarRow(QWidget):
                 "Separate parameter from the glued suffix in the command "
                 "(e.g. ${RV_INPUT}_b.text). Editable at run; default = base + suffix."
             )
-        self._refresh_output_fields()
+        self._refresh_role_fields()
 
-    def _on_output_toggled(self, checked: bool) -> None:
-        if checked:
-            self.output_toggled.emit(self, True)
+    def _on_role_changed(self, _index: int = 0) -> None:
+        role = str(self._role.currentData() or "")
+        self._refresh_role_fields()
+        if role:
+            self.role_changed.emit(self, role)
 
-    def set_output_checked(self, checked: bool) -> None:
-        self._is_output.blockSignals(True)
-        self._is_output.setChecked(checked)
-        self._is_output.blockSignals(False)
-        self._refresh_output_fields()
+    def set_role(self, role: str) -> None:
+        key = str(role or "").strip().lower()
+        if key not in {"input", "output"}:
+            key = ""
+        index = self._role.findData(key)
+        if index < 0:
+            return
+        self._role.blockSignals(True)
+        self._role.setCurrentIndex(index)
+        self._role.blockSignals(False)
+        self._refresh_role_fields()
 
-    def _refresh_output_fields(self) -> None:
-        is_output = self._is_output.isChecked()
-        if is_output:
+    def _refresh_role_fields(self) -> None:
+        role = str(self._role.currentData() or "")
+        if role in {"input", "output"}:
             mode = normalize_var_mode(str(self._mode.currentData()))
             if mode not in {"file", "folder"}:
                 index = self._mode.findData("file")
                 if index >= 0:
                     self._mode.setCurrentIndex(index)
 
-    def definition(self) -> tuple[CommandVarDef | None, bool]:
+    def definition(self) -> tuple[CommandVarDef | None, str]:
         name = normalize_var_name(self._name.text())
         if not name:
-            return None, False
+            return None, ""
         shown = display_var_name(name)
         if self._name.text().strip() != shown:
             self._name.blockSignals(True)
@@ -414,9 +434,9 @@ class _CommandVarRow(QWidget):
                     mode=special_variable_mode(name),
                     value="",
                 ),
-                False,
+                "",
             )
-        is_output = self._is_output.isChecked()
+        role = str(self._role.currentData() or "")
         mode = str(self._mode.currentData())
         if is_affixed_variable(name) and not mode:
             mode = special_variable_mode(name)
@@ -425,10 +445,9 @@ class _CommandVarRow(QWidget):
             mode=mode,
             value=self._default.text().strip(),
         )
-        return var, is_output
+        return var, role
 
     def mark_removable(self, removable: bool) -> None:
-        # Keep the button's slot so columns stay aligned; disable when not removable.
         if self._special:
             self._remove_btn.setEnabled(False)
             self._remove_btn.setVisible(True)
@@ -452,7 +471,10 @@ class CommandPluginDesignerDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Design command wrapper")
-        self.setMinimumWidth(700)
+        self.setMinimumWidth(720)
+        self.setMinimumHeight(520)
+        self.resize(780, 640)
+        self.setSizeGripEnabled(True)
         spec = initial or UserCommandPluginSpec(
             id="",
             label="",
@@ -473,9 +495,11 @@ class CommandPluginDesignerDialog(QDialog):
         )
         self._tooltip.setPlainText(spec.tooltip)
         self._tooltip.setFixedHeight(52)
+        self._tooltip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._tooltip.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._command = QTextEdit(self)
         self._command.setFixedHeight(140)
+        self._command.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._command.setPlaceholderText(
             "blastn -query ${RV_INPUT} -db ${RV_GENOME} "
             "-out ${RV_OUTDIR}/${RV_STEM}_b.txt "
@@ -525,8 +549,26 @@ class CommandPluginDesignerDialog(QDialog):
         self._rows_layout = QVBoxLayout(self._rows_host)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.setSpacing(6)
+        self._rows_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._rows: list[_CommandVarRow] = []
+        self._vars_scroll = QScrollArea(self)
+        self._vars_scroll.setWidgetResizable(True)
+        self._vars_scroll.setFrameShape(QFrame.Shape.StyledPanel)
+        self._vars_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._vars_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._vars_scroll.setWidget(self._rows_host)
+        self._vars_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        # Scroll inside this area so upper fields stay put; dialog itself can resize.
+        self._vars_scroll.setMinimumHeight(132)
+
         out_set = {normalize_var_name(v) for v in spec.output_vars}
+        in_set = {normalize_var_name(v) for v in (spec.input_vars or [])}
         saved: dict[str, CommandVarDef] = {
             normalize_var_name(v.name): v
             for v in spec.var_defs
@@ -542,20 +584,22 @@ class CommandPluginDesignerDialog(QDialog):
         # Affixed tokens like ${RV_INPUT}_b.text are separate editable parameters.
         for name in template_affixed_variables(spec.command_template):
             existing = saved.pop(name, None)
+            role = "output" if name in out_set else ("input" if name in in_set else "")
             self._add_var_row(
                 existing
                 or CommandVarDef(name=name, mode=special_variable_mode(name), value=""),
-                is_output=name in out_set,
+                role=role,
             )
         for name, var in saved.items():
-            self._add_var_row(var, is_output=name in out_set)
+            role = "output" if name in out_set else ("input" if name in in_set else "")
+            self._add_var_row(var, role=role)
         if not self._rows:
             self._add_var_row()
 
         detect_btn = QPushButton("Detect variables from command", self)
         detect_btn.clicked.connect(self._detect_variables)
         add_var_btn = QPushButton("Add variable", self)
-        add_var_btn.clicked.connect(lambda: self._add_var_row())
+        add_var_btn.clicked.connect(self._on_add_variable_clicked)
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -571,7 +615,7 @@ class CommandPluginDesignerDialog(QDialog):
         btn_layout.addWidget(detect_btn)
         btn_layout.addStretch(1)
         form.addRow("", btn_row)
-        form.addRow("Define variables:", self._rows_host)
+        form.addRow("Define variables:", self._vars_scroll)
         add_row = QWidget(self)
         add_layout = QHBoxLayout(add_row)
         add_layout.setContentsMargins(0, 0, 0, 0)
@@ -582,37 +626,45 @@ class CommandPluginDesignerDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        save_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if save_btn is not None:
+            save_btn.setText("Save")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.addLayout(form, 1)
+        layout.addWidget(buttons, 0)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         QTimer.singleShot(0, self._label.setFocus)
 
+    def _on_add_variable_clicked(self) -> None:
+        self._add_var_row()
+
     def _add_var_row(
         self,
         var: CommandVarDef | None = None,
         *,
-        is_output: bool = False,
+        role: str = "",
         special: bool = False,
     ) -> None:
         if not hasattr(self, "_rows_host"):
             return
         row = _CommandVarRow(
             var,
-            is_output=is_output,
+            role=role,
             special=special,
             parent=self._rows_host,
         )
         row.remove_requested.connect(self._remove_var_row)
-        row.output_toggled.connect(self._on_output_toggled)
-        self._rows.append(row)
+        row.role_changed.connect(self._on_role_changed)
         self._rows_layout.addWidget(row)
+        self._rows.append(row)
         self._refresh_remove_buttons()
+        if not self._rebuilding_rows:
+            QTimer.singleShot(0, lambda r=row: self._scroll_var_row_into_view(r))
 
     def _remove_var_row(self, row: _CommandVarRow) -> None:
         if row not in self._rows or row.is_special:
@@ -621,9 +673,9 @@ class CommandPluginDesignerDialog(QDialog):
         if len(user_rows) <= 1 and row in user_rows:
             row._name.clear()
             row._default.clear()
-            row._is_output.setChecked(False)
+            row.set_role("")
             row._mode.setCurrentIndex(row._mode.findData("file"))
-            row._refresh_output_fields()
+            row._refresh_role_fields()
             return
         self._rows.remove(row)
         self._rows_layout.removeWidget(row)
@@ -631,29 +683,38 @@ class CommandPluginDesignerDialog(QDialog):
         row.deleteLater()
         self._refresh_remove_buttons()
 
+    def _scroll_var_row_into_view(self, row: _CommandVarRow) -> None:
+        if not hasattr(self, "_vars_scroll"):
+            return
+        self._vars_scroll.ensureWidgetVisible(row, 0, 6)
+
     def _refresh_remove_buttons(self) -> None:
         user_rows = [r for r in self._rows if not r.is_special]
         removable = len(user_rows) > 1
         for row in self._rows:
             row.mark_removable(removable)
 
-    def _on_output_toggled(self, source_row: _CommandVarRow, checked: bool) -> None:
-        if not checked:
+    def _on_role_changed(self, source_row: _CommandVarRow, role: str) -> None:
+        if role not in {"input", "output"}:
             return
         for row in self._rows:
-            if row is not source_row:
-                row.set_output_checked(False)
+            if row is source_row:
+                continue
+            other, other_role = row.definition()
+            del other
+            if other_role == role:
+                row.set_role("")
 
     def _detect_variables(self) -> None:
         current_defs: dict[str, CommandVarDef] = {}
-        outputs: set[str] = set()
+        roles: dict[str, str] = {}
         for row in self._rows:
-            var, is_output = row.definition()
+            var, role = row.definition()
             if var is None or is_special_variable(var.name):
                 continue
             current_defs[var.name] = var
-            if is_output:
-                outputs.add(var.name)
+            if role:
+                roles[var.name] = role
         cmd = self._command.toPlainText()
         names_in_cmd = template_variables(cmd)
         specials = [n for n in names_in_cmd if is_special_variable(n)]
@@ -668,7 +729,6 @@ class CommandPluginDesignerDialog(QDialog):
                 continue
             if name not in current_defs:
                 current_defs[name] = CommandVarDef(name=name, mode="file", value="")
-        # Keep affixed after specials, then other user vars.
         affixed_set = set(affixed)
         other_names = [n for n in sorted(current_defs) if n not in affixed_set]
         self._rebuilding_rows = True
@@ -684,30 +744,34 @@ class CommandPluginDesignerDialog(QDialog):
                     special=True,
                 )
             for name in affixed:
-                self._add_var_row(
-                    current_defs[name], is_output=name in outputs
-                )
+                self._add_var_row(current_defs[name], role=roles.get(name, ""))
             for name in other_names:
-                self._add_var_row(current_defs[name], is_output=name in outputs)
+                self._add_var_row(current_defs[name], role=roles.get(name, ""))
         finally:
             self._rebuilding_rows = False
         if not self._rows:
             self._add_var_row()
+        if self._rows:
+            QTimer.singleShot(0, lambda: self._scroll_var_row_into_view(self._rows[-1]))
 
     def spec(self) -> UserCommandPluginSpec:
+        inputs: list[str] = []
         outputs: list[str] = []
         var_defs: list[CommandVarDef] = []
         for row in self._rows:
-            var, is_output = row.definition()
+            var, role = row.definition()
             if var is None or is_special_variable(var.name):
                 continue
             var_defs.append(var)
-            if is_output:
+            if role == "input":
+                inputs.append(var.name)
+            elif role == "output":
                 outputs.append(var.name)
         return UserCommandPluginSpec(
             id=plugin_id_from_label(self._label.text().strip()),
             label=self._label.text().strip(),
             command_template=self._command.toPlainText().strip(),
+            input_vars=inputs[:1],
             output_vars=outputs[:1],
             var_defs=var_defs,
             fasta_only=self._initial_fasta_only,
@@ -736,20 +800,32 @@ class CommandPluginDesignerDialog(QDialog):
                 self, "Design command wrapper", "Command template is required."
             )
             return
+        input_count = 0
         output_count = 0
         for row in self._rows:
-            var, is_output = row.definition()
+            var, role = row.definition()
             if var is None:
                 continue
-            if is_output:
-                output_count += 1
+            if role in {"input", "output"}:
                 if normalize_var_mode(var.mode) not in {"file", "folder"}:
                     QMessageBox.warning(
                         self,
                         "Design command wrapper",
-                        f"Output variable “{var.name}” must use type File or Folder.",
+                        f"{role.title()} variable “{display_var_name(var.name)}” "
+                        "must use type File or Folder.",
                     )
                     return
+                if role == "input":
+                    input_count += 1
+                else:
+                    output_count += 1
+        if input_count > 1:
+            QMessageBox.warning(
+                self,
+                "Design command wrapper",
+                "Only one variable can be marked as Input.",
+            )
+            return
         if output_count > 1:
             QMessageBox.warning(
                 self,

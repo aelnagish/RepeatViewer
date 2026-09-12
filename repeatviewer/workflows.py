@@ -146,11 +146,16 @@ def resolve_tool_info(tool_id: str) -> WorkflowToolInfo | None:
     if tool_id in WORKFLOW_TOOLS:
         return WORKFLOW_TOOLS[tool_id]
     if is_plugin_tool_id(tool_id):
+        from repeatviewer.plugins.custom_command import UserCommandPlugin
         from repeatviewer.plugins.registry import get_registry
 
         plugin = get_registry().get(plugin_id_from_tool_id(tool_id))
         if plugin is None:
             return None
+        if isinstance(plugin, UserCommandPlugin):
+            spec = getattr(plugin, "spec", None)
+            if spec is None or not spec.is_workflow_ready():
+                return None
         return WorkflowToolInfo(
             tool_id,
             getattr(plugin, "label", None) or plugin_id_from_tool_id(tool_id),
@@ -659,8 +664,19 @@ def run_workflow(
                     ),
                 )
                 try:
+                    step_runtime = dict(runtime_values)
+                    step_runtime["RV_INPUT"] = str(path)
+                    if spec_obj is not None:
+                        for name in getattr(spec_obj, "input_vars", None) or []:
+                            step_runtime[name] = str(path)
                     outs = plugin.run(
-                        path, project, runtime_values=runtime_values
+                        path,
+                        project,
+                        runtime_values=step_runtime,
+                        selected_files=[path],
+                        genome_file=(
+                            str(project.genome_file) if project.genome_file else ""
+                        ),
                     )
                     step_outs.extend(str(p) for p in (outs or []))
                 except Exception as exc:  # noqa: BLE001

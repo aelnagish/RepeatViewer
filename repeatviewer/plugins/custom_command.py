@@ -26,7 +26,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox as QDoubleSpinBox
+from repeatviewer.widgets.spin_boxes import (
+    NoWheelDoubleSpinBox as QDoubleSpinBox,
+    NoWheelSpinBox as QSpinBox,
+)
 
 
 from repeatviewer.plugins.api import RepeatViewerPlugin
@@ -176,13 +179,21 @@ def special_variables_help_text() -> str:
 
 
 def normalize_var_mode(mode: str) -> str:
-    """Map stored / legacy modes to file, folder, text, or number."""
+    """Map stored / legacy modes to file, folder, text, integer, or float."""
     key = (mode or "text").strip().lower()
     if key in {"path", "input", "output"}:
         return "file"
-    if key in {"file", "folder", "text", "number"}:
+    if key in {"number", "float", "double"}:
+        return "float"
+    if key in {"int", "integer"}:
+        return "integer"
+    if key in {"file", "folder", "text", "integer", "float"}:
         return key
     return "text"
+
+
+def is_numeric_var_mode(mode: str) -> bool:
+    return normalize_var_mode(mode) in {"integer", "float"}
 
 
 def is_path_var_mode(mode: str) -> bool:
@@ -207,7 +218,7 @@ def plugin_id_from_label(label: str) -> str:
 @dataclass
 class CommandVarDef:
     name: str
-    mode: str  # file|folder|text|number
+    mode: str  # file|folder|text|integer|float
     value: str = ""
 
 
@@ -221,12 +232,14 @@ class UserCommandPluginSpec:
     fasta_only: bool = True
     tooltip: str = ""
     show_on_toolbar: bool = False
+    input_vars: list[str] | None = None
 
     def to_json(self) -> dict:
         return {
             "id": self.id,
             "label": self.label,
             "command_template": self.command_template,
+            "input_vars": list(self.input_vars or []),
             "output_vars": list(self.output_vars),
             "var_defs": [
                 {
@@ -263,6 +276,11 @@ class UserCommandPluginSpec:
             id=plugin_id,
             label=label,
             command_template=str(raw.get("command_template", "")),
+            input_vars=[
+                normalize_var_name(str(v).strip())
+                for v in raw.get("input_vars", [])
+                if normalize_var_name(str(v).strip())
+            ],
             output_vars=[
                 normalize_var_name(str(v).strip())
                 for v in raw.get("output_vars", [])
@@ -273,6 +291,15 @@ class UserCommandPluginSpec:
             tooltip=str(raw.get("tooltip", "")).strip(),
             show_on_toolbar=bool(raw.get("show_on_toolbar", False)),
         )
+
+    def is_workflow_ready(self) -> bool:
+        """True when this wrapper can be chained as a workflow step."""
+        has_output = bool(self.output_vars)
+        has_input = bool(self.input_vars)
+        if not has_input:
+            names = set(template_variables(self.command_template))
+            has_input = bool(names & {"RV_INPUT", "RV_INPUTS"})
+        return has_input and has_output
 
 
 def template_variables(template: str) -> list[str]:
@@ -581,6 +608,15 @@ class UserCommandPlugin(RepeatViewerPlugin):
         selected_files = [
             Path(p) for p in (job_options.get("selected_files") or []) if str(p).strip()
         ]
+        if not selected_files and anchor.is_file():
+            selected_files = [anchor]
+        # Workflow / batch: map the step FASTA onto declared input variables.
+        if anchor.is_file():
+            for name in self.spec.input_vars or []:
+                if not str(runtime_values.get(name, "")).strip():
+                    runtime_values[name] = str(anchor)
+            if not str(runtime_values.get("RV_INPUT", "")).strip():
+                runtime_values["RV_INPUT"] = str(anchor)
         genome_raw = job_options.get("genome_file") or (
             str(project.genome_file) if project.genome_file else ""
         )
@@ -759,7 +795,7 @@ def build_command_context(
             if not str(raw_value).strip():
                 continue
             raw_value = str(raw_value)
-            if normalize_var_mode(defn.mode) == "number":
+            if is_numeric_var_mode(defn.mode):
                 context[name] = raw_value
                 changed = True
                 continue
@@ -1080,7 +1116,37 @@ class _TextInputRow(QWidget):
         return self._edit.text().strip()
 
 
-class _NumberInputRow(QWidget):
+class _IntegerInputRow(QWidget):
+    activated = Signal(object)
+
+    def __init__(self, *, initial: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._spin = QSpinBox(self)
+        self._spin.setRange(-2_147_483_648, 2_147_483_647)
+        self._spin.setSingleStep(1)
+        if initial:
+            try:
+                self._spin.setValue(int(float(initial)))
+            except ValueError:
+                pass
+        self._spin.installEventFilter(self)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self._spin, 1)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.FocusIn and obj is self._spin:
+            self.activated.emit(self)
+        return super().eventFilter(obj, event)
+
+    def focus_field(self) -> None:
+        self._spin.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def value(self) -> str:
+        return str(self._spin.value())
+
+
+class _FloatInputRow(QWidget):
     activated = Signal(object)
 
     def __init__(self, *, initial: str = "", parent: QWidget | None = None) -> None:
@@ -1108,7 +1174,8 @@ class _NumberInputRow(QWidget):
         self._spin.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def value(self) -> str:
-        return str(self._spin.value())
+        text = f"{self._spin.value():.6f}".rstrip("0").rstrip(".")
+        return text or "0"
 
 
 class UserCommandRunDialog(QDialog):
@@ -1196,8 +1263,10 @@ class UserCommandRunDialog(QDialog):
             self._default_templates[name] = template
             initial = self._expand_default(template, mode)
             self._auto_defaults[name] = initial
-            if mode == "number":
-                row = _NumberInputRow(initial=initial or defn.value, parent=self)
+            if mode == "integer":
+                row = _IntegerInputRow(initial=initial or defn.value, parent=self)
+            elif mode == "float":
+                row = _FloatInputRow(initial=initial or defn.value, parent=self)
             elif mode == "folder":
                 row = _FolderInputRow(initial=initial, parent=self)
                 row.activated.connect(self._on_path_row_activated)
