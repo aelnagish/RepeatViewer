@@ -405,6 +405,7 @@ def run_fastga_alignment(
             cmd.append(str(source2))
 
         from repeatviewer.conda_tools import prepare_command
+        from repeatviewer.external_process import windows_hidden_process_kwargs
 
         launch_cmd = prepare_command(cmd)
 
@@ -437,6 +438,7 @@ def run_fastga_alignment(
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=str(source1.parent),
+                **windows_hidden_process_kwargs(),
             )
             process_started = time.monotonic()
             process_logger.info("START tool=FastGA pid=%s", proc.pid)
@@ -544,6 +546,7 @@ def run_fastga_self_dotplot(
 
         try:
             from repeatviewer.conda_tools import prepare_command
+            from repeatviewer.external_process import windows_hidden_process_kwargs
 
             launch_cmd = prepare_command(cmd)
             log_command("FastGA", launch_cmd, inputs=[fasta], cwd=fasta.parent)
@@ -553,6 +556,7 @@ def run_fastga_self_dotplot(
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=str(fasta.parent),
+                **windows_hidden_process_kwargs(),
             )
             process_started = time.monotonic()
             process_logger.info("START tool=FastGA pid=%s", proc.pid)

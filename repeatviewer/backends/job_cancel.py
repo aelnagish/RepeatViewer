@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-from repeatviewer.external_process import log_command
+from repeatviewer.external_process import log_command, windows_hidden_process_kwargs
 
 process_logger = logging.getLogger("repeatviewer.commands")
 
@@ -115,6 +115,7 @@ def run_subprocess_with_cancel(
         stderr=subprocess.PIPE,
         text=True,
         env=env,
+        **windows_hidden_process_kwargs(),
     )
     started = time.monotonic()
     process_logger.info("START tool=%s pid=%s", tool, proc.pid)

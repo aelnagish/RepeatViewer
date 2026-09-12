@@ -87,6 +87,8 @@ def _wsl_run(
     *,
     timeout: float = 20,
 ) -> subprocess.CompletedProcess[str]:
+    from repeatviewer.external_process import windows_hidden_process_kwargs
+
     return subprocess.run(
         _wsl_bash_argv(linux_command),
         capture_output=True,
@@ -95,6 +97,7 @@ def _wsl_run(
         check=False,
         encoding="utf-8",
         errors="replace",
+        **windows_hidden_process_kwargs(),
     )
 
 
@@ -164,12 +167,15 @@ def _candidate_conda_roots() -> list[Path]:
 
     if conda_exe:
         try:
+            from repeatviewer.external_process import windows_hidden_process_kwargs
+
             result = subprocess.run(
                 [conda_exe, "info", "--base"],
                 capture_output=True,
                 text=True,
                 timeout=8,
                 check=False,
+                **windows_hidden_process_kwargs(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 add(Path(result.stdout.strip()))
@@ -420,6 +426,8 @@ def _to_wsl_path(value: str) -> str:
     # Last resort: wslpath with -e so backslashes survive argv.
     posixish = value.replace("\\", "/")
     try:
+        from repeatviewer.external_process import windows_hidden_process_kwargs
+
         result = subprocess.run(
             ["wsl", "-e", "wslpath", "-a", "-u", posixish],
             capture_output=True,
@@ -428,6 +436,7 @@ def _to_wsl_path(value: str) -> str:
             check=False,
             encoding="utf-8",
             errors="replace",
+            **windows_hidden_process_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
         return value

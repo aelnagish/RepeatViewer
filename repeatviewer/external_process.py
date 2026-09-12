@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -14,6 +15,23 @@ from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger("repeatviewer.commands")
+
+# Packed Windows builds use console=False (no parent console). Child console
+# tools such as blastn.exe / mafft.exe / wsl.exe then flash a new cmd window.
+# Unpacked `python` already has a console, so children inherit it and no extra
+# window appears. CREATE_NO_WINDOW keeps both cases quiet.
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+
+def windows_hidden_process_kwargs() -> dict:
+    """Kwargs so Windows GUI/frozen launches do not flash a console."""
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    return {"startupinfo": startupinfo, "creationflags": _CREATE_NO_WINDOW}
+
 
 _ProcessLogCallback = Callable[[str], None]
 _process_log_sink: contextvars.ContextVar[_ProcessLogCallback | None] = contextvars.ContextVar(
@@ -139,6 +157,7 @@ def run_logged_process(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            **windows_hidden_process_kwargs(),
         )
     except OSError:
         logger.exception("LAUNCH FAILED tool=%s", tool)
