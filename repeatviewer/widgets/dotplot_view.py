@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -401,6 +401,13 @@ class DotplotCanvas(QGraphicsView):
         self._title = ""
         self._top_ruler = _Ruler(self, horizontal=True)
         self._left_ruler = _Ruler(self, horizontal=False)
+        # The viewport margins leave a hole at (0,0)–(_RULER_LEFT,_RULER_TOP)
+        # that neither ruler covers; fill it with the same grey as the scales.
+        self._ruler_corner = QWidget(self)
+        self._ruler_corner.setAutoFillBackground(True)
+        corner_pal = self._ruler_corner.palette()
+        corner_pal.setColor(QPalette.ColorRole.Window, _RULER_BG)
+        self._ruler_corner.setPalette(corner_pal)
         # Repaint the rulers whenever the view scrolls, so ticks track the plot.
         self.horizontalScrollBar().valueChanged.connect(self._refresh_rulers)
         self.verticalScrollBar().valueChanged.connect(self._refresh_rulers)
@@ -452,8 +459,13 @@ class DotplotCanvas(QGraphicsView):
 
     def _position_rulers(self) -> None:
         vp = self.viewport().geometry()
+        # Only the top-left margin corner — plot stays white.
+        self._ruler_corner.setGeometry(0, 0, max(vp.x(), 1), max(vp.y(), 1))
+        self._ruler_corner.raise_()
         self._top_ruler.setGeometry(vp.x(), 0, vp.width(), _RULER_TOP)
         self._left_ruler.setGeometry(0, vp.y(), _RULER_LEFT, vp.height())
+        self._top_ruler.raise_()
+        self._left_ruler.raise_()
 
     # ------------------------------------------------------------------
     # content
