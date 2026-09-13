@@ -77,7 +77,10 @@ def paint_folder_indent_guides(
     content_left: int,
     chevron_center_x: int | None = None,
 ) -> None:
-    """Draw vertical indent guides centered on folder chevrons (no horizontals)."""
+    """Draw vertical indent guides centered on folder chevrons.
+
+    The last child at any level gets a short horizontal end-cap (└).
+    """
     depth = _index_depth(index)
     if depth <= 0:
         return
@@ -104,8 +107,13 @@ def paint_folder_indent_guides(
         innermost = column == depth - 1
 
         if innermost:
-            # Full-height stem under the parent chevron (no horizontal stub).
-            painter.drawLine(x, top, x, bottom)
+            if last:
+                mid = (top + bottom) // 2
+                painter.drawLine(x, top, x, mid)
+                stub = max(6, min(indent // 2, 10))
+                painter.drawLine(x, mid, x + stub, mid)
+            else:
+                painter.drawLine(x, top, x, bottom)
         elif not last:
             # Keep the stem only while that ancestor still has siblings below.
             painter.drawLine(x, top, x, bottom)

@@ -41,6 +41,7 @@ from PySide6.QtGui import (
     QPainter,
     QPalette,
     QShortcut,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -1123,6 +1124,9 @@ class FolderTreeWidget(QTreeWidget):
         self.setDropIndicatorShown(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.horizontalScrollBar().setSingleStep(12)
+        self.verticalScrollBar().setSingleStep(12)
         self.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.setWordWrap(False)
         self.setUniformRowHeights(False)
@@ -1146,6 +1150,38 @@ class FolderTreeWidget(QTreeWidget):
         self.itemCollapsed.connect(lambda *_: self.refresh_horizontal_extent())
         self._suppress_current_changed = False
         self._active_folder_key: str | None = None
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        """Scroll the folder tree more slowly than Qt's default trackpad/wheel speed."""
+        # Keep horizontal and vertical motion; Shift+vertical becomes horizontal.
+        pixel = event.pixelDelta()
+        angle = event.angleDelta()
+        if pixel.manhattanLength() > 0:
+            dx, dy = float(pixel.x()), float(pixel.y())
+        else:
+            # angleDelta is 1/8 degree units; 120 ≈ one notch.
+            dx, dy = float(angle.x()) / 8.0, float(angle.y()) / 8.0
+        if (
+            event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            and abs(dx) < 0.5
+            and abs(dy) >= 0.5
+        ):
+            dx, dy = dy, 0.0
+
+        scale = 0.35
+        moved = False
+        if abs(dx) >= 0.5:
+            hbar = self.horizontalScrollBar()
+            hbar.setValue(hbar.value() - int(round(dx * scale)))
+            moved = True
+        if abs(dy) >= 0.5:
+            vbar = self.verticalScrollBar()
+            vbar.setValue(vbar.value() - int(round(dy * scale)))
+            moved = True
+        if moved:
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def refresh_horizontal_extent(self) -> None:
         """Widen column to fit visible labels; keep at least the viewport width."""
