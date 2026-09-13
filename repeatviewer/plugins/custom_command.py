@@ -10,7 +10,7 @@ from repeatviewer.external_process import run_logged_process
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QEventLoop, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QEventLoop, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -986,7 +987,7 @@ class _FileInputRow(QWidget):
         super().__init__(parent)
         self._allow_multiple = allow_multiple
         self._edit = QLineEdit(initial, self)
-        self._browse = QPushButton("Browse…", self)
+        self._browse = QPushButton("Browse", self)
         self._browse.clicked.connect(self._pick_path)
         self._edit.installEventFilter(self)
         self._edit.textChanged.connect(self.path_changed.emit)
@@ -1048,7 +1049,7 @@ class _FolderInputRow(QWidget):
     def __init__(self, *, initial: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._edit = QLineEdit(initial, self)
-        self._browse = QPushButton("Browse…", self)
+        self._browse = QPushButton("Browse", self)
         self._browse.clicked.connect(self._pick_path)
         self._edit.installEventFilter(self)
         self._edit.textChanged.connect(self.path_changed.emit)
@@ -1181,6 +1182,8 @@ class _FloatInputRow(QWidget):
 class UserCommandRunDialog(QDialog):
     """Runtime parameter dialog for a user-designed command wrapper."""
 
+    _DEFAULT_WIDTH = 820
+
     def __init__(
         self,
         spec: UserCommandPluginSpec,
@@ -1193,7 +1196,7 @@ class UserCommandRunDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(spec.label)
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(640)
         self._active_path_row: _FileInputRow | _FolderInputRow | None = None
         self._rows: dict[str, QWidget] = {}
         self._modes: dict[str, str] = {}
@@ -1213,18 +1216,23 @@ class UserCommandRunDialog(QDialog):
         title_font.setBold(True)
         title_font.setPointSize(title_font.pointSize() + 1)
         title.setFont(title_font)
+        title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         self._command_template = spec.command_template.strip()
         self._command_box = QTextEdit(self)
         self._command_box.setReadOnly(True)
         self._command_box.setPlainText(self._command_template)
-        self._command_box.setFixedHeight(
-            max(72, 24 * max(1, len(command_template_lines(self._command_template))))
+        line_count = max(1, len(command_template_lines(self._command_template)))
+        self._command_box.setFixedHeight(max(40, 8 + 18 * line_count))
+        self._command_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._command_box.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self._command_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setVerticalSpacing(6)
         vars_in_cmd = template_variables(spec.command_template)
         affixed_in_cmd = template_affixed_variables(spec.command_template)
         if not vars_in_cmd and not affixed_in_cmd:
@@ -1302,15 +1310,36 @@ class UserCommandRunDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addWidget(title)
-        if spec.tooltip:
-            desc = QLabel(spec.tooltip)
+        layout.setSpacing(8)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.addWidget(title, 0)
+        if spec.tooltip.strip():
+            desc = QLabel(spec.tooltip.strip())
             desc.setWordWrap(True)
-            layout.addWidget(desc)
-        layout.addWidget(QLabel("Command:", self))
-        layout.addWidget(self._command_box)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+            desc.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+            layout.addWidget(desc, 0)
+        layout.addWidget(QLabel("Command:", self), 0)
+        layout.addWidget(self._command_box, 0)
+        layout.addLayout(form, 0)
+        layout.addWidget(buttons, 0)
+        self._fit_to_content()
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        hint = super().sizeHint()
+        return QSize(max(hint.width(), self._DEFAULT_WIDTH), hint.height())
+
+    def _fit_to_content(self) -> None:
+        """Keep preferred width; shrink height to the laid-out content."""
+        lay = self.layout()
+        if lay is None:
+            return
+        # Lay out at the target width first so wrapped labels don't keep a
+        # tall height computed for a narrower window.
+        self.resize(self._DEFAULT_WIDTH, 80)
+        lay.activate()
+        margins = self.contentsMargins()
+        height = lay.sizeHint().height() + margins.top() + margins.bottom()
+        self.resize(self._DEFAULT_WIDTH, max(height, self.minimumSizeHint().height()))
 
     def _add_affixed_row(
         self,
@@ -1348,6 +1377,7 @@ class UserCommandRunDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        QTimer.singleShot(0, self._fit_to_content)
         QTimer.singleShot(0, self._focus_first_field)
 
     def _focus_first_field(self) -> None:
