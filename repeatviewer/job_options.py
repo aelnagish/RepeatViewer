@@ -643,14 +643,36 @@ MSA_CLEAN_RIGHT_CLICK_ACTIONS = (
 )
 
 MSA_CLEAN_METHOD_DESCRIPTIONS: dict[str, str] = {
-    "msa_clean_gappy": "Remove columns that are mostly gaps (uses the gappy-column parameters below).",
+    "msa_clean_gappy": (
+        "Remove gappy columns: if a single column in the multiple sequence "
+        "alignment has a gap proportion larger than the gap threshold and the "
+        "proportion of the most common nucleotide in this column is less than "
+        "the similarity threshold, this column will be removed.\n\n"
+        "Example: if a column has less than 40% gaps (similarity-check gap "
+        "threshold) and the portion of T (or any other nucleotide) is greater "
+        "than 70% (similarity threshold), this column will be kept.\n\n"
+        "Columns with gap proportion above the gap threshold are removed "
+        "directly. Columns with fewer than the minimum nucleotides are also "
+        "removed."
+    ),
     "msa_clean_div": (
-        "Trim alignment ends where rows diverge from the consensus "
-        "(uses the clean row with divergence parameters below)."
+        "Clean rows with divergence converts each nucleotide in the multiple "
+        "sequence alignment into a proportion value. It iteratively chooses a "
+        "sliding window from each end of each sequence of the MSA and sums the "
+        "proportion numbers in this window. Cropping continues until the sum of "
+        "proportions is larger than the divergence threshold. Cropped "
+        "nucleotides are converted to '-'.\n\n"
+        "Window size (bp) is the sliding window used for this end-cropping "
+        "process."
     ),
     "msa_clean_gap": (
-        "Trim alignment ends where rows are mostly gaps "
-        "(uses the clean row with gap parameters below)."
+        "Clean rows with gaps iteratively chooses a sliding window from each "
+        "end of each sequence of the MSA and calculates the gap proportion in "
+        "this window. Cropping continues until the gap proportion is smaller "
+        "than the gap proportion threshold. Cropped nucleotides are converted "
+        "to '-'.\n\n"
+        "Window size (bp) is the sliding window used for this end-cropping "
+        "process."
     ),
 }
 

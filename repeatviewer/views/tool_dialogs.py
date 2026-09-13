@@ -228,6 +228,7 @@ from repeatviewer.job_options import (
     MSA_CLEAN_RIGHT_CLICK_DIV,
     MSA_CLEAN_RIGHT_CLICK_GAP,
     MSA_CLEAN_RIGHT_CLICK_DIALOG,
+    msa_clean_method_description,
     DEFAULT_TEAID_EVALUE,
     DEFAULT_TEAID_X_AXIS_LABEL,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
@@ -4255,49 +4256,55 @@ class MsaCleanParamsDialog(QDialog):
             "Check steps to include in Combined MSA clean. Drag to set execution order."
         )
         for method_id in opts.method_order:
-            item = QListWidgetItem(self._method_labels[method_id])
-            item.setData(Qt.ItemDataRole.UserRole, method_id)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDragEnabled
+            self._add_method_list_item(
+                method_id,
+                checked=enabled_methods.get(method_id, False),
             )
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if enabled_methods.get(method_id, False)
-                else Qt.CheckState.Unchecked
-            )
-            self._method_order.addItem(item)
         # Ensure every known method appears (in case order was incomplete).
-        listed = {str(self._method_order.item(i).data(Qt.ItemDataRole.UserRole))
-                  for i in range(self._method_order.count())}
+        listed = {
+            str(self._method_order.item(i).data(Qt.ItemDataRole.UserRole))
+            for i in range(self._method_order.count())
+        }
         for method_id in DEFAULT_MSA_CLEAN_ORDER:
             if method_id in listed:
                 continue
-            item = QListWidgetItem(self._method_labels[method_id])
-            item.setData(Qt.ItemDataRole.UserRole, method_id)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDragEnabled
+            self._add_method_list_item(
+                method_id,
+                checked=enabled_methods.get(method_id, False),
             )
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if enabled_methods.get(method_id, False)
-                else Qt.CheckState.Unchecked
-            )
-            self._method_order.addItem(item)
         self._method_order.itemChanged.connect(self._on_method_item_changed)
         self._fit_method_list_height()
 
-        combined_box = QGroupBox("Combined MSA clean", self)
+        combined_help = (
+            "Combined MSA clean runs the checked cleaning steps in list order "
+            "on the selected alignment.\n\n"
+            "How to use it:\n"
+            "• Check a step to include it in the pipeline.\n"
+            "• Uncheck a step to skip it.\n"
+            "• Drag steps up or down to change the order they run.\n"
+            "• At least one step must stay checked.\n\n"
+            "Each step uses the parameters in its section below. "
+            "Use the ? next to a step title for details on that method."
+        )
+        combined_box = QGroupBox(self)
         combined_layout = QVBoxLayout(combined_box)
         combined_layout.setContentsMargins(10, 8, 10, 8)
         combined_layout.setSpacing(6)
+        combined_header = QWidget(combined_box)
+        combined_header_layout = QHBoxLayout(combined_header)
+        combined_header_layout.setContentsMargins(0, 0, 0, 0)
+        combined_header_layout.setSpacing(6)
+        combined_title = QLabel("Combined MSA clean", combined_header)
+        title_font = combined_title.font()
+        title_font.setBold(True)
+        combined_title.setFont(title_font)
+        combined_header_layout.addWidget(combined_title, 1)
+        combined_header_layout.addWidget(
+            self._msa_help_button("Combined MSA clean", combined_help),
+            0,
+            Qt.AlignmentFlag.AlignRight,
+        )
+        combined_layout.addWidget(combined_header)
         hint = QLabel("Check steps to include. Drag to set order.", combined_box)
         hint.setWordWrap(True)
         combined_layout.addWidget(hint)
@@ -4305,7 +4312,7 @@ class MsaCleanParamsDialog(QDialog):
 
         spin_width = 90
 
-        div_box = QGroupBox("Clean rows with divergence")
+        div_box = QGroupBox(self)
         self._div_threshold = QDoubleSpinBox()
         self._div_threshold.setRange(0.0, 1.0)
         self._div_threshold.setDecimals(2)
@@ -4324,9 +4331,11 @@ class MsaCleanParamsDialog(QDialog):
                 ("Divergence threshold:", self._div_threshold),
                 ("Window size (bp):", self._div_window),
             ],
+            heading="Clean rows with divergence",
+            help_text=msa_clean_method_description("msa_clean_div"),
         )
 
-        gap_box = QGroupBox("Clean rows with gaps")
+        gap_box = QGroupBox(self)
         self._row_gap_threshold = QDoubleSpinBox()
         self._row_gap_threshold.setRange(0.0, 1.0)
         self._row_gap_threshold.setDecimals(3)
@@ -4345,9 +4354,11 @@ class MsaCleanParamsDialog(QDialog):
                 ("Gap proportion threshold:", self._row_gap_threshold),
                 ("Window size (bp):", self._row_gap_window),
             ],
+            heading="Clean rows with gaps",
+            help_text=msa_clean_method_description("msa_clean_gap"),
         )
 
-        gappy_box = QGroupBox("Remove gappy columns")
+        gappy_box = QGroupBox(self)
         self._gap_threshold = QDoubleSpinBox()
         self._gap_threshold.setRange(0.0, 1.0)
         self._gap_threshold.setDecimals(2)
@@ -4382,6 +4393,8 @@ class MsaCleanParamsDialog(QDialog):
                 ("Similarity threshold:", self._similarity),
                 ("Min nucleotides per column:", self._min_nt),
             ],
+            heading="Remove gappy columns",
+            help_text=msa_clean_method_description("msa_clean_gappy"),
         )
 
         self._right_click_group = QButtonGroup(self)
@@ -4496,7 +4509,56 @@ class MsaCleanParamsDialog(QDialog):
         return dialog_should_run(self)
 
     @staticmethod
-    def _fill_labeled_grid(box, rows) -> None:
+    def _msa_help_button_style() -> str:
+        return (
+            "QToolButton {"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 10px;"
+            "  background: palette(base);"
+            "  font-weight: 600;"
+            "  padding: 0px;"
+            "}"
+            "QToolButton:hover { background: palette(alternate-base); }"
+        )
+
+    def _msa_help_button(self, title: str, help_text: str) -> QToolButton:
+        button = QToolButton(self)
+        button.setText("?")
+        button.setToolTip(help_text)
+        button.setAutoRaise(False)
+        button.setFixedSize(22, 22)
+        button.setStyleSheet(self._msa_help_button_style())
+        button.clicked.connect(
+            lambda checked=False, t=title, text=help_text: QMessageBox.information(
+                self, t, text
+            )
+        )
+        return button
+
+    def _add_method_list_item(self, method_id: str, *, checked: bool) -> None:
+        label_text = self._method_labels[method_id]
+        item = QListWidgetItem(label_text)
+        item.setData(Qt.ItemDataRole.UserRole, method_id)
+        item.setFlags(
+            item.flags()
+            | Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsDragEnabled
+        )
+        item.setCheckState(
+            Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        )
+        self._method_order.addItem(item)
+
+    def _fill_labeled_grid(
+        self,
+        box,
+        rows,
+        *,
+        heading: str | None = None,
+        help_text: str = "",
+    ) -> None:
         """Lay out (label, widget) rows in a group box with a real label column.
 
         Uses an explicit QGridLayout rather than QFormLayout: the form's label
@@ -4504,7 +4566,28 @@ class MsaCleanParamsDialog(QDialog):
         stray character. A grid gives column 0 its natural width and stretches
         column 1, so every label is always fully visible.
         """
-        grid = QGridLayout(box)
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(8)
+        if heading:
+            header = QWidget(box)
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(0, 0, 0, 0)
+            header_layout.setSpacing(6)
+            title = QLabel(heading, header)
+            font = title.font()
+            font.setBold(True)
+            title.setFont(font)
+            header_layout.addWidget(title, 1)
+            if help_text:
+                header_layout.addWidget(
+                    self._msa_help_button(heading, help_text),
+                    0,
+                    Qt.AlignmentFlag.AlignRight,
+                )
+            outer.addWidget(header)
+
+        grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(8)
         grid.setColumnStretch(0, 0)
@@ -4518,6 +4601,7 @@ class MsaCleanParamsDialog(QDialog):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             )
             grid.addWidget(widget, row, 1)
+        outer.addLayout(grid)
 
     def _fit_method_list_height(self) -> None:
         """Keep the Combined list only as tall as its rows, with a little padding."""
@@ -4573,21 +4657,10 @@ class MsaCleanParamsDialog(QDialog):
         self._method_order.blockSignals(True)
         self._method_order.clear()
         for method_id in defaults.method_order:
-            item = QListWidgetItem(self._method_labels[method_id])
-            item.setData(Qt.ItemDataRole.UserRole, method_id)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDragEnabled
+            self._add_method_list_item(
+                method_id,
+                checked=enabled.get(method_id, False),
             )
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if enabled.get(method_id, False)
-                else Qt.CheckState.Unchecked
-            )
-            self._method_order.addItem(item)
         self._method_order.blockSignals(False)
         self._fit_method_list_height()
         self._right_click_buttons[MSA_CLEAN_RIGHT_CLICK_COMBINED].setChecked(True)

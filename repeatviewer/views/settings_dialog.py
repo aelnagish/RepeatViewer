@@ -1038,7 +1038,8 @@ class SettingsDialog(QDialog):
             self,
             "Restore defaults",
             "Reset all preferences to their defaults?\n\n"
-            "Your folders, genomes and files are not affected. "
+            "Your folders, genomes, files, workflows, and command wrappers "
+            "are not affected. "
             f"{APP_DISPLAY_NAME} must be restarted for this to take full effect.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
