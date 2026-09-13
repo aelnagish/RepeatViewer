@@ -1,4 +1,4 @@
-"""RepeatViewer plugin: run RepeatMasker on selected FASTA or the defined genome."""
+"""RepeatViewer plugin: run RepeatMasker on the defined/chosen genome."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ class RepeatMaskerPlugin(RepeatViewerPlugin):
     id = "repeatmasker"
     label = "RepeatMasker"
     tooltip = (
-        "Run RepeatMasker on selected FASTA (-lib or -species), "
-        "or mask the defined genome with the selected library"
+        "Mask a genome FASTA with RepeatMasker using the selected TE library (-lib) "
+        "or a -species / clade database"
     )
     fasta_only = True
     # One RM job can be heavy; keep sequential by default.
@@ -31,7 +31,11 @@ class RepeatMaskerPlugin(RepeatViewerPlugin):
         files: list[Path],
         project: RepeatViewerProject,
     ) -> bool:
-        dialog = RepeatMaskerParamsDialog(parent)
+        dialog = RepeatMaskerParamsDialog(
+            parent,
+            selected_files=files,
+            genome_file=project.genome_file,
+        )
         if dialog.exec() != dialog.DialogCode.Accepted:
             return False
         self._job_options = dialog.options()
@@ -43,7 +47,7 @@ class RepeatMaskerPlugin(RepeatViewerPlugin):
         project: RepeatViewerProject,
     ) -> str | None:
         if not files:
-            return "Select at least one FASTA file."
+            return "Select at least one TE library FASTA file."
         if not repeatmasker_executable_available():
             return (
                 "RepeatMasker is not on PATH. Install it "
@@ -51,11 +55,12 @@ class RepeatMaskerPlugin(RepeatViewerPlugin):
                 "File → Setting → External tools."
             )
         opts = getattr(self, "_job_options", {}) or {}
-        if opts.get("target") == "genome":
-            if not project.genome_file or not project.genome_file.is_file():
-                return "Define a genome FASTA first (File → Define genome)."
-            if len(files) != 1:
-                return "Select exactly one library FASTA when masking the defined genome."
+        genome_raw = str(opts.get("genome_fasta") or "").strip()
+        genome = Path(genome_raw).expanduser() if genome_raw else project.genome_file
+        if genome is None or not Path(genome).is_file():
+            return "Choose a genome FASTA in the RepeatMasker dialog (or File → Define genome)."
+        if opts.get("library_mode", "lib") == "lib" and len(files) < 1:
+            return "Select a TE library FASTA for -lib."
         return None
 
     def run(
@@ -64,22 +69,32 @@ class RepeatMaskerPlugin(RepeatViewerPlugin):
         project: RepeatViewerProject,
         **job_options,
     ) -> list[str]:
+        cancel = job_options.pop("cancel", None)
         opts = dict(job_options)
-        path = file_path.expanduser().resolve()
+        lib_path = file_path.expanduser().resolve()
 
-        if opts.get("target") == "genome":
-            genome = project.genome_file
-            if genome is None or not genome.is_file():
-                raise RuntimeError("Defined genome FASTA is missing.")
-            run_opts = dict(opts)
-            run_opts["library_mode"] = "lib"
-            run_opts["library_fasta"] = str(path)
-            out_dir = path.parent / f"{path.stem}_vs_{genome.stem}_RepeatMasker"
-            return run_repeatmasker_on_query(
-                genome.expanduser().resolve(),
-                options=run_opts,
-                output_dir=out_dir,
-            )
+        genome_raw = str(opts.get("genome_fasta") or "").strip()
+        if genome_raw:
+            genome = Path(genome_raw).expanduser().resolve()
+        elif project.genome_file is not None:
+            genome = project.genome_file.expanduser().resolve()
+        else:
+            raise RuntimeError("Genome FASTA is missing.")
+        if not genome.is_file():
+            raise RuntimeError(f"Genome FASTA not found: {genome}")
 
-        out_dir = path.parent / f"{path.stem}_RepeatMasker"
-        return run_repeatmasker_on_query(path, options=opts, output_dir=out_dir)
+        run_opts = dict(opts)
+        run_opts["target"] = "genome"
+        if run_opts.get("library_mode", "lib") == "lib":
+            # Selected panel file is always the -lib TE library.
+            run_opts["library_fasta"] = str(lib_path)
+            out_dir = lib_path.parent / f"{lib_path.stem}_vs_{genome.stem}_RepeatMasker"
+        else:
+            out_dir = genome.parent / f"{genome.stem}_RepeatMasker"
+
+        return run_repeatmasker_on_query(
+            genome,
+            options=run_opts,
+            output_dir=out_dir,
+            cancel=cancel,
+        )

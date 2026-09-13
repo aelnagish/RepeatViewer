@@ -56,6 +56,7 @@ class PluginRegistry:
         progress_cb: ProgressCallback,
         *,
         max_workers: int = 4,
+        cancel=None,
     ) -> dict:
         plugin = self._plugins.get(plugin_id)
         if plugin is None:
@@ -65,6 +66,7 @@ class PluginRegistry:
             project,
             progress_cb,
             max_workers=max_workers,
+            cancel=cancel,
         ).as_dict()
 
 

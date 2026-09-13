@@ -5,9 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from repeatviewer.backends.job_cancel import (
+    JobCancellation,
+    JobCancelledError,
+    run_subprocess_with_cancel,
+)
 from repeatviewer.backends.repeat_quantify import _sanitize_fasta_ids
 from repeatviewer.backends.te_library_benchmark import repeatmasker_executable
-from repeatviewer.external_process import run_logged_process
 
 
 def build_repeatmasker_cmd(
@@ -82,6 +86,7 @@ def run_repeatmasker_on_query(
     *,
     options: dict[str, Any],
     output_dir: Path | None = None,
+    cancel: JobCancellation | None = None,
 ) -> list[str]:
     """Run RepeatMasker on one query FASTA; return created artifact paths."""
     exe = repeatmasker_executable()
@@ -119,14 +124,15 @@ def run_repeatmasker_on_query(
         output_dir=work,
         options=run_opts,
     )
-    proc = run_logged_process(
-        cmd,
-        tool="RepeatMasker",
-        inputs=[short_query],
-        cwd=work,
-        check=False,
-        output_path=work,
-    )
+    try:
+        proc = run_subprocess_with_cancel(
+            cmd,
+            cancel=cancel,
+            cwd=work,
+            check=False,
+        )
+    except JobCancelledError:
+        raise
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         low = detail.lower()

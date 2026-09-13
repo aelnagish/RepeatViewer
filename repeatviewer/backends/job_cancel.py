@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-import subprocess
 import logging
+import os
+import signal
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -69,10 +72,18 @@ def check_cancelled(cancel: JobCancellation | None) -> None:
 
 
 def terminate_process(proc: subprocess.Popen, *, wait_s: float = 3.0) -> None:
+    """Stop a subprocess, including child workers when started in a new session."""
     if proc.poll() is not None:
         return
     try:
-        proc.terminate()
+        if sys.platform != "win32":
+            # RepeatMasker -pa and similar tools spawn children; kill the group.
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.terminate()
+        else:
+            proc.terminate()
     except OSError:
         pass
     deadline = time.monotonic() + wait_s
@@ -80,7 +91,13 @@ def terminate_process(proc: subprocess.Popen, *, wait_s: float = 3.0) -> None:
         time.sleep(0.05)
     if proc.poll() is None:
         try:
-            proc.kill()
+            if sys.platform != "win32":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.kill()
+            else:
+                proc.kill()
         except OSError:
             pass
         try:
@@ -94,6 +111,7 @@ def run_subprocess_with_cancel(
     *,
     cancel: JobCancellation | None = None,
     env: dict[str, str] | None = None,
+    cwd: str | os.PathLike[str] | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess, polling for user cancellation and terminating it on stop."""
@@ -108,14 +126,19 @@ def run_subprocess_with_cancel(
     from repeatviewer.external_process import current_process_log_sink, emit_process_log
 
     sink = current_process_log_sink()
-    log_command(tool, command)
+    log_command(tool, command, cwd=cwd)
+    popen_kwargs = dict(windows_hidden_process_kwargs())
+    if sys.platform != "win32":
+        # Own process group so Stop can kill RepeatMasker workers (-pa), etc.
+        popen_kwargs["start_new_session"] = True
     proc = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         env=env,
-        **windows_hidden_process_kwargs(),
+        cwd=str(cwd) if cwd is not None else None,
+        **popen_kwargs,
     )
     started = time.monotonic()
     process_logger.info("START tool=%s pid=%s", tool, proc.pid)

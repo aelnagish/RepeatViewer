@@ -385,9 +385,9 @@ from repeatviewer.views.tool_dialogs import (
     TeLibraryBenchmarkDialog,
     CommandPluginDesignerDialog,
     WrapperManageDialog,
-    PluginManageDialog,
     exec_modal_dialog,
 )
+from repeatviewer.views.plugin_manage_dialog import InstalledPluginManageDialog
 from repeatviewer.backends.separate_fasta import (
     count_fasta_sequences,
     sanitize_name,
@@ -8741,13 +8741,11 @@ class MainWindow(QMainWindow):
                 if answer != QMessageBox.StandardButton.Yes:
                     return
             func_name = f"plugin:{plugin_id}"
-            self._start_background_job(
-                FunctionWorker(self._run_plugin_job, func_name, files, {}),
-                job_title=func_name,
-                total_steps=self._job_total_steps(func_name, files, {}),
+            self._start_plugin_background_job(
+                plugin,
+                func_name=func_name,
+                files=files,
                 source_files=self._plugin_job_source_files(plugin, work_dir),
-                on_finished=self._on_worker_finished,
-                on_failed=self._on_worker_failed,
             )
             return
         selected = preselected or self._selected_files()
@@ -8794,11 +8792,42 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, plugin.label, error)
             return
         func_name = f"plugin:{plugin_id}"
+        self._start_plugin_background_job(
+            plugin,
+            func_name=func_name,
+            files=files,
+            source_files=files,
+        )
+
+    def _start_plugin_background_job(
+        self,
+        plugin,
+        *,
+        func_name: str,
+        files: list[Path],
+        source_files: list[Path],
+    ) -> None:
+        job_options = getattr(plugin, "_job_options", {}) or {}
+        show_log = bool(job_options.get("show_process_window", False))
+        worker = FunctionWorker(
+            self._run_plugin_job,
+            func_name,
+            files,
+            {},
+            stream_log=show_log,
+        )
+        self._attach_process_monitor(
+            worker,
+            title=plugin.label,
+            enabled=show_log,
+            tool_key=f"plugin_{getattr(plugin, 'id', 'tool')}",
+            mirror_progress=True,
+        )
         self._start_background_job(
-            FunctionWorker(self._run_plugin_job, func_name, files, {}),
+            worker,
             job_title=func_name,
             total_steps=self._job_total_steps(func_name, files, {}),
-            source_files=files,
+            source_files=source_files,
             on_finished=self._on_worker_finished,
             on_failed=self._on_worker_failed,
         )
@@ -8852,9 +8881,11 @@ class MainWindow(QMainWindow):
     def _rebuild_others_menu(self) -> None:
         def _fill(menu: QMenu) -> None:
             menu.clear()
-            plugin_menu = menu.addMenu("Plugin")
+            plugin_menu = menu.addMenu("Plugin (Beta)")
             wrapper_menu = menu.addMenu("Command wrapper")
 
+            plugin_menu.addAction("Manage plugin", self._open_plugin_manager)
+            plugin_menu.addSeparator()
             installed = [
                 plugin
                 for plugin in self._plugin_registry.all_plugins()
@@ -9141,8 +9172,20 @@ class MainWindow(QMainWindow):
         exec_modal_dialog(dialog)
 
     def _open_plugin_manager(self) -> None:
-        # Legacy name — command wrappers are managed here.
-        self._open_wrapper_manager()
+        dialog = InstalledPluginManageDialog(
+            parent=self,
+            on_changed=self._reload_entry_point_plugins,
+        )
+        exec_modal_dialog(dialog)
+
+    def _reload_entry_point_plugins(self) -> None:
+        from repeatviewer.plugins.loader import reload_plugins
+        from repeatviewer.views.toolbar_dialog import load_toolbar_order
+
+        self._plugin_registry = reload_plugins()
+        self._toolbar_order = load_toolbar_order(self._plugin_registry)
+        QTimer.singleShot(0, self._rebuild_others_menu)
+        QTimer.singleShot(0, self._rebuild_top_toolbar)
 
     def _open_command_plugin_designer(self) -> None:
         if self._command_plugin_dialog is not None and self._command_plugin_dialog.isVisible():
@@ -9225,6 +9268,7 @@ class MainWindow(QMainWindow):
             self._project,
             progress_cb,
             max_workers=self._project.batch_workers,
+            cancel=self._job_cancel,
         )
 
     def _run_function_job(
