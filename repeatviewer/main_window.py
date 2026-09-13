@@ -1122,7 +1122,9 @@ class FolderTreeWidget(QTreeWidget):
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.setWordWrap(False)
         self.setUniformRowHeights(False)
         self.setAnimated(False)
         self.setIconSize(QSize(_BROWSER_ICON_SIZE, _BROWSER_ICON_SIZE))
@@ -1134,12 +1136,27 @@ class FolderTreeWidget(QTreeWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         header = self.header()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        # Size the column to content so deep/long names can scroll horizontally
+        # instead of being clipped by a stretched viewport-width column.
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.setMinimumSectionSize(100)
         self.currentItemChanged.connect(self._on_folder_current_changed)
+        self.itemExpanded.connect(lambda *_: self.refresh_horizontal_extent())
+        self.itemCollapsed.connect(lambda *_: self.refresh_horizontal_extent())
         self._suppress_current_changed = False
         self._active_folder_key: str | None = None
+
+    def refresh_horizontal_extent(self) -> None:
+        """Widen column to fit visible labels; keep at least the viewport width."""
+        self.resizeColumnToContents(0)
+        viewport_w = self.viewport().width() if self.viewport() is not None else 0
+        if viewport_w > 0 and self.columnWidth(0) < viewport_w:
+            self.setColumnWidth(0, viewport_w)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.refresh_horizontal_extent()
 
     def drawBranches(self, painter: QPainter, rect: QRect, index) -> None:  # noqa: N802
         """Skip stock branch artwork; indent guides are painted by the item delegate."""
@@ -1234,6 +1251,7 @@ class FolderTreeWidget(QTreeWidget):
 
             for index in range(self.topLevelItemCount()):
                 reset(self.topLevelItem(index))
+            self.refresh_horizontal_extent()
             return
 
         def filter_item(item: QTreeWidgetItem) -> bool:
@@ -1253,6 +1271,7 @@ class FolderTreeWidget(QTreeWidget):
 
         for index in range(self.topLevelItemCount()):
             filter_item(self.topLevelItem(index))
+        self.refresh_horizontal_extent()
 
     def select_folder_item(self, item: QTreeWidgetItem) -> None:
         """Select exactly one folder row and make it current."""
@@ -8087,7 +8106,7 @@ class MainWindow(QMainWindow):
             index = self._folder_tree.indexOfTopLevelItem(item)
             if index >= 0:
                 self._folder_tree.takeTopLevelItem(index)
-        self._folder_tree.resizeColumnToContents(0)
+        self._folder_tree.refresh_horizontal_extent()
 
     def _replace_folder_path_in_tree(self, old: Path, new: Path) -> None:
         old_root = old.expanduser().resolve()
@@ -8111,7 +8130,7 @@ class MainWindow(QMainWindow):
 
         for index in range(self._folder_tree.topLevelItemCount()):
             walk(self._folder_tree.topLevelItem(index))
-        self._folder_tree.resizeColumnToContents(0)
+        self._folder_tree.refresh_horizontal_extent()
 
     def _separate_fasta_file(self, path: Path, *, subfolder_per_sequence: bool = False) -> None:
         path = path.expanduser().resolve()
