@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QRect, QModelIndex
-from PySide6.QtGui import QColor, QPainter, QPalette
+from PySide6.QtGui import QColor, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -28,8 +28,99 @@ def _contrasting_on(background: QColor) -> QColor:
     return QColor(Qt.GlobalColor.white) if lum < 0.62 else QColor(20, 20, 20)
 
 
+def _guide_pen(palette: QPalette) -> QPen:
+    guide = palette.color(QPalette.ColorRole.Mid)
+    if not guide.isValid() or guide.alpha() == 0:
+        guide = palette.color(QPalette.ColorRole.Dark)
+    if not guide.isValid() or guide.alpha() == 0:
+        guide = QColor(120, 120, 120)
+    guide.setAlpha(160)
+    return QPen(guide, 1)
+
+
+def _index_depth(index: QModelIndex) -> int:
+    depth = 0
+    parent = index.parent()
+    while parent.isValid():
+        depth += 1
+        parent = parent.parent()
+    return depth
+
+
+def _is_last_child(index: QModelIndex) -> bool:
+    parent = index.parent()
+    model = index.model()
+    if model is None:
+        return True
+    if not parent.isValid():
+        return index.row() >= model.rowCount(QModelIndex()) - 1
+    return index.row() >= model.rowCount(parent) - 1
+
+
+def _ancestor_at_depth(index: QModelIndex, target_depth: int) -> QModelIndex:
+    """Return the ancestor of ``index`` whose depth equals ``target_depth``."""
+    current_depth = _index_depth(index)
+    node = index
+    while current_depth > target_depth and node.isValid():
+        node = node.parent()
+        current_depth -= 1
+    return node
+
+
+def paint_folder_indent_guides(
+    painter: QPainter,
+    *,
+    tree: QTreeWidget,
+    index: QModelIndex,
+    top: int,
+    bottom: int,
+    content_left: int,
+    chevron_center_x: int | None = None,
+) -> None:
+    """Draw vertical indent guides centered on folder chevrons (no horizontals)."""
+    depth = _index_depth(index)
+    if depth <= 0:
+        return
+    indent = max(1, int(tree.indentation()))
+    if chevron_center_x is not None:
+        # Offset from this row's content left to the chevron tip / icon center.
+        chevron_offset = chevron_center_x - content_left
+    else:
+        chevron_offset = max(1, int(tree.iconSize().width()) // 2)
+
+    painter.save()
+    painter.setClipping(False)
+    painter.setPen(_guide_pen(tree.palette()))
+
+    for column in range(depth):
+        # Column N lines up with the chevron of the ancestor at depth N.
+        steps_from_content = depth - column
+        x = content_left - steps_from_content * indent + chevron_offset
+        if x >= content_left:
+            continue
+
+        ancestor = _ancestor_at_depth(index, column + 1)
+        last = _is_last_child(ancestor) if ancestor.isValid() else True
+        innermost = column == depth - 1
+
+        if innermost:
+            # Full-height stem under the parent chevron (no horizontal stub).
+            painter.drawLine(x, top, x, bottom)
+        elif not last:
+            # Keep the stem only while that ancestor still has siblings below.
+            painter.drawLine(x, top, x, bottom)
+
+    painter.restore()
+
+
 class FolderTreeItemDelegate(QStyledItemDelegate):
     """Clip row highlight so indented subfolders do not show blue before the chevron."""
+
+    def _tree_widget(self, widget) -> QTreeWidget | None:
+        if isinstance(widget, QTreeWidget):
+            return widget
+        parent = widget.parent() if widget is not None else None
+        return parent if isinstance(parent, QTreeWidget) else None
 
     def _icon_left(self, opt: QStyleOptionViewItem, widget) -> int:
         style = widget.style() if widget is not None else QApplication.style()
@@ -48,10 +139,8 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
         return rect
 
     def _current_index(self, widget, index: QModelIndex) -> bool:
-        tree = widget
-        if not isinstance(tree, QTreeWidget):
-            tree = widget.parent() if widget is not None else None
-        if not isinstance(tree, QTreeWidget):
+        tree = self._tree_widget(widget)
+        if tree is None:
             return False
 
         current = tree.currentItem()
@@ -91,6 +180,29 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.StateFlag.State_Selected
         opt.state &= ~QStyle.StateFlag.State_HasFocus
         opt.state &= ~QStyle.StateFlag.State_MouseOver
+
+        tree = self._tree_widget(widget)
+        if tree is not None:
+            deco_left = self._icon_left(opt, widget)
+            style = widget.style() if widget is not None else QApplication.style()
+            deco = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemDecoration,
+                opt,
+                widget,
+            )
+            if deco.isValid() and deco.width() > 0:
+                chevron_cx = (deco.left() + deco.right()) // 2
+            else:
+                chevron_cx = deco_left + max(1, int(tree.iconSize().width()) // 2)
+            paint_folder_indent_guides(
+                painter,
+                tree=tree,
+                index=index,
+                top=opt.rect.top(),
+                bottom=opt.rect.bottom(),
+                content_left=opt.rect.left(),
+                chevron_center_x=chevron_cx,
+            )
 
         if is_selected or is_current or is_hover:
             bg_rect = self._highlight_rect(opt, widget)

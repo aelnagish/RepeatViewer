@@ -38,6 +38,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QKeySequence,
     QMouseEvent,
+    QPainter,
     QPalette,
     QShortcut,
 )
@@ -1125,7 +1126,7 @@ class FolderTreeWidget(QTreeWidget):
         self.setUniformRowHeights(False)
         self.setAnimated(False)
         self.setIconSize(QSize(_BROWSER_ICON_SIZE, _BROWSER_ICON_SIZE))
-        self.setIndentation(14)
+        self.setIndentation(18)
         self.setRootIsDecorated(False)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -1139,6 +1140,10 @@ class FolderTreeWidget(QTreeWidget):
         self.currentItemChanged.connect(self._on_folder_current_changed)
         self._suppress_current_changed = False
         self._active_folder_key: str | None = None
+
+    def drawBranches(self, painter: QPainter, rect: QRect, index) -> None:  # noqa: N802
+        """Skip stock branch artwork; indent guides are painted by the item delegate."""
+        del painter, rect, index
 
     def set_active_folder(self, folder: Path | None) -> None:
         """Mark which folder owns the Files panel without wiping multi-selection.
