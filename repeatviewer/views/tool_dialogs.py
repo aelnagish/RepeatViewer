@@ -5693,6 +5693,7 @@ class TeDivergencePlotDialog(QDialog):
         self._input = TeMultiInputFilesWidget(
             self,
             initial=[input_file] if input_file is not None else None,
+            allow_multiple=False,
         )
         self._focused_file_input: TeMultiInputFilesWidget | None = None
         self._input.field_activated.connect(self._on_file_input_field_activated)

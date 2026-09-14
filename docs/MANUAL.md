@@ -746,8 +746,9 @@ order follows field order, first row at the top.
 | Chromosome order | Sort order for chromosomes |
 | Chromosomes to show | Subset to plot |
 
-**Outputs:** `<name>_genome_map.html`, and `<name>_genome_map_region.html`
-for a zoomed region.
+**Outputs:** `<name>_{blast|RM}_den_plot.html` (or
+`<name>_multi_dens_plot.html` when multiple TE sources are used), and the
+same names with `_region` before `.html` for a zoomed region.
 
 ### TE divergence plot
 
@@ -760,7 +761,8 @@ sustained older activity.
 | TE input files | RepeatMasker `.out` or BLAST hit tables |
 | Bin size | Histogram bin width (divergence = 1 − identity, range 0–1) |
 
-**Output:** `<name>_blast_divergence_plot.html`
+**Output:** `<name>_{blast|RM}_div_plot.html` (or
+`<name>_multi_div_plot.html` for multiple sources)
 
 ### TE abundance plot
 
@@ -772,6 +774,9 @@ genome.
 | RepeatMasker .out files | One or more; each becomes a separate curve |
 | Y axis | Percentage of genome occupied, or occupied nucleotides (bp) |
 | Top families | How many families to show, ranked by occupied bp |
+
+**Output:** `<name>_RM_abund_plot.html` (or
+`<name>_multi_abund_plot.html` for multiple sources)
 
 ---
 
@@ -972,9 +977,11 @@ All outputs are written beside their input file unless noted.
 | `<genome>_repeat_quant.gff` | Repeat Quantify | Array coordinates |
 | `<genome>_repeat_landscape.html` | Repeat Quantify | Divergence landscape |
 | `<genome>_repeat_landscape.tsv` | Repeat Quantify | Landscape data |
-| `<name>_genome_map.html` | Visualization | Chromosome-scale TE map |
-| `<name>_genome_map_region.html` | Visualization | Zoomed region map |
-| `<name>_blast_divergence_plot.html` | TE divergence | Divergence histogram |
+| `<name>_{blast|RM}_den_plot.html` | Visualization | Chromosome-scale TE density map |
+| `<name>_multi_dens_plot.html` | Visualization | Density map from multiple TE sources |
+| `<name>_{blast|RM}_den_plot_region.html` | Visualization | Zoomed region density map |
+| `<name>_{blast|RM}_div_plot.html` | TE divergence | Divergence histogram |
+| `<name>_{blast|RM|multi}_abund_plot.html` | TE abundance | Family abundance curves |
 | `<name>_library_benchmark.html` | Benchmarking | Library comparison |
 | `<base>_confusion_matrix.txt` | Benchmarking | Classification matrix |
 | `<base>_heatmap_proportion_plot.pdf` | Benchmarking | Proportion heatmap |

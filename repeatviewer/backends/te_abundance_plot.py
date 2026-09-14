@@ -15,7 +15,23 @@ from repeatviewer.backends.blast_genome_plot import (
     _figure_to_preview_html,
     is_repeatmasker_out_file,
     read_repeatmasker_out,
+    te_hit_table_stem,
+    te_plot_output_suffix,
 )
+
+
+def te_abundance_plot_html_path_for_sources(sources: list[Path] | Path) -> Path:
+    """Expected abundance-plot HTML path for one or more RepeatMasker .out files."""
+    paths = (
+        [sources.expanduser().resolve()]
+        if isinstance(sources, Path)
+        else [p.expanduser().resolve() for p in sources if p]
+    )
+    if not paths:
+        raise ValueError("Select at least one RepeatMasker .out file.")
+    stem = te_hit_table_stem(paths[0])
+    suffix = te_plot_output_suffix(paths, kind="abund")
+    return paths[0].parent / f"{stem}{suffix}"
 
 TE_ABUNDANCE_PERCENT = "percent"
 TE_ABUNDANCE_BP = "bp"
@@ -82,7 +98,7 @@ def _inject_page_controls(
     datasets: list[dict[str, Any]],
 ) -> str:
     sections: list[str] = []
-    for dataset in datasets:
+    for index, dataset in enumerate(datasets):
         rows = "".join(
             "<tr>"
             f"<td>{rank}</td>"
@@ -99,8 +115,11 @@ def _inject_page_controls(
         label = html.escape(str(dataset["label"]))
         color = html.escape(str(dataset["color"]), quote=True)
         sections.append(
-            f'<section class="te-dataset" style="--dataset-color:{color}">'
-            f'<h3><span class="te-color-dot"></span>{label}</h3>'
+            f'<section class="te-dataset" data-trace-index="{index}" '
+            f'style="--dataset-color:{color}">'
+            f'<h3><input type="color" class="te-color-picker" value="{color}" '
+            f'title="Change line color for {label}" aria-label="Color for {label}">'
+            f"{label}</h3>"
             '<table><colgroup><col style="width:9%"><col style="width:46%">'
             '<col style="width:25%"><col style="width:20%"></colgroup>'
             '<thead><tr><th>Rank</th><th>TE family</th><th>Occupied bp</th>'
@@ -122,7 +141,7 @@ font:9px Arial,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.12)}}
 .te-abundance-list.te-collapsed .te-list-body{{display:none}}
 .te-abundance-list h3{{font-size:10px;margin:7px 0 4px;display:flex;align-items:center;gap:5px}}
 .te-abundance-list .te-dataset{{border-left:3px solid var(--dataset-color);padding-left:6px;margin-bottom:12px}}
-.te-abundance-list .te-color-dot{{width:10px;height:10px;border-radius:50%;background:var(--dataset-color);flex:0 0 auto}}
+.te-abundance-list .te-color-picker{{width:22px;height:18px;padding:0;border:1px solid #ccc;border-radius:3px;cursor:pointer;flex:0 0 auto;background:none}}
 .te-abundance-list table{{width:100%;border-collapse:collapse;table-layout:fixed}}
 .te-abundance-list th{{position:sticky;top:0;background:#f6f8fa;text-align:right;padding:3px;border-bottom:1px solid #d0d7de;font-size:9px}}
 .te-abundance-list th:nth-child(2){{text-align:left}}
@@ -177,6 +196,20 @@ font:9px Arial,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.12)}}
     list.style.top = Math.max(4, Math.min(window.innerHeight - 40, event.clientY - dragY)) + 'px';
   });
   window.addEventListener('mouseup', () => { dragging = false; });
+  list.querySelectorAll('.te-color-picker').forEach((input) => {
+    input.addEventListener('input', () => {
+      const section = input.closest('.te-dataset');
+      if (!section) return;
+      const idx = Number(section.getAttribute('data-trace-index'));
+      if (!Number.isInteger(idx) || idx < 0) return;
+      const color = input.value;
+      section.style.setProperty('--dataset-color', color);
+      Plotly.restyle(gd, {
+        'line.color': color,
+        'marker.color': color,
+      }, [idx]);
+    });
+  });
 })();
 </script>
 """
@@ -318,9 +351,7 @@ def write_te_abundance_plot_html(
     destination = (
         output_html.expanduser().resolve()
         if output_html is not None
-        else sources[0].with_name(
-            f"{sources[0].stem}{'_comparison' if len(sources) > 1 else ''}_te_abundance_plot.html"
-        )
+        else te_abundance_plot_html_path_for_sources(sources)
     )
     page = _inject_page_controls(
         _figure_to_preview_html(fig, destination),

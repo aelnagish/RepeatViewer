@@ -54,6 +54,7 @@ def test_abundance_html_defaults_to_ranked_percentage_curve(tmp_path: Path) -> N
     assert "text-overflow:ellipsis" not in page
     assert 'id="te-list-drag-handle"' in page
     assert 'id="te-list-toggle"' in page
+    assert 'class="te-color-picker"' in page
     assert "resize:both" in page
     assert ">21<" in page  # Family_A: 10 bp forward + 11 bp reverse.
     assert ">21.00<" in page  # 21 occupied bp out of a 100 bp query.
@@ -81,7 +82,7 @@ def test_multiple_repeatmasker_outputs_get_distinct_curves(tmp_path: Path) -> No
 
     output = write_te_abundance_plot_html([first, second])
     page = output.read_text(encoding="utf-8")
-    assert output.name == "genome_a_comparison_te_abundance_plot.html"
+    assert output.name == "genome_a_multi_abund_plot.html"
     assert "genome_a" in page
     assert "genome_b" in page
     assert "#3b82f6" in page
@@ -89,3 +90,7 @@ def test_multiple_repeatmasker_outputs_get_distinct_curves(tmp_path: Path) -> No
     assert "RepeatMasker outputs" in page
     assert 'id="te-sf-save-svg"' in page
     assert 'id="te-sf-save-pdf"' in page
+    assert 'class="te-color-picker"' in page
+    assert 'data-trace-index="0"' in page
+    assert 'data-trace-index="1"' in page
+    assert "Plotly.restyle" in page
