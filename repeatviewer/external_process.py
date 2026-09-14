@@ -266,7 +266,20 @@ def run_logged_process(
         emit_process_log(f"output: {output_path}", sink=sink)
     result = subprocess.CompletedProcess(display_command, returncode, stdout, stderr)
     if check and returncode != 0:
+        detail_parts = [
+            f"{tool} exited with code {returncode}",
+            f"Command: {command_text(display_command)}",
+        ]
+        err_text = (stderr or "").strip()
+        out_text = (stdout or "").strip()
+        if err_text:
+            detail_parts.append(err_text)
+        elif out_text:
+            detail_parts.append(out_text)
         raise subprocess.CalledProcessError(
-            returncode, display_command, output=stdout, stderr=stderr
+            returncode,
+            display_command,
+            output=stdout,
+            stderr="\n\n".join(detail_parts),
         )
     return result

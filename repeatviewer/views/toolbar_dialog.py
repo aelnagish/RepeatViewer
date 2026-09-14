@@ -57,14 +57,12 @@ TOOLS_TOOLBAR_IDS: tuple[str, ...] = (
     "fastga",
     "repeat_quantify",
     "extend",
-    "tsd_search",
     "teaid",
     "msa_clean",
     "consensus",
     "flexidot",
     "te_annotation",
     "te_genome_map",
-    "te_benchmark",
 )
 
 # Built-in tools known to the customize dialog.
@@ -106,11 +104,9 @@ TOOLBAR_LABELS: dict[str, str] = {
     "msa_clean": "MSA Clean",
     "consensus": "Consensus",
     "flexidot": "Flexidot",
-    "te_annotation": "TE annotation",
+    "te_annotation": "Sequence Annotation",
     "te_genome_map": "Visualization",
-    "te_benchmark": "Benchmarking",
     "te_divergence_plot": "TE divergence",
-    "tsd_search": "TSD search",
     "workflows_manage": "Design and manage workflows",
 }
 

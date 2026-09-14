@@ -209,11 +209,23 @@ def run_subprocess_with_cancel(
             sink=sink,
         )
         if check and result.returncode != 0:
+            from repeatviewer.external_process import command_text
+
+            detail_parts = [
+                f"{tool} exited with code {result.returncode}",
+                f"Command: {command_text(result.args if isinstance(result.args, (list, tuple)) else [result.args])}",
+            ]
+            err_text = (result.stderr or "").strip()
+            out_text = (result.stdout or "").strip()
+            if err_text:
+                detail_parts.append(err_text)
+            elif out_text:
+                detail_parts.append(out_text)
             raise subprocess.CalledProcessError(
                 result.returncode,
                 result.args,
                 output=result.stdout,
-                stderr=result.stderr,
+                stderr="\n\n".join(detail_parts),
             )
         return result
     finally:

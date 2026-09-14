@@ -505,36 +505,42 @@ _TOOLBAR_TOOLTIPS = {
     "fastga": "FastGA whole-genome alignment (self-comparison one-by-one by default; optional all-pairs)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
-    "te_benchmark": "TE benchmarking (confusion matrix and library comparison)",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
     "extend": "Extend MSA ends using default parameters",
     "teaid": "TEAid interactive HTML report using default parameters",
     "msa_clean": "Trim or clean MSA using default parameters",
     "flexidot": "Dotplot comparison of selected sequences using default parameters",
     "consensus": "Click: set consensus parameters and run. Right-click: run with saved settings.",
-    "tsd_search": "Search for target site duplications using default parameters",
-    "te_annotation": "Run TE annotation on selected single-sequence FASTA files",
+    "te_annotation": "Run sequence annotation on selected single-sequence FASTA files",
 }
 
 _JOB_DISPLAY_TITLES = {
     "teaid": "TEAid",
-    "blast": "Blast",
+    "blast": "BLAST",
     "extend": "MSA Extend",
-    "msa_clean": "MSA clean",
+    "msa_clean": "MSA Clean",
     "msa_clean_gappy": "MSA remove gappy columns",
     "msa_clean_div": "Clean row with divergence",
     "msa_clean_gap": "Clean row with gap",
     "consensus_generation": "Consensus",
     "flexidot": "Flexidot",
-    "te_annotation": "TE annotation",
-    "tsd_search": "TSD search",
+    "te_annotation": "Sequence Annotation",
     "reverse_complement": "Reverse complement",
     "orf_prediction": "ORF prediction",
     "dna_translation": "DNA translation",
-    "te_confusion_benchmark": "Confusion matrix benchmark",
-    "te_library_benchmark": "TE library benchmark",
     "te_abundance_plot": "TE abundance plot",
 }
+
+
+def _format_cli_failure(exc: BaseException) -> str:
+    """Prefer stderr/command detail from failed external tools."""
+    import subprocess
+
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = (exc.stderr or exc.output or "").strip()
+        if detail:
+            return detail
+    return str(exc)
 
 
 def _mafft_option_kwargs(options) -> dict[str, Any]:
@@ -590,14 +596,13 @@ class AlignWorker(QObject):
         def _log(message: str) -> None:
             self.log_line.emit(str(message))
 
-        sink = _log if self._stream_log else None
+        sink = _log  # always capture; UI shows live and/or on failure
 
         if self._mode == ALIGN_MODE_COMBINED:
             try:
                 with process_log_sink(sink):
                     self.progress.emit(0, "Aligning combined MSA…")
-                    if sink is not None:
-                        _log("Aligning combined MSA…")
+                    _log("Aligning combined MSA…")
                     output = run_alignment_combined(
                         self._seq_files,
                         **_mafft_option_kwargs(self._options),
@@ -606,11 +611,10 @@ class AlignWorker(QObject):
                         engine=self._engine,
                     )
                     self.progress.emit(1, "Alignment finished.")
-                    if sink is not None:
-                        _log("Alignment finished.")
+                    _log("Alignment finished.")
                 self.finished.emit([str(output)])
             except Exception as exc:  # noqa: BLE001
-                self.failed.emit(str(exc))
+                self.failed.emit(_format_cli_failure(exc))
             return
 
         total = len(self._seq_files)
@@ -631,14 +635,13 @@ class AlignWorker(QObject):
                     )
                 return seq_path, str(output), None
             except Exception as exc:  # noqa: BLE001
-                return seq_path, None, str(exc)
+                return seq_path, None, _format_cli_failure(exc)
 
         try:
             if workers == 1:
                 for seq_path in self._seq_files:
                     self.progress.emit(completed, f"Aligning {seq_path.name}…")
-                    if sink is not None:
-                        _log(f"—— Aligning {seq_path.name} ——")
+                    _log(f"—— Aligning {seq_path.name} ——")
                     _, out_path, err = _align_one(seq_path)
                     completed += 1
                     if err:
@@ -651,16 +654,14 @@ class AlignWorker(QObject):
                     for future in as_completed(futures):
                         seq_path, out_path, err = future.result()
                         self.progress.emit(completed, f"Aligning {seq_path.name}…")
-                        if sink is not None:
-                            _log(f"Finished {seq_path.name}")
+                        _log(f"Finished {seq_path.name}")
                         completed += 1
                         if err:
                             failures.append(f"{seq_path.name}: {err}")
                         elif out_path:
                             created.append(out_path)
             self.progress.emit(total, "Alignment finished.")
-            if sink is not None:
-                _log("Alignment finished.")
+            _log("Alignment finished.")
             if failures and not created:
                 self.failed.emit("\n".join(failures[:8]))
                 return
@@ -669,7 +670,7 @@ class AlignWorker(QObject):
                 return
             self.finished.emit(created)
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_cli_failure(exc))
 
 
 class FastGaWorker(QObject):
@@ -745,8 +746,7 @@ class FastGaWorker(QObject):
                 for index, (source1, source2) in enumerate(pair_jobs, start=1):
                     self._step = index
                     label = f"{source1.name} vs {source2.name}"
-                    if self._stream_log:
-                        _log(f"—— Pair {index}/{len(pair_jobs)}: {label} ——")
+                    _log(f"—— Pair {index}/{len(pair_jobs)}: {label} ——")
                     with tempfile.NamedTemporaryFile(
                         prefix=".repeatviewer_fastga_pair_",
                         suffix=combine_suffix,
@@ -775,7 +775,7 @@ class FastGaWorker(QObject):
                             ),
                             temp_dir=temp_dir,
                             progress=_progress,
-                            on_log=_log if self._stream_log else None,
+                            on_log=_log,
                             is_cancelled=_cancelled,
                         )
                         text = written.read_text(encoding="utf-8")
@@ -797,7 +797,7 @@ class FastGaWorker(QObject):
                     self._step = index
                     base = f"{source1.name}_FastGA"
                     out_path = source1.parent / f"{base}{suffix}"
-                    if self._stream_log and len(jobs) > 1:
+                    if len(jobs) > 1:
                         _log(f"—— Job {index}/{len(jobs)}: {base} ——")
                     written = run_fastga_alignment(
                         source1,
@@ -815,14 +815,14 @@ class FastGaWorker(QObject):
                         no_soft_mask=getattr(self._options, "no_soft_mask", False),
                         temp_dir=temp_dir,
                         progress=_progress,
-                        on_log=_log if self._stream_log else None,
+                        on_log=_log,
                         is_cancelled=_cancelled,
                     )
                     created.append(str(written))
 
             self.finished.emit(created)
         except Exception as exc:  # noqa: BLE001 - surface to the UI
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_cli_failure(exc))
 
 
 class RepeatQuantifyWorker(QObject):
@@ -890,7 +890,7 @@ class RepeatQuantifyWorker(QObject):
         except JobCancelledError:
             self.finished.emit([])  # stopped by user; end quietly
         except Exception as exc:  # noqa: BLE001 - surface to the UI
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_cli_failure(exc))
 
 
 class GenomeMapWorker(QObject):
@@ -928,9 +928,9 @@ class GenomeMapWorker(QObject):
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
         except GenomeMapNothingToPlotError as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_cli_failure(exc))
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_cli_failure(exc))
 
 
 class ConfusionMatrixBenchmarkWorker(QObject):
@@ -984,7 +984,7 @@ class ConfusionMatrixBenchmarkWorker(QObject):
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_cli_failure(exc))
 
 
 class TeLibraryBenchmarkWorker(QObject):
@@ -1030,7 +1030,7 @@ class TeLibraryBenchmarkWorker(QObject):
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_cli_failure(exc))
 
 
 class FunctionWorker(QObject):
@@ -1063,7 +1063,7 @@ class FunctionWorker(QObject):
             self.log_line.emit(str(message))
 
         try:
-            with process_log_sink(_log if self._stream_log else None):
+            with process_log_sink(_log):
                 result = self._run_func(
                     self._func_name,
                     self._seq_files,
@@ -1074,13 +1074,14 @@ class FunctionWorker(QObject):
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_cli_failure(exc))
 
 
 class WorkflowWorker(QObject):
     """Run a multi-step tool workflow on a background thread."""
 
     progress = Signal(int, str)
+    log_line = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
 
@@ -1091,13 +1092,19 @@ class WorkflowWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
         try:
-            result = self._run_func(self.progress.emit, **self._job_kwargs)
+            with process_log_sink(_log):
+                result = self._run_func(self.progress.emit, **self._job_kwargs)
             self.finished.emit(result)
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
+            self.failed.emit(_format_cli_failure(exc))
 
 
 class FolderTreeWidget(QTreeWidget):
@@ -2900,9 +2907,7 @@ class MainWindow(QMainWindow):
         tool_key: str,
         mirror_progress: bool = True,
     ) -> None:
-        """Open FastGA-style process window when the tool option is enabled."""
-        if not enabled:
-            return
+        """Capture command output; show live when enabled, always show on failure."""
         from repeatviewer.widgets.process_monitor_dialog import ProcessMonitorDialog
 
         attr = f"_{tool_key}_process_dialog"
@@ -2911,17 +2916,126 @@ class MainWindow(QMainWindow):
             short = title.split("(")[0].strip() or tool_key
             dialog = ProcessMonitorDialog(short, parent=self)
             setattr(self, attr, dialog)
-        dialog.prepare(title)
+
+        buffer: list[str] = []
+        setattr(self, f"_{tool_key}_process_log", buffer)
+
+        def _on_line(text: str, *, d=dialog, buf=buffer, live=enabled) -> None:
+            line = str(text)
+            buf.append(line)
+            if live and d.isVisible():
+                d.append_line(line)
+
+        if enabled:
+            dialog.prepare(title)
+
         if hasattr(worker, "log_line"):
-            worker.log_line.connect(dialog.append_line)
+            worker.log_line.connect(_on_line)
         if mirror_progress:
             worker.progress.connect(
-                lambda _value, label, d=dialog: d.append_line(label) if label else None
+                lambda _value, label, fn=_on_line: fn(label) if label else None
             )
-        worker.finished.connect(lambda *_args, d=dialog: d.mark_finished(True))
-        worker.failed.connect(
-            lambda error, d=dialog: d.mark_finished(False, str(error))
+
+        def _on_finished(*_args, d=dialog, live=enabled) -> None:
+            if live:
+                d.mark_finished(True)
+
+        def _on_failed(
+            error: str,
+            *,
+            d=dialog,
+            buf=buffer,
+            live=enabled,
+            job_title=title,
+        ) -> None:
+            if error == CANCELLED_MESSAGE:
+                if live:
+                    d.mark_finished(False, "Stopped")
+                return
+            if live:
+                d.mark_finished(False, str(error))
+                d.raise_()
+                d.activateWindow()
+            else:
+                d.show_failure_log(job_title, list(buf), error=str(error))
+
+        worker.finished.connect(_on_finished)
+        worker.failed.connect(_on_failed)
+
+    def _rename_paths_with_spaces(
+        self,
+        paths: list[Path],
+        *,
+        kind: str = "file",
+    ) -> list[Path]:
+        """Rename basenames that contain spaces to use ``_`` and remind the user."""
+        from repeatviewer.backends.safe_cli_paths import (
+            basename_has_spaces,
+            rename_spaces_in_basename,
         )
+
+        prepared: list[Path] = []
+        renames: list[tuple[str, str]] = []
+        for raw in paths:
+            path = Path(raw).expanduser().resolve()
+            if not basename_has_spaces(path):
+                prepared.append(path)
+                continue
+            try:
+                new_path, renamed = rename_spaces_in_basename(path)
+            except OSError as exc:
+                QMessageBox.warning(
+                    self,
+                    "Rename required",
+                    f"Could not rename “{path.name}” (spaces break many "
+                    f"command-line tools):\n{exc}",
+                )
+                prepared.append(path)
+                continue
+            prepared.append(new_path)
+            if renamed:
+                renames.append((path.name, new_path.name))
+                if self._project.genome_file is not None:
+                    try:
+                        if path == self._project.genome_file.expanduser().resolve():
+                            self._project.genome_file = new_path
+                    except OSError:
+                        pass
+                if self._project.pan_genomes:
+                    updated = []
+                    for entry in self._project.pan_genomes:
+                        try:
+                            if path == Path(entry.path).expanduser().resolve():
+                                updated.append(type(entry)(name=entry.name, path=new_path))
+                            else:
+                                updated.append(entry)
+                        except OSError:
+                            updated.append(entry)
+                    self._project.pan_genomes = updated
+
+        if renames:
+            lines = "\n".join(f"• {old} → {new}" for old, new in renames)
+            QMessageBox.information(
+                self,
+                "Spaces in file name",
+                "Spaces in file names can break command-line tools.\n"
+                f"Renamed {len(renames)} {kind}(s) (spaces → underscores):\n\n"
+                f"{lines}\n\n"
+                "Analysis will continue with the new name(s).",
+            )
+            if self._current_folder is not None:
+                self._populate_file_list(self._current_folder)
+            self._persist_workspace()
+        return prepared
+
+    def _ensure_genome_paths_without_spaces(self) -> None:
+        """Rename configured genome FASTA(s) if their basenames contain spaces."""
+        targets: list[Path] = []
+        for _label, path in self._project.genome_targets():
+            targets.append(Path(path))
+        if not targets:
+            return
+        self._rename_paths_with_spaces(targets, kind="genome")
 
     def _start_fastga_job(self, files: list[Path], options) -> None:
         pairwise = bool(getattr(options, "pairwise", False))
@@ -3158,12 +3272,12 @@ class MainWindow(QMainWindow):
     def _populate_te_annotation_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction(
-                "TE annotation with default parameters",
+                "Sequence annotation with default parameters",
                 self._run_te_annotation_saved,
             )
         menu.addSeparator()
         menu.addAction(
-            "Change TE annotation parameters",
+            "Change Sequence annotation parameters",
             self._modify_te_annotation_parameters,
         )
 
@@ -3217,19 +3331,17 @@ class MainWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
         tools_menu.addSeparator()
-        self._populate_blast_menu(tools_menu.addMenu("&Blast"))
+        self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_fastga_menu(tools_menu.addMenu("Fast&GA"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
-        self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(tools_menu.addMenu("&TEAid"))
-        self._populate_msa_clean_menu(tools_menu.addMenu("MSA &clean"))
+        self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
         self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
         self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
-        self._populate_te_annotation_menu(tools_menu.addMenu("TE &annotation"))
+        self._populate_te_annotation_menu(tools_menu.addMenu("Sequence &Annotation"))
         tools_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
         self._populate_te_visualization_menu(tools_menu.addMenu("&Visualization"))
-        self._populate_benchmarking_menu(tools_menu.addMenu("&Benchmarking"))
 
         workflows_menu = QMenu("&Workflows", self)
         self.menuBar().addMenu(workflows_menu)
@@ -3934,15 +4046,6 @@ class MainWindow(QMainWindow):
                 tooltip=tip,
                 run_label="TE density plot",
             )
-        elif tool_id == "te_benchmark":
-            self._add_toolbar_text_menu_button(
-                bar,
-                "Benchmarking",
-                self._open_confusion_matrix_benchmark,
-                self._populate_benchmarking_menu,
-                tooltip=tip,
-                run_label="Confusion matrix benchmark",
-            )
         elif tool_id == "te_divergence_plot":
             self._add_toolbar_text_action(
                 bar,
@@ -4007,18 +4110,10 @@ class MainWindow(QMainWindow):
                 ),
                 right_click_slot=self._quick_flexidot_right_click,
             )
-        elif tool_id == "tsd_search":
-            self._add_toolbar_text_menu_button(
-                bar,
-                "TSD search",
-                self._run_tsd_search,
-                self._populate_tsd_search_menu,
-                tooltip=tip,
-            )
         elif tool_id == "te_annotation":
             self._add_toolbar_action_button(
                 bar,
-                "TE annotation",
+                "Sequence Annotation",
                 self._open_te_annotation_dialog,
                 tooltip=(
                     "Click: set modules and run.\n"
@@ -4129,17 +4224,30 @@ class MainWindow(QMainWindow):
         targets = self._project.genome_targets()
         if not targets:
             return
+        self._ensure_genome_paths_without_spaces()
+        targets = self._project.genome_targets()
+        if not targets:
+            return
         self._set_status_message("Preparing genome index and chromosome sizes…", 0)
         QApplication.processEvents()
+        from repeatviewer.external_process import process_log_sink
+        from repeatviewer.widgets.process_monitor_dialog import ProcessMonitorDialog
+
+        log_lines: list[str] = []
+
+        def _log(message: str) -> None:
+            log_lines.append(str(message))
+
         messages: list[str] = []
         ok_all = True
-        for label, path in targets:
-            ok, msg = ensure_genome_artifacts(
-                path,
-                use_system_blast=self._project.use_system_blast,
-            )
-            ok_all = ok_all and ok
-            messages.append(f"{label}: {msg}" if label else msg)
+        with process_log_sink(_log):
+            for label, path in targets:
+                ok, msg = ensure_genome_artifacts(
+                    path,
+                    use_system_blast=self._project.use_system_blast,
+                )
+                ok_all = ok_all and ok
+                messages.append(f"{label}: {msg}" if label else msg)
         if ok_all:
             preview = "; ".join(messages[:3])
             if len(messages) > 3:
@@ -4147,6 +4255,16 @@ class MainWindow(QMainWindow):
             self._set_status_message(preview, 10000)
         else:
             QMessageBox.warning(self, "Genome preparation", "\n".join(messages))
+            if log_lines:
+                dialog = getattr(self, "_genome_prepare_process_dialog", None)
+                if dialog is None:
+                    dialog = ProcessMonitorDialog("Genome preparation", parent=self)
+                    self._genome_prepare_process_dialog = dialog
+                dialog.show_failure_log(
+                    "Genome preparation",
+                    log_lines,
+                    error="\n".join(messages),
+                )
             self._set_status_message("Genome preparation incomplete", 8000)
 
     def _on_genome_changed(self, genome_before: Path | None, genome_after: Path | None) -> None:
@@ -4211,6 +4329,7 @@ class MainWindow(QMainWindow):
             return
         genome_before = self._genome_path_resolved()
         self._project = dialog.apply_to_project()
+        self._ensure_genome_paths_without_spaces()
         genome_after = self._genome_path_resolved()
         self._on_genome_changed(genome_before, genome_after)
         self._persist_workspace()
@@ -7668,7 +7787,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "No valid files",
-                "Select at least one single-sequence FASTA file for TE annotation.",
+                "Select at least one single-sequence FASTA file for Sequence Annotation.",
             )
             return None
         return single
@@ -7682,7 +7801,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Nothing selected",
-                "No annotation modules are saved. Open TE annotation and choose "
+                "No annotation modules are saved. Open Sequence Annotation and choose "
                 "at least one auto-annotation module or similarity database.",
             )
             return
@@ -7713,7 +7832,7 @@ class MainWindow(QMainWindow):
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
         if not run_after:
-            self._set_status_message("TE annotation settings saved", 4000)
+            self._set_status_message("Sequence Annotation settings saved", 4000)
             return
         if opts is None:
             return
@@ -9210,8 +9329,15 @@ class MainWindow(QMainWindow):
         def _run(progress_cb, **kwargs):
             return run_workflow(progress_cb=progress_cb, **kwargs)
 
+        worker = WorkflowWorker(_run, job_kwargs)
+        self._attach_process_monitor(
+            worker,
+            title=f"Workflow: {spec.name}",
+            enabled=False,
+            tool_key=f"workflow_{spec.id}",
+        )
         self._start_background_job(
-            WorkflowWorker(_run, job_kwargs),
+            worker,
             job_title=f"workflow:{spec.id}",
             total_steps=(
                 len(spec.steps) * len(seq_files)
@@ -9367,7 +9493,23 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._last_job_source_files = list(source_files or [])
+        self._ensure_genome_paths_without_spaces()
+        prepared_sources = list(source_files or [])
+        if prepared_sources:
+            prepared_sources = self._rename_paths_with_spaces(
+                prepared_sources,
+                kind="input file",
+            )
+            # Keep the worker in sync with renamed paths.
+            if hasattr(worker, "_seq_files"):
+                worker._seq_files = list(prepared_sources)
+            if hasattr(worker, "_job_kwargs") and isinstance(
+                getattr(worker, "_job_kwargs", None), dict
+            ):
+                if "seq_files" in worker._job_kwargs:
+                    worker._job_kwargs["seq_files"] = list(prepared_sources)
+
+        self._last_job_source_files = list(prepared_sources)
         self._job_cancel.reset()
         self._show_job_progress(job_title, total_steps)
         self._set_job_actions_enabled(False)
