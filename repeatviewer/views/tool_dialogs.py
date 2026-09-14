@@ -6,13 +6,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QColorDialog,
-    QComboBox,
     QCompleter,
     QDialog,
     QDialogButtonBox,
@@ -48,6 +47,7 @@ from repeatviewer.widgets.spin_boxes import (  # noqa: E402
     NoWheelDoubleSpinBox as QDoubleSpinBox,
     NoWheelSpinBox as QSpinBox,
 )
+from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox  # noqa: E402
 
 
 def exec_modal_dialog(dialog: QDialog) -> bool:
@@ -70,6 +70,25 @@ def _prepare_option_dialog(dialog: QDialog) -> None:
         | Qt.WindowType.WindowTitleHint
         | Qt.WindowType.WindowCloseButtonHint
     )
+
+
+def make_process_output_box(
+    parent: QWidget,
+    *,
+    tool_name: str,
+    checked: bool = False,
+) -> tuple[QGroupBox, QCheckBox]:
+    """FastGA-style Options-tab group for the live process monitor window."""
+    checkbox = QCheckBox(f"Show process window while {tool_name} runs", parent)
+    checkbox.setChecked(bool(checked))
+    checkbox.setToolTip(
+        f"Open a window that first shows the {tool_name} command line, then "
+        "streams progress and tool messages. Useful for long runs."
+    )
+    box = QGroupBox("Process output", parent)
+    layout = QVBoxLayout(box)
+    layout.addWidget(checkbox)
+    return box, checkbox
 
 
 def make_cancel_save_run_bar(
@@ -179,6 +198,8 @@ from repeatviewer.job_options import (
     DEFAULT_EXTEND_RIGHT,
     EXTEND_RIGHT_CLICK_RUN,
     EXTEND_RIGHT_CLICK_DIALOG,
+    FASTGA_RIGHT_CLICK_RUN,
+    FASTGA_RIGHT_CLICK_DIALOG,
     DEFAULT_FLEXIDOT_LCS_SHADING,
     DEFAULT_FLEXIDOT_OUTPUT_FORMAT,
     DEFAULT_FLEXIDOT_WORDSIZE,
@@ -207,6 +228,7 @@ from repeatviewer.job_options import (
     MSA_CLEAN_RIGHT_CLICK_DIV,
     MSA_CLEAN_RIGHT_CLICK_GAP,
     MSA_CLEAN_RIGHT_CLICK_DIALOG,
+    msa_clean_method_description,
     DEFAULT_TEAID_EVALUE,
     DEFAULT_TEAID_X_AXIS_LABEL,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
@@ -252,93 +274,204 @@ from repeatviewer.job_options import (
 from repeatviewer.plugins.custom_command import (
     CommandVarDef,
     UserCommandPluginSpec,
+    display_var_name,
     get_user_command_plugin_spec,
+    is_affixed_variable,
+    is_special_variable,
     load_user_command_plugin_specs,
     normalize_var_mode,
+    normalize_var_name,
     plugin_id_from_label,
+    special_variable_mode,
+    special_variables_help_text,
+    template_affixed_variables,
     template_variables,
-    user_command_plugin_ids,
+    user_template_variables,
 )
 
 
 class _CommandVarRow(QWidget):
-    remove_requested = Signal(object)
-    output_toggled = Signal(object, bool)
+    """One variable row; fixed-width type / role / Remove keep columns aligned."""
 
-    def __init__(self, initial: CommandVarDef | None = None, *, is_output: bool = False, parent=None) -> None:
+    remove_requested = Signal(object)
+    role_changed = Signal(object, str)
+
+    _NAME_MIN_WIDTH = 140
+    _DEFAULT_MIN_WIDTH = 220
+    _MODE_WIDTH = 104
+    _ROLE_WIDTH = 88
+    _REMOVE_WIDTH = 80
+
+    def __init__(
+        self,
+        initial: CommandVarDef | None = None,
+        *,
+        role: str = "",
+        special: bool = False,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         var = initial or CommandVarDef(name="", mode="file", value="")
-        self._name = QLineEdit(var.name, self)
-        self._name.setPlaceholderText("variable_name")
+        self._special = bool(special) or (
+            is_special_variable(var.name) and not is_affixed_variable(var.name)
+        )
+        name_key = normalize_var_name(var.name)
+        self._affixed = is_affixed_variable(name_key)
+        self._name = QLineEdit(display_var_name(name_key) if name_key else "", self)
+        self._name.setPlaceholderText("${variable_name} or ${RV_INPUT}_b.text")
+        self._name.setMinimumWidth(self._NAME_MIN_WIDTH)
+        self._name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._mode = QComboBox(self)
         self._mode.addItem("File", "file")
         self._mode.addItem("Folder", "folder")
         self._mode.addItem("Text", "text")
-        self._mode.addItem("Number", "number")
-        self._mode.setMinimumWidth(76)
-        mode_key = normalize_var_mode(var.mode)
+        self._mode.addItem("Integer", "integer")
+        self._mode.addItem("Float", "float")
+        self._mode.setFixedWidth(self._MODE_WIDTH)
+        self._mode.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        if self._special and name_key:
+            mode_key = special_variable_mode(name_key)
+        elif self._affixed:
+            mode_key = normalize_var_mode(var.mode) or special_variable_mode(name_key)
+        else:
+            mode_key = normalize_var_mode(var.mode)
         index = self._mode.findData(mode_key)
         if index >= 0:
             self._mode.setCurrentIndex(index)
         self._default = QLineEdit(var.value, self)
-        self._default.setPlaceholderText("Default value (optional)")
-        self._is_output = QCheckBox("Output", self)
-        self._is_output.setChecked(is_output)
-        self._is_output.setMinimumWidth(self._is_output.fontMetrics().horizontalAdvance("Output") + 28)
-        self._is_output.toggled.connect(self._on_output_toggled)
-        self._is_output.toggled.connect(self._refresh_output_fields)
+        self._default.setPlaceholderText("Default variable")
+        self._default.setMinimumWidth(self._DEFAULT_MIN_WIDTH)
+        self._default.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._role = QComboBox(self)
+        self._role.addItem("—", "")
+        self._role.addItem("Input", "input")
+        self._role.addItem("Output", "output")
+        self._role.setFixedWidth(self._ROLE_WIDTH)
+        self._role.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._role.setToolTip(
+            "Input: the FASTA (or path) passed into this step when used in a workflow.\n"
+            "Output: a result file/folder produced by the command "
+            "(shown in the file panel).\n"
+            "Only one Input; multiple Outputs are allowed."
+        )
+        role_key = str(role or "").strip().lower()
+        if role_key not in {"input", "output"}:
+            role_key = ""
+        role_index = self._role.findData(role_key)
+        if role_index >= 0:
+            self._role.setCurrentIndex(role_index)
+        self._role.currentIndexChanged.connect(self._on_role_changed)
         remove_btn = QPushButton("Remove", self)
         remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
         self._remove_btn = remove_btn
-        remove_btn.setMinimumWidth(72)
+        remove_btn.setFixedWidth(self._REMOVE_WIDTH)
+        remove_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
-        row.addWidget(self._name, 1)
+        row.addWidget(self._name, 2)
         row.addWidget(self._mode, 0)
-        row.addWidget(self._default, 1)
-        row.addWidget(self._is_output, 0)
+        row.addWidget(self._default, 3)
+        row.addWidget(self._role, 0)
         row.addWidget(remove_btn, 0)
-        self._refresh_output_fields()
+        if self._special:
+            self._name.setReadOnly(True)
+            self._mode.setEnabled(False)
+            self._default.setEnabled(False)
+            self._default.setPlaceholderText("Filled at run from selection / genome")
+            self._name.setToolTip("Special variable filled at run.")
+        elif self._affixed:
+            self._name.setReadOnly(True)
+            self._default.setPlaceholderText(
+                "Leave empty to auto-fill as base path + suffix at run"
+            )
+            self._name.setToolTip(
+                "Separate parameter from the glued suffix in the command "
+                "(e.g. ${RV_INPUT}_b.text). Editable at run; default = base + suffix."
+            )
+        self._refresh_role_fields()
 
-    def _on_output_toggled(self, checked: bool) -> None:
-        if checked:
-            self.output_toggled.emit(self, True)
+    def _on_role_changed(self, _index: int = 0) -> None:
+        role = str(self._role.currentData() or "")
+        self._refresh_role_fields()
+        if role:
+            self.role_changed.emit(self, role)
 
-    def set_output_checked(self, checked: bool) -> None:
-        self._is_output.blockSignals(True)
-        self._is_output.setChecked(checked)
-        self._is_output.blockSignals(False)
-        self._refresh_output_fields()
+    def set_role(self, role: str) -> None:
+        key = str(role or "").strip().lower()
+        if key not in {"input", "output"}:
+            key = ""
+        index = self._role.findData(key)
+        if index < 0:
+            return
+        self._role.blockSignals(True)
+        self._role.setCurrentIndex(index)
+        self._role.blockSignals(False)
+        self._refresh_role_fields()
 
-    def _refresh_output_fields(self) -> None:
-        is_output = self._is_output.isChecked()
-        if is_output:
+    def _refresh_role_fields(self) -> None:
+        # Specials keep their built-in type; do not rewrite mode when I/O is set.
+        if self._special:
+            return
+        role = str(self._role.currentData() or "")
+        if role in {"input", "output"}:
             mode = normalize_var_mode(str(self._mode.currentData()))
             if mode not in {"file", "folder"}:
                 index = self._mode.findData("file")
                 if index >= 0:
                     self._mode.setCurrentIndex(index)
 
-    def definition(self) -> tuple[CommandVarDef | None, bool]:
-        name = self._name.text().strip()
+    def definition(self) -> tuple[CommandVarDef | None, str]:
+        name = normalize_var_name(self._name.text())
         if not name:
-            return None, False
-        is_output = self._is_output.isChecked()
+            return None, ""
+        shown = display_var_name(name)
+        if self._name.text().strip() != shown:
+            self._name.blockSignals(True)
+            self._name.setText(shown)
+            self._name.blockSignals(False)
+        role = str(self._role.currentData() or "")
+        if is_special_variable(name) and not is_affixed_variable(name):
+            return (
+                CommandVarDef(
+                    name=name,
+                    mode=special_variable_mode(name),
+                    value="",
+                ),
+                role,
+            )
+        mode = str(self._mode.currentData())
+        if is_affixed_variable(name) and not mode:
+            mode = special_variable_mode(name)
         var = CommandVarDef(
             name=name,
-            mode=str(self._mode.currentData()),
+            mode=mode,
             value=self._default.text().strip(),
         )
-        return var, is_output
+        return var, role
 
     def mark_removable(self, removable: bool) -> None:
-        self._remove_btn.setVisible(removable)
+        if self._special:
+            self._remove_btn.setEnabled(False)
+            self._remove_btn.setVisible(True)
+            return
+        self._remove_btn.setEnabled(removable)
+        self._remove_btn.setVisible(True)
+
+    @property
+    def is_special(self) -> bool:
+        return self._special
 
 
 class CommandPluginDesignerDialog(QDialog):
     """Design a user-defined command plugin from a command template."""
+
+    # Preferred open size. Must be reflected in sizeHint() because
+    # exec_modal_dialog / dialog polish call adjustSize(), which otherwise
+    # shrinks back to the content sizeHint and ignores resize().
+    _DEFAULT_WIDTH = 1100
+    _DEFAULT_HEIGHT = 640
 
     def __init__(
         self,
@@ -347,8 +480,11 @@ class CommandPluginDesignerDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Design your plugin")
-        self.setMinimumWidth(760)
+        self.setWindowTitle("Design command wrapper")
+        self.setMinimumWidth(720)
+        self.setMinimumHeight(520)
+        self.resize(self._DEFAULT_WIDTH, self._DEFAULT_HEIGHT)
+        self.setSizeGripEnabled(True)
         spec = initial or UserCommandPluginSpec(
             id="",
             label="",
@@ -361,48 +497,175 @@ class CommandPluginDesignerDialog(QDialog):
         self._initial_id = spec.id
         self._rebuilding_rows = False
         self._label = QLineEdit(spec.label, self)
-        self._label.setPlaceholderText("Plugin name (must be unique)")
+        self._label.setPlaceholderText("Wrapper name (must be unique)")
         self._tooltip = QTextEdit(self)
-        self._tooltip.setPlaceholderText("Short description (optional)")
+        self._tooltip.setPlaceholderText(
+            "Optional. Shown as the toolbar / menu tooltip, e.g. "
+            "Run blastn of the selected FASTA against the defined genome."
+        )
         self._tooltip.setPlainText(spec.tooltip)
         self._tooltip.setFixedHeight(52)
+        self._tooltip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._tooltip.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._command = QTextEdit(self)
-        self._command.setFixedHeight(120)
+        self._command.setFixedHeight(140)
+        self._command.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._command.setPlaceholderText(
-            "Example:\nFastGA ${genome1} ${genome2} -1:${output}"
+            "blastn -query ${RV_INPUT} -db ${RV_GENOME} "
+            "-out ${RV_OUTDIR}/${RV_STEM}_b.txt "
+            "-evalue 1e-5 -outfmt 6 -num_threads 4\n"
+            "\n"
+            "Glue a fixed suffix after a variable: ${RV_STEM}_b.txt\n"
+            "Use ${RV_STEM} (name without extension), not ${RV_INPUT}_b.txt."
         )
         self._command.setPlainText(spec.command_template)
+
+        special_hint = QLabel(
+            "Special (auto-filled): ${RV_INPUT}, ${RV_INPUTS}, ${RV_GENOME}, "
+            "${RV_FOLDER}, ${RV_OUTDIR}, ${RV_STEM}, ${RV_NAME}",
+            self,
+        )
+        special_hint.setWordWrap(True)
+        special_hint.setStyleSheet("color: #666666;")
+        help_text = special_variables_help_text()
+        help_btn = QToolButton(self)
+        help_btn.setText("?")
+        help_btn.setToolTip(help_text)
+        help_btn.setAutoRaise(False)
+        help_btn.setFixedSize(22, 22)
+        help_btn.setStyleSheet(
+            "QToolButton {"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 10px;"
+            "  background: palette(base);"
+            "  font-weight: 600;"
+            "  padding: 0px;"
+            "}"
+            "QToolButton:hover { background: palette(alternate-base); }"
+        )
+        help_btn.clicked.connect(
+            lambda checked=False, text=help_text: QMessageBox.information(
+                self, "Special variables", text
+            )
+        )
+        special_row = QWidget(self)
+        special_layout = QHBoxLayout(special_row)
+        special_layout.setContentsMargins(0, 0, 0, 0)
+        special_layout.setSpacing(6)
+        special_layout.addWidget(special_hint, 1)
+        special_layout.addWidget(help_btn, 0)
+
         self._rows_host = QWidget(self)
         self._rows_layout = QVBoxLayout(self._rows_host)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.setSpacing(6)
+        self._rows_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._rows: list[_CommandVarRow] = []
-        out_set = set(spec.output_vars)
-        for var in spec.var_defs:
-            self._add_var_row(var, is_output=var.name in out_set)
+        self._vars_scroll = QScrollArea(self)
+        self._vars_scroll.setWidgetResizable(True)
+        self._vars_scroll.setFrameShape(QFrame.Shape.StyledPanel)
+        self._vars_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._vars_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._vars_scroll.setWidget(self._rows_host)
+        self._vars_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        # Scroll inside this area so upper fields stay put; dialog itself can resize.
+        self._vars_scroll.setMinimumHeight(132)
+
+        out_set = {normalize_var_name(v) for v in spec.output_vars}
+        in_set = {normalize_var_name(v) for v in (spec.input_vars or [])}
+        saved: dict[str, CommandVarDef] = {
+            normalize_var_name(v.name): v
+            for v in spec.var_defs
+            if normalize_var_name(v.name) and not is_special_variable(v.name)
+        }
+        # Show specials used in the command first (read-only name/type; I/O editable).
+        for name in template_variables(spec.command_template):
+            if is_special_variable(name):
+                role = "output" if name in out_set else ("input" if name in in_set else "")
+                self._add_var_row(
+                    CommandVarDef(name=name, mode=special_variable_mode(name), value=""),
+                    role=role,
+                    special=True,
+                )
+        # Affixed tokens like ${RV_INPUT}_b.text are separate editable parameters.
+        for name in template_affixed_variables(spec.command_template):
+            existing = saved.pop(name, None)
+            role = "output" if name in out_set else ("input" if name in in_set else "")
+            self._add_var_row(
+                existing
+                or CommandVarDef(name=name, mode=special_variable_mode(name), value=""),
+                role=role,
+            )
+        for name, var in saved.items():
+            role = "output" if name in out_set else ("input" if name in in_set else "")
+            self._add_var_row(var, role=role)
         if not self._rows:
             self._add_var_row()
 
         detect_btn = QPushButton("Detect variables from command", self)
         detect_btn.clicked.connect(self._detect_variables)
         add_var_btn = QPushButton("Add variable", self)
-        add_var_btn.clicked.connect(lambda: self._add_var_row())
+        add_var_btn.clicked.connect(self._on_add_variable_clicked)
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
-        form.addRow("Plugin name:", self._label)
+        form.addRow("Wrapper name:", self._label)
         form.addRow("Description:", self._tooltip)
         form.addRow("Command template:", self._command)
+        form.addRow("", special_row)
         btn_row = QWidget(self)
         btn_layout = QHBoxLayout(btn_row)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.addWidget(detect_btn)
         btn_layout.addStretch(1)
         form.addRow("", btn_row)
-        form.addRow("Define variables:", self._rows_host)
+        define_help = (
+            "Input / Output mark variables for workflow chaining "
+            "(sequence in → result files out).\n\n"
+            "• Input: the file or folder this step receives from the previous "
+            "step (or the selected FASTA). Only one Input can be defined.\n"
+            "• Output: a file or folder this command produces. Multiple "
+            "Outputs can be defined; they are also shown in the file panel.\n\n"
+            "Input and Output variables must use type File or Folder."
+        )
+        define_label = QLabel("Define variables:", self)
+        define_help_btn = QToolButton(self)
+        define_help_btn.setText("?")
+        define_help_btn.setToolTip(define_help)
+        define_help_btn.setAutoRaise(False)
+        define_help_btn.setFixedSize(22, 22)
+        define_help_btn.setStyleSheet(
+            "QToolButton {"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 10px;"
+            "  background: palette(base);"
+            "  font-weight: 600;"
+            "  padding: 0px;"
+            "}"
+            "QToolButton:hover { background: palette(alternate-base); }"
+        )
+        define_help_btn.clicked.connect(
+            lambda checked=False, text=define_help: QMessageBox.information(
+                self, "Input / Output", text
+            )
+        )
+        define_label_col = QWidget(self)
+        define_label_layout = QVBoxLayout(define_label_col)
+        define_label_layout.setContentsMargins(0, 0, 0, 0)
+        define_label_layout.setSpacing(4)
+        define_label_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        define_label_layout.addWidget(define_label, 0, Qt.AlignmentFlag.AlignRight)
+        define_label_layout.addWidget(define_help_btn, 0, Qt.AlignmentFlag.AlignRight)
+        define_label_layout.addStretch(1)
+        form.addRow(define_label_col, self._vars_scroll)
         add_row = QWidget(self)
         add_layout = QHBoxLayout(add_row)
         add_layout.setContentsMargins(0, 0, 0, 0)
@@ -413,36 +676,56 @@ class CommandPluginDesignerDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        save_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if save_btn is not None:
+            save_btn.setText("Save")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.addLayout(form, 1)
+        layout.addWidget(buttons, 0)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         QTimer.singleShot(0, self._label.setFocus)
 
-    def _add_var_row(self, var: CommandVarDef | None = None, *, is_output: bool = False) -> None:
+    def _on_add_variable_clicked(self) -> None:
+        self._add_var_row()
+
+    def _add_var_row(
+        self,
+        var: CommandVarDef | None = None,
+        *,
+        role: str = "",
+        special: bool = False,
+    ) -> None:
         if not hasattr(self, "_rows_host"):
             return
-        row = _CommandVarRow(var, is_output=is_output, parent=self._rows_host)
+        row = _CommandVarRow(
+            var,
+            role=role,
+            special=special,
+            parent=self._rows_host,
+        )
         row.remove_requested.connect(self._remove_var_row)
-        row.output_toggled.connect(self._on_output_toggled)
-        self._rows.append(row)
+        row.role_changed.connect(self._on_role_changed)
         self._rows_layout.addWidget(row)
+        self._rows.append(row)
         self._refresh_remove_buttons()
+        if not self._rebuilding_rows:
+            QTimer.singleShot(0, lambda r=row: self._scroll_var_row_into_view(r))
 
     def _remove_var_row(self, row: _CommandVarRow) -> None:
-        if row not in self._rows:
+        if row not in self._rows or row.is_special:
             return
-        if len(self._rows) <= 1:
+        user_rows = [r for r in self._rows if not r.is_special]
+        if len(user_rows) <= 1 and row in user_rows:
             row._name.clear()
             row._default.clear()
-            row._is_output.setChecked(False)
+            row.set_role("")
             row._mode.setCurrentIndex(row._mode.findData("file"))
-            row._refresh_output_fields()
+            row._refresh_role_fields()
             return
         self._rows.remove(row)
         self._rows_layout.removeWidget(row)
@@ -450,32 +733,57 @@ class CommandPluginDesignerDialog(QDialog):
         row.deleteLater()
         self._refresh_remove_buttons()
 
+    def _scroll_var_row_into_view(self, row: _CommandVarRow) -> None:
+        if not hasattr(self, "_vars_scroll"):
+            return
+        self._vars_scroll.ensureWidgetVisible(row, 0, 6)
+
     def _refresh_remove_buttons(self) -> None:
-        removable = len(self._rows) > 1
+        user_rows = [r for r in self._rows if not r.is_special]
+        removable = len(user_rows) > 1
         for row in self._rows:
             row.mark_removable(removable)
 
-    def _on_output_toggled(self, source_row: _CommandVarRow, checked: bool) -> None:
-        if not checked:
+    def _on_role_changed(self, source_row: _CommandVarRow, role: str) -> None:
+        # Only one Input; multiple Outputs are allowed.
+        if role != "input":
             return
         for row in self._rows:
-            if row is not source_row:
-                row.set_output_checked(False)
+            if row is source_row:
+                continue
+            other, other_role = row.definition()
+            del other
+            if other_role == "input":
+                row.set_role("")
 
     def _detect_variables(self) -> None:
-        current_defs = {}
-        outputs = set()
+        current_defs: dict[str, CommandVarDef] = {}
+        roles: dict[str, str] = {}
         for row in self._rows:
-            var, is_output = row.definition()
+            var, role = row.definition()
             if var is None:
                 continue
+            if role:
+                roles[var.name] = role
+            if is_special_variable(var.name) and not is_affixed_variable(var.name):
+                continue
             current_defs[var.name] = var
-            if is_output:
-                outputs.add(var.name)
-        vars_in_cmd = template_variables(self._command.toPlainText())
-        for name in vars_in_cmd:
+        cmd = self._command.toPlainText()
+        names_in_cmd = template_variables(cmd)
+        specials = [n for n in names_in_cmd if is_special_variable(n)]
+        affixed = template_affixed_variables(cmd)
+        for name in affixed:
+            if name not in current_defs:
+                current_defs[name] = CommandVarDef(
+                    name=name, mode=special_variable_mode(name), value=""
+                )
+        for name in names_in_cmd:
+            if is_special_variable(name):
+                continue
             if name not in current_defs:
                 current_defs[name] = CommandVarDef(name=name, mode="file", value="")
+        affixed_set = set(affixed)
+        other_names = [n for n in sorted(current_defs) if n not in affixed_set]
         self._rebuilding_rows = True
         try:
             for row in list(self._rows):
@@ -483,37 +791,65 @@ class CommandPluginDesignerDialog(QDialog):
                 row.setParent(None)
                 row.deleteLater()
             self._rows = []
-            for name in sorted(current_defs):
-                self._add_var_row(current_defs[name], is_output=name in outputs)
+            for name in specials:
+                self._add_var_row(
+                    CommandVarDef(name=name, mode=special_variable_mode(name), value=""),
+                    role=roles.get(name, ""),
+                    special=True,
+                )
+            for name in affixed:
+                self._add_var_row(current_defs[name], role=roles.get(name, ""))
+            for name in other_names:
+                self._add_var_row(current_defs[name], role=roles.get(name, ""))
         finally:
             self._rebuilding_rows = False
         if not self._rows:
             self._add_var_row()
+        if self._rows:
+            QTimer.singleShot(0, lambda: self._scroll_var_row_into_view(self._rows[-1]))
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        hint = super().sizeHint()
+        return QSize(
+            max(hint.width(), self._DEFAULT_WIDTH),
+            max(hint.height(), self._DEFAULT_HEIGHT),
+        )
 
     def spec(self) -> UserCommandPluginSpec:
+        inputs: list[str] = []
         outputs: list[str] = []
         var_defs: list[CommandVarDef] = []
         for row in self._rows:
-            var, is_output = row.definition()
+            var, role = row.definition()
             if var is None:
                 continue
+            if is_special_variable(var.name) and not is_affixed_variable(var.name):
+                if role == "input":
+                    inputs.append(var.name)
+                elif role == "output":
+                    outputs.append(var.name)
+                continue
             var_defs.append(var)
-            if is_output:
+            if role == "input":
+                inputs.append(var.name)
+            elif role == "output":
                 outputs.append(var.name)
         return UserCommandPluginSpec(
             id=plugin_id_from_label(self._label.text().strip()),
             label=self._label.text().strip(),
             command_template=self._command.toPlainText().strip(),
-            output_vars=outputs[:1],
+            input_vars=inputs[:1],
+            output_vars=outputs,
             var_defs=var_defs,
             fasta_only=self._initial_fasta_only,
             tooltip=self._tooltip.toPlainText().strip(),
+            show_on_toolbar=False,
         )
 
     def accept(self) -> None:
         spec = self.spec()
         if not spec.label:
-            QMessageBox.warning(self, "Design your plugin", "Plugin name is required.")
+            QMessageBox.warning(self, "Design command wrapper", "Wrapper name is required.")
             return
         label_key = spec.label.strip().lower()
         for existing in load_user_command_plugin_specs():
@@ -522,70 +858,75 @@ class CommandPluginDesignerDialog(QDialog):
             if existing.label.strip().lower() == label_key:
                 QMessageBox.warning(
                     self,
-                    "Design your plugin",
-                    f"A plugin named “{spec.label}” already exists. Choose a different name.",
+                    "Design command wrapper",
+                    f"A wrapper named “{spec.label}” already exists. Choose a different name.",
                 )
                 return
         if not spec.command_template:
-            QMessageBox.warning(self, "Design your plugin", "Command template is required.")
+            QMessageBox.warning(
+                self, "Design command wrapper", "Command template is required."
+            )
             return
-        output_count = 0
+        input_count = 0
         for row in self._rows:
-            var, is_output = row.definition()
+            var, role = row.definition()
             if var is None:
                 continue
-            if is_output:
-                output_count += 1
+            if role in {"input", "output"}:
                 if normalize_var_mode(var.mode) not in {"file", "folder"}:
                     QMessageBox.warning(
                         self,
-                        "Design your plugin",
-                        f"Output variable “{var.name}” must use type File or Folder.",
+                        "Design command wrapper",
+                        f"{role.title()} variable “{display_var_name(var.name)}” "
+                        "must use type File or Folder.",
                     )
                     return
-        if output_count > 1:
+                if role == "input":
+                    input_count += 1
+        if input_count > 1:
             QMessageBox.warning(
                 self,
-                "Design your plugin",
-                "Only one variable can be marked as Output.",
+                "Design command wrapper",
+                "Only one variable can be marked as Input.",
             )
             return
         super().accept()
 
 
-class PluginManageDialog(QDialog):
-    """List installed plugins; add, edit, or delete user-designed command plugins."""
+class WrapperManageDialog(QDialog):
+    """List, create, edit, or delete command wrappers."""
 
     def __init__(
         self,
-        plugin_registry,
         *,
         on_save,
         on_delete,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Manage plugins")
-        self.setMinimumWidth(720)
-        self.setMinimumHeight(420)
-        self._registry = plugin_registry
+        self.setWindowTitle("Manage wrapper")
+        self.setMinimumWidth(640)
+        self.setMinimumHeight(400)
         self._on_save = on_save
         self._on_delete = on_delete
 
         self._list = QListWidget(self)
         self._list.currentItemChanged.connect(self._update_buttons)
 
-        self._add_btn = QPushButton("Add…", self)
-        self._edit_btn = QPushButton("Edit…", self)
-        self._delete_btn = QPushButton("Delete…", self)
-        self._add_btn.clicked.connect(self._add_plugin)
-        self._edit_btn.clicked.connect(self._edit_plugin)
-        self._delete_btn.clicked.connect(self._delete_plugin)
-        self._list.itemDoubleClicked.connect(lambda _item: self._edit_plugin())
+        self._add_btn = QPushButton("New", self)
+        self._edit_btn = QPushButton("Edit", self)
+        self._duplicate_btn = QPushButton("Duplicate", self)
+        self._delete_btn = QPushButton("Delete", self)
+        self._add_btn.clicked.connect(self._add_wrapper)
+        self._edit_btn.clicked.connect(self._edit_wrapper)
+        self._duplicate_btn.clicked.connect(self._duplicate_wrapper)
+        self._delete_btn.clicked.connect(self._delete_wrapper)
+        self._list.itemDoubleClicked.connect(lambda _item: self._edit_wrapper())
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._add_btn)
         btn_row.addWidget(self._edit_btn)
+        btn_row.addWidget(self._duplicate_btn)
         btn_row.addWidget(self._delete_btn)
         btn_row.addStretch(1)
 
@@ -605,55 +946,46 @@ class PluginManageDialog(QDialog):
 
     def _populate(self) -> None:
         self._list.clear()
-        custom_ids = user_command_plugin_ids()
-        plugins = self._registry.all_plugins()
-        if not plugins:
-            item = QListWidgetItem("(No plugins loaded)")
+        specs = load_user_command_plugin_specs()
+        if not specs:
+            item = QListWidgetItem("(No command wrappers yet — click New)")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._list.addItem(item)
             return
-        for plugin in plugins:
-            kind = "Custom" if plugin.id in custom_ids else "Installed"
-            tooltip = (plugin.tooltip or "").strip()
-            text = f"{plugin.label} — {kind}"
-            item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, plugin.id)
-            item.setData(Qt.ItemDataRole.UserRole + 1, plugin.id in custom_ids)
-            if tooltip:
-                item.setToolTip(tooltip)
+        for index, spec in enumerate(specs, start=1):
+            item = QListWidgetItem(f"{index}. {spec.label}")
+            item.setData(Qt.ItemDataRole.UserRole, spec.id)
+            if spec.tooltip:
+                item.setToolTip(spec.tooltip)
             self._list.addItem(item)
 
-    def _selected(self) -> tuple[str, bool] | None:
+    def _selected_id(self) -> str | None:
         item = self._list.currentItem()
         if item is None:
             return None
         plugin_id = item.data(Qt.ItemDataRole.UserRole)
-        is_custom = bool(item.data(Qt.ItemDataRole.UserRole + 1))
-        if not plugin_id:
-            return None
-        return str(plugin_id), is_custom
+        return str(plugin_id) if plugin_id else None
 
     def _update_buttons(self) -> None:
-        selected = self._selected()
-        has_custom = selected is not None and selected[1]
-        self._edit_btn.setEnabled(has_custom)
-        self._delete_btn.setEnabled(has_custom)
+        has = self._selected_id() is not None
+        self._edit_btn.setEnabled(has)
+        self._duplicate_btn.setEnabled(has)
+        self._delete_btn.setEnabled(has)
 
-    def _add_plugin(self) -> None:
+    def _add_wrapper(self) -> None:
         dialog = CommandPluginDesignerDialog(parent=self)
         if not exec_modal_dialog(dialog):
             return
         self._on_save(dialog.spec())
         self._populate()
 
-    def _edit_plugin(self) -> None:
-        selected = self._selected()
-        if selected is None or not selected[1]:
+    def _edit_wrapper(self) -> None:
+        plugin_id = self._selected_id()
+        if not plugin_id:
             return
-        plugin_id = selected[0]
         spec = get_user_command_plugin_spec(plugin_id)
         if spec is None:
-            QMessageBox.warning(self, "Manage plugins", f"Could not load plugin {plugin_id!r}.")
+            QMessageBox.warning(self, "Manage wrapper", f"Could not load wrapper {plugin_id!r}.")
             return
         dialog = CommandPluginDesignerDialog(initial=spec, parent=self)
         if not exec_modal_dialog(dialog):
@@ -661,27 +993,86 @@ class PluginManageDialog(QDialog):
         self._on_save(dialog.spec(), previous_id=plugin_id)
         self._populate()
 
-    def _delete_plugin(self) -> None:
-        selected = self._selected()
-        if selected is None or not selected[1]:
+    @staticmethod
+    def _unique_copy_label(base_label: str) -> str:
+        existing = {
+            spec.label.strip().lower() for spec in load_user_command_plugin_specs()
+        }
+        base = (base_label or "Wrapper").strip() or "Wrapper"
+        candidate = f"{base} copy"
+        if candidate.lower() not in existing:
+            return candidate
+        index = 2
+        while f"{base} copy {index}".lower() in existing:
+            index += 1
+        return f"{base} copy {index}"
+
+    def _duplicate_wrapper(self) -> None:
+        plugin_id = self._selected_id()
+        if not plugin_id:
             return
-        plugin_id = selected[0]
+        spec = get_user_command_plugin_spec(plugin_id)
+        if spec is None:
+            QMessageBox.warning(
+                self, "Manage wrapper", f"Could not load wrapper {plugin_id!r}."
+            )
+            return
+        new_label = self._unique_copy_label(spec.label)
+        new_id = plugin_id_from_label(new_label)
+        existing_ids = {item.id for item in load_user_command_plugin_specs()}
+        if new_id in existing_ids:
+            stem = new_id
+            index = 2
+            while f"{stem}_{index}" in existing_ids:
+                index += 1
+            new_id = f"{stem}_{index}"
+        duplicate = UserCommandPluginSpec(
+            id=new_id,
+            label=new_label,
+            command_template=spec.command_template,
+            output_vars=list(spec.output_vars),
+            var_defs=[
+                CommandVarDef(name=var.name, mode=var.mode, value=var.value)
+                for var in spec.var_defs
+            ],
+            fasta_only=spec.fasta_only,
+            tooltip=spec.tooltip,
+            show_on_toolbar=False,
+            input_vars=list(spec.input_vars or []),
+        )
+        self._on_save(duplicate)
+        self._populate()
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == new_id:
+                self._list.setCurrentItem(item)
+                break
+        self._update_buttons()
+
+    def _delete_wrapper(self) -> None:
+        plugin_id = self._selected_id()
+        if not plugin_id:
+            return
         spec = get_user_command_plugin_spec(plugin_id)
         label = spec.label if spec is not None else plugin_id
         answer = QMessageBox.question(
             self,
-            "Manage plugins",
-            f"Delete custom plugin “{label}” ({plugin_id})?",
+            "Manage wrapper",
+            f"Delete command wrapper “{label}”?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         if not self._on_delete(plugin_id):
-            QMessageBox.warning(self, "Manage plugins", f"Could not delete plugin {plugin_id!r}.")
+            QMessageBox.warning(self, "Manage wrapper", f"Could not delete wrapper {plugin_id!r}.")
             return
         self._populate()
         self._update_buttons()
+
+
+# Backward-compatible alias (older call sites / docs).
+PluginManageDialog = WrapperManageDialog
 
 
 class AlignParamsDialog(QDialog):
@@ -879,6 +1270,13 @@ class AlignParamsDialog(QDialog):
         exe_box_layout.addWidget(self._use_system_mafft)
         exe_box_layout.addWidget(self._use_system_muscle)
         options_layout.addWidget(exe_box)
+
+        process_box, self._show_process_window = make_process_output_box(
+            self,
+            tool_name="Align",
+            checked=bool(getattr(opts, "show_process_window", False)),
+        )
+        options_layout.addWidget(process_box)
         options_layout.addStretch(1)
 
         self._aligner_tabs = QTabWidget(self)
@@ -997,6 +1395,7 @@ class AlignParamsDialog(QDialog):
             mafft_combined=self._mafft_combined.isChecked(),
             muscle_combined=self._muscle_combined.isChecked(),
             right_click_aligner=self.right_click_aligner(),
+            show_process_window=self._show_process_window.isChecked(),
         )
 
     def use_system_mafft(self) -> bool:
@@ -1033,6 +1432,7 @@ class AlignParamsDialog(QDialog):
 
         for value, radio in self._right_click_buttons.items():
             radio.setChecked(value == defaults.right_click_aligner)
+        self._show_process_window.setChecked(defaults.show_process_window)
         # Default: bundled MAFFT / MUSCLE binaries, not system PATH.
         self._use_system_mafft.setChecked(False)
         self._use_system_muscle.setChecked(False)
@@ -1222,14 +1622,14 @@ class ExtractSequencesDialog(QDialog):
 
 
 class FastGaParamsDialog(QDialog):
-    """FastGA whole-genome alignment parameters."""
+    """FastGA whole-genome alignment parameters (BLAST-style form)."""
 
     def __init__(
         self,
         *,
         initial=None,
         file_count: int = 1,
-        title: str = "FastGA",
+        title: str = "FastGA parameters",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -1245,16 +1645,23 @@ class FastGaParamsDialog(QDialog):
         idx = self._format.findData(opts.output_format)
         if idx >= 0:
             self._format.setCurrentIndex(idx)
+        self._format.setToolTip(
+            "Output format: PAF and PSL are text files streamed by FastGA "
+            "(-paf / -pafx / -pafm / -pafs / -pafS / -psl); -1 writes a binary "
+            ".1aln (ONEcode) file."
+        )
 
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 128)
         self._threads.setValue(max(1, opts.threads))
+        self._threads.setToolTip("FastGA -T: number of threads to use.")
 
         self._identity = QDoubleSpinBox(self)
         self._identity.setRange(0.5, 1.0)
         self._identity.setSingleStep(0.05)
         self._identity.setDecimals(2)
         self._identity.setValue(opts.min_identity)
+        self._identity.setToolTip("FastGA -i: minimum alignment identity.")
 
         self._min_length = QSpinBox(self)
         # Below ~100 FastGA fails: an alignment must contain a 40 bp seed and
@@ -1263,8 +1670,8 @@ class FastGaParamsDialog(QDialog):
         self._min_length.setSingleStep(50)
         self._min_length.setValue(max(100, opts.min_length))
         self._min_length.setToolTip(
-            "Shortest alignment to report, in bp. Cannot go below 100 -- "
-            "FastGA rejects limits shorter than its seed length.\n"
+            "FastGA -l: shortest alignment to report, in bp. Cannot go below 100 "
+            "-- FastGA rejects limits shorter than its seed length.\n"
             "Raise this on satellite arrays, where short matches can swamp "
             "the output."
         )
@@ -1272,28 +1679,57 @@ class FastGaParamsDialog(QDialog):
         self._seed_freq = QSpinBox(self)
         self._seed_freq.setRange(1, 100_000)
         self._seed_freq.setSingleStep(50)
-        self._seed_freq.setValue(getattr(opts, "seed_freq", 200))
+        self._seed_freq.setValue(max(1, opts.seed_freq))
         self._seed_freq.setToolTip(
-            "FastGA's -f: seeds occurring more often than this are discarded as "
-            "'repetitive' before alignment.\n"
+            "FastGA -f: adaptive seed count cutoff. Seeds occurring more often "
+            "than this are discarded as repetitive before alignment.\n"
             "FastGA's own default is 10, which removes satellite arrays "
-            "entirely, since every monomer k-mer occurs far more than 10 times.\n"
-            "Raise it to see repeat structure; higher values are slower."
+            "entirely. Raise it to see repeat structure; higher values are slower."
+        )
+
+        self._chain_coverage = QSpinBox(self)
+        self._chain_coverage.setRange(1, 1_000_000)
+        self._chain_coverage.setValue(max(1, opts.chain_coverage))
+        self._chain_coverage.setToolTip(
+            "FastGA -c: minimum seed chain coverage (bases) in both genomes. "
+            "FastGA default: 85."
+        )
+
+        self._chain_gap = QSpinBox(self)
+        self._chain_gap.setRange(1, 10_000_000)
+        self._chain_gap.setSingleStep(100)
+        self._chain_gap.setValue(max(1, opts.chain_gap))
+        self._chain_gap.setToolTip(
+            "FastGA -s: maximum spacing between consecutive seeds when starting "
+            "a new seed chain. FastGA default: 1000."
         )
 
         self._symmetric = QCheckBox("Symmetric seeding (-S)", self)
         self._symmetric.setChecked(opts.symmetric)
         self._symmetric.setToolTip(
-            "Uses the seeds of both genomes so the result does not depend on "
-            "argument order. Recommended when the repeat structure is the "
-            "point; slower, and not needed when looking for synteny."
+            "FastGA -S: seed adaptamers from both genomes so the result does "
+            "not depend on argument order. Useful for repeat structure; slower."
         )
 
-        self._keep_index = QCheckBox("Keep genome index for reuse (-k)", self)
+        self._keep_index = QCheckBox("Keep genome index (-k)", self)
         self._keep_index.setChecked(opts.keep_index)
         self._keep_index.setToolTip(
-            "Keeps the .1gdb / .gidx files beside the FASTA so later runs skip "
-            "the index build, which is the slow part of a first run."
+            "FastGA -k: keep generated .1gdb / .gix files beside the FASTA so "
+            "later runs skip the index build."
+        )
+
+        self._no_soft_mask = QCheckBox("Do not soft mask (-N)", self)
+        self._no_soft_mask.setChecked(opts.no_soft_mask)
+        self._no_soft_mask.setToolTip("FastGA -N: do not soft mask.")
+
+        self._pairwise = QCheckBox("Do each pair comparison", self)
+        self._pairwise.setChecked(bool(getattr(opts, "pairwise", False)))
+        self._pairwise.setToolTip(
+            "Off (default): each selected FASTA is compared against itself, "
+            "one file at a time.\n"
+            "On: compare every unique pair among the selected files and write "
+            "all alignments into one file named "
+            "<first_selected>_multi_FastGA.<ext>."
         )
 
         for field in (
@@ -1302,43 +1738,138 @@ class FastGaParamsDialog(QDialog):
             self._identity,
             self._min_length,
             self._seed_freq,
+            self._chain_coverage,
+            self._chain_gap,
         ):
-            field.setFixedWidth(240)
+            field.setFixedWidth(280)
 
-        mode = QLabel(self)
-        mode.setWordWrap(True)
-        mode.setStyleSheet("color: palette(mid);")
-        if file_count >= 2:
-            mode.setText(
-                "Two files selected: they will be compared against each other."
-            )
-        else:
-            mode.setText(
-                "One file selected: it will be compared against itself, which "
-                "finds repetitive regions. Self matches are excluded."
-            )
+        self._file_count = int(file_count)
+        self._mode = QLabel(self)
+        self._mode.setWordWrap(True)
+        self._mode.setStyleSheet("color: palette(mid);")
+        self._pairwise.toggled.connect(self._update_mode_text)
+        self._update_mode_text()
 
-        form = QFormLayout()
+        params_tab = QWidget(self)
+        form = QFormLayout(params_tab)
+        form.setContentsMargins(16, 14, 16, 14)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
+        form.addRow(self._mode)
         form.addRow("Output format:", self._format)
-        form.addRow("Min identity:", self._identity)
-        form.addRow("Min alignment length:", self._min_length)
-        form.addRow("Repeat cutoff (-f):", self._seed_freq)
-        form.addRow("Threads:", self._threads)
+        form.addRow("-T (threads):", self._threads)
+        form.addRow("-i (min identity):", self._identity)
+        form.addRow("-l (min length):", self._min_length)
+        form.addRow("-f (seed cutoff):", self._seed_freq)
+        form.addRow("-c (chain coverage):", self._chain_coverage)
+        form.addRow("-s (chain gap):", self._chain_gap)
         form.addRow("", self._symmetric)
         form.addRow("", self._keep_index)
+        form.addRow("", self._no_soft_mask)
+        form.addRow("", self._pairwise)
 
-        self._button_box = make_cancel_save_run_bar(self)
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Run FastGA with saved parameters", FASTGA_RIGHT_CLICK_RUN),
+            ("Open this dialog", FASTGA_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_action == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the FastGA button does:", self)
+        )
+        for radio in self._right_click_buttons.values():
+            rc_box_layout.addWidget(radio)
+
+        process_box, self._show_process_window = make_process_output_box(
+            self,
+            tool_name="FastGA",
+            checked=bool(getattr(opts, "show_process_window", False)),
+        )
+
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+        options_layout.addWidget(rc_box)
+        options_layout.addWidget(process_box)
+        options_layout.addStretch(1)
+
+        self._tabs = QTabWidget(self)
+        self._tabs.addTab(params_tab, "Parameters")
+        self._tabs.addTab(options_tab, "Options")
+
+        restore = QPushButton("Restore Defaults", self)
+        restore.clicked.connect(self._restore_defaults)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
-        layout.addWidget(mode)
-        layout.addLayout(form)
+        layout.addWidget(self._tabs)
         layout.addWidget(self._button_box)
+
+    def _update_mode_text(self) -> None:
+        pairwise = self._pairwise.isChecked()
+        n = self._file_count
+        if pairwise:
+            if n >= 2:
+                pair_count = n * (n - 1) // 2
+                text = (
+                    f"{n} files selected: every unique pair will be compared "
+                    f"({pair_count} pair(s)). Results are merged into one file "
+                    "named after the first selection with _multi_FastGA."
+                )
+            else:
+                text = ""
+        elif n >= 1:
+            text = (
+                f"{n} file(s) selected: each will be compared against itself "
+                "one by one (self-comparison)."
+            )
+        else:
+            text = (
+                "Self-comparison (default): select one or more FASTA files. "
+                "Each is compared against itself, one by one. Enable "
+                "Do each pair comparison to compare every unique pair among "
+                "the selected files."
+            )
+        self._mode.setText(text)
+
+    def _restore_defaults(self) -> None:
+        from repeatviewer.job_options import FastGaOptions
+
+        opts = FastGaOptions()
+        idx = self._format.findData(opts.output_format)
+        if idx >= 0:
+            self._format.setCurrentIndex(idx)
+        self._threads.setValue(max(1, opts.threads))
+        self._identity.setValue(opts.min_identity)
+        self._min_length.setValue(max(100, opts.min_length))
+        self._seed_freq.setValue(opts.seed_freq)
+        self._chain_coverage.setValue(opts.chain_coverage)
+        self._chain_gap.setValue(opts.chain_gap)
+        self._symmetric.setChecked(opts.symmetric)
+        self._keep_index.setChecked(opts.keep_index)
+        self._no_soft_mask.setChecked(opts.no_soft_mask)
+        self._pairwise.setChecked(opts.pairwise)
+        self._show_process_window.setChecked(opts.show_process_window)
+        self._right_click_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
+        self._update_mode_text()
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -1346,14 +1877,27 @@ class FastGaParamsDialog(QDialog):
     def options(self):
         from repeatviewer.job_options import FastGaOptions
 
+        right_click_action = FASTGA_RIGHT_CLICK_RUN
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                right_click_action = value
+                break
+
         return FastGaOptions(
             output_format=str(self._format.currentData()),
             threads=int(self._threads.value()),
             min_identity=float(self._identity.value()),
             min_length=int(self._min_length.value()),
             seed_freq=int(self._seed_freq.value()),
+            chain_coverage=int(self._chain_coverage.value()),
+            chain_gap=int(self._chain_gap.value()),
             symmetric=self._symmetric.isChecked(),
             keep_index=self._keep_index.isChecked(),
+            no_soft_mask=self._no_soft_mask.isChecked(),
+            pairwise=self._pairwise.isChecked(),
+            temp_dir="",
+            right_click_action=right_click_action,
+            show_process_window=self._show_process_window.isChecked(),
         )
 
 
@@ -1640,7 +2184,11 @@ class BlastParamsDialog(QDialog):
         self._blastn_database = QComboBox()
         self._blastp_database = QComboBox()
         for combo in (self._blastn_database, self._blastp_database):
-            combo.setMinimumWidth(220)
+            combo.setMinimumWidth(260)
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(28)
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
@@ -1739,7 +2287,11 @@ class BlastParamsDialog(QDialog):
 
         # --- blastx: nucleotide query translated against a protein database ---
         self._blastx_database = QComboBox()
-        self._blastx_database.setMinimumWidth(220)
+        self._blastx_database.setMinimumWidth(260)
+        self._blastx_database.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._blastx_database.setMinimumContentsLength(28)
 
         self._blastx_evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._blastx_evalue)
@@ -1826,11 +2378,17 @@ class BlastParamsDialog(QDialog):
             self._blastp_gap_open,
             self._blastp_gap_extend,
             self._blastp_query_coverage,
+            self._blastx_evalue,
+            self._blastx_threads,
+            self._blastx_word_size,
+            self._blastx_gap_open,
+            self._blastx_gap_extend,
+            self._blastx_query_coverage,
             self._max_msa,
             self._top_msa,
             self._min_bit_score,
         ):
-            field.setFixedWidth(150)
+            field.setFixedWidth(260)
             field.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         blastn_tab = QWidget()
@@ -1890,9 +2448,11 @@ class BlastParamsDialog(QDialog):
         rc_box = QGroupBox("Right-click action", self)
         rc_box_layout = QVBoxLayout(rc_box)
         rc_box_layout.setSpacing(6)
-        rc_box_layout.addWidget(
-            QLabel("Right-clicking the BLAST button runs, with saved settings:", self)
+        rc_label = QLabel(
+            "Right-clicking the BLAST button runs, with saved settings:", self
         )
+        rc_label.setWordWrap(True)
+        rc_box_layout.addWidget(rc_label)
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
@@ -1913,6 +2473,13 @@ class BlastParamsDialog(QDialog):
         exe_box_layout = QVBoxLayout(exe_box)
         exe_box_layout.addWidget(self._use_system_blast)
         options_layout.addWidget(exe_box)
+
+        process_box, self._show_process_window = make_process_output_box(
+            self,
+            tool_name="BLAST",
+            checked=bool(getattr(opts, "show_process_window", False)),
+        )
+        options_layout.addWidget(process_box)
 
         options_layout.addStretch(1)
         self._tabs.addTab(options_tab, "Options")
@@ -1960,6 +2527,12 @@ class BlastParamsDialog(QDialog):
         self._tabs.currentChanged.connect(self._update_postprocessing_visibility)
         self._update_postprocessing_visibility(self._tabs.currentIndex())
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # After dialog polish's adjustSize(), shrink to the active tab so the
+        # wider Options page does not leave blank space on BLASTn/p/x.
+        QTimer.singleShot(0, self._fit_to_content)
+
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
@@ -1973,7 +2546,7 @@ class BlastParamsDialog(QDialog):
         return form
 
     def _database_row(self, combo: QComboBox) -> QWidget:
-        manage = QPushButton("Add/Manage databases…")
+        manage = QPushButton("Add/Manage databases")
         manage.clicked.connect(self._manage_databases)
         row = QWidget()
         layout = QHBoxLayout(row)
@@ -2015,7 +2588,41 @@ class BlastParamsDialog(QDialog):
     def _update_postprocessing_visibility(self, tab_index: int) -> None:
         self._post_box.setVisible(tab_index == 0)
         if self.isVisible():
-            self.adjustSize()
+            QTimer.singleShot(0, self._fit_to_content)
+
+    def _fit_to_content(self) -> None:
+        """Size width/height to the active tab (not the widest tab page)."""
+        page = self._tabs.currentWidget()
+        if page is None or self.layout() is None:
+            return
+        page.ensurePolished()
+        page.adjustSize()
+        page_hint = page.sizeHint()
+        post_w = self._post_box.sizeHint().width() if self._post_box.isVisible() else 0
+        post_h = self._post_box.sizeHint().height() if self._post_box.isVisible() else 0
+        tab_chrome = max(24, self._tabs.tabBar().sizeHint().height()) + 8
+        buttons_h = self._button_box.sizeHint().height()
+        buttons_w = self._button_box.sizeHint().width()
+        margins = self.layout().contentsMargins()
+        spacing = max(0, self.layout().spacing())
+        gaps = 2 if self._post_box.isVisible() else 1
+        width = max(
+            420,
+            page_hint.width() + margins.left() + margins.right() + 24,
+            post_w + margins.left() + margins.right() + 24,
+            buttons_w + margins.left() + margins.right(),
+        )
+        height = (
+            page_hint.height()
+            + tab_chrome
+            + post_h
+            + buttons_h
+            + margins.top()
+            + margins.bottom()
+            + spacing * gaps
+            + 4
+        )
+        self.resize(width, height)
 
     def _populate_database_combo(
         self,
@@ -2113,6 +2720,8 @@ class BlastParamsDialog(QDialog):
         self._blastp_database.setCurrentIndex(0)
         self._blastx_database.setCurrentIndex(0)
         self._use_system_blast.setChecked(False)
+        self._show_process_window.setChecked(defaults.show_process_window)
+        self._right_click_buttons[BLAST_PROGRAM_BLASTN].setChecked(True)
 
     def use_system_blast(self) -> bool:
         return self._use_system_blast.isChecked()
@@ -2158,6 +2767,7 @@ class BlastParamsDialog(QDialog):
             blastx_write_text=self._blastx_write_text.isChecked(),
             blastx_write_gff=self._blastx_write_gff.isChecked(),
             right_click_program=self._selected_right_click_program(),
+            show_process_window=self._show_process_window.isChecked(),
         )
 
     def _selected_right_click_program(self) -> str:
@@ -2484,11 +3094,18 @@ class FlexidotParamsDialog(QDialog):
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 
+        process_box, self._show_process_window = make_process_output_box(
+            self,
+            tool_name="Flexidot",
+            checked=bool(getattr(opts, "show_process_window", False)),
+        )
+
         options_tab = QWidget(self)
         options_layout = QVBoxLayout(options_tab)
         options_layout.setContentsMargins(16, 14, 16, 14)
         options_layout.setSpacing(14)
         options_layout.addWidget(rc_box)
+        options_layout.addWidget(process_box)
         options_layout.addStretch(1)
 
         self._tabs = QTabWidget(self)
@@ -2547,6 +3164,7 @@ class FlexidotParamsDialog(QDialog):
         self._line_width.setValue(defaults.line_width)
         self._length_scaling.setChecked(defaults.length_scaling)
         self._combined.setChecked(defaults.combined)
+        self._show_process_window.setChecked(defaults.show_process_window)
         self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
 
     def options(self) -> FlexidotOptions:
@@ -2575,6 +3193,7 @@ class FlexidotParamsDialog(QDialog):
             # pairwise/all-vs-all for multiple.
             modes=DEFAULT_FLEXIDOT_MODES,
             right_click_action=right_click_action,
+            show_process_window=self._show_process_window.isChecked(),
         )
 
 
@@ -3637,49 +4256,55 @@ class MsaCleanParamsDialog(QDialog):
             "Check steps to include in Combined MSA clean. Drag to set execution order."
         )
         for method_id in opts.method_order:
-            item = QListWidgetItem(self._method_labels[method_id])
-            item.setData(Qt.ItemDataRole.UserRole, method_id)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDragEnabled
+            self._add_method_list_item(
+                method_id,
+                checked=enabled_methods.get(method_id, False),
             )
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if enabled_methods.get(method_id, False)
-                else Qt.CheckState.Unchecked
-            )
-            self._method_order.addItem(item)
         # Ensure every known method appears (in case order was incomplete).
-        listed = {str(self._method_order.item(i).data(Qt.ItemDataRole.UserRole))
-                  for i in range(self._method_order.count())}
+        listed = {
+            str(self._method_order.item(i).data(Qt.ItemDataRole.UserRole))
+            for i in range(self._method_order.count())
+        }
         for method_id in DEFAULT_MSA_CLEAN_ORDER:
             if method_id in listed:
                 continue
-            item = QListWidgetItem(self._method_labels[method_id])
-            item.setData(Qt.ItemDataRole.UserRole, method_id)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDragEnabled
+            self._add_method_list_item(
+                method_id,
+                checked=enabled_methods.get(method_id, False),
             )
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if enabled_methods.get(method_id, False)
-                else Qt.CheckState.Unchecked
-            )
-            self._method_order.addItem(item)
         self._method_order.itemChanged.connect(self._on_method_item_changed)
         self._fit_method_list_height()
 
-        combined_box = QGroupBox("Combined MSA clean", self)
+        combined_help = (
+            "Combined MSA clean runs the checked cleaning steps in list order "
+            "on the selected alignment.\n\n"
+            "How to use it:\n"
+            "• Check a step to include it in the pipeline.\n"
+            "• Uncheck a step to skip it.\n"
+            "• Drag steps up or down to change the order they run.\n"
+            "• At least one step must stay checked.\n\n"
+            "Each step uses the parameters in its section below. "
+            "Use the ? next to a step title for details on that method."
+        )
+        combined_box = QGroupBox(self)
         combined_layout = QVBoxLayout(combined_box)
         combined_layout.setContentsMargins(10, 8, 10, 8)
         combined_layout.setSpacing(6)
+        combined_header = QWidget(combined_box)
+        combined_header_layout = QHBoxLayout(combined_header)
+        combined_header_layout.setContentsMargins(0, 0, 0, 0)
+        combined_header_layout.setSpacing(6)
+        combined_title = QLabel("Combined MSA clean", combined_header)
+        title_font = combined_title.font()
+        title_font.setBold(True)
+        combined_title.setFont(title_font)
+        combined_header_layout.addWidget(combined_title, 1)
+        combined_header_layout.addWidget(
+            self._msa_help_button("Combined MSA clean", combined_help),
+            0,
+            Qt.AlignmentFlag.AlignRight,
+        )
+        combined_layout.addWidget(combined_header)
         hint = QLabel("Check steps to include. Drag to set order.", combined_box)
         hint.setWordWrap(True)
         combined_layout.addWidget(hint)
@@ -3687,7 +4312,7 @@ class MsaCleanParamsDialog(QDialog):
 
         spin_width = 90
 
-        div_box = QGroupBox("Clean rows with divergence")
+        div_box = QGroupBox(self)
         self._div_threshold = QDoubleSpinBox()
         self._div_threshold.setRange(0.0, 1.0)
         self._div_threshold.setDecimals(2)
@@ -3706,9 +4331,11 @@ class MsaCleanParamsDialog(QDialog):
                 ("Divergence threshold:", self._div_threshold),
                 ("Window size (bp):", self._div_window),
             ],
+            heading="Clean rows with divergence",
+            help_text=msa_clean_method_description("msa_clean_div"),
         )
 
-        gap_box = QGroupBox("Clean rows with gaps")
+        gap_box = QGroupBox(self)
         self._row_gap_threshold = QDoubleSpinBox()
         self._row_gap_threshold.setRange(0.0, 1.0)
         self._row_gap_threshold.setDecimals(3)
@@ -3727,9 +4354,11 @@ class MsaCleanParamsDialog(QDialog):
                 ("Gap proportion threshold:", self._row_gap_threshold),
                 ("Window size (bp):", self._row_gap_window),
             ],
+            heading="Clean rows with gaps",
+            help_text=msa_clean_method_description("msa_clean_gap"),
         )
 
-        gappy_box = QGroupBox("Remove gappy columns")
+        gappy_box = QGroupBox(self)
         self._gap_threshold = QDoubleSpinBox()
         self._gap_threshold.setRange(0.0, 1.0)
         self._gap_threshold.setDecimals(2)
@@ -3764,6 +4393,8 @@ class MsaCleanParamsDialog(QDialog):
                 ("Similarity threshold:", self._similarity),
                 ("Min nucleotides per column:", self._min_nt),
             ],
+            heading="Remove gappy columns",
+            help_text=msa_clean_method_description("msa_clean_gappy"),
         )
 
         self._right_click_group = QButtonGroup(self)
@@ -3878,7 +4509,56 @@ class MsaCleanParamsDialog(QDialog):
         return dialog_should_run(self)
 
     @staticmethod
-    def _fill_labeled_grid(box, rows) -> None:
+    def _msa_help_button_style() -> str:
+        return (
+            "QToolButton {"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 10px;"
+            "  background: palette(base);"
+            "  font-weight: 600;"
+            "  padding: 0px;"
+            "}"
+            "QToolButton:hover { background: palette(alternate-base); }"
+        )
+
+    def _msa_help_button(self, title: str, help_text: str) -> QToolButton:
+        button = QToolButton(self)
+        button.setText("?")
+        button.setToolTip(help_text)
+        button.setAutoRaise(False)
+        button.setFixedSize(22, 22)
+        button.setStyleSheet(self._msa_help_button_style())
+        button.clicked.connect(
+            lambda checked=False, t=title, text=help_text: QMessageBox.information(
+                self, t, text
+            )
+        )
+        return button
+
+    def _add_method_list_item(self, method_id: str, *, checked: bool) -> None:
+        label_text = self._method_labels[method_id]
+        item = QListWidgetItem(label_text)
+        item.setData(Qt.ItemDataRole.UserRole, method_id)
+        item.setFlags(
+            item.flags()
+            | Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsDragEnabled
+        )
+        item.setCheckState(
+            Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        )
+        self._method_order.addItem(item)
+
+    def _fill_labeled_grid(
+        self,
+        box,
+        rows,
+        *,
+        heading: str | None = None,
+        help_text: str = "",
+    ) -> None:
         """Lay out (label, widget) rows in a group box with a real label column.
 
         Uses an explicit QGridLayout rather than QFormLayout: the form's label
@@ -3886,7 +4566,28 @@ class MsaCleanParamsDialog(QDialog):
         stray character. A grid gives column 0 its natural width and stretches
         column 1, so every label is always fully visible.
         """
-        grid = QGridLayout(box)
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(8)
+        if heading:
+            header = QWidget(box)
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(0, 0, 0, 0)
+            header_layout.setSpacing(6)
+            title = QLabel(heading, header)
+            font = title.font()
+            font.setBold(True)
+            title.setFont(font)
+            header_layout.addWidget(title, 1)
+            if help_text:
+                header_layout.addWidget(
+                    self._msa_help_button(heading, help_text),
+                    0,
+                    Qt.AlignmentFlag.AlignRight,
+                )
+            outer.addWidget(header)
+
+        grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(8)
         grid.setColumnStretch(0, 0)
@@ -3900,6 +4601,7 @@ class MsaCleanParamsDialog(QDialog):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             )
             grid.addWidget(widget, row, 1)
+        outer.addLayout(grid)
 
     def _fit_method_list_height(self) -> None:
         """Keep the Combined list only as tall as its rows, with a little padding."""
@@ -3955,21 +4657,10 @@ class MsaCleanParamsDialog(QDialog):
         self._method_order.blockSignals(True)
         self._method_order.clear()
         for method_id in defaults.method_order:
-            item = QListWidgetItem(self._method_labels[method_id])
-            item.setData(Qt.ItemDataRole.UserRole, method_id)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDragEnabled
+            self._add_method_list_item(
+                method_id,
+                checked=enabled.get(method_id, False),
             )
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if enabled.get(method_id, False)
-                else Qt.CheckState.Unchecked
-            )
-            self._method_order.addItem(item)
         self._method_order.blockSignals(False)
         self._fit_method_list_height()
         self._right_click_buttons[MSA_CLEAN_RIGHT_CLICK_COMBINED].setChecked(True)

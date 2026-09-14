@@ -709,7 +709,7 @@ class FilePreviewPage(QWidget):
             return
         self._refresh_sequence_info_bar()
         if index == 0:
-            QTimer.singleShot(0, self._refresh_text_view)
+            QTimer.singleShot(0, self._open_text_tab)
         elif index == 1:
             QTimer.singleShot(0, self._open_annotation_tab)
         elif index == 2:
@@ -725,7 +725,7 @@ class FilePreviewPage(QWidget):
         if self._single_fasta_mode:
             index = self._fasta_stack.currentIndex()
             if index == 0:
-                self._refresh_text_view()
+                self._open_text_tab()
             elif index == 1:
                 self._open_annotation_tab()
             elif index == 2:
@@ -751,7 +751,7 @@ class FilePreviewPage(QWidget):
                     load_preview_zoom_percent(),
                     load_preview_fit_mode(),
                 )
-                QTimer.singleShot(0, self._refresh_text_view)
+                QTimer.singleShot(0, self._open_text_tab)
             elif index == 1:
                 QTimer.singleShot(0, self._open_annotation_tab)
             return
@@ -931,6 +931,9 @@ class FilePreviewPage(QWidget):
             # Selection is shared with the Annotation tab, but switching tabs
             # is left to the user -- clicking the plot never navigates.
             self._dotplot_panel.rangeSelected.connect(self._on_dotplot_range_selected)
+            self._dotplot_panel.viewInAnnotationRequested.connect(
+                self._on_dotplot_view_in_annotation
+            )
             holder_layout = self._fasta_dotplot_holder.layout()
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_dotplot_holder)
@@ -942,6 +945,7 @@ class FilePreviewPage(QWidget):
         return self._dotplot_panel
 
     def _open_dotplot_tab(self) -> None:
+        self._capture_text_selection_into_pending()
         panel = self._ensure_dotplot_panel()
         panel.ensure_loaded()
         # Carry the current Annotation selection across to the plot. A pending
@@ -960,6 +964,123 @@ class FilePreviewPage(QWidget):
             if current:
                 panel.show_selection(int(current[0]), int(current[1]))
 
+    def _open_text_tab(self) -> None:
+        self._refresh_text_view()
+        selection = self._current_sequence_selection()
+        if selection is not None:
+            self._highlight_fasta_range(int(selection[0]), int(selection[1]))
+
+    def _capture_text_selection_into_pending(self) -> None:
+        """If Text has a sequence selection, store it for Annotation / Dotplot."""
+        if not self._single_fasta_mode:
+            return
+        cursor = self._fasta_text.textCursor()
+        if not cursor.hasSelection():
+            return
+        mapped = self._fasta_document_range_to_bp(
+            self._fasta_text.toPlainText(),
+            cursor.selectionStart(),
+            cursor.selectionEnd(),
+        )
+        if mapped is not None:
+            self._pending_annotation_selection = mapped
+
+    def _current_sequence_selection(self) -> tuple[int, int] | None:
+        if self._pending_annotation_selection is not None:
+            return self._pending_annotation_selection
+        if self._single_fasta_mode:
+            cursor = self._fasta_text.textCursor()
+            if cursor.hasSelection():
+                mapped = self._fasta_document_range_to_bp(
+                    self._fasta_text.toPlainText(),
+                    cursor.selectionStart(),
+                    cursor.selectionEnd(),
+                )
+                if mapped is not None:
+                    return mapped
+        if self._annotation_panel is not None:
+            try:
+                return self._annotation_panel.selection_range()
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not read Annotation selection")
+        if self._dotplot_panel is not None:
+            coords = getattr(self._dotplot_panel, "_selection_xy", None)
+            if coords is not None:
+                x1, x2, _y1, _y2 = coords
+                return (int(x1), int(x2)) if x1 <= x2 else (int(x2), int(x1))
+        return None
+
+    @staticmethod
+    def _fasta_bp_to_document_index(text: str, bp: int) -> int:
+        """Map a 1-based sequence position to a character index in FASTA text."""
+        if bp < 1:
+            return 0
+        i = 0
+        if text.startswith(">"):
+            nl = text.find("\n")
+            i = nl + 1 if nl >= 0 else 0
+        seen = 0
+        while i < len(text):
+            ch = text[i]
+            if ch in " \t\r\n":
+                i += 1
+                continue
+            seen += 1
+            if seen >= bp:
+                return i
+            i += 1
+        return len(text)
+
+    @staticmethod
+    def _fasta_document_range_to_bp(
+        text: str, start_idx: int, end_idx: int
+    ) -> tuple[int, int] | None:
+        """Map a document selection to a 1-based inclusive sequence range."""
+        lo, hi = (start_idx, end_idx) if start_idx <= end_idx else (end_idx, start_idx)
+        if lo >= hi or not text:
+            return None
+        i = 0
+        if text.startswith(">"):
+            nl = text.find("\n")
+            i = nl + 1 if nl >= 0 else 0
+        first_bp: int | None = None
+        last_bp: int | None = None
+        seen = 0
+        while i < len(text):
+            ch = text[i]
+            if ch in " \t\r\n":
+                i += 1
+                continue
+            seen += 1
+            if lo <= i < hi:
+                if first_bp is None:
+                    first_bp = seen
+                last_bp = seen
+            elif i >= hi:
+                break
+            i += 1
+        if first_bp is None or last_bp is None:
+            return None
+        return (first_bp, last_bp)
+
+    def _highlight_fasta_range(self, start: int, end: int) -> None:
+        """Select [start, end] (1-based inclusive) in the Text preview."""
+        editor = self._fasta_text
+        plain = editor.toPlainText()
+        if not plain:
+            return
+        lo, hi = (start, end) if start <= end else (end, start)
+        begin = self._fasta_bp_to_document_index(plain, lo)
+        # End is inclusive: advance to the character after the last selected base.
+        end_idx = self._fasta_bp_to_document_index(plain, hi)
+        if end_idx < len(plain) and plain[end_idx] not in " \t\r\n":
+            end_idx += 1
+        cursor = editor.textCursor()
+        cursor.setPosition(begin)
+        cursor.setPosition(end_idx, QTextCursor.MoveMode.KeepAnchor)
+        editor.setTextCursor(cursor)
+        editor.ensureCursorVisible()
+
     def _on_dotplot_range_selected(
         self, x_start: int, x_end: int, y_start: int, y_end: int
     ) -> None:
@@ -975,6 +1096,13 @@ class FilePreviewPage(QWidget):
         # otherwise it is applied when that tab is opened.
         if self._fasta_stack.currentIndex() == 1:
             self._apply_pending_annotation_selection()
+        elif self._fasta_stack.currentIndex() == 0:
+            self._highlight_fasta_range(int(x_start), int(x_end))
+
+    def _on_dotplot_view_in_annotation(self, start: int, end: int) -> None:
+        """Switch to Annotation and highlight the chosen x or y range."""
+        self._pending_annotation_selection = (int(start), int(end))
+        self._activate_fasta_tab(DefaultFastaPreviewTab.ANNOTATION)
 
     def _apply_pending_annotation_selection(self) -> None:
         pending = self._pending_annotation_selection
@@ -1021,9 +1149,10 @@ class FilePreviewPage(QWidget):
             return
         self.set_fasta_tab_index(0)
         self._refresh_sequence_info_bar()
-        QTimer.singleShot(0, self._refresh_text_view)
+        QTimer.singleShot(0, self._open_text_tab)
 
     def _open_annotation_tab(self) -> None:
+        self._capture_text_selection_into_pending()
         panel = self._ensure_annotation_panel()
         tab_host = self._preview_tab_host()
         if tab_host is not None and tab_host._annotation_zoom_bar is not None:
@@ -1095,6 +1224,10 @@ class FilePreviewPage(QWidget):
         cursor = self._fasta_text.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
         self._fasta_text.setTextCursor(cursor)
+        # Selections belong to one sequence; never carry them to the next file.
+        self._pending_annotation_selection = None
+        if self._dotplot_panel is not None:
+            self._dotplot_panel.clear_selection()
         if self._annotation_panel is not None:
             self._annotation_panel.load_path(path)
         self._activate_fasta_tab(load_default_fasta_preview_tab())

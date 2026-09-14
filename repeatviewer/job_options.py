@@ -231,23 +231,121 @@ class AlignOptions:
     muscle_combined: bool = False
     # Which aligner a right-click on the Align toolbar button runs.
     right_click_aligner: str = ALIGNER_MAFFT
+    show_process_window: bool = False
+
+
+# FastGA output formats (CLI streaming flags, except 1aln which uses -1:file).
+FASTGA_FORMAT_PAF = "paf"
+FASTGA_FORMAT_PAFX = "pafx"
+FASTGA_FORMAT_PAFM = "pafm"
+FASTGA_FORMAT_PAFS = "pafs"
+FASTGA_FORMAT_PAFS_LONG = "pafS"
+FASTGA_FORMAT_PSL = "psl"
+FASTGA_FORMAT_ALN = "1aln"
+FASTGA_OUTPUT_FORMATS = (
+    FASTGA_FORMAT_PAF,
+    FASTGA_FORMAT_PAFX,
+    FASTGA_FORMAT_PAFM,
+    FASTGA_FORMAT_PAFS,
+    FASTGA_FORMAT_PAFS_LONG,
+    FASTGA_FORMAT_PSL,
+    FASTGA_FORMAT_ALN,
+)
+
+FASTGA_RIGHT_CLICK_RUN = "run"
+FASTGA_RIGHT_CLICK_DIALOG = "dialog"
+FASTGA_RIGHT_CLICK_ACTIONS = (FASTGA_RIGHT_CLICK_RUN, FASTGA_RIGHT_CLICK_DIALOG)
+
+DEFAULT_FASTGA_MIN_IDENTITY = 0.7
+DEFAULT_FASTGA_MIN_LENGTH = 100
+DEFAULT_FASTGA_SEED_FREQ = 200
+DEFAULT_FASTGA_CHAIN_COVERAGE = 85
+DEFAULT_FASTGA_CHAIN_GAP = 1000
+DEFAULT_FASTGA_SYMMETRIC = True
+DEFAULT_FASTGA_KEEP_INDEX = True
+DEFAULT_FASTGA_NO_SOFT_MASK = False
+DEFAULT_FASTGA_SHOW_PROCESS_WINDOW = False
+DEFAULT_FASTGA_PAIRWISE = False
 
 
 @dataclass
 class FastGaOptions:
     """FastGA whole-genome alignment.
 
-    One selected file is compared against itself (finds repetitive regions);
-    two files are compared against each other.
+    By default each selected FASTA is self-compared one by one. Pairwise mode
+    ("Do each pair comparison") compares every unique pair among the selected
+    files and writes one combined alignment file.
     """
 
-    output_format: str = "paf"
+    output_format: str = FASTGA_FORMAT_PAF
     threads: int = field(default_factory=_default_tool_threads)
-    min_identity: float = 0.7
-    min_length: int = 100
-    seed_freq: int = 200
-    symmetric: bool = True
-    keep_index: bool = True
+    min_identity: float = DEFAULT_FASTGA_MIN_IDENTITY
+    min_length: int = DEFAULT_FASTGA_MIN_LENGTH
+    seed_freq: int = DEFAULT_FASTGA_SEED_FREQ
+    chain_coverage: int = DEFAULT_FASTGA_CHAIN_COVERAGE
+    chain_gap: int = DEFAULT_FASTGA_CHAIN_GAP
+    symmetric: bool = DEFAULT_FASTGA_SYMMETRIC
+    keep_index: bool = DEFAULT_FASTGA_KEEP_INDEX
+    no_soft_mask: bool = DEFAULT_FASTGA_NO_SOFT_MASK
+    pairwise: bool = DEFAULT_FASTGA_PAIRWISE
+    temp_dir: str = ""
+    right_click_action: str = FASTGA_RIGHT_CLICK_RUN
+    show_process_window: bool = DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
+
+
+def load_fastga_options() -> FastGaOptions:
+    v = _load_settings_group("fastga")
+    fmt = str(v.get("output_format", FASTGA_FORMAT_PAF))
+    if fmt not in FASTGA_OUTPUT_FORMATS:
+        fmt = FASTGA_FORMAT_PAF
+    right_click_action = str(v.get("right_click_action", FASTGA_RIGHT_CLICK_RUN))
+    if right_click_action not in FASTGA_RIGHT_CLICK_ACTIONS:
+        right_click_action = FASTGA_RIGHT_CLICK_RUN
+    return FastGaOptions(
+        output_format=fmt,
+        threads=max(1, int(v.get("threads", _default_tool_threads()))),
+        min_identity=max(
+            0.0,
+            min(1.0, float(v.get("min_identity", DEFAULT_FASTGA_MIN_IDENTITY))),
+        ),
+        min_length=max(1, int(v.get("min_length", DEFAULT_FASTGA_MIN_LENGTH))),
+        seed_freq=max(1, int(v.get("seed_freq", DEFAULT_FASTGA_SEED_FREQ))),
+        chain_coverage=max(
+            1, int(v.get("chain_coverage", DEFAULT_FASTGA_CHAIN_COVERAGE))
+        ),
+        chain_gap=max(1, int(v.get("chain_gap", DEFAULT_FASTGA_CHAIN_GAP))),
+        symmetric=_to_bool(v.get("symmetric"), DEFAULT_FASTGA_SYMMETRIC),
+        keep_index=_to_bool(v.get("keep_index"), DEFAULT_FASTGA_KEEP_INDEX),
+        no_soft_mask=_to_bool(v.get("no_soft_mask"), DEFAULT_FASTGA_NO_SOFT_MASK),
+        pairwise=_to_bool(v.get("pairwise"), DEFAULT_FASTGA_PAIRWISE),
+        temp_dir=str(v.get("temp_dir", "") or ""),
+        right_click_action=right_click_action,
+        show_process_window=_to_bool(
+            v.get("show_process_window"), DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
+        ),
+    )
+
+
+def save_fastga_options(opts: FastGaOptions) -> None:
+    _save_settings_group(
+        "fastga",
+        {
+            "output_format": opts.output_format,
+            "threads": opts.threads,
+            "min_identity": opts.min_identity,
+            "min_length": opts.min_length,
+            "seed_freq": opts.seed_freq,
+            "chain_coverage": opts.chain_coverage,
+            "chain_gap": opts.chain_gap,
+            "symmetric": opts.symmetric,
+            "keep_index": opts.keep_index,
+            "no_soft_mask": opts.no_soft_mask,
+            "pairwise": opts.pairwise,
+            "temp_dir": opts.temp_dir,
+            "right_click_action": opts.right_click_action,
+            "show_process_window": opts.show_process_window,
+        },
+    )
 
 
 @dataclass
@@ -287,6 +385,7 @@ class BlastOptions:
     blastx_num_threads: int = field(default_factory=_default_tool_threads)
     # Which program a right-click on the BLAST toolbar button runs.
     right_click_program: str = BLAST_PROGRAM_BLASTN
+    show_process_window: bool = False
 
     @property
     def active_database_name(self) -> str | None:
@@ -397,6 +496,7 @@ class FlexidotOptions:
     # Explicit flexidot comparison modes (-m); empty tuple = auto (see above).
     modes: tuple[str, ...] = DEFAULT_FLEXIDOT_MODES
     right_click_action: str = FLEXIDOT_RIGHT_CLICK_RUN
+    show_process_window: bool = False
 
 
 TE_ANNOTATION_RIGHT_CLICK_RUN = "run"
@@ -543,14 +643,36 @@ MSA_CLEAN_RIGHT_CLICK_ACTIONS = (
 )
 
 MSA_CLEAN_METHOD_DESCRIPTIONS: dict[str, str] = {
-    "msa_clean_gappy": "Remove columns that are mostly gaps (uses the gappy-column parameters below).",
+    "msa_clean_gappy": (
+        "Remove gappy columns: if a single column in the multiple sequence "
+        "alignment has a gap proportion larger than the gap threshold and the "
+        "proportion of the most common nucleotide in this column is less than "
+        "the similarity threshold, this column will be removed.\n\n"
+        "Example: if a column has less than 40% gaps (similarity-check gap "
+        "threshold) and the portion of T (or any other nucleotide) is greater "
+        "than 70% (similarity threshold), this column will be kept.\n\n"
+        "Columns with gap proportion above the gap threshold are removed "
+        "directly. Columns with fewer than the minimum nucleotides are also "
+        "removed."
+    ),
     "msa_clean_div": (
-        "Trim alignment ends where rows diverge from the consensus "
-        "(uses the clean row with divergence parameters below)."
+        "Clean rows with divergence converts each nucleotide in the multiple "
+        "sequence alignment into a proportion value. It iteratively chooses a "
+        "sliding window from each end of each sequence of the MSA and sums the "
+        "proportion numbers in this window. Cropping continues until the sum of "
+        "proportions is larger than the divergence threshold. Cropped "
+        "nucleotides are converted to '-'.\n\n"
+        "Window size (bp) is the sliding window used for this end-cropping "
+        "process."
     ),
     "msa_clean_gap": (
-        "Trim alignment ends where rows are mostly gaps "
-        "(uses the clean row with gap parameters below)."
+        "Clean rows with gaps iteratively chooses a sliding window from each "
+        "end of each sequence of the MSA and calculates the gap proportion in "
+        "this window. Cropping continues until the gap proportion is smaller "
+        "than the gap proportion threshold. Cropped nucleotides are converted "
+        "to '-'.\n\n"
+        "Window size (bp) is the sliding window used for this end-cropping "
+        "process."
     ),
 }
 
@@ -743,6 +865,7 @@ def load_blast_options() -> BlastOptions:
             if str(v.get("right_click_program", BLAST_PROGRAM_BLASTN)) in BLAST_PROGRAMS
             else BLAST_PROGRAM_BLASTN
         ),
+        show_process_window=_to_bool(v.get("show_process_window"), False),
     )
 
 
@@ -784,6 +907,7 @@ def save_blast_options(opts: BlastOptions) -> None:
             "blastx_write_gff": opts.blastx_write_gff,
             "blastx_num_threads": opts.blastx_num_threads,
             "right_click_program": opts.right_click_program,
+            "show_process_window": opts.show_process_window,
         },
     )
 
@@ -948,6 +1072,7 @@ def load_align_options() -> AlignOptions:
         mafft_combined=_flag("mafft_combined"),
         muscle_combined=_flag("muscle_combined"),
         right_click_aligner=right_click_aligner,
+        show_process_window=_flag("show_process_window"),
     )
 
 
@@ -970,6 +1095,7 @@ def save_align_options(opts: AlignOptions) -> None:
             "mafft_combined": opts.mafft_combined,
             "muscle_combined": opts.muscle_combined,
             "right_click_aligner": opts.right_click_aligner,
+            "show_process_window": opts.show_process_window,
         },
     )
 
@@ -1223,6 +1349,8 @@ def load_flexidot_options() -> FlexidotOptions:
         # Comparison mode is always automatic (not exposed in the dialog).
         modes=DEFAULT_FLEXIDOT_MODES,
         right_click_action=right_click_action,
+        show_process_window=str(v.get("show_process_window", "false")).lower()
+        in {"1", "true", "yes"},
     )
 
 
@@ -1248,6 +1376,7 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
                 if opts.right_click_action in FLEXIDOT_RIGHT_CLICK_ACTIONS
                 else FLEXIDOT_RIGHT_CLICK_RUN
             ),
+            "show_process_window": opts.show_process_window,
         },
     )
 

@@ -5,14 +5,17 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, Qt, QRectF
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, QRectF, Qt
+from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 _ASSETS_ROOT = Path(__file__).resolve().parent.parent / "assets" / "icons"
 
 # macOS dock icons leave ~18% margin around artwork (1024 canvas → ~832pt glyph).
+# Without this, a full-bleed square looks larger than neighbouring Dock icons.
 _MACOS_ICON_ARTWORK_SCALE = 0.8125
+# Corner radius relative to the artwork plate (macOS-like rounded square).
+_MACOS_ICON_CORNER_RATIO = 0.223
 
 
 def _resolve_app_icon_path() -> Path | None:
@@ -43,9 +46,17 @@ def _render_svg_pixmap(svg_path: Path, logical_size: int, *, device_ratio: float
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
     artwork = logical_size * _MACOS_ICON_ARTWORK_SCALE
     margin = (logical_size - artwork) / 2.0
-    renderer.render(painter, QRectF(margin, margin, artwork, artwork))
+    plate = QRectF(margin, margin, artwork, artwork)
+    radius = artwork * _MACOS_ICON_CORNER_RATIO
+
+    # Clip to a rounded square so the logo matches other Dock icons (not a sharp tile).
+    clip = QPainterPath()
+    clip.addRoundedRect(plate, radius, radius)
+    painter.setClipPath(clip)
+    renderer.render(painter, plate)
     painter.end()
     return pixmap
 

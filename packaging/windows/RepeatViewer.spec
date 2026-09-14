@@ -44,9 +44,14 @@ hiddenimports: list[str] = [
     "plotly",
     "matplotlib",
     "matplotlib.backends.backend_agg",
+    "numpy",
+    "numpy._core",
+    "numpy._core._multiarray_umath",
+    "six",
+    "six.moves",
 ]
 
-for pkg in ("flexidot", "plotly"):
+for pkg in ("flexidot",):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
         datas += pkg_datas
@@ -54,6 +59,15 @@ for pkg in ("flexidot", "plotly"):
         hiddenimports += pkg_hidden
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: collect_all({pkg}) failed: {exc}")
+
+# Plotly: data + submodules only. collect_all() can pull a second copy of
+# numpy/scipy binaries and trigger:
+#   ImportError: cannot load module more than once per process
+try:
+    datas += collect_data_files("plotly")
+    hiddenimports += collect_submodules("plotly")
+except Exception as exc:  # noqa: BLE001
+    print(f"WARNING: plotly collect failed: {exc}")
 
 try:
     datas += collect_data_files(
@@ -82,9 +96,13 @@ a = Analysis(  # noqa: F821
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[str(SPECDIR / "hooks")],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[
+        str(SPECDIR / "pyi_rth_six_importer.py"),
+        str(SPECDIR / "pyi_rth_numpy_guard.py"),
+        str(SPECDIR / "pyi_rth_scipy_distn.py"),
+    ],
     excludes=[
         "tkinter",
         "PyQt5",
@@ -98,6 +116,48 @@ a = Analysis(  # noqa: F821
     cipher=block_cipher,
     noarchive=False,
 )
+
+
+def _dedupe_numpy_binaries(entries: list) -> list:
+    """Keep one copy of each numpy C-extension (numpy 2.4+ forbids re-init)."""
+    markers = (
+        "_multiarray_umath",
+        "_multiarray_tests",
+        "_umath_linalg",
+        "_pocketfft_umath",
+    )
+    groups: dict[str, list] = {}
+    others: list = []
+    for entry in entries:
+        name = str(entry[0]).replace("\\", "/")
+        base = name.rsplit("/", 1)[-1].lower()
+        key = next((marker for marker in markers if marker in base), None)
+        if key is None:
+            others.append(entry)
+            continue
+        groups.setdefault(key, []).append(entry)
+
+    out = list(others)
+    for key, group in groups.items():
+        if len(group) == 1:
+            out.extend(group)
+            continue
+        nested = [
+            item
+            for item in group
+            if "/numpy/" in str(item[0]).replace("\\", "/").lower()
+        ]
+        chosen = nested[0] if nested else group[0]
+        dropped = [str(item[0]) for item in group if item is not chosen]
+        print(
+            f"WARNING: duplicate numpy binary {key!r}; keeping {chosen[0]!r}, "
+            f"dropping {dropped}"
+        )
+        out.append(chosen)
+    return out
+
+
+a.binaries = _dedupe_numpy_binaries(list(a.binaries))
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)  # noqa: F821
 

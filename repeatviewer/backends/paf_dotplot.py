@@ -21,6 +21,7 @@ with FastGA's ``ALNtoPAF`` first.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from repeatviewer.external_process import run_logged_process
@@ -40,6 +41,14 @@ ALN_SUFFIXES = frozenset({".1aln"})
 # A PAF of a whole-genome comparison can hold millions of records. Past this
 # the plot is unreadable and the memory pointless, so stop and say so.
 MAX_PAF_RECORDS = 2_000_000
+
+
+def _natural_sort_key(name: str) -> list:
+    """Scaffold_1 before Scaffold_9 before Scaffold_112."""
+    return [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", str(name))
+    ]
 
 
 class PafError(RuntimeError):
@@ -71,12 +80,29 @@ class PafAlignments:
     truncated: bool = False
 
     def pairs(self) -> list[tuple[str, str]]:
-        """Sequence pairs present, most alignments first."""
-        counts: dict[tuple[str, str], int] = {}
+        """Sequence pairs for the Compare menu.
+
+        Order: self-comparisons first (natural name order), then each query
+        against every other target (queries and targets both natural-sorted).
+        """
+        pair_set: set[tuple[str, str]] = set()
         for qname, _ql, _qs, _qe, _st, tname, _tl, _ts, _te in self.records:
-            key = (qname, tname)
-            counts[key] = counts.get(key, 0) + 1
-        return [k for k, _ in sorted(counts.items(), key=lambda kv: -kv[1])]
+            pair_set.add((qname, tname))
+        names = sorted(
+            {q for q, _t in pair_set} | {t for _q, t in pair_set},
+            key=_natural_sort_key,
+        )
+        ordered: list[tuple[str, str]] = []
+        for name in names:
+            if (name, name) in pair_set:
+                ordered.append((name, name))
+        for query in names:
+            for target in names:
+                if query == target:
+                    continue
+                if (query, target) in pair_set:
+                    ordered.append((query, target))
+        return ordered
 
     def is_single_pair(self) -> bool:
         return len(self.pairs()) <= 1

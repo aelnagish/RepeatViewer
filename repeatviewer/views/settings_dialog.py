@@ -584,7 +584,9 @@ class SettingsDialog(QDialog):
                 "(…/envs/your_env). Leave empty to use only the system PATH."
             )
             conda_browse_title = "Choose conda environment folder"
-        self._conda_tools_env.textChanged.connect(self._refresh_conda_tools_status)
+        # Do not resolve the env on every keystroke — that freezes typing.
+        # Only update a cheap idle hint while typing; resolve on Test.
+        self._conda_tools_env.textChanged.connect(self._show_conda_tools_idle_status)
         # Full status text; wraps within the path field; at most 4 lines (scroll if longer).
         self._conda_tools_status = _CondaStatusLabel()
         status_pal = self._conda_tools_status.palette()
@@ -708,7 +710,6 @@ class SettingsDialog(QDialog):
             parent=self,
             is_dir=True,
             browse_title=conda_browse_title,
-            on_changed=self._refresh_conda_tools_status,
         )
         # Status sits under the path text box (form field column), wraps to that
         # field's right edge, max 4 lines.
@@ -751,7 +752,7 @@ class SettingsDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(content)
 
-        self._reset_btn = QPushButton("Restore defaults…")
+        self._reset_btn = QPushButton("Restore defaults")
         self._reset_btn.clicked.connect(self._on_reset_defaults)
         config_lbl = QLabel(f"Config: {config_dir()}")
         config_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -790,6 +791,9 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setText("Save")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
@@ -920,12 +924,31 @@ class SettingsDialog(QDialog):
         self._conda_tools_status.setToolTip(status)
         QTimer.singleShot(0, self._fit_conda_tools_status_height)
 
+    def _show_conda_tools_idle_status(self) -> None:
+        """Lightweight hint — no filesystem / conda lookup while typing."""
+        text = self._conda_tools_env.text().strip()
+        if text:
+            status = f"Click Test to check “{text}”."
+        else:
+            status = "Enter a conda env name or path, then click Test."
+        self._conda_tools_status.setText(status)
+        self._conda_tools_status.setToolTip(status)
+        QTimer.singleShot(0, self._fit_conda_tools_status_height)
+
     def _on_test_conda_tools(self) -> None:
+        # Always show an immediate change so a repeat Test is visible even when
+        # the resolved path is unchanged.
+        self._conda_tools_status.setText("Testing…")
+        self._conda_tools_status.setToolTip("Testing…")
+        self._fit_conda_tools_status_height()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
         self._refresh_conda_tools_status()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._refresh_conda_tools_status()
+        self._show_conda_tools_idle_status()
         QTimer.singleShot(0, self._fit_conda_tools_status_height)
         QTimer.singleShot(50, self._fit_conda_tools_status_height)
 
@@ -1015,7 +1038,8 @@ class SettingsDialog(QDialog):
             self,
             "Restore defaults",
             "Reset all preferences to their defaults?\n\n"
-            "Your folders, genomes and files are not affected. "
+            "Your folders, genomes, files, workflows, and command wrappers "
+            "are not affected. "
             f"{APP_DISPLAY_NAME} must be restarted for this to take full effect.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

@@ -107,12 +107,17 @@ class RepeatViewerPlugin(ABC):
         progress_cb: ProgressCallback,
         *,
         max_workers: int = 1,
+        cancel=None,
     ) -> PluginBatchResult:
         """
         Default batch runner (sequential or threaded). Override for custom batching.
+
+        ``cancel`` is a ``JobCancellation`` from the main window Stop button.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
+
+        from repeatviewer.backends.job_cancel import JobCancelledError, check_cancelled
 
         file_list = [Path(p).expanduser().resolve() for p in files]
         total = len(file_list)
@@ -124,9 +129,12 @@ class RepeatViewerPlugin(ABC):
 
         def _run_one(path: Path) -> None:
             nonlocal completed
+            check_cancelled(cancel)
             try:
-                opts = getattr(self, "_job_options", {})
-                outs = self.run(path, project, **opts)
+                opts = dict(getattr(self, "_job_options", {}) or {})
+                outs = self.run(path, project, cancel=cancel, **opts)
+            except JobCancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 with lock:
                     failures.append(f"{path.name}: {exc}")
@@ -141,12 +149,17 @@ class RepeatViewerPlugin(ABC):
         workers = max(1, min(max_workers, total)) if self.supports_parallel else 1
         if workers == 1:
             for path in file_list:
+                check_cancelled(cancel)
                 _run_one(path)
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [pool.submit(_run_one, p) for p in file_list]
-                for _ in as_completed(futures):
-                    pass
+                for fut in as_completed(futures):
+                    check_cancelled(cancel)
+                    # Surface cancel from worker threads.
+                    exc = fut.exception()
+                    if isinstance(exc, JobCancelledError):
+                        raise exc
 
         progress_cb(total, f"{self.label}: finished")
         return PluginBatchResult(

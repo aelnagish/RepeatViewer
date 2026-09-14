@@ -180,8 +180,6 @@ def application_stylesheet(
     QTreeWidget#FolderTree::branch {{
         background: transparent;
         border: none;
-        width: 0px;
-        margin: 0px;
         image: none;
     }}
     QTreeWidget#FolderTree::branch:has-children:!has-siblings,

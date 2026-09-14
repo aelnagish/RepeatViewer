@@ -38,8 +38,10 @@ from PySide6.QtGui import (
     QFontMetrics,
     QKeySequence,
     QMouseEvent,
+    QPainter,
     QPalette,
     QShortcut,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -312,6 +314,7 @@ from repeatviewer.plugins.custom_command import (
     is_file_var_mode,
     is_folder_var_mode,
     is_path_var_mode,
+    load_user_command_plugin_specs,
     normalize_var_mode,
     save_user_command_plugin_spec,
 )
@@ -324,6 +327,7 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_BLASTP,
     BLAST_PROGRAM_BLASTX,
     EXTEND_RIGHT_CLICK_DIALOG,
+    FASTGA_RIGHT_CLICK_DIALOG,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     CONSENSUS_RIGHT_CLICK_DIALOG,
     TEAID_RIGHT_CLICK_DIALOG,
@@ -333,6 +337,7 @@ from repeatviewer.job_options import (
     load_blast_options,
     load_consensus_options,
     load_extend_options,
+    load_fastga_options,
     load_flexidot_options,
     load_msa_clean_options,
     load_te_annotation_options,
@@ -347,6 +352,7 @@ from repeatviewer.job_options import (
     save_blast_options,
     save_consensus_options,
     save_extend_options,
+    save_fastga_options,
     save_flexidot_options,
     save_msa_clean_options,
     save_te_annotation_options,
@@ -380,9 +386,10 @@ from repeatviewer.views.tool_dialogs import (
     ConfusionMatrixBenchmarkDialog,
     TeLibraryBenchmarkDialog,
     CommandPluginDesignerDialog,
-    PluginManageDialog,
+    WrapperManageDialog,
     exec_modal_dialog,
 )
+from repeatviewer.views.plugin_manage_dialog import InstalledPluginManageDialog
 from repeatviewer.backends.separate_fasta import (
     count_fasta_sequences,
     sanitize_name,
@@ -495,7 +502,7 @@ _TOOLBAR_TOOLTIPS = {
     "translate": "Translate selected DNA FASTA to protein",
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
-    "fastga": "FastGA whole-genome alignment (one genome vs itself, or two genomes)",
+    "fastga": "FastGA whole-genome alignment (self-comparison one-by-one by default; optional all-pairs)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_benchmark": "TE benchmarking (confusion matrix and library comparison)",
@@ -548,6 +555,7 @@ def _mafft_option_kwargs(options) -> dict[str, Any]:
 
 class AlignWorker(QObject):
     progress = Signal(int, str)
+    log_line = Signal(str)
     finished = Signal(list)
     failed = Signal(str)
 
@@ -561,6 +569,7 @@ class AlignWorker(QObject):
         use_system_mafft: bool = False,
         use_system_muscle: bool = False,
         engine: str = "mafft",
+        stream_log: bool = False,
     ):
         super().__init__()
         self._seq_files = seq_files
@@ -570,22 +579,35 @@ class AlignWorker(QObject):
         self._use_system_mafft = use_system_mafft
         self._use_system_muscle = use_system_muscle
         self._engine = engine
+        self._stream_log = bool(stream_log)
 
     @Slot()
     def run(self) -> None:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
+        sink = _log if self._stream_log else None
+
         if self._mode == ALIGN_MODE_COMBINED:
             try:
-                self.progress.emit(0, "Aligning combined MSA…")
-                output = run_alignment_combined(
-                    self._seq_files,
-                    **_mafft_option_kwargs(self._options),
-                    use_system_mafft=self._use_system_mafft,
-                    use_system_muscle=self._use_system_muscle,
-                    engine=self._engine,
-                )
-                self.progress.emit(1, "Alignment finished.")
+                with process_log_sink(sink):
+                    self.progress.emit(0, "Aligning combined MSA…")
+                    if sink is not None:
+                        _log("Aligning combined MSA…")
+                    output = run_alignment_combined(
+                        self._seq_files,
+                        **_mafft_option_kwargs(self._options),
+                        use_system_mafft=self._use_system_mafft,
+                        use_system_muscle=self._use_system_muscle,
+                        engine=self._engine,
+                    )
+                    self.progress.emit(1, "Alignment finished.")
+                    if sink is not None:
+                        _log("Alignment finished.")
                 self.finished.emit([str(output)])
             except Exception as exc:  # noqa: BLE001
                 self.failed.emit(str(exc))
@@ -599,13 +621,14 @@ class AlignWorker(QObject):
 
         def _align_one(seq_path: Path) -> tuple[Path, str | None, str | None]:
             try:
-                output = run_alignment(
-                    seq_path,
-                    **_mafft_option_kwargs(self._options),
-                    use_system_mafft=self._use_system_mafft,
-                    use_system_muscle=self._use_system_muscle,
-                    engine=self._engine,
-                )
+                with process_log_sink(sink):
+                    output = run_alignment(
+                        seq_path,
+                        **_mafft_option_kwargs(self._options),
+                        use_system_mafft=self._use_system_mafft,
+                        use_system_muscle=self._use_system_muscle,
+                        engine=self._engine,
+                    )
                 return seq_path, str(output), None
             except Exception as exc:  # noqa: BLE001
                 return seq_path, None, str(exc)
@@ -614,6 +637,8 @@ class AlignWorker(QObject):
             if workers == 1:
                 for seq_path in self._seq_files:
                     self.progress.emit(completed, f"Aligning {seq_path.name}…")
+                    if sink is not None:
+                        _log(f"—— Aligning {seq_path.name} ——")
                     _, out_path, err = _align_one(seq_path)
                     completed += 1
                     if err:
@@ -626,12 +651,16 @@ class AlignWorker(QObject):
                     for future in as_completed(futures):
                         seq_path, out_path, err = future.result()
                         self.progress.emit(completed, f"Aligning {seq_path.name}…")
+                        if sink is not None:
+                            _log(f"Finished {seq_path.name}")
                         completed += 1
                         if err:
                             failures.append(f"{seq_path.name}: {err}")
                         elif out_path:
                             created.append(out_path)
             self.progress.emit(total, "Alignment finished.")
+            if sink is not None:
+                _log("Alignment finished.")
             if failures and not created:
                 self.failed.emit("\n".join(failures[:8]))
                 return
@@ -644,66 +673,154 @@ class AlignWorker(QObject):
 
 
 class FastGaWorker(QObject):
-    """Run a FastGA alignment off the UI thread.
+    """Run FastGA alignment(s) off the UI thread.
 
-    One file is compared against itself (repetitive regions); two files are
-    compared against each other. Indexing a large genome takes minutes, so
-    progress is reported and cancellation is polled throughout.
+    Default: self-compare each selected FASTA. Pairwise mode with two files
+    compares them against each other. Indexing a large genome takes minutes,
+    so progress is reported and cancellation is polled throughout.
     """
 
     progress = Signal(int, str)
+    log_line = Signal(str)
     finished = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, seq_files: list[Path], options, *, cancel=None) -> None:
+    def __init__(
+        self,
+        seq_files: list[Path],
+        options,
+        *,
+        cancel=None,
+        stream_log: bool = False,
+    ) -> None:
         super().__init__()
         self._seq_files = list(seq_files)
         self._options = options
         self._cancel = cancel
+        self._stream_log = bool(stream_log)
 
     @Slot()
     def run(self) -> None:
+        from itertools import combinations
+        import tempfile
+        from pathlib import Path as _Path
+
         from repeatviewer.backends.fastga_dotplot import (
             FORMAT_ALN,
-            FORMAT_PSL,
+            FORMAT_PAF,
+            output_suffix_for_format,
             run_fastga_alignment,
         )
 
         try:
-            source1 = self._seq_files[0]
-            source2 = self._seq_files[1] if len(self._seq_files) > 1 else None
-            suffix = {
-                FORMAT_ALN: ".1aln",
-                FORMAT_PSL: ".psl",
-            }.get(self._options.output_format, ".paf")
-            if source2 is None:
-                stem = f"{source1.stem}_self"
-            else:
-                stem = f"{source1.stem}_vs_{source2.stem}"
-            out_path = source1.parent / f"{stem}{suffix}"
-
             def _progress(message: str) -> None:
-                self.progress.emit(1, message)
+                self.progress.emit(max(1, getattr(self, "_step", 1)), message)
+
+            def _log(message: str) -> None:
+                self.log_line.emit(str(message))
 
             def _cancelled() -> bool:
-                # JobCancellation.requested is a @property, not a method.
                 return bool(self._cancel is not None and self._cancel.requested)
 
-            written = run_fastga_alignment(
-                source1,
-                source2,
-                out_path,
-                fmt=self._options.output_format,
-                threads=self._options.threads,
-                min_identity=self._options.min_identity,
-                min_length=self._options.min_length,
-                seed_freq=getattr(self._options, "seed_freq", 200),
-                symmetric=self._options.symmetric,
-                keep_index=self._options.keep_index,
-                progress=_progress,
-                is_cancelled=_cancelled,
-            )
-            self.finished.emit([str(written)])
+            temp_raw = str(getattr(self._options, "temp_dir", "") or "").strip()
+            temp_dir = _Path(temp_raw).expanduser() if temp_raw else None
+            if temp_dir is not None:
+                temp_dir.mkdir(parents=True, exist_ok=True)
+
+            pairwise = bool(getattr(self._options, "pairwise", False))
+            fmt = self._options.output_format
+            suffix = output_suffix_for_format(fmt)
+            created: list[str] = []
+
+            if pairwise and len(self._seq_files) >= 2:
+                # All unique unordered pairs → one combined alignment file.
+                # Binary .1aln cannot be concatenated; stream PAF instead.
+                pair_jobs = list(combinations(self._seq_files, 2))
+                combine_fmt = FORMAT_PAF if fmt == FORMAT_ALN else fmt
+                combine_suffix = output_suffix_for_format(combine_fmt)
+                first = self._seq_files[0]
+                out_path = first.parent / f"{first.name}_multi_FastGA{combine_suffix}"
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                chunks: list[str] = []
+                for index, (source1, source2) in enumerate(pair_jobs, start=1):
+                    self._step = index
+                    label = f"{source1.name} vs {source2.name}"
+                    if self._stream_log:
+                        _log(f"—— Pair {index}/{len(pair_jobs)}: {label} ——")
+                    with tempfile.NamedTemporaryFile(
+                        prefix=".repeatviewer_fastga_pair_",
+                        suffix=combine_suffix,
+                        dir=str(first.parent),
+                        delete=False,
+                    ) as tmp:
+                        tmp_path = _Path(tmp.name)
+                    try:
+                        written = run_fastga_alignment(
+                            source1,
+                            source2,
+                            tmp_path,
+                            fmt=combine_fmt,
+                            threads=self._options.threads,
+                            min_identity=self._options.min_identity,
+                            min_length=self._options.min_length,
+                            seed_freq=getattr(self._options, "seed_freq", 200),
+                            chain_coverage=getattr(
+                                self._options, "chain_coverage", 85
+                            ),
+                            chain_gap=getattr(self._options, "chain_gap", 1000),
+                            symmetric=self._options.symmetric,
+                            keep_index=self._options.keep_index,
+                            no_soft_mask=getattr(
+                                self._options, "no_soft_mask", False
+                            ),
+                            temp_dir=temp_dir,
+                            progress=_progress,
+                            on_log=_log if self._stream_log else None,
+                            is_cancelled=_cancelled,
+                        )
+                        text = written.read_text(encoding="utf-8")
+                        if text and not text.endswith("\n"):
+                            text += "\n"
+                        if text:
+                            chunks.append(text)
+                    finally:
+                        try:
+                            tmp_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                out_path.write_text("".join(chunks), encoding="utf-8")
+                created.append(str(out_path))
+            else:
+                # Default: self-compare each selected FASTA one by one.
+                jobs = [(path, None) for path in self._seq_files]
+                for index, (source1, source2) in enumerate(jobs, start=1):
+                    self._step = index
+                    base = f"{source1.name}_FastGA"
+                    out_path = source1.parent / f"{base}{suffix}"
+                    if self._stream_log and len(jobs) > 1:
+                        _log(f"—— Job {index}/{len(jobs)}: {base} ——")
+                    written = run_fastga_alignment(
+                        source1,
+                        source2,
+                        out_path,
+                        fmt=fmt,
+                        threads=self._options.threads,
+                        min_identity=self._options.min_identity,
+                        min_length=self._options.min_length,
+                        seed_freq=getattr(self._options, "seed_freq", 200),
+                        chain_coverage=getattr(self._options, "chain_coverage", 85),
+                        chain_gap=getattr(self._options, "chain_gap", 1000),
+                        symmetric=self._options.symmetric,
+                        keep_index=self._options.keep_index,
+                        no_soft_mask=getattr(self._options, "no_soft_mask", False),
+                        temp_dir=temp_dir,
+                        progress=_progress,
+                        on_log=_log if self._stream_log else None,
+                        is_cancelled=_cancelled,
+                    )
+                    created.append(str(written))
+
+            self.finished.emit(created)
         except Exception as exc:  # noqa: BLE001 - surface to the UI
             self.failed.emit(str(exc))
 
@@ -918,6 +1035,7 @@ class TeLibraryBenchmarkWorker(QObject):
 
 class FunctionWorker(QObject):
     progress = Signal(int, str)
+    log_line = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
 
@@ -927,22 +1045,31 @@ class FunctionWorker(QObject):
         func_name: str,
         seq_files: list[Path],
         job_kwargs: dict | None = None,
+        *,
+        stream_log: bool = False,
     ):
         super().__init__()
         self._run_func = run_func
         self._func_name = func_name
         self._seq_files = seq_files
         self._job_kwargs = job_kwargs or {}
+        self._stream_log = bool(stream_log)
 
     @Slot()
     def run(self) -> None:
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
         try:
-            result = self._run_func(
-                self._func_name,
-                self._seq_files,
-                self.progress.emit,
-                **self._job_kwargs,
-            )
+            with process_log_sink(_log if self._stream_log else None):
+                result = self._run_func(
+                    self._func_name,
+                    self._seq_files,
+                    self.progress.emit,
+                    **self._job_kwargs,
+                )
             self.finished.emit(result)
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
@@ -996,11 +1123,16 @@ class FolderTreeWidget(QTreeWidget):
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.horizontalScrollBar().setSingleStep(12)
+        self.verticalScrollBar().setSingleStep(12)
         self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.setWordWrap(False)
         self.setUniformRowHeights(False)
         self.setAnimated(False)
         self.setIconSize(QSize(_BROWSER_ICON_SIZE, _BROWSER_ICON_SIZE))
-        self.setIndentation(14)
+        self.setIndentation(18)
         self.setRootIsDecorated(False)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -1008,12 +1140,63 @@ class FolderTreeWidget(QTreeWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         header = self.header()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        # Size the column to content so deep/long names can scroll horizontally
+        # instead of being clipped by a stretched viewport-width column.
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.setMinimumSectionSize(100)
         self.currentItemChanged.connect(self._on_folder_current_changed)
+        self.itemExpanded.connect(lambda *_: self.refresh_horizontal_extent())
+        self.itemCollapsed.connect(lambda *_: self.refresh_horizontal_extent())
         self._suppress_current_changed = False
         self._active_folder_key: str | None = None
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        """Scroll the folder tree more slowly than Qt's default trackpad/wheel speed."""
+        # Keep horizontal and vertical motion; Shift+vertical becomes horizontal.
+        pixel = event.pixelDelta()
+        angle = event.angleDelta()
+        if pixel.manhattanLength() > 0:
+            dx, dy = float(pixel.x()), float(pixel.y())
+        else:
+            # angleDelta is 1/8 degree units; 120 ≈ one notch.
+            dx, dy = float(angle.x()) / 8.0, float(angle.y()) / 8.0
+        if (
+            event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            and abs(dx) < 0.5
+            and abs(dy) >= 0.5
+        ):
+            dx, dy = dy, 0.0
+
+        scale = 0.35
+        moved = False
+        if abs(dx) >= 0.5:
+            hbar = self.horizontalScrollBar()
+            hbar.setValue(hbar.value() - int(round(dx * scale)))
+            moved = True
+        if abs(dy) >= 0.5:
+            vbar = self.verticalScrollBar()
+            vbar.setValue(vbar.value() - int(round(dy * scale)))
+            moved = True
+        if moved:
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def refresh_horizontal_extent(self) -> None:
+        """Widen column to fit visible labels; keep at least the viewport width."""
+        self.resizeColumnToContents(0)
+        viewport_w = self.viewport().width() if self.viewport() is not None else 0
+        if viewport_w > 0 and self.columnWidth(0) < viewport_w:
+            self.setColumnWidth(0, viewport_w)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.refresh_horizontal_extent()
+
+    def drawBranches(self, painter: QPainter, rect: QRect, index) -> None:  # noqa: N802
+        """Skip stock branch artwork; indent guides are painted by the item delegate."""
+        del painter, rect, index
 
     def set_active_folder(self, folder: Path | None) -> None:
         """Mark which folder owns the Files panel without wiping multi-selection.
@@ -1104,6 +1287,7 @@ class FolderTreeWidget(QTreeWidget):
 
             for index in range(self.topLevelItemCount()):
                 reset(self.topLevelItem(index))
+            self.refresh_horizontal_extent()
             return
 
         def filter_item(item: QTreeWidgetItem) -> bool:
@@ -1123,6 +1307,7 @@ class FolderTreeWidget(QTreeWidget):
 
         for index in range(self.topLevelItemCount()):
             filter_item(self.topLevelItem(index))
+        self.refresh_horizontal_extent()
 
     def select_folder_item(self, item: QTreeWidgetItem) -> None:
         """Select exactly one folder row and make it current."""
@@ -1532,6 +1717,7 @@ class MainWindow(QMainWindow):
         self._plugin_run_dialog: UserCommandRunDialog | None = None
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
+        self._fastga_options = load_fastga_options()
         self._extend_options = load_extend_options()
         self._tsd_search_options = load_tsd_search_options()
         self._teaid_options = load_teaid_options()
@@ -1553,6 +1739,7 @@ class MainWindow(QMainWindow):
         self.database_index_runner = DatabaseIndexRunner(self)
         self._plugin_registry = load_plugins()
         self._plugins_menu: QMenu | None = None
+        self._others_menu: QMenu | None = None
         self._workflows_menu: QMenu | None = None
         self._toolbar_order = load_toolbar_order(self._plugin_registry)
         self._browser_panel: QWidget | None = None
@@ -2628,11 +2815,19 @@ class MainWindow(QMainWindow):
 
     def _populate_fastga_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("Run FastGA with default parameters", self._run_fastga_default)
+            menu.addAction("Run FastGA with saved parameters", self._run_fastga_default)
         menu.addSeparator()
         menu.addAction("Change FastGA parameters", self._open_fastga_dialog)
 
-    def _selected_files_for_fastga(self) -> list[Path]:
+    def _fastga_candidate_files(self) -> list[Path]:
+        """Selected FASTA files suitable for FastGA (0, 1, or 2+). No UI."""
+        selected = self._selected_files()
+        return [
+            p for p in selected
+            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+
+    def _selected_files_for_fastga(self, options=None) -> list[Path]:
         from repeatviewer.backends.fastga_dotplot import fastga_available, install_hint
 
         if not fastga_available():
@@ -2642,60 +2837,122 @@ class MainWindow(QMainWindow):
                 f"FastGA is not installed or not on PATH.\n\n{install_hint()}",
             )
             return []
-        selected = self._selected_files()
-        files = [
-            p for p in selected
-            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
-        ]
+        opts = options if options is not None else self._fastga_options
+        pairwise = bool(getattr(opts, "pairwise", False))
+        files = self._fastga_candidate_files()
         if not files:
             QMessageBox.information(
                 self,
                 "FastGA",
-                "Select one FASTA to compare against itself, or two FASTA files "
-                "to compare against each other.",
+                "Select one or more FASTA files for self-comparison (one by one), "
+                "or enable Do each pair comparison and select two or more FASTA files.",
             )
             return []
-        if len(files) > 2:
+        if pairwise and len(files) < 2:
             QMessageBox.information(
                 self,
                 "FastGA",
-                f"{len(files)} files selected. FastGA compares one genome "
-                "against itself, or exactly two against each other.",
+                "Do each pair comparison needs at least two FASTA files.\n"
+                "Select more files, or turn the option off for self-comparison.",
             )
             return []
         return files
 
     def _run_fastga_default(self) -> None:
-        from repeatviewer.job_options import FastGaOptions
-
-        files = self._selected_files_for_fastga()
+        files = self._selected_files_for_fastga(self._fastga_options)
         if files:
-            self._start_fastga_job(files, FastGaOptions())
+            self._start_fastga_job(files, self._fastga_options)
+
+    def _quick_fastga_right_click(self) -> None:
+        """Right-click FastGA: run or reopen dialog per Options tab."""
+        if self._fastga_options.right_click_action == FASTGA_RIGHT_CLICK_DIALOG:
+            self._open_fastga_dialog()
+            return
+        self._run_fastga_default()
 
     def _open_fastga_dialog(self) -> None:
+        """Click FastGA → parameters dialog (same Cancel / Save / Run pattern as BLAST)."""
         from repeatviewer.views.tool_dialogs import FastGaParamsDialog
 
-        files = self._selected_files_for_fastga()
-        if not files:
-            return
-        dialog = FastGaParamsDialog(file_count=len(files), parent=self)
+        candidates = self._fastga_candidate_files()
+        dialog = FastGaParamsDialog(
+            initial=self._fastga_options,
+            file_count=len(candidates),
+            parent=self,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._fastga_options = dialog.options()
+        save_fastga_options(self._fastga_options)
         if dialog.should_run():
-            self._start_fastga_job(files, dialog.options())
+            files = self._selected_files_for_fastga(self._fastga_options)
+            if files:
+                self._start_fastga_job(files, self._fastga_options)
         else:
-            self._set_status_message("FastGA settings noted (not persisted)", 4000)
+            self._set_status_message("FastGA settings saved", 4000)
+
+    def _attach_process_monitor(
+        self,
+        worker,
+        *,
+        title: str,
+        enabled: bool,
+        tool_key: str,
+        mirror_progress: bool = True,
+    ) -> None:
+        """Open FastGA-style process window when the tool option is enabled."""
+        if not enabled:
+            return
+        from repeatviewer.widgets.process_monitor_dialog import ProcessMonitorDialog
+
+        attr = f"_{tool_key}_process_dialog"
+        dialog = getattr(self, attr, None)
+        if dialog is None:
+            short = title.split("(")[0].strip() or tool_key
+            dialog = ProcessMonitorDialog(short, parent=self)
+            setattr(self, attr, dialog)
+        dialog.prepare(title)
+        if hasattr(worker, "log_line"):
+            worker.log_line.connect(dialog.append_line)
+        if mirror_progress:
+            worker.progress.connect(
+                lambda _value, label, d=dialog: d.append_line(label) if label else None
+            )
+        worker.finished.connect(lambda *_args, d=dialog: d.mark_finished(True))
+        worker.failed.connect(
+            lambda error, d=dialog: d.mark_finished(False, str(error))
+        )
 
     def _start_fastga_job(self, files: list[Path], options) -> None:
-        title = (
-            f"FastGA ({files[0].name} self)"
-            if len(files) == 1
-            else f"FastGA ({files[0].name} vs {files[1].name})"
+        pairwise = bool(getattr(options, "pairwise", False))
+        if pairwise and len(files) >= 2:
+            pair_count = len(files) * (len(files) - 1) // 2
+            title = f"FastGA ({pair_count} pair(s) → multi)"
+            total_steps = max(1, pair_count)
+        elif len(files) == 1:
+            title = f"FastGA ({files[0].name} self)"
+            total_steps = 1
+        else:
+            title = f"FastGA ({len(files)} self-comparisons)"
+            total_steps = len(files)
+        show_log = bool(getattr(options, "show_process_window", False))
+        worker = FastGaWorker(
+            files,
+            options,
+            cancel=self._job_cancel,
+            stream_log=show_log,
+        )
+        self._attach_process_monitor(
+            worker,
+            title=title,
+            enabled=show_log,
+            tool_key="fastga",
+            mirror_progress=False,
         )
         self._start_background_job(
-            FastGaWorker(files, options, cancel=self._job_cancel),
+            worker,
             job_title=title,
-            total_steps=1,
+            total_steps=total_steps,
             source_files=files,
             on_finished=self._on_fastga_finished,
             on_failed=self._on_fastga_failed,
@@ -2974,17 +3231,16 @@ class MainWindow(QMainWindow):
         self._populate_te_visualization_menu(tools_menu.addMenu("&Visualization"))
         self._populate_benchmarking_menu(tools_menu.addMenu("&Benchmarking"))
 
-        plugins_menu = self.menuBar().addMenu("&Plugins")
-        self._plugins_menu = plugins_menu
-        plugins_menu.addAction("Manage plugins", self._open_plugin_manager)
-        plugins_menu.addAction("Design your plugin", self._open_command_plugin_designer)
-        plugins_menu.addSeparator()
-        self._populate_plugins_menu_actions()
-
         workflows_menu = QMenu("&Workflows", self)
         self.menuBar().addMenu(workflows_menu)
         self._workflows_menu = workflows_menu
         self._rebuild_workflows_menu()
+
+        others_menu = QMenu("&Others", self)
+        self.menuBar().addMenu(others_menu)
+        self._others_menu = others_menu
+        self._plugins_menu = others_menu  # rebuild helpers refresh Others
+        self._rebuild_others_menu()
 
         view_menu = self.menuBar().addMenu("&View")
         if self._dock_folders is not None:
@@ -3643,12 +3899,12 @@ class MainWindow(QMainWindow):
             self._add_toolbar_action_button(
                 bar,
                 "FastGA",
-                self._run_fastga_default,
+                self._open_fastga_dialog,
                 tooltip=(
-                    "Click: run FastGA with default parameters.\n"
-                    "Right-click: change parameters."
+                    "Click: set parameters and run.\n"
+                    "Right-click: action chosen in the Options tab."
                 ),
-                right_click_slot=self._open_fastga_dialog,
+                right_click_slot=self._quick_fastga_right_click,
             )
         elif tool_id == "repeat_quantify":
             self._add_toolbar_text_action(
@@ -6029,16 +6285,20 @@ class MainWindow(QMainWindow):
         if mode == ALIGN_MODE_COMBINED:
             title = f"{title} (combined)"
         total_steps = 1 if mode == ALIGN_MODE_COMBINED else len(seq_files)
+        show_log = bool(getattr(opts, "show_process_window", False))
+        worker = AlignWorker(
+            seq_files,
+            options=opts,
+            mode=mode,
+            max_workers=self._project.batch_workers,
+            use_system_mafft=self._project.use_system_mafft,
+            use_system_muscle=self._project.use_system_muscle,
+            engine=engine,
+            stream_log=show_log,
+        )
+        self._attach_process_monitor(worker, title=title, enabled=show_log, tool_key="align")
         self._start_background_job(
-            AlignWorker(
-                seq_files,
-                options=opts,
-                mode=mode,
-                max_workers=self._project.batch_workers,
-                use_system_mafft=self._project.use_system_mafft,
-                use_system_muscle=self._project.use_system_muscle,
-                engine=engine,
-            ),
+            worker,
             job_title=title,
             total_steps=total_steps,
             source_files=seq_files,
@@ -7882,7 +8142,7 @@ class MainWindow(QMainWindow):
             index = self._folder_tree.indexOfTopLevelItem(item)
             if index >= 0:
                 self._folder_tree.takeTopLevelItem(index)
-        self._folder_tree.resizeColumnToContents(0)
+        self._folder_tree.refresh_horizontal_extent()
 
     def _replace_folder_path_in_tree(self, old: Path, new: Path) -> None:
         old_root = old.expanduser().resolve()
@@ -7906,7 +8166,7 @@ class MainWindow(QMainWindow):
 
         for index in range(self._folder_tree.topLevelItemCount()):
             walk(self._folder_tree.topLevelItem(index))
-        self._folder_tree.resizeColumnToContents(0)
+        self._folder_tree.refresh_horizontal_extent()
 
     def _separate_fasta_file(self, path: Path, *, subfolder_per_sequence: bool = False) -> None:
         path = path.expanduser().resolve()
@@ -8395,8 +8655,28 @@ class MainWindow(QMainWindow):
                     "Left boundary must be less than the right boundary.",
                 )
                 return
+        show_log = False
+        if func_name == "blast":
+            blast_opts = job_kwargs.get("blast_options") or self._blast_options
+            show_log = bool(getattr(blast_opts, "show_process_window", False))
+        elif func_name == "flexidot":
+            flex_opts = job_kwargs.get("flexidot_options") or self._flexidot_options
+            show_log = bool(getattr(flex_opts, "show_process_window", False))
+        worker = FunctionWorker(
+            self._run_function_job,
+            func_name,
+            seq_files,
+            job_kwargs,
+            stream_log=show_log,
+        )
+        self._attach_process_monitor(
+            worker,
+            title=func_name,
+            enabled=show_log,
+            tool_key=func_name,
+        )
         self._start_background_job(
-            FunctionWorker(self._run_function_job, func_name, seq_files, job_kwargs),
+            worker,
             job_title=func_name,
             total_steps=self._job_total_steps(func_name, seq_files, job_kwargs),
             source_files=seq_files,
@@ -8404,27 +8684,26 @@ class MainWindow(QMainWindow):
             on_failed=self._on_worker_failed,
         )
 
-    def _plugin_job_source_files(self, plugin: UserCommandPlugin, work_dir: Path) -> list[Path]:
-        runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
-        sources: list[Path] = []
-        for name, defn in plugin._defs.items():
-            if name in plugin.spec.output_vars:
-                continue
-            if not is_file_var_mode(defn.mode):
-                continue
-            raw = str(runtime.get(name, "")).strip()
-            if not raw:
-                continue
-            path = Path(raw).expanduser()
-            if path.is_file():
-                sources.append(path.resolve())
-        resolved_work_dir = work_dir.expanduser().resolve()
-        if resolved_work_dir.is_dir():
-            sources.append(resolved_work_dir)
-        return sources
-
     def _command_plugin_work_dir(self, plugin: UserCommandPlugin) -> Path:
         runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
+        outdir = str(runtime.get("RV_OUTDIR", "")).strip()
+        if outdir:
+            path = Path(outdir).expanduser()
+            if path.is_dir():
+                return path.resolve()
+            if path.parent.exists():
+                return path.parent.resolve()
+        for key in ("RV_INPUT", "RV_GENOME"):
+            raw = str(runtime.get(key, "")).strip()
+            if not raw:
+                continue
+            path = Path(raw.split()[0]).expanduser()
+            if path.is_file():
+                return path.parent.resolve()
+            if path.is_dir():
+                return path.resolve()
+            if path.parent.exists():
+                return path.parent.resolve()
         for name, defn in plugin._defs.items():
             if not is_path_var_mode(defn.mode):
                 continue
@@ -8443,6 +8722,45 @@ class MainWindow(QMainWindow):
         if self._project.input_dir and self._project.input_dir.is_dir():
             return self._project.input_dir.expanduser().resolve()
         return Path.cwd()
+
+    def _plugin_job_source_files(self, plugin: UserCommandPlugin, work_dir: Path) -> list[Path]:
+        runtime = getattr(plugin, "_job_options", {}).get("runtime_values") or {}
+        sources: list[Path] = []
+        for key in ("RV_INPUT", "RV_GENOME"):
+            raw = str(runtime.get(key, "")).strip()
+            if not raw:
+                continue
+            path = Path(raw.split()[0]).expanduser()
+            if path.is_file():
+                sources.append(path.resolve())
+        for raw in str(runtime.get("RV_INPUTS", "")).split():
+            path = Path(raw).expanduser()
+            if path.is_file():
+                sources.append(path.resolve())
+        for name, defn in plugin._defs.items():
+            if name in plugin.spec.output_vars:
+                continue
+            if not is_file_var_mode(defn.mode):
+                continue
+            raw = str(runtime.get(name, "")).strip()
+            if not raw:
+                continue
+            path = Path(raw).expanduser()
+            if path.is_file():
+                sources.append(path.resolve())
+        resolved_work_dir = work_dir.expanduser().resolve()
+        if resolved_work_dir.is_dir():
+            sources.append(resolved_work_dir)
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for path in sources:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+        return unique
 
     def _apply_plugin(self, plugin_id: str, *, preselected: list[Path] | None = None) -> None:
         plugin = self._plugin_registry.get(plugin_id)
@@ -8483,13 +8801,11 @@ class MainWindow(QMainWindow):
                 if answer != QMessageBox.StandardButton.Yes:
                     return
             func_name = f"plugin:{plugin_id}"
-            self._start_background_job(
-                FunctionWorker(self._run_plugin_job, func_name, files, {}),
-                job_title=func_name,
-                total_steps=self._job_total_steps(func_name, files, {}),
+            self._start_plugin_background_job(
+                plugin,
+                func_name=func_name,
+                files=files,
                 source_files=self._plugin_job_source_files(plugin, work_dir),
-                on_finished=self._on_worker_finished,
-                on_failed=self._on_worker_failed,
             )
             return
         selected = preselected or self._selected_files()
@@ -8536,38 +8852,152 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, plugin.label, error)
             return
         func_name = f"plugin:{plugin_id}"
+        self._start_plugin_background_job(
+            plugin,
+            func_name=func_name,
+            files=files,
+            source_files=files,
+        )
+
+    def _start_plugin_background_job(
+        self,
+        plugin,
+        *,
+        func_name: str,
+        files: list[Path],
+        source_files: list[Path],
+    ) -> None:
+        job_options = getattr(plugin, "_job_options", {}) or {}
+        show_log = bool(job_options.get("show_process_window", False))
+        worker = FunctionWorker(
+            self._run_plugin_job,
+            func_name,
+            files,
+            {},
+            stream_log=show_log,
+        )
+        self._attach_process_monitor(
+            worker,
+            title=plugin.label,
+            enabled=show_log,
+            tool_key=f"plugin_{getattr(plugin, 'id', 'tool')}",
+            mirror_progress=True,
+        )
         self._start_background_job(
-            FunctionWorker(self._run_plugin_job, func_name, files, {}),
+            worker,
             job_title=func_name,
             total_steps=self._job_total_steps(func_name, files, {}),
-            source_files=files,
+            source_files=source_files,
             on_finished=self._on_worker_finished,
             on_failed=self._on_worker_failed,
         )
 
     def _populate_plugins_menu_actions(self) -> None:
-        if self._plugins_menu is None:
-            return
-        loaded_plugins = self._plugin_registry.all_plugins()
-        if loaded_plugins:
-            for plugin in loaded_plugins:
-                self._plugins_menu.addAction(
-                    plugin.label,
-                    lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
-                )
+        """Deprecated path — use ``_rebuild_others_menu``."""
+        self._rebuild_others_menu()
+
+    def _ensure_others_menu(self) -> QMenu | None:
+        """Return a live Others menu, recreating it if the cached one was deleted."""
+        if self._menu_object_alive(self._others_menu):
+            return self._others_menu
+
+        self._others_menu = None
+        self._plugins_menu = None
+        for action in list(self.menuBar().actions()):
+            candidate = action.menu()
+            if not self._menu_object_alive(candidate):
+                label = self._clean_menu_label(action.text()).lower()
+                if label in {"others", "plugins"}:
+                    self.menuBar().removeAction(action)
+                continue
+            title = self._clean_menu_label(candidate.title()).lower()
+            if title in {"others", "plugins"}:
+                # Migrate old Plugins title to Others.
+                candidate.setTitle("&Others")
+                self._others_menu = candidate
+                self._plugins_menu = candidate
+                return candidate
+
+        self._remove_menubar_menus_named("Others")
+        self._remove_menubar_menus_named("Plugins")
+        menu = QMenu("&Others", self)
+        self._others_menu = menu
+        self._plugins_menu = menu
+        insert_before = None
+        for action in self.menuBar().actions():
+            label = self._clean_menu_label(action.text())
+            if label in {"View", "Help"}:
+                insert_before = action
+                break
+        if insert_before is not None:
+            self.menuBar().insertMenu(insert_before, menu)
         else:
-            none_action = self._plugins_menu.addAction("(No plugins loaded)")
-            none_action.setEnabled(False)
+            self.menuBar().addMenu(menu)
+        return menu
+
+    def _ensure_plugins_menu(self) -> QMenu | None:
+        return self._ensure_others_menu()
+
+    def _rebuild_others_menu(self) -> None:
+        def _fill(menu: QMenu) -> None:
+            menu.clear()
+            plugin_menu = menu.addMenu("Plugin (Beta)")
+            wrapper_menu = menu.addMenu("Command wrapper")
+
+            plugin_menu.addAction("Manage plugin", self._open_plugin_manager)
+            plugin_menu.addSeparator()
+            installed = [
+                plugin
+                for plugin in self._plugin_registry.all_plugins()
+                if not isinstance(plugin, UserCommandPlugin)
+            ]
+            if installed:
+                for plugin in installed:
+                    plugin_menu.addAction(
+                        plugin.label,
+                        lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
+                    )
+            else:
+                none_action = plugin_menu.addAction("(No installed plugins)")
+                none_action.setEnabled(False)
+
+            wrapper_menu.addAction("Manage wrapper", self._open_wrapper_manager)
+            wrapper_menu.addSeparator()
+            specs = load_user_command_plugin_specs()
+            if specs:
+                for spec in specs:
+                    wrapper_menu.addAction(
+                        spec.label,
+                        lambda checked=False, pid=spec.id: self._apply_plugin(pid),
+                    )
+            else:
+                empty = wrapper_menu.addAction("(No wrappers yet)")
+                empty.setEnabled(False)
+
+            self._others_menu = menu
+            self._plugins_menu = menu
+
+        menu = self._ensure_others_menu()
+        if menu is None:
+            return
+        try:
+            _fill(menu)
+        except RuntimeError:
+            self._others_menu = None
+            self._plugins_menu = None
+            self._remove_menubar_menus_named("Others")
+            self._remove_menubar_menus_named("Plugins")
+            menu = self._ensure_others_menu()
+            if menu is None:
+                return
+            try:
+                _fill(menu)
+            except RuntimeError:
+                return
+        self._connect_menu_operation_logging()
 
     def _rebuild_plugins_menu(self) -> None:
-        if self._plugins_menu is None:
-            return
-        self._plugins_menu.clear()
-        self._plugins_menu.addAction("Manage plugins", self._open_plugin_manager)
-        self._plugins_menu.addAction("Design your plugin", self._open_command_plugin_designer)
-        self._plugins_menu.addSeparator()
-        self._populate_plugins_menu_actions()
-        self._connect_menu_operation_logging()
+        self._rebuild_others_menu()
 
     def _menu_object_alive(self, obj) -> bool:
         if obj is None:
@@ -8617,7 +9047,12 @@ class MainWindow(QMainWindow):
         self._workflows_menu = menu
         insert_before = None
         for action in self.menuBar().actions():
-            if self._clean_menu_label(action.text()) in {"View", "Help"}:
+            if self._clean_menu_label(action.text()) in {
+                "Others",
+                "Plugins",
+                "View",
+                "Help",
+            }:
                 insert_before = action
                 break
         if insert_before is not None:
@@ -8788,23 +9223,29 @@ class MainWindow(QMainWindow):
             on_failed=self._on_worker_failed,
         )
 
-    def _open_plugin_manager(self) -> None:
-        dialog = PluginManageDialog(
-            self._plugin_registry,
+    def _open_wrapper_manager(self) -> None:
+        dialog = WrapperManageDialog(
             on_save=self._save_designed_plugin,
             on_delete=self._delete_custom_plugin,
             parent=self,
         )
         exec_modal_dialog(dialog)
 
-    def _delete_custom_plugin(self, plugin_id: str) -> bool:
-        if not delete_user_command_plugin_spec(plugin_id):
-            return False
-        self._plugin_registry.unregister(plugin_id)
-        self._rebuild_plugins_menu()
-        self._rebuild_top_toolbar()
-        self._set_status_message(f"Deleted plugin {plugin_id}", 5000)
-        return True
+    def _open_plugin_manager(self) -> None:
+        dialog = InstalledPluginManageDialog(
+            parent=self,
+            on_changed=self._reload_entry_point_plugins,
+        )
+        exec_modal_dialog(dialog)
+
+    def _reload_entry_point_plugins(self) -> None:
+        from repeatviewer.plugins.loader import reload_plugins
+        from repeatviewer.views.toolbar_dialog import load_toolbar_order
+
+        self._plugin_registry = reload_plugins()
+        self._toolbar_order = load_toolbar_order(self._plugin_registry)
+        QTimer.singleShot(0, self._rebuild_others_menu)
+        QTimer.singleShot(0, self._rebuild_top_toolbar)
 
     def _open_command_plugin_designer(self) -> None:
         if self._command_plugin_dialog is not None and self._command_plugin_dialog.isVisible():
@@ -8826,6 +9267,22 @@ class MainWindow(QMainWindow):
             self._command_plugin_dialog.deleteLater()
             self._command_plugin_dialog = None
 
+    def _ensure_wrapper_on_toolbar(self, plugin_id: str, *, enabled: bool) -> None:
+        from repeatviewer.views.toolbar_dialog import plugin_tool_id, save_toolbar_order
+
+        tool_id = plugin_tool_id(plugin_id)
+        order = list(self._toolbar_order)
+        if enabled:
+            if tool_id not in order:
+                order.append(tool_id)
+                self._toolbar_order = order
+                save_toolbar_order(self._toolbar_order, self._plugin_registry)
+        else:
+            if tool_id in order:
+                order = [item for item in order if item != tool_id]
+                self._toolbar_order = order
+                save_toolbar_order(self._toolbar_order, self._plugin_registry)
+
     def _save_designed_plugin(self, spec, *, previous_id: str | None = None) -> None:
         plugin = UserCommandPlugin(spec)
         try:
@@ -8835,14 +9292,27 @@ class MainWindow(QMainWindow):
             was_existing = self._plugin_registry.get(spec.id) is not None
             save_user_command_plugin_spec(spec)
             self._plugin_registry.register_or_replace(plugin)
-            self._rebuild_plugins_menu()
-            self._rebuild_top_toolbar()
+            # Defer menubar/toolbar refresh until after modal dialogs fully close
+            # (macOS can otherwise hit a deleted QMenu during clear/rebuild).
+            QTimer.singleShot(0, self._rebuild_others_menu)
+            QTimer.singleShot(0, self._rebuild_top_toolbar)
             if was_existing or (previous_id and previous_id != spec.id):
-                self._set_status_message(f"Updated plugin {spec.label}", 5000)
+                self._set_status_message(f"Updated wrapper {spec.label}", 5000)
             else:
-                self._set_status_message(f"Added plugin {spec.label}", 5000)
+                self._set_status_message(f"Added wrapper {spec.label}", 5000)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Design your plugin", str(exc))
+            QMessageBox.warning(self, "Design command wrapper", str(exc))
+
+    def _delete_custom_plugin(self, plugin_id: str) -> bool:
+        if not delete_user_command_plugin_spec(plugin_id):
+            return False
+        self._plugin_registry.unregister(plugin_id)
+        # Drop from toolbar if the user had added it via Setting → Toolbar.
+        self._ensure_wrapper_on_toolbar(plugin_id, enabled=False)
+        QTimer.singleShot(0, self._rebuild_others_menu)
+        QTimer.singleShot(0, self._rebuild_top_toolbar)
+        self._set_status_message(f"Deleted wrapper {plugin_id}", 5000)
+        return True
 
     def _run_plugin_job(
         self,
@@ -8858,6 +9328,7 @@ class MainWindow(QMainWindow):
             self._project,
             progress_cb,
             max_workers=self._project.batch_workers,
+            cancel=self._job_cancel,
         )
 
     def _run_function_job(

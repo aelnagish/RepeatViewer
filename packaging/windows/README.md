@@ -12,6 +12,13 @@ From the repo root, in an environment where `pip install -e .` already works:
 powershell -ExecutionPolicy Bypass -File packaging/windows/build_windows.ps1
 ```
 
+The script upgrades **PyInstaller ≥ 6.14.1** and pins **numpy &lt; 2.4** for the build.
+That avoids a known frozen-app crash:
+
+`ImportError: cannot load module more than once per process`
+
+(from `numpy._core.multiarray` / `_multiarray_umath`).
+
 Outputs:
 
 - `dist/RepeatViewer/RepeatViewer.exe` (+ supporting files)
@@ -48,3 +55,15 @@ RepeatMasker, FastGA, bedtools, and similar bioconda tools are **Linux** binarie
 4. Click **Test** — status should show `Using WSL2 …/bin (like …)`.
 
 Bundled BLAST/MAFFT/MUSCLE stay on Windows and are not routed through WSL.
+
+## Troubleshooting
+
+### `cannot load module more than once per process`
+
+Rebuild with the current `build_windows.ps1` (clean dist/build). If you pack manually, use:
+
+```powershell
+python -m pip install -U "pyinstaller>=6.14.1" "numpy>=1.24,<2.4"
+Remove-Item -Recurse -Force build, dist\RepeatViewer -ErrorAction SilentlyContinue
+python -m PyInstaller --noconfirm --clean packaging\windows\RepeatViewer.spec
+```

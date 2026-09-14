@@ -194,8 +194,22 @@ def clear_cache() -> int:
 
 
 def reset_all_preferences() -> None:
-    """Clear every persisted preference (QSettings). Files/projects are untouched."""
-    QSettings().clear()
+    """Clear UI preferences in QSettings, keeping user workspace content.
+
+    Preserves folders/genomes/databases, command wrappers, workflows, and
+    folder colors so Restore defaults only resets Preference-dialog settings.
+    """
+    s = QSettings()
+    # QSettings.allKeys() returns "group/key" paths.
+    preserve_prefixes = ("project/", "workflows/", "folders/")
+    preserve_keys = {"plugins/custom_commands_json"}
+    saved: dict[str, object] = {}
+    for key in s.allKeys():
+        if key in preserve_keys or any(key.startswith(prefix) for prefix in preserve_prefixes):
+            saved[key] = s.value(key)
+    s.clear()
+    for key, value in saved.items():
+        s.setValue(key, value)
 
 
 def apply_log_level(verbose: bool | None = None) -> None:
