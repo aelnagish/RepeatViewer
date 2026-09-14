@@ -82,3 +82,20 @@ class ProcessMonitorDialog(QDialog):
             self.append_line("")
             self.append_line(f"— failed: {message} —")
         self._close_btn.setEnabled(True)
+
+    def show_failure_log(
+        self,
+        title: str,
+        lines: list[str],
+        *,
+        error: str = "",
+    ) -> None:
+        """Open (or reveal) this window with a captured command log after a failure."""
+        self.setWindowTitle(title)
+        self._log.clear()
+        for line in lines:
+            self.append_line(line)
+        self.mark_finished(False, error)
+        self.show()
+        self.raise_()
+        self.activateWindow()

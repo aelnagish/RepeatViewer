@@ -8,7 +8,7 @@ import platform
 from pathlib import Path
 
 from repeatviewer.backends.curation import genome_chrom_sizes
-from repeatviewer.backends.gui_functions import check_database
+from repeatviewer.backends.gui_functions import blast_database_basename, check_database
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,9 @@ def ensure_genome_blast_index(
     genome_fasta = genome_fasta.expanduser().resolve()
     if not genome_fasta.is_file():
         raise FileNotFoundError(genome_fasta)
-    db_prefix = genome_fasta
+    # Index files use a sanitized basename (spaces → ``_``); do not look for
+    # ``{original name with spaces}.nin``.
+    db_prefix = genome_fasta.parent / blast_database_basename(genome_fasta)
     nin = Path(f"{db_prefix}.nin")
     if nin.is_file() and not _sidecar_is_stale(nin, genome_fasta):
         return str(db_prefix)
@@ -94,7 +96,10 @@ def ensure_genome_blast_index(
             "makeblastdb was not found. Install BLAST+ or enable bundled BLAST in Settings."
         )
     if result == "makeblastdb_got_error":
-        raise RuntimeError("makeblastdb failed while indexing the genome FASTA.")
+        raise RuntimeError(
+            "makeblastdb failed while indexing the genome FASTA. "
+            "See the process log for the command output."
+        )
     if not result:
         raise RuntimeError("Could not prepare BLAST index for the genome FASTA.")
     return str(result)

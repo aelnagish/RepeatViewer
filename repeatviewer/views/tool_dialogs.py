@@ -2174,7 +2174,7 @@ class BlastParamsDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Blast parameters")
+        self.setWindowTitle("BLAST parameters")
         self._project = project
         self._for_run = for_run
         opts = initial or BlastOptions()
@@ -3357,7 +3357,7 @@ class TeAnnotationDialog(QDialog):
         )
 
         super().__init__(parent)
-        self.setWindowTitle("TE annotation")
+        self.setWindowTitle("Sequence Annotation")
         opts = initial or TeAnnotationJobOptions()
         self._for_run = for_run
         self._run_after = False
@@ -3479,7 +3479,7 @@ class TeAnnotationDialog(QDialog):
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
-            ("Run TE annotation with saved selection", TE_ANNOTATION_RIGHT_CLICK_RUN),
+            ("Run Sequence annotation with saved selection", TE_ANNOTATION_RIGHT_CLICK_RUN),
             ("Open this dialog", TE_ANNOTATION_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
@@ -3493,7 +3493,7 @@ class TeAnnotationDialog(QDialog):
         rc_box_layout = QVBoxLayout(rc_box)
         rc_box_layout.setSpacing(6)
         rc_box_layout.addWidget(
-            QLabel("Right-clicking the TE annotation button does:", self)
+            QLabel("Right-clicking the Sequence Annotation button does:", self)
         )
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)

@@ -65,6 +65,53 @@ def blast_database_basename(genome_file: str | os.PathLike) -> str:
     return sanitize_name(os.path.basename(str(genome_file)))
 
 
+def _blast_path_has_unsafe_chars(path: str) -> bool:
+    """True when BLAST may mis-parse the path (spaces and other specials)."""
+    return any(ch in path for ch in special_character)
+
+
+def _blast_safe_fasta_for_makeblastdb(genome_file: str) -> tuple[str, str | None]:
+    """Return ``(in_path, cleanup_path)`` for makeblastdb ``-in``.
+
+    NCBI makeblastdb often fails when ``-in`` contains spaces even if argv is
+    correctly quoted. Use a same-directory symlink/hardlink with a sanitized
+    name when needed. ``cleanup_path`` is removed after the run when set.
+    """
+    genome_abs = os.path.abspath(str(genome_file))
+    if not _blast_path_has_unsafe_chars(genome_abs):
+        return genome_abs, None
+
+    parent = os.path.dirname(genome_abs)
+    safe_base = blast_database_basename(genome_abs)
+    # Distinct from the ``-out`` prefix (same sanitized basename).
+    link_name = f".repeatviewer_blast_in_{safe_base}"
+    link_path = os.path.join(parent, link_name)
+
+    # Prefer a space-free parent; otherwise fall back to the system temp dir.
+    if _blast_path_has_unsafe_chars(parent):
+        import tempfile
+
+        safe_dir = os.path.join(tempfile.gettempdir(), "repeatviewer_blast")
+        os.makedirs(safe_dir, exist_ok=True)
+        link_path = os.path.join(safe_dir, link_name)
+
+    if os.path.lexists(link_path):
+        try:
+            os.remove(link_path)
+        except OSError:
+            pass
+    # Prefer a hard link so BLAST never has to resolve a spaced realpath.
+    try:
+        os.link(genome_abs, link_path)
+    except OSError:
+        try:
+            os.symlink(genome_abs, link_path)
+        except OSError:
+            # Last resort: copying whole genomes is too heavy; try original path.
+            return genome_abs, None
+    return link_path, link_path
+
+
 _FLEXIDOT_UNSAFE_ID_CHARS = frozenset("/\\")
 
 
@@ -129,10 +176,18 @@ def check_database(
     script_dir = get_original_file_path()
 
     blast_dir = os.path.join(script_dir, "blast")
-    # Define database path (sanitize basename: ``#`` breaks BLAST index files)
+    # Define database path (sanitize basename: ``#`` / spaces break BLAST index files)
     genome_n = blast_database_basename(genome_file)
+    genome_dir = os.path.dirname(os.path.abspath(str(genome_file)))
     if output_dir is None:
-        database_path = os.path.join(os.path.dirname(str(genome_file)), genome_n)
+        if _blast_path_has_unsafe_chars(genome_dir):
+            import tempfile
+
+            output_dir = os.path.join(tempfile.gettempdir(), "repeatviewer_blast")
+            os.makedirs(output_dir, exist_ok=True)
+            database_path = os.path.join(output_dir, genome_n)
+        else:
+            database_path = os.path.join(genome_dir, genome_n)
     else:
         database_path = os.path.join(output_dir, genome_n)
 
@@ -141,6 +196,7 @@ def check_database(
 
     with _blast_db_lock(lock_key):
         if not os.path.isfile(database_file):
+            in_path, cleanup_in = _blast_safe_fasta_for_makeblastdb(str(genome_file))
             try:
 
                 makeblastdb_cmd = [
@@ -148,7 +204,7 @@ def check_database(
                         blast_dir, os_type, use_system_blast=use_system_blast
                     ),
                     "-in",
-                    str(genome_file),
+                    in_path,
                     "-dbtype",
                     "nucl",
                     "-out",
@@ -159,7 +215,7 @@ def check_database(
                     makeblastdb_cmd,
                     tool="makeblastdb",
                     inputs=[genome_file],
-                    cwd=os.path.dirname(database_path),
+                    cwd=os.path.dirname(database_path) or None,
                     check=True,
                     output_path=database_path,
                 )
@@ -178,6 +234,12 @@ def check_database(
                 )
                 logging.error(e.stderr)
                 return 'makeblastdb_got_error'
+            finally:
+                if cleanup_in and os.path.lexists(cleanup_in):
+                    try:
+                        os.remove(cleanup_in)
+                    except OSError:
+                        pass
         return database_path
 
 

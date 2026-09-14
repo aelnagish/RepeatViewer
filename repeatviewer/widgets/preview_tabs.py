@@ -106,7 +106,7 @@ _TEXT_PREVIEW_SUFFIXES = _FASTA_SUFFIXES | {
 _TEXT_PREVIEW_MAX_CHARS = 500_000
 _DEFAULT_TEXT_MAX_CHARS = 200_000
 _EDITABLE_TEXT_MAX_CHARS = 2_000_000
-_TRUNCATION_MARKER = "\n\n... (truncated preview)"
+_TRUNCATION_MARKER = "\n\n... (truncated preview"
 _EMPTY_FILE_PREFIX = "(empty file)\n"
 _IMAGE_PREVIEW_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}
 _HTML_PREVIEW_SUFFIXES = {".html", ".htm"}
@@ -168,19 +168,45 @@ def _is_text_like_preview(path: Path) -> bool:
     return suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith("blast.txt")
 
 
+def _format_byte_size(num_bytes: int) -> str:
+    size = float(max(0, num_bytes))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
 def _read_text_preview(path: Path, max_chars: int) -> tuple[str, bool]:
     """Return ``(text, truncated)`` for preview display."""
     resolved = path.expanduser().resolve()
     if resolved.name.lower().endswith(".gz"):
         with gzip.open(resolved, "rt", encoding="utf-8", errors="replace") as handle:
             text = handle.read(max_chars + 1)
+        try:
+            file_size = resolved.stat().st_size
+            size_note = f"compressed size {_format_byte_size(file_size)}"
+        except OSError:
+            size_note = "file is large"
     else:
         with resolved.open(encoding="utf-8", errors="replace") as handle:
             text = handle.read(max_chars + 1)
+        try:
+            file_size = resolved.stat().st_size
+            size_note = f"file size {_format_byte_size(file_size)}"
+        except OSError:
+            size_note = "file is large"
     if not text.strip():
         return f"(empty file)\n\n{resolved}", False
     if len(text) > max_chars:
-        return text[:max_chars] + "\n\n... (truncated preview)", True
+        return (
+            text[:max_chars]
+            + "\n\n... (truncated preview — "
+            + f"{size_note} is too big for full preview; "
+            + f"showing the first {max_chars:,} characters)"
+        ), True
     return text, False
 
 
