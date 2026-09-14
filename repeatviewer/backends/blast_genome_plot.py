@@ -922,7 +922,7 @@ def _plotly_interactive_controls_html(
     filter_title = (
         "TE types — legend (show / colour / order)"
         if genome_mode
-        else "TE types"
+        else "TE classes — legend"
     )
     # Genome map: stacked category bars + plain identity-colour bars (no legendgroup).
     apply_body = (
@@ -4766,8 +4766,54 @@ def find_blast_table_for_query(query_fasta: Path) -> Path | None:
     return None
 
 
-GENOME_MAP_HTML_SUFFIX = "_genome_map.html"
-GENOME_MAP_REGION_HTML_SUFFIX = "_genome_map_region.html"
+GENOME_MAP_HTML_SUFFIX = "_den_plot.html"
+GENOME_MAP_REGION_HTML_SUFFIX = "_den_plot_region.html"
+# Legacy suffixes kept for preview detection of older outputs.
+_LEGACY_GENOME_MAP_SUFFIXES = (
+    "_density_plot.html",
+    "_density_plot_region.html",
+    "_genome_map.html",
+    "_genome_map_region.html",
+)
+
+
+def te_hit_source_tag(path: Path) -> str:
+    """Return ``RM`` or ``blast`` for TE hit-table naming.
+
+    Naming uses the file extension so plot outputs stay consistent even when the
+    path is only being predicted. Content validation still happens at read time.
+    """
+    name = path.name.lower()
+    if name.endswith(".out") and not name.endswith("_blast.txt"):
+        return "RM"
+    return "blast"
+
+
+def te_plot_output_suffix(
+    te_input_files: list[Path] | Path,
+    *,
+    kind: str,
+    region: bool = False,
+) -> str:
+    """Build a plot HTML suffix: ``_{blast|RM|multi}_{kind}_plot[.region].html``."""
+    te_paths = (
+        [te_input_files.expanduser().resolve()]
+        if isinstance(te_input_files, Path)
+        else [p.expanduser().resolve() for p in te_input_files if p]
+    )
+    if len(te_paths) > 1:
+        tag = "multi"
+    elif te_paths:
+        tag = te_hit_source_tag(te_paths[0])
+    else:
+        tag = "blast"
+    kind = str(kind).strip("_") or "plot"
+    # Multi-source density plots use ``dens`` (``_multi_dens_plot.html``).
+    if tag == "multi" and kind in {"den", "density"}:
+        kind = "dens"
+    if region:
+        return f"_{tag}_{kind}_plot_region.html"
+    return f"_{tag}_{kind}_plot.html"
 
 
 def is_blast_table_file(path: Path) -> bool:
@@ -4779,23 +4825,34 @@ def is_genome_map_html_file(path: Path) -> bool:
     name = path.name.lower()
     if not name.endswith((".html", ".htm")):
         return False
+    if "_dens_plot" in name or "_den_plot" in name or "_density_plot" in name:
+        return True
     return (
         name.endswith(GENOME_MAP_HTML_SUFFIX)
         or name.endswith(GENOME_MAP_REGION_HTML_SUFFIX)
+        or any(name.endswith(suffix) for suffix in _LEGACY_GENOME_MAP_SUFFIXES)
         or "_blast_genome_map" in name
+        or "_genome_map" in name
     )
 
 
 def is_divergence_plot_html_file(path: Path) -> bool:
     name = path.name.lower()
-    return "_blast_divergence" in name and name.endswith((".html", ".htm"))
+    if not name.endswith((".html", ".htm")):
+        return False
+    return (
+        "_div_plot" in name
+        or "_divergence_plot" in name
+        or "_blast_divergence" in name
+    )
 
 
 def blast_genome_map_html_path_for_blast_table(blast_txt: Path) -> Path:
-    """Expected genome-map HTML path for a BLAST table."""
+    """Expected density-plot HTML path for a BLAST table."""
     blast_txt = blast_txt.expanduser().resolve()
     stem = te_hit_table_stem(blast_txt)
-    return blast_txt.parent / f"{stem}{GENOME_MAP_HTML_SUFFIX}"
+    suffix = te_plot_output_suffix(blast_txt, kind="den")
+    return blast_txt.parent / f"{stem}{suffix}"
 
 
 def genome_map_html_path_for_te_inputs(
@@ -4804,7 +4861,7 @@ def genome_map_html_path_for_te_inputs(
     region: bool = False,
     gene_gff: Path | None = None,
 ) -> Path:
-    """Expected genome-map HTML path for one or more TE hit-table inputs."""
+    """Expected density-plot HTML path for one or more TE hit-table inputs."""
     te_paths = (
         [te_input_files.expanduser().resolve()]
         if isinstance(te_input_files, Path)
@@ -4815,18 +4872,38 @@ def genome_map_html_path_for_te_inputs(
         stem = _genome_map_output_stem(te_paths)
         if gene_gff is not None:
             stem = f"{stem}_genes"
+        suffix = te_plot_output_suffix(te_paths, kind="den", region=region)
     elif gene_gff is not None:
         primary = gene_gff.expanduser().resolve()
         stem = f"{primary.stem}_genes"
+        suffix = (
+            GENOME_MAP_REGION_HTML_SUFFIX if region else GENOME_MAP_HTML_SUFFIX
+        )
     else:
         raise ValueError("At least one TE or gene input path is required")
-    suffix = GENOME_MAP_REGION_HTML_SUFFIX if region else GENOME_MAP_HTML_SUFFIX
     return primary.parent / f"{stem}{suffix}"
 
 
 def blast_genome_map_html_path_for_query(query_fasta: Path) -> Path:
     query_fasta = query_fasta.expanduser().resolve()
     return query_fasta.parent / f"{query_fasta.name}{GENOME_MAP_HTML_SUFFIX}"
+
+
+def divergence_plot_html_path_for_te_inputs(
+    te_input_files: list[Path] | Path,
+) -> Path:
+    """Expected divergence-plot HTML path for one or more TE hit tables."""
+    te_paths = (
+        [te_input_files.expanduser().resolve()]
+        if isinstance(te_input_files, Path)
+        else [p.expanduser().resolve() for p in te_input_files if p]
+    )
+    if not te_paths:
+        raise ValueError("At least one TE input path is required")
+    primary = te_paths[0]
+    stem = _genome_map_output_stem(te_paths)
+    suffix = te_plot_output_suffix(te_paths, kind="div")
+    return primary.parent / f"{stem}{suffix}"
 
 
 def read_blast_table(path: Path) -> pd.DataFrame:
@@ -5254,12 +5331,10 @@ def load_combined_te_hits(paths: list[Path]) -> pd.DataFrame:
 
 
 def _genome_map_output_stem(te_input_files: list[Path]) -> str:
+    """Base stem for plot HTML; multi-source is marked in the file suffix instead."""
     if not te_input_files:
         return "genes"
-    stem = te_hit_table_stem(te_input_files[0])
-    if len(te_input_files) > 1:
-        stem = f"{stem}_plus{len(te_input_files) - 1}"
-    return stem
+    return te_hit_table_stem(te_input_files[0])
 
 
 def _annotation_feature_types_for_path(
@@ -8472,7 +8547,11 @@ def build_blast_genome_map_figure(
                     x=[None],
                     y=[None],
                     mode="markers",
-                    marker={"size": 10, "color": cat_colors.get(cat, TE_EXTRA_TYPE_COLORS[0])},
+                    marker={
+                        "size": 10,
+                        "symbol": "square",
+                        "color": cat_colors.get(cat, TE_EXTRA_TYPE_COLORS[0]),
+                    },
                     name=cat,
                     legendgroup=cat,
                     showlegend=True,
@@ -8924,8 +9003,7 @@ def write_blast_divergence_plot_html(
         return None
     primary = te_paths[0]
     if output_html is None:
-        stem = _genome_map_output_stem(te_paths)
-        output_html = primary.parent / f"{stem}_blast_divergence_plot.html"
+        output_html = divergence_plot_html_path_for_te_inputs(te_paths)
     else:
         output_html = output_html.expanduser().resolve()
 
@@ -8949,18 +9027,27 @@ def write_blast_divergence_plot_html(
         n_bins = int(np.ceil(1.0 / bw))
         edges = np.linspace(0.0, 1.0, n_bins + 1)
         centers = (edges[:-1] + edges[1:]) / 2.0
-        superfamilies = _ordered_te_types(
-            {str(v) for v in hits.get("superfamily", pd.Series(dtype=str)).astype(str) if str(v)}
-        )
-        if not superfamilies:
-            superfamilies = ["Unclassified"]
+        # Stack / colour by TE class (order), matching landscape-plot legends
+        # (LTR, LINE, DNA, …) rather than fine-grained superfamily names.
+        if "order" in hits.columns:
+            cat_series = hits["order"].astype(str)
+        elif "superfamily" in hits.columns:
+            cat_series = hits["superfamily"].astype(str)
+        else:
+            cat_series = pd.Series(["Unclassified"] * len(hits), index=hits.index, dtype=str)
+        categories = _ordered_te_types({str(v) for v in cat_series if str(v)})
+        if not categories:
+            categories = ["Unclassified"]
             hits = hits.copy()
-            hits["superfamily"] = "Unclassified"
-        cat_colors = _category_color_map(superfamilies)
+            cat_series = pd.Series("Unclassified", index=hits.index, dtype=str)
+        cat_colors = _category_color_map(
+            categories,
+            color_by=TE_GENOME_MAP_COLOR_ORDER,
+        )
         stack_totals = np.zeros(n_bins, dtype=float)
-        per_sf_bins: dict[str, np.ndarray] = {}
-        for sf in superfamilies:
-            part = hits[hits["superfamily"].astype(str) == sf]
+        per_cat_bins: dict[str, np.ndarray] = {}
+        for cat in categories:
+            part = hits[cat_series == cat]
             part_div = ((100.0 - part["pident"].astype(float)) / 100.0).clip(lower=0.0, upper=1.0)
             part_bp = part["te_bp"].astype(float).clip(lower=0.0)
             bp_per_bin, _ = np.histogram(
@@ -8968,7 +9055,7 @@ def write_blast_divergence_plot_html(
                 bins=edges,
                 weights=part_bp.to_numpy(dtype=float),
             )
-            per_sf_bins[sf] = bp_per_bin
+            per_cat_bins[cat] = bp_per_bin
             stack_totals += bp_per_bin
         active = stack_totals > 0
         if not np.any(active):
@@ -8989,13 +9076,13 @@ def write_blast_divergence_plot_html(
             y_top = max(1.0, global_stack_max * 1.08)
             fig = go.Figure()
             stack_base = np.zeros(len(plot_centers), dtype=float)
-            for sf in superfamilies:
-                bp_active = per_sf_bins[sf][active]
+            for cat in categories:
+                bp_active = per_cat_bins[cat][active]
                 bar_base = stack_base.copy()
                 hover = [
                     (
                         f"Divergence: {lo:.3f} - {hi:.3f}<br>"
-                        f"Superfamily: {sf}<br>"
+                        f"TE class: {cat}<br>"
                         f"Total TE length: {int(bp):,} bp"
                     )
                     for lo, hi, bp in zip(plot_edges_lo, plot_edges_hi, bp_active)
@@ -9006,23 +9093,40 @@ def write_blast_divergence_plot_html(
                         y=bp_active,
                         base=bar_base,
                         width=[bar_width] * len(plot_centers),
-                        marker={"color": cat_colors.get(sf, TE_EXTRA_TYPE_COLORS[0]), "line": {"width": 0}},
+                        marker={
+                            "color": cat_colors.get(cat, TE_EXTRA_TYPE_COLORS[0]),
+                            "line": {"width": 0},
+                        },
                         hovertext=hover,
                         hoverinfo="text",
-                        name=sf,
-                        legendgroup=sf,
-                        showlegend=False,
+                        name=cat,
+                        legendgroup=cat,
+                        showlegend=True,
                     )
                 )
                 stack_base += bp_active
             label = query_label or (
-        te_hit_table_stem(primary)
-        if len(te_paths) == 1
-        else f"{te_hit_table_stem(primary)} + {len(te_paths) - 1} more"
-    )
+                te_hit_table_stem(primary)
+                if len(te_paths) == 1
+                else f"{te_hit_table_stem(primary)} + {len(te_paths) - 1} more"
+            )
             fig.update_layout(
                 title=f"TE divergence from {source} — {label}",
-                showlegend=False,
+                showlegend=True,
+                legend={
+                    "title": {"text": ""},
+                    "orientation": "v",
+                    "yanchor": "top",
+                    "y": 1.0,
+                    "xanchor": "left",
+                    "x": 1.02,
+                    "bgcolor": "rgba(255,255,255,0.92)",
+                    "bordercolor": "#d0d7de",
+                    "borderwidth": 1,
+                    "font": {"size": 11, "family": "Arial, sans-serif"},
+                    "itemsizing": "constant",
+                    "traceorder": "normal",
+                },
                 xaxis={
                     "title": "Divergence",
                     "range": [0.0, 1.0],
@@ -9044,7 +9148,7 @@ def write_blast_divergence_plot_html(
                 uirevision="te-divergence-plot",
                 template="plotly_white",
                 bargap=0,
-                margin={"l": 72, "r": 100, "t": 96, "b": 60},
+                margin={"l": 72, "r": 160, "t": 96, "b": 60},
                 width=1120,
                 height=540,
                 meta={
@@ -9054,9 +9158,10 @@ def write_blast_divergence_plot_html(
                         "xRange": [0.0, 1.0],
                         "binWidth": bw,
                         "categoryColors": {
-                            sf: cat_colors.get(sf, TE_EXTRA_TYPE_COLORS[0]) for sf in superfamilies
+                            cat: cat_colors.get(cat, TE_EXTRA_TYPE_COLORS[0])
+                            for cat in categories
                         },
-                        "categoryOrder": list(superfamilies),
+                        "categoryOrder": list(categories),
                     }
                 },
             )

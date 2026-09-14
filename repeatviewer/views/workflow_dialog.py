@@ -365,10 +365,10 @@ class WorkflowDesignerDialog(QDialog):
                     keep = True
                     item.setData(_ROLE_STEP_KEEP, True)
                     item.setCheckState(Qt.CheckState.Checked)
-                    suffix = " — keep (final)"
+                    suffix = " — keep result (final)"
                 elif keep:
                     item.setCheckState(Qt.CheckState.Checked)
-                    suffix = " — keep"
+                    suffix = " — keep result"
                 else:
                     item.setCheckState(Qt.CheckState.Unchecked)
                     suffix = ""

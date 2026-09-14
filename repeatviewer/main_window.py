@@ -248,7 +248,9 @@ from repeatviewer.backends.genome_prepare import ensure_genome_artifacts
 from repeatviewer.backends.blast_genome_plot import (
     _map_chromosome_filter_to_genome,
     blast_genome_map_html_path_for_blast_table,
+    divergence_plot_html_path_for_te_inputs,
     genome_map_html_path_for_te_inputs,
+    GENOME_MAP_HTML_SUFFIX,
     blast_txt_path_for_query,
     chromosome_names_from_genome,
     genome_chrom_sizes_from_fasta,
@@ -267,7 +269,10 @@ from repeatviewer.backends.blast_genome_plot import (
     TE_INPUT_KIND_CONSENSUS,
     TE_INPUT_KIND_MASKING,
 )
-from repeatviewer.backends.te_abundance_plot import write_te_abundance_plot_html
+from repeatviewer.backends.te_abundance_plot import (
+    te_abundance_plot_html_path_for_sources,
+    write_te_abundance_plot_html,
+)
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE, JobCancellation, JobCancelledError
 
 logger = logging.getLogger(__name__)
@@ -6640,6 +6645,13 @@ class MainWindow(QMainWindow):
             label = te_hit_table_stem(primary)
         else:
             label = f"{te_hit_table_stem(primary)} + {len(te_paths) - 1} more"
+        proposed = divergence_plot_html_path_for_te_inputs(te_paths)
+        output_html = self._confirm_plot_output_path(
+            proposed,
+            title="TE divergence plot",
+        )
+        if output_html is None:
+            return
         bw = bin_width if bin_width is not None else self._te_divergence_plot_options.bin_width
         self._set_status_message("Building TE divergence plot…", 0)
         try:
@@ -6647,6 +6659,7 @@ class MainWindow(QMainWindow):
                 te_paths,
                 query_label=label,
                 bin_width=bw,
+                output_html=output_html,
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "TE divergence plot failed", str(exc))
@@ -7046,12 +7059,19 @@ class MainWindow(QMainWindow):
         metric: str,
         top_n: int,
     ) -> None:
+        proposed = te_abundance_plot_html_path_for_sources(sources)
+        output_html = self._confirm_plot_output_path(
+            proposed,
+            title="TE abundance plot",
+        )
+        if output_html is None:
+            return
         self._start_background_job(
             FunctionWorker(
                 self._run_te_abundance_plot_job,
                 "te_abundance_plot",
                 sources,
-                {"metric": metric, "top_n": top_n},
+                {"metric": metric, "top_n": top_n, "output_html": output_html},
             ),
             job_title="te_abundance_plot",
             total_steps=max(1, len(sources)),
@@ -7068,6 +7088,7 @@ class MainWindow(QMainWindow):
         *,
         metric: str,
         top_n: int,
+        output_html: Path | None = None,
     ) -> dict:
         progress(0, "Building TE abundance plot…")
         if self._job_cancel.requested:
@@ -7076,6 +7097,7 @@ class MainWindow(QMainWindow):
             sources,
             metric=metric,
             top_n=top_n,
+            output_html=output_html,
         )
         if self._job_cancel.requested:
             raise JobCancelledError()
@@ -7233,6 +7255,27 @@ class MainWindow(QMainWindow):
                 )
         else:
             query_label = "genome map"
+        if te_paths:
+            proposed = genome_map_html_path_for_te_inputs(
+                te_paths,
+                gene_gff=gene_paths[0] if gene_paths else None,
+            )
+        elif gene_paths:
+            proposed = genome_map_html_path_for_te_inputs(
+                [],
+                gene_gff=gene_paths[0],
+            )
+        else:
+            proposed = (
+                methylation_paths[0].parent
+                / f"{methylation_paths[0].stem}{GENOME_MAP_HTML_SUFFIX}"
+            )
+        output_html = self._confirm_plot_output_path(
+            proposed,
+            title="TE density plot",
+        )
+        if output_html is None:
+            return
         self._start_genome_map_build(
             te_paths,
             gene_files=gene_paths,
@@ -7254,7 +7297,54 @@ class MainWindow(QMainWindow):
             chromosomes_only=opts.chromosomes_only or None,
             superfamilies_only=None,
             chromosome_sort=opts.chromosome_sort,
+            output_html=output_html,
         )
+
+    def _confirm_plot_output_path(self, proposed: Path, *, title: str) -> Path | None:
+        """If ``proposed`` already exists, ask to overwrite, rename, or cancel."""
+        proposed = proposed.expanduser().resolve()
+        if not proposed.exists():
+            return proposed
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f"“{proposed.name}” already exists in this folder.")
+        box.setInformativeText(
+            "Overwrite the existing plot, or save under a different name?"
+        )
+        overwrite_btn = box.addButton("Overwrite", QMessageBox.ButtonRole.DestructiveRole)
+        rename_btn = box.addButton("Rename…", QMessageBox.ButtonRole.AcceptRole)
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(rename_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == overwrite_btn:
+            return proposed
+        if clicked != rename_btn:
+            return None
+        new_name, ok = self._prompt_rename_text(
+            title=f"{title} — rename",
+            label="New file name:",
+            initial=proposed.name,
+        )
+        if not ok or not new_name.strip():
+            return None
+        name = new_name.strip()
+        if Path(name).name != name or "/" in name or "\\" in name:
+            QMessageBox.warning(
+                self,
+                title,
+                "Enter a file name only (no folder path).",
+            )
+            return self._confirm_plot_output_path(proposed, title=title)
+        path = (proposed.parent / name).expanduser().resolve()
+        if path.suffix.lower() not in {".html", ".htm"}:
+            path = path.with_suffix(".html")
+        if path == proposed:
+            return self._confirm_plot_output_path(proposed, title=title)
+        if path.exists():
+            return self._confirm_plot_output_path(path, title=title)
+        return path
 
     def _start_genome_map_build(
         self,
@@ -7279,6 +7369,7 @@ class MainWindow(QMainWindow):
         chromosomes_only: list[str] | None,
         superfamilies_only: list[str] | None,
         chromosome_sort: str,
+        output_html: Path | None = None,
     ) -> None:
         genome = self._project.genome_file
         assert genome is not None
@@ -7307,6 +7398,7 @@ class MainWindow(QMainWindow):
             te_paths,
             genome,
             job_kwargs={
+                "output_html": output_html,
                 "gene_gff": gene_paths or None,
                 "methylation_files": methylation_paths or None,
                 "te_input_kinds": te_input_kinds,
@@ -7985,15 +8077,32 @@ class MainWindow(QMainWindow):
         self._ensure_preview_visible()
         QTimer.singleShot(0, self._ensure_preview_visible)
 
+    def _prompt_rename_text(
+        self,
+        *,
+        title: str,
+        label: str,
+        initial: str,
+    ) -> tuple[str, bool]:
+        """Wide rename prompt so long filenames fit without horizontal scrolling."""
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setLabelText(label)
+        dialog.setTextValue(initial)
+        dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        dialog.resize(560, dialog.sizeHint().height())
+        dialog.setMinimumWidth(520)
+        ok = dialog.exec() == QDialog.DialogCode.Accepted
+        return dialog.textValue(), ok
+
     def _rename_file(self, path: Path) -> None:
         path = path.expanduser().resolve()
         if not path.is_file():
             return
-        new_name, ok = QInputDialog.getText(
-            self,
-            "Rename file",
-            "New file name:",
-            text=path.name,
+        new_name, ok = self._prompt_rename_text(
+            title="Rename file",
+            label="New file name:",
+            initial=path.name,
         )
         if not ok or not new_name.strip() or new_name.strip() == path.name:
             return
@@ -8016,11 +8125,10 @@ class MainWindow(QMainWindow):
         folder = folder.expanduser().resolve()
         if not folder.is_dir():
             return
-        new_name, ok = QInputDialog.getText(
-            self,
-            "Rename folder",
-            "New folder name:",
-            text=folder.name,
+        new_name, ok = self._prompt_rename_text(
+            title="Rename folder",
+            label="New folder name:",
+            initial=folder.name,
         )
         if not ok or not new_name.strip() or new_name.strip() == folder.name:
             return

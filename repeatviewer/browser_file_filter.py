@@ -32,6 +32,10 @@ def is_tool_output_file(path: Path) -> bool:
         return True
     if is_genome_map_html_file(path) or is_divergence_plot_html_file(path):
         return True
+    if name.endswith((".html", ".htm")) and (
+        "_abund_plot" in name or "_abundance_plot" in name
+    ):
+        return True
     if name.endswith("_sankey.html") or "confusion_matrix" in name:
         return True
     if "_flexidot" in name and name.endswith(".png"):
