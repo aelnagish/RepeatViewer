@@ -60,6 +60,12 @@ Available from the toolbar and **Sequence** menu:
 
 Bundled **BLAST+**, **MAFFT**, and **MUSCLE** binaries are included for macOS, Linux, and Windows. The corresponding **Use system …** options in **File → Setting** select an installation from `PATH` instead.
 
+## Documentation
+
+The **[User Manual](docs/MANUAL.md)** covers installation, the interface, every
+tool and its parameters, workflows, plugins, preferences and troubleshooting.
+Start with its Quick start if you are new to RepeatViewer.
+
 ## Install
 
 **Requirements:** Python 3.10+, conda or venv recommended.
