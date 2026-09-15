@@ -36,6 +36,13 @@ $ZipPath = Join-Path $Dist $ZipName
 Write-Host "==> Using Python: $Python"
 Write-Host "==> Version: $Version"
 
+# Conda stdlib extensions (_ctypes, _lzma, …) load DLLs from Library\bin.
+$CondaBin = Join-Path (Split-Path $Python -Parent) "Library\bin"
+if (Test-Path $CondaBin) {
+    $env:PATH = "$CondaBin;$env:PATH"
+    Write-Host "==> Prepended conda Library\bin to PATH"
+}
+
 Write-Host "==> Ensuring build tools (pyinstaller)…"
 # NumPy 2.4+ raises "cannot load module more than once per process" when a
 # frozen app loads _multiarray_umath twice. Keep numpy <2.4 for Windows packs

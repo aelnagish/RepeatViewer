@@ -58,6 +58,10 @@ Bundled BLAST/MAFFT/MUSCLE stay on Windows and are not routed through WSL.
 
 ## Troubleshooting
 
+### `DLL load failed while importing _ctypes`
+
+Conda keeps `ffi.dll` (and related stdlib DLLs) in `Library\bin`. The current spec copies those into the app folder. Rebuild with `build_windows.ps1` if you still see this on an older zip.
+
 ### `cannot load module more than once per process`
 
 Rebuild with the current `build_windows.ps1` (clean dist/build). If you pack manually, use:

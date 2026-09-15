@@ -22,6 +22,44 @@ def collect_datas() -> list[tuple[str, str]]:
     return collect_datas_for("windows")
 
 
+def collect_conda_runtime_dlls() -> list[tuple[str, str]]:
+    """Collect conda ``Library\\bin`` DLLs that PyInstaller often fails to resolve.
+
+    Conda Python loads ``_ctypes`` from ``ffi.dll`` (and similar stdlib
+    extensions from liblzma / libbz2 / libexpat / sqlite3). Those live next
+    to conda, not on the default DLL search path, so a frozen app crashes with:
+
+        ImportError: DLL load failed while importing _ctypes
+    """
+    names = (
+        "ffi.dll",
+        "libffi.dll",
+        "libffi-8.dll",
+        "liblzma.dll",
+        "libbz2.dll",
+        "LIBBZ2.dll",
+        "libexpat.dll",
+        "sqlite3.dll",
+    )
+    folders = (
+        Path(sys.prefix) / "Library" / "bin",
+        Path(sys.base_prefix) / "Library" / "bin",
+    )
+    seen: set[str] = set()
+    binaries: list[tuple[str, str]] = []
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        for name in names:
+            path = folder / name
+            key = path.name.lower()
+            if path.is_file() and key not in seen:
+                seen.add(key)
+                binaries.append((str(path), "."))
+                print(f"INFO: bundling conda DLL {path}")
+    return binaries
+
+
 def _png_to_ico(png_bytes: bytes, out_ico: Path, sizes: tuple[int, ...] = (16, 32, 48, 256)) -> None:
     """Write a multi-size .ico from a square RGBA PNG (Qt-rendered)."""
     from PySide6.QtCore import QByteArray, QBuffer, QIODevice

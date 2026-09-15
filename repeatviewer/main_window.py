@@ -497,6 +497,26 @@ _SOURCE_FG_DARK = QColor(170, 205, 255)
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 
+# Extract Sequences also accepts the genome-style suffixes and gzipped input;
+# it streams rather than parsing into memory, so size is not a reason to refuse.
+_EXTRACT_SOURCE_SUFFIXES = _FASTA_SUFFIXES | {".fna", ".ffn"}
+_GZIP_SUFFIXES = {".gz", ".bgz"}
+# Above this, the tick-box list is not built -- listing a read set record by
+# record is what makes the old dialog unusable on anything large.
+_EXTRACT_PICK_LIST_MAX_BYTES = 20_000_000
+# Confirm before scattering this many single-sequence files into a folder.
+_EXTRACT_MANY_FILES_WARNING = 200
+# sseqid in a RepeatViewer BLAST table: the genome sequence that was hit.
+_BLAST_SUBJECT_COLUMN = 2
+
+
+def _is_extract_source(path: Path) -> bool:
+    """True for a FASTA the Extract Sequences tool can read, gzipped or not."""
+    suffixes = [s.lower() for s in path.suffixes]
+    if suffixes and suffixes[-1] in _GZIP_SUFFIXES:
+        suffixes = suffixes[:-1]
+    return bool(suffixes) and suffixes[-1] in _EXTRACT_SOURCE_SUFFIXES
+
 _TOOLBAR_TOOLTIPS = {
     "define_genome": "Set or change the project reference genome FASTA",
     "new_sequence": "Create a new empty sequence FASTA",
@@ -934,6 +954,75 @@ class GenomeMapWorker(QObject):
             self.failed.emit(CANCELLED_MESSAGE)
         except GenomeMapNothingToPlotError as exc:
             self.failed.emit(_format_cli_failure(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(_format_cli_failure(exc))
+
+
+class ExtractSequencesWorker(QObject):
+    """Extract (or just count) FASTA records named in an ID list, off the UI thread."""
+
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        source: Path,
+        ids: list[str],
+        out_dir: Path,
+        *,
+        count_only: bool = False,
+        single_file: bool = True,
+        exclude: bool = False,
+        cancel=None,
+    ):
+        super().__init__()
+        self._source = Path(source).expanduser().resolve()
+        self._ids = list(ids)
+        self._out_dir = Path(out_dir).expanduser().resolve()
+        self._count_only = count_only
+        self._single_file = single_file
+        self._exclude = exclude
+        self._cancel = cancel
+
+    def _emit_progress(self, done: int, total: int) -> None:
+        if total > 0:
+            percent = max(0, min(100, int(done * 100 / total)))
+            self.progress.emit(percent, f"{percent}%")
+        else:
+            # Compressed input: the uncompressed size is unknown, so report
+            # what has actually been read rather than a made-up percentage.
+            self.progress.emit(0, f"{done / 1_000_000:.0f} MB read")
+
+    @Slot()
+    def run(self) -> None:
+        from repeatviewer.backends.sequence_compose import (
+            SequenceComposeError,
+            count_matching_ids,
+            extract_records_by_ids,
+        )
+
+        try:
+            if self._count_only:
+                summary = count_matching_ids(
+                    self._source,
+                    self._ids,
+                    progress=self._emit_progress,
+                    cancel=self._cancel,
+                )
+            else:
+                summary = extract_records_by_ids(
+                    self._source,
+                    self._ids,
+                    self._out_dir,
+                    single_file=self._single_file,
+                    exclude=self._exclude,
+                    progress=self._emit_progress,
+                    cancel=self._cancel,
+                )
+            self.finished.emit(summary)
+        except SequenceComposeError as exc:
+            self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(_format_cli_failure(exc))
 
@@ -1850,6 +1939,11 @@ class MainWindow(QMainWindow):
         self._genome_map_worker: GenomeMapWorker | None = None
         self._benchmark_thread: QThread | None = None
         self._benchmark_worker: ConfusionMatrixBenchmarkWorker | TeLibraryBenchmarkWorker | None = None
+        self._extract_thread: QThread | None = None
+        self._extract_worker: ExtractSequencesWorker | None = None
+        self._extract_dialog = None
+        self._extract_source: Path | None = None
+        self._extract_count_only = False
         self._last_benchmark_source_files: list[Path] = []
         self._job_cancel = JobCancellation()
         self._genome_map_blast_txt: Path | None = None
@@ -1889,6 +1983,9 @@ class MainWindow(QMainWindow):
         self._file_list.rename_file_requested.connect(self._rename_file)
         self._file_list.extract_sequences_requested.connect(
             self._extract_sequences_from_list
+        )
+        self._file_list.extract_hit_subjects_requested.connect(
+            self._extract_sequences_from_hit_table
         )
         self._file_list.group_sequences_requested.connect(self._group_sequences)
         self._file_list.new_folder_with_files_requested.connect(
@@ -2267,7 +2364,12 @@ class MainWindow(QMainWindow):
         self._queued_genome_map_jobs.clear()
 
         threads: list[QThread] = []
-        for attr in ("_worker_thread", "_genome_map_thread", "_benchmark_thread"):
+        for attr in (
+            "_worker_thread",
+            "_genome_map_thread",
+            "_benchmark_thread",
+            "_extract_thread",
+        ):
             thread = getattr(self, attr, None)
             if isinstance(thread, QThread):
                 threads.append(thread)
@@ -2828,15 +2930,26 @@ class MainWindow(QMainWindow):
             [written], f"Combined {count} sequences into {written.name}"
         )
 
-    def _extract_sequences_from_list(self, source_path: object = None) -> None:
+    def _extract_sequences_from_list(
+        self,
+        source_path: object = None,
+        *,
+        initial_ids: str = "",
+        initial_column: int = 1,
+    ) -> None:
         """Pull chosen records out of a multi-FASTA, leaving the original alone.
 
+        Two ways to choose: tick boxes, or a list of sequence names. The tick
+        list is only built when the file is small enough to list cheaply --
+        a read set is handled through the ID tab, which never holds the FASTA
+        in memory.
+
         ``source_path`` comes from the right-click menu; without it the current
-        selection is used.
+        selection is used. ``initial_ids`` pre-fills the ID tab (used by
+        "Extract subject sequences" on a BLAST hit table).
         """
         from repeatviewer.backends.sequence_compose import (
             SequenceComposeError,
-            extract_records,
             list_records,
         )
         from repeatviewer.views.tool_dialogs import ExtractSequencesDialog
@@ -2846,7 +2959,7 @@ class MainWindow(QMainWindow):
         else:
             files = [
                 p for p in self._selected_files()
-                if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+                if p.is_file() and _is_extract_source(p)
             ]
         if len(files) != 1:
             QMessageBox.information(
@@ -2855,25 +2968,63 @@ class MainWindow(QMainWindow):
                 "Select one FASTA file containing several sequences.",
             )
             return
-        source = files[0]
-        try:
-            records = list_records(source)
-        except SequenceComposeError as exc:
-            QMessageBox.warning(self, "Extract Sequences from File", str(exc))
-            return
-        if len(records) < 2:
-            QMessageBox.information(
-                self,
-                "Extract Sequences from File",
-                f"{source.name} contains a single sequence; there is nothing to extract.",
+        source = files[0].expanduser().resolve()
+        if not source.is_file():
+            QMessageBox.warning(
+                self, "Extract Sequences from File", f"{source.name} was not found."
             )
             return
 
+        records: list[tuple[str, str, int]] | None = None
+        records_note = ""
+        try:
+            size = source.stat().st_size
+        except OSError:
+            size = 0
+        if size > _EXTRACT_PICK_LIST_MAX_BYTES or source.suffix.lower() in {".gz", ".bgz"}:
+            records_note = (
+                f"{source.name} is too large to list sequence by sequence "
+                f"({size / 1_000_000:.0f} MB). Use the ID list tab."
+            )
+        else:
+            try:
+                records = list_records(source)
+            except SequenceComposeError as exc:
+                if not initial_ids:
+                    QMessageBox.warning(self, "Extract Sequences from File", str(exc))
+                    return
+                records_note = str(exc)
+
         dialog = ExtractSequencesDialog(
-            records=records, source_name=source.name, parent=self
+            records=records,
+            source_name=source.name,
+            initial_ids=initial_ids,
+            initial_column=initial_column,
+            records_note=records_note,
+            parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        self._extract_dialog = dialog
+        self._extract_source = source
+        dialog.check_requested.connect(self._check_extract_ids)
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            self._extract_dialog = None
+        if not accepted:
             return
+
+        if dialog.use_id_list():
+            self._run_id_list_extraction(source, dialog)
+        else:
+            self._run_pick_list_extraction(source, dialog)
+
+    def _run_pick_list_extraction(self, source: Path, dialog) -> None:
+        """The original tick-box path: small files, fast enough to do inline."""
+        from repeatviewer.backends.sequence_compose import (
+            SequenceComposeError,
+            extract_records,
+        )
+
         try:
             written = extract_records(
                 source,
@@ -2889,6 +3040,266 @@ class MainWindow(QMainWindow):
         if len(written) > 4:
             names += ", …"
         self._refresh_after_compose(written, f"Extracted {len(written)} file(s): {names}")
+
+    def _run_id_list_extraction(self, source: Path, dialog) -> None:
+        """ID-list path: one streaming pass in the background, with cancel."""
+        parsed = dialog.parsed_ids()
+        if not parsed.ids:
+            return
+        single_file = dialog.single_file()
+        exclude = dialog.exclude()
+
+        if not single_file and (exclude or len(parsed.ids) > _EXTRACT_MANY_FILES_WARNING):
+            expected = (
+                "one file per sequence that is NOT in the list"
+                if exclude
+                else f"up to {len(parsed.ids):,} files"
+            )
+            answer = QMessageBox.question(
+                self,
+                "Extract Sequences from File",
+                f"This will write {expected} into:\n{source.parent}\n\n"
+                "Tick \"Write all selected into one file\" to get a single "
+                "multi-FASTA instead.\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        self._start_extract_job(
+            source,
+            parsed.ids,
+            count_only=False,
+            single_file=single_file,
+            exclude=exclude,
+        )
+
+    @Slot(object)
+    def _check_extract_ids(self, ids: object) -> None:
+        """Check button: count matches without writing anything."""
+        source = self._extract_source
+        if source is None or self._extract_thread is not None:
+            return
+        self._start_extract_job(source, list(ids or []), count_only=True)
+
+    def _start_extract_job(
+        self,
+        source: Path,
+        ids: list[str],
+        *,
+        count_only: bool,
+        single_file: bool = True,
+        exclude: bool = False,
+    ) -> None:
+        if not ids:
+            return
+        if self._extract_thread is not None:
+            # Nearly always a Check still reading a large file when OK was pressed.
+            if not count_only:
+                QMessageBox.information(
+                    self,
+                    "Extract Sequences from File",
+                    "The ID check is still running. Wait for it to finish, or press "
+                    "Stop, then try again.",
+                )
+            return
+        self._job_cancel.reset()
+        self._extract_count_only = count_only
+        self._extract_source = source
+        title = "Checking sequence IDs" if count_only else "Extracting sequences"
+        self._set_status_message(f"{title} in {source.name}…", 0)
+        if not count_only:
+            self._job_running = True
+            self._set_job_actions_enabled(False)
+            if self._task_progress is not None:
+                self._task_progress.start(self._running_job_title("Extract sequences"), 100)
+            if self._stop_btn is not None:
+                self._stop_btn.setEnabled(True)
+
+        self._extract_thread = QThread(self)
+        self._extract_worker = ExtractSequencesWorker(
+            source,
+            ids,
+            source.parent,
+            count_only=count_only,
+            single_file=single_file,
+            exclude=exclude,
+            cancel=lambda: self._job_cancel.requested,
+        )
+        self._extract_worker.moveToThread(self._extract_thread)
+        self._extract_thread.started.connect(self._extract_worker.run)
+        self._extract_worker.progress.connect(self._on_extract_progress)
+        self._extract_worker.finished.connect(self._on_extract_finished)
+        self._extract_worker.failed.connect(self._on_extract_failed)
+        self._extract_worker.finished.connect(self._extract_thread.quit)
+        self._extract_worker.failed.connect(self._extract_thread.quit)
+        self._extract_thread.finished.connect(self._cleanup_extract_worker)
+        self._extract_thread.start()
+
+    @Slot(int, str)
+    def _on_extract_progress(self, percent: int, text: str) -> None:
+        if self._extract_count_only:
+            if self._extract_dialog is not None:
+                self._extract_dialog.set_check_progress(f"Checking… {text}")
+            return
+        if self._task_progress is not None:
+            self._task_progress.update(percent, text)
+
+    @Slot(object)
+    def _on_extract_finished(self, summary: object) -> None:
+        source = self._extract_source
+        name = source.name if source else "the file"
+        if getattr(summary, "cancelled", False):
+            if self._extract_count_only and self._extract_dialog is not None:
+                self._extract_dialog.set_check_result("Check stopped.", ok=False)
+            self._set_status_message("Extract sequences stopped", 6000)
+            return
+
+        if self._extract_count_only:
+            found = summary.found_ids
+            total = summary.requested_ids
+            text = f"{found:,} of {total:,} IDs found in {name}."
+            if summary.missing:
+                shown = ", ".join(summary.missing[:5])
+                if len(summary.missing) > 5:
+                    shown += ", …"
+                text += f"\nNot found: {shown}"
+            if self._extract_dialog is not None:
+                self._extract_dialog.set_check_result(text, ok=not summary.missing)
+            self._set_status_message(f"{found:,} of {total:,} IDs found", 8000)
+            return
+
+        if not summary.written:
+            QMessageBox.warning(
+                self,
+                "Extract Sequences from File",
+                f"None of the {summary.requested_ids:,} IDs matched a sequence in "
+                f"{name}.\n\nSequence names are matched up to the first space, "
+                "the same text BLAST reports.",
+            )
+            self._set_status_message("No sequences extracted", 6000)
+            return
+
+        message = f"Wrote {summary.matched:,} sequence(s)"
+        if len(summary.written) > 1:
+            message += f" to {len(summary.written):,} file(s)"
+        message += "."
+        if summary.missing:
+            message += f" {len(summary.missing):,} ID(s) not found."
+        outputs = list(summary.written)
+        if summary.missing_path is not None:
+            outputs.append(summary.missing_path)
+        self._refresh_after_compose(outputs, message)
+
+        detail = message
+        if summary.missing_path is not None:
+            detail += f"\n\nThe missing names are listed in:\n{summary.missing_path.name}"
+        QMessageBox.information(self, "Extract Sequences from File", detail)
+
+    @Slot(str)
+    def _on_extract_failed(self, message: str) -> None:
+        if message == CANCELLED_MESSAGE:
+            self._set_status_message("Extract sequences stopped", 6000)
+            return
+        if self._extract_count_only and self._extract_dialog is not None:
+            self._extract_dialog.set_check_result(message, ok=False)
+            return
+        QMessageBox.warning(self, "Extract Sequences from File", message)
+        self._set_status_message("Extract sequences failed", 6000)
+
+    def _cleanup_extract_worker(self) -> None:
+        if self._job_cancel.requested:
+            self._job_cancel.reset()
+        if not self._extract_count_only:
+            self._job_running = self._worker_thread is not None
+            if self._task_progress is not None:
+                self._task_progress.reset()
+            if self._worker_thread is None:
+                self._set_job_actions_enabled(True)
+            if self._stop_btn is not None and not self._job_running:
+                self._stop_btn.setEnabled(False)
+        thread = self._extract_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
+        if self._extract_worker is not None:
+            self._extract_worker.deleteLater()
+            self._extract_worker = None
+        if self._extract_thread is not None:
+            self._extract_thread.deleteLater()
+            self._extract_thread = None
+
+    def _extract_sequences_from_hit_table(self, blast_txt: object = None) -> None:
+        """Right-click a *_blast.txt: extract the genome sequences it hit.
+
+        Reads the ``sseqid`` column itself, so no ID list has to be made by
+        hand. The subject FASTA is the genome the BLAST ran against -- taken
+        from the ``*.lnk.fa`` reference link written beside the results, then
+        the project genome, and only then asked for.
+        """
+        from repeatviewer.backends.sequence_compose import (
+            SequenceComposeError,
+            read_id_file,
+        )
+
+        if isinstance(blast_txt, (str, Path)):
+            table = Path(blast_txt).expanduser().resolve()
+        else:
+            selected = [p for p in self._selected_files() if is_blast_table_file(p)]
+            if len(selected) != 1:
+                QMessageBox.information(
+                    self,
+                    "Extract subject sequences",
+                    "Select one BLAST hit table (*_blast.txt).",
+                )
+                return
+            table = selected[0].resolve()
+
+        try:
+            parsed = read_id_file(table, column=_BLAST_SUBJECT_COLUMN)
+        except SequenceComposeError as exc:
+            QMessageBox.warning(self, "Extract subject sequences", str(exc))
+            return
+        if not parsed.ids:
+            QMessageBox.information(
+                self,
+                "Extract subject sequences",
+                f"No subject names found in {table.name}.",
+            )
+            return
+
+        subject = self._subject_fasta_for_hit_table(table)
+        if subject is None:
+            return
+        self._extract_sequences_from_list(
+            subject, initial_ids="\n".join(parsed.ids), initial_column=1
+        )
+
+    def _subject_fasta_for_hit_table(self, table: Path) -> Path | None:
+        """The FASTA a hit table was searched against, asking only if needed."""
+        links = sorted(table.parent.glob("*.lnk.fa"))
+        for link in links:
+            try:
+                target = link.resolve()
+            except OSError:
+                continue
+            if target.is_file():
+                return target
+
+        genome = getattr(self._project, "genome_file", None)
+        if genome is not None and Path(genome).is_file():
+            return Path(genome).expanduser().resolve()
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Genome or read FASTA searched by {table.name}",
+            str(table.parent),
+            "FASTA (*.fa *.fasta *.fas *.fna *.faa *.gz);;All files (*)",
+        )
+        if not path:
+            return None
+        return Path(path).expanduser().resolve()
 
     def _refresh_after_compose(self, created: list[Path], message: str) -> None:
         if self._current_folder:
@@ -3562,6 +3973,10 @@ class MainWindow(QMainWindow):
         seq_menu.addAction("New Sequence", self._new_sequence)
         seq_menu.addAction("Combine Sequences to One File", self._group_sequences)
         seq_menu.addAction("Extract Sequences from File", self._extract_sequences_from_list)
+        seq_menu.addAction(
+            "Extract subject sequences from hit table",
+            self._extract_sequences_from_hit_table,
+        )
         seq_menu.addSeparator()
         seq_menu.addAction(
             "Reverse Complement",
@@ -10091,6 +10506,7 @@ class MainWindow(QMainWindow):
             self._worker_thread is not None
             or self._genome_map_thread is not None
             or self._benchmark_thread is not None
+            or self._extract_thread is not None
         ):
             self._set_status_message("No running task to stop", 3000)
             return
@@ -10110,6 +10526,8 @@ class MainWindow(QMainWindow):
             threads.append(self._genome_map_thread)
         if self._benchmark_thread is not None:
             threads.append(self._benchmark_thread)
+        if self._extract_thread is not None:
+            threads.append(self._extract_thread)
 
         for thread in threads:
             if thread.isRunning():
