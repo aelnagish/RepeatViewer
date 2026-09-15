@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,13 @@ TE_ABUNDANCE_COLORS = (
     "#f97316",
     "#6366f1",
 )
+# RepeatMasker simple/satellite motif names such as ``(TTAGTTT)n`` / ``(ATTC)n``.
+_SIMPLE_REPEAT_MOTIF_NAME = re.compile(r"^\([^()]{1,64}\)n$", re.IGNORECASE)
+
+
+def is_simple_repeat_motif_name(name: str) -> bool:
+    """True for RepeatMasker ``(motif)n`` simple-repeat labels (not TE families)."""
+    return bool(_SIMPLE_REPEAT_MOTIF_NAME.match(str(name).strip()))
 
 
 def _merged_interval_bp(intervals: list[tuple[int, int]]) -> int:
@@ -66,7 +74,10 @@ def _merged_interval_bp(intervals: list[tuple[int, int]]) -> int:
 
 
 def family_occupied_bp(hits: pd.DataFrame) -> pd.Series:
-    """Occupied bp per RepeatMasker column-10 name; opposite strands stay separate."""
+    """Occupied bp per RepeatMasker column-10 name; opposite strands stay separate.
+
+    Names matching ``(motif)n`` simple-repeat labels are excluded from ranking.
+    """
     if hits.empty:
         return pd.Series(dtype=np.int64)
     totals: dict[str, int] = {}
@@ -75,8 +86,10 @@ def family_occupied_bp(hits: pd.DataFrame) -> pd.Series:
     name_column = "repeat_name" if "repeat_name" in hits.columns else "family"
     grouped = hits.groupby([name_column, "chrom", "sstrand"], dropna=False, sort=False)
     for (family, _chrom, _strand), group in grouped:
-        intervals = list(zip(group["start"].astype(int), group["end"].astype(int)))
         name = str(family).strip() or "Unclassified"
+        if is_simple_repeat_motif_name(name):
+            continue
+        intervals = list(zip(group["start"].astype(int), group["end"].astype(int)))
         totals[name] = totals.get(name, 0) + _merged_interval_bp(intervals)
     return pd.Series(totals, dtype=np.int64).sort_values(ascending=False, kind="stable")
 

@@ -23,14 +23,14 @@ ROOT = SPECDIR.parents[1]
 sys.path.insert(0, str(SPECDIR))
 sys.path.insert(0, str(SPECDIR.parent))
 
-from packaging_utils import collect_datas  # noqa: E402
+from packaging_utils import collect_conda_runtime_dlls, collect_datas  # noqa: E402
 from bundle_datas import app_version  # noqa: E402
 
 block_cipher = None
 version = app_version()
 
 datas = collect_datas()
-binaries: list = []
+binaries: list = collect_conda_runtime_dlls()
 hiddenimports: list[str] = [
     "flexidot",
     "flexidot.app",

@@ -29,6 +29,22 @@ def test_family_coverage_merges_only_within_same_strand() -> None:
     assert abundance["B"] == 5
 
 
+def test_simple_repeat_motif_names_are_not_te_families() -> None:
+    hits = pd.DataFrame(
+        [
+            {"family": "(TTAGTTT)n", "chrom": "chr1", "sstrand": "+", "start": 1, "end": 100},
+            {"family": "(ATTC)n", "chrom": "chr1", "sstrand": "+", "start": 200, "end": 250},
+            {"family": "TE_00002035", "chrom": "chr1", "sstrand": "+", "start": 1, "end": 10},
+            {"family": "TE_00005247_LTR", "chrom": "chr1", "sstrand": "+", "start": 20, "end": 29},
+        ]
+    )
+
+    abundance = family_occupied_bp(hits)
+    assert list(abundance.index) == ["TE_00002035", "TE_00005247_LTR"]
+    assert "(TTAGTTT)n" not in abundance.index
+    assert "(ATTC)n" not in abundance.index
+
+
 def test_abundance_html_defaults_to_ranked_percentage_curve(tmp_path: Path) -> None:
     source = tmp_path / "sample.out"
     source.write_text(
