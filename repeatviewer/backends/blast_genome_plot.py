@@ -5231,19 +5231,23 @@ def _load_genome_meta_from_fasta(genome_fasta: Path) -> tuple[list[str], dict[st
         mtime = path.stat().st_mtime
     except OSError:
         return [], {}
-    sizes_path = path.parent / f"{path.name}.chrom.sizes"
-    if sizes_path.is_file():
+    from repeatviewer.backends.genome_prepare import resolve_genome_chrom_sizes_file
+
+    sizes_path = resolve_genome_chrom_sizes_file(path)
+    if sizes_path is not None and sizes_path.is_file():
         try:
             mtime = max(mtime, sizes_path.stat().st_mtime)
         except OSError:
             pass
+    else:
+        sizes_path = None
 
     cached = _GENOME_META_CACHE.get(key)
     if cached is not None and cached[0] == mtime:
         return cached[1], cached[2]
 
     sizes: dict[str, int] = {}
-    if sizes_path.is_file():
+    if sizes_path is not None and sizes_path.is_file():
         try:
             for line in sizes_path.read_text(encoding="utf-8", errors="replace").splitlines():
                 if not line.strip():

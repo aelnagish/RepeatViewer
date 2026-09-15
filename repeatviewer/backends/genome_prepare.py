@@ -26,9 +26,31 @@ _BLAST_NUCL_EXTENSIONS = (
 
 
 def genome_chrom_sizes_path(genome_fasta: Path) -> Path:
-    """Tab-separated chromosome lengths next to the FASTA (``*.chrom.sizes``)."""
+    """Tab-separated chromosome lengths next to the FASTA (``*.chrom.sizes``).
+
+    The sidecar basename uses underscores instead of spaces so tools that
+    mishandle spaced paths can still open it.
+    """
+    genome_fasta = genome_fasta.expanduser().resolve()
+    safe_name = genome_fasta.name.replace(" ", "_")
+    return genome_fasta.parent / f"{safe_name}.chrom.sizes"
+
+
+def _legacy_genome_chrom_sizes_path(genome_fasta: Path) -> Path:
+    """Pre-sanitization sidecar name (kept for reading older files)."""
     genome_fasta = genome_fasta.expanduser().resolve()
     return genome_fasta.parent / f"{genome_fasta.name}.chrom.sizes"
+
+
+def resolve_genome_chrom_sizes_file(genome_fasta: Path) -> Path | None:
+    """Return an existing chrom.sizes sidecar, preferring the space-free name."""
+    preferred = genome_chrom_sizes_path(genome_fasta)
+    if preferred.is_file():
+        return preferred
+    legacy = _legacy_genome_chrom_sizes_path(genome_fasta)
+    if legacy != preferred and legacy.is_file():
+        return legacy
+    return None
 
 
 def _sidecar_is_stale(sidecar: Path, genome_fasta: Path) -> bool:
@@ -49,14 +71,29 @@ def write_genome_chrom_sizes_file(genome_fasta: Path) -> Path:
     sizes = genome_chrom_sizes(genome_fasta)
     lines = [f"{chrom}\t{length}" for chrom, length in sorted(sizes.items(), key=lambda kv: kv[0])]
     sizes_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Drop an older spaced sidecar so it is not listed as a problem path.
+    legacy = _legacy_genome_chrom_sizes_path(genome_fasta)
+    if legacy != sizes_path and legacy.is_file():
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
     return sizes_path
 
 
 def ensure_genome_chrom_sizes_file(genome_fasta: Path) -> Path:
     genome_fasta = genome_fasta.expanduser().resolve()
-    sizes_path = genome_chrom_sizes_path(genome_fasta)
-    if not _sidecar_is_stale(sizes_path, genome_fasta):
-        return sizes_path
+    preferred = genome_chrom_sizes_path(genome_fasta)
+    existing = resolve_genome_chrom_sizes_file(genome_fasta)
+    if existing is not None and not _sidecar_is_stale(existing, genome_fasta):
+        if existing == preferred:
+            return preferred
+        # Migrate legacy spaced name → underscore name.
+        try:
+            existing.replace(preferred)
+            return preferred
+        except OSError:
+            pass
     return write_genome_chrom_sizes_file(genome_fasta)
 
 

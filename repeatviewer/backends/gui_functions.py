@@ -164,6 +164,29 @@ def _makeblastdb_executable(
     return os.path.join(blast_dir, "makeblastdb.exe")
 
 
+def _blast_safe_db_parent(preferred_dir: str | None = None) -> str:
+    """Return a directory safe for NCBI BLAST ``-out`` / ``-db`` prefixes.
+
+    makeblastdb fails with ``Please provide a database name using -out`` when the
+    ``-out`` path contains spaces, even if argv is correctly quoted.
+    """
+    import tempfile
+
+    safe_root = os.path.join(tempfile.gettempdir(), "repeatviewer_blast")
+    os.makedirs(safe_root, exist_ok=True)
+    if preferred_dir is None:
+        return safe_root
+    preferred_abs = os.path.abspath(str(preferred_dir))
+    if not _blast_path_has_unsafe_chars(preferred_abs):
+        os.makedirs(preferred_abs, exist_ok=True)
+        return preferred_abs
+    # Keep uniqueness when callers pass a temp work dir under a spaced path.
+    unique = sanitize_name(os.path.basename(preferred_abs.rstrip(os.sep))) or "db"
+    relocated = os.path.join(safe_root, unique)
+    os.makedirs(relocated, exist_ok=True)
+    return relocated
+
+
 def check_database(
         genome_file,
         output_dir=None,
@@ -180,16 +203,9 @@ def check_database(
     genome_n = blast_database_basename(genome_file)
     genome_dir = os.path.dirname(os.path.abspath(str(genome_file)))
     if output_dir is None:
-        if _blast_path_has_unsafe_chars(genome_dir):
-            import tempfile
-
-            output_dir = os.path.join(tempfile.gettempdir(), "repeatviewer_blast")
-            os.makedirs(output_dir, exist_ok=True)
-            database_path = os.path.join(output_dir, genome_n)
-        else:
-            database_path = os.path.join(genome_dir, genome_n)
+        database_path = os.path.join(_blast_safe_db_parent(genome_dir), genome_n)
     else:
-        database_path = os.path.join(output_dir, genome_n)
+        database_path = os.path.join(_blast_safe_db_parent(str(output_dir)), genome_n)
 
     database_file = f'{database_path}.nin'
     lock_key = os.path.abspath(database_path)
@@ -274,12 +290,23 @@ def blast(
     base_name = os.path.basename(input_file)
     label_suffix = f"_{output_label}" if output_label else ""
 
+    query_path = os.path.abspath(str(input_file))
+    cleanup_query = None
+    if _blast_path_has_unsafe_chars(query_path):
+        query_path, cleanup_query = _blast_safe_fasta_for_makeblastdb(query_path)
+
+    # When the caller’s output dir has spaces, BLAST ``-out`` must use a
+    # space-free temp file; final header/TEAid tables are written from that file.
+    blast_run_out_dir = str(blast_out_dir)
+    if _blast_path_has_unsafe_chars(os.path.abspath(blast_run_out_dir)):
+        blast_run_out_dir = _blast_safe_db_parent(str(blast_out_dir))
+
     output_tag = {"blastn": "blast", "blastp": "blastp", "blastx": "blastx"}[program]
     # Define BLAST output without header.
     blast_out_file = os.path.join(
-        blast_out_dir, f'{base_name}{label_suffix}_{output_tag}_no_header.b'
+        blast_run_out_dir, f'{base_name}{label_suffix}_{output_tag}_no_header.b'
     )
-    # Define BLAST output with header.
+    # Define BLAST output with header (always in the caller-requested directory).
     blast_out_file_header = os.path.join(
         blast_out_dir, f'{base_name}{label_suffix}_{output_tag}.txt'
     )
@@ -311,7 +338,7 @@ def blast(
     # -outfmt 6 use "\t" as deliminator. -outfmt 10 use "," as deliminator
     blast_cmd = [
         str(blast_executable),
-        "-query", input_file,
+        "-query", query_path,
         "-db", blast_database,
         "-max_target_seqs", str(10000),
         "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send sstrand evalue bitscore",
@@ -352,7 +379,7 @@ def blast(
             blast_cmd,
             tool=program,
             inputs=[input_file, blast_database],
-            cwd=blast_out_dir,
+            cwd=blast_run_out_dir,
             check=True,
             output_path=blast_out_file,
         )
@@ -370,6 +397,13 @@ def blast(
         # Print the error generated from the BLAST itself
         logging.error(e.stderr)
         return ('blastn_got_error' if program == 'blastn' else 'blastp_got_error'), False
+
+    finally:
+        if cleanup_query and os.path.lexists(cleanup_query):
+            try:
+                os.remove(cleanup_query)
+            except OSError:
+                pass
 
     # Check if the blast hit number is 0
     if os.path.isfile(blast_out_file) and os.path.getsize(blast_out_file) == 0:
