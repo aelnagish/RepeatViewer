@@ -29,6 +29,10 @@ if TYPE_CHECKING:
     from repeatviewer.plugins.registry import PluginRegistry
 
 TOOLBAR_SETTINGS_GROUP = "toolbar"
+# One-shot flag: the "drop Repeat Quantify from the old default" migration in
+# load_toolbar_order() must run at most once, or it silently deletes the button
+# again every launch for anyone who deliberately adds it back.
+REPEAT_QUANTIFY_MIGRATION_KEY = "repeat_quantify_migrated_v1"
 DEFAULT_TOOLBAR_FONT_SIZE = 12
 MAX_TOOLBAR_FONT_SIZE = 20
 MIN_TOOLBAR_FONT_SIZE = 8
@@ -197,11 +201,29 @@ def build_toolbar_catalog(
     return catalog
 
 
+def _repeat_quantify_migration_done() -> bool:
+    """True once the one-shot Repeat Quantify migration has run (and mark it done)."""
+    from PySide6.QtCore import QSettings
+
+    s = QSettings()
+    s.beginGroup(TOOLBAR_SETTINGS_GROUP)
+    raw = s.value(REPEAT_QUANTIFY_MIGRATION_KEY)
+    if isinstance(raw, str):
+        done = raw.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        done = bool(raw)
+    if not done:
+        s.setValue(REPEAT_QUANTIFY_MIGRATION_KEY, True)
+    s.endGroup()
+    return done
+
+
 def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
     from PySide6.QtCore import QSettings
 
     labels = toolbar_labels_for(registry)
     default_order = default_toolbar_order_for(registry)
+    migration_done = _repeat_quantify_migration_done()
     s = QSettings()
     s.beginGroup(TOOLBAR_SETTINGS_GROUP)
     raw = s.value("order")
@@ -221,7 +243,9 @@ def load_toolbar_order(registry: PluginRegistry | None = None) -> list[str]:
         visible.pop(0)
     visible = normalize_toolbar_order(visible, known=known)
     # Migrate users still on the previous default (which included Repeat Quantify).
-    if "repeat_quantify" in visible:
+    # One-shot only: after this has run once, Repeat Quantify is a normal toolbar
+    # button the user is free to keep.
+    if not migration_done and "repeat_quantify" in visible:
         stripped = [tool_id for tool_id in visible if tool_id != "repeat_quantify"]
         if stripped == list(default_order):
             save_toolbar_order(stripped, registry)
