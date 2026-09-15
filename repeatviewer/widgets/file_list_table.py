@@ -18,7 +18,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from repeatviewer.backends.blast_genome_plot import find_blast_table_for_query, is_te_hit_table_file
+from repeatviewer.backends.blast_genome_plot import (
+    find_blast_table_for_query,
+    is_blast_table_file,
+    is_te_hit_table_file,
+)
 from repeatviewer.backends.separate_fasta import count_fasta_sequences
 from repeatviewer.browser_file_metadata import BrowserFileMetadata
 from repeatviewer.widgets.browser_icons import browser_file_icon
@@ -153,6 +157,7 @@ class FileListTableWidget(QTableWidget):
     separate_fasta_requested = Signal(Path)
     separate_fasta_subfolders_requested = Signal(Path)
     extract_sequences_requested = Signal(Path)      # pick records out of one file
+    extract_hit_subjects_requested = Signal(Path)  # hit table -> subject sequences
     group_sequences_requested = Signal(list)        # combine several files
     new_folder_with_files_requested = Signal(list)  # move selection into a new folder
     blast_genome_map_requested = Signal(Path)
@@ -716,16 +721,21 @@ class FileListTableWidget(QTableWidget):
                                 f"Separate sequence into {seq_n} folders",
                                 lambda: self.separate_fasta_subfolders_requested.emit(path),
                             )
-                            menu.addAction(
-                                "Extract Sequences from File",
-                                lambda p=path: self.extract_sequences_requested.emit(p),
-                            )
+                        menu.addAction(
+                            "Extract Sequences from File",
+                            lambda p=path: self.extract_sequences_requested.emit(p),
+                        )
                         blast_txt = find_blast_table_for_query(path)
                         if blast_txt is not None:
                             menu.addAction(
                                 "TE density plot",
                                 lambda bt=blast_txt: self.blast_genome_map_requested.emit(bt),
                             )
+                    if is_blast_table_file(path):
+                        menu.addAction(
+                            "Extract subject sequences",
+                            lambda bt=path: self.extract_hit_subjects_requested.emit(bt),
+                        )
                     if is_te_hit_table_file(path):
                         menu.addAction(
                             "TE density plot",

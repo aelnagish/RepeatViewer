@@ -1546,36 +1546,43 @@ class NewSequenceDialog(QDialog):
 
 
 class ExtractSequencesDialog(QDialog):
-    """Pick records out of a multi-FASTA."""
+    """Pick records out of a multi-FASTA, by hand or from a list of names.
 
-    def __init__(self, *, records: list[tuple[str, str, int]], source_name: str, parent=None) -> None:
+    Two ways in: tick boxes (fine for a handful of monomers) or an ID list
+    (the only workable option for thousands of reads). ``records`` may be
+    ``None`` when the source is too large to list cheaply -- the tick-box tab
+    is then replaced by a note.
+    """
+
+    #: Emitted with the parsed id list when the user presses Check.
+    check_requested = Signal(object)
+
+    def __init__(
+        self,
+        *,
+        records: list[tuple[str, str, int]] | None,
+        source_name: str,
+        initial_ids: str = "",
+        initial_column: int = 1,
+        records_note: str = "",
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Extract Sequences from File")
-        self.resize(560, 460)
+        self.resize(600, 520)
+        self._source_name = source_name
 
-        self._list = QListWidget(self)
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        for rec_id, description, length in records:
-            label = f"{rec_id}    ({length:,} bp)"
-            if description:
-                label += f"   {description}"
-            item = QListWidgetItem(label, self._list)
-            item.setData(Qt.ItemDataRole.UserRole, rec_id)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Unchecked)
+        self._tabs = QTabWidget(self)
+        self._tabs.addTab(self._build_pick_tab(records, records_note), "Pick from list")
+        self._tabs.addTab(self._build_id_tab(initial_ids, initial_column), "From ID list")
 
         self._single_file = QCheckBox("Write all selected into one file", self)
-
-        select_all = QPushButton("Select all", self)
-        select_none = QPushButton("Select none", self)
-        select_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Checked))
-        select_none.clicked.connect(lambda: self._set_all(Qt.CheckState.Unchecked))
-
-        top = QHBoxLayout()
-        top.addWidget(QLabel(f"Sequences in {source_name}:", self))
-        top.addStretch(1)
-        top.addWidget(select_all)
-        top.addWidget(select_none)
+        self._single_file.setChecked(True)
+        self._single_file.setToolTip(
+            "On: one multi-FASTA holding every extracted sequence.\n"
+            "Off: one file per sequence, which with a long ID list means "
+            "one file per matching record."
+        )
 
         self._summary = QLabel(self)
         self._summary.setStyleSheet("color: palette(mid);")
@@ -1589,26 +1596,139 @@ class ExtractSequencesDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 14, 18, 14)
         layout.setSpacing(10)
-        layout.addLayout(top)
-        layout.addWidget(self._list, stretch=1)
+        layout.addWidget(self._tabs, stretch=1)
         layout.addWidget(self._single_file)
         layout.addWidget(self._summary)
         layout.addWidget(self._buttons)
 
-        self._list.itemChanged.connect(self._sync)
+        self._tabs.currentChanged.connect(self._sync)
+        # Opened with ids already in hand (from a hit table): start on that tab.
+        if initial_ids.strip() or records is None:
+            self._tabs.setCurrentIndex(1)
         self._sync()
+
+    # -- construction -------------------------------------------------------
+
+    def _build_pick_tab(
+        self, records: list[tuple[str, str, int]] | None, records_note: str
+    ) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        self._list = QListWidget(page)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+
+        if records is None:
+            note = QLabel(
+                records_note
+                or "This file is too large to list sequence by sequence. "
+                "Use the ID list tab instead.",
+                page,
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color: palette(mid);")
+            layout.addWidget(note)
+            layout.addStretch(1)
+            self._list.hide()
+            return page
+
+        for rec_id, description, length in records:
+            label = f"{rec_id}    ({length:,} bp)"
+            if description:
+                label += f"   {description}"
+            item = QListWidgetItem(label, self._list)
+            item.setData(Qt.ItemDataRole.UserRole, rec_id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+
+        select_all = QPushButton("Select all", page)
+        select_none = QPushButton("Select none", page)
+        select_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Checked))
+        select_none.clicked.connect(lambda: self._set_all(Qt.CheckState.Unchecked))
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel(f"Sequences in {self._source_name}:", page))
+        top.addStretch(1)
+        top.addWidget(select_all)
+        top.addWidget(select_none)
+
+        layout.addLayout(top)
+        layout.addWidget(self._list, stretch=1)
+        self._list.itemChanged.connect(self._sync)
+        return page
+
+    def _build_id_tab(self, initial_ids: str, initial_column: int) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(8)
+
+        intro = QLabel(
+            "Paste one sequence name per line, or load a list. "
+            "Blank lines, '#' comments and a leading '>' are ignored.",
+            page,
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: palette(mid);")
+
+        self._id_text = QPlainTextEdit(page)
+        self._id_text.setPlaceholderText("read_00123\nread_00456\n…")
+        self._id_text.setPlainText(initial_ids)
+
+        load = QPushButton("Load from file…", page)
+        load.clicked.connect(self._load_id_file)
+        load.setToolTip("Read the names from a text file or a hit table.")
+
+        self._column = QSpinBox(page)
+        self._column.setRange(1, 50)
+        self._column.setValue(max(1, int(initial_column)))
+        self._column.setToolTip(
+            "Which column holds the names when the pasted text is a table.\n"
+            "In a RepeatViewer BLAST table, column 1 is qseqid (the query) "
+            "and column 2 is sseqid (the genome sequence hit)."
+        )
+
+        self._check_btn = QPushButton("Check", page)
+        self._check_btn.clicked.connect(self._request_check)
+        self._check_btn.setToolTip(
+            "Count how many of these names exist in the file, without writing "
+            "anything. Reads the file once."
+        )
+
+        self._exclude = QCheckBox("Exclude matching IDs (keep everything else)", page)
+        self._exclude.setToolTip(
+            "Write every sequence whose name is NOT in the list -- for dropping "
+            "contaminant or organelle sequences."
+        )
+
+        self._check_result = QLabel(page)
+        self._check_result.setWordWrap(True)
+
+        row = QHBoxLayout()
+        row.addWidget(load)
+        row.addSpacing(12)
+        row.addWidget(QLabel("IDs are in column:", page))
+        row.addWidget(self._column)
+        row.addStretch(1)
+        row.addWidget(self._check_btn)
+
+        layout.addWidget(intro)
+        layout.addWidget(self._id_text, stretch=1)
+        layout.addLayout(row)
+        layout.addWidget(self._exclude)
+        layout.addWidget(self._check_result)
+
+        self._id_text.textChanged.connect(self._on_ids_changed)
+        self._column.valueChanged.connect(self._on_ids_changed)
+        self._exclude.toggled.connect(self._sync)
+        return page
+
+    # -- pick tab -----------------------------------------------------------
 
     def _set_all(self, state) -> None:
         for index in range(self._list.count()):
             self._list.item(index).setCheckState(state)
-
-    def _sync(self) -> None:
-        chosen = self.selected_ids()
-        self._summary.setText(
-            f"{len(chosen)} of {self._list.count()} selected"
-            if chosen else "Nothing selected"
-        )
-        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(chosen))
 
     def selected_ids(self) -> set[str]:
         return {
@@ -1617,8 +1737,93 @@ class ExtractSequencesDialog(QDialog):
             if self._list.item(i).checkState() == Qt.CheckState.Checked
         }
 
+    # -- id tab -------------------------------------------------------------
+
+    def _load_id_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load sequence IDs",
+            "",
+            "ID lists and tables (*.txt *.tsv *.csv *.ids *.list);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            QMessageBox.warning(self, "Load sequence IDs", str(exc))
+            return
+        self._id_text.setPlainText(text)
+
+    def _on_ids_changed(self) -> None:
+        self._check_result.clear()
+        self._sync()
+
+    def parsed_ids(self):
+        from repeatviewer.backends.sequence_compose import parse_id_list
+
+        return parse_id_list(self._id_text.toPlainText(), column=self._column.value())
+
+    def _request_check(self) -> None:
+        ids = self.parsed_ids().ids
+        if not ids:
+            self._check_result.setText("No sequence names found in the text above.")
+            return
+        self.set_check_running()
+        self.check_requested.emit(list(ids))
+
+    def set_check_running(self) -> None:
+        self._check_btn.setEnabled(False)
+        self._check_result.setStyleSheet("color: palette(mid);")
+        self._check_result.setText("Checking…")
+
+    def set_check_progress(self, text: str) -> None:
+        """Progress while a check runs; leaves the button disabled."""
+        self._check_result.setStyleSheet("color: palette(mid);")
+        self._check_result.setText(text)
+
+    def set_check_result(self, text: str, *, ok: bool = True) -> None:
+        self._check_btn.setEnabled(True)
+        self._check_result.setStyleSheet("" if ok else "color: palette(mid);")
+        self._check_result.setText(text)
+
+    def id_column(self) -> int:
+        return self._column.value()
+
+    def exclude(self) -> bool:
+        return self._exclude.isChecked()
+
+    # -- shared -------------------------------------------------------------
+
+    def use_id_list(self) -> bool:
+        return self._tabs.currentIndex() == 1
+
     def single_file(self) -> bool:
         return self._single_file.isChecked()
+
+    def _sync(self) -> None:
+        if self.use_id_list():
+            parsed = self.parsed_ids()
+            bits = []
+            if parsed.ids:
+                verb = "to exclude" if self.exclude() else "to extract"
+                bits.append(f"{len(parsed.ids):,} name(s) {verb}")
+            else:
+                bits.append("No sequence names yet")
+            if parsed.duplicates:
+                bits.append(f"{parsed.duplicates:,} duplicate(s) collapsed")
+            if parsed.ignored:
+                bits.append(f"{parsed.ignored:,} line(s) ignored")
+            self._summary.setText(" · ".join(bits))
+            enabled = bool(parsed.ids)
+        else:
+            chosen = self.selected_ids()
+            self._summary.setText(
+                f"{len(chosen)} of {self._list.count()} selected"
+                if chosen else "Nothing selected"
+            )
+            enabled = bool(chosen)
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
 
 
 class FastGaParamsDialog(QDialog):
