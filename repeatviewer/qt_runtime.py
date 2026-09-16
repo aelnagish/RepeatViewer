@@ -16,6 +16,10 @@ _MACOS_STDERR_SKIP = (
     b"IMKInputSession subclass",
     b"error messaging the mach port",
     b"TSMSendMessageToUIServer",
+    # Chromium writes this on FD 2 even with --disable-gpu; harmless when we
+    # force software rendering, but scary in the terminal.
+    b"GPUInfo not initialized",
+    b"GpuInfoUpdate",
 )
 
 
@@ -253,10 +257,15 @@ def _configure_webengine() -> None:
         if flag not in flags:
             flags = f"{flags} {flag}".strip()
     if sys.platform == "darwin":
+        # Software path only: Metal/GPU init on some Macs prints
+        # "GPUInfo not initialized on GpuInfoUpdate" and can abort.
         for flag in (
             "--disable-gpu",
             "--disable-gpu-compositing",
             "--disable-gpu-rasterization",
+            "--disable-gpu-sandbox",
+            "--in-process-gpu",
+            "--use-gl=disabled",
             "--disable-features=Metal,Vulkan,WebGPU,VizDisplayCompositor",
             "--no-sandbox",
         ):
@@ -285,6 +294,8 @@ class _QtNoiseStderrFilter:
         "qt.pointer.dispatch:",
         "Path override failed for key base::DIR_APP_DICTIONARIES",
         "Path override failed for key",
+        "GPUInfo not initialized",
+        "GpuInfoUpdate",
         "IMKCFRunLoopWakeUpReliable",
         "IMKClient subclass",
         "IMKInputSession subclass",

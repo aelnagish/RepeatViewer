@@ -32,8 +32,10 @@ extra = (
     "--disable-gpu "
     "--disable-gpu-compositing "
     "--disable-gpu-rasterization "
+    "--disable-gpu-sandbox "
     "--disable-features=Metal,Vulkan,WebGPU,VizDisplayCompositor "
     "--in-process-gpu "
+    "--use-gl=disabled "
     "--no-sandbox"
 )
 for part in extra.split():

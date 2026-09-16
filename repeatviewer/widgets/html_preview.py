@@ -137,23 +137,27 @@ def create_html_preview_widget(parent: QWidget | None = None) -> QWidget:
 
 
 def _configure_web_settings(settings) -> None:
-    import sys
-
     from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings
 
     QWebEngineProfile.defaultProfile().setSpellCheckEnabled(False)
 
-    attrs = [
+    on_attrs = [
         QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,
         QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls,
         QWebEngineSettings.WebAttribute.JavascriptEnabled,
         QWebEngineSettings.WebAttribute.LocalStorageEnabled,
-        QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled,
     ]
-    if hasattr(QWebEngineSettings.WebAttribute, "WebGLEnabled"):
-        attrs.append(QWebEngineSettings.WebAttribute.WebGLEnabled)
-    for attribute in attrs:
+    for attribute in on_attrs:
         settings.setAttribute(attribute, True)
+
+    # Keep GPU/canvas paths off on macOS — enabling these with Chromium's
+    # software fallback still trips "GPUInfo not initialized on GpuInfoUpdate".
+    settings.setAttribute(
+        QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled,
+        False,
+    )
+    if hasattr(QWebEngineSettings.WebAttribute, "WebGLEnabled"):
+        settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, False)
 
 
 class LazyHtmlPreview(QWidget):
