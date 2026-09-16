@@ -16,7 +16,9 @@ This is *quantification against a known library* — not de-novo discovery.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import logging
+import math
 import os
 import platform
 import shutil
@@ -68,7 +70,9 @@ class FamilyQuant:
     covered_bp: int = 0        # bp of target covered (merged, non-double-counted)
     pct_of_target: float = 0.0
     mean_identity: float = 0.0
-    mean_divergence: float = 0.0   # RepeatMasker only (0 for blastn)
+    # RepeatMasker only (0 for blastn): CpG-adjusted Kimura when the run has
+    # a .align file, else the raw .out value -- see QuantifyResult.divergence_metric.
+    mean_divergence: float = 0.0
     scaffolds: int = 0         # distinct target sequences hit
     monomer_len: int = 0       # library monomer length (period size)
     copy_number: float = 0.0   # covered_bp / monomer_len (fractional below 1)
@@ -88,7 +92,18 @@ class QuantifyResult:
     # RepeatMasker landscape: (family, divergence_bin_start, bp) rows.
     landscape: list[tuple[str, float, int]] = field(default_factory=list)
     landscape_tsv: Path | None = None
+    landscape_bin_width: float = 1.0
+    # "kimura": CpG-adjusted Kimura from the RepeatMasker .align file;
+    # "raw": the .out "perc div." column (no .align available).
+    landscape_metric: str = "raw"
+    # Hits with no matching .align record (Jukes-Cantor-corrected instead).
+    landscape_unmatched_hits: int = 0
     rm_out: Path | None = None
+
+    @property
+    def divergence_metric(self) -> str:
+        """Metric behind ``mean_divergence`` and the landscape ("" for blastn)."""
+        return self.landscape_metric if self.engine == "repeatmasker" else ""
 
     @property
     def total_covered_bp(self) -> int:
@@ -253,14 +268,17 @@ def _write_summary_tsv(result: QuantifyResult, path: Path) -> Path:
     lines = [
         "family\tmonomer_len\tcopy_number\thits\tarrays\tcovered_bp\t"
         "pct_of_target\tmean_array_bp\tmax_array_bp\tmean_identity\t"
-        "mean_divergence\tscaffolds"
+        "mean_divergence\tscaffolds\tdivergence_metric"
     ]
+    metric = _LANDSCAPE_METRIC_LABELS.get(
+        result.divergence_metric, result.divergence_metric
+    )
     for f in result.families:
         lines.append(
             f"{f.family}\t{f.monomer_len}\t{_format_copy_number(f.copy_number)}\t{f.hits}\t"
             f"{f.arrays}\t{f.covered_bp}\t{f.pct_of_target}\t"
             f"{round(f.mean_array_bp)}\t{f.max_array_bp}\t{f.mean_identity}\t"
-            f"{f.mean_divergence}\t{f.scaffolds}"
+            f"{f.mean_divergence}\t{f.scaffolds}\t{metric}"
         )
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -427,6 +445,10 @@ def quantify_library_blastn(
 # RepeatMasker .out whitespace columns (0-based): see REPEATMASKER_OUT_COLUMNS
 # in blast_genome_plot.py. We only need divergence, query coords, and the
 # matching repeat (library family) name.
+# "perc div." is raw percent substitution (mismatched / aligned bases, no
+# indels, no multiple-hit correction; rmhubley/RepeatMasker#216). Kimura
+# divergence exists only in the -a .align file -- see
+# parse_repeatmasker_align_kimura().
 _RM_PERC_DIV = 1
 _RM_QUERY_NAME = 4
 _RM_QUERY_START = 5
@@ -473,14 +495,19 @@ def _aggregate_rm_rows(
             r["family"], {"div_len": [], "by_scaffold": {}}
         )
         length = r["end"] - r["start"] + 1
-        fam["div_len"].append((r["divergence"], length))
+        # (raw perc div, reported divergence, length). Identity stays
+        # 100 - raw substitution %; divergence uses Kimura when present.
+        fam["div_len"].append(
+            (r["divergence"], r.get("landscape_div", r["divergence"]), length)
+        )
         fam["by_scaffold"].setdefault(r["scaffold"], []).append((r["start"], r["end"]))
 
     families: list[FamilyQuant] = []
     for fam_name, data in acc.items():
         arrays, covered, max_array = _array_stats(data["by_scaffold"])
-        total_len = sum(length for _d, length in data["div_len"]) or 1
-        mean_div = sum(d * length for d, length in data["div_len"]) / total_len
+        total_len = sum(length for _r, _d, length in data["div_len"]) or 1
+        mean_raw = sum(r * length for r, _d, length in data["div_len"]) / total_len
+        mean_div = sum(d * length for _r, d, length in data["div_len"]) / total_len
         pct = (covered / target_length * 100.0) if target_length else 0.0
         mono = int(monomer_lengths.get(fam_name, 0))
         families.append(
@@ -490,7 +517,7 @@ def _aggregate_rm_rows(
                 arrays=arrays,
                 covered_bp=covered,
                 pct_of_target=round(pct, 4),
-                mean_identity=round(100.0 - mean_div, 2),
+                mean_identity=round(100.0 - mean_raw, 2),
                 mean_divergence=round(mean_div, 2),
                 scaffolds=len(data["by_scaffold"]),
                 monomer_len=mono,
@@ -503,29 +530,187 @@ def _aggregate_rm_rows(
     return families
 
 
+# Trailer line RepeatMasker writes under each alignment in the ``-a`` file.
+_ALIGN_KIMURA_PREFIX = "Kimura (with divCpGMod)"
+
+
+def align_path_for_out(out_path: Path) -> Path | None:
+    """Return the ``.align`` written next to a RepeatMasker ``.out`` (if any)."""
+    out_path = Path(out_path)
+    if out_path.name.endswith(".out"):
+        candidate = out_path.with_name(out_path.name[: -len(".out")] + ".align")
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _align_header_key(parts: list[str]) -> tuple[str, int, int, str] | None:
+    """Key an ``.align`` header line the same way as a parsed ``.out`` row.
+
+    Header layout (whitespace separated)::
+
+        score div del ins query qstart qend (qleft) [C] repeat[#class] ...
+
+    Returns ``(query, start, end, bare_repeat_name)`` or ``None`` for any
+    other line.
+    """
+    if len(parts) < 9:
+        return None
+    try:
+        int(parts[0])
+        float(parts[1])
+        qstart = int(parts[5])
+        qend = int(parts[6])
+    except ValueError:
+        return None
+    if not parts[7].startswith("("):
+        return None
+    idx = 9 if parts[8] == "C" else 8
+    if idx >= len(parts):
+        return None
+    repeat = parts[idx].split("#", 1)[0]
+    return (parts[4], min(qstart, qend), max(qstart, qend), repeat)
+
+
+def parse_repeatmasker_align_kimura(
+    align_path: Path,
+) -> dict[tuple[str, int, int, str], float]:
+    """Map each alignment to its CpG-adjusted Kimura divergence (percent).
+
+    RepeatMasker (``-a``) writes ``Kimura (with divCpGMod) = X`` under every
+    alignment: Kimura two-parameter distance with transitions at CpG sites
+    down-weighted, the metric used for published repeat landscapes. Keys match
+    ``_parse_repeatmasker_out`` rows: ``(query, start, end, repeat)``.
+    """
+    kimura: dict[tuple[str, int, int, str], float] = {}
+    key: tuple[str, int, int, str] | None = None
+    with open(align_path) as handle:
+        for line in handle:
+            if line[:1].isdigit():
+                header = _align_header_key(line.split())
+                if header is not None:
+                    key = header
+                    continue
+            if key is not None and line.startswith(_ALIGN_KIMURA_PREFIX):
+                try:
+                    value = float(line.split("=", 1)[1].split()[0])
+                except (IndexError, ValueError):
+                    key = None
+                    continue
+                kimura.setdefault(key, value)
+                key = None
+    return kimura
+
+
+def jukes_cantor_percent(p_distance_percent: float, *, cap: float = 50.0) -> float:
+    """Jukes-Cantor-correct a raw mismatch percentage (fallback only)."""
+    p = max(p_distance_percent, 0.0) / 100.0
+    inner = 1.0 - 4.0 * p / 3.0
+    if inner <= 0:
+        return cap
+    return min(-0.75 * math.log(inner) * 100.0, cap)
+
+
+def apply_kimura_to_rows(
+    rows: list[dict], kimura: dict[tuple[str, int, int, str], float]
+) -> int:
+    """Set ``row["landscape_div"]`` from the .align Kimura values.
+
+    Must run while ``row["family"]`` still holds the name RepeatMasker saw.
+    Rows without an alignment record get the Jukes-Cantor-corrected ``.out``
+    value, so every hit stays in the landscape on a comparable scale.
+    Returns the number of unmatched rows.
+    """
+    unmatched = 0
+    for row in rows:
+        key = (row["scaffold"], row["start"], row["end"], row["family"])
+        value = kimura.get(key)
+        if value is None:
+            unmatched += 1
+            value = jukes_cantor_percent(row["divergence"])
+        row["landscape_div"] = value
+    return unmatched
+
+
+def _bin_start(div: float, bin_width: float, div_max: float) -> float:
+    div = min(max(div, 0.0), div_max)
+    b = math.floor(div / bin_width + 1e-9) * bin_width
+    # Values at the ceiling land in the last bin, not a bin beyond the range.
+    b = min(b, div_max - bin_width)
+    return round(b, 6)
+
+
+def _least_diverged_segments(hits: list[tuple[int, int, float]]):
+    """Yield ``(divergence, bp)`` counting each base once.
+
+    ``hits`` are ``(start, end, divergence)`` on one sequence (1-based,
+    inclusive). Where hits overlap, the base goes to the least-diverged hit --
+    the copy's best match -- so the total equals the merged covered bp.
+    """
+    if not hits:
+        return
+    points = sorted({h[0] for h in hits} | {h[1] + 1 for h in hits})
+    order = sorted(hits)
+    heap: list[tuple[float, int]] = []
+    k = 0
+    for left, right in zip(points, points[1:]):
+        while k < len(order) and order[k][0] <= left:
+            start, end, div = order[k]
+            heapq.heappush(heap, (div, end))
+            k += 1
+        while heap and heap[0][1] < left:
+            heapq.heappop(heap)
+        if heap:
+            yield heap[0][0], right - left
+
+
 def _landscape_from_rows(
-    rows: list[dict], *, bin_width: float = 1.0, div_max: float = 50.0
+    rows: list[dict],
+    *,
+    bin_width: float = 1.0,
+    div_max: float = 50.0,
+    div_key: str = "divergence",
 ) -> list[tuple[str, float, int]]:
-    """Bin covered bp by divergence, per family (for a Kimura landscape)."""
-    bins: dict[tuple[str, float], int] = {}
+    """Bin covered bp by divergence, per family (repeat landscape).
+
+    Overlapping hits of the same family are not double-counted: each base is
+    assigned to the least-diverged hit covering it, so a family's landscape
+    total equals its ``covered_bp`` in the summary table.
+    """
+    groups: dict[tuple[str, str], list[tuple[int, int, float]]] = {}
     for r in rows:
-        div = min(max(r["divergence"], 0.0), div_max)
-        bin_start = float(int(div / bin_width) * bin_width)
-        length = r["end"] - r["start"] + 1
-        key = (r["family"], bin_start)
-        bins[key] = bins.get(key, 0) + length
+        div = r.get(div_key, r["divergence"])
+        groups.setdefault((r["family"], r["scaffold"]), []).append(
+            (r["start"], r["end"], div)
+        )
+    bins: dict[tuple[str, float], int] = {}
+    for (family, _scaffold), hits in groups.items():
+        for div, bp in _least_diverged_segments(hits):
+            key = (family, _bin_start(div, bin_width, div_max))
+            bins[key] = bins.get(key, 0) + bp
     return sorted(
         ((fam, b, bp) for (fam, b), bp in bins.items()),
         key=lambda t: (t[0], t[1]),
     )
 
 
+_LANDSCAPE_METRIC_LABELS = {
+    "kimura": "kimura_cpg_adjusted",
+    "raw": "raw_perc_div",
+}
+
+
 def _write_landscape_tsv(
-    landscape: list[tuple[str, float, int]], path: Path
+    landscape: list[tuple[str, float, int]],
+    path: Path,
+    *,
+    bin_width: float = 1.0,
+    metric: str = "raw",
 ) -> Path:
-    lines = ["family\tdivergence_bin\tbp"]
+    label = _LANDSCAPE_METRIC_LABELS.get(metric, metric)
+    lines = ["family\tdivergence_bin\tbp\tdivergence_bin_end\tmetric"]
     for fam, b, bp in landscape:
-        lines.append(f"{fam}\t{b}\t{bp}")
+        lines.append(f"{fam}\t{b}\t{bp}\t{round(b + bin_width, 6)}\t{label}")
     path.write_text("\n".join(lines) + "\n")
     return path
 
@@ -594,10 +779,28 @@ def quantify_library_repeatmasker(
             threads=threads,
             div=div,
             sensitivity=sensitivity,
+            write_alignments=True,
         )
     rm_out = Path(rm_out).expanduser().resolve()
 
     rows = _parse_repeatmasker_out(rm_out)
+    # Divergence (table + landscape): CpG-adjusted Kimura from the .align file when
+    # present (matched before family names are restored, since the .align
+    # carries the names RepeatMasker saw); otherwise the raw .out column.
+    metric = "raw"
+    unmatched = 0
+    align_path = align_path_for_out(rm_out)
+    if align_path is not None:
+        kimura = parse_repeatmasker_align_kimura(align_path)
+        if kimura:
+            unmatched = apply_kimura_to_rows(rows, kimura)
+            metric = "kimura"
+            if unmatched:
+                logger.warning(
+                    "Repeat landscape: %d of %d hits had no .align record; "
+                    "used Jukes-Cantor-corrected .out divergence for those.",
+                    unmatched, len(rows),
+                )
     if library_map:  # restore original family names
         for row in rows:
             row["family"] = library_map.get(row["family"], row["family"])
@@ -609,13 +812,24 @@ def quantify_library_repeatmasker(
             rows, target_length, monomer_lengths=_fasta_lengths(library_fasta)
         ),
         rm_out=rm_out,
+        landscape_metric=metric,
+        landscape_unmatched_hits=unmatched,
     )
     result.summary_tsv = _write_summary_tsv(
         result, out_dir / f"{target_fasta.stem}_repeat_quant_rm.tsv"
     )
-    result.landscape = _landscape_from_rows(rows)
+    bin_width = 1.0
+    result.landscape = _landscape_from_rows(
+        rows,
+        bin_width=bin_width,
+        div_key="landscape_div" if metric == "kimura" else "divergence",
+    )
+    result.landscape_bin_width = bin_width
     result.landscape_tsv = _write_landscape_tsv(
-        result.landscape, out_dir / f"{target_fasta.stem}_repeat_landscape.tsv"
+        result.landscape,
+        out_dir / f"{target_fasta.stem}_repeat_landscape.tsv",
+        bin_width=bin_width,
+        metric=metric,
     )
     return result
 
@@ -660,9 +874,12 @@ _COLUMN_DEFS = [
     ("mean_array_bp", "Average tandem-array length = covered_bp ÷ arrays."),
     ("max_array_bp", "Largest single contiguous array, bp."),
     ("mean_identity", "Length-weighted mean % identity to the consensus "
-                      "(high = young / conserved copies)."),
-    ("mean_divergence", "RepeatMasker Kimura substitution % "
-                        "(high = old / diverged copies)."),
+                      "(RepeatMasker: 100 − raw substitution %; "
+                      "high = young / conserved copies)."),
+    ("mean_divergence", "Length-weighted mean divergence from the consensus. "
+                        "Kimura: CpG-adjusted Kimura 2-parameter % from the "
+                        "RepeatMasker .align file. raw: .out substitution % "
+                        "(runs without a .align). High = old / diverged copies."),
     ("scaffolds", "Number of distinct target sequences hit."),
 ]
 
@@ -704,7 +921,13 @@ def write_summary_html(
         cols = ["family", "monomer_len", "copy_number", "hits", "arrays",
                 "covered_bp", "pct_of_target", "mean_array_bp", "max_array_bp",
                 "mean_identity"] + (["mean_divergence"] if show_div else []) + ["scaffolds"]
-        thead = "".join(f"<th>{_COLUMN_LABELS[c]}</th>" for c in cols)
+        div_label = {"kimura": "mean_divergence (Kimura)",
+                     "raw": "mean_divergence (raw)"}.get(
+            result.divergence_metric, _COLUMN_LABELS["mean_divergence"])
+        thead = "".join(
+            f"<th>{div_label if c == 'mean_divergence' else _COLUMN_LABELS[c]}</th>"
+            for c in cols
+        )
         by_name = {f.family: f for f in result.families}
         body_rows = []
         for fam_name in family_order:  # same order in every table
@@ -773,7 +996,10 @@ def write_summary_html(
 def write_landscape_html(
     result: QuantifyResult, path: Path, *, target_label: str = ""
 ) -> Path:
-    """Stacked-bar Kimura divergence landscape (bp vs divergence, per family)."""
+    """Stacked-bar divergence landscape (bp vs divergence, per family).
+
+    Bars are centred on their bins (a 1 % bar for 8-9 % sits at 8.5).
+    """
     import plotly.graph_objects as go
     import plotly.io as pio
 
@@ -781,13 +1007,22 @@ def write_landscape_html(
     families = sorted({fam for fam, _b, _bp in result.landscape})
     bins = sorted({b for _f, b, _bp in result.landscape})
     lookup = {(fam, b): bp for fam, b, bp in result.landscape}
+    width = result.landscape_bin_width or 1.0
+    centres = [round(b + width / 2, 6) for b in bins]
+    ranges = [f"{b:g}–{b + width:g}%" for b in bins]
     fig = go.Figure()
     for fam in families:
         fig.add_trace(
             go.Bar(
-                x=bins,
+                x=centres,
                 y=[lookup.get((fam, b), 0) for b in bins],
+                width=width,
                 name=fam,
+                customdata=ranges,
+                hovertemplate=(
+                    f"{_html_escape(fam)}<br>%{{customdata}}: %{{y:,}} bp"
+                    "<extra></extra>"
+                ),
             )
         )
     title = (
@@ -796,8 +1031,13 @@ def write_landscape_html(
     )
     fig.update_layout(
         barmode="stack",
+        bargap=0.1,
         title=title,
-        xaxis_title="Divergence (%)",
+        xaxis_title=(
+            "Kimura divergence, CpG-adjusted (%)"
+            if result.landscape_metric == "kimura"
+            else "Divergence from consensus, raw (%)"
+        ),
         yaxis_title="Covered bp",
         plot_bgcolor="white",
         paper_bgcolor="white",
