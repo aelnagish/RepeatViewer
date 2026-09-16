@@ -191,7 +191,8 @@ def check_database(
         genome_file,
         output_dir=None,
         os_type='Darwin',
-        use_system_blast=False
+        use_system_blast=False,
+        cancel=None,
 ):
     #script_dir = get_original_file_path()
     #blast_dir = os.path.join(script_dir, 'blast')
@@ -234,6 +235,7 @@ def check_database(
                     cwd=os.path.dirname(database_path) or None,
                     check=True,
                     output_path=database_path,
+                    cancel=cancel,
                 )
 
             except FileNotFoundError:
@@ -242,6 +244,9 @@ def check_database(
                     f'{traceback.format_exc()}'
                 )
                 return 'makeblastdb_not_found'
+
+            except JobCancelledError:
+                raise
 
             except subprocess.CalledProcessError as e:
                 logging.error(
@@ -277,6 +282,7 @@ def blast(
     num_threads=1,
     use_system_blast=False,
     output_label=None,
+    cancel=None,
 ):
     from repeatviewer.job_options import normalize_blast_evalue
 
@@ -382,6 +388,7 @@ def blast(
             cwd=blast_run_out_dir,
             check=True,
             output_path=blast_out_file,
+            cancel=cancel,
         )
 
     except FileNotFoundError:
@@ -390,6 +397,9 @@ def blast(
             f'{traceback.format_exc()}'
         )
         return ('blastn_not_found' if program == 'blastn' else 'blastp_not_found'), False
+
+    except JobCancelledError:
+        raise
 
     except subprocess.CalledProcessError as e:
         logging.error(f'An error occurred during BLAST: \n {traceback.format_exc()}')

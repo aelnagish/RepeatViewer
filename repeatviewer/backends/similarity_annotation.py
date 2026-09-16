@@ -29,7 +29,7 @@ from repeatviewer.backends.database_prepare import (
     pyhmmer_install_hint,
 )
 from repeatviewer.backends.gui_functions import check_cmd_in_path, get_original_file_path
-from repeatviewer.backends.job_cancel import JobCancellation, check_cancelled
+from repeatviewer.backends.job_cancel import JobCancellation, JobCancelledError, check_cancelled
 from repeatviewer.backends.orf_detect import OrfDetectResult, detect_orf_features
 from repeatviewer.backends.sequence_features import SequenceFeature, load_sequence_map_data
 from repeatviewer.project import (
@@ -679,6 +679,7 @@ def _run_blast_tabular(
     report_evalue: float | str = DEFAULT_BLAST_EVALUE,
     max_target_seqs: int = DEFAULT_MAX_HITS_PER_DATABASE,
     num_threads: int = 1,
+    cancel: JobCancellation | None = None,
 ) -> list[dict[str, str]]:
     exe = _blast_executable(program, use_system_blast=use_system_blast)
     with tempfile.TemporaryDirectory(prefix="repeatviewer_simann_") as tmp:
@@ -706,6 +707,7 @@ def _run_blast_tabular(
             inputs=[query_path, db_path],
             check=True,
             output_path=out_path,
+            cancel=cancel,
         )
         if not out_path.is_file() or out_path.stat().st_size == 0:
             return []
@@ -827,6 +829,7 @@ def _annotate_protein_database(
     settings: SimilarityAnnotationSettings,
     use_system_blast: bool,
     blast_threads: int = 1,
+    cancel: JobCancellation | None = None,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     db_path = database.path.expanduser().resolve()
     readiness = database_search_readiness(database)
@@ -851,7 +854,10 @@ def _annotate_protein_database(
                 report_evalue=report_evalue,
                 max_target_seqs=_search_max_target_seqs(display_limit=max_hits),
                 num_threads=blast_threads,
+                cancel=cancel,
             )
+        except JobCancelledError:
+            raise
         except FileNotFoundError as exc:
             return (), str(exc)
         except subprocess.CalledProcessError as exc:
@@ -922,6 +928,7 @@ def _annotate_dna_database(
     settings: SimilarityAnnotationSettings,
     use_system_blast: bool,
     blast_threads: int = 1,
+    cancel: JobCancellation | None = None,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     db_path = database.path.expanduser().resolve()
     readiness = database_search_readiness(database)
@@ -941,7 +948,10 @@ def _annotate_dna_database(
                 report_evalue=report_evalue,
                 max_target_seqs=_search_max_target_seqs(display_limit=max_hits),
                 num_threads=blast_threads,
+                cancel=cancel,
             )
+        except JobCancelledError:
+            raise
         except FileNotFoundError as exc:
             return (), str(exc)
         except subprocess.CalledProcessError as exc:
@@ -999,6 +1009,7 @@ def _annotate_cdd_database(
     settings: SimilarityAnnotationSettings,
     use_system_blast: bool,
     blast_threads: int = 1,
+    cancel: JobCancellation | None = None,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     cdd_evalue = _clamp_evalue(settings.cdd_evalue, default=DEFAULT_CDD_EVALUE)
     max_hits = _max_hits(settings.max_hits_per_database)
@@ -1037,7 +1048,10 @@ def _annotate_cdd_database(
                 inputs=[query_fa, cdd_profile],
                 check=True,
                 output_path=out_path,
+                cancel=cancel,
             )
+        except JobCancelledError:
+            raise
         except FileNotFoundError as exc:
             return (), str(exc)
         except subprocess.CalledProcessError as exc:
@@ -1293,6 +1307,7 @@ def _annotate_single_similarity_database(
     settings: SimilarityAnnotationSettings,
     use_system_blast: bool,
     blast_threads: int = 1,
+    cancel: JobCancellation | None = None,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     db = entry.database
     if db.db_type == DATABASE_TYPE_CDD:
@@ -1303,6 +1318,7 @@ def _annotate_single_similarity_database(
             settings=settings,
             use_system_blast=use_system_blast,
             blast_threads=blast_threads,
+            cancel=cancel,
         )
     if db.is_hmm:
         return _annotate_hmm_database(
@@ -1320,6 +1336,7 @@ def _annotate_single_similarity_database(
             settings=settings,
             use_system_blast=use_system_blast,
             blast_threads=blast_threads,
+            cancel=cancel,
         )
     if db.db_type == DATABASE_TYPE_DNA:
         return _annotate_dna_database(
@@ -1329,6 +1346,7 @@ def _annotate_single_similarity_database(
             settings=settings,
             use_system_blast=use_system_blast,
             blast_threads=blast_threads,
+            cancel=cancel,
         )
     return (), f"{db.name}: unsupported database type {db.display_type_label!r}."
 
@@ -1432,6 +1450,7 @@ def run_similarity_annotations(
             settings=cfg,
             use_system_blast=use_system_blast,
             blast_threads=blast_threads,
+            cancel=cancel,
         )
         return index, entry, detected, msg
 

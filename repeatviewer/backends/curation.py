@@ -272,6 +272,7 @@ def _prepare_genome_resources(
     genome_items: list[tuple[str, Path]],
     project: RepeatViewerProject,
     os_type: str,
+    cancel: JobCancellation | None = None,
 ) -> tuple[dict[Path, str], dict[Path, dict[str, int]]]:
     db_cache: dict[Path, str] = {}
     chrom_cache: dict[Path, dict[str, int]] = {}
@@ -281,6 +282,7 @@ def _prepare_genome_resources(
                 str(genome_path),
                 os_type=os_type,
                 use_system_blast=project.use_system_blast,
+                cancel=cancel,
             )
             if genome_db in {"makeblastdb_not_found", "makeblastdb_got_error", None, False}:
                 raise RuntimeError(
@@ -654,6 +656,7 @@ def run_on_sequence(
             num_threads=(p_threads if is_protein else blast_opts.num_threads),
             use_system_blast=project.use_system_blast,
             output_label=genome_label or None,
+            cancel=cancel,
         )
         if is_protein:
             if not blast_txt:
@@ -787,6 +790,7 @@ def run_on_sequence(
                     hit_len_mid_pct=teaid_opts.hit_len_mid_pct,
                     hit_color_high=teaid_opts.hit_color_high,
                     hit_color_mid=teaid_opts.hit_color_mid,
+                    cancel=cancel,
                 )
         except TeaidInputError as exc:
             if scratch_dir is not None:
@@ -1064,7 +1068,7 @@ def run_batch(
             raise RuntimeError("Genome FASTA is required for this tool.")
         genome_items = _genome_work_items(project, func_name, extend)
         db_cache, chrom_cache = _prepare_genome_resources(
-            func_name, genome_items, project, os_type
+            func_name, genome_items, project, os_type, cancel=cancel
         )
 
     display_name = _DISPLAY_NAMES.get(func_name, func_name)

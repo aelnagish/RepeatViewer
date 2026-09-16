@@ -601,6 +601,7 @@ class AlignWorker(QObject):
         use_system_muscle: bool = False,
         engine: str = "mafft",
         stream_log: bool = False,
+        cancel=None,
     ):
         super().__init__()
         self._seq_files = seq_files
@@ -611,6 +612,7 @@ class AlignWorker(QObject):
         self._use_system_muscle = use_system_muscle
         self._engine = engine
         self._stream_log = bool(stream_log)
+        self._cancel = cancel
 
     @Slot()
     def run(self) -> None:
@@ -622,10 +624,13 @@ class AlignWorker(QObject):
             self.log_line.emit(str(message))
 
         sink = _log  # always capture; UI shows live and/or on failure
+        cancel = self._cancel
 
         if self._mode == ALIGN_MODE_COMBINED:
             try:
                 with process_log_sink(sink):
+                    if cancel is not None:
+                        cancel.check()
                     self.progress.emit(0, "Aligning combined MSA…")
                     _log("Aligning combined MSA…")
                     output = run_alignment_combined(
@@ -634,10 +639,13 @@ class AlignWorker(QObject):
                         use_system_mafft=self._use_system_mafft,
                         use_system_muscle=self._use_system_muscle,
                         engine=self._engine,
+                        cancel=cancel,
                     )
                     self.progress.emit(1, "Alignment finished.")
                     _log("Alignment finished.")
                 self.finished.emit([str(output)])
+            except JobCancelledError:
+                self.failed.emit(CANCELLED_MESSAGE)
             except Exception as exc:  # noqa: BLE001
                 self.failed.emit(_format_cli_failure(exc))
             return
@@ -650,6 +658,8 @@ class AlignWorker(QObject):
 
         def _align_one(seq_path: Path) -> tuple[Path, str | None, str | None]:
             try:
+                if cancel is not None:
+                    cancel.check()
                 with process_log_sink(sink):
                     output = run_alignment(
                         seq_path,
@@ -657,14 +667,19 @@ class AlignWorker(QObject):
                         use_system_mafft=self._use_system_mafft,
                         use_system_muscle=self._use_system_muscle,
                         engine=self._engine,
+                        cancel=cancel,
                     )
                 return seq_path, str(output), None
+            except JobCancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 return seq_path, None, _format_cli_failure(exc)
 
         try:
             if workers == 1:
                 for seq_path in self._seq_files:
+                    if cancel is not None:
+                        cancel.check()
                     self.progress.emit(completed, f"Aligning {seq_path.name}…")
                     _log(f"—— Aligning {seq_path.name} ——")
                     _, out_path, err = _align_one(seq_path)
@@ -677,6 +692,10 @@ class AlignWorker(QObject):
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = [pool.submit(_align_one, p) for p in self._seq_files]
                     for future in as_completed(futures):
+                        if cancel is not None and cancel.requested:
+                            for pending in futures:
+                                pending.cancel()
+                            raise JobCancelledError("Job stopped by user")
                         seq_path, out_path, err = future.result()
                         self.progress.emit(completed, f"Aligning {seq_path.name}…")
                         _log(f"Finished {seq_path.name}")
@@ -694,6 +713,8 @@ class AlignWorker(QObject):
                 self.finished.emit(created)
                 return
             self.finished.emit(created)
+        except JobCancelledError:
+            self.failed.emit(CANCELLED_MESSAGE)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(_format_cli_failure(exc))
 
@@ -7098,6 +7119,7 @@ class MainWindow(QMainWindow):
             use_system_muscle=self._project.use_system_muscle,
             engine=engine,
             stream_log=show_log,
+            cancel=self._job_cancel,
         )
         self._attach_process_monitor(worker, title=title, enabled=show_log, tool_key="align")
         self._start_background_job(
@@ -7131,6 +7153,9 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_align_failed(self, error: str) -> None:
+        if error == CANCELLED_MESSAGE:
+            self._set_status_message("Stopped", 6000)
+            return
         body = error.strip()
         QMessageBox.critical(self, "Alignment failed", body)
 
@@ -10526,13 +10551,16 @@ class MainWindow(QMainWindow):
             self._set_status_message("No running task to stop", 3000)
             return
 
+        # Kill child tools immediately (non-blocking on the GUI thread), then
+        # ask worker QThreads to wind down. Do not wait here — that froze Stop.
         self._job_cancel.request()
         self._pending_te_genome_map_fastas = []
         self._pending_te_genome_map = None
         self._pending_te_viz = None
         self._queued_genome_map_jobs.clear()
-        self._finish_background_job()
         self._set_status_message("Stopping…", 8000)
+        if self._stop_btn is not None:
+            self._stop_btn.setEnabled(False)
 
         threads: list[QThread] = []
         if self._worker_thread is not None:
@@ -10549,14 +10577,8 @@ class MainWindow(QMainWindow):
                 thread.requestInterruption()
                 thread.quit()
 
-        for thread in threads:
-            if not thread.isRunning():
-                continue
-            if thread.wait(5000):
-                continue
-            logger.warning("Background thread did not stop in time; terminating.")
-            thread.terminate()
-            thread.wait(3000)
+        # Re-enable toolbar promptly; cleanup finishes via failed/finished.
+        self._finish_background_job()
 
     def _open_te_genome_map_after_blast(
         self,

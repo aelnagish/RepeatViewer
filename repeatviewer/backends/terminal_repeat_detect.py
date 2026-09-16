@@ -453,6 +453,7 @@ def run_self_blast(
         str(work_dir),
         os_type=os_type,
         use_system_blast=use_system_blast,
+        cancel=cancel,
     )
     if database == "makeblastdb_not_found":
         raise RuntimeError(

@@ -35,6 +35,7 @@ class JobCancellation:
             self._processes.clear()
 
     def request(self) -> None:
+        """Mark cancelled and kill registered subprocesses without blocking the UI."""
         self._event.set()
         self.kill_processes()
 
@@ -49,6 +50,9 @@ class JobCancellation:
     def register_process(self, proc: subprocess.Popen) -> None:
         with self._lock:
             self._processes.append(proc)
+        # Stop may have been clicked just before register — kill immediately.
+        if self._event.is_set():
+            terminate_process(proc, wait_s=0.35)
 
     def unregister_process(self, proc: subprocess.Popen) -> None:
         with self._lock:
@@ -58,12 +62,24 @@ class JobCancellation:
                 pass
 
     def kill_processes(self) -> None:
+        """Signal all registered processes; finish waiting off the caller thread."""
         with self._lock:
             procs = list(self._processes)
-        for proc in procs:
-            terminate_process(proc)
-        with self._lock:
             self._processes.clear()
+        if not procs:
+            return
+
+        def _finish() -> None:
+            for proc in procs:
+                terminate_process(proc, wait_s=0.35)
+
+        # SIGTERM/SIGKILL wait must not freeze the GUI thread when Stop is clicked.
+        if threading.current_thread() is threading.main_thread():
+            for proc in procs:
+                _signal_stop(proc)
+            threading.Thread(target=_finish, daemon=True, name="job-cancel-kill").start()
+        else:
+            _finish()
 
 
 def check_cancelled(cancel: JobCancellation | None) -> None:
@@ -71,13 +87,12 @@ def check_cancelled(cancel: JobCancellation | None) -> None:
         cancel.check()
 
 
-def terminate_process(proc: subprocess.Popen, *, wait_s: float = 3.0) -> None:
-    """Stop a subprocess, including child workers when started in a new session."""
+def _signal_stop(proc: subprocess.Popen) -> None:
+    """Send a stop signal without waiting for the process to exit."""
     if proc.poll() is not None:
         return
     try:
         if sys.platform != "win32":
-            # RepeatMasker -pa and similar tools spawn children; kill the group.
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError, OSError):
@@ -86,9 +101,16 @@ def terminate_process(proc: subprocess.Popen, *, wait_s: float = 3.0) -> None:
             proc.terminate()
     except OSError:
         pass
-    deadline = time.monotonic() + wait_s
+
+
+def terminate_process(proc: subprocess.Popen, *, wait_s: float = 0.35) -> None:
+    """Stop a subprocess, including child workers when started in a new session."""
+    if proc.poll() is not None:
+        return
+    _signal_stop(proc)
+    deadline = time.monotonic() + max(0.05, float(wait_s))
     while proc.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.05)
+        time.sleep(0.02)
     if proc.poll() is None:
         try:
             if sys.platform != "win32":
@@ -101,7 +123,7 @@ def terminate_process(proc: subprocess.Popen, *, wait_s: float = 3.0) -> None:
         except OSError:
             pass
         try:
-            proc.wait(timeout=2)
+            proc.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
             pass
 
@@ -168,7 +190,7 @@ def run_subprocess_with_cancel(
             if cancel is not None and cancel.requested:
                 terminate_process(proc)
                 for reader in readers:
-                    reader.join()
+                    reader.join(timeout=0.5)
                 process_logger.warning(
                     "CANCELLED tool=%s pid=%s exit=%s elapsed=%.3fs",
                     tool,
@@ -183,8 +205,13 @@ def run_subprocess_with_cancel(
                 )
                 raise JobCancelledError("Job stopped by user")
             if proc.poll() is not None:
+                # Kill may have finished the process before we observed cancel.
+                if cancel is not None and cancel.requested:
+                    for reader in readers:
+                        reader.join(timeout=0.5)
+                    raise JobCancelledError("Job stopped by user")
                 break
-            time.sleep(0.25)
+            time.sleep(0.05)
         for reader in readers:
             reader.join()
         stdout = "".join(captured["stdout"])

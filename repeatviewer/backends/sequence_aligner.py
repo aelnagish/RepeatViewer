@@ -173,6 +173,7 @@ def run_alignment(
     adjust_direction: bool = False,
     muscle_mode: str = "align",
     muscle_num_threads: int = 5,
+    cancel=None,
 ) -> Path:
     """
     Align a FASTA/MSA file. Writes ``<stem>_msa.fa`` next to the input.
@@ -214,6 +215,7 @@ def run_alignment(
             env=resolved[1],
             mode=muscle_mode,
             num_threads=muscle_num_threads,
+            cancel=cancel,
         )
     else:
         _run_mafft(
@@ -230,6 +232,7 @@ def run_alignment(
             offset=offset,
             reorder=reorder,
             adjust_direction=adjust_direction,
+            cancel=cancel,
         )
     return output_file
 
@@ -257,6 +260,7 @@ def _run_mafft(
     offset: float,
     reorder: bool,
     adjust_direction: bool,
+    cancel=None,
 ) -> None:
     arguments = _mafft_arguments(
         num_threads=num_threads,
@@ -295,6 +299,7 @@ def _run_mafft(
                 stdout_is_result=True,
                 output_path=output_file,
                 progress_file=progress_path,
+                cancel=cancel,
             )
         finally:
             progress_path.unlink(missing_ok=True)
@@ -314,6 +319,7 @@ def _run_muscle(
     env: dict[str, str],
     mode: str,
     num_threads: int,
+    cancel=None,
 ) -> None:
     if mode not in {"align", "super5"}:
         raise ValueError(f"Unknown MUSCLE mode: {mode}")
@@ -335,6 +341,7 @@ def _run_muscle(
             check=True,
             env=env,
             output_path=output_file,
+            cancel=cancel,
         )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(_format_subprocess_error("MUSCLE", exc)) from exc
@@ -415,6 +422,7 @@ def run_alignment_combined(
     adjust_direction: bool = False,
     muscle_mode: str = "align",
     muscle_num_threads: int = 5,
+    cancel=None,
 ) -> Path:
     """Merge selected FASTA files into one input, then align once."""
     if not seq_files:
@@ -461,6 +469,7 @@ def run_alignment_combined(
             adjust_direction=adjust_direction,
             muscle_mode=muscle_mode,
             muscle_num_threads=muscle_num_threads,
+            cancel=cancel,
         )
         if aligned.resolve() != desired.resolve() and aligned.is_file():
             if desired.is_file():

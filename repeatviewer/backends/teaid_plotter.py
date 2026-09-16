@@ -165,7 +165,7 @@ def _consensus_axis_tick_kwargs(max_len: int, *, tickangle: int = 0) -> dict:
 # Code block: genome blast
 #####################################################################################################
 def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads=1,
-                       use_system_blast=False, output_label=None):
+                       use_system_blast=False, output_label=None, cancel=None):
     # input_file: fasta file contain only one sequence
     # Used global variable: os_type
 
@@ -181,7 +181,9 @@ def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads
         return False
 
     # Check genome blast database availability
-    blast_database = check_database(genome_file, os_type=os_type, use_system_blast = use_system_blast)
+    blast_database = check_database(
+        genome_file, os_type=os_type, use_system_blast=use_system_blast, cancel=cancel
+    )
 
     # Check if makeblastdb is correctly installed
     if blast_database == 'makeblastdb_not_found':
@@ -207,6 +209,7 @@ def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads
         num_threads=num_threads,
         use_system_blast=use_system_blast,
         output_label=output_label,
+        cancel=cancel,
     )
 
     if genome_blast_out == 'blastn_not_found':
@@ -235,7 +238,7 @@ def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads
 #####################################################################################################
 # Code block: self blast
 #####################################################################################################
-def self_blast(input_file, output_dir, use_system_blast=False, word_size=11):
+def self_blast(input_file, output_dir, use_system_blast=False, word_size=11, cancel=None):
     # input_file: fasta file contain only one sequence
     # Used global variable: os_type
 
@@ -263,6 +266,7 @@ def self_blast(input_file, output_dir, use_system_blast=False, word_size=11):
         work_dir,
         os_type=os_type,
         use_system_blast=use_system_blast,
+        cancel=cancel,
     )
 
     # Check if makeblastdb is correctly installed
@@ -287,7 +291,8 @@ def self_blast(input_file, output_dir, use_system_blast=False, word_size=11):
         self_blast=True,
         word_size=word_size,
         os_type=os_type,
-        use_system_blast=use_system_blast
+        use_system_blast=use_system_blast,
+        cancel=cancel,
     )
 
     if self_blast_out == 'blastn_not_found':
@@ -941,6 +946,7 @@ def _build_genome_teaid_panels(
     hit_len_mid_pct=50.0,
     hit_color_high='red',
     hit_color_mid='#1f77b4',
+    cancel=None,
 ):
     """BLAST hits, coverage, and divergence panels for one genome."""
     genome_blast_out = teaid_genome_blast(
@@ -951,6 +957,7 @@ def _build_genome_teaid_panels(
         num_threads=num_threads,
         use_system_blast=use_system_blast,
         output_label=output_label,
+        cancel=cancel,
     )
 
     if genome_blast_out:
@@ -1013,6 +1020,7 @@ def _build_self_dot_figure(
     *,
     use_system_blast=False,
     self_blast_word_size=DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
+    cancel=None,
 ):
     self_word_size = clamp_teaid_self_blast_word_size(self_blast_word_size)
     dotplot_blast, work_dir = self_blast(
@@ -1020,6 +1028,7 @@ def _build_self_dot_figure(
         output_dir,
         use_system_blast=use_system_blast,
         word_size=self_word_size,
+        cancel=cancel,
     )
     try:
         if dotplot_blast == 'blast_n_zero':
@@ -1595,6 +1604,7 @@ def teaid_plotter(
     hit_len_mid_pct=50.0,
     hit_color_high='red',
     hit_color_mid='#1f77b4',
+    cancel=None,
 ):
     # Used global variable: os_type
 
@@ -1637,6 +1647,7 @@ def teaid_plotter(
         hit_len_mid_pct=hit_len_mid_pct,
         hit_color_high=hit_color_high,
         hit_color_mid=hit_color_mid,
+        cancel=cancel,
     )
     fig_dot = _build_self_dot_figure(
         con_seq,
@@ -1644,6 +1655,7 @@ def teaid_plotter(
         cons_len,
         use_system_blast=use_system_blast,
         self_blast_word_size=self_blast_word_size,
+        cancel=cancel,
     )
     fig = _assemble_teaid_2x2_figure(
         plot_main_title, cons_len, panels, fig_dot, x_axis_label=x_axis_label

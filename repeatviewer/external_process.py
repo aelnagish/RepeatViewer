@@ -134,8 +134,13 @@ def run_logged_process(
     stdout_is_result: bool = False,
     output_path: str | os.PathLike[str] | None = None,
     progress_file: str | os.PathLike[str] | None = None,
+    cancel=None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a command while streaming its terminal output into the log."""
+    """Run a command while streaming its terminal output into the log.
+
+    When ``cancel`` is a :class:`~repeatviewer.backends.job_cancel.JobCancellation`,
+    Stop registers and kills this process so long BLAST/MAFFT/etc. jobs end quickly.
+    """
     if not isinstance(command, str):
         from repeatviewer.conda_tools import prepare_command
 
@@ -147,6 +152,10 @@ def run_logged_process(
     sink = current_process_log_sink()
     log_command(tool, display_command, inputs=inputs, cwd=cwd)
     started = time.monotonic()
+    popen_kwargs = dict(windows_hidden_process_kwargs())
+    if sys.platform != "win32" and not shell:
+        # Own process group so Stop can kill threaded BLAST/MAFFT children.
+        popen_kwargs["start_new_session"] = True
     try:
         proc = subprocess.Popen(
             command,
@@ -157,7 +166,7 @@ def run_logged_process(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            **windows_hidden_process_kwargs(),
+            **popen_kwargs,
         )
     except OSError:
         logger.exception("LAUNCH FAILED tool=%s", tool)
@@ -223,23 +232,69 @@ def run_logged_process(
 
     progress_thread = threading.Thread(target=_tail_progress, daemon=True)
     progress_thread.start()
-    try:
-        returncode = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        logger.error("TIMEOUT tool=%s pid=%s timeout=%ss", tool, proc.pid, timeout)
-        emit_process_log(
-            f"TIMEOUT tool={tool} pid={proc.pid} timeout={timeout}s",
-            sink=sink,
-        )
-        raise
-    finally:
-        stdout_thread.join()
-        stderr_thread.join()
-        progress_stop.set()
-        progress_thread.join()
+    if cancel is not None:
+        cancel.register_process(proc)
 
+    returncode: int | None = None
+    try:
+        deadline = None if timeout is None else (time.monotonic() + float(timeout))
+        while True:
+            if cancel is not None and cancel.requested:
+                from repeatviewer.backends.job_cancel import (
+                    JobCancelledError,
+                    terminate_process,
+                )
+
+                terminate_process(proc)
+                logger.warning(
+                    "CANCELLED tool=%s pid=%s exit=%s elapsed=%.3fs",
+                    tool,
+                    proc.pid,
+                    proc.returncode,
+                    time.monotonic() - started,
+                )
+                emit_process_log(
+                    f"CANCELLED exit={proc.returncode} "
+                    f"elapsed={time.monotonic() - started:.3f}s",
+                    sink=sink,
+                )
+                raise JobCancelledError("Job stopped by user")
+            try:
+                # Short waits so Stop is noticed quickly; None = forever in slices.
+                slice_timeout = 0.1
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(proc.args, timeout)
+                    slice_timeout = min(slice_timeout, remaining)
+                returncode = proc.wait(timeout=slice_timeout)
+                if cancel is not None and cancel.requested:
+                    from repeatviewer.backends.job_cancel import JobCancelledError
+
+                    raise JobCancelledError("Job stopped by user")
+                break
+            except subprocess.TimeoutExpired:
+                if deadline is not None and time.monotonic() >= deadline:
+                    proc.kill()
+                    proc.wait()
+                    logger.error(
+                        "TIMEOUT tool=%s pid=%s timeout=%ss", tool, proc.pid, timeout
+                    )
+                    emit_process_log(
+                        f"TIMEOUT tool={tool} pid={proc.pid} timeout={timeout}s",
+                        sink=sink,
+                    )
+                    raise
+                continue
+    finally:
+        if cancel is not None:
+            cancel.unregister_process(proc)
+        stdout_thread.join(timeout=1.0)
+        stderr_thread.join(timeout=1.0)
+        progress_stop.set()
+        progress_thread.join(timeout=1.0)
+
+    assert returncode is not None
     stdout = "".join(captured["stdout"])
     stderr = "".join(captured["stderr"])
     elapsed = time.monotonic() - started
