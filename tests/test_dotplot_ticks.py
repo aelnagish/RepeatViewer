@@ -5,8 +5,10 @@ from __future__ import annotations
 from PySide6.QtCore import QRectF
 
 from repeatviewer.widgets.dotplot_view import (
+    _axis_tick_positions,
     _format_bp,
     _nice_tick_step,
+    _non_overlapping_tick_labels,
     _scene_to_bp,
 )
 
@@ -55,3 +57,39 @@ def test_shared_tick_step_ignores_letterbox_span(qapp) -> None:
     step = canvas.shared_tick_step()
     assert step == 1000
     canvas.deleteLater()
+
+
+def test_axis_end_tick_replaces_crowding_major() -> None:
+    """Length 810 with step 100 must keep 810 and drop 800 (no 800/810 overlap)."""
+    ticks = _axis_tick_positions(lo=0.0, hi=810.0, length=810, step=100)
+    assert 810 in ticks
+    assert 800 not in ticks
+    assert 0 in ticks
+    assert 700 in ticks
+
+
+def test_axis_exact_step_end_keeps_single_end() -> None:
+    ticks = _axis_tick_positions(lo=0.0, hi=800.0, length=800, step=100)
+    assert ticks.count(800) == 1
+    assert 800 in ticks
+
+
+def test_non_overlapping_prefers_sequence_end() -> None:
+    ticks = [0, 100, 200, 800, 810]
+    positions = {t: float(t) for t in ticks}
+
+    def extent(pos: float, label: str) -> tuple[float, float]:
+        # Pretend each digit is 10 px so 800 and 810 collide hard.
+        return pos, pos + 10.0 * len(label)
+
+    shown = _non_overlapping_tick_labels(
+        ticks,
+        length=810,
+        offset=0,
+        positions=positions,
+        label_extent=extent,
+        pad=4.0,
+    )
+    assert 810 in shown
+    assert 800 not in shown
+    assert 0 in shown

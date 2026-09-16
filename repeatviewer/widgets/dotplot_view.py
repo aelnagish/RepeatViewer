@@ -187,6 +187,71 @@ def _scene_to_bp(scene_coord: float | int, *, length: int, offset: int) -> int:
     return tick + offset
 
 
+def _axis_tick_positions(
+    *,
+    lo: float,
+    hi: float,
+    length: int,
+    step: int,
+) -> list[int]:
+    """Major ticks in ``[0, length]`` intersecting the visible span, plus ends.
+
+    Sequence start/end always win over a nearby major tick so labels do not
+    collide at the axis tip (e.g. length 810 with step 100 keeps 810, drops 800).
+    """
+    if step <= 0:
+        step = 1
+    length = max(int(length), 0)
+    ticks: list[int] = []
+    tick = int(lo // step) * step
+    while tick <= hi + step:
+        if 0 <= tick <= length and lo - step <= tick <= hi + step:
+            ticks.append(int(tick))
+        tick += step
+
+    # Drop majors that would sit under an end label (~half a step).
+    min_sep = max(int(step * 0.45), 1)
+    for edge in (0, length):
+        if not (lo - step <= edge <= hi + step):
+            continue
+        ticks = [t for t in ticks if abs(t - edge) >= min_sep]
+        if edge not in ticks:
+            ticks.append(edge)
+    ticks.sort()
+    return ticks
+
+
+def _non_overlapping_tick_labels(
+    ticks: list[int],
+    *,
+    length: int,
+    offset: int,
+    positions: dict[int, float],
+    label_extent,
+    pad: float = 4.0,
+) -> set[int]:
+    """Return tick values whose labels fit without overlapping.
+
+    Prefers true sequence ends over intermediate majors. ``label_extent`` is
+    ``(pos, label) -> (axis_lo, axis_hi)`` in ruler pixels.
+    """
+    preferred = [t for t in ticks if t in (0, length)]
+    preferred.extend(t for t in ticks if t not in (0, length))
+    chosen_spans: list[tuple[float, float]] = []
+    show: set[int] = set()
+    for tick in preferred:
+        pos = positions.get(tick)
+        if pos is None:
+            continue
+        label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
+        a0, a1 = label_extent(pos, label)
+        if any(not (a1 + pad <= b0 or b1 + pad <= a0) for b0, b1 in chosen_spans):
+            continue
+        chosen_spans.append((a0, a1))
+        show.add(tick)
+    return show
+
+
 class _SegmentsItem(QGraphicsItem):
     """Paints every dotplot segment in one pass."""
 
@@ -317,32 +382,44 @@ class _Ruler(QWidget):
         painter.setPen(QPen(_RULER_FG))
         metrics = painter.fontMetrics()
         offset = view.coordinate_offset()
-        ticks: list[int] = []
-        tick = int(lo // step) * step
-        while tick <= hi + step:
-            if 0 <= tick <= length and lo - step <= tick <= hi + step:
-                ticks.append(int(tick))
-            tick += step
-        # Always mark the sequence start/end when they are in view.
-        for edge in (0, length):
-            if lo - step <= edge <= hi + step and edge not in ticks:
-                ticks.append(edge)
-        ticks.sort()
+        ticks = _axis_tick_positions(lo=lo, hi=hi, length=length, step=step)
+        positions = {
+            tick: view.scene_to_ruler(tick, self._horizontal) for tick in ticks
+        }
+
+        def _label_extent(pos: float, label: str) -> tuple[float, float]:
+            if self._horizontal:
+                # Horizontal labels start just right of the tick mark.
+                width = float(metrics.horizontalAdvance(label))
+                return pos + 2.0, pos + 2.0 + width
+            height = float(metrics.height())
+            return pos - height / 2.0, pos + height / 2.0
+
+        labeled = _non_overlapping_tick_labels(
+            ticks,
+            length=length,
+            offset=offset,
+            positions=positions,
+            label_extent=_label_extent,
+        )
 
         for tick in ticks:
-            pos = view.scene_to_ruler(tick, self._horizontal)
+            pos = positions[tick]
             label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
             if self._horizontal:
                 if 0 <= pos <= self.width():
                     painter.drawLine(int(pos), self.height() - 4, int(pos), self.height())
-                    painter.drawText(
-                        int(pos) + 2,
-                        self.height() - 6,
-                        label,
-                    )
+                    if tick in labeled:
+                        painter.drawText(
+                            int(pos) + 2,
+                            self.height() - 6,
+                            label,
+                        )
             else:
                 if 0 <= pos <= self.height():
                     painter.drawLine(self.width() - 4, int(pos), self.width(), int(pos))
+                    if tick not in labeled:
+                        continue
                     # Right-align and vertically centre on the tick so the
                     # number sits on the mark (drawText y is baseline).
                     label_h = metrics.height()
@@ -908,27 +985,63 @@ class DotplotCanvas(QGraphicsView):
             painter.setPen(QPen(QColor(70, 70, 70)))
             metrics = painter.fontMetrics()
 
-            tick = 0
-            while tick <= length:
-                frac = tick / length
+            ticks = _axis_tick_positions(
+                lo=0.0, hi=float(length), length=length, step=step
+            )
+            x_positions = {
+                tick: plot.left() + (tick / length) * plot.width() for tick in ticks
+            }
+            y_positions = {
+                tick: plot.top() + (tick / length) * plot.height() for tick in ticks
+            }
+
+            def _export_x_extent(pos: float, label: str) -> tuple[float, float]:
+                half = metrics.horizontalAdvance(label) / 2.0
+                return pos - half, pos + half
+
+            def _export_y_extent(pos: float, label: str) -> tuple[float, float]:
+                half = metrics.height() / 2.0
+                return pos - half, pos + half
+
+            x_labeled = _non_overlapping_tick_labels(
+                ticks,
+                length=length,
+                offset=offset,
+                positions=x_positions,
+                label_extent=_export_x_extent,
+            )
+            y_labeled = _non_overlapping_tick_labels(
+                ticks,
+                length=length,
+                offset=offset,
+                positions=y_positions,
+                label_extent=_export_y_extent,
+            )
+
+            for tick in ticks:
                 label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
-
-                x = plot.left() + frac * plot.width()
+                x = x_positions[tick]
                 painter.drawLine(int(x), int(plot.top() - tick_len), int(x), int(plot.top()))
-                painter.drawText(
-                    int(x - metrics.horizontalAdvance(label) / 2),
-                    int(plot.top() - tick_len - 2 * unit),
-                    label,
-                )
+                if tick in x_labeled:
+                    painter.drawText(
+                        int(x - metrics.horizontalAdvance(label) / 2),
+                        int(plot.top() - tick_len - 2 * unit),
+                        label,
+                    )
 
-                y = plot.top() + frac * plot.height()
+                y = y_positions[tick]
                 painter.drawLine(int(plot.left() - tick_len), int(y), int(plot.left()), int(y))
-                painter.drawText(
-                    int(plot.left() - tick_len - 2 * unit - metrics.horizontalAdvance(label)),
-                    int(y + metrics.ascent() / 2),
-                    label,
-                )
-                tick += step
+                if tick in y_labeled:
+                    painter.drawText(
+                        int(
+                            plot.left()
+                            - tick_len
+                            - 2 * unit
+                            - metrics.horizontalAdvance(label)
+                        ),
+                        int(y + metrics.ascent() / 2),
+                        label,
+                    )
 
             # sequence name down the y axis
             if title:
