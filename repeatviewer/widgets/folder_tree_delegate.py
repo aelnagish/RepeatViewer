@@ -173,6 +173,15 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
             text = opt.palette.color(QPalette.ColorRole.WindowText)
         return text
 
+    def _is_drop_target(self, widget, index: QModelIndex) -> bool:
+        tree = self._tree_widget(widget)
+        if tree is None or not hasattr(tree, "drop_target_item"):
+            return False
+        target = tree.drop_target_item()
+        if target is None:
+            return False
+        return index == tree.indexFromItem(target)
+
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:  # noqa: N802
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
@@ -182,6 +191,7 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
         is_current = self._current_index(widget, index)
         is_hover = bool(opt.state & QStyle.StateFlag.State_MouseOver)
+        is_drop_target = self._is_drop_target(widget, index)
 
         # Draw our own clipped highlight (icon → text), not the full-row macOS
         # selection chrome — but still honor ExtendedSelection multi-select.
@@ -212,7 +222,18 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
                 chevron_center_x=chevron_cx,
             )
 
-        if is_selected or is_current or is_hover:
+        if is_drop_target:
+            # Distinct from selection blue: green fill + border = copy target.
+            bg_rect = self._highlight_rect(opt, widget)
+            fill = QColor(46, 160, 67, 70)
+            border = QColor(26, 127, 55)
+            painter.setPen(QPen(border, 2))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(bg_rect.adjusted(1, 1, -1, -1), 4, 4)
+            text = _contrasting_on(QColor(200, 235, 205))
+            opt.palette.setBrush(QPalette.ColorRole.Text, text)
+            opt.palette.setBrush(QPalette.ColorRole.WindowText, text)
+        elif is_selected or is_current or is_hover:
             bg_rect = self._highlight_rect(opt, widget)
             painter.setPen(Qt.PenStyle.NoPen)
             if is_selected or is_current:

@@ -1251,6 +1251,48 @@ class FolderTreeWidget(QTreeWidget):
         self.itemCollapsed.connect(lambda *_: self.refresh_horizontal_extent())
         self._suppress_current_changed = False
         self._active_folder_key: str | None = None
+        self._drop_target_item: QTreeWidgetItem | None = None
+
+    def drop_target_item(self) -> QTreeWidgetItem | None:
+        """Folder row currently under an in-progress file drop, if any."""
+        return self._drop_target_item
+
+    def _set_drop_target_item(self, item: QTreeWidgetItem | None) -> None:
+        if item is self._drop_target_item:
+            return
+        previous = self._drop_target_item
+        self._drop_target_item = item
+        viewport = self.viewport()
+        if viewport is None:
+            return
+        for row in (previous, item):
+            if row is None:
+                continue
+            rect = self.visualItemRect(row)
+            if rect.isValid():
+                viewport.update(rect.adjusted(-2, -2, 2, 2))
+
+    def _folder_item_at(self, pos) -> QTreeWidgetItem | None:
+        item = self.itemAt(pos)
+        if item is None or self._is_lazy_placeholder(item):
+            return None
+        raw = item.data(0, ROLE_PATH)
+        if not raw:
+            return None
+        return item
+
+    @staticmethod
+    def _mime_local_paths(mime) -> list[Path]:
+        if mime is None or not mime.hasUrls():
+            return []
+        paths: list[Path] = []
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            text = url.toLocalFile()
+            if text:
+                paths.append(Path(text))
+        return paths
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         """Scroll the folder tree more slowly than Qt's default trackpad/wheel speed."""
@@ -1634,24 +1676,51 @@ class FolderTreeWidget(QTreeWidget):
         event.ignore()
 
     def dragMoveEvent(self, event):  # noqa: N802 (Qt API)
-        if event.mimeData().hasUrls():
+        paths = self._mime_local_paths(event.mimeData())
+        if not paths:
+            self._set_drop_target_item(None)
+            event.ignore()
+            return
+
+        target_item = self._folder_item_at(event.position().toPoint())
+        file_paths = [p for p in paths if p.is_file()]
+        folder_paths = [p for p in paths if p.is_dir()]
+
+        # File → folder copy: highlight the hovered folder as the drop target.
+        if file_paths:
+            if target_item is not None:
+                self._set_drop_target_item(target_item)
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+            self._set_drop_target_item(None)
+            # Still allow folder-root drops in the same gesture.
+            if folder_paths:
+                event.acceptProposedAction()
+                return
+            event.ignore()
+            return
+
+        self._set_drop_target_item(None)
+        if folder_paths:
             event.acceptProposedAction()
             return
         event.ignore()
 
+    def dragLeaveEvent(self, event):  # noqa: N802 (Qt API)
+        self._set_drop_target_item(None)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event):  # noqa: N802 (Qt API)
-        if not event.mimeData().hasUrls():
-            event.ignore()
-            return
-        urls = event.mimeData().urls()
-        paths = [Path(url.toLocalFile()) for url in urls if url.isLocalFile()]
+        paths = self._mime_local_paths(event.mimeData())
+        self._set_drop_target_item(None)
         if not paths:
             event.ignore()
             return
 
-        target_item = self.itemAt(event.position().toPoint())
+        target_item = self._folder_item_at(event.position().toPoint())
         target_dir = None
-        if target_item:
+        if target_item is not None:
             raw = target_item.data(0, ROLE_PATH)
             if raw:
                 target_dir = Path(str(raw))
@@ -1666,6 +1735,7 @@ class FolderTreeWidget(QTreeWidget):
                 self.folder_dropped.emit(folder)
         if target_dir and file_paths:
             self.files_dropped_to_folder.emit(target_dir, file_paths)
+            event.setDropAction(Qt.DropAction.CopyAction)
         event.acceptProposedAction()
 
 
@@ -1894,7 +1964,7 @@ class MainWindow(QMainWindow):
         self._folder_tree.folder_selected.connect(self._on_folder_selected)
         self._folder_tree.files_dropped_to_folder.connect(self._copy_files_to_folder)
         self._folder_tree.folder_dropped.connect(
-            lambda folder: self._add_root_folder(folder, unhide=True),
+            lambda folder: self._add_root_folder(folder, unhide=True, warn_spaces=True),
         )
 
         self._file_list = FileListTableWidget()
@@ -3377,6 +3447,179 @@ class MainWindow(QMainWindow):
 
         worker.finished.connect(_on_finished)
         worker.failed.connect(_on_failed)
+
+    def _warn_folders_with_spaces(self, folders: list[Path]) -> None:
+        """Remind the user when imported paths contain spaces; offer conversion."""
+        from repeatviewer.backends.safe_cli_paths import (
+            SpacedNameHit,
+            find_names_with_spaces,
+            rename_spaced_paths,
+        )
+
+        roots: list[Path] = []
+        hits: list[SpacedNameHit] = []
+        any_truncated = False
+        seen: set[str] = set()
+        for folder in folders:
+            try:
+                resolved = Path(folder).expanduser().resolve()
+            except OSError:
+                continue
+            roots.append(resolved)
+            found, truncated = find_names_with_spaces(resolved, limit=500)
+            any_truncated = any_truncated or truncated
+            for hit in found:
+                key = str(hit.path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(hit)
+
+        if not hits:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Spaces in folder or file names")
+        dialog.setMinimumWidth(520)
+        dialog.setMinimumHeight(420)
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "Some folder or file names contain spaces. Import is allowed, but "
+            "tools such as BLAST and TEAid can fail on paths with spaces."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        tip = QLabel(
+            "Recommendation: replace each space with an underscore (_).\n"
+            "Example: TEtrimmer output → TEtrimmer_output\n"
+            "(one space → _ two spaces → __ and so on)"
+        )
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        list_label = QLabel("Folders or files have space in their name:")
+        list_label.setWordWrap(True)
+        layout.addWidget(list_label)
+
+        list_widget = QListWidget()
+        list_widget.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        for hit in hits:
+            list_widget.addItem(hit.display)
+        if any_truncated:
+            list_widget.addItem("… (more names not shown)")
+        layout.addWidget(list_widget, stretch=1)
+
+        buttons = QDialogButtonBox()
+        convert_btn = buttons.addButton(
+            "Convert spaces to _", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        keep_btn = buttons.addButton(
+            "Keep as is", QDialogButtonBox.ButtonRole.RejectRole
+        )
+        layout.addWidget(buttons)
+
+        def _on_convert() -> None:
+            renames, errors = rename_spaced_paths([hit.path for hit in hits])
+            if errors and not renames:
+                QMessageBox.warning(
+                    dialog,
+                    "Convert spaces",
+                    "Could not rename any paths:\n\n" + "\n".join(errors[:20]),
+                )
+                return
+            if renames:
+                self._apply_space_renames_to_workspace(roots, renames)
+            dialog.accept()
+            if renames:
+                lines = "\n".join(
+                    f"• {old.name} → {new.name}" for old, new in renames[:40]
+                )
+                extra = ""
+                if len(renames) > 40:
+                    extra = f"\n… and {len(renames) - 40} more"
+                err_text = ""
+                if errors:
+                    err_text = "\n\nSome renames failed:\n" + "\n".join(errors[:10])
+                QMessageBox.information(
+                    self,
+                    "Spaces converted",
+                    f"Renamed {len(renames)} folder(s)/file(s) "
+                    f"(spaces → underscores):\n\n{lines}{extra}{err_text}",
+                )
+            elif errors:
+                QMessageBox.warning(
+                    dialog,
+                    "Convert spaces",
+                    "Could not rename:\n\n" + "\n".join(errors[:20]),
+                )
+
+        convert_btn.clicked.connect(_on_convert)
+        keep_btn.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def _apply_space_renames_to_workspace(
+        self,
+        roots: list[Path],
+        renames: list[tuple[Path, Path]],
+    ) -> None:
+        """Update folder-tree paths and project pointers after space conversion."""
+        from repeatviewer.backends.safe_cli_paths import apply_path_renames
+
+        def _map(path: Path | None) -> Path | None:
+            if path is None:
+                return None
+            try:
+                return apply_path_renames(Path(path), renames)
+            except OSError:
+                return path
+
+        # Remap top-level roots (import path ancestors may have moved).
+        for index in range(self._folder_tree.topLevelItemCount()):
+            item = self._folder_tree.topLevelItem(index)
+            raw = item.data(0, ROLE_PATH)
+            if not raw:
+                continue
+            old = Path(str(raw))
+            new = _map(old)
+            if new is None or new == old:
+                continue
+            item.setData(0, ROLE_PATH, str(new))
+            counts = self._folder_panel_counts(new) if new.is_dir() else (0, 0)
+            item.setText(0, self._folder_tree_label(new, counts=counts))
+            item.setToolTip(
+                0, f"{new}\n{counts[0]} folders · {counts[1]} files"
+            )
+            # Drop stale children; rebuild if expanded.
+            while item.childCount():
+                item.removeChild(item.child(0))
+            if new.is_dir():
+                self._set_folder_expandable(item, new, counts=counts)
+                if item.isExpanded() and counts[0] > 0:
+                    self._populate_folder_tree_children(item)
+            self._sync_folder_item_icon(item)
+
+        if self._project.input_dir is not None:
+            self._project.input_dir = _map(self._project.input_dir)
+        if self._current_folder is not None:
+            mapped = _map(self._current_folder)
+            if mapped is not None and mapped.is_dir():
+                self._on_folder_selected(mapped)
+        if self._project.genome_file is not None:
+            self._project.genome_file = _map(self._project.genome_file)
+        if self._project.pan_genomes:
+            updated = []
+            for entry in self._project.pan_genomes:
+                new_path = _map(Path(entry.path))
+                updated.append(
+                    type(entry)(name=entry.name, path=new_path or entry.path)
+                )
+            self._project.pan_genomes = updated
+
+        self._sync_folder_tree_labels()
+        self._persist_workspace()
+        # roots unused except for documentation of call sites; keep API clear.
+        _ = roots
 
     def _rename_paths_with_spaces(
         self,
@@ -5057,7 +5300,7 @@ class MainWindow(QMainWindow):
             start = str(self._current_folder)
         picked = QFileDialog.getExistingDirectory(self, "Select folder", start)
         if picked:
-            self._add_root_folder(Path(picked), unhide=True)
+            self._add_root_folder(Path(picked), unhide=True, warn_spaces=True)
 
     def _add_root_folder(
         self,
@@ -5067,6 +5310,7 @@ class MainWindow(QMainWindow):
         persist: bool = True,
         select: bool = True,
         expand_root: bool = True,
+        warn_spaces: bool = False,
     ) -> None:
         folder = folder.expanduser().resolve()
         if not folder.is_dir():
@@ -5075,13 +5319,17 @@ class MainWindow(QMainWindow):
             self._hidden_root_folders = unhide_root_folder(self._hidden_root_folders, folder)
         elif self._is_root_hidden(folder):
             return
+        already_present = False
         for i in range(self._folder_tree.topLevelItemCount()):
             item = self._folder_tree.topLevelItem(i)
             if Path(str(item.data(0, ROLE_PATH))) == folder:
+                already_present = True
                 if select:
                     self._folder_tree.select_folder_item(item)
                     self._on_folder_selected(folder)
-                return
+                break
+        if already_present:
+            return
         counts = self._folder_panel_counts(folder)
         root = QTreeWidgetItem([self._folder_tree_label(folder, counts=counts)])
         root.setData(0, ROLE_PATH, str(folder))
@@ -5102,6 +5350,8 @@ class MainWindow(QMainWindow):
         if persist:
             self._persist_workspace()
         self._apply_folder_filter()
+        if warn_spaces:
+            self._warn_folders_with_spaces([folder])
 
     def _sync_folder_item_icon(self, item: QTreeWidgetItem) -> None:
         if self._is_lazy_folder_placeholder(item):

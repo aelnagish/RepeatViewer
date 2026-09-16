@@ -15,7 +15,12 @@ from Bio.Align import AlignInfo
 from Bio.SeqRecord import SeqRecord
 from plotly.subplots import make_subplots
 
-from repeatviewer.backends.gui_functions import blast, check_database
+from repeatviewer.backends.gui_functions import (
+    _blast_path_has_unsafe_chars,
+    blast,
+    blast_database_basename,
+    check_database,
+)
 from repeatviewer.job_options import (
     DEFAULT_TE_DIVERGENCE_BIN_WIDTH,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
@@ -234,11 +239,27 @@ def self_blast(input_file, output_dir, use_system_blast=False, word_size=11):
     # input_file: fasta file contain only one sequence
     # Used global variable: os_type
 
-    work_dir = tempfile.mkdtemp(prefix=".repeatviewer_selfblast_", dir=output_dir)
+    # NCBI BLAST mishandles paths with spaces; keep the work tree space-free.
+    work_parent = output_dir
+    if _blast_path_has_unsafe_chars(os.path.abspath(str(output_dir))):
+        work_parent = tempfile.gettempdir()
+    work_dir = tempfile.mkdtemp(prefix=".repeatviewer_selfblast_", dir=work_parent)
+
+    query_path = os.path.abspath(str(input_file))
+    if _blast_path_has_unsafe_chars(query_path):
+        safe_query = os.path.join(work_dir, blast_database_basename(query_path))
+        try:
+            os.link(query_path, safe_query)
+        except OSError:
+            try:
+                os.symlink(query_path, safe_query)
+            except OSError:
+                shutil.copy2(query_path, safe_query)
+        query_path = safe_query
 
     # Build blast database
     blast_database = check_database(
-        input_file,
+        query_path,
         work_dir,
         os_type=os_type,
         use_system_blast=use_system_blast,
@@ -259,7 +280,7 @@ def self_blast(input_file, output_dir, use_system_blast=False, word_size=11):
         return False, work_dir
 
     self_blast_out, _ = blast(
-        input_file,
+        query_path,
         blast_database,
         work_dir,
         e_value=0.05,
