@@ -118,6 +118,18 @@ def application_stylesheet(
     QLineEdit#FileFilter:focus, QLineEdit#FolderFilter:focus {{
         border-color: {accent};
     }}
+    /* File-path inputs in tool dialogs. The generic QLineEdit rule below sets
+       border-radius only, which leaves a frameless white strip; give path
+       fields the same visible frame as the spin boxes beside them. */
+    QLineEdit#PathField {{
+        border: 1px solid palette(mid);
+        padding: 1px 6px;
+        border-radius: {radius_sm}px;
+        background: palette(base);
+    }}
+    QLineEdit#PathField:focus {{
+        border-color: {accent};
+    }}
     QWidget#FolderNavigationBar QToolButton, QToolButton#FolderAddButton {{
         border: none;
         background: transparent;

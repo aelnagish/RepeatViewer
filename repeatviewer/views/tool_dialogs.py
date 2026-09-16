@@ -178,6 +178,7 @@ from repeatviewer.job_options import (
     CHROMOSOME_SORT_SIZE_DESC,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
+    RepeatQuantifyOptions,
     TeConfusionMatrixBenchmarkOptions,
     TeLibraryBenchmarkOptions,
     DEFAULT_TE_BENCHMARK_THREADS,
@@ -5119,9 +5120,13 @@ class _TeInputFileRow(QWidget):
         self._file_filter = file_filter
         self._start_dir = start_dir
         self._path = QLineEdit(self)
+        self._path.setObjectName("PathField")  # framed via the app stylesheet
         self._path.setPlaceholderText(placeholder)
         self._path.setMinimumWidth(280)
+        self._path.setClearButtonEnabled(True)
         self._path.installEventFilter(self)
+        # A long path is wider than the field: hovering shows all of it.
+        self._path.textChanged.connect(self._sync_path_tooltip)
         if initial is not None:
             self._path.setText(str(initial.expanduser().resolve()))
 
@@ -5146,6 +5151,9 @@ class _TeInputFileRow(QWidget):
         if obj is self._path and event.type() == QEvent.Type.FocusIn:
             self.activated.emit(self)
         return super().eventFilter(obj, event)
+
+    def _sync_path_tooltip(self, text: str) -> None:
+        self._path.setToolTip(text.strip())
 
     def set_removable(self, removable: bool) -> None:
         self._remove_btn.setVisible(removable)
@@ -6197,8 +6205,12 @@ TeGenomeMapDefaultsDialog = TeDensityPlotDialog
 class RepeatQuantifyDialog(QDialog):
     """Choose a library FASTA, one or more genome FASTAs, and the engine.
 
-    Both fields are path inputs pre-filled from the current selection / folder.
-    The dialog is shown non-modally, so the Folders and Files panels stay live:
+    Laid out like the BLAST / Align dialogs: right-aligned labels, fixed-width
+    parameter fields, one tab per engine, and Restore Defaults + Cancel / Save /
+    Run. Save stores the parameters without running.
+
+    Both path fields are pre-filled from the current selection / folder. The
+    dialog is shown non-modally, so the Folders and Files panels stay live:
     clicking a FASTA there drops it into whichever field last had focus
     (``apply_path_from_panel``), and Browse covers files elsewhere.
     """
@@ -6206,13 +6218,23 @@ class RepeatQuantifyDialog(QDialog):
     _FASTA_FILTER = "FASTA (*.fa *.fasta *.fna *.fas);;All files (*)"
     # Mirrors _FASTA_FILTER: what a Files-panel click may drop into a field.
     _FASTA_SUFFIXES = frozenset({".fa", ".fasta", ".fna", ".fas"})
+    _ENGINES = ("blastn", "repeatmasker", "both")
+    _FIELD_WIDTH = 260  # same as the BLAST / Align parameter fields
 
-    def __init__(self, *, candidates, start_dir: str = "", parent=None) -> None:
+    def __init__(
+        self,
+        *,
+        candidates,
+        start_dir: str = "",
+        initial: RepeatQuantifyOptions | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Repeat quantify")
-        # Path fields need more room than the fixed-width combos they replaced.
-        self.setMinimumWidth(620)
+        # Room for the long labels plus path, Browse and Remove on one line.
+        self.setMinimumWidth(880)
         self._start_dir = start_dir
+        opts = initial or RepeatQuantifyOptions()
         cand = [Path(p) for p in candidates]
 
         # Path fields rather than dropdowns, so the dialog can stay non-modal and
@@ -6243,20 +6265,21 @@ class RepeatQuantifyDialog(QDialog):
         for widget in (self._library_input, self._genome_input):
             widget.field_activated.connect(self._on_file_input_field_activated)
 
-        inputs_box = QGroupBox("Inputs", self)
-        form = QFormLayout(inputs_box)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-        form.addRow("Library (monomers / satellites):", self._library_input)
-        form.addRow("Genome (scaffolds / assembly):", self._genome_input)
+        inputs_form = self._form()
+        inputs_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        inputs_form.setContentsMargins(0, 0, 0, 0)
+        inputs_form.addRow("Library (monomers / satellites):", self._library_input)
+        inputs_form.addRow("Genome (scaffolds / assembly):", self._genome_input)
 
         # Tabs are the engine choice; each tab holds that engine's parameters.
+        # "Both" repeats the controls, kept in sync with the single-engine tabs.
         self._tabs = QTabWidget(self)
         self._blast_a = self._make_blast_controls()
         self._rm_b = self._make_rm_controls()
         self._blast_c = self._make_blast_controls()
         self._rm_d = self._make_rm_controls()
+        self._link_controls(self._blast_a, self._blast_c)
+        self._link_controls(self._rm_b, self._rm_d)
         self._tabs.addTab(
             self._params_tab(self._blast_rows(self._blast_a)), "BLASTn"
         )
@@ -6270,58 +6293,66 @@ class RepeatQuantifyDialog(QDialog):
             + self._rm_rows(self._rm_d)
         )
         self._tabs.addTab(self._params_tab(both_rows), "Both")
-        self._tabs.setCurrentIndex(2)  # default: Both
+        self._apply_options(opts)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        restore = QPushButton("Restore Defaults", self)
+        restore.clicked.connect(self._restore_defaults)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore],
+            on_accept=self._on_footer_accept,
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Run")
-        buttons.accepted.connect(self._try_accept)
-        buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
-        layout.addWidget(inputs_box)
+        layout.addLayout(inputs_form)
         layout.addWidget(self._tabs)
-        layout.addWidget(buttons)
+        layout.addWidget(self._button_box)
+
+    @staticmethod
+    def _form(parent: QWidget | None = None) -> QFormLayout:
+        form = QFormLayout(parent) if parent is not None else QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        return form
 
     def _make_blast_controls(self) -> dict:
         word = QSpinBox(self)
         word.setRange(4, 24)
-        word.setValue(11)
         word.setToolTip(
             "BLASTn -word_size. Lower is more sensitive but much slower on "
             "big/repetitive genomes (7 can hang; 11 is a good balance)."
         )
         evalue = QDoubleSpinBox(self)
         configure_report_evalue_spinbox(evalue)
-        evalue.setValue(1e-5)
+        evalue.setToolTip("BLASTn -evalue: report hits at or below this E-value.")
         minid = QDoubleSpinBox(self)
         minid.setRange(0.0, 100.0)
         minid.setDecimals(0)
         minid.setSuffix(" %")
-        minid.setValue(0)
         minid.setToolTip("BLASTn -perc_identity. 0 = no minimum.")
         mincov = QDoubleSpinBox(self)
         mincov.setRange(0.0, 100.0)
         mincov.setDecimals(0)
         mincov.setSuffix(" %")
-        mincov.setValue(0)
         mincov.setToolTip(
             "BLASTn -qcov_hsp_perc: minimum query (monomer) coverage per hit. "
             "0 = no minimum."
         )
         for w in (word, evalue, minid, mincov):
-            w.setFixedWidth(150)
+            w.setFixedWidth(self._FIELD_WIDTH)
+            w.setAlignment(Qt.AlignmentFlag.AlignRight)
         return {"word": word, "evalue": evalue, "minid": minid, "mincov": mincov}
 
     def _make_rm_controls(self) -> dict:
         div = QSpinBox(self)
         div.setRange(1, 100)
-        div.setValue(40)
         div.setSuffix(" %")
-        div.setFixedWidth(150)
+        div.setFixedWidth(self._FIELD_WIDTH)
+        div.setAlignment(Qt.AlignmentFlag.AlignRight)
         div.setToolTip(
             "RepeatMasker -div: report only copies less than this % diverged "
             "(higher captures older copies, but noisier)."
@@ -6330,7 +6361,7 @@ class RepeatQuantifyDialog(QDialog):
         sens.addItem("Sensitive (-s)", "sensitive")
         sens.addItem("Default", "default")
         sens.addItem("Quick (-q)", "quick")
-        sens.setFixedWidth(150)
+        sens.setFixedWidth(self._FIELD_WIDTH)
         sens.setToolTip(
             "RepeatMasker search sensitivity. Sensitive is slowest; Quick is "
             "fastest on large genomes."
@@ -6338,28 +6369,37 @@ class RepeatQuantifyDialog(QDialog):
         return {"div": div, "sens": sens}
 
     @staticmethod
+    def _link_controls(first: dict, second: dict) -> None:
+        """Mirror each control of ``first`` into ``second`` and back."""
+        for key, a in first.items():
+            b = second[key]
+            if isinstance(a, QComboBox):
+                a.currentIndexChanged.connect(b.setCurrentIndex)
+                b.currentIndexChanged.connect(a.setCurrentIndex)
+            else:
+                a.valueChanged.connect(b.setValue)
+                b.valueChanged.connect(a.setValue)
+
+    @staticmethod
     def _blast_rows(c: dict) -> list:
         return [
-            ("Word size:", c["word"]),
-            ("E-value:", c["evalue"]),
-            ("Min identity:", c["minid"]),
-            ("Min coverage:", c["mincov"]),
+            ("-word_size:", c["word"]),
+            ("-evalue:", c["evalue"]),
+            ("-perc_identity:", c["minid"]),
+            ("-qcov_hsp_perc:", c["mincov"]),
         ]
 
     @staticmethod
     def _rm_rows(c: dict) -> list:
         return [
-            ("Divergence cutoff (-div):", c["div"]),
+            ("-div (divergence cutoff):", c["div"]),
             ("Sensitivity:", c["sens"]),
         ]
 
     def _params_tab(self, rows: list) -> QWidget:
         """Build a tab from (label, widget) rows; a None widget = bold header."""
         tab = QWidget()
-        form = QFormLayout(tab)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(8)
+        form = self._form(tab)
         form.setContentsMargins(16, 14, 16, 14)
         for label, widget in rows:
             if widget is None:
@@ -6371,6 +6411,44 @@ class RepeatQuantifyDialog(QDialog):
             else:
                 form.addRow(label, widget)
         return tab
+
+    def _apply_options(self, opts: RepeatQuantifyOptions) -> None:
+        # Setting the single-engine controls updates the "Both" copies too.
+        self._blast_a["word"].setValue(int(opts.blast_word_size))
+        self._blast_a["evalue"].setValue(float(opts.blast_evalue))
+        self._blast_a["minid"].setValue(float(opts.blast_min_identity))
+        self._blast_a["mincov"].setValue(float(opts.blast_min_coverage))
+        self._rm_b["div"].setValue(int(opts.rm_div))
+        idx = self._rm_b["sens"].findData(opts.rm_sensitivity)
+        self._rm_b["sens"].setCurrentIndex(max(0, idx))
+        engine = opts.engine if opts.engine in self._ENGINES else "both"
+        self._tabs.setCurrentIndex(self._ENGINES.index(engine))
+
+    def _restore_defaults(self) -> None:
+        """Reset the parameters (not the chosen files) to their defaults."""
+        self._apply_options(RepeatQuantifyOptions())
+
+    def options(self) -> RepeatQuantifyOptions:
+        return RepeatQuantifyOptions(
+            engine=self.engine(),
+            blast_word_size=int(self._blast_a["word"].value()),
+            blast_evalue=float(self._blast_a["evalue"].value()),
+            blast_min_identity=float(self._blast_a["minid"].value()),
+            blast_min_coverage=float(self._blast_a["mincov"].value()),
+            rm_div=int(self._rm_b["div"].value()),
+            rm_sensitivity=str(self._rm_b["sens"].currentData()),
+        )
+
+    def should_run(self) -> bool:
+        """True when the dialog was closed with Run (not Save or Cancel)."""
+        return dialog_should_run(self)
+
+    def _on_footer_accept(self) -> None:
+        # Save only stores the parameters, so it needs no input files.
+        if self._close_action == "run":
+            self._try_accept()
+        else:
+            self.accept()
 
     def _on_file_input_field_activated(self) -> None:
         sender = self.sender()
@@ -6432,14 +6510,4 @@ class RepeatQuantifyDialog(QDialog):
         return ("blastn", "repeatmasker", "both")[self._tabs.currentIndex()]
 
     def params(self) -> dict:
-        idx = self._tabs.currentIndex()
-        blast = {0: self._blast_a, 2: self._blast_c}.get(idx)
-        rm = {1: self._rm_b, 2: self._rm_d}.get(idx)
-        return {
-            "blast_word_size": blast["word"].value() if blast else 11,
-            "blast_evalue": blast["evalue"].value() if blast else 1e-5,
-            "blast_min_identity": blast["minid"].value() if blast else 0.0,
-            "blast_min_coverage": blast["mincov"].value() if blast else 0.0,
-            "rm_div": rm["div"].value() if rm else 40,
-            "rm_sensitivity": rm["sens"].currentData() if rm else "sensitive",
-        }
+        return self.options().params()

@@ -1291,6 +1291,81 @@ def save_te_divergence_plot_options(opts: TeDivergencePlotOptions) -> None:
     )
 
 
+REPEAT_QUANTIFY_ENGINES = ("blastn", "repeatmasker", "both")
+REPEAT_QUANTIFY_SENSITIVITIES = ("sensitive", "default", "quick")
+
+
+@dataclass
+class RepeatQuantifyOptions:
+    """Repeat Quantify engine choice and per-engine parameters."""
+
+    engine: str = "both"
+    blast_word_size: int = 11
+    # The dialog's E-value box has four decimals (min 0.0001), so 1e-5 was
+    # never actually selectable there.
+    blast_evalue: float = DEFAULT_BLAST_EVALUE
+    blast_min_identity: float = 0.0
+    blast_min_coverage: float = 0.0
+    rm_div: int = 40
+    rm_sensitivity: str = "sensitive"
+
+    def params(self) -> dict:
+        """Keyword arguments for ``quantify_library`` (everything but engine)."""
+        return {
+            "blast_word_size": self.blast_word_size,
+            "blast_evalue": self.blast_evalue,
+            "blast_min_identity": self.blast_min_identity,
+            "blast_min_coverage": self.blast_min_coverage,
+            "rm_div": self.rm_div,
+            "rm_sensitivity": self.rm_sensitivity,
+        }
+
+
+def _clamped(value, cast, default, low, high):
+    try:
+        out = cast(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(out, low), high)
+
+
+def load_repeat_quantify_options() -> RepeatQuantifyOptions:
+    v = _load_settings_group("repeat_quantify")
+    d = RepeatQuantifyOptions()
+    engine = str(v.get("engine", d.engine))
+    sensitivity = str(v.get("rm_sensitivity", d.rm_sensitivity))
+    return RepeatQuantifyOptions(
+        engine=engine if engine in REPEAT_QUANTIFY_ENGINES else d.engine,
+        blast_word_size=_clamped(
+            v.get("blast_word_size", d.blast_word_size), int, d.blast_word_size, 4, 24
+        ),
+        blast_evalue=_clamped(
+            v.get("blast_evalue", d.blast_evalue), float, d.blast_evalue,
+            MIN_BLAST_EVALUE, 1.0,
+        ),
+        blast_min_identity=_clamped(
+            v.get("blast_min_identity", d.blast_min_identity), float,
+            d.blast_min_identity, 0.0, 100.0,
+        ),
+        blast_min_coverage=_clamped(
+            v.get("blast_min_coverage", d.blast_min_coverage), float,
+            d.blast_min_coverage, 0.0, 100.0,
+        ),
+        rm_div=_clamped(v.get("rm_div", d.rm_div), int, d.rm_div, 1, 100),
+        rm_sensitivity=(
+            sensitivity if sensitivity in REPEAT_QUANTIFY_SENSITIVITIES
+            else d.rm_sensitivity
+        ),
+    )
+
+
+def save_repeat_quantify_options(opts: RepeatQuantifyOptions) -> None:
+    _save_settings_group(
+        "repeat_quantify",
+        {"engine": opts.engine, **opts.params()},
+    )
+
+
 def load_consensus_options() -> ConsensusOptions:
     v = _load_settings_group("consensus")
     right_click_action = str(v.get("right_click_action", CONSENSUS_RIGHT_CLICK_RUN))

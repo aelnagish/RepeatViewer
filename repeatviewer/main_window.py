@@ -349,6 +349,7 @@ from repeatviewer.job_options import (
     load_teaid_options,
     load_te_genome_map_options,
     load_te_divergence_plot_options,
+    load_repeat_quantify_options,
     load_te_confusion_matrix_benchmark_options,
     load_te_library_benchmark_options,
     load_tsd_search_options,
@@ -364,6 +365,7 @@ from repeatviewer.job_options import (
     save_teaid_options,
     save_te_genome_map_options,
     save_te_divergence_plot_options,
+    save_repeat_quantify_options,
     save_te_confusion_matrix_benchmark_options,
     save_te_library_benchmark_options,
     save_tsd_search_options,
@@ -3804,6 +3806,10 @@ class MainWindow(QMainWindow):
         start_dir = str(self._current_folder) if self._current_folder else ""
 
         def _on_accept(dialog: RepeatQuantifyDialog) -> None:
+            save_repeat_quantify_options(dialog.options())
+            if not dialog.should_run():
+                self._set_status_message("Repeat quantify settings saved", 4000)
+                return
             library = dialog.library()
             targets = dialog.targets()
             engine = dialog.engine()
@@ -3840,7 +3846,10 @@ class MainWindow(QMainWindow):
             )
 
         dialog = RepeatQuantifyDialog(
-            candidates=candidates, start_dir=start_dir, parent=self
+            candidates=candidates,
+            start_dir=start_dir,
+            initial=load_repeat_quantify_options(),
+            parent=self,
         )
         # Same non-modal presentation as the TE visualization dialogs, so the
         # Folders and Files panels stay clickable while it is open.
