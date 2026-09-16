@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, Qt, QThread, Signal, Slot
+from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QTransform
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -136,9 +136,10 @@ _ZOOM_STEP = 1.12        # +/- button step
 _TRACKPAD_ZOOM_BASE = 1.0022
 
 _RULER_TOP = 18
-# Wide enough for the tick labels plus the rotated sequence name beside them.
-_RULER_LEFT = 66
-_Y_LABEL_STRIP = 16
+# Left margin: name strip + tick labels flush against the axis (same px/base as X).
+_RULER_LEFT = 48
+_Y_NAME_X = 9
+_Y_TICK_PAD = 3  # gap between label and tick mark
 _RULER_BG = QColor(250, 250, 250)
 _RULER_FG = QColor(110, 110, 110)
 _RULER_LINE = QColor(200, 200, 200)
@@ -149,7 +150,7 @@ _SELECT_EDGE = QColor(60, 110, 200, 190)
 _CLICK_SLOP = 4
 
 
-def _nice_tick_step(span: float, target_ticks: int = 8) -> int:
+def _nice_tick_step(span: float, target_ticks: int = 10) -> int:
     """A round tick interval (1/2/5 x 10^n) giving roughly ``target_ticks``."""
     if span <= 0:
         return 1
@@ -307,35 +308,58 @@ class _Ruler(QWidget):
 
         visible = view.visible_scene_rect()
         length = view.plot_length()
-        span = visible.width() if self._horizontal else visible.height()
-        step = _nice_tick_step(max(span, 1.0))
+        # Same tick interval on X and Y so equal scale is obvious (a wide
+        # viewport would otherwise pick step 100 on X and 20 on Y).
+        step = view.shared_tick_step()
         lo = visible.left() if self._horizontal else visible.top()
         hi = visible.right() if self._horizontal else visible.bottom()
 
         painter.setPen(QPen(_RULER_FG))
+        metrics = painter.fontMetrics()
         offset = view.coordinate_offset()
+        ticks: list[int] = []
         tick = int(lo // step) * step
-        while tick <= hi:
-            if 0 <= tick <= length:
-                pos = view.scene_to_ruler(tick, self._horizontal)
-                label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
-                if self._horizontal:
-                    if 0 <= pos <= self.width():
-                        painter.drawLine(int(pos), self.height() - 4, int(pos), self.height())
-                        painter.drawText(
-                            int(pos) + 2,
-                            self.height() - 6,
-                            label,
-                        )
-                else:
-                    if 0 <= pos <= self.height():
-                        painter.drawLine(self.width() - 4, int(pos), self.width(), int(pos))
-                        painter.drawText(
-                            _Y_LABEL_STRIP,
-                            int(pos) - 2,
-                            label,
-                        )
+        while tick <= hi + step:
+            if 0 <= tick <= length and lo - step <= tick <= hi + step:
+                ticks.append(int(tick))
             tick += step
+        # Always mark the sequence start/end when they are in view.
+        for edge in (0, length):
+            if lo - step <= edge <= hi + step and edge not in ticks:
+                ticks.append(edge)
+        ticks.sort()
+
+        for tick in ticks:
+            pos = view.scene_to_ruler(tick, self._horizontal)
+            label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
+            if self._horizontal:
+                if 0 <= pos <= self.width():
+                    painter.drawLine(int(pos), self.height() - 4, int(pos), self.height())
+                    painter.drawText(
+                        int(pos) + 2,
+                        self.height() - 6,
+                        label,
+                    )
+            else:
+                if 0 <= pos <= self.height():
+                    painter.drawLine(self.width() - 4, int(pos), self.width(), int(pos))
+                    # Right-align and vertically centre on the tick so the
+                    # number sits on the mark (drawText y is baseline).
+                    label_h = metrics.height()
+                    text_rect = QRect(
+                        0,
+                        int(pos) - label_h // 2,
+                        self.width() - 4 - _Y_TICK_PAD,
+                        label_h,
+                    )
+                    painter.drawText(
+                        text_rect,
+                        int(
+                            Qt.AlignmentFlag.AlignRight
+                            | Qt.AlignmentFlag.AlignVCenter
+                        ),
+                        label,
+                    )
 
         cursor = view.cursor_scene_pos()
         if cursor is not None:
@@ -343,16 +367,28 @@ class _Ruler(QWidget):
             value = cursor.x() if self._horizontal else cursor.y()
             pos = view.scene_to_ruler(value, self._horizontal)
             real = _scene_to_bp(value, length=length, offset=offset)
+            label = f"{real:,}"
             if self._horizontal and 0 <= pos <= self.width():
-                painter.drawText(int(pos) + 2, self.height() - 6, f"{real:,}")
+                painter.drawText(int(pos) + 2, self.height() - 6, label)
             elif not self._horizontal and 0 <= pos <= self.height():
-                painter.drawText(_Y_LABEL_STRIP, int(pos) - 2, f"{real:,}")
+                label_h = metrics.height()
+                text_rect = QRect(
+                    0,
+                    int(pos) - label_h // 2,
+                    self.width() - 4 - _Y_TICK_PAD,
+                    label_h,
+                )
+                painter.drawText(
+                    text_rect,
+                    int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                    label,
+                )
 
-        # Sequence name down the y axis, as Geneious labels its dotplot.
+        # Sequence name down the y axis, packed against the tick labels.
         if not self._horizontal and view.plot_title():
             painter.setPen(QPen(_RULER_FG))
             painter.save()
-            painter.translate(11, self.height() / 2.0)
+            painter.translate(_Y_NAME_X, self.height() / 2.0)
             painter.rotate(-90)
             painter.drawText(
                 QRectF(-self.height() / 2.0, -8, self.height(), 16),
@@ -471,6 +507,17 @@ class DotplotCanvas(QGraphicsView):
         point = self.mapFromScene(QPointF(value, value))
         return point.x() if horizontal else point.y()
 
+    def shared_tick_step(self) -> int:
+        """One tick interval for both axes (equal scale stays visually clear)."""
+        visible = self.visible_scene_rect()
+        length = max(float(self._length), 1.0)
+        # Intersect with the sequence square so empty letterbox beside a fitted
+        # plot does not inflate the span (that produced only 1 and 5k on a 6 kb
+        # sequence in a wide window).
+        shown = visible.intersected(QRectF(0.0, 0.0, length, length))
+        span = max(float(shown.width()), float(shown.height()), 1.0)
+        return _nice_tick_step(span, target_ticks=10)
+
     def _refresh_rulers(self) -> None:
         self._top_ruler.update()
         self._left_ruler.update()
@@ -547,20 +594,41 @@ class DotplotCanvas(QGraphicsView):
     def reset_zoom(self) -> None:
         """Fit the whole sequence square into the plot area.
 
-        Ruler space is reserved by setViewportMargins(), so the viewport *is*
-        the plot area and this is a straight fit with no padding arithmetic.
+        X and Y use the same pixels-per-base so a self-dotplot is always a
+        true square (45° diagonal). ``fitInView`` is avoided: with viewport
+        margins it can leave a non-uniform transform and stretch the plot.
         """
         if not self._length:
             return
-        self.resetTransform()
-        # The viewport is now exactly the plot area, so fit the sequence square
-        # into it directly -- no padding tricks.
+        vp = self.viewport().rect()
+        if vp.width() < 1 or vp.height() < 1:
+            return
         n = float(self._length)
-        self.fitInView(QRectF(0, 0, n, n), Qt.AspectRatioMode.KeepAspectRatio)
-        self._fit_scale = self.transform().m11() or 0.0
+        scale = min(vp.width() / n, vp.height() / n)
+        self._set_uniform_scale(scale)
+        self._fit_scale = scale
         self._clamp_scroll_to_plot()
         self.viewport().update()
         self._refresh_rulers()
+
+    def _set_uniform_scale(self, scale: float) -> None:
+        """Identical X/Y scale, plot pinned to the top-left of the viewport."""
+        scale = max(float(scale), 1e-12)
+        self.setTransform(QTransform.fromScale(scale, scale))
+        self.horizontalScrollBar().setValue(0)
+        self.verticalScrollBar().setValue(0)
+
+    def _uniform_scale(self) -> float:
+        """Current pixels-per-base (forces X/Y equal if they ever drift)."""
+        t = self.transform()
+        sx = abs(t.m11()) or 1.0
+        sy = abs(t.m22()) or sx
+        if abs(sx - sy) > 1e-9 * max(sx, sy):
+            # Repair a non-uniform matrix without changing the intended zoom.
+            scale = min(sx, sy)
+            self.setTransform(QTransform.fromScale(scale, scale))
+            return scale
+        return sx
 
     def zoom_to_selection(self) -> bool:
         """Fit the current selection into the view. Returns False if none."""
@@ -575,10 +643,15 @@ class DotplotCanvas(QGraphicsView):
         )
         if target.width() < 1.0 or target.height() < 1.0:
             return False
-        self.fitInView(target, Qt.AspectRatioMode.KeepAspectRatio)
-        current = self.transform().m11() or 1.0
-        if current > _MAX_PIXELS_PER_BASE:
-            self.scale(_MAX_PIXELS_PER_BASE / current, _MAX_PIXELS_PER_BASE / current)
+        vp = self.viewport().rect()
+        if vp.width() < 1 or vp.height() < 1:
+            return False
+        # Same px/base on both axes; size to the larger side of the selection.
+        side = max(target.width(), target.height())
+        scale = min(vp.width() / side, vp.height() / side)
+        scale = min(scale, _MAX_PIXELS_PER_BASE)
+        self.setTransform(QTransform.fromScale(scale, scale))
+        self.centerOn(target.center())
         self._clamp_scroll_to_plot()
         self.viewport().update()
         self._refresh_rulers()
@@ -588,14 +661,20 @@ class DotplotCanvas(QGraphicsView):
         rect = self._selection
         return rect is not None and rect.width() >= 1.0 and rect.height() >= 1.0
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        self._position_rulers()
-        self._fit_if_needed()
-        self._refresh_rulers()
-
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._position_rulers()
+        if self._needs_fit:
+            self._fit_if_needed()
+        elif self._item is not None and self._fit_scale > 0:
+            # Stay locked to a square fit when the user hasn't zoomed in.
+            current = self._uniform_scale()
+            if abs(current - self._fit_scale) <= max(1e-6, self._fit_scale * 1e-4):
+                self.reset_zoom()
+        self._refresh_rulers()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
         self._position_rulers()
         self._fit_if_needed()
         self._refresh_rulers()
@@ -728,7 +807,7 @@ class DotplotCanvas(QGraphicsView):
         """Zoom by ``factor`` about ``anchor`` (viewport coords), then clamp."""
         if self._item is None or not self._length:
             return
-        current = self.transform().m11() or 1.0
+        current = self._uniform_scale()
         floor = (self._fit_scale or current) * _ZOOM_OUT_LIMIT
         target = min(_MAX_PIXELS_PER_BASE, max(floor, current * factor))
         actual = target / current
@@ -822,7 +901,7 @@ class DotplotCanvas(QGraphicsView):
             # --- axes, matching the on-screen rulers ---
             length = max(self._length, 1)
             offset = self._offset
-            step = _nice_tick_step(float(length))
+            step = self.shared_tick_step() if self._length else _nice_tick_step(float(length))
             tick_len = 3 * unit
             f = QFont(base_font); f.setPointSizeF(7)
             painter.setFont(f)

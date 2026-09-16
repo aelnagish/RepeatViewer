@@ -10516,7 +10516,10 @@ class MainWindow(QMainWindow):
             if len(created_paths) > 4:
                 names += ", …"
             summary += f" — created: {names}"
-        self._set_status_message(summary, 12000, override_file_link=True)
+        # TEAid opens its HTML in Preview and sets the file link; a timed
+        # "finished" banner only flashes then covers that link.
+        if func_name != "teaid":
+            self._set_status_message(summary, 12000, override_file_link=True)
 
         if failures:
             msg = summary + "\n\nFailures:\n" + "\n".join(failures[:8])
