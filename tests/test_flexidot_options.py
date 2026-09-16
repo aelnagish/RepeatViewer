@@ -10,7 +10,8 @@ def test_normalize_flexidot_output_format() -> None:
     assert normalize_flexidot_output_format("png") == "png"
     assert normalize_flexidot_output_format("PNG") == "png"
     assert normalize_flexidot_output_format("html") == "html"
-    assert normalize_flexidot_output_format("unknown") == "html"
+    # Unknown values fall back to the project default (png).
+    assert normalize_flexidot_output_format("unknown") == "png"
 
 
 def test_save_and_load_flexidot_output_format(monkeypatch) -> None:
