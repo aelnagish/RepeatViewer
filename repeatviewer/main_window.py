@@ -2037,9 +2037,16 @@ class MainWindow(QMainWindow):
         self._status_file_link = QLabel()
         self._status_file_link.setTextFormat(Qt.TextFormat.RichText)
         self._status_file_link.setOpenExternalLinks(False)
+        self._status_file_link.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
         self._status_file_link.linkActivated.connect(self._on_status_file_link_activated)
         self._status_file_link.hide()
+        # Left-side temporary widget: replaces status text when a file is selected.
         status.addWidget(self._status_file_link)
+        self._status_link_restore_timer = QTimer(self)
+        self._status_link_restore_timer.setSingleShot(True)
+        self._status_link_restore_timer.timeout.connect(self._restore_status_file_link)
         self._task_progress = TaskProgressPanel()
         status.addPermanentWidget(self._task_progress)
         self._stop_btn = QPushButton("Stop")
@@ -2459,9 +2466,12 @@ class MainWindow(QMainWindow):
             self._stop_btn.setEnabled(False)
 
     def _set_status_file_link(self, path: Path | None) -> None:
+        """Replace the left status text with a clickable filename (Finder link)."""
+        self._status_link_restore_timer.stop()
         if path is None:
             self._status_linked_file = None
             self._status_file_link.hide()
+            self._status_file_link.clear()
             self._update_status()
             return
         try:
@@ -2469,16 +2479,23 @@ class MainWindow(QMainWindow):
         except OSError:
             self._status_linked_file = None
             self._status_file_link.hide()
+            self._status_file_link.clear()
             self._update_status()
             return
         self._status_linked_file = resolved
         safe_name = resolved.name.replace("&", "&amp;").replace("<", "&lt;")
         self._status_file_link.setText(f'<a href="reveal">{safe_name}</a>')
         self._status_file_link.setToolTip(f"Show in file manager\n{resolved}")
-        # Deliberately no clearMessage() here. Previewing an output is queued on a
-        # QTimer right after a job posts its result, so clearing would cut that
-        # result short. Qt keeps a widget added with addWidget() hidden while a
-        # message is showing and reveals it once the message expires.
+        # Clear status text first — showing both causes the stacked/overlap glitch.
+        self.statusBar().clearMessage()
+        self._status_file_link.show()
+
+    def _restore_status_file_link(self) -> None:
+        """After a timed status message, show the file link again if still set."""
+        if self._status_linked_file is None:
+            return
+        if self.statusBar().currentMessage():
+            return
         self._status_file_link.show()
 
     def _on_status_file_link_activated(self, _href: str) -> None:
@@ -2492,18 +2509,24 @@ class MainWindow(QMainWindow):
         *,
         override_file_link: bool = False,
     ) -> None:
-        """Show a status message.
+        """Show status text on the left.
 
-        A visible file link normally wins, so routine chatter cannot clobber the
-        "reveal in file manager" link. Job results pass ``override_file_link`` —
-        Qt hides the link label for the message's lifetime and restores it after,
-        so the result is always seen and the link is not lost.
+        While a file link is active, routine messages are skipped so the link
+        stays put. Job results pass ``override_file_link=True`` to temporarily
+        replace the link; it returns after ``timeout``.
         """
         if self._job_running:
             return
         if self._status_linked_file is not None and not override_file_link:
             return
+        self._status_file_link.hide()
         self.statusBar().showMessage(message, timeout)
+        if self._status_linked_file is not None and timeout > 0:
+            self._status_link_restore_timer.start(timeout + 50)
+        elif self._status_linked_file is not None and timeout == 0:
+            # Persistent override message — link stays hidden until cleared.
+            self._status_link_restore_timer.stop()
+
 
     def _make_browser_dock(
         self,
@@ -3396,7 +3419,10 @@ class MainWindow(QMainWindow):
         mirror_progress: bool = True,
     ) -> None:
         """Capture command output; show live when enabled, always show on failure."""
-        from repeatviewer.widgets.process_monitor_dialog import ProcessMonitorDialog
+        from repeatviewer.widgets.process_monitor_dialog import (
+            ProcessMonitorBridge,
+            ProcessMonitorDialog,
+        )
 
         attr = f"_{tool_key}_process_dialog"
         dialog = getattr(self, attr, None)
@@ -3408,47 +3434,32 @@ class MainWindow(QMainWindow):
         buffer: list[str] = []
         setattr(self, f"_{tool_key}_process_log", buffer)
 
-        def _on_line(text: str, *, d=dialog, buf=buffer, live=enabled) -> None:
-            line = str(text)
-            buf.append(line)
-            if live and d.isVisible():
-                d.append_line(line)
-
         if enabled:
             dialog.prepare(title)
 
-        if hasattr(worker, "log_line"):
-            worker.log_line.connect(_on_line)
-        if mirror_progress:
-            worker.progress.connect(
-                lambda _value, label, fn=_on_line: fn(label) if label else None
-            )
-
-        def _on_finished(*_args, d=dialog, live=enabled) -> None:
-            if live:
-                d.mark_finished(True)
-
-        def _on_failed(
-            error: str,
-            *,
-            d=dialog,
-            buf=buffer,
+        # Bound methods on a main-thread QObject + QueuedConnection — never
+        # lambdas — so dialog.show()/append never run on the worker QThread
+        # (macOS aborts when NSPanel is touched off the GUI thread).
+        bridge_attr = f"_{tool_key}_process_bridge"
+        old_bridge = getattr(self, bridge_attr, None)
+        if old_bridge is not None:
+            old_bridge.deleteLater()
+        bridge = ProcessMonitorBridge(
+            dialog,
+            buffer,
             live=enabled,
-            job_title=title,
-        ) -> None:
-            if error == CANCELLED_MESSAGE:
-                if live:
-                    d.mark_finished(False, "Stopped")
-                return
-            if live:
-                d.mark_finished(False, str(error))
-                d.raise_()
-                d.activateWindow()
-            else:
-                d.show_failure_log(job_title, list(buf), error=str(error))
-
-        worker.finished.connect(_on_finished)
-        worker.failed.connect(_on_failed)
+            title=title,
+            cancelled_message=CANCELLED_MESSAGE,
+            parent=self,
+        )
+        setattr(self, bridge_attr, bridge)
+        queued = Qt.ConnectionType.QueuedConnection
+        if hasattr(worker, "log_line"):
+            worker.log_line.connect(bridge.on_line, queued)
+        if mirror_progress:
+            worker.progress.connect(bridge.on_progress, queued)
+        worker.finished.connect(bridge.on_finished, queued)
+        worker.failed.connect(bridge.on_failed, queued)
 
     def _warn_folders_with_spaces(self, folders: list[Path]) -> None:
         """Remind the user when imported paths contain spaces; offer conversion."""
@@ -6086,9 +6097,12 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self._job_running or not self._current_folder:
             return
+        # File link owns the left status slot — do not paint folder text over it.
         if self._status_linked_file is not None:
             self.statusBar().clearMessage()
+            self._status_file_link.show()
             return
+        self._status_file_link.hide()
         if visible_count == total_count:
             count = f"{total_count} files"
         else:
@@ -10300,17 +10314,18 @@ class MainWindow(QMainWindow):
         self._worker = worker
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
-        self._worker.progress.connect(self._on_job_progress)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._worker.progress.connect(self._on_job_progress, queued)
         self._worker.finished.connect(
             lambda result, title=job_title: self._log_job_finished(title, result)
         )
         self._worker.failed.connect(
             lambda error, title=job_title: self._log_job_failed(title, error)
         )
-        self._worker.finished.connect(self._finish_background_job)
-        self._worker.failed.connect(self._finish_background_job)
-        self._worker.finished.connect(on_finished)
-        self._worker.failed.connect(on_failed)
+        self._worker.finished.connect(self._finish_background_job, queued)
+        self._worker.failed.connect(self._finish_background_job, queued)
+        self._worker.finished.connect(on_finished, queued)
+        self._worker.failed.connect(on_failed, queued)
         self._worker.finished.connect(self._worker_thread.quit)
         self._worker.failed.connect(self._worker_thread.quit)
         self._worker_thread.finished.connect(self._cleanup_worker)
@@ -10628,13 +10643,13 @@ class MainWindow(QMainWindow):
     def _update_status(self) -> None:
         if self._job_running:
             return
-        if self.statusBar().currentMessage():
-            # A timed message (usually a job result) is on screen. Leave it alone;
-            # _cleanup_worker runs here once the job thread ends, and clearing
-            # would cut the result short. Qt restores the file link on expiry.
-            return
         if self._status_linked_file is not None:
+            # Keep the clickable filename on the left; don't restore folder text.
             self.statusBar().clearMessage()
+            self._status_file_link.show()
+            return
+        if self.statusBar().currentMessage():
+            # A timed message (usually a job result) is on screen. Leave it alone.
             return
         if self._current_folder and self._cached_folder_files is not None:
             visible = self._file_list.rowCount()

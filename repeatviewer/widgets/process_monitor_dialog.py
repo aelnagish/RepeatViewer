@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Slot
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
@@ -99,3 +99,62 @@ class ProcessMonitorDialog(QDialog):
         self.show()
         self.raise_()
         self.activateWindow()
+
+
+class ProcessMonitorBridge(QObject):
+    """Marshal worker log/finish signals onto the GUI thread.
+
+    Worker signals connected to plain lambdas use a DirectConnection (no
+    receiver QObject), so dialog.show() would run on the QThread and abort
+    on macOS (NSWindow / NSPanel must be used from the main thread).
+    Parent this bridge to the main window and connect with QueuedConnection.
+    """
+
+    def __init__(
+        self,
+        dialog: ProcessMonitorDialog,
+        buffer: list[str],
+        *,
+        live: bool,
+        title: str,
+        cancelled_message: str,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._dialog = dialog
+        self._buffer = buffer
+        self._live = live
+        self._title = title
+        self._cancelled_message = cancelled_message
+
+    @Slot(str)
+    def on_line(self, text: str) -> None:
+        line = str(text)
+        self._buffer.append(line)
+        if self._live and self._dialog.isVisible():
+            self._dialog.append_line(line)
+
+    @Slot(int, str)
+    def on_progress(self, _value: int, label: str) -> None:
+        if label:
+            self.on_line(label)
+
+    @Slot()
+    def on_finished(self) -> None:
+        if self._live:
+            self._dialog.mark_finished(True)
+
+    @Slot(str)
+    def on_failed(self, error: str) -> None:
+        if error == self._cancelled_message:
+            if self._live:
+                self._dialog.mark_finished(False, "Stopped")
+            return
+        if self._live:
+            self._dialog.mark_finished(False, str(error))
+            self._dialog.raise_()
+            self._dialog.activateWindow()
+        else:
+            self._dialog.show_failure_log(
+                self._title, list(self._buffer), error=str(error)
+            )

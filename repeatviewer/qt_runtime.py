@@ -257,6 +257,7 @@ def _configure_webengine() -> None:
             "--disable-gpu",
             "--disable-gpu-compositing",
             "--disable-gpu-rasterization",
+            "--disable-features=Metal,Vulkan,WebGPU,VizDisplayCompositor",
             "--no-sandbox",
         ):
             if flag not in flags:
