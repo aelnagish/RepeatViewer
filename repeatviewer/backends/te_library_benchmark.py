@@ -301,12 +301,15 @@ def run_repeatmasker_lib_benchmark(
     threads: int = 4,
     div: int = 40,
     sensitivity: str = "sensitive",
+    write_alignments: bool = False,
 ) -> Path:
     """Run RepeatMasker ``-lib standard query`` and return the ``.out`` path.
 
     ``div`` is the ``-div`` cutoff (report only copies < div% diverged).
     ``sensitivity`` is ``"sensitive"`` (-s), ``"default"`` (none), or
     ``"quick"`` (-q). Defaults reproduce the original behaviour.
+    ``write_alignments`` adds ``-a`` so a ``.align`` file (with per-hit
+    CpG-adjusted Kimura divergence) is written next to the ``.out``.
     """
     exe = repeatmasker_executable()
     if not exe:
@@ -323,6 +326,8 @@ def run_repeatmasker_lib_benchmark(
         cmd.append("-s")
     elif sensitivity == "quick":
         cmd.append("-q")
+    if write_alignments:
+        cmd.append("-a")
     cmd += [
         "-div",
         str(int(div)),
