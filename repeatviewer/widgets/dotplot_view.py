@@ -122,9 +122,29 @@ class _FastgaWorker(QObject):
             return
         self.finished.emit(result)
 
-_FORWARD_COLOR = QColor(40, 90, 180)
-_REVERSE_COLOR = QColor(200, 60, 40)
-_DIAGONAL_COLOR = QColor(230, 120, 40)
+_FORWARD_COLOR = QColor(40, 90, 180)   # direct repeats (blue)
+_REVERSE_COLOR = QColor(200, 60, 40)   # inverted repeats (red)
+# Charcoal — must stay distinct from warm reverse red and cool forward blue.
+_DIAGONAL_COLOR = QColor(45, 45, 45)
+
+_DEFAULT_LINE_WIDTH_STEP = 1
+_MIN_LINE_WIDTH_STEP = 1
+_MAX_LINE_WIDTH_STEP = 15
+# UI steps 1…15: same fine gradient as before (≈0.25 px per step), up to ~4.5 px.
+_LINE_WIDTH_PX_MIN = 1.0
+_LINE_WIDTH_PX_MAX = 4.5
+
+
+def _line_width_px(step: int) -> float:
+    """Map toolbar step (1–5) to cosmetic pen width in screen pixels."""
+    step = max(_MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(step)))
+    if _MAX_LINE_WIDTH_STEP <= _MIN_LINE_WIDTH_STEP:
+        return _LINE_WIDTH_PX_MIN
+    t = (step - _MIN_LINE_WIDTH_STEP) / (
+        _MAX_LINE_WIDTH_STEP - _MIN_LINE_WIDTH_STEP
+    )
+    return _LINE_WIDTH_PX_MIN + t * (_LINE_WIDTH_PX_MAX - _LINE_WIDTH_PX_MIN)
+
 
 # Zoom limits are relative to the scale that fits the whole plot, not absolute.
 # A 190 kb window fits at ~0.004 px/base, so an absolute lower bound of 0.02
@@ -164,10 +184,7 @@ def _nice_tick_step(span: float, target_ticks: int = 10) -> int:
 
 
 def _format_bp(value: int) -> str:
-    if value >= 1_000_000 and value % 1_000_000 == 0:
-        return f"{value // 1_000_000}M"
-    if value >= 1_000 and value % 1_000 == 0:
-        return f"{value // 1_000}k"
+    """Always use comma grouping (1,000) — never mix with compact 1k / 1M."""
     return f"{value:,}"
 
 
@@ -255,14 +272,36 @@ def _non_overlapping_tick_labels(
 class _SegmentsItem(QGraphicsItem):
     """Paints every dotplot segment in one pass."""
 
-    def __init__(self, result: DotplotResult) -> None:
+    def __init__(
+        self,
+        result: DotplotResult,
+        *,
+        line_width_step: int = _DEFAULT_LINE_WIDTH_STEP,
+    ) -> None:
         super().__init__()
         self._result = result
         self._n = max(result.sequence_length, 1)
+        self._line_width_step = max(
+            _MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(line_width_step))
+        )
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
+
+    def set_line_width_step(self, step: int) -> None:
+        step = max(_MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(step)))
+        if step == self._line_width_step:
+            return
+        self._line_width_step = step
+        self.update()
 
     def boundingRect(self) -> QRectF:  # noqa: N802
         return QRectF(0, 0, float(self._n), float(self._n))
+
+    def _pen(self, color: QColor) -> QPen:
+        pen = QPen(color)
+        pen.setCosmetic(True)
+        pen.setWidthF(_line_width_px(self._line_width_step))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        return pen
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -273,9 +312,7 @@ class _SegmentsItem(QGraphicsItem):
         min_length = 0.0 if scale >= 1.0 else (1.0 / scale)
         visible = option.exposedRect if option is not None else self.boundingRect()
 
-        pen = QPen(_DIAGONAL_COLOR)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
+        painter.setPen(self._pen(_DIAGONAL_COLOR))
         painter.drawLine(QPointF(0, 0), QPointF(self._n, self._n))
 
         forward: list[tuple[float, float, float, float]] = []
@@ -306,16 +343,12 @@ class _SegmentsItem(QGraphicsItem):
             else:
                 forward.append((x1, y1, x2, y2))
 
-        pen = QPen(_FORWARD_COLOR)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
+        painter.setPen(self._pen(_FORWARD_COLOR))
         for x1, y1, x2, y2 in forward:
             painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
             painter.drawLine(QPointF(y1, x1), QPointF(y2, x2))  # self-symmetry
 
-        pen = QPen(_REVERSE_COLOR)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
+        painter.setPen(self._pen(_REVERSE_COLOR))
         for x1, y1, x2, y2 in reverse:
             painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
@@ -510,6 +543,7 @@ class DotplotCanvas(QGraphicsView):
         self.setBackgroundBrush(_RULER_BG)
         self._item: _SegmentsItem | None = None
         self._length = 0
+        self._line_width_step = _DEFAULT_LINE_WIDTH_STEP
         # Plot coordinates are 0..length; add this to show real positions when
         # only a window of a large sequence is plotted.
         self._offset = 0
@@ -584,12 +618,22 @@ class DotplotCanvas(QGraphicsView):
         point = self.mapFromScene(QPointF(value, value))
         return point.x() if horizontal else point.y()
 
+    def set_line_width_step(self, step: int) -> None:
+        """Toolbar step 1–15 maps evenly onto ~1–4.5 screen pixels."""
+        step = max(_MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(step)))
+        self._line_width_step = step
+        if self._item is not None:
+            self._item.set_line_width_step(step)
+
+    def line_width_step(self) -> int:
+        return self._line_width_step
+
     def shared_tick_step(self) -> int:
         """One tick interval for both axes (equal scale stays visually clear)."""
         visible = self.visible_scene_rect()
         length = max(float(self._length), 1.0)
         # Intersect with the sequence square so empty letterbox beside a fitted
-        # plot does not inflate the span (that produced only 1 and 5k on a 6 kb
+        # plot does not inflate the span (that produced only 1 and 5,000 on a 6 kb
         # sequence in a wide window).
         shown = visible.intersected(QRectF(0.0, 0.0, length, length))
         span = max(float(shown.width()), float(shown.height()), 1.0)
@@ -630,7 +674,7 @@ class DotplotCanvas(QGraphicsView):
 
         scene = self.scene()
         scene.clear()
-        self._item = _SegmentsItem(result)
+        self._item = _SegmentsItem(result, line_width_step=self._line_width_step)
         self._length = result.sequence_length
         self._offset = int(getattr(result, "coordinate_offset", 0) or 0)
         self._selection = None
@@ -1226,6 +1270,17 @@ class DotplotPanel(QWidget):
             "as anti-diagonal lines."
         )
 
+        self._line_width = QSpinBox(self)
+        self._line_width.setRange(_MIN_LINE_WIDTH_STEP, _MAX_LINE_WIDTH_STEP)
+        self._line_width.setValue(_DEFAULT_LINE_WIDTH_STEP)
+        self._line_width.setFixedWidth(55)
+        self._line_width.setToolTip(
+            "Match and self-diagonal thickness.\n"
+            "Steps 1–15 use a fine gradient "
+            f"({_LINE_WIDTH_PX_MIN:g}–{_LINE_WIDTH_PX_MAX:g} screen pixels)."
+        )
+        self._line_width_label = QLabel("Line width:", self)
+
         # FastGA controls: only meaningful for the large-sequence engine.
         self._identity = QDoubleSpinBox(self)
         self._identity.setRange(0.5, 1.0)
@@ -1412,6 +1467,8 @@ class DotplotPanel(QWidget):
         bar.addWidget(self._word_label)
         bar.addWidget(self._word)
         bar.addWidget(self._reverse)
+        bar.addWidget(self._line_width_label)
+        bar.addWidget(self._line_width)
         bar.addWidget(self._identity_label)
         bar.addWidget(self._identity)
         bar.addWidget(self._min_len_label)
@@ -1455,6 +1512,7 @@ class DotplotPanel(QWidget):
 
         self._word.valueChanged.connect(self._recompute)
         self._reverse.toggled.connect(self._recompute)
+        self._line_width.valueChanged.connect(self._apply_line_width)
         self._identity.valueChanged.connect(self._recompute)
         self._min_len.valueChanged.connect(self._recompute)
         self._seed_freq.valueChanged.connect(self._recompute)
@@ -1714,6 +1772,9 @@ class DotplotPanel(QWidget):
         key = self._current_key()
         if self._thread is None:
             self._compute_fastga(key)
+
+    def _apply_line_width(self, step: int) -> None:
+        self._canvas.set_line_width_step(int(step))
 
     def _recompute(self) -> None:
         if self._mode == "alignment":

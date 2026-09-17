@@ -32,9 +32,9 @@ def test_nice_tick_step_short_sequence() -> None:
 def test_format_bp_compact_labels() -> None:
     assert _format_bp(1) == "1"
     assert _format_bp(500) == "500"
-    assert _format_bp(1000) == "1k"
-    assert _format_bp(5000) == "5k"
-    assert _format_bp(1_000_000) == "1M"
+    assert _format_bp(1000) == "1,000"
+    assert _format_bp(5000) == "5,000"
+    assert _format_bp(1_000_000) == "1,000,000"
     assert _format_bp(1500) == "1,500"
 
 
