@@ -2093,6 +2093,7 @@ class MainWindow(QMainWindow):
             lambda p: self._open_te_divergence_plot_dialog(input_file=p),
         )
         self._file_list.add_blast_database_requested.connect(self._add_fasta_as_blast_database)
+        self._file_list.add_annotation_requested.connect(self._add_annotation_for_fasta)
         self._folder_tree.rename_folder_requested.connect(self._rename_folder)
         self._folder_tree.delete_folders_requested.connect(self._delete_folders)
         self._folder_tree.clear_root_folders_requested.connect(self._clear_root_folders)
@@ -7307,6 +7308,66 @@ class MainWindow(QMainWindow):
         self._project.blast_databases.append(db)
         save_blast_databases_to_settings(self._project.blast_databases)
         self._set_status_message(f"Added BLAST database “{db.name}”", 4000)
+
+    def _add_annotation_for_fasta(self, path: Path) -> None:
+        """Copy/convert GFF/GFF3/GTF/BED into ``{stem}.RV.gff3`` beside the FASTA.
+
+        Deferred one tick so the Files context menu can finish and release the
+        click-to-preview suppress flag before the file dialog opens.
+        """
+        self._file_list.clear_suppress_selection_preview()
+        QTimer.singleShot(0, lambda p=path: self._run_add_annotation_for_fasta(p))
+
+    def _run_add_annotation_for_fasta(self, path: Path) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        from repeatviewer.backends.sequence_features import (
+            features_gff_path,
+            import_annotation_as_rv_gff3,
+        )
+
+        self._file_list.clear_suppress_selection_preview()
+        fasta = path.expanduser().resolve()
+        if not fasta.is_file():
+            QMessageBox.warning(self, "Add annotation", f"FASTA not found:\n{fasta}")
+            return
+        start_dir = str(fasta.parent)
+        try:
+            chosen, _ = QFileDialog.getOpenFileName(
+                self,
+                f"Add annotation for {fasta.name}",
+                start_dir,
+                "Annotations (*.gff *.gff3 *.gtf *.bed);;All files (*)",
+            )
+        finally:
+            self._file_list.clear_suppress_selection_preview()
+        if not chosen:
+            return
+        annotation = Path(chosen).expanduser().resolve()
+        dest = features_gff_path(fasta)
+        if dest.is_file() and dest.resolve() == annotation:
+            QMessageBox.information(
+                self,
+                "Add annotation",
+                f"{dest.name} is already the RepeatViewer annotation for this FASTA.",
+            )
+            return
+        try:
+            gff_path, count = import_annotation_as_rv_gff3(fasta, annotation)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Add annotation", str(exc))
+            return
+
+        self._sync_sidecar_in_file_list(gff_path, select=False)
+        if self._preview_tabs is not None:
+            self._preview_tabs.reload_paths([fasta])
+        self._file_list.clear_suppress_selection_preview()
+        self._set_status_message(
+            f"Added {count:,} feature(s) → {gff_path.name}",
+            8000,
+            override_file_link=True,
+        )
+        self._set_status_file_link(gff_path)
 
     def _open_blast_genome_map_from_selection(
         self,

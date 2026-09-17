@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -106,6 +107,7 @@ from repeatviewer.backends.sequence_features import (
     format_single_sequence_summary_parts,
     format_single_sequence_summary_text,
     load_sequence_map_data,
+    remount_parent_ids,
     summarize_loaded_sequence,
     resolve_features_gff_path,
     save_annotations,
@@ -962,6 +964,7 @@ class AnnotationTrackWidget(QWidget):
     deleteRequested = Signal()
     copySequenceRequested = Signal()
     extractSequenceRequested = Signal()
+    modifyRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1288,8 +1291,16 @@ class AnnotationTrackWidget(QWidget):
         copy_action.triggered.connect(self.copySequenceRequested.emit)
         extract_action = menu.addAction("Extract Sequence")
         extract_action.triggered.connect(self.extractSequenceRequested.emit)
+        modify_action = menu.addAction("Modify")
+        modify_action.triggered.connect(lambda _checked=False, idx=hit: self._request_modify(idx))
         menu.exec(event.globalPos())
         event.accept()
+
+    def _request_modify(self, index: int) -> None:
+        self._selected_indices = {int(index)}
+        self._emit_selection()
+        self.modifyRequested.emit()
+        self.update()
 
 
 class SequenceMapCanvas(QWidget):
@@ -1299,7 +1310,7 @@ class SequenceMapCanvas(QWidget):
     featureClicked = Signal(int)  # index in features list
     addFeatureRequested = Signal(str, str)  # feature_type, label
     extractSequenceRequested = Signal(int, int)  # 1-based inclusive range
-    featureActionRequested = Signal(str)  # delete | copy | extract
+    featureActionRequested = Signal(str)  # delete | copy | extract | modify
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2093,6 +2104,9 @@ class SequenceMapCanvas(QWidget):
             menu.addAction("Extract Sequence").triggered.connect(
                 lambda _checked=False: self.featureActionRequested.emit("extract")
             )
+            menu.addAction("Modify").triggered.connect(
+                lambda _checked=False: self.featureActionRequested.emit("modify")
+            )
             menu.addSeparator()
 
         add_menu = menu.addMenu("Add annotation")
@@ -2238,6 +2252,7 @@ class SequenceMapWidget(QWidget):
     deleteFeaturesRequested = Signal()
     copyFeatureSequencesRequested = Signal()
     extractFeatureSequencesRequested = Signal()
+    modifyFeatureRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None, *, embedded: bool = False) -> None:
         super().__init__(parent)
@@ -2452,6 +2467,7 @@ class SequenceMapWidget(QWidget):
         self._annot_track.extractSequenceRequested.connect(
             self._request_extract_feature_sequences
         )
+        self._annot_track.modifyRequested.connect(self._request_modify_feature)
         self._overview = OverviewWidget(self)
         self._overview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._overview.viewportChanged.connect(self._scroll_to_fraction)
@@ -3159,6 +3175,11 @@ class SequenceMapWidget(QWidget):
         if self._selected_feature_indices:
             self.extractFeatureSequencesRequested.emit()
 
+    def _request_modify_feature(self) -> None:
+        self._sync_feature_selection_from_annot_track()
+        if self._selected_feature_indices:
+            self.modifyFeatureRequested.emit()
+
     def _on_canvas_feature_action(self, action: str) -> None:
         kind = str(action or "").strip().lower()
         if kind == "delete":
@@ -3167,6 +3188,8 @@ class SequenceMapWidget(QWidget):
             self.copyFeatureSequencesRequested.emit()
         elif kind == "extract":
             self.extractFeatureSequencesRequested.emit()
+        elif kind == "modify":
+            self.modifyFeatureRequested.emit()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if _is_delete_key(event.key()):
@@ -3331,6 +3354,130 @@ class AddFeatureDialog(QDialog):
             feature_type=str(self._type.currentData() or self._type.currentText()),
             color=self._color.color_hex(),
             strand=str(self._strand.currentData()),
+        )
+
+
+class ModifyFeatureDialog(QDialog):
+    """Edit an existing feature; Type is free-form and Parent preserves GFF3 links."""
+
+    _POSITION_GAP = 8
+
+    def __init__(
+        self,
+        *,
+        feature: SequenceFeature,
+        seq_length: int,
+        parent_candidates: list[str] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Modify feature")
+        self._track = max(0, int(getattr(feature, "track", 0) or 0))
+
+        start_pos, end_pos = sorted((int(feature.start), int(feature.end)))
+
+        self._type = QComboBox(self)
+        self._type.setEditable(True)
+        self._type.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        known_types = {ftype for _, ftype in load_add_feature_buttons()}
+        for label, ftype in load_add_feature_buttons():
+            self._type.addItem(label, ftype)
+        current_type = str(feature.feature_type or "").strip() or "others"
+        index = self._type.findData(current_type)
+        if index < 0:
+            index = self._type.findText(current_type)
+        if index >= 0:
+            self._type.setCurrentIndex(index)
+        else:
+            self._type.setEditText(current_type)
+            if current_type not in known_types:
+                self._type.addItem(current_type, current_type)
+                self._type.setCurrentIndex(self._type.count() - 1)
+
+        self._strand = QComboBox(self)
+        self._strand.addItem("Forward (+)", "+")
+        self._strand.addItem("Reverse (−)", "-")
+        self._strand.setCurrentIndex(0 if feature.is_forward() else 1)
+
+        self._start = QSpinBox(self)
+        self._start.setRange(1, seq_length)
+        self._start.setValue(start_pos)
+
+        self._end = QSpinBox(self)
+        self._end.setRange(1, seq_length)
+        self._end.setValue(end_pos)
+
+        self._color = _AddFeatureColorField(feature.color or feature_type_color(current_type), self)
+
+        self._name = QLineEdit(self)
+        self._name.setPlaceholderText("e.g. LTR5")
+        self._name.setText(feature.name)
+
+        self._parent = QLineEdit(self)
+        self._parent.setPlaceholderText("GFF3 Parent ID (e.g. gene name)")
+        self._parent.setText(feature.parent)
+        if parent_candidates:
+            completer = QCompleter(sorted({c for c in parent_candidates if c}), self)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            self._parent.setCompleter(completer)
+
+        self._position_row = QWidget(self)
+        position_layout = QHBoxLayout(self._position_row)
+        position_layout.setContentsMargins(0, 0, 0, 0)
+        position_layout.setSpacing(6)
+        position_layout.addWidget(self._start)
+        self._end_label = QLabel("End:", self._position_row)
+        self._end_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        position_layout.addWidget(self._end_label)
+        position_layout.addWidget(self._end)
+
+        form = QFormLayout()
+        form.addRow("Type:", self._type)
+        form.addRow("Direction:", self._strand)
+        form.addRow("Start:", self._position_row)
+        form.addRow("Color:", self._color)
+        form.addRow("Name:", self._name)
+        form.addRow("Parent:", self._parent)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def _selected_type(self) -> str:
+        typed = self._type.currentText().strip()
+        if not typed:
+            return ""
+        for i in range(self._type.count()):
+            if self._type.itemText(i).strip() == typed:
+                data = self._type.itemData(i)
+                if data is not None and str(data).strip():
+                    return str(data).strip()
+                return typed
+        return typed
+
+    def feature(self) -> SequenceFeature | None:
+        name = self._name.text().strip()
+        if not name:
+            return None
+        ftype = self._selected_type()
+        if not ftype:
+            return None
+        return SequenceFeature(
+            start=self._start.value(),
+            end=self._end.value(),
+            name=name,
+            feature_type=ftype,
+            color=self._color.color_hex(),
+            strand=str(self._strand.currentData()),
+            parent=self._parent.text().strip(),
+            track=self._track,
         )
 
 
@@ -3710,6 +3857,7 @@ class SequenceMapPanel(QWidget):
         self._map.extractFeatureSequencesRequested.connect(
             self._extract_selected_feature_sequences
         )
+        self._map.modifyFeatureRequested.connect(self._modify_feature)
         self.annotationJobProgress.connect(self._set_annotation_job_status)
         self._auto_ann_thread: QThread | None = None
         self._auto_ann_worker: Worker | None = None
@@ -4181,6 +4329,7 @@ class SequenceMapPanel(QWidget):
                     color=color,
                     strand=feat.strand,
                     track=feat.track,
+                    parent=feat.parent,
                 )
             )
         if changed:
@@ -4505,6 +4654,57 @@ class SequenceMapPanel(QWidget):
             return
         self._persist_annotations()
         self.statusMessage.emit(f"Deleted {removed} feature(s).")
+
+    def _modify_feature(self) -> None:
+        data = self._map.data()
+        if data is None:
+            return
+        self._map._sync_feature_selection_from_annot_track()
+        indices = sorted(self._map.selected_feature_indices())
+        if len(indices) != 1:
+            QMessageBox.information(
+                self,
+                "Modify feature",
+                "Select a single feature to modify.",
+            )
+            return
+        index = indices[0]
+        features = list(data.features)
+        if not (0 <= index < len(features)):
+            return
+        current = features[index]
+        parent_candidates = [
+            feat.gff_id()
+            for i, feat in enumerate(features)
+            if i != index and feat.gff_id()
+        ]
+        dialog = ModifyFeatureDialog(
+            feature=current,
+            seq_length=data.length,
+            parent_candidates=parent_candidates,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        edited = dialog.feature()
+        if edited is None:
+            QMessageBox.warning(self, "Modify feature", "Enter a feature name and type.")
+            return
+        if edited.parent and edited.parent == edited.gff_id():
+            QMessageBox.warning(
+                self,
+                "Modify feature",
+                "A feature cannot be its own GFF3 Parent.",
+            )
+            return
+        self._push_feature_undo_snapshot()
+        old_id = current.gff_id()
+        features[index] = edited
+        features = remount_parent_ids(features, old_id=old_id, new_id=edited.gff_id())
+        self._map.set_features(features)
+        self._map.set_selected_features({index})
+        self._persist_annotations()
+        self.statusMessage.emit(f"Modified feature “{edited.name}”.")
 
     def _selected_features(self) -> list[SequenceFeature]:
         self._map._sync_feature_selection_from_annot_track()

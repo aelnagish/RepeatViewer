@@ -58,6 +58,7 @@ def find_companion_gff(sequence_path: Path) -> Path | None:
     folder = sequence_path.parent
     stem = sequence_path.stem
     candidates = [
+        folder / f"{stem}.RV.gff3",
         folder / f"{stem}.features.gff3",
         folder / f"{sequence_path.name}.features.gff3",
         folder / f"{stem}.gff3",
@@ -105,9 +106,16 @@ def _parse_attributes(raw: str) -> dict[str, str]:
             continue
         if "=" in part:
             key, value = part.split("=", 1)
-        else:
-            key, value = part, ""
-        attrs[key.strip()] = value.strip()
+            attrs[key.strip()] = value.strip().strip('"')
+            continue
+        # GTF style: gene_id "foo"
+        if '"' in part:
+            key, _, rest = part.partition(" ")
+            value = rest.strip().strip('"')
+            if key:
+                attrs[key.strip()] = value
+            continue
+        attrs[part] = ""
     return attrs
 
 

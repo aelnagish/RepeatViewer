@@ -91,7 +91,7 @@ def test_unique_folder_name_counts_up(tmp_path: Path) -> None:
 
 def test_common_prefix_name_groups_a_family() -> None:
     paths = [
-        Path("CroSat2_2.features.gff3"),
+        Path("CroSat2_2.RV.gff3"),
         Path("CroSat2_2_flexidot.gff.colors.config"),
         Path("CroSat2_2_flexidot.html"),
         Path("CroSat2_2_flexidot.png"),

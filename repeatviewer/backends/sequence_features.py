@@ -45,6 +45,8 @@ class SequenceFeature:
     color: str = ""
     strand: str = "+"
     track: int = 0
+    # GFF3 Parent attribute (e.g. exon → gene ID). Empty when top-level.
+    parent: str = ""
 
     def __post_init__(self) -> None:
         self.start = int(self.start)
@@ -63,6 +65,7 @@ class SequenceFeature:
                 )
         self.strand = self._normalize_strand(self.strand)
         self.track = max(0, int(self.track))
+        self.parent = str(self.parent or "").strip()
 
     @staticmethod
     def _normalize_strand(strand: str) -> str:
@@ -73,6 +76,10 @@ class SequenceFeature:
 
     def is_forward(self) -> bool:
         return self.strand != "-"
+
+    def gff_id(self) -> str:
+        """Stable GFF3 ID used for Parent links (Name/ID in our exports)."""
+        return str(self.name or "").strip()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -87,7 +94,39 @@ class SequenceFeature:
             color=str(data.get("color", "")),
             strand=str(data.get("strand", "+")),
             track=int(data.get("track", 0)),
+            parent=str(data.get("parent", "") or ""),
         )
+
+
+def remount_parent_ids(
+    features: list[SequenceFeature],
+    *,
+    old_id: str,
+    new_id: str,
+) -> list[SequenceFeature]:
+    """Retarget ``Parent`` attributes when a feature's GFF ID (name) changes."""
+    old = str(old_id or "").strip()
+    new = str(new_id or "").strip()
+    if not old or old == new:
+        return features
+    updated: list[SequenceFeature] = []
+    for feat in features:
+        if feat.parent != old:
+            updated.append(feat)
+            continue
+        updated.append(
+            SequenceFeature(
+                start=feat.start,
+                end=feat.end,
+                name=feat.name,
+                feature_type=feat.feature_type,
+                color=feat.color,
+                strand=feat.strand,
+                track=feat.track,
+                parent=new,
+            )
+        )
+    return updated
 
 
 @dataclass
@@ -119,15 +158,21 @@ def legacy_sidecar_path(fasta_path: Path) -> Path:
 
 
 def features_gff_path(fasta_path: Path) -> Path:
-    """Canonical GFF3 path for sequence-map annotations: ``{stem}.features.gff3``."""
+    """Canonical GFF3 path for sequence-map annotations: ``{stem}.RV.gff3``."""
     path = _resolved_fasta_path(fasta_path)
-    return path.parent / f"{path.stem}.features.gff3"
+    return path.parent / f"{path.stem}.RV.gff3"
 
 
 def legacy_features_gff_path(fasta_path: Path) -> Path:
     """Older GFF3 name that duplicated the ``.fa`` suffix."""
     path = _resolved_fasta_path(fasta_path)
     return path.parent / f"{path.name}.features.gff3"
+
+
+def legacy_stem_features_gff_path(fasta_path: Path) -> Path:
+    """Previous canonical name ``{stem}.features.gff3`` (pre-.RV.gff3)."""
+    path = _resolved_fasta_path(fasta_path)
+    return path.parent / f"{path.stem}.features.gff3"
 
 
 def resolve_sidecar_path(fasta_path: Path) -> Path | None:
@@ -138,7 +183,11 @@ def resolve_sidecar_path(fasta_path: Path) -> Path | None:
 
 
 def resolve_features_gff_path(fasta_path: Path) -> Path | None:
-    for candidate in (features_gff_path(fasta_path), legacy_features_gff_path(fasta_path)):
+    for candidate in (
+        features_gff_path(fasta_path),
+        legacy_stem_features_gff_path(fasta_path),
+        legacy_features_gff_path(fasta_path),
+    ):
         if candidate.is_file():
             return candidate
     return None
@@ -150,15 +199,18 @@ def _remove_sidecar_if_exists(path: Path) -> None:
 
 
 def _cleanup_legacy_sidecars(fasta_path: Path) -> None:
-    """Drop pre-stem sidecar names after writing the canonical files."""
+    """Drop pre-stem / pre-.RV sidecar names after writing the canonical files."""
     canonical_json = sidecar_path(fasta_path)
     canonical_gff = features_gff_path(fasta_path)
     legacy_json = legacy_sidecar_path(fasta_path)
-    legacy_gff = legacy_features_gff_path(fasta_path)
     if legacy_json != canonical_json:
         _remove_sidecar_if_exists(legacy_json)
-    if legacy_gff != canonical_gff:
-        _remove_sidecar_if_exists(legacy_gff)
+    for legacy_gff in (
+        legacy_features_gff_path(fasta_path),
+        legacy_stem_features_gff_path(fasta_path),
+    ):
+        if legacy_gff != canonical_gff:
+            _remove_sidecar_if_exists(legacy_gff)
 
 
 def is_sequence_map_hidden_file(path: Path) -> bool:
@@ -308,6 +360,7 @@ def _merge_feature_colors_from_json(
                 color=color,
                 strand=feat.strand,
                 track=feat.track,
+                parent=feat.parent,
             )
         )
     return merged
@@ -370,6 +423,7 @@ def load_features_from_gff(path: Path, *, expected_id: str) -> list[SequenceFeat
         feat_type = row.attributes.get("type", row.feature_type)
         raw_color = str(row.attributes.get("color", "")).strip()
         color = raw_color or _infer_feature_color(name, feat_type)
+        parent = str(row.attributes.get("Parent", "") or "").strip()
         features.append(
             SequenceFeature(
                 start=row.start,
@@ -379,6 +433,7 @@ def load_features_from_gff(path: Path, *, expected_id: str) -> list[SequenceFeat
                 color=color,
                 strand=row.strand if row.strand in {"+", "-"} else "+",
                 track=int(row.attributes.get("track", 0) or 0),
+                parent=parent,
             )
         )
     return sorted(features, key=lambda f: (f.start, f.end))
@@ -410,15 +465,19 @@ def export_features_gff(
         end = max(1, min(feat.end, sequence_length))
         if start > end:
             start, end = end, start
-        safe_name = feat.name.replace("\t", " ").replace("\n", " ")
+        safe_name = feat.name.replace("\t", " ").replace("\n", " ").replace(";", ",")
+        safe_type = str(feat.feature_type).replace("\t", " ").replace("\n", " ").replace(";", ",")
         strand = "-" if not feat.is_forward() else "+"
-        attrs = f"ID={safe_name};Name={safe_name};type={feat.feature_type}"
+        attrs = f"ID={safe_name};Name={safe_name};type={safe_type}"
+        if feat.parent:
+            safe_parent = feat.parent.replace("\t", " ").replace("\n", " ").replace(";", ",")
+            attrs += f";Parent={safe_parent}"
         if feat.track:
             attrs += f";track={feat.track}"
         if feat.color:
             attrs += f";color={feat.color}"
         lines.append(
-            f"{sequence_id}\tRepeatViewer\t{feat.feature_type}\t{start}\t{end}\t.\t{strand}\t.\t{attrs}"
+            f"{sequence_id}\tRepeatViewer\t{safe_type}\t{start}\t{end}\t.\t{strand}\t.\t{attrs}"
         )
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out
@@ -444,8 +503,122 @@ def save_annotations(
         )
         _cleanup_legacy_sidecars(path)
     else:
-        for candidate in (gff_path, legacy_gff):
+        for candidate in (
+            gff_path,
+            legacy_gff,
+            legacy_stem_features_gff_path(path),
+        ):
             _remove_sidecar_if_exists(candidate)
         gff_path = None
         _cleanup_legacy_sidecars(path)
     return json_path, gff_path
+
+
+def _gff_rows_to_sequence_features(
+    rows: list,
+    *,
+    sequence_id: str,
+    sequence_length: int,
+) -> list[SequenceFeature]:
+    """Map parsed GFF/BED rows onto SequenceFeature objects for one FASTA id."""
+    from repeatviewer.backends.gff_features import _seqid_matches
+
+    matched = [row for row in rows if _seqid_matches(sequence_id, row.seqid)]
+    # Single-consensus TE files often use a different seqid than the FASTA
+    # header; remap all rows when nothing matched but rows exist.
+    use_rows = matched if matched else list(rows)
+    features: list[SequenceFeature] = []
+    for row in use_rows:
+        start = max(1, min(int(row.start), sequence_length))
+        end = max(1, min(int(row.end), sequence_length))
+        if start > end:
+            start, end = end, start
+        name = row.label()
+        feat_type = row.attributes.get("type", row.feature_type)
+        raw_color = str(row.attributes.get("color", "")).strip()
+        color = raw_color or _infer_feature_color(name, feat_type)
+        strand = row.strand if row.strand in {"+", "-"} else "+"
+        try:
+            track = int(row.attributes.get("track", 0) or 0)
+        except (TypeError, ValueError):
+            track = 0
+        parent = str(row.attributes.get("Parent", "") or "").strip()
+        features.append(
+            SequenceFeature(
+                start=start,
+                end=end,
+                name=name,
+                feature_type=str(feat_type),
+                color=color,
+                strand=strand,
+                track=track,
+                parent=parent,
+            )
+        )
+    return sorted(features, key=lambda f: (f.start, f.end))
+
+
+def import_annotation_as_rv_gff3(
+    fasta_path: Path,
+    annotation_path: Path,
+    *,
+    merge_existing: bool = True,
+) -> tuple[Path, int]:
+    """Convert GFF/GFF3/GTF/BED into ``{stem}.RV.gff3`` beside the FASTA.
+
+    Returns ``(written_gff_path, feature_count)``.
+    """
+    from repeatviewer.backends.gff_features import parse_annotation
+
+    fasta = _resolved_fasta_path(fasta_path)
+    source = annotation_path.expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    suffix = source.suffix.lower()
+    if source.name.lower().endswith(".gz"):
+        raise ValueError("Gzipped annotation files are not supported for import.")
+    if suffix not in {".gff", ".gff3", ".gtf", ".bed"}:
+        raise ValueError(
+            f"Unsupported annotation type ({suffix or 'unknown'}). "
+            "Use .gff, .gff3, .gtf, or .bed."
+        )
+
+    sequence_id, sequence = load_single_sequence_fasta(fasta)
+    rows = parse_annotation(source)
+    if not rows:
+        raise ValueError(f"No features found in {source.name}")
+
+    imported = _gff_rows_to_sequence_features(
+        rows,
+        sequence_id=sequence_id,
+        sequence_length=len(sequence),
+    )
+    if not imported:
+        raise ValueError(
+            f"No usable features for sequence “{sequence_id}” in {source.name}"
+        )
+
+    features = list(imported)
+    if merge_existing:
+        existing_path = resolve_features_gff_path(fasta)
+        existing = (
+            load_features_from_gff(existing_path, expected_id=sequence_id)
+            if existing_path is not None
+            else []
+        )
+        if existing:
+            seen = {_feature_color_key(f) for f in imported}
+            for feat in existing:
+                if _feature_color_key(feat) not in seen:
+                    features.append(feat)
+            features = sorted(features, key=lambda f: (f.start, f.end))
+
+    _json_path, gff_path = save_annotations(
+        fasta,
+        sequence_id=sequence_id,
+        sequence_length=len(sequence),
+        features=features,
+    )
+    if gff_path is None:
+        raise RuntimeError("Failed to write RepeatViewer annotation GFF3.")
+    return gff_path, len(features)

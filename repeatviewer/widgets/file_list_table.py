@@ -163,6 +163,7 @@ class FileListTableWidget(QTableWidget):
     blast_genome_map_requested = Signal(Path)
     blast_divergence_requested = Signal(Path)
     add_blast_database_requested = Signal(Path)
+    add_annotation_requested = Signal(Path)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -625,14 +626,21 @@ class FileListTableWidget(QTableWidget):
         """True while a right-click context menu is active (must not swap Preview)."""
         return self._suppress_selection_preview
 
-    def _clear_suppress_selection_preview(self) -> None:
+    def clear_suppress_selection_preview(self) -> None:
         self._suppress_selection_preview = False
+
+    def _clear_suppress_selection_preview(self) -> None:
+        self.clear_suppress_selection_preview()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         # Qt changes the current row on right-click *before* customContextMenuRequested.
         # Block Preview reload until the context menu finishes (see main_window handler).
         if event.button() == Qt.MouseButton.RightButton:
             self._suppress_selection_preview = True
+        elif event.button() == Qt.MouseButton.LeftButton:
+            # Never leave click-to-preview stuck after a modal dialog from a
+            # context-menu action (e.g. Add annotation…).
+            self._suppress_selection_preview = False
         super().mousePressEvent(event)
 
     def _on_header_clicked(self, column: int) -> None:
@@ -707,6 +715,10 @@ class FileListTableWidget(QTableWidget):
                         menu.addAction(
                             "Add as BLAST database…",
                             lambda p=path: self.add_blast_database_requested.emit(p),
+                        )
+                        menu.addAction(
+                            "Add annotation…",
+                            lambda p=path: self.add_annotation_requested.emit(p),
                         )
                         try:
                             seq_n = count_fasta_sequences(path)
