@@ -6202,6 +6202,55 @@ class TeLibraryBenchmarkDialog(QDialog):
 TeGenomeMapDefaultsDialog = TeDensityPlotDialog
 
 
+class _ElidedPathLabel(QLabel):
+    """One-line path label that shortens the middle of the path to fit.
+
+    ``prefix`` and ``suffix`` always stay whole; only ``path`` is elided, and the
+    full text is available on hover and via ``full_text()``.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._prefix = ""
+        self._path = ""
+        self._suffix = ""
+        self.setWordWrap(False)
+        # Never widen the dialog for a long path; shrink the text instead.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(1)
+
+    def set_parts(self, prefix: str, path: str, suffix: str = "") -> None:
+        self._prefix, self._path, self._suffix = prefix, path, suffix
+        self.setToolTip(self.full_text())
+        self._refit()
+
+    def full_text(self) -> str:
+        return f"{self._prefix}{self._path}{self._suffix}"
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._refit()
+
+    def _refit(self) -> None:
+        metrics = self.fontMetrics()
+        fixed = metrics.horizontalAdvance(self._prefix + self._suffix)
+        room = max(0, self.contentsRect().width() - fixed)
+        middle = Qt.TextElideMode.ElideMiddle
+        # Keep the last component (the run folder name) whole and shorten the
+        # parent path in its middle; only if the name alone is too wide does
+        # the whole path get shortened.
+        cut = max(self._path.rfind("/"), self._path.rfind("\\")) + 1
+        head, tail = self._path[:cut], self._path[cut:]
+        tail_width = metrics.horizontalAdvance(tail)
+        if metrics.horizontalAdvance(self._path) <= room:
+            shown = self._path
+        elif head and tail_width < room:
+            shown = metrics.elidedText(head, middle, room - tail_width) + tail
+        else:
+            shown = metrics.elidedText(self._path, middle, room)
+        super().setText(f"{self._prefix}{shown}{self._suffix}")
+
+
 class RepeatQuantifyDialog(QDialog):
     """Choose a library FASTA, one or more genome FASTAs, and the engine.
 
@@ -6209,10 +6258,16 @@ class RepeatQuantifyDialog(QDialog):
     parameter fields, one tab per engine, and Restore Defaults + Cancel / Save /
     Run. Save stores the parameters without running.
 
-    Both path fields are pre-filled from the current selection / folder. The
+    Both path fields start empty (nothing is guessed from the current folder,
+    which could pick up a previous run's intermediate FASTAs). The
     dialog is shown non-modally, so the Folders and Files panels stay live:
     clicking a FASTA there drops it into whichever field last had focus
     (``apply_path_from_panel``), and Browse covers files elsewhere.
+
+    The output folder is optional. Empty (Auto) writes each genome's results to
+    a new ``<genome>_repeat_quant_<YYYY-MM-DD_HHMM>`` folder next to the genome;
+    a chosen folder gets those new run folders inside it. It is deliberately not
+    saved with the parameters, so every run starts on Auto.
     """
 
     _FASTA_FILTER = "FASTA (*.fa *.fasta *.fna *.fas);;All files (*)"
@@ -6224,24 +6279,22 @@ class RepeatQuantifyDialog(QDialog):
     def __init__(
         self,
         *,
-        candidates,
         start_dir: str = "",
         initial: RepeatQuantifyOptions | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Repeat quantify")
-        # Room for the long labels plus path, Browse and Remove on one line.
-        self.setMinimumWidth(880)
+        # Wide enough for the labels plus a readable path, Browse and Remove;
+        # any wider only leaves empty space beside the fixed-width parameters.
+        self.setMinimumWidth(680)
         self._start_dir = start_dir
         opts = initial or RepeatQuantifyOptions()
-        cand = [Path(p) for p in candidates]
 
         # Path fields rather than dropdowns, so the dialog can stay non-modal and
         # be filled by clicking files in the Files panel (see apply_path_from_panel).
         self._library_input = TeMultiInputFilesWidget(
             self,
-            initial=[cand[1]] if len(cand) > 1 else None,
             allow_multiple=False,
             start_dir=start_dir,
             placeholder="TE library FASTA (monomers / satellites)",
@@ -6250,7 +6303,6 @@ class RepeatQuantifyDialog(QDialog):
         )
         self._genome_input = TeMultiInputFilesWidget(
             self,
-            initial=[cand[0]] if cand else None,
             start_dir=start_dir,
             placeholder="Genome FASTA (scaffolds / assembly)",
             browse_title="Select genome FASTA",
@@ -6270,6 +6322,7 @@ class RepeatQuantifyDialog(QDialog):
         inputs_form.setContentsMargins(0, 0, 0, 0)
         inputs_form.addRow("Library (monomers / satellites):", self._library_input)
         inputs_form.addRow("Genome (scaffolds / assembly):", self._genome_input)
+        inputs_form.addRow("Output folder:", self._make_output_controls())
 
         # Tabs are the engine choice; each tab holds that engine's parameters.
         # "Both" repeats the controls, kept in sync with the single-engine tabs.
@@ -6309,6 +6362,101 @@ class RepeatQuantifyDialog(QDialog):
         layout.addLayout(inputs_form)
         layout.addWidget(self._tabs)
         layout.addWidget(self._button_box)
+
+    def _make_output_controls(self) -> QWidget:
+        """Output folder field + Browse, with a preview of the run folder below."""
+        self._output_focused = False
+        self._output_path = QLineEdit(self)
+        self._output_path.setObjectName("PathField")  # framed like the file fields
+        self._output_path.setPlaceholderText("Auto — a new folder next to each genome")
+        self._output_path.setMinimumWidth(280)
+        self._output_path.setClearButtonEnabled(True)  # clearing = back to Auto
+        self._output_path.setToolTip(
+            "Leave empty to write each genome's results to a new folder next to "
+            "that genome. Choose a folder to create the run folders inside it "
+            "instead. Every run gets its own timestamped folder."
+        )
+        self._output_path.installEventFilter(self)
+        self._output_path.textChanged.connect(self._update_output_preview)
+
+        browse = QPushButton("Browse", self)
+        browse.clicked.connect(self._browse_output_dir)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self._output_path, stretch=1)
+        row.addWidget(browse)
+
+        # One line, path shortened in the middle; full path on hover.
+        self._output_preview = _ElidedPathLabel(self)
+        self._output_preview.setStyleSheet("color: palette(mid);")
+
+        host = QWidget(self)
+        box = QVBoxLayout(host)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(3)
+        box.addLayout(row)
+        box.addWidget(self._output_preview)
+
+        self._genome_input.paths_changed.connect(self._update_output_preview)
+        self._update_output_preview()
+        return host
+
+    def _update_output_preview(self, *_args) -> None:
+        from repeatviewer.backends.repeat_quantify import (
+            repeat_quant_output_dir,
+            run_stamp,
+        )
+
+        stamp = run_stamp()
+        base = self.output_dir()
+        targets = self.targets()
+        suffix = ""
+        if targets:
+            path = str(repeat_quant_output_dir(targets[0], stamp, base))
+            if len(targets) > 1:
+                suffix = f"  (+{len(targets) - 1} more)"  # one folder per genome
+        else:
+            name = f"<genome>_repeat_quant_{stamp}"
+            path = str(base / name) if base else f"<genome folder>/{name}"
+        self._output_preview.set_parts("→ ", path, suffix)
+
+    def _browse_output_dir(self) -> None:
+        start = self._output_path.text().strip()
+        if not start:
+            targets = self.targets()
+            start = str(targets[0].parent) if targets else (
+                self._start_dir or str(Path.home())
+            )
+        picked = QFileDialog.getExistingDirectory(self, "Select output folder", start)
+        if picked:
+            self.set_output_dir(Path(picked))
+
+    def set_output_dir(self, folder: Path | None) -> None:
+        """Set the output folder (None = Auto)."""
+        if folder is None:
+            self._output_path.clear()
+        else:
+            self._output_path.setText(str(Path(folder).expanduser().resolve()))
+
+    def output_dir(self) -> Path | None:
+        """Chosen output folder, or None for Auto (next to each genome)."""
+        text = self._output_path.text().strip()
+        return Path(text).expanduser() if text else None
+
+    @staticmethod
+    def run_stamp() -> str:
+        """Timestamp for this run's folder names (taken at call time)."""
+        from repeatviewer.backends.repeat_quantify import run_stamp
+
+        return run_stamp()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self._output_path and event.type() == QEvent.Type.FocusIn:
+            self._output_focused = True
+            self._focused_file_input = None
+        return super().eventFilter(obj, event)
 
     @staticmethod
     def _form(parent: QWidget | None = None) -> QFormLayout:
@@ -6454,9 +6602,19 @@ class RepeatQuantifyDialog(QDialog):
         sender = self.sender()
         if isinstance(sender, TeMultiInputFilesWidget):
             self._focused_file_input = sender
+            self._output_focused = False
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        """Folders-panel click: fill the output field if it last had focus."""
+        if not self._output_focused or not Path(folder).is_dir():
+            return False
+        self.set_output_dir(Path(folder))
+        return True
 
     def apply_path_from_panel(self, path: Path) -> bool:
         """Fill the last-focused path field from a Files-panel click."""
+        if self._output_focused:
+            return self.apply_folder_from_panel(path)
         if self._focused_file_input is None:
             return False
         if path.suffix.lower() not in self._FASTA_SUFFIXES:
@@ -6492,6 +6650,20 @@ class RepeatQuantifyDialog(QDialog):
                 "The same genome is listed more than once.",
             )
             return
+        out = self.output_dir()
+        if out is not None:
+            if not out.is_absolute():
+                QMessageBox.warning(
+                    self, "Repeat quantify",
+                    "Enter the full path of the output folder, or use Browse.",
+                )
+                return
+            if out.exists() and not out.is_dir():
+                QMessageBox.warning(
+                    self, "Repeat quantify",
+                    f"The output path is a file, not a folder:\n{out}",
+                )
+                return
         self.accept()
 
     def targets(self) -> list[Path]:

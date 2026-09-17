@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import json
 import logging
 import math
 import os
 import platform
 import shutil
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from Bio import SeqIO
@@ -1061,6 +1063,116 @@ def repeatmasker_executable_available() -> bool:
     from repeatviewer.conda_tools import which_tool
 
     return which_tool("RepeatMasker") is not None
+
+
+# --- Output folders -----------------------------------------------------------
+# Every run writes into its own new folder, so a repeat run never overwrites or
+# mixes with an earlier one: <base>/<genome stem>_repeat_quant_<YYYY-MM-DD_HHMM>,
+# where <base> defaults to the genome's own folder.
+
+RUN_STAMP_FORMAT = "%Y-%m-%d_%H%M"
+RUN_PARAMETERS_FILENAME = "run_parameters.json"
+_RM_PARAM_KEYS = ("rm_div", "rm_sensitivity")
+
+
+def run_stamp(now: datetime | None = None) -> str:
+    """Timestamp used in run folder names, e.g. ``2026-09-17_1432``."""
+    return (now or datetime.now()).strftime(RUN_STAMP_FORMAT)
+
+
+def repeat_quant_output_dir(
+    target_fasta: Path, stamp: str, base_dir: Path | None = None
+) -> Path:
+    """Planned run folder for one genome (not created, no clash handling)."""
+    target_fasta = Path(target_fasta).expanduser()
+    parent = Path(base_dir).expanduser() if base_dir else target_fasta.parent
+    return parent / f"{target_fasta.stem}_repeat_quant_{stamp}"
+
+
+def create_repeat_quant_output_dir(
+    target_fasta: Path, stamp: str, base_dir: Path | None = None
+) -> Path:
+    """Create and return a fresh run folder; adds ``_2``, ``_3``... on a clash.
+
+    ``mkdir(exist_ok=False)`` claims the name atomically, so two genomes with
+    the same file name (or two runs in the same minute) never share a folder.
+    """
+    planned = repeat_quant_output_dir(target_fasta, stamp, base_dir).resolve()
+    planned.parent.mkdir(parents=True, exist_ok=True)
+    candidate, n = planned, 1
+    while True:
+        try:
+            candidate.mkdir(exist_ok=False)
+            return candidate
+        except FileExistsError:
+            n += 1
+            candidate = planned.with_name(f"{planned.name}_{n}")
+
+
+def engine_params(engine: str, params: dict) -> dict:
+    """Only the parameters the chosen engine actually uses."""
+    use_blast = engine in ("blastn", "both")
+    use_rm = engine in ("repeatmasker", "both")
+    out = {}
+    for key, value in params.items():
+        if key.startswith("blast_") and not use_blast:
+            continue
+        if key in _RM_PARAM_KEYS and not use_rm:
+            continue
+        out[key] = value
+    return out
+
+
+def write_run_parameters(
+    out_dir: Path,
+    *,
+    library_fasta: Path,
+    target_fasta: Path,
+    engine: str,
+    threads: int,
+    params: dict,
+    started: datetime,
+    status: str = "running",
+    finished: datetime | None = None,
+    outputs: list[Path] | None = None,
+    error: str = "",
+) -> Path:
+    """Write (or rewrite) ``run_parameters.json`` describing one run.
+
+    Written once with status "running" before the tools start and again at the
+    end ("completed", "failed" or "cancelled"), so an interrupted run still
+    leaves a record of how it was started.
+    """
+    from repeatviewer import __version__
+
+    out_dir = Path(out_dir)
+    record = {
+        "tool": "RepeatViewer - Repeat quantify",
+        "repeatviewer_version": __version__,
+        "status": status,
+        "started": started.isoformat(timespec="seconds"),
+        "finished": finished.isoformat(timespec="seconds") if finished else None,
+        "library": str(Path(library_fasta).expanduser().resolve()),
+        "genome": str(Path(target_fasta).expanduser().resolve()),
+        "output_dir": str(out_dir.resolve()),
+        "engine": engine,
+        "threads": int(threads),
+        "parameters": engine_params(engine, params),
+        "outputs": sorted(
+            str(Path(p).resolve().relative_to(out_dir.resolve()))
+            if Path(p).resolve().is_relative_to(out_dir.resolve())
+            else str(Path(p).resolve())
+            for p in (outputs or [])
+        ),
+        "platform": platform.platform(),
+    }
+    if error:
+        record["error"] = error
+    path = out_dir / RUN_PARAMETERS_FILENAME
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return path
 
 
 def quantify_library(

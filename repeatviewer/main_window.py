@@ -882,31 +882,72 @@ class RepeatQuantifyWorker(QObject):
 
     def __init__(
         self, library: Path, targets: list[Path], *, engine: str, threads: int,
-        params: dict | None = None, cancel=None
+        params: dict | None = None, cancel=None,
+        output_base: Path | None = None, stamp: str | None = None,
     ) -> None:
         super().__init__()
+        from repeatviewer.backends.repeat_quantify import run_stamp
+
         self._library = Path(library)
         self._targets = list(targets)
         self._engine = engine
         self._threads = threads
         self._params = params or {}
         self._cancel = cancel
+        # None = a new folder next to each genome; otherwise new folders inside it.
+        self._output_base = Path(output_base) if output_base else None
+        # One stamp for the whole batch, taken when Run was clicked.
+        self._stamp = stamp or run_stamp()
 
     @Slot()
     def run(self) -> None:
+        from datetime import datetime
+
         from repeatviewer.backends.repeat_quantify import (
+            RUN_PARAMETERS_FILENAME,
+            create_repeat_quant_output_dir,
             library_duplicate_warnings,
             quantify_library,
             write_landscape_html,
+            write_run_parameters,
             write_summary_html,
         )
+
+        out_dir: Path | None = None
+        run_info: dict = {}
+
+        def _record(status: str, error: str = "") -> None:
+            if out_dir is None:
+                return
+            try:
+                files = [
+                    p for p in out_dir.rglob("*")
+                    if p.is_file() and p.name != RUN_PARAMETERS_FILENAME
+                ]
+                write_run_parameters(
+                    out_dir, **run_info, status=status,
+                    finished=datetime.now(), outputs=files, error=error,
+                )
+            except OSError:
+                logger.exception("Could not write %s", RUN_PARAMETERS_FILENAME)
 
         try:
             lib_warnings = library_duplicate_warnings(self._library)
             outputs: list[str] = []
             for index, target in enumerate(self._targets, 1):
                 self.progress.emit(index, f"Quantifying {target.name}…")
-                out_dir = target.parent / f"{target.stem}_repeat_quant"
+                out_dir = create_repeat_quant_output_dir(
+                    target, self._stamp, self._output_base
+                )
+                run_info = dict(
+                    library_fasta=self._library,
+                    target_fasta=target,
+                    engine=self._engine,
+                    threads=self._threads,
+                    params=self._params,
+                    started=datetime.now(),
+                )
+                write_run_parameters(out_dir, **run_info)
                 results = quantify_library(
                     self._library,
                     target,
@@ -934,11 +975,16 @@ class RepeatQuantifyWorker(QObject):
                                 )
                             )
                         )
+                _record("completed")
+                out_dir = None
             self.finished.emit(outputs)
         except JobCancelledError:
+            _record("cancelled")
             self.finished.emit([])  # stopped by user; end quietly
         except Exception as exc:  # noqa: BLE001 - surface to the UI
-            self.failed.emit(_format_cli_failure(exc))
+            message = _format_cli_failure(exc)
+            _record("failed", message)
+            self.failed.emit(message)
 
 
 class GenomeMapWorker(QObject):
@@ -1273,6 +1319,9 @@ class FolderTreeWidget(QTreeWidget):
         self.itemExpanded.connect(lambda *_: self.refresh_horizontal_extent())
         self.itemCollapsed.connect(lambda *_: self.refresh_horizontal_extent())
         self._suppress_current_changed = False
+        # True while Qt is handling a click / key press: Qt applies the
+        # selection itself then, so set_active_folder must not touch it.
+        self._user_selecting = False
         self._active_folder_key: str | None = None
         self._drop_target_item: QTreeWidgetItem | None = None
 
@@ -1379,7 +1428,11 @@ class FolderTreeWidget(QTreeWidget):
         except OSError:
             self._active_folder_key = str(folder.expanduser())
         item = self.find_item_for_folder(folder)
-        if item is not None:
+        if item is not None and not self._user_selecting:
+            # During a click/key press Qt sets the selection after this runs
+            # (Cmd/Ctrl+click toggles, Shift extends). Selecting here with the
+            # Current flag dropped the earlier rows and let the toggle unselect
+            # the clicked one, so Cmd+click emptied the selection.
             index = self.indexFromItem(item)
             if index.isValid():
                 self._suppress_current_changed = True
@@ -1476,9 +1529,13 @@ class FolderTreeWidget(QTreeWidget):
         self.refresh_horizontal_extent()
 
     def select_folder_item(self, item: QTreeWidgetItem) -> None:
-        """Select exactly one folder row and make it current."""
+        """Select exactly one folder row and make it current.
+
+        Skipped while Qt is handling a click / key press in the tree: Qt sets
+        the selection itself then, and clearing it here broke Cmd/Ctrl+click.
+        """
         index = self.indexFromItem(item)
-        if not index.isValid():
+        if not index.isValid() or self._user_selecting:
             return
         self._suppress_current_changed = True
         try:
@@ -1542,7 +1599,18 @@ class FolderTreeWidget(QTreeWidget):
                     )
                     if has_branch:
                         item.setExpanded(not item.isExpanded())
-        super().mousePressEvent(event)
+        self._user_selecting = True
+        try:
+            super().mousePressEvent(event)
+        finally:
+            self._user_selecting = False
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        self._user_selecting = True
+        try:
+            super().keyPressEvent(event)
+        finally:
+            self._user_selecting = False
 
     def _folder_path_for_item(self, item: QTreeWidgetItem | None) -> Path | None:
         if item is None:
@@ -3786,23 +3854,10 @@ class MainWindow(QMainWindow):
             body += f"\n\n{install_hint()}"
         QMessageBox.warning(self, "FastGA failed", body)
 
-    def _repeat_quantify_candidates(self) -> list[Path]:
-        """FASTA files to offer in the quantify dialog: selection first, then folder."""
-        seen: dict[str, Path] = {}
-        for path in self._selected_files():
-            if path.suffix.lower() in _FASTA_SUFFIXES and path.is_file():
-                seen.setdefault(str(path.expanduser().resolve()), path)
-        if self._current_folder and self._current_folder.is_dir():
-            for path in sorted(self._current_folder.iterdir()):
-                if path.is_file() and path.suffix.lower() in _FASTA_SUFFIXES:
-                    seen.setdefault(str(path.expanduser().resolve()), path)
-        return list(seen.values())
-
     def _open_repeat_quantify(self) -> None:
         """Quantify a tandem-repeat / satellite library across a target FASTA."""
         from repeatviewer.views.tool_dialogs import RepeatQuantifyDialog
 
-        candidates = self._repeat_quantify_candidates()
         start_dir = str(self._current_folder) if self._current_folder else ""
 
         def _on_accept(dialog: RepeatQuantifyDialog) -> None:
@@ -3837,16 +3892,19 @@ class MainWindow(QMainWindow):
                     threads=self._project.batch_workers,
                     params=params,
                     cancel=self._job_cancel,
+                    output_base=dialog.output_dir(),
+                    stamp=dialog.run_stamp(),
                 ),
                 job_title="Repeat quantify",
-                total_steps=len(targets),
+                # 1 = the app's plain "Repeat quantify… <genome>" status line; a
+                # count > 1 would switch the status bar to the batch progress bar.
+                total_steps=1,
                 source_files=targets,
                 on_finished=self._on_repeat_quantify_finished,
                 on_failed=self._on_repeat_quantify_failed,
             )
 
         dialog = RepeatQuantifyDialog(
-            candidates=candidates,
             start_dir=start_dir,
             initial=load_repeat_quantify_options(),
             parent=self,
@@ -3859,6 +3917,8 @@ class MainWindow(QMainWindow):
     def _on_repeat_quantify_finished(self, outputs) -> None:
         paths = [Path(p) for p in outputs if Path(p).is_file()]
         if self._current_folder:
+            # Each run creates a new timestamped folder; show it in the tree.
+            self._refresh_subfolders_under(self._current_folder)
             self._populate_file_list(
                 self._current_folder,
                 new_outputs=paths,
@@ -5758,6 +5818,7 @@ class MainWindow(QMainWindow):
 
     def _on_folder_selected(self, folder: Path) -> None:
         self._sync_define_database_dialog_from_folder(folder)
+        self._sync_te_viz_dialog_from_folder(folder)
         self._populate_file_list(folder, record_history=True)
         self._update_directory_watchers()
         self._persist_workspace()
@@ -6664,6 +6725,15 @@ class MainWindow(QMainWindow):
         if methylation_path is not None and hasattr(dialog, "set_methylation_input_file"):
             filled = dialog.set_methylation_input_file(methylation_path) or filled
         if filled:
+            self._schedule_raise_te_viz_dialog()
+
+    def _sync_te_viz_dialog_from_folder(self, folder: Path) -> None:
+        """Fill a folder field (e.g. Repeat quantify output) from a Folders-panel click."""
+        dialog = self._te_viz_input_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        apply = getattr(dialog, "apply_folder_from_panel", None)
+        if apply is not None and apply(folder):
             self._schedule_raise_te_viz_dialog()
 
     def _schedule_raise_te_viz_dialog(self) -> None:
