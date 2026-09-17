@@ -1319,6 +1319,9 @@ class FolderTreeWidget(QTreeWidget):
         self.itemExpanded.connect(lambda *_: self.refresh_horizontal_extent())
         self.itemCollapsed.connect(lambda *_: self.refresh_horizontal_extent())
         self._suppress_current_changed = False
+        # True while Qt is handling a click / key press: Qt applies the
+        # selection itself then, so set_active_folder must not touch it.
+        self._user_selecting = False
         self._active_folder_key: str | None = None
         self._drop_target_item: QTreeWidgetItem | None = None
 
@@ -1425,7 +1428,11 @@ class FolderTreeWidget(QTreeWidget):
         except OSError:
             self._active_folder_key = str(folder.expanduser())
         item = self.find_item_for_folder(folder)
-        if item is not None:
+        if item is not None and not self._user_selecting:
+            # During a click/key press Qt sets the selection after this runs
+            # (Cmd/Ctrl+click toggles, Shift extends). Selecting here with the
+            # Current flag dropped the earlier rows and let the toggle unselect
+            # the clicked one, so Cmd+click emptied the selection.
             index = self.indexFromItem(item)
             if index.isValid():
                 self._suppress_current_changed = True
@@ -1522,9 +1529,13 @@ class FolderTreeWidget(QTreeWidget):
         self.refresh_horizontal_extent()
 
     def select_folder_item(self, item: QTreeWidgetItem) -> None:
-        """Select exactly one folder row and make it current."""
+        """Select exactly one folder row and make it current.
+
+        Skipped while Qt is handling a click / key press in the tree: Qt sets
+        the selection itself then, and clearing it here broke Cmd/Ctrl+click.
+        """
         index = self.indexFromItem(item)
-        if not index.isValid():
+        if not index.isValid() or self._user_selecting:
             return
         self._suppress_current_changed = True
         try:
@@ -1588,7 +1599,18 @@ class FolderTreeWidget(QTreeWidget):
                     )
                     if has_branch:
                         item.setExpanded(not item.isExpanded())
-        super().mousePressEvent(event)
+        self._user_selecting = True
+        try:
+            super().mousePressEvent(event)
+        finally:
+            self._user_selecting = False
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        self._user_selecting = True
+        try:
+            super().keyPressEvent(event)
+        finally:
+            self._user_selecting = False
 
     def _folder_path_for_item(self, item: QTreeWidgetItem | None) -> Path | None:
         if item is None:
