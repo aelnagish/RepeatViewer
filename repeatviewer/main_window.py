@@ -6223,6 +6223,12 @@ class MainWindow(QMainWindow):
         )
         self._current_folder = target_folder
         self._folder_tree.set_active_folder(target_folder)
+        # File name search is per-folder: clear it when navigating away so the
+        # previous query does not hide files in the next directory.
+        if not same_folder and self._file_filter.text():
+            self._file_filter.blockSignals(True)
+            self._file_filter.clear()
+            self._file_filter.blockSignals(False)
         try:
             self._cached_folder_files = self._files_for_folder(self._current_folder)
         except OSError as exc:
