@@ -130,3 +130,73 @@ def test_params_match_quantify_library_keywords():
 
     accepted = set(inspect.signature(quantify_library).parameters)
     assert set(_dialog().params()) <= accepted
+
+
+# --- Output folder ------------------------------------------------------------
+
+
+def test_output_folder_defaults_to_auto_and_is_not_saved(settings):
+    d = _dialog()
+    assert d.output_dir() is None
+    assert "<genome folder>/<genome>_repeat_quant_" in d._output_preview.text()
+    d.set_output_dir(Path("/tmp/results"))
+    save_repeat_quantify_options(d.options())
+    assert not any("output" in k for k in settings["repeat_quantify"])
+    assert _dialog().output_dir() is None
+
+
+def test_output_preview_follows_genome_and_chosen_folder(tmp_path):
+    genome = tmp_path / "Csat_v1.fa"
+    genome.write_text(">s\nACGT\n")
+    d = _dialog()
+    d._genome_input.add_row(genome)
+    d._update_output_preview()
+    text = d._output_preview.text()
+    assert str(tmp_path.resolve() / "Csat_v1_repeat_quant_") in text
+    results = tmp_path / "results"
+    d.set_output_dir(results)
+    assert str(results.resolve() / "Csat_v1_repeat_quant_") in d._output_preview.text()
+    d.set_output_dir(None)
+    assert d.output_dir() is None
+
+
+def test_folder_click_fills_output_only_when_it_had_focus(tmp_path):
+    fasta = tmp_path / "genome.fa"
+    fasta.write_text(">s\nACGT\n")
+    d = _dialog()
+    assert not d.apply_folder_from_panel(tmp_path)  # output field never focused
+    d._output_focused = True
+    assert not d.apply_path_from_panel(fasta)  # a file is not a folder
+    assert d.apply_path_from_panel(tmp_path)
+    assert d.output_dir() == tmp_path.resolve()
+
+
+def _run_with_output(tmp_path, monkeypatch, output: str):
+    lib = tmp_path / "lib.fa"
+    genome = tmp_path / "genome.fa"
+    for f in (lib, genome):
+        f.write_text(">s\nACGT\n")
+    warned = []
+    monkeypatch.setattr(
+        "repeatviewer.views.tool_dialogs.QMessageBox.warning",
+        lambda *a, **k: warned.append(a),
+    )
+    d = RepeatQuantifyDialog(candidates=[genome, lib])
+    d._output_path.setText(output)
+    d._close_action = "run"
+    d._on_footer_accept()
+    return d, warned
+
+
+def test_run_rejects_relative_or_file_output_path(tmp_path, monkeypatch):
+    d, warned = _run_with_output(tmp_path, monkeypatch, "results")
+    assert warned and d.result() != d.DialogCode.Accepted
+    d, warned = _run_with_output(tmp_path, monkeypatch, str(tmp_path / "lib.fa"))
+    assert warned and d.result() != d.DialogCode.Accepted
+
+
+def test_run_accepts_a_new_output_folder(tmp_path, monkeypatch):
+    d, warned = _run_with_output(tmp_path, monkeypatch, str(tmp_path / "new"))
+    assert not warned
+    assert d.result() == d.DialogCode.Accepted
+    assert d.should_run()

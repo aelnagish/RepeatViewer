@@ -882,31 +882,72 @@ class RepeatQuantifyWorker(QObject):
 
     def __init__(
         self, library: Path, targets: list[Path], *, engine: str, threads: int,
-        params: dict | None = None, cancel=None
+        params: dict | None = None, cancel=None,
+        output_base: Path | None = None, stamp: str | None = None,
     ) -> None:
         super().__init__()
+        from repeatviewer.backends.repeat_quantify import run_stamp
+
         self._library = Path(library)
         self._targets = list(targets)
         self._engine = engine
         self._threads = threads
         self._params = params or {}
         self._cancel = cancel
+        # None = a new folder next to each genome; otherwise new folders inside it.
+        self._output_base = Path(output_base) if output_base else None
+        # One stamp for the whole batch, taken when Run was clicked.
+        self._stamp = stamp or run_stamp()
 
     @Slot()
     def run(self) -> None:
+        from datetime import datetime
+
         from repeatviewer.backends.repeat_quantify import (
+            RUN_PARAMETERS_FILENAME,
+            create_repeat_quant_output_dir,
             library_duplicate_warnings,
             quantify_library,
             write_landscape_html,
+            write_run_parameters,
             write_summary_html,
         )
+
+        out_dir: Path | None = None
+        run_info: dict = {}
+
+        def _record(status: str, error: str = "") -> None:
+            if out_dir is None:
+                return
+            try:
+                files = [
+                    p for p in out_dir.rglob("*")
+                    if p.is_file() and p.name != RUN_PARAMETERS_FILENAME
+                ]
+                write_run_parameters(
+                    out_dir, **run_info, status=status,
+                    finished=datetime.now(), outputs=files, error=error,
+                )
+            except OSError:
+                logger.exception("Could not write %s", RUN_PARAMETERS_FILENAME)
 
         try:
             lib_warnings = library_duplicate_warnings(self._library)
             outputs: list[str] = []
             for index, target in enumerate(self._targets, 1):
                 self.progress.emit(index, f"Quantifying {target.name}…")
-                out_dir = target.parent / f"{target.stem}_repeat_quant"
+                out_dir = create_repeat_quant_output_dir(
+                    target, self._stamp, self._output_base
+                )
+                run_info = dict(
+                    library_fasta=self._library,
+                    target_fasta=target,
+                    engine=self._engine,
+                    threads=self._threads,
+                    params=self._params,
+                    started=datetime.now(),
+                )
+                write_run_parameters(out_dir, **run_info)
                 results = quantify_library(
                     self._library,
                     target,
@@ -934,11 +975,16 @@ class RepeatQuantifyWorker(QObject):
                                 )
                             )
                         )
+                _record("completed")
+                out_dir = None
             self.finished.emit(outputs)
         except JobCancelledError:
+            _record("cancelled")
             self.finished.emit([])  # stopped by user; end quietly
         except Exception as exc:  # noqa: BLE001 - surface to the UI
-            self.failed.emit(_format_cli_failure(exc))
+            message = _format_cli_failure(exc)
+            _record("failed", message)
+            self.failed.emit(message)
 
 
 class GenomeMapWorker(QObject):
@@ -3837,6 +3883,8 @@ class MainWindow(QMainWindow):
                     threads=self._project.batch_workers,
                     params=params,
                     cancel=self._job_cancel,
+                    output_base=dialog.output_dir(),
+                    stamp=dialog.run_stamp(),
                 ),
                 job_title="Repeat quantify",
                 total_steps=len(targets),
@@ -3859,6 +3907,8 @@ class MainWindow(QMainWindow):
     def _on_repeat_quantify_finished(self, outputs) -> None:
         paths = [Path(p) for p in outputs if Path(p).is_file()]
         if self._current_folder:
+            # Each run creates a new timestamped folder; show it in the tree.
+            self._refresh_subfolders_under(self._current_folder)
             self._populate_file_list(
                 self._current_folder,
                 new_outputs=paths,
@@ -5758,6 +5808,7 @@ class MainWindow(QMainWindow):
 
     def _on_folder_selected(self, folder: Path) -> None:
         self._sync_define_database_dialog_from_folder(folder)
+        self._sync_te_viz_dialog_from_folder(folder)
         self._populate_file_list(folder, record_history=True)
         self._update_directory_watchers()
         self._persist_workspace()
@@ -6664,6 +6715,15 @@ class MainWindow(QMainWindow):
         if methylation_path is not None and hasattr(dialog, "set_methylation_input_file"):
             filled = dialog.set_methylation_input_file(methylation_path) or filled
         if filled:
+            self._schedule_raise_te_viz_dialog()
+
+    def _sync_te_viz_dialog_from_folder(self, folder: Path) -> None:
+        """Fill a folder field (e.g. Repeat quantify output) from a Folders-panel click."""
+        dialog = self._te_viz_input_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        apply = getattr(dialog, "apply_folder_from_panel", None)
+        if apply is not None and apply(folder):
             self._schedule_raise_te_viz_dialog()
 
     def _schedule_raise_te_viz_dialog(self) -> None:
