@@ -8,8 +8,6 @@ version = "1.0.0"
 description = "RepeatViewer: PySide6 desktop app for TE curation, annotation, and visualization"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "GPL-3.0"
-license-files = ["LICENSE"]
 authors = [
   { name = "Jiangzhao Qian" },
 ]

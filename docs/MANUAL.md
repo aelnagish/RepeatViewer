@@ -32,7 +32,7 @@ before.
 14. [Command line](#14-command-line)
 15. [Output file reference](#15-output-file-reference)
 16. [Troubleshooting](#16-troubleshooting)
-17. [License and citation](#17-license-and-citation)
+17. [Citation](#17-citation)
 
 ---
 
@@ -1029,10 +1029,7 @@ attach the log file from **Open log file**.
 
 ---
 
-## 17. License and citation
-
-RepeatViewer is released under the
-[GNU General Public License v3.0 or later](../LICENSE).
+## 17. Citation
 
 If RepeatViewer contributes to your work, please cite **TEtrimmer**
 (*Nature Communications*, 2025) where applicable, and mention **RepeatViewer**

@@ -177,10 +177,6 @@ RepeatViewer/
 
 The two tools are independent applications; RepeatViewer does not require a TEtrimmer installation.
 
-## License
-
-RepeatViewer is licensed under the [GNU General Public License v3.0 or later](LICENSE).
-
 ## Citation
 
 If RepeatViewer contributes to your work, cite **TEtrimmer** (*Nature Communications*, 2025) when applicable and mention **RepeatViewer** for manual curation and visualization.
