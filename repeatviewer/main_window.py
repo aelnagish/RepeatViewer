@@ -3874,7 +3874,9 @@ class MainWindow(QMainWindow):
                     stamp=dialog.run_stamp(),
                 ),
                 job_title="Repeat quantify",
-                total_steps=len(targets),
+                # 1 = the app's plain "Repeat quantify… <genome>" status line; a
+                # count > 1 would switch the status bar to the batch progress bar.
+                total_steps=1,
                 source_files=targets,
                 on_finished=self._on_repeat_quantify_finished,
                 on_failed=self._on_repeat_quantify_failed,
