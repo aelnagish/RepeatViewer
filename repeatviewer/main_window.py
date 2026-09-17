@@ -3832,23 +3832,10 @@ class MainWindow(QMainWindow):
             body += f"\n\n{install_hint()}"
         QMessageBox.warning(self, "FastGA failed", body)
 
-    def _repeat_quantify_candidates(self) -> list[Path]:
-        """FASTA files to offer in the quantify dialog: selection first, then folder."""
-        seen: dict[str, Path] = {}
-        for path in self._selected_files():
-            if path.suffix.lower() in _FASTA_SUFFIXES and path.is_file():
-                seen.setdefault(str(path.expanduser().resolve()), path)
-        if self._current_folder and self._current_folder.is_dir():
-            for path in sorted(self._current_folder.iterdir()):
-                if path.is_file() and path.suffix.lower() in _FASTA_SUFFIXES:
-                    seen.setdefault(str(path.expanduser().resolve()), path)
-        return list(seen.values())
-
     def _open_repeat_quantify(self) -> None:
         """Quantify a tandem-repeat / satellite library across a target FASTA."""
         from repeatviewer.views.tool_dialogs import RepeatQuantifyDialog
 
-        candidates = self._repeat_quantify_candidates()
         start_dir = str(self._current_folder) if self._current_folder else ""
 
         def _on_accept(dialog: RepeatQuantifyDialog) -> None:
@@ -3894,7 +3881,6 @@ class MainWindow(QMainWindow):
             )
 
         dialog = RepeatQuantifyDialog(
-            candidates=candidates,
             start_dir=start_dir,
             initial=load_repeat_quantify_options(),
             parent=self,

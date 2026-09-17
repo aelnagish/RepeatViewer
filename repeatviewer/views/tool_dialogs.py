@@ -6202,6 +6202,55 @@ class TeLibraryBenchmarkDialog(QDialog):
 TeGenomeMapDefaultsDialog = TeDensityPlotDialog
 
 
+class _ElidedPathLabel(QLabel):
+    """One-line path label that shortens the middle of the path to fit.
+
+    ``prefix`` and ``suffix`` always stay whole; only ``path`` is elided, and the
+    full text is available on hover and via ``full_text()``.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._prefix = ""
+        self._path = ""
+        self._suffix = ""
+        self.setWordWrap(False)
+        # Never widen the dialog for a long path; shrink the text instead.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(1)
+
+    def set_parts(self, prefix: str, path: str, suffix: str = "") -> None:
+        self._prefix, self._path, self._suffix = prefix, path, suffix
+        self.setToolTip(self.full_text())
+        self._refit()
+
+    def full_text(self) -> str:
+        return f"{self._prefix}{self._path}{self._suffix}"
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._refit()
+
+    def _refit(self) -> None:
+        metrics = self.fontMetrics()
+        fixed = metrics.horizontalAdvance(self._prefix + self._suffix)
+        room = max(0, self.contentsRect().width() - fixed)
+        middle = Qt.TextElideMode.ElideMiddle
+        # Keep the last component (the run folder name) whole and shorten the
+        # parent path in its middle; only if the name alone is too wide does
+        # the whole path get shortened.
+        cut = max(self._path.rfind("/"), self._path.rfind("\\")) + 1
+        head, tail = self._path[:cut], self._path[cut:]
+        tail_width = metrics.horizontalAdvance(tail)
+        if metrics.horizontalAdvance(self._path) <= room:
+            shown = self._path
+        elif head and tail_width < room:
+            shown = metrics.elidedText(head, middle, room - tail_width) + tail
+        else:
+            shown = metrics.elidedText(self._path, middle, room)
+        super().setText(f"{self._prefix}{shown}{self._suffix}")
+
+
 class RepeatQuantifyDialog(QDialog):
     """Choose a library FASTA, one or more genome FASTAs, and the engine.
 
@@ -6209,7 +6258,8 @@ class RepeatQuantifyDialog(QDialog):
     parameter fields, one tab per engine, and Restore Defaults + Cancel / Save /
     Run. Save stores the parameters without running.
 
-    Both path fields are pre-filled from the current selection / folder. The
+    Both path fields start empty (nothing is guessed from the current folder,
+    which could pick up a previous run's intermediate FASTAs). The
     dialog is shown non-modally, so the Folders and Files panels stay live:
     clicking a FASTA there drops it into whichever field last had focus
     (``apply_path_from_panel``), and Browse covers files elsewhere.
@@ -6229,24 +6279,22 @@ class RepeatQuantifyDialog(QDialog):
     def __init__(
         self,
         *,
-        candidates,
         start_dir: str = "",
         initial: RepeatQuantifyOptions | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Repeat quantify")
-        # Room for the long labels plus path, Browse and Remove on one line.
-        self.setMinimumWidth(880)
+        # Wide enough for the labels plus a readable path, Browse and Remove;
+        # any wider only leaves empty space beside the fixed-width parameters.
+        self.setMinimumWidth(680)
         self._start_dir = start_dir
         opts = initial or RepeatQuantifyOptions()
-        cand = [Path(p) for p in candidates]
 
         # Path fields rather than dropdowns, so the dialog can stay non-modal and
         # be filled by clicking files in the Files panel (see apply_path_from_panel).
         self._library_input = TeMultiInputFilesWidget(
             self,
-            initial=[cand[1]] if len(cand) > 1 else None,
             allow_multiple=False,
             start_dir=start_dir,
             placeholder="TE library FASTA (monomers / satellites)",
@@ -6255,7 +6303,6 @@ class RepeatQuantifyDialog(QDialog):
         )
         self._genome_input = TeMultiInputFilesWidget(
             self,
-            initial=[cand[0]] if cand else None,
             start_dir=start_dir,
             placeholder="Genome FASTA (scaffolds / assembly)",
             browse_title="Select genome FASTA",
@@ -6341,15 +6388,9 @@ class RepeatQuantifyDialog(QDialog):
         row.addWidget(self._output_path, stretch=1)
         row.addWidget(browse)
 
-        self._output_preview = QLabel(self)
+        # One line, path shortened in the middle; full path on hover.
+        self._output_preview = _ElidedPathLabel(self)
         self._output_preview.setStyleSheet("color: palette(mid);")
-        self._output_preview.setWordWrap(True)
-        self._output_preview.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self._output_preview.setToolTip(
-            "The time in the folder name is set when you click Run."
-        )
 
         host = QWidget(self)
         box = QVBoxLayout(host)
@@ -6371,14 +6412,15 @@ class RepeatQuantifyDialog(QDialog):
         stamp = run_stamp()
         base = self.output_dir()
         targets = self.targets()
+        suffix = ""
         if targets:
-            text = f"→ {repeat_quant_output_dir(targets[0], stamp, base)}"
+            path = str(repeat_quant_output_dir(targets[0], stamp, base))
             if len(targets) > 1:
-                text += f"\n   + {len(targets) - 1} more genome(s), one new folder each"
+                suffix = f"  (+{len(targets) - 1} more)"  # one folder per genome
         else:
             name = f"<genome>_repeat_quant_{stamp}"
-            text = f"→ {base / name}" if base else f"→ <genome folder>/{name}"
-        self._output_preview.setText(text)
+            path = str(base / name) if base else f"<genome folder>/{name}"
+        self._output_preview.set_parts("→ ", path, suffix)
 
     def _browse_output_dir(self) -> None:
         start = self._output_path.text().strip()

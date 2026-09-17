@@ -36,7 +36,7 @@ def settings(monkeypatch):
 
 
 def _dialog(**kwargs) -> RepeatQuantifyDialog:
-    return RepeatQuantifyDialog(candidates=[], **kwargs)
+    return RepeatQuantifyDialog(**kwargs)
 
 
 def test_initial_options_fill_every_tab():
@@ -93,7 +93,8 @@ def test_run_without_files_keeps_dialog_open(monkeypatch):
 
 def test_path_field_is_framed_and_shows_full_path_on_hover():
     long_path = Path("/Users/someone/Downloads/run2/RepeatQuantify/scaffold_1.fasta")
-    d = RepeatQuantifyDialog(candidates=[long_path, long_path.with_name("lib.fa")])
+    d = _dialog()
+    d._library_input._rows[0].set_path(long_path.with_name("lib.fa"))
     field = d._library_input._rows[0]._path
     assert field.objectName() == "PathField"
     assert field.toolTip() == str(long_path.with_name("lib.fa").resolve())
@@ -138,7 +139,7 @@ def test_params_match_quantify_library_keywords():
 def test_output_folder_defaults_to_auto_and_is_not_saved(settings):
     d = _dialog()
     assert d.output_dir() is None
-    assert "<genome folder>/<genome>_repeat_quant_" in d._output_preview.text()
+    assert "<genome folder>/<genome>_repeat_quant_" in d._output_preview.full_text()
     d.set_output_dir(Path("/tmp/results"))
     save_repeat_quantify_options(d.options())
     assert not any("output" in k for k in settings["repeat_quantify"])
@@ -151,11 +152,11 @@ def test_output_preview_follows_genome_and_chosen_folder(tmp_path):
     d = _dialog()
     d._genome_input.add_row(genome)
     d._update_output_preview()
-    text = d._output_preview.text()
+    text = d._output_preview.full_text()
     assert str(tmp_path.resolve() / "Csat_v1_repeat_quant_") in text
     results = tmp_path / "results"
     d.set_output_dir(results)
-    assert str(results.resolve() / "Csat_v1_repeat_quant_") in d._output_preview.text()
+    assert str(results.resolve() / "Csat_v1_repeat_quant_") in d._output_preview.full_text()
     d.set_output_dir(None)
     assert d.output_dir() is None
 
@@ -181,7 +182,9 @@ def _run_with_output(tmp_path, monkeypatch, output: str):
         "repeatviewer.views.tool_dialogs.QMessageBox.warning",
         lambda *a, **k: warned.append(a),
     )
-    d = RepeatQuantifyDialog(candidates=[genome, lib])
+    d = _dialog()
+    d._library_input._rows[0].set_path(lib)
+    d._genome_input._rows[0].set_path(genome)
     d._output_path.setText(output)
     d._close_action = "run"
     d._on_footer_accept()
@@ -200,3 +203,43 @@ def test_run_accepts_a_new_output_folder(tmp_path, monkeypatch):
     assert not warned
     assert d.result() == d.DialogCode.Accepted
     assert d.should_run()
+
+
+def test_output_preview_is_one_line_and_elided_in_the_middle(tmp_path):
+    deep = tmp_path.joinpath(*["very_long_folder_name"] * 12)
+    deep.mkdir(parents=True)
+    genome = deep / "scaffold_5.fa"
+    genome.write_text(">s\nACGT\n")
+    d = _dialog()
+    d._genome_input.add_row(genome)
+    d._update_output_preview()
+    label = d._output_preview
+    label.resize(420, label.sizeHint().height())
+    label._refit()  # hidden widgets get no resize event
+    shown = label.text()
+    assert "\n" not in shown and not label.wordWrap()
+    assert "…" in shown
+    assert shown.startswith("→ /")
+    run_folder = Path(label.full_text()).name
+    assert shown.endswith("/" + run_folder)  # run folder name stays whole
+    assert label.toolTip() == label.full_text()
+    assert str(deep.resolve()) in label.full_text()
+
+
+def test_output_preview_keeps_the_more_genomes_note(tmp_path):
+    a, b = tmp_path / "a.fa", tmp_path / "b.fa"
+    for f in (a, b):
+        f.write_text(">s\nACGT\n")
+    d = _dialog()
+    d._genome_input.add_row(a)
+    d._genome_input.add_row(b)
+    d._update_output_preview()
+    d._output_preview.resize(200, 20)
+    d._output_preview._refit()
+    assert d._output_preview.text().endswith("(+1 more)")
+
+
+def test_library_and_genome_start_empty():
+    d = _dialog(start_dir="/some/folder")
+    assert d.library() is None
+    assert d.targets() == []
