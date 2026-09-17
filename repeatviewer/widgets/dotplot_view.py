@@ -1419,9 +1419,11 @@ class DotplotPanel(QWidget):
         self._selection_xy: tuple[int, int, int, int] | None = None
         # Status line without the appended x/y readout (alignment mode).
         self._status_base = ""
+        self._status_plain = ""
 
         self._status = QLabel("", self)
-        self._status.setStyleSheet("color: palette(mid);")
+        self._status.setTextFormat(Qt.TextFormat.RichText)
+        self._status.setContentsMargins(0, 2, 6, 2)
 
         self._sel_row = QWidget(self)
         sel_layout = QHBoxLayout(self._sel_row)
@@ -1501,10 +1503,10 @@ class DotplotPanel(QWidget):
         layout.setSpacing(0)
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 8, 0)
-        title_row.setSpacing(12)
-        title_row.addWidget(self._title)
+        title_row.setSpacing(8)
+        title_row.addWidget(self._title, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_row.addWidget(self._status, 0, Qt.AlignmentFlag.AlignVCenter)
         title_row.addStretch(1)
-        title_row.addWidget(self._status)
 
         layout.addLayout(bar)
         layout.addLayout(title_row)
@@ -1939,19 +1941,30 @@ class DotplotPanel(QWidget):
             engine = "FastGA"
         offset = int(getattr(result, "coordinate_offset", 0) or 0)
         full = int(getattr(result, "full_sequence_length", 0) or 0)
+        # Length / word size stay available for PDF captions; the title row
+        # only shows the segment count in parentheses next to the name.
         if offset or (full and full > result.sequence_length):
-            where = (
-                f"{offset + 1:,}-{offset + result.sequence_length:,}"
-                f" of {full:,} bp" if full else
-                f"{offset + 1:,}-{offset + result.sequence_length:,}"
-            )
+            if full:
+                where_plain = (
+                    f"{offset + 1:,}-{offset + result.sequence_length:,}"
+                    f" of {full:,} bp"
+                )
+            else:
+                where_plain = f"{offset + 1:,}-{offset + result.sequence_length:,}"
         else:
-            where = f"{result.sequence_length:,} bp"
+            where_plain = f"{result.sequence_length:,} bp"
+        engine_plain = (
+            f"word {result.word_size}" if result.word_size else engine
+        )
         suffix = f" — {result.note}" if result.note else ""
         # New plot data clears any previous drag box; chrome follows.
         self._clear_selection_chrome()
         self._set_status_text(
-            f"{where} · {engine} · {result.segment_count:,} segments{suffix}"
+            f"(<b>{result.segment_count:,}</b> hits){suffix}",
+            plain=(
+                f"{where_plain} · {engine_plain} · "
+                f"{result.segment_count:,} hits{suffix}"
+            ),
         )
 
     def suggest_default_word_size(self) -> None:
@@ -1980,22 +1993,35 @@ class DotplotPanel(QWidget):
         self._sel_y.clear()
         self._sel_row.hide()
         if self._mode == "alignment" and self._status_base:
+            self._status.setTextFormat(Qt.TextFormat.RichText)
             self._status.setText(self._status_base)
 
-    def _set_status_text(self, text: str, *, tooltip: str = "") -> None:
-        """Show a plain status message in the title row (does not clear x/y select)."""
+    def _set_status_text(
+        self,
+        text: str,
+        *,
+        tooltip: str = "",
+        plain: str | None = None,
+    ) -> None:
+        """Show status beside the sequence name (numbers may be bold HTML)."""
         self._status_base = text
+        self._status_plain = plain if plain is not None else text
         self._status.show()
+        # Transient messages are plain; meta stats use RichText with <b> numbers.
+        if "<" in text and ">" in text:
+            self._status.setTextFormat(Qt.TextFormat.RichText)
+        else:
+            self._status.setTextFormat(Qt.TextFormat.PlainText)
         self._status.setText(text)
-        self._status.setToolTip(tooltip)
+        self._status.setToolTip(tooltip or self._status_plain)
 
     def _status_caption(self) -> str:
         """Plain-text status for PDF captions / tooltips."""
+        base = self._status_plain or self._status_base
         if self._selection_xy is not None:
             x1, x2, y1, y2 = self._selection_xy
-            base = self._status_base or self._status.text()
             return f"{base} · x {x1:,}-{x2:,} · y {y1:,}-{y2:,}"
-        return self._status.text()
+        return base
 
     def _alignment_shows_xy_readout(self) -> bool:
         """True for self / two-sequence compares (not 'All sequences')."""
@@ -2012,9 +2038,11 @@ class DotplotPanel(QWidget):
             # No View select buttons; append coords after the segment count.
             self._sel_row.hide()
             if self._alignment_shows_xy_readout():
-                base = self._status_base or self._status.text()
+                base = self._status_base
+                self._status.setTextFormat(Qt.TextFormat.RichText)
                 self._status.setText(
-                    f"{base} · x {x1:,}-{x2:,} · y {y1:,}-{y2:,}"
+                    f"{base} · x <b>{x1:,}</b>–<b>{x2:,}</b> · "
+                    f"y <b>{y1:,}</b>–<b>{y2:,}</b>"
                 )
             return
         self._sel_x.setText(f"x {x1:,}-{x2:,}")
