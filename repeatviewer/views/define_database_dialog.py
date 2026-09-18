@@ -274,10 +274,18 @@ class UserDatabasesWidget(QWidget):
         self._refresh_remove_buttons()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
-        if event.type() == QEvent.Type.FocusIn:
+        if event.type() in {QEvent.Type.FocusIn, QEvent.Type.MouseButtonPress}:
             for row in self._rows:
                 if watched is row._path:
                     self._active_row = row
+                    host = self.window()
+                    focused = getattr(host, "_focused_path_edit", None)
+                    # Keep DefineDatabaseDialog's target in sync (row filters live here).
+                    if focused is not None or hasattr(host, "_focused_path_edit"):
+                        try:
+                            host._focused_path_edit = row._path  # type: ignore[attr-defined]
+                        except Exception:  # noqa: BLE001
+                            pass
                     break
         return super().eventFilter(watched, event)
 
@@ -287,8 +295,20 @@ class UserDatabasesWidget(QWidget):
             return False
         target = self._active_row
         if target is None:
+            for row in self._rows:
+                if not row._path.text().strip():
+                    target = row
+                    break
+        if target is None and self._rows:
+            # Prefer a blank-name placeholder row over silently overwriting a filled one.
+            for row in self._rows:
+                if not row._name.text().strip() or not row._path.text().strip():
+                    target = row
+                    break
+        if target is None:
             return False
         target.apply_path_from_panel(path)
+        self._active_row = target
         return True
 
     def _remove_row(self, row: _UserDatabaseRow) -> None:
@@ -383,10 +403,10 @@ class DefineDatabaseDialog(QDialog):
         return super().eventFilter(watched, event)
 
     def apply_folder_from_panel(self, folder: Path) -> bool:
-        """Fill the focused CDD directory field from a Folders-panel click."""
+        """Fill the CDD directory field from a Folders-panel click when CDD is targeted."""
+        # Use the last focused path edit — do not require live focusWidget().
+        # Clicking the Folders panel moves focus away from the line edit.
         if self._focused_path_edit is not self._cdd_path:
-            return False
-        if self.focusWidget() is not self._cdd_path:
             return False
         resolved = folder.expanduser().resolve()
         if not resolved.is_dir():
@@ -395,24 +415,34 @@ class DefineDatabaseDialog(QDialog):
         return True
 
     def apply_file_from_panel(self, path: Path) -> bool:
-        """Fill the focused CDD or user-database path field from a Files panel click."""
-        if self._focused_path_edit is None:
-            return False
+        """Fill the CDD or user-database path field from a Files panel click."""
         resolved = resolve_panel_database_path(path)
         if resolved is None:
             return False
         kind, target_path = resolved
-        if self._focused_path_edit is self._cdd_path:
-            if kind != "cdd":
-                return False
+        if kind == "cdd":
             self._cdd_path.setText(str(target_path))
+            self._focused_path_edit = self._cdd_path
             return True
-        for row in self._user_databases._rows:
-            if self._focused_path_edit is row._path:
-                if kind != "user":
-                    return False
-                row.apply_path_from_panel(target_path)
-                return True
+
+        # User DB file (.fa / .hmm / BLAST index, …). Prefer the focused row;
+        # otherwise fill the first empty Other-databases row so a click works
+        # even when CDD still holds default focus after the dialog opens.
+        focused_row = None
+        if self._focused_path_edit is not None and self._focused_path_edit is not self._cdd_path:
+            for row in self._user_databases._rows:
+                if self._focused_path_edit is row._path:
+                    focused_row = row
+                    break
+        if focused_row is not None:
+            focused_row.apply_path_from_panel(target_path)
+            self._user_databases._active_row = focused_row
+            return True
+        if self._user_databases.apply_path_from_panel(target_path):
+            active = self._user_databases._active_row
+            if active is not None:
+                self._focused_path_edit = active._path
+            return True
         return False
 
     def accept(self) -> None:
@@ -422,9 +452,25 @@ class DefineDatabaseDialog(QDialog):
         use_system_blast = self._project.use_system_blast
         saved_targets = self._collect_database_targets()
         self._apply_to_project()
-        host = self.parentWidget() or self.parent() or self
+        host = self.parentWidget() or self.parent()
+        already_ready_msg: str | None = None
+        if not pending and saved_targets:
+            already_ready = [
+                target.label
+                for target in saved_targets
+                if index_is_ready(target.kind, target.path)
+            ]
+            if already_ready:
+                already_ready_msg = (
+                    "Database settings saved.\n\n"
+                    "No indexing was needed (index files already present):\n"
+                    + "\n".join(f"  • {label}" for label in already_ready)
+                )
+        # Close first, then show follow-up UI on the host window. A nested modal
+        # QMessageBox parented to ``self`` during/after accept() trips macOS
+        # "modalSession has been exited prematurely".
         super().accept()
-        if pending:
+        if pending and host is not None:
             runner = find_database_index_runner(host)
             QTimer.singleShot(
                 0,
@@ -434,20 +480,15 @@ class DefineDatabaseDialog(QDialog):
                     show_success=True,
                 ),
             )
-        elif saved_targets:
-            already_ready = [
-                target.label
-                for target in saved_targets
-                if index_is_ready(target.kind, target.path)
-            ]
-            if already_ready:
-                QMessageBox.information(
-                    self,
-                    "Define databases",
-                    "Database settings saved.\n\n"
-                    "No indexing was needed (index files already present):\n"
-                    + "\n".join(f"  • {label}" for label in already_ready),
-                )
+        elif already_ready_msg and host is not None:
+            message = already_ready_msg
+            parent = host
+            QTimer.singleShot(
+                0,
+                lambda m=message, p=parent: QMessageBox.information(
+                    p, "Define databases", m
+                ),
+            )
 
     def _collect_database_targets(self):
         cdd_text = self._cdd_path.text().strip()
