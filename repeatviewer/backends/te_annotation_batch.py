@@ -12,6 +12,7 @@ from repeatviewer.backends.job_cancel import JobCancellation
 from repeatviewer.backends.sequence_features import (
     load_sequence_map_data,
     load_single_sequence_fasta,
+    resolve_features_gff_path,
     save_annotations,
 )
 from repeatviewer.backends.similarity_annotation import (
@@ -29,6 +30,22 @@ class TeAnnotationOptions:
 
     auto_modes: tuple[AutoAnnotationMode, ...] = ()
     similarity_databases: tuple[SimilarityDatabaseRun, ...] = ()
+
+
+def existing_annotation_gff_paths(fasta_paths: list[Path]) -> list[Path]:
+    """Return existing companion annotation GFF files (``.RV.gff3`` / legacy)."""
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for fasta in fasta_paths:
+        gff = resolve_features_gff_path(fasta)
+        if gff is None:
+            continue
+        resolved = gff.expanduser().resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        found.append(resolved)
+    return found
 
 
 def is_single_sequence_fasta(path: Path) -> bool:

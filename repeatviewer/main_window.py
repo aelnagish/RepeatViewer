@@ -8774,6 +8774,27 @@ class MainWindow(QMainWindow):
             return None
         return single
 
+    def _confirm_te_annotation_overwrite(self, fastas: list[Path]) -> bool:
+        """Ask before overwriting existing ``*.RV.gff3`` companions. True = continue."""
+        from repeatviewer.backends.te_annotation_batch import existing_annotation_gff_paths
+
+        existing = existing_annotation_gff_paths(fastas)
+        if not existing:
+            return True
+        listing = "\n".join(f"  • {path.name}" for path in existing[:20])
+        if len(existing) > 20:
+            listing += f"\n  … and {len(existing) - 20} more"
+        answer = QMessageBox.question(
+            self,
+            "Overwrite annotations?",
+            "Annotation file(s) already exist for the selected sequence(s):\n\n"
+            f"{listing}\n\n"
+            "Running Sequence Annotation will overwrite them. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def _run_te_annotation_saved(self) -> None:
         single = self._te_annotation_fasta_selection()
         if single is None:
@@ -8786,6 +8807,8 @@ class MainWindow(QMainWindow):
                 "No annotation modules are saved. Open Sequence Annotation and choose "
                 "at least one auto-annotation module or similarity database.",
             )
+            return
+        if not self._confirm_te_annotation_overwrite(single):
             return
         self._apply_function(
             "te_annotation",
@@ -8827,6 +8850,8 @@ class MainWindow(QMainWindow):
             return
         single = self._te_annotation_fasta_selection()
         if single is None:
+            return
+        if not self._confirm_te_annotation_overwrite(single):
             return
         self._apply_function(
             "te_annotation",
