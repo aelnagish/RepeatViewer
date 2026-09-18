@@ -471,14 +471,14 @@ _BROWSER_ICON_SIZE = 16
 
 
 def _unique_duplicate_path(path: Path) -> Path:
-    """Next unused path in the same folder: ``name copy.ext``, ``name copy 2.ext``, …"""
+    """Next unused path in the same folder: ``name_copy.ext``, ``name_copy2.ext``, …"""
     parent = path.parent
-    candidate = parent / f"{path.stem} copy{path.suffix}"
+    candidate = parent / f"{path.stem}_copy{path.suffix}"
     if not candidate.exists():
         return candidate
     n = 2
     while True:
-        candidate = parent / f"{path.stem} copy {n}{path.suffix}"
+        candidate = parent / f"{path.stem}_copy{n}{path.suffix}"
         if not candidate.exists():
             return candidate
         n += 1
@@ -1983,6 +1983,7 @@ class MainWindow(QMainWindow):
         )
         self._genome_dialog: GenomeDialog | None = None
         self._define_database_dialog: DefineDatabaseDialog | None = None
+        self._add_annotation_dialog = None
         self._command_plugin_dialog: CommandPluginDesignerDialog | None = None
         self._plugin_run_dialog: UserCommandRunDialog | None = None
         self._msa_clean_options = load_msa_clean_options()
@@ -6998,6 +6999,7 @@ class MainWindow(QMainWindow):
             self._sync_plugin_run_dialog_from_files(panel_path)
             self._sync_te_viz_dialog_input_from_files(panel_path)
             self._sync_define_database_dialog_from_files(panel_path)
+            self._sync_add_annotation_dialog_from_files(panel_path)
 
     def _on_file_double_clicked(self, item: FileListRow) -> None:
         raw = item.data(ROLE_PATH)
@@ -7324,64 +7326,88 @@ class MainWindow(QMainWindow):
         self._set_status_message(f"Added BLAST database “{db.name}”", 4000)
 
     def _add_annotation_for_fasta(self, path: Path) -> None:
-        """Copy/convert GFF/GFF3/GTF/BED into ``{stem}.RV.gff3`` beside the FASTA.
+        """Open a non-modal Add annotation dialog for ``path``.
 
         Deferred one tick so the Files context menu can finish and release the
-        click-to-preview suppress flag before the file dialog opens.
+        click-to-preview suppress flag before the dialog opens.
         """
         self._file_list.clear_suppress_selection_preview()
         QTimer.singleShot(0, lambda p=path: self._run_add_annotation_for_fasta(p))
 
-    def _run_add_annotation_for_fasta(self, path: Path) -> None:
-        from PySide6.QtWidgets import QFileDialog
+    def _sync_add_annotation_dialog_from_files(self, clicked_path: Path | None = None) -> None:
+        dialog = self._add_annotation_dialog
+        if dialog is None or not dialog.isVisible() or clicked_path is None:
+            return
+        if dialog.apply_path_from_panel(clicked_path):
+            dialog.raise_()
 
-        from repeatviewer.backends.sequence_features import (
-            features_gff_path,
-            import_annotation_as_rv_gff3,
-        )
+    def _run_add_annotation_for_fasta(self, path: Path) -> None:
+        from repeatviewer.views.add_annotation_dialog import AddAnnotationDialog
 
         self._file_list.clear_suppress_selection_preview()
         fasta = path.expanduser().resolve()
         if not fasta.is_file():
             QMessageBox.warning(self, "Add annotation", f"FASTA not found:\n{fasta}")
             return
-        start_dir = str(fasta.parent)
-        try:
-            chosen, _ = QFileDialog.getOpenFileName(
-                self,
-                f"Add annotation for {fasta.name}",
-                start_dir,
-                "Annotations (*.gff *.gff3 *.gtf *.bed);;All files (*)",
-            )
-        finally:
-            self._file_list.clear_suppress_selection_preview()
-        if not chosen:
-            return
-        annotation = Path(chosen).expanduser().resolve()
-        dest = features_gff_path(fasta)
-        if dest.is_file() and dest.resolve() == annotation:
-            QMessageBox.information(
-                self,
-                "Add annotation",
-                f"{dest.name} is already the RepeatViewer annotation for this FASTA.",
-            )
-            return
-        try:
-            gff_path, count = import_annotation_as_rv_gff3(fasta, annotation)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Add annotation", str(exc))
-            return
+        if self._add_annotation_dialog is not None:
+            existing = self._add_annotation_dialog
+            if existing.isVisible() and existing.fasta_path() == fasta:
+                existing.raise_()
+                existing.activateWindow()
+                return
+            existing.close()
+            self._add_annotation_dialog = None
 
-        self._sync_sidecar_in_file_list(gff_path, select=False)
-        if self._preview_tabs is not None:
-            self._preview_tabs.reload_paths([fasta])
-        self._file_list.clear_suppress_selection_preview()
-        self._set_status_message(
-            f"Added {count:,} feature(s) → {gff_path.name}",
-            8000,
-            override_file_link=True,
+        dialog = AddAnnotationDialog(fasta_path=fasta, parent=self)
+        self._add_annotation_dialog = dialog
+        dialog.finished.connect(self._on_add_annotation_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_add_annotation_dialog_finished(self, result: int) -> None:
+        from repeatviewer.backends.sequence_features import (
+            features_gff_path,
+            import_annotation_as_rv_gff3,
         )
-        self._set_status_file_link(gff_path)
+
+        dialog = self._add_annotation_dialog
+        self._add_annotation_dialog = None
+        self._file_list.clear_suppress_selection_preview()
+        if dialog is None:
+            return
+        try:
+            if result != int(QDialog.DialogCode.Accepted):
+                return
+            fasta = dialog.fasta_path()
+            annotation = dialog.result_path()
+            if annotation is None:
+                return
+            dest = features_gff_path(fasta)
+            if dest.is_file() and dest.resolve() == annotation:
+                QMessageBox.information(
+                    self,
+                    "Add annotation",
+                    f"{dest.name} is already the RepeatViewer annotation for this FASTA.",
+                )
+                return
+            try:
+                gff_path, count = import_annotation_as_rv_gff3(fasta, annotation)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Add annotation", str(exc))
+                return
+
+            self._sync_sidecar_in_file_list(gff_path, select=False)
+            if self._preview_tabs is not None:
+                self._preview_tabs.reload_paths([fasta])
+            self._set_status_message(
+                f"Added {count:,} feature(s) → {gff_path.name}",
+                8000,
+                override_file_link=True,
+            )
+            self._set_status_file_link(gff_path)
+        finally:
+            dialog.deleteLater()
 
     def _open_blast_genome_map_from_selection(
         self,
