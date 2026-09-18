@@ -957,6 +957,19 @@ def _feature_sequence_fragment(sequence: str, feat: SequenceFeature) -> str:
     return fragment
 
 
+def _feature_with_track(feat: SequenceFeature, track: int) -> SequenceFeature:
+    return SequenceFeature(
+        start=feat.start,
+        end=feat.end,
+        name=feat.name,
+        feature_type=feat.feature_type,
+        color=feat.color,
+        strand=feat.strand,
+        track=max(0, int(track)),
+        parent=feat.parent,
+    )
+
+
 class AnnotationTrackWidget(QWidget):
     """Feature annotations below the sequence; stacked rows for overlaps."""
 
@@ -965,6 +978,7 @@ class AnnotationTrackWidget(QWidget):
     copySequenceRequested = Signal()
     extractSequenceRequested = Signal()
     modifyRequested = Signal()
+    tracksMoved = Signal(object)  # list[SequenceFeature]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -986,6 +1000,11 @@ class AnnotationTrackWidget(QWidget):
         self._marquee_additive_base: set[int] = set()
         self._mouse_grabbed = False
         self._show_similarity_database_name = True
+        self._move_active = False
+        self._move_indices: set[int] = set()
+        self._move_preview_track: int | None = None
+        self._move_ghost_y: float | None = None
+        self._hover_idx: int | None = None
         self.setFixedHeight(0)
 
     def set_show_similarity_database_name(self, show: bool) -> None:
@@ -1014,11 +1033,146 @@ class AnnotationTrackWidget(QWidget):
     def hideEvent(self, event) -> None:  # noqa: N802
         self._press_pos = None
         self._marquee_active = False
+        self._move_active = False
+        self._move_indices = set()
+        self._move_preview_track = None
+        self._move_ghost_y = None
+        self._hover_idx = None
         self._release_drag_mouse()
         super().hideEvent(event)
 
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._hover_idx is not None and not self._move_active and not self._marquee_active:
+            self._hover_idx = None
+            self.update()
+        super().leaveEvent(event)
+
     def _row_height(self) -> float:
         return float(_ANNOT_FEATURE_HEIGHT + _TRACK_GAP)
+
+    def _feature_full_label(self, feat: SequenceFeature) -> str:
+        base = feat.name or feat.feature_type
+        return similarity_feature_track_label(
+            base,
+            feat.feature_type,
+            show_database_name=self._show_similarity_database_name,
+        )
+
+    def _label_overflows(self, feat: SequenceFeature, rect: QRectF) -> bool:
+        label = self._feature_full_label(feat)
+        if not label or rect.width() <= 28:
+            return bool(label) and rect.width() <= 28
+        fm = QFontMetrics(self.font())
+        # Match the 7pt label font used while painting features.
+        label_font = QFont(self.font())
+        label_font.setPointSize(7)
+        fm = QFontMetrics(label_font)
+        available = max(0.0, rect.width() - 10.0)
+        return fm.horizontalAdvance(label) > available
+
+    def _track_band_ranges(self) -> list[tuple[int, float, float]]:
+        """Return (track_id, y_top, y_bottom) for each track in display order."""
+        if not self._features:
+            return []
+        tracks = sorted({feat.track for feat in self._features})
+        bands: list[tuple[int, float, float]] = []
+        row_offset = 0
+        row_h = self._row_height()
+        for track in tracks:
+            group = [feat for feat in self._features if feat.track == track]
+            _, group_count = _pack_feature_row_group(group)
+            group_count = max(1, group_count)
+            y0 = _ANNOT_TRACK_VPAD + row_offset * row_h
+            y1 = y0 + group_count * row_h
+            bands.append((track, y0, y1))
+            row_offset += group_count
+        return bands
+
+    def _target_track_at_y(self, y: float) -> int:
+        """Map a vertical cursor position to a durable feature track id."""
+        bands = self._track_band_ranges()
+        if not bands:
+            return 0
+        if y < bands[0][1]:
+            return bands[0][0]
+        for track, y0, y1 in bands:
+            if y0 <= y < y1:
+                return track
+        return bands[-1][0]
+
+    def _features_after_track_move(self, y: float) -> list[SequenceFeature] | None:
+        """Return updated features after a vertical track move, or None if unchanged."""
+        moving = {idx for idx in self._move_indices if 0 <= idx < len(self._features)}
+        if not moving:
+            return None
+        bands = self._track_band_ranges()
+        if not bands:
+            updated = [
+                _feature_with_track(feat, 0) if idx in moving else feat
+                for idx, feat in enumerate(self._features)
+            ]
+            return self._normalize_track_ids(updated)
+
+        join_track: int | None = None
+        insert_before: int | None = None
+        if y < bands[0][1]:
+            insert_before = 0
+        elif y >= bands[-1][2]:
+            insert_before = len(bands)
+        else:
+            for index, (track, y0, y1) in enumerate(bands):
+                if y0 <= y < y1:
+                    # Top/bottom thirds of a multi-row band create a new lane;
+                    # the middle joins the existing track.
+                    span = max(1.0, y1 - y0)
+                    local = (y - y0) / span
+                    if span > self._row_height() * 1.5 and local < 0.28:
+                        insert_before = index
+                    elif span > self._row_height() * 1.5 and local > 0.72:
+                        insert_before = index + 1
+                    else:
+                        join_track = track
+                    break
+
+        if join_track is not None:
+            if all(self._features[idx].track == join_track for idx in moving):
+                return None
+            updated = [
+                _feature_with_track(feat, join_track) if idx in moving else feat
+                for idx, feat in enumerate(self._features)
+            ]
+            return self._normalize_track_ids(updated)
+
+        assert insert_before is not None
+        old_to_new = {
+            track: (index if index < insert_before else index + 1)
+            for index, (track, _, _) in enumerate(bands)
+        }
+        new_track = insert_before
+        updated = []
+        for idx, feat in enumerate(self._features):
+            if idx in moving:
+                updated.append(_feature_with_track(feat, new_track))
+            else:
+                updated.append(
+                    _feature_with_track(feat, old_to_new.get(feat.track, feat.track))
+                )
+        return self._normalize_track_ids(updated)
+
+    def _normalize_track_ids(self, features: list[SequenceFeature]) -> list[SequenceFeature]:
+        """Keep relative track order; remap to contiguous non-negative ids."""
+        ordered = sorted({feat.track for feat in features})
+        if not ordered:
+            return features
+        remap = {old: idx for idx, old in enumerate(ordered)}
+        return [_feature_with_track(feat, remap[feat.track]) for feat in features]
+
+    def _can_start_move(self, hit: int | None) -> bool:
+        return (
+            hit is not None
+            and hit in self._selected_indices
+            and bool(self._selected_indices)
+        )
 
     def _feature_rect(self, idx: int) -> QRectF:
         feat = self._features[idx]
@@ -1121,10 +1275,16 @@ class AnnotationTrackWidget(QWidget):
         self._scroll_px = max(0.0, float(scroll_px))
         self._ppb = max(0.01, float(ppb))
         self._viewport_w = max(1, int(viewport_w))
-        if not self._marquee_active and self._press_pos is None:
+        if (
+            not self._marquee_active
+            and not self._move_active
+            and self._press_pos is None
+        ):
             self._selected_indices = set(selected_indices or [])
         valid = set(range(len(self._features)))
         self._selected_indices &= valid
+        if self._hover_idx is not None and self._hover_idx not in valid:
+            self._hover_idx = None
         self._row_count = max((r for r in feature_rows), default=-1) + 1 if features else 0
         track_w = max(1, int(viewport_w))
         if self._row_count > 0:
@@ -1173,6 +1333,70 @@ class AnnotationTrackWidget(QWidget):
             if selected:
                 _draw_feature_selection_chrome(painter, rect)
 
+        if self._move_active and self._move_ghost_y is not None and self._move_indices:
+            for idx in sorted(self._move_indices):
+                if not (0 <= idx < len(self._features)):
+                    continue
+                feat = self._features[idx]
+                x1 = _bp_view_x(feat.start, scroll, ppb)
+                x2 = _bp_view_x(feat.end + 1, scroll, ppb)
+                rect = QRectF(
+                    x1,
+                    self._move_ghost_y,
+                    max(2.0, x2 - x1),
+                    max(2.0, float(_ANNOT_FEATURE_HEIGHT) - 1.0),
+                )
+                color = QColor(feat.color or feature_type_color(feat.feature_type))
+                color.setAlpha(110)
+                _draw_directed_feature(
+                    painter,
+                    rect,
+                    color,
+                    forward=feat.is_forward(),
+                    label="",
+                )
+                painter.setPen(QPen(_FEATURE_SELECTION_BORDER, 1, Qt.PenStyle.DashLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect)
+
+        hover_idx = self._hover_idx
+        if (
+            hover_idx is not None
+            and 0 <= hover_idx < len(self._features)
+            and not self._marquee_active
+            and not self._move_active
+        ):
+            feat = self._features[hover_idx]
+            rect = self._feature_rect(hover_idx)
+            full_label = self._feature_full_label(feat)
+            if full_label and self._label_overflows(feat, rect):
+                tip_font = QFont(painter.font())
+                tip_font.setPointSize(8)
+                painter.setFont(tip_font)
+                fm = QFontMetrics(tip_font)
+                tip_w = min(
+                    max(fm.horizontalAdvance(full_label) + 10, 40),
+                    max(80, self.width() - 8),
+                )
+                tip_h = fm.height() + 6
+                tip_x = min(
+                    max(4.0, rect.left()),
+                    max(4.0, float(self.width()) - tip_w - 4.0),
+                )
+                tip_y = rect.bottom() + 3.0
+                if tip_y + tip_h > self.height() - 2:
+                    tip_y = max(2.0, rect.top() - tip_h - 3.0)
+                tip_rect = QRectF(tip_x, tip_y, tip_w, tip_h)
+                painter.setPen(QPen(QColor("#555555"), 1))
+                painter.setBrush(QColor(255, 255, 255, 235))
+                painter.drawRoundedRect(tip_rect, 3, 3)
+                painter.setPen(QColor("#222222"))
+                painter.drawText(
+                    tip_rect.adjusted(5, 0, -5, 0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    full_label,
+                )
+
         if self._marquee_active:
             marquee = self._marquee_rect()
             painter.setPen(QPen(QColor("#2c6fad"), 1, Qt.PenStyle.DashLine))
@@ -1190,23 +1414,60 @@ class AnnotationTrackWidget(QWidget):
         self._marquee_active = False
         self._marquee_origin = None
         self._marquee_current = None
+        self._move_active = False
+        self._move_indices = set()
+        self._move_preview_track = None
+        self._move_ghost_y = None
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        pos = event.position()
         if self._press_pos is None:
+            hit = self._hit_test_feature(pos)
+            if hit != self._hover_idx:
+                self._hover_idx = hit
+                self.update()
             super().mouseMoveEvent(event)
             return
-        pos = event.position()
+
+        if self._move_active:
+            self._move_ghost_y = pos.y() - float(_ANNOT_FEATURE_HEIGHT) * 0.5
+            self._move_preview_track = self._target_track_at_y(pos.y())
+            self.update()
+            event.accept()
+            return
+
         if self._marquee_active:
             self._marquee_current = pos
             self._apply_marquee_preview(additive=self._additive_modifier(event.modifiers()))
             self.update()
             return
+
         delta = pos - self._press_pos
         if math.hypot(delta.x(), delta.y()) < _MARQUEE_DRAG_THRESHOLD:
             super().mouseMoveEvent(event)
             return
+
+        # Drag from an already-selected feature (mostly vertical) → move track.
+        # Otherwise → marquee multi-select.
+        if (
+            self._can_start_move(self._press_hit)
+            and not self._additive_modifier(event.modifiers())
+            and abs(delta.y()) >= abs(delta.x())
+        ):
+            self._move_active = True
+            self._move_indices = set(self._selected_indices)
+            self._move_ghost_y = pos.y() - float(_ANNOT_FEATURE_HEIGHT) * 0.5
+            self._move_preview_track = self._target_track_at_y(pos.y())
+            self._hover_idx = None
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+            self.grabMouse()
+            self._mouse_grabbed = True
+            self.update()
+            event.accept()
+            return
+
         self._marquee_active = True
         self._marquee_origin = self._press_pos
         self._marquee_current = pos
@@ -1225,14 +1486,19 @@ class AnnotationTrackWidget(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             super().mouseReleaseEvent(event)
             return
-        if self._press_pos is None and not self._marquee_active:
+        if self._press_pos is None and not self._marquee_active and not self._move_active:
             self._release_drag_mouse()
             super().mouseReleaseEvent(event)
             return
         pos = event.position()
         additive = self._additive_modifier(event.modifiers())
         try:
-            if self._marquee_active:
+            if self._move_active and self._move_indices:
+                updated = self._features_after_track_move(pos.y())
+                if updated is not None:
+                    self.tracksMoved.emit(updated)
+                self._emit_selection()
+            elif self._marquee_active:
                 picked = self._indices_in_marquee()
                 if additive:
                     self._selected_indices = set(self._marquee_additive_base) | picked
@@ -1261,6 +1527,10 @@ class AnnotationTrackWidget(QWidget):
             self._marquee_origin = None
             self._marquee_current = None
             self._marquee_additive_base = set()
+            self._move_active = False
+            self._move_indices = set()
+            self._move_preview_track = None
+            self._move_ghost_y = None
             self._release_drag_mouse()
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.update()
@@ -2253,6 +2523,7 @@ class SequenceMapWidget(QWidget):
     copyFeatureSequencesRequested = Signal()
     extractFeatureSequencesRequested = Signal()
     modifyFeatureRequested = Signal()
+    annotationTracksMoveRequested = Signal(object)  # list[SequenceFeature]
 
     def __init__(self, parent: QWidget | None = None, *, embedded: bool = False) -> None:
         super().__init__(parent)
@@ -2468,6 +2739,7 @@ class SequenceMapWidget(QWidget):
             self._request_extract_feature_sequences
         )
         self._annot_track.modifyRequested.connect(self._request_modify_feature)
+        self._annot_track.tracksMoved.connect(self._on_annot_tracks_moved)
         self._overview = OverviewWidget(self)
         self._overview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._overview.viewportChanged.connect(self._scroll_to_fraction)
@@ -3180,6 +3452,12 @@ class SequenceMapWidget(QWidget):
         if self._selected_feature_indices:
             self.modifyFeatureRequested.emit()
 
+    def _on_annot_tracks_moved(self, features: object) -> None:
+        updated = list(features or [])
+        if not updated:
+            return
+        self.annotationTracksMoveRequested.emit(updated)
+
     def _on_canvas_feature_action(self, action: str) -> None:
         kind = str(action or "").strip().lower()
         if kind == "delete":
@@ -3858,6 +4136,7 @@ class SequenceMapPanel(QWidget):
             self._extract_selected_feature_sequences
         )
         self._map.modifyFeatureRequested.connect(self._modify_feature)
+        self._map.annotationTracksMoveRequested.connect(self._apply_annotation_track_move)
         self.annotationJobProgress.connect(self._set_annotation_job_status)
         self._auto_ann_thread: QThread | None = None
         self._auto_ann_worker: Worker | None = None
@@ -4705,6 +4984,17 @@ class SequenceMapPanel(QWidget):
         self._map.set_selected_features({index})
         self._persist_annotations()
         self.statusMessage.emit(f"Modified feature “{edited.name}”.")
+
+    def _apply_annotation_track_move(self, features: object) -> None:
+        updated = list(features or [])
+        if not updated:
+            return
+        selected = set(self._map.selected_feature_indices())
+        self._push_feature_undo_snapshot()
+        self._map.set_features(updated)
+        self._map.set_selected_features(selected)
+        self._persist_annotations()
+        self.statusMessage.emit("Moved annotation track(s).")
 
     def _selected_features(self) -> list[SequenceFeature]:
         self._map._sync_feature_selection_from_annot_track()
