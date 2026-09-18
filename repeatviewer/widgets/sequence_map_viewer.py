@@ -2586,12 +2586,16 @@ class SequenceMapWidget(QWidget):
         self._pos_start.setMinimum(1)
         self._pos_start.setMaximum(1)
         self._pos_start.setFixedWidth(72)
+        self._pos_start.setKeyboardTracking(False)
         self._pos_end = QSpinBox(controls_parent)
         self._pos_end.setMinimum(1)
         self._pos_end.setMaximum(1)
         self._pos_end.setFixedWidth(72)
+        self._pos_end.setKeyboardTracking(False)
         self._pos_start.valueChanged.connect(self._on_position_spin_changed)
         self._pos_end.valueChanged.connect(self._on_position_spin_changed)
+        self._pos_start.editingFinished.connect(self._on_position_editing_finished)
+        self._pos_end.editingFinished.connect(self._on_position_editing_finished)
         select_btn = QPushButton("Select", controls_parent)
         select_btn.setToolTip(
             "Zoom to the selected range and center its midpoint in the window"
@@ -2999,6 +3003,9 @@ class SequenceMapWidget(QWidget):
             spin.setValue(min(spin.value(), seq_len) if spin.value() > 0 else 1)
 
     def _sync_position_spins(self, start: int, end: int) -> None:
+        # Do not overwrite an in-progress typed value in either spin box.
+        if self._pos_start.hasFocus() or self._pos_end.hasFocus():
+            return
         a, b = sorted((int(start), int(end)))
         self._pos_start.blockSignals(True)
         self._pos_end.blockSignals(True)
@@ -3007,10 +3014,33 @@ class SequenceMapWidget(QWidget):
         self._pos_start.blockSignals(False)
         self._pos_end.blockSignals(False)
 
-    def _on_position_spin_changed(self, _value: int) -> None:
+    def _ensure_position_end_not_before_start(self) -> None:
+        """If start > end, bump end to start+1 (clamped to sequence length)."""
+        start = self._pos_start.value()
+        end = self._pos_end.value()
+        if start <= end:
+            return
+        seq_len = max(1, int(self._pos_end.maximum()))
+        new_end = min(seq_len, start + 1)
+        if new_end < start:
+            new_end = start
+        self._pos_end.blockSignals(True)
+        self._pos_end.setValue(new_end)
+        self._pos_end.blockSignals(False)
+
+    def _apply_position_spins_to_selection(self) -> None:
         if self._data is None:
             return
+        self._ensure_position_end_not_before_start()
         self._canvas.set_selection_range(self._pos_start.value(), self._pos_end.value())
+
+    def _on_position_spin_changed(self, _value: int) -> None:
+        # With keyboardTracking=False this runs after Enter/arrows/focus-out,
+        # so typed multi-digit start values are not interrupted mid-entry.
+        self._apply_position_spins_to_selection()
+
+    def _on_position_editing_finished(self) -> None:
+        self._apply_position_spins_to_selection()
 
     def _on_horizontal_scroll(self, value: int) -> None:
         self._canvas.set_scroll_px(float(value))
@@ -3061,12 +3091,8 @@ class SequenceMapWidget(QWidget):
     def _select_by_position(self) -> None:
         if self._data is None:
             return
-        sel = self._canvas.selection_range()
-        if sel is not None:
-            start, end = sel
-        else:
-            start, end = self._pos_start.value(), self._pos_end.value()
-        self.select_by_position(start, end)
+        self._ensure_position_end_not_before_start()
+        self.select_by_position(self._pos_start.value(), self._pos_end.value())
 
     def _scroll_to_bp_range(self, start: int, end: int) -> None:
         viewport_w = self._scroll_viewport_width()
