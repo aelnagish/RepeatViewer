@@ -1115,7 +1115,14 @@ class AnnotationTrackWidget(QWidget):
         return bands[-1][0]
 
     def _features_after_track_move(self, y: float) -> list[SequenceFeature] | None:
-        """Return updated features after a vertical track move, or None if unchanged."""
+        """Return updated features after a vertical track move, or None if unchanged.
+
+        Dropping inside a track band joins the *visual row* under the cursor, not
+        merely the track id. That matters when a track is stacked (e.g. HHCC above
+        INT): greedy packing would otherwise keep putting a newcomer on the top
+        free row, leaving the gap beside INT empty. A new track is inserted only
+        on the thin edge between bands, or above/below all bands.
+        """
         moving = {idx for idx in self._move_indices if 0 <= idx < len(self._features)}
         if not moving:
             return None
@@ -1128,34 +1135,32 @@ class AnnotationTrackWidget(QWidget):
             return self._normalize_track_ids(updated)
 
         join_track: int | None = None
+        join_band_y0: float | None = None
         insert_before: int | None = None
+        edge = max(4.0, self._row_height() * 0.22)
         if y < bands[0][1]:
             insert_before = 0
         elif y >= bands[-1][2]:
             insert_before = len(bands)
         else:
             for index, (track, y0, y1) in enumerate(bands):
-                if y0 <= y < y1:
-                    # Top/bottom thirds of a multi-row band create a new lane;
-                    # the middle joins the existing track.
-                    span = max(1.0, y1 - y0)
-                    local = (y - y0) / span
-                    if span > self._row_height() * 1.5 and local < 0.28:
-                        insert_before = index
-                    elif span > self._row_height() * 1.5 and local > 0.72:
-                        insert_before = index + 1
-                    else:
-                        join_track = track
-                    break
+                if not (y0 <= y < y1):
+                    continue
+                dist_top = y - y0
+                dist_bottom = y1 - y
+                if dist_top <= edge and dist_top <= dist_bottom and index > 0:
+                    insert_before = index
+                elif dist_bottom <= edge and dist_bottom < dist_top and index + 1 < len(bands):
+                    insert_before = index + 1
+                else:
+                    join_track = track
+                    join_band_y0 = y0
+                break
 
-        if join_track is not None:
-            if all(self._features[idx].track == join_track for idx in moving):
-                return None
-            updated = [
-                _feature_with_track(feat, join_track) if idx in moving else feat
-                for idx, feat in enumerate(self._features)
-            ]
-            return self._normalize_track_ids(updated)
+        if join_track is not None and join_band_y0 is not None:
+            row_h = max(1.0, float(self._row_height()))
+            local_row = int((y - join_band_y0) // row_h)
+            return self._join_features_to_track_row(moving, join_track, local_row)
 
         assert insert_before is not None
         old_to_new = {
@@ -1172,6 +1177,60 @@ class AnnotationTrackWidget(QWidget):
                     _feature_with_track(feat, old_to_new.get(feat.track, feat.track))
                 )
         return self._normalize_track_ids(updated)
+
+    def _join_features_to_track_row(
+        self,
+        moving: set[int],
+        join_track: int,
+        local_row: int,
+    ) -> list[SequenceFeature] | None:
+        """Put ``moving`` on the same durable track as the chosen packed row.
+
+        Multi-row tracks (overlapping features) are split into one track per
+        packed row so a drop onto INT's row aligns with INT instead of the
+        topmost free row (HHCC).
+        """
+        residents = [
+            idx
+            for idx, feat in enumerate(self._features)
+            if feat.track == join_track and idx not in moving
+        ]
+        group = [self._features[idx] for idx in residents]
+        group_rows, group_count = _pack_feature_row_group(group)
+        group_count = max(1, int(group_count) or 1)
+        target_row = max(0, min(group_count - 1, int(local_row)))
+
+        # Rebuild track ids in display order, splitting join_track by packed row.
+        ordered_tracks = sorted({feat.track for feat in self._features})
+        new_track_for_index = [feat.track for feat in self._features]
+        next_track = 0
+        target_new_track = 0
+        for track in ordered_tracks:
+            if track != join_track:
+                for idx, feat in enumerate(self._features):
+                    if feat.track == track and idx not in moving:
+                        new_track_for_index[idx] = next_track
+                next_track += 1
+                continue
+            row_track_ids = list(range(next_track, next_track + group_count))
+            next_track += group_count
+            target_new_track = row_track_ids[target_row]
+            for local_i, idx in enumerate(residents):
+                row = group_rows[local_i] if local_i < len(group_rows) else 0
+                row = max(0, min(group_count - 1, int(row)))
+                new_track_for_index[idx] = row_track_ids[row]
+        for idx in moving:
+            new_track_for_index[idx] = target_new_track
+
+        updated = [
+            _feature_with_track(feat, new_track_for_index[idx])
+            for idx, feat in enumerate(self._features)
+        ]
+        normalized = self._normalize_track_ids(updated)
+        current = self._normalize_track_ids(list(self._features))
+        if [feat.track for feat in normalized] == [feat.track for feat in current]:
+            return None
+        return normalized
 
     def _normalize_track_ids(self, features: list[SequenceFeature]) -> list[SequenceFeature]:
         """Keep relative track order; remap to contiguous non-negative ids."""
