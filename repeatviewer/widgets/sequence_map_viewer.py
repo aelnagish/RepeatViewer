@@ -970,6 +970,19 @@ def _feature_with_track(feat: SequenceFeature, track: int) -> SequenceFeature:
     )
 
 
+def _feature_with_color(feat: SequenceFeature, color: str) -> SequenceFeature:
+    return SequenceFeature(
+        start=feat.start,
+        end=feat.end,
+        name=feat.name,
+        feature_type=feat.feature_type,
+        color=color,
+        strand=feat.strand,
+        track=feat.track,
+        parent=feat.parent,
+    )
+
+
 class AnnotationTrackWidget(QWidget):
     """Feature annotations below the sequence; stacked rows for overlaps."""
 
@@ -978,6 +991,7 @@ class AnnotationTrackWidget(QWidget):
     copySequenceRequested = Signal()
     extractSequenceRequested = Signal()
     modifyRequested = Signal()
+    changeColorRequested = Signal()
     tracksMoved = Signal(object)  # list[SequenceFeature]
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1561,8 +1575,14 @@ class AnnotationTrackWidget(QWidget):
         copy_action.triggered.connect(self.copySequenceRequested.emit)
         extract_action = menu.addAction("Extract Sequence")
         extract_action.triggered.connect(self.extractSequenceRequested.emit)
-        modify_action = menu.addAction("Modify")
-        modify_action.triggered.connect(lambda _checked=False, idx=hit: self._request_modify(idx))
+        if len(self._selected_indices) > 1:
+            color_action = menu.addAction("Change color")
+            color_action.triggered.connect(self.changeColorRequested.emit)
+        else:
+            modify_action = menu.addAction("Modify")
+            modify_action.triggered.connect(
+                lambda _checked=False, idx=hit: self._request_modify(idx)
+            )
         menu.exec(event.globalPos())
         event.accept()
 
@@ -2523,6 +2543,7 @@ class SequenceMapWidget(QWidget):
     copyFeatureSequencesRequested = Signal()
     extractFeatureSequencesRequested = Signal()
     modifyFeatureRequested = Signal()
+    changeFeatureColorRequested = Signal()
     annotationTracksMoveRequested = Signal(object)  # list[SequenceFeature]
 
     def __init__(self, parent: QWidget | None = None, *, embedded: bool = False) -> None:
@@ -2739,6 +2760,7 @@ class SequenceMapWidget(QWidget):
             self._request_extract_feature_sequences
         )
         self._annot_track.modifyRequested.connect(self._request_modify_feature)
+        self._annot_track.changeColorRequested.connect(self._request_change_feature_color)
         self._annot_track.tracksMoved.connect(self._on_annot_tracks_moved)
         self._overview = OverviewWidget(self)
         self._overview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -3452,6 +3474,11 @@ class SequenceMapWidget(QWidget):
         if self._selected_feature_indices:
             self.modifyFeatureRequested.emit()
 
+    def _request_change_feature_color(self) -> None:
+        self._sync_feature_selection_from_annot_track()
+        if len(self._selected_feature_indices) > 1:
+            self.changeFeatureColorRequested.emit()
+
     def _on_annot_tracks_moved(self, features: object) -> None:
         updated = list(features or [])
         if not updated:
@@ -4136,6 +4163,7 @@ class SequenceMapPanel(QWidget):
             self._extract_selected_feature_sequences
         )
         self._map.modifyFeatureRequested.connect(self._modify_feature)
+        self._map.changeFeatureColorRequested.connect(self._change_selected_feature_colors)
         self._map.annotationTracksMoveRequested.connect(self._apply_annotation_track_move)
         self.annotationJobProgress.connect(self._set_annotation_job_status)
         self._auto_ann_thread: QThread | None = None
@@ -4291,11 +4319,16 @@ class SequenceMapPanel(QWidget):
         )
         self._fit_btn.clicked.connect(self._map.fit_window)
         action_row.addWidget(self._fit_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        del_btn = QPushButton("Delete feature", self._action_row_container)
-        del_btn.setToolTip("Delete selected feature(s). Select on the track below, then press Delete or Backspace.")
+        del_btn = QPushButton("Delete", self._action_row_container)
+        del_btn.setToolTip(
+            "Delete selected feature(s). Select on the track below, then press Delete or Backspace."
+        )
         del_btn.clicked.connect(lambda: self._delete_feature(confirm_empty=True))
-        restore_btn = QPushButton("Restore feature", self._action_row_container)
-        restore_btn.setToolTip("Restore features deleted in this session")
+        restore_btn = QPushButton("Restore", self._action_row_container)
+        restore_btn.setToolTip(
+            "Undo the last feature change on this sequence (delete, modify, color, move, …). "
+            "History is cleared when you open another sequence."
+        )
         restore_btn.clicked.connect(self._restore_features)
         color_btn = QPushButton("Color", self._action_row_container)
         color_btn.setToolTip(
@@ -4904,6 +4937,7 @@ class SequenceMapPanel(QWidget):
         if feat is None:
             QMessageBox.warning(self, "Add feature", "Enter a feature name.")
             return
+        self._push_feature_undo_snapshot()
         features = list(data.features)
         features.append(feat)
         self._map.set_features(features)
@@ -4920,9 +4954,9 @@ class SequenceMapPanel(QWidget):
             if confirm_empty:
                 QMessageBox.information(
                     self,
-                    "Delete feature",
+                    "Delete",
                     "Select one or more features in the track below the sequence, "
-                    "then press Delete or Backspace, or click Delete feature.\n\n"
+                    "then press Delete or Backspace, or click Delete.\n\n"
                     "Drag an area on the feature track to select multiple features.",
                 )
             return
@@ -4984,6 +5018,37 @@ class SequenceMapPanel(QWidget):
         self._map.set_selected_features({index})
         self._persist_annotations()
         self.statusMessage.emit(f"Modified feature “{edited.name}”.")
+
+    def _change_selected_feature_colors(self) -> None:
+        data = self._map.data()
+        if data is None:
+            return
+        self._map._sync_feature_selection_from_annot_track()
+        indices = sorted(self._map.selected_feature_indices())
+        if len(indices) < 2:
+            QMessageBox.information(
+                self,
+                "Change color",
+                "Select two or more features to change their color together.",
+            )
+            return
+        features = list(data.features)
+        first = features[indices[0]]
+        initial = QColor(first.color or feature_type_color(first.feature_type))
+        chosen = QColorDialog.getColor(initial, self, "Change color")
+        if not chosen.isValid():
+            return
+        color_hex = chosen.name(QColor.NameFormat.HexRgb)
+        selected = set(indices)
+        self._push_feature_undo_snapshot()
+        updated = [
+            _feature_with_color(feat, color_hex) if idx in selected else feat
+            for idx, feat in enumerate(features)
+        ]
+        self._map.set_features(updated)
+        self._map.set_selected_features(selected)
+        self._persist_annotations()
+        self.statusMessage.emit(f"Changed color for {len(selected)} feature(s).")
 
     def _apply_annotation_track_move(self, features: object) -> None:
         updated = list(features or [])
@@ -5085,15 +5150,15 @@ class SequenceMapPanel(QWidget):
         if not self._feature_undo_stack:
             QMessageBox.information(
                 self,
-                "Restore feature",
-                "No deleted features to restore.",
+                "Restore",
+                "No feature changes to restore for this sequence.",
             )
             return
         features = self._feature_undo_stack.pop()
         self._map.set_features(features)
         self._map.clear_feature_selection()
         self._persist_annotations()
-        self.statusMessage.emit(f"Restored {len(features)} feature(s).")
+        self.statusMessage.emit("Restored previous feature state.")
 
     def _set_annotation_job_status(self, text: str) -> None:
         self._annotation_job_status.setText(text.strip())
