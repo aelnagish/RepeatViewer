@@ -1,166 +1,215 @@
 # RepeatViewer
 
-**RepeatViewer** is a desktop application for working with transposable element (TE) consensus sequences: browse folders of FASTA and tool outputs, run analyses from a toolbar, and inspect results in an integrated preview pane.
+RepeatViewer is a cross-platform desktop application for **inspecting, annotating, curating, and visualizing** 
+repetitive DNAs, especially transposable elements (TEs). It works on Linux, macOS, and Windows.
 
-Built with **PySide6**, it targets the manual curation workflow—proofreading consensus sequences, checking terminal repeats, comparing dotplots, running BLAST against a reference genome, and cleaning alignments before publication or database submission.
+---
 
-The app name shown in the window is **RepeatViewer**. The installable Python package and command-line entry point are **`repeatviewer`**.
+**Main features**
 
-## What you can do
+- Detect TE structural features (LTRs, TIRs, tandem repeats) and ORFs interactively
+- Search user-defined protein, DNA, and HMM databases (e.g. Pfam, Dfam, REXdb, Repbase, CDD)
+- Edit annotations visually and export GFF
+- Run a one-click (or custom) consensus curation workflow
+- Visualize TE sequences and genome-wide annotations (dot plots, abundance, divergence, density)
+- Extend the app with plugins, command wrappers, and workflows
 
-- Open any folder tree of TE FASTA files, BLAST tables, MSAs, GFF annotations, and HTML reports
-- Define a single reference genome or a **pan-genome** for BLAST and chromosome-scale plots
-- Run curation and annotation tools without leaving the app; outputs land **beside the source FASTA** in the same folder
-- Preview sequences (text, annotation map, self dotplot), Plotly HTML, PDFs, and images inline
-- Detach Folders, Files, or Preview to a second monitor; **View → Reset layout** restores the default docking
+---
 
-RepeatViewer works well on TEtrimmer output folders, curated consensus libraries, or any organized set of TE sequences you already have on disk.
+## Installation
 
-## Browser workspace
+**Requirements:** Python **3.10 or later**.
 
-Three docked panels form the main interface:
+Command-line install from source is the **recommended** way to run RepeatViewer for now.
+Prebuilt packages (macOS / Windows / Linux) are in preparation and will be linked here when ready.
+
+---
+
+### macOS and Linux
+
+Open **Terminal**, then:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/qjiangzhao/RepeatViewer.git
+cd RepeatViewer
+
+# 2. Create and activate a conda environment (Python 3.10 or newer)
+conda create -n repeatviewer "python>=3.10" -y
+conda activate repeatviewer
+
+# 3. Install RepeatViewer
+pip install -e .
+```
+
+**Run:**
+
+```bash
+conda activate repeatviewer
+repeatviewer
+```
+Or from the repository root: `python RepeatViewer.py`.
+
+**Optional RepeatMasker and FastGA** (only if you need those features, e.g.
+Repeat Quantify or FastGA alignment):
+
+```bash
+conda activate repeatviewer
+conda install -c bioconda -c conda-forge repeatmasker fastga -y
+```
+
+Then point RepeatViewer at this environment under
+**File → Setting → External tools (conda)** (env name `repeatviewer`, or the
+full path to the env).
+
+---
+
+### Windows
+
+Install RepeatViewer with **native Windows Python** (not inside WSL). Follow these
+steps in **PowerShell** (Start → type `PowerShell`, or open Windows Terminal
+and choose a **PowerShell** tab — not Command Prompt and not Ubuntu/WSL).
+
+#### 1. Prerequisites
+
+- [Python 3.10 or later](https://www.python.org/downloads/) for Windows  
+  During setup, enable **“Add python.exe to PATH”**.
+
+#### 2. Download RepeatViewer from GitHub
+
+1. Open https://github.com/qjiangzhao/RepeatViewer
+2. Click the green **Code** button → **Download ZIP**
+3. Unzip the archive (e.g. to `Downloads`). You should get a folder such as
+   `RepeatViewer-main` (GitHub adds `-main` or a tag name to ZIP downloads).
+
+#### 3. Open PowerShell in that folder
+
+```powershell
+# Adjust the path if you unzipped somewhere else
+cd Your_path_to_downloaded_RepeatViewer\RepeatViewer-main
+```
+
+Confirm you are in the right place (`RepeatViewer.py` should be listed):
+
+```powershell
+dir
+```
+
+Check that Python is available:
+
+```powershell
+python --version
+```
+
+#### 4. Create a virtual environment and install with pip
+
+Always create a **virtual environment** first. It is the same idea as a named
+conda env (`conda create -n …`): an isolated place for packages. With venv, that
+“name” is simply a **folder** next to the project (here: `repeatviewer`).
+
+```powershell
+# Created a python environment
+python -m venv repeatviewer
+
+# Activate the python environment
+.\repeatviewer\Scripts\Activate.ps1
+
+# Install pip to python
+python -m pip install -U pip
+
+# Install all RepeatViewer required dependences
+pip install -e .
+```
+
+If PowerShell blocks script activation, run once:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Then activate again with `.\repeatviewer\Scripts\Activate.ps1`.
+
+Each new PowerShell session needs activation again before running RepeatViewer:
+
+```powershell
+cd Yours_path_to_donwloaded_RepeatViewer\RepeatViewer-main
+
+# Activate the python environment
+.\repeatviewer\Scripts\Activate.ps1
+```
+
+**Run** (with the env activated):
+
+```powershell
+repeatviewer
+```
+
+Or: `python RepeatViewer.py` from the RepeatViewer folder.
+
+#### 5. Optional — WSL2 + conda for RepeatMasker and FastGA
+
+This step is **optional**. Core RepeatViewer features (browse, annotate, BLAST,
+align with bundled tools, most plots) work without it. Install WSL2 only if you
+want **extra** Linux-only tools such as RepeatMasker and FastGA.
+
+1. Install [WSL2](https://learn.microsoft.com/windows/wsl/install) (e.g. Ubuntu).
+2. Inside the **WSL** terminal, install conda/mamba, then:
+
+   ```bash
+   conda create -n repeatviewer "python>=3.10" -y
+   conda activate repeatviewer
+   
+   # Add the tools you need
+   conda install -c bioconda -c conda-forge repeatmasker fastga -y
+   ```
+
+3. In RepeatViewer (the Windows app): **File → Setting → External tools (conda / WSL2)**
+   → set `repeatviewer` (or the full path to that WSL env, e.g.
+   `~/miniconda3/envs/repeatviewer`).
+4. Click **Test** — status should show that WSL2 conda is used.
+
+---
+
+## Quick start
+
+1. **Get example data** — download the TEtrimmer test files from
+   [github.com/qjiangzhao/TEtrimmer/tree/main/tests](https://github.com/qjiangzhao/TEtrimmer/tree/main/tests)
+   (use **Download raw file** for individual FASTAs, or clone/download the TEtrimmer
+   repository ZIP and open the `tests` folder).
+2. **Import the folder** — in RepeatViewer, drag the downloaded `tests` folder into
+   the Folders panel (or add it via the folder context menu).
+3. **Select a FASTA** — click a sequence in the Files panel; Preview opens Text /
+   Annotation / Dotplot tabs.
+4. **Define genome** — **File → Define genome** (single FASTA or pan-genome list)
+   when you need BLAST or genome plots.
+5. **Annotate** — run Auto annotation and/or Similarity annotation; edit features on
+   the Annotation tab; **Save**.
+6. **Curate** — run BLAST / Extend / Align / MSA clean / Consensus, or a saved workflow.
+7. **Visualize** — Flexidot, TE abundance, divergence, density, or TE-Aid as needed.
+
+Background jobs show progress in the status bar; **Stop** cancels the active task.
+
+---
+
+## Interface overview
 
 | Panel | Purpose |
 |-------|---------|
 | **Folders** | Workspace roots and subfolders; back / forward / up; filter by name |
-| **Files** | Sortable table (name, length, GC%, sequence count); filter by name; optional columns |
-| **Preview** | FASTA tabs (Text · Annotation · Dotplot), HTML reports, alignments, PDFs, images |
+| **Files** | Sortable table (name, length, GC%, sequence count); multi-select; context actions |
+| **Preview** | FASTA (Text · Annotation · Dotplot), HTML reports, alignments, PDFs, images |
 
-Set the reference under **File → Define genome** before BLAST, genome maps, or genome-aware TEAid plots.
-
-## Typical workflow
-
-1. **Add folders** — drag a workspace root into the Folders panel or use the folder context menu.
-2. **Select a consensus FASTA** — the Files panel lists folder contents; click a file to preview it.
-3. **Define genome** — **File → Define genome** (single FASTA or pan-genome list).
-4. **Run a tool** — use the top toolbar or **Sequence** menu (BLAST, Align, TEAid, Flexidot, …).
-5. **Review outputs** — new files appear in the same folder; recent results are highlighted in green or blue.
-6. **Iterate** — extend ends, clean the MSA, rebuild consensus, re-BLAST, compare dotplots.
-
-Background jobs show progress in the status bar; **Stop** cancels the active task.
-
-## Analysis tools
-
-Available from the toolbar and **Sequence** menu:
-
-| Category | Capabilities |
-|----------|--------------|
-| **BLAST** | Bundled BLASTN and BLASTP; nucleotide/protein databases; hit tables; BLASTN GFF and interactive genome maps |
-| **Align** | Bundled MAFFT and MUSCLE; configurable per-aligner settings, default engine selection, and combined multi-sequence alignment |
-| **MSA clean** | Remove gappy columns; trim divergent rows; combined clean |
-| **Consensus** | Build consensus from an alignment |
-| **TEAid** | Interactive HTML TE annotation report |
-| **Flexidot** | Self, paired, and multi-sequence dotplots; in-app HTML dotplots with **Go-to → Annotation** |
-| **Extend** | Extend alignment ends (preset or custom distances) |
-| **TE visualization** | Genome map and TE divergence plot |
-| **FastGA** | FastGA alignment workflow |
-| **TSD search** | Target site duplication search |
-| **Benchmarking** | Confusion-matrix benchmark against reference classification tables |
-| **Plugins** | Install custom command plugins (**Plugins** menu) |
-
-Bundled **BLAST+**, **MAFFT**, and **MUSCLE** binaries are included for macOS, Linux, and Windows. The corresponding **Use system …** options in **File → Setting** select an installation from `PATH` instead.
+---
 
 ## Documentation
 
-The **[User Manual](docs/MANUAL.md)** covers installation, the interface, every
-tool and its parameters, workflows, plugins, preferences and troubleshooting.
-Start with its Quick start if you are new to RepeatViewer.
-
-## Install
-
-**Requirements:** Python 3.10+, conda or venv recommended.
-
-```bash
-git clone https://github.com/qjiangzhao/RepeatViewer.git
-cd RepeatViewer
-conda create -n repeatviewer python=3.10 -y
-conda activate repeatviewer
-pip install -e .
-```
-
-### Optional external programs
-
-| Program | Role |
-|---------|------|
-| Reference **genome FASTA** | BLAST, extend, genome maps, TEAid genome tracks |
-| **AliView** | Open selected FASTA externally (**Sequence → Open in AliView**) |
-| **RepeatMasker / FastGA / bedtools** | Optional CLIs from a conda env |
-
-For conda-installed tools, set **File → Setting → External tools (conda)** to an env name (e.g. `tetrimmer`) or the env folder path.
-
-- **macOS / Linux:** RepeatViewer prepends that env’s `bin` to `PATH` (useful for the packed `.app`, which otherwise misses conda).
-- **Windows:** the same preference targets **conda inside WSL2**. Linux CLIs (RepeatMasker, FastGA, …) are launched via `wsl`; bundled BLAST/MAFFT/MUSCLE stay native on Windows. See [packaging/windows/README.md](packaging/windows/README.md).
-
-Flexidot (with HTML output and RepeatViewer integration) is installed as a dependency of `pip install -e .`.
-
-## Run
-
-```bash
-repeatviewer
-```
-
-Or from the repository root:
-
-```bash
-python RepeatViewer.py
-```
-
-### macOS DMG (double-click app)
-
-Build a `RepeatViewer.app` and `.dmg` (Apple Silicon or Intel, matching the build Mac):
-
-```bash
-bash packaging/macos/build_macos_dmg.sh
-```
-
-See [packaging/macos/README.md](packaging/macos/README.md). End users open the DMG and drag **RepeatViewer** to Applications. Unsigned builds may need **right-click → Open** the first time.
-
-### Windows zip (double-click exe)
-
-Build on a **Windows** machine (cannot cross-compile from macOS):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File packaging/windows/build_windows.ps1
-```
-
-See [packaging/windows/README.md](packaging/windows/README.md). End users unzip and run **RepeatViewer.exe**. For RepeatMasker / FastGA, install them in a WSL2 conda env and set that env under **File → Setting → External tools (conda / WSL2)**.
-
-### Linux tarball
-
-Build on a **Linux** machine (matching target arch: `x86_64` or `aarch64`):
-
-```bash
-bash packaging/linux/build_linux.sh
-```
-
-See [packaging/linux/README.md](packaging/linux/README.md). End users unpack the `.tar.gz` and run `./RepeatViewer`. Optional conda tools: **File → Setting → External tools (conda)**.
-
-Open a folder and genome immediately:
-
-```bash
-repeatviewer -i /path/to/consensus/folder -g /path/to/genome.fa
-```
-
-| Flag | Meaning |
-|------|---------|
-| `-i`, `--input-dir` | Workspace folder opened on launch |
-| `-g`, `--genome` | Reference genome FASTA |
-
-Workspace roots, window layout, genomes, and preferences are saved between sessions.
-
-## Shortcuts
-
-| Key | Action |
-|-----|--------|
-| **Ctrl+F** / **⌘F** | Focus file or folder filter (depends on active panel) |
-| **F5** | Refresh current folder |
-| **Delete** | Delete selected files (with confirmation) |
+---
 
 ## Project structure
 
 ```
 RepeatViewer/
-  RepeatViewer.py              # entry script
+  RepeatViewer.py          # entry script
   repeatviewer/
     main_window.py         # browser UI, menus, job runner
     project.py             # genome, pan-genome, database settings
@@ -168,15 +217,20 @@ RepeatViewer/
     views/                 # tool and settings dialogs
     widgets/               # folder tree, file table, preview tabs
     plugins/               # plugin API
+  docs/                    # user manual
+  packaging/               # optional native package build scripts
   examples/                # sample plugin
 ```
 
-## Companion to TEtrimmer
+---
 
-[TEtrimmer](https://github.com/qjiangzhao/TEtrimmer) automates TE discovery and consensus building from genome assemblies. **RepeatViewer** is the interactive companion for what comes next: inspecting candidates, fixing consensus sequences, running targeted BLAST and annotation, and preparing libraries for release.
-
-The two tools are independent applications; RepeatViewer does not require a TEtrimmer installation.
+**Recommended pairing:**
+generate libraries with [TEtrimmer](https://github.com/qjiangzhao/TEtrimmer), then inspect and refine them in
+RepeatViewer.
 
 ## Citation
 
-If RepeatViewer contributes to your work, cite **TEtrimmer** (*Nature Communications*, 2025) when applicable and mention **RepeatViewer** for manual curation and visualization.
+If RepeatViewer contributes to your work, please cite this application (manuscript in preparation) and, when applicable, [TEtrimmer](https://github.com/qjiangzhao/TEtrimmer) (*Nature Communications*, 2025).
+
+**Authors:** Jiangzhao Qian, Abdullah El-nagish, Shlok Szatkowski, Tony Heitkam  
+Chair of Molecular Botany, Institute for Biology I, RWTH Aachen University
