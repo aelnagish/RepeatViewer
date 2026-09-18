@@ -93,10 +93,11 @@ def hmm_index_files(hmm_path: Path) -> tuple[Path, Path, Path, Path]:
 
 def _pyhmmer_importable() -> bool:
     try:
-        import pyhmmer  # type: ignore[import-untyped]  # noqa: F401
-    except ImportError:
+        import pyhmmer  # type: ignore[import-untyped]
+        from pyhmmer.plan7 import HMMFile  # type: ignore[import-untyped]  # noqa: F401
+    except Exception:
         return False
-    return True
+    return getattr(pyhmmer, "__file__", None) is not None
 
 
 def pyhmmer_install_hint() -> str:

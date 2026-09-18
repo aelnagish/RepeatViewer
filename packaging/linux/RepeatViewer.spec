@@ -24,7 +24,7 @@ sys.path.insert(0, str(SPECDIR))
 sys.path.insert(0, str(SPECDIR.parent))
 
 from packaging_utils import collect_datas  # noqa: E402
-from bundle_datas import app_version  # noqa: E402
+from bundle_datas import app_version, collect_annotation_python_deps  # noqa: E402
 
 block_cipher = None
 version = app_version()
@@ -44,6 +44,8 @@ hiddenimports: list[str] = [
     "plotly",
     "matplotlib",
     "matplotlib.backends.backend_agg",
+    "orfipy_core",
+    "pyhmmer",
 ]
 
 for pkg in ("flexidot", "plotly"):
@@ -54,6 +56,11 @@ for pkg in ("flexidot", "plotly"):
         hiddenimports += pkg_hidden
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: collect_all({pkg}) failed: {exc}")
+
+ann_datas, ann_bins, ann_hidden = collect_annotation_python_deps()
+datas += ann_datas
+binaries += ann_bins
+hiddenimports += ann_hidden
 
 try:
     datas += collect_data_files(

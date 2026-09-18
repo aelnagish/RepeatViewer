@@ -677,11 +677,86 @@ def extract_fasta_from_bed(genome_fasta, bed_file, output_fasta):
 def flexidot_command() -> list[str] | None:
     """Return argv prefix to launch Flexidot (works in frozen macOS apps too)."""
     # PyInstaller / frozen app: re-enter this binary in Flexidot mode.
+    # Prefer in-process execution via ``_run_flexidot_argv`` when frozen so macOS
+    # does not flash a second Dock icon; this prefix remains for logging / probes.
     if getattr(sys, "frozen", False):
         return [sys.executable, "--repeatviewer-flexidot"]
 
     exe = flexidot_executable()
     return [exe] if exe else None
+
+
+def _run_flexidot_inprocess(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Call bundled Flexidot in this process (no second .app / Dock icon)."""
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    old_argv = sys.argv[:]
+    sys.argv = ["flexidot", *argv]
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code: int | object = 0
+    try:
+        from flexidot.app import main as flexidot_main
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                result = flexidot_main()
+                if isinstance(result, int):
+                    code = result
+            except SystemExit as exc:
+                if exc.code is None:
+                    code = 0
+                else:
+                    code = exc.code
+    finally:
+        sys.argv = old_argv
+
+    returncode = code if isinstance(code, int) else (0 if code is None else 1)
+    return subprocess.CompletedProcess(
+        ["flexidot", *argv],
+        returncode,
+        stdout.getvalue(),
+        stderr.getvalue(),
+    )
+
+
+def _run_flexidot_argv(
+    argv: list[str],
+    *,
+    cancel=None,
+    env: dict[str, str] | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run Flexidot with CLI args (no executable). In-process when frozen."""
+    from repeatviewer.backends.job_cancel import check_cancelled
+
+    check_cancelled(cancel)
+    if getattr(sys, "frozen", False):
+        completed = _run_flexidot_inprocess(argv)
+        check_cancelled(cancel)
+        if check and completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                completed.args,
+                output=completed.stdout,
+                stderr=completed.stderr,
+            )
+        return completed
+
+    cmd_prefix = flexidot_command()
+    if not cmd_prefix:
+        raise FileNotFoundError(
+            "Flexidot command not found. Install with: pip install flexidot "
+            "(ensure the Python scripts directory is on PATH, e.g. "
+            "~/Library/Python/3.x/bin on macOS)."
+        )
+    return run_subprocess_with_cancel(
+        [*cmd_prefix, *argv],
+        cancel=cancel,
+        env=env,
+        check=check,
+    )
 
 
 def flexidot_executable() -> str | None:
@@ -727,12 +802,16 @@ def _flexidot_help_text(exe: str | None = None) -> str:
         return _flexidot_help_cache[cache_key]
     text = ""
     try:
-        cmd = flexidot_command()
-        if not cmd:
-            _flexidot_help_cache[cache_key] = ""
-            return ""
-        result = run_logged_process([*cmd, "-h"], tool="Flexidot", timeout=20)
-        text = ((result.stdout or "") + (result.stderr or "")).lower()
+        if getattr(sys, "frozen", False):
+            result = _run_flexidot_inprocess(["-h"])
+            text = ((result.stdout or "") + (result.stderr or "")).lower()
+        else:
+            cmd = flexidot_command()
+            if not cmd:
+                _flexidot_help_cache[cache_key] = ""
+                return ""
+            result = run_logged_process([*cmd, "-h"], tool="Flexidot", timeout=20)
+            text = ((result.stdout or "") + (result.stderr or "")).lower()
     except Exception:  # noqa: BLE001
         text = ""
     _flexidot_help_cache[cache_key] = text
@@ -747,6 +826,9 @@ def flexidot_supports_html(exe: str | None = None) -> bool:
     the ``{...}`` list) rather than anywhere in the text, to avoid false matches.
     """
     del exe  # kept for call-site compatibility
+    # Frozen builds always ship the forked Flexidot with html support.
+    if getattr(sys, "frozen", False):
+        return True
     if not flexidot_command():
         return False
     help_text = _flexidot_help_text()
@@ -756,6 +838,8 @@ def flexidot_supports_html(exe: str | None = None) -> bool:
 def flexidot_supports_repeatviewer_integration(exe: str | None = None) -> bool:
     """True if the forked Flexidot exposes the ``--teviewer-integration`` flag."""
     del exe  # kept for call-site compatibility
+    if getattr(sys, "frozen", False):
+        return True
     if not flexidot_command():
         return False
     return "teviewer-integration" in _flexidot_help_text()
@@ -839,14 +923,13 @@ def run_flexidot(
     logging.info("FlexiDot is running for %s...", original_name)
 
     modes = _normalize_flexidot_modes(mode)
-    flexidot_cmd = [
-        *cmd_prefix,
+    flexidot_argv: list[str] = [
         "-i",
         run_path,
     ]
     for mode_token in modes:
-        flexidot_cmd.extend(["-m", mode_token])
-    flexidot_cmd.extend(
+        flexidot_argv.extend(["-m", mode_token])
+    flexidot_argv.extend(
         [
             "-k",
             str(wordsize),
@@ -859,22 +942,22 @@ def run_flexidot(
     if filetype == "html" and flexidot_supports_repeatviewer_integration():
         # Show "Go to <seq> <start>-<end>" buttons in the dotplot that jump the
         # Annotation view; only available in the forked Flexidot build.
-        flexidot_cmd.append("--teviewer-integration")
+        flexidot_argv.append("--teviewer-integration")
     mode_set = set(modes)
     if lcs_shading and mode_set & {"1", "2"}:
-        flexidot_cmd.append("-x")
+        flexidot_argv.append("-x")
     if substitution_count > 0:
-        flexidot_cmd.extend(["-S", str(int(substitution_count))])
+        flexidot_argv.extend(["-S", str(int(substitution_count))])
     if wobble_conversion:
-        flexidot_cmd.extend(["-w", "--max_n", str(float(max_n_percentage))])
+        flexidot_argv.extend(["-w", "--max_n", str(float(max_n_percentage))])
     if not include_reverse:
-        flexidot_cmd.append("-r")
+        flexidot_argv.append("-r")
     if only_vs_first and "1" in mode_set:
-        flexidot_cmd.append("-O")
+        flexidot_argv.append("-O")
     # Length scaling only affects pairwise / all-vs-all plots.
     if length_scaling and mode_set & {"1", "2"}:
-        flexidot_cmd.append("-L")
-    flexidot_cmd.extend(["-A", str(float(line_width))])
+        flexidot_argv.append("-L")
+    flexidot_argv.extend(["-A", str(float(line_width))])
 
     temp_gff_paths: list[str] = []
     if use_gff:
@@ -899,8 +982,8 @@ def run_flexidot(
             )
         else:
             gff_paths, color_config, temp_gff_files = prepared
-            flexidot_cmd.extend(["-g", *gff_paths])
-            flexidot_cmd.extend(["-G", color_config])
+            flexidot_argv.extend(["-g", *gff_paths])
+            flexidot_argv.extend(["-G", color_config])
             temp_gff_paths = [str(path) for path in temp_gff_files]
 
     env = os.environ.copy()
@@ -909,8 +992,8 @@ def run_flexidot(
         env["PATH"] = exe_dir + os.pathsep + env.get("PATH", "")
 
     try:
-        completed = run_subprocess_with_cancel(
-            flexidot_cmd,
+        completed = _run_flexidot_argv(
+            flexidot_argv,
             cancel=cancel,
             env=env,
             check=True,

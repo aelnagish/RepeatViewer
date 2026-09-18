@@ -20,7 +20,15 @@ class OrfDetectResult:
 
 
 def orfipy_available() -> bool:
-    return orfipy_core is not None
+    global orfipy_core
+    if orfipy_core is not None:
+        return True
+    try:
+        import orfipy_core as _orfipy_core
+    except ImportError:
+        return False
+    orfipy_core = _orfipy_core
+    return True
 
 
 def _require_orfipy() -> None:

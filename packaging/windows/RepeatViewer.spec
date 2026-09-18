@@ -24,7 +24,7 @@ sys.path.insert(0, str(SPECDIR))
 sys.path.insert(0, str(SPECDIR.parent))
 
 from packaging_utils import collect_conda_runtime_dlls, collect_datas  # noqa: E402
-from bundle_datas import app_version  # noqa: E402
+from bundle_datas import app_version, collect_annotation_python_deps  # noqa: E402
 
 block_cipher = None
 version = app_version()
@@ -49,6 +49,8 @@ hiddenimports: list[str] = [
     "numpy._core._multiarray_umath",
     "six",
     "six.moves",
+    "orfipy_core",
+    "pyhmmer",
 ]
 
 for pkg in ("flexidot",):
@@ -59,6 +61,11 @@ for pkg in ("flexidot",):
         hiddenimports += pkg_hidden
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: collect_all({pkg}) failed: {exc}")
+
+ann_datas, ann_bins, ann_hidden = collect_annotation_python_deps()
+datas += ann_datas
+binaries += ann_bins
+hiddenimports += ann_hidden
 
 # Plotly: data + submodules only. collect_all() can pull a second copy of
 # numpy/scipy binaries and trigger:

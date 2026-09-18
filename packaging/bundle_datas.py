@@ -158,3 +158,75 @@ def collect_datas_for(target: str) -> list[tuple[str, str]]:
     _add_aliview(datas)
     _add_icons(datas)
     return datas
+
+
+def collect_annotation_python_deps() -> tuple[
+    list[tuple[str, str]],
+    list,
+    list[str],
+]:
+    """Collect orfipy + pyhmmer for PyInstaller (full package trees, no tests).
+
+    Binary extensions alone are not enough: a ``pyhmmer/`` folder of ``.so`` files
+    shadows the pure-Python package in PYZ and ``import pyhmmer`` fails at runtime.
+    ``collect_all`` also misses some Cython extensions (e.g. ``pyhmmer.platform.bsd``)
+    and orfipy's ``ahocorasick`` dependency — those are added explicitly.
+    """
+    from PyInstaller.utils.hooks import collect_all
+
+    datas: list[tuple[str, str]] = []
+    binaries: list = []
+    hidden: list[str] = ["orfipy_core", "ahocorasick", "pyhmmer.platform", "pyhmmer.platform.bsd"]
+
+    def _without_tests(entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        kept: list[tuple[str, str]] = []
+        for src, dest in entries:
+            if "tests" in Path(src).parts or "tests" in Path(dest).parts:
+                continue
+            kept.append((src, dest))
+        return kept
+
+    for pkg in ("pyhmmer", "orfipy"):
+        try:
+            pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: collect_all({pkg}) failed: {exc}")
+            continue
+        datas += _without_tests(list(pkg_datas))
+        binaries += list(pkg_binaries)
+        hidden += list(pkg_hidden)
+
+    # Explicit Cython / extension modules that Analysis often skips.
+    try:
+        import pyhmmer  # type: ignore[import-untyped]
+
+        pyhmmer_root = Path(pyhmmer.__file__).resolve().parent
+        site_packages = pyhmmer_root.parent
+        for so in pyhmmer_root.rglob("*.so"):
+            dest = str(so.relative_to(site_packages).parent).replace("\\", "/")
+            binaries.append((str(so), dest))
+        for pyd in pyhmmer_root.rglob("*.pyd"):
+            dest = str(pyd.relative_to(site_packages).parent).replace("\\", "/")
+            binaries.append((str(pyd), dest))
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: pyhmmer extension collect failed: {exc}")
+
+    try:
+        import ahocorasick  # type: ignore[import-untyped]
+
+        path = getattr(ahocorasick, "__file__", None)
+        if path:
+            binaries.append((str(path), "."))
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: ahocorasick collect failed: {exc}")
+
+    try:
+        import orfipy_core  # type: ignore[import-untyped]
+
+        path = getattr(orfipy_core, "__file__", None)
+        if path:
+            binaries.append((str(path), "."))
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: orfipy_core collect failed: {exc}")
+
+    return datas, binaries, hidden

@@ -27,8 +27,10 @@ Unsigned builds: first launch may require **right-click → Open**.
 
 - PySide6 UI + Qt WebEngine (HTML previews)
 - Bundled **macOS-only** BLAST+, MAFFT, MUSCLE (linux/windows tool trees are not packed)
-- Flexidot (via the frozen app re-entry flag)
+- Flexidot (run in-process when frozen — no second Dock icon)
 - AliView runtime (`aliview.jar` + launcher); installer scripts are omitted
+- Annotation deps **orfipy** (ORF detection) and **pyhmmer** (HMM / Dfam search),
+  collected in full so frozen imports work
 
 ## Signing / notarization (optional)
 

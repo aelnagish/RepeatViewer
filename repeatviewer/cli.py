@@ -13,11 +13,40 @@ def _maybe_run_flexidot_entrypoint() -> None:
     # Drop the marker (and anything before it that is the app path already in argv[0]).
     idx = sys.argv.index(marker)
     sys.argv = [sys.argv[0], *sys.argv[idx + 1 :]]
+    # Re-entering the .app binary would otherwise show a second Dock icon.
+    from repeatviewer.ui.platform import hide_from_macos_dock
+
+    hide_from_macos_dock()
     from flexidot.app import main as flexidot_main
 
     raise SystemExit(flexidot_main())
 
 
+def _maybe_run_import_check() -> None:
+    """Frozen-app diagnostic: ``--repeatviewer-import-check`` → print key deps and exit."""
+    marker = "--repeatviewer-import-check"
+    if marker not in sys.argv:
+        return
+    checks = (
+        ("orfipy_core", "orfipy_core"),
+        ("pyhmmer", "pyhmmer"),
+        ("pyhmmer.plan7", "pyhmmer.plan7"),
+        ("pyhmmer.hmmer", "pyhmmer.hmmer"),
+        ("pytrf", "pytrf"),
+    )
+    lines: list[str] = []
+    for label, modname in checks:
+        try:
+            mod = __import__(modname, fromlist=["*"])
+            where = getattr(mod, "__file__", "?")
+            lines.append(f"OK  {label}: {where}")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"FAIL {label}: {type(exc).__name__}: {exc}")
+    sys.stderr.write("\n".join(lines) + "\n")
+    raise SystemExit(0 if all(line.startswith("OK") for line in lines) else 1)
+
+
+_maybe_run_import_check()
 _maybe_run_flexidot_entrypoint()
 
 from repeatviewer.qt_runtime import configure_qt_runtime
