@@ -169,14 +169,14 @@ def collect_annotation_python_deps() -> tuple[
 
     Binary extensions alone are not enough: a ``pyhmmer/`` folder of ``.so`` files
     shadows the pure-Python package in PYZ and ``import pyhmmer`` fails at runtime.
-    ``collect_all`` also misses some Cython extensions (e.g. ``pyhmmer.platform.bsd``)
+    ``collect_all`` also misses some Cython extensions (e.g. ``pyhmmer.platform.*``)
     and orfipy's ``ahocorasick`` dependency — those are added explicitly.
     """
     from PyInstaller.utils.hooks import collect_all
 
     datas: list[tuple[str, str]] = []
     binaries: list = []
-    hidden: list[str] = ["orfipy_core", "ahocorasick", "pyhmmer.platform", "pyhmmer.platform.bsd"]
+    hidden: list[str] = ["orfipy_core", "ahocorasick", "pyhmmer.platform"]
 
     def _without_tests(entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
         kept: list[tuple[str, str]] = []
@@ -205,11 +205,26 @@ def collect_annotation_python_deps() -> tuple[
         for so in pyhmmer_root.rglob("*.so"):
             dest = str(so.relative_to(site_packages).parent).replace("\\", "/")
             binaries.append((str(so), dest))
+            # e.g. pyhmmer/platform/linux*.so → pyhmmer.platform.linux
+            rel = so.relative_to(pyhmmer_root)
+            mod_parts = list(rel.parts[:-1]) + [so.name.split(".", 1)[0]]
+            if mod_parts:
+                hidden.append("pyhmmer." + ".".join(mod_parts))
         for pyd in pyhmmer_root.rglob("*.pyd"):
             dest = str(pyd.relative_to(site_packages).parent).replace("\\", "/")
             binaries.append((str(pyd), dest))
+            rel = pyd.relative_to(pyhmmer_root)
+            mod_parts = list(rel.parts[:-1]) + [pyd.name.split(".", 1)[0]]
+            if mod_parts:
+                hidden.append("pyhmmer." + ".".join(mod_parts))
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: pyhmmer extension collect failed: {exc}")
+        # Fallbacks if import failed before discovery (build host still needs them).
+        hidden += [
+            "pyhmmer.platform.bsd",
+            "pyhmmer.platform.linux",
+            "pyhmmer.platform.win32",
+        ]
 
     try:
         import ahocorasick  # type: ignore[import-untyped]
@@ -229,4 +244,13 @@ def collect_annotation_python_deps() -> tuple[
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: orfipy_core collect failed: {exc}")
 
-    return datas, binaries, hidden
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    unique_hidden: list[str] = []
+    for name in hidden:
+        if name in seen:
+            continue
+        seen.add(name)
+        unique_hidden.append(name)
+
+    return datas, binaries, unique_hidden
