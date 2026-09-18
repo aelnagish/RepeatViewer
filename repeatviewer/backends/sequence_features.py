@@ -275,6 +275,51 @@ def companion_annotation_files_for_delete(path: Path) -> list[Path]:
     return companions
 
 
+def companion_annotation_renames_for_fasta(
+    old_fasta: Path,
+    new_fasta: Path,
+) -> list[tuple[Path, Path]]:
+    """Map existing annotation sidecars of ``old_fasta`` onto ``new_fasta`` names.
+
+    Renames ``{stem}.RV.gff3`` / legacy ``.features.gff3`` and ``*.seqmap_RV.json``
+    (plus legacy JSON names) so they stay paired after a FASTA rename. Legacy
+    companion names are migrated to the canonical ``.RV.gff3`` /
+    ``.seqmap_RV.json`` forms when possible.
+    """
+    old = old_fasta.expanduser().resolve()
+    new = new_fasta.expanduser().resolve()
+    if old == new:
+        return []
+
+    planned: list[tuple[Path, Path]] = []
+    seen_src: set[str] = set()
+    for src, dst in (
+        (features_gff_path(old), features_gff_path(new)),
+        (legacy_stem_features_gff_path(old), features_gff_path(new)),
+        (legacy_features_gff_path(old), features_gff_path(new)),
+        (sidecar_path(old), sidecar_path(new)),
+        (legacy_stem_sidecar_path(old), sidecar_path(new)),
+        (legacy_sidecar_path(old), sidecar_path(new)),
+    ):
+        if not src.is_file():
+            continue
+        try:
+            src_resolved = src.resolve()
+            dst_resolved = dst.expanduser().resolve()
+        except OSError:
+            continue
+        src_key = str(src_resolved)
+        if src_key in seen_src:
+            continue
+        if src_resolved == dst_resolved:
+            continue
+        if dst_resolved.exists():
+            continue
+        seen_src.add(src_key)
+        planned.append((src_resolved, dst_resolved))
+    return planned
+
+
 def load_single_sequence_fasta(path: Path) -> tuple[str, str]:
     """Return (sequence_id, sequence) when the file contains exactly one record."""
     resolved = path.expanduser().resolve()

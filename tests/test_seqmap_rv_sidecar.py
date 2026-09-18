@@ -7,6 +7,7 @@ from pathlib import Path
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
     companion_annotation_files_for_delete,
+    companion_annotation_renames_for_fasta,
     is_sequence_map_hidden_file,
     resolve_sidecar_path,
     save_annotations,
@@ -68,3 +69,18 @@ def test_companion_delete_pairs_rv_gff3_with_seqmap_json(tmp_path: Path) -> None
 def test_seqmap_json_files_are_hidden_from_file_list() -> None:
     assert is_sequence_map_hidden_file(Path("Beetle1.seqmap_RV.json"))
     assert is_sequence_map_hidden_file(Path("Beetle1.seqmap.json"))
+
+
+def test_companion_renames_follow_fasta_rename(tmp_path: Path) -> None:
+    old_fasta = tmp_path / "Beetle1.fasta"
+    new_fasta = tmp_path / "Beetle1_copy.fasta"
+    old_fasta.write_text(">TE1\nACGT\n", encoding="utf-8")
+    gff = tmp_path / "Beetle1.RV.gff3"
+    gff.write_text("##gff-version 3\n", encoding="utf-8")
+    json_path = tmp_path / "Beetle1.seqmap_RV.json"
+    json_path.write_text("{}\n", encoding="utf-8")
+
+    renames = companion_annotation_renames_for_fasta(old_fasta, new_fasta)
+    by_src = {src.name: dst.name for src, dst in renames}
+    assert by_src["Beetle1.RV.gff3"] == "Beetle1_copy.RV.gff3"
+    assert by_src["Beetle1.seqmap_RV.json"] == "Beetle1_copy.seqmap_RV.json"

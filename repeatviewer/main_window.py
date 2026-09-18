@@ -8986,6 +8986,10 @@ class MainWindow(QMainWindow):
         return dialog.textValue(), ok
 
     def _rename_file(self, path: Path) -> None:
+        from repeatviewer.backends.sequence_features import (
+            companion_annotation_renames_for_fasta,
+        )
+
         path = path.expanduser().resolve()
         if not path.is_file():
             return
@@ -8996,20 +9000,52 @@ class MainWindow(QMainWindow):
         )
         if not ok or not new_name.strip() or new_name.strip() == path.name:
             return
-        target = path.parent / new_name.strip()
+        target = (path.parent / new_name.strip()).expanduser().resolve()
         if target.exists():
             QMessageBox.warning(self, "Rename failed", f"Already exists:\n{target}")
             return
+
+        companion_renames: list[tuple[Path, Path]] = []
+        if path.suffix.lower() in _FASTA_SUFFIXES:
+            companion_renames = companion_annotation_renames_for_fasta(path, target)
+            blocked = [dst for _src, dst in companion_renames if dst.exists()]
+            if blocked:
+                QMessageBox.warning(
+                    self,
+                    "Rename failed",
+                    "Cannot rename paired annotation file(s); already exists:\n"
+                    + "\n".join(str(path) for path in blocked[:6]),
+                )
+                return
+
         try:
             path.rename(target)
+            for src, dst in companion_renames:
+                src.rename(dst)
         except OSError as exc:
             QMessageBox.critical(self, "Rename failed", str(exc))
             return
+
+        closed = [path, *[src for src, _dst in companion_renames]]
         if self._preview_tabs is not None:
-            self._preview_tabs.close_paths([path])
+            self._preview_tabs.close_paths(closed)
         if self._current_folder:
-            self._populate_file_list(self._current_folder)
-        self._set_status_message(f"Renamed to {target.name}", 5000)
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=[target],
+                source_files=[dst for _src, dst in companion_renames],
+                open_preview=True,
+            )
+        else:
+            self._select_path_in_file_list(target)
+        if companion_renames:
+            extras = ", ".join(dst.name for _src, dst in companion_renames)
+            self._set_status_message(
+                f"Renamed to {target.name} (also {extras})",
+                6000,
+            )
+        else:
+            self._set_status_message(f"Renamed to {target.name}", 5000)
 
     def _rename_folder(self, folder: Path) -> None:
         folder = folder.expanduser().resolve()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import platform
 from pathlib import Path
@@ -212,6 +213,8 @@ _SELECTION_HIGHLIGHT_MARGIN = 2
 _FEATURE_UNDO_LIMIT = 32
 _LEFT_MARGIN = 8
 _RIGHT_MARGIN = 8
+
+operation_logger = logging.getLogger("repeatviewer.operations")
 _MIN_PPB = 0.05
 _FIT_MIN_PPB = 1e-6
 _MAX_PPB = 48.0
@@ -5320,15 +5323,34 @@ class SequenceMapPanel(QWidget):
             return
         self._similarity_based_annotate()
 
+    def _log_annotation_job(
+        self,
+        event: str,
+        name: str,
+        *,
+        detail: str = "",
+        level: int = logging.INFO,
+    ) -> None:
+        operation_logger.log(
+            level,
+            "%s name=%s fasta=%s detail=%s",
+            event,
+            name,
+            str(self._path) if self._path is not None else "",
+            detail,
+        )
+
     def _stop_auto_annotation(self) -> None:
         if not self._auto_annotate_running():
             return
+        self._log_annotation_job("JOB STOP", "Auto annotation")
         self._auto_ann_cancel.request()
         self._set_annotation_job_status("Stopping auto annotation…")
 
     def _stop_similarity_annotation(self) -> None:
         if not self._similarity_annotation_running():
             return
+        self._log_annotation_job("JOB STOP", "Similarity annotation")
         self._sim_ann_cancel.request()
         self._set_annotation_job_status("Stopping similarity annotation…")
 
@@ -5499,6 +5521,11 @@ class SequenceMapPanel(QWidget):
         self._sim_ann_cancel.reset()
         self._set_similarity_annotation_enabled(False)
         labels = ", ".join(run.database.name for run in databases)
+        self._log_annotation_job(
+            "JOB START",
+            "Similarity annotation",
+            detail=f"databases=[{labels}]",
+        )
         self._set_annotation_job_status(f"Running similarity annotation: {labels}…")
         self.statusMessage.emit(f"Running similarity annotation: {labels}…")
 
@@ -5536,6 +5563,12 @@ class SequenceMapPanel(QWidget):
 
     def _on_similarity_annotation_finished(self, result: object) -> None:
         if not isinstance(result, SimilarityAnnotationResult):
+            self._log_annotation_job(
+                "JOB ERROR",
+                "Similarity annotation",
+                detail="unexpected result",
+                level=logging.ERROR,
+            )
             self.statusMessage.emit("Similarity annotation finished with an unexpected result.")
             self._clear_annotation_job_status()
             return
@@ -5551,6 +5584,11 @@ class SequenceMapPanel(QWidget):
             1 for feat in result.features if feat.feature_type == "domain"
         )
         self._clear_annotation_job_status()
+        self._log_annotation_job(
+            "JOB FINISH",
+            "Similarity annotation",
+            detail=result.message,
+        )
         self.statusMessage.emit(f"{result.message} Click Save to write changes to disk.")
         added_domains = after_domains - before_domains
         lower_message = result.message.lower()
@@ -5576,8 +5614,19 @@ class SequenceMapPanel(QWidget):
     def _on_similarity_annotation_error(self, message: str) -> None:
         self._clear_annotation_job_status()
         if "stopped by user" in message.lower() or "job stopped" in message.lower():
+            self._log_annotation_job(
+                "JOB FINISH",
+                "Similarity annotation",
+                detail="stopped by user",
+            )
             self.statusMessage.emit("Similarity annotation stopped.")
             return
+        self._log_annotation_job(
+            "JOB ERROR",
+            "Similarity annotation",
+            detail=message,
+            level=logging.ERROR,
+        )
         QMessageBox.warning(self, "Similarity annotation failed", message)
         self.statusMessage.emit(f"Similarity annotation failed: {message}")
 
@@ -5601,6 +5650,11 @@ class SequenceMapPanel(QWidget):
         self._auto_ann_cancel.reset()
         self._set_auto_annotation_enabled(False)
         labels = ", ".join(_AUTO_MODE_LABEL[mode] for mode in modes)
+        self._log_annotation_job(
+            "JOB START",
+            "Auto annotation",
+            detail=f"modes=[{labels}]",
+        )
         self._set_annotation_job_status(f"Running auto annotation: {labels}…")
         self.statusMessage.emit(f"Running auto annotation: {labels}…")
 
@@ -5643,6 +5697,11 @@ class SequenceMapPanel(QWidget):
             features = list(result.features)
             self._map.set_features(features)
             self._clear_annotation_job_status()
+            self._log_annotation_job(
+                "JOB FINISH",
+                "Auto annotation",
+                detail=result.message,
+            )
             if features:
                 self.statusMessage.emit(f"{result.message} Click Save to write changes to disk.")
             else:
@@ -5650,6 +5709,12 @@ class SequenceMapPanel(QWidget):
             return
 
         if not isinstance(result, AutoAnnotationResult):
+            self._log_annotation_job(
+                "JOB ERROR",
+                "Auto annotation",
+                detail="unexpected result",
+                level=logging.ERROR,
+            )
             self.statusMessage.emit("Auto annotation finished with an unexpected result.")
             self._clear_annotation_job_status()
             return
@@ -5661,6 +5726,11 @@ class SequenceMapPanel(QWidget):
 
         if not result.features:
             QMessageBox.information(self, "Auto annotation", result.message)
+            self._log_annotation_job(
+                "JOB FINISH",
+                "Auto annotation",
+                detail=result.message,
+            )
             self.statusMessage.emit(result.message)
             self._clear_annotation_job_status()
             return
@@ -5668,13 +5738,29 @@ class SequenceMapPanel(QWidget):
         merged = merge_auto_annotation_features(data.features, result.features, result.mode)
         self._map.set_features(merged)
         self._clear_annotation_job_status()
+        self._log_annotation_job(
+            "JOB FINISH",
+            "Auto annotation",
+            detail=result.message,
+        )
         self.statusMessage.emit(f"{result.message} Click Save to write changes to disk.")
 
     def _on_auto_annotation_error(self, message: str) -> None:
         self._clear_annotation_job_status()
         if "stopped by user" in message.lower() or "job stopped" in message.lower():
+            self._log_annotation_job(
+                "JOB FINISH",
+                "Auto annotation",
+                detail="stopped by user",
+            )
             self.statusMessage.emit("Auto annotation stopped.")
             return
+        self._log_annotation_job(
+            "JOB ERROR",
+            "Auto annotation",
+            detail=message,
+            level=logging.ERROR,
+        )
         QMessageBox.warning(self, "Auto annotation failed", message)
         self.statusMessage.emit(f"Auto annotation failed: {message}")
 
