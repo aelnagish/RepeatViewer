@@ -9,6 +9,7 @@ import platform
 import tempfile
 import time
 import re
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -307,6 +308,7 @@ from repeatviewer.backends.gff_features import (
     is_gene_annotation_file,
 )
 from repeatviewer.backends.sequence_features import (
+    companion_annotation_files_for_delete,
     is_sequence_map_hidden_file,
     load_single_sequence_fasta,
 )
@@ -1973,6 +1975,12 @@ class MainWindow(QMainWindow):
         self._cached_folder_files: list[Path] = []
         self._highlight_output_keys: set[str] = set()
         self._highlight_source_keys: set[str] = set()
+        # Soft-deleted files / folder actions for Cmd/Ctrl+Z restore.
+        # Each entry is a dict with ``kind`` in {files, hide_folders, delete_folders}.
+        self._browser_undo_stack: list[dict[str, Any]] = []
+        self._deleted_files_trash_root = (
+            Path(tempfile.gettempdir()) / "RepeatViewerDeletedFiles"
+        )
         self._genome_dialog: GenomeDialog | None = None
         self._define_database_dialog: DefineDatabaseDialog | None = None
         self._command_plugin_dialog: CommandPluginDesignerDialog | None = None
@@ -4203,6 +4211,12 @@ class MainWindow(QMainWindow):
         find_tree = QShortcut(QKeySequence.StandardKey.Find, self._folder_tree)
         find_tree.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         find_tree.activated.connect(lambda: self._folder_filter.setFocus())
+        undo_files = QShortcut(QKeySequence.StandardKey.Undo, self._file_list)
+        undo_files.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        undo_files.activated.connect(self._undo_browser_action)
+        undo_folders = QShortcut(QKeySequence.StandardKey.Undo, self._folder_tree)
+        undo_folders.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        undo_folders.activated.connect(self._undo_browser_action)
 
     def _focus_browser_filter(self) -> None:
         focus = QApplication.focusWidget()
@@ -9005,19 +9019,29 @@ class MainWindow(QMainWindow):
     def _clear_root_folders(self, folders: list[Path]) -> None:
         if not folders:
             return
-        removed = 0
+        removed_folders: list[Path] = []
         for folder in folders:
-            if self._clear_root_folder(folder, show_status=False):
-                removed += 1
-        if removed:
-            label = "folder" if removed == 1 else "folders"
+            if self._clear_root_folder(folder, show_status=False, record_undo=False):
+                removed_folders.append(folder.expanduser().resolve())
+        if removed_folders:
+            self._push_browser_undo(
+                {"kind": "hide_folders", "folders": removed_folders}
+            )
+            label = "folder" if len(removed_folders) == 1 else "folders"
             self._set_status_message(
-                f"Removed {removed} {label} from list (not deleted on disk)",
+                f"Removed {len(removed_folders)} {label} from list "
+                f"(⌘Z / Ctrl+Z to restore)",
                 6000,
             )
             self._persist_workspace()
 
-    def _clear_root_folder(self, folder: Path, *, show_status: bool = True) -> bool:
+    def _clear_root_folder(
+        self,
+        folder: Path,
+        *,
+        show_status: bool = True,
+        record_undo: bool = True,
+    ) -> bool:
         """Hide a top-level root folder from the tree without deleting it on disk."""
         folder = folder.expanduser().resolve()
         is_top_level = False
@@ -9033,10 +9057,12 @@ class MainWindow(QMainWindow):
         self._hidden_root_folders = hide_root_folder(self._hidden_root_folders, folder)
         self._remove_folder_from_tree(folder)
         self._navigate_after_folder_removed(folder)
+        if record_undo:
+            self._push_browser_undo({"kind": "hide_folders", "folders": [folder]})
 
         if show_status:
             self._set_status_message(
-                f"Removed from folder list (not deleted): {folder.name}",
+                f"Removed from folder list (⌘Z / Ctrl+Z to restore): {folder.name}",
                 6000,
             )
             self._persist_workspace()
@@ -9150,7 +9176,8 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "Delete folder",
-                f"Permanently delete this folder and everything inside it?\n\n{folder}",
+                f"Delete this folder and everything inside it?\n\n{folder}\n\n"
+                "Press ⌘Z / Ctrl+Z afterward to restore.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -9161,33 +9188,59 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "Delete folders",
-                f"Permanently delete {len(targets)} folders and everything inside them?\n\n{names}",
+                f"Delete {len(targets)} folders and everything inside them?\n\n{names}\n\n"
+                "Press ⌘Z / Ctrl+Z afterward to restore.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
         if answer != QMessageBox.StandardButton.Yes:
             return
 
+        batch_dir = self._new_trash_batch_dir()
+        if batch_dir is None:
+            QMessageBox.critical(
+                self,
+                "Delete folder failed",
+                "Could not create a temporary trash folder for undo.",
+            )
+            return
+
         deleted = 0
         failed: list[str] = []
-        removed_any = False
-        for folder in targets:
-            if not folder.is_dir():
-                continue
+        batch: list[tuple[Path, Path]] = []
+        for index, folder in enumerate(targets):
             try:
-                shutil.rmtree(folder)
+                resolved = folder.expanduser().resolve()
             except OSError as exc:
                 failed.append(f"{folder.name}: {exc}")
                 continue
+            if not resolved.is_dir():
+                continue
+            dest = batch_dir / f"{index:04d}_{resolved.name}"
+            try:
+                shutil.move(str(resolved), str(dest))
+            except OSError as exc:
+                failed.append(f"{resolved.name}: {exc}")
+                continue
 
             deleted += 1
-            removed_any = True
+            batch.append((resolved, dest))
             if self._preview_tabs is not None:
-                self._preview_tabs.close_under_folder(folder)
-            self._remove_folder_from_tree(folder)
-            remove_folder_colors_under(folder)
-            self._hidden_root_folders = remove_hidden_root(self._hidden_root_folders, folder)
-            self._navigate_after_folder_removed(folder)
+                self._preview_tabs.close_under_folder(resolved)
+            self._remove_folder_from_tree(resolved)
+            remove_folder_colors_under(resolved)
+            self._hidden_root_folders = remove_hidden_root(
+                self._hidden_root_folders, resolved
+            )
+            self._navigate_after_folder_removed(resolved)
+
+        if batch:
+            self._push_browser_undo({"kind": "delete_folders", "items": batch})
+        else:
+            try:
+                batch_dir.rmdir()
+            except OSError:
+                pass
 
         if failed:
             QMessageBox.warning(
@@ -9197,8 +9250,11 @@ class MainWindow(QMainWindow):
             )
         elif deleted:
             label = "folder" if deleted == 1 else "folders"
-            self._set_status_message(f"Deleted {deleted} {label}", 6000)
-        elif not removed_any and failed:
+            self._set_status_message(
+                f"Deleted {deleted} {label} (⌘Z / Ctrl+Z to restore)",
+                6000,
+            )
+        elif failed:
             QMessageBox.critical(
                 self,
                 "Delete folder failed",
@@ -9360,7 +9416,226 @@ class MainWindow(QMainWindow):
                 5000,
             )
 
+    def _push_browser_undo(self, entry: dict[str, Any]) -> None:
+        self._browser_undo_stack.append(entry)
+        while len(self._browser_undo_stack) > 20:
+            old = self._browser_undo_stack.pop(0)
+            self._discard_browser_undo_entry(old)
+
+    def _discard_browser_undo_entry(self, entry: dict[str, Any]) -> None:
+        kind = str(entry.get("kind") or "")
+        if kind in {"files", "delete_folders"}:
+            items = list(entry.get("items") or [])
+            parents: set[Path] = set()
+            for _original, trash in items:
+                trash_path = Path(trash)
+                parents.add(trash_path.parent)
+                try:
+                    if trash_path.is_file() or trash_path.is_symlink():
+                        trash_path.unlink()
+                    elif trash_path.is_dir():
+                        shutil.rmtree(trash_path, ignore_errors=True)
+                except OSError:
+                    pass
+            for parent in parents:
+                try:
+                    if parent.is_dir() and not any(parent.iterdir()):
+                        parent.rmdir()
+                except OSError:
+                    pass
+
+    def _new_trash_batch_dir(self) -> Path | None:
+        try:
+            self._deleted_files_trash_root.mkdir(parents=True, exist_ok=True)
+            batch_dir = self._deleted_files_trash_root / uuid.uuid4().hex
+            batch_dir.mkdir(parents=True, exist_ok=True)
+            return batch_dir
+        except OSError:
+            return None
+
+    def _expand_paths_for_delete(self, paths: list[Path]) -> list[Path]:
+        """Include paired annotation sidecars (e.g. seqmap JSON with RV.gff3)."""
+        expanded: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            try:
+                resolved = path.expanduser().resolve()
+            except OSError:
+                continue
+            candidates = [resolved, *companion_annotation_files_for_delete(resolved)]
+            for candidate in candidates:
+                key = str(candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if candidate.is_file():
+                    expanded.append(candidate)
+        return expanded
+
+    def _soft_delete_files(self, paths: list[Path]) -> tuple[int, list[str]]:
+        """Move files into a session trash folder so Cmd+Z can restore them."""
+        if not paths:
+            return 0, []
+        batch_dir = self._new_trash_batch_dir()
+        if batch_dir is None:
+            return 0, ["Could not create trash folder"]
+
+        batch: list[tuple[Path, Path]] = []
+        failed: list[str] = []
+        for index, path in enumerate(paths):
+            try:
+                resolved = path.expanduser().resolve()
+            except OSError as exc:
+                failed.append(f"{path.name}: {exc}")
+                continue
+            if not resolved.is_file():
+                failed.append(f"{path.name}: not a file")
+                continue
+            dest = batch_dir / f"{index:04d}_{resolved.name}"
+            try:
+                shutil.move(str(resolved), str(dest))
+            except OSError as exc:
+                failed.append(f"{resolved.name}: {exc}")
+                continue
+            batch.append((resolved, dest))
+
+        if batch:
+            self._push_browser_undo({"kind": "files", "items": batch})
+        else:
+            try:
+                batch_dir.rmdir()
+            except OSError:
+                pass
+        return len(batch), failed
+
+    def _undo_browser_action(self) -> None:
+        if not self._browser_undo_stack:
+            self._set_status_message("Nothing to undo", 3000)
+            return
+        entry = self._browser_undo_stack.pop()
+        kind = str(entry.get("kind") or "")
+        if kind == "files":
+            self._undo_deleted_files_batch(list(entry.get("items") or []))
+        elif kind == "hide_folders":
+            self._undo_hidden_folders(list(entry.get("folders") or []))
+        elif kind == "delete_folders":
+            self._undo_deleted_folders_batch(list(entry.get("items") or []))
+        else:
+            self._set_status_message("Nothing to undo", 3000)
+
+    def _undo_deleted_files_batch(self, batch: list[tuple[Path, Path]]) -> None:
+        restored = 0
+        failed: list[str] = []
+        for original, trash in batch:
+            original = Path(original)
+            trash = Path(trash)
+            try:
+                if not trash.is_file():
+                    failed.append(f"{original.name}: trash copy missing")
+                    continue
+                original.parent.mkdir(parents=True, exist_ok=True)
+                if original.exists():
+                    failed.append(f"{original.name}: already exists")
+                    continue
+                shutil.move(str(trash), str(original))
+                restored += 1
+            except OSError as exc:
+                failed.append(f"{original.name}: {exc}")
+        try:
+            parent = Path(batch[0][1]).parent if batch else None
+            if parent is not None and parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass
+
+        if self._current_folder:
+            self._populate_file_list(self._current_folder)
+
+        if failed and restored:
+            QMessageBox.warning(
+                self,
+                "Restore partially failed",
+                f"Restored {restored} file(s).\n\nFailed:\n" + "\n".join(failed[:8]),
+            )
+        elif failed:
+            QMessageBox.warning(
+                self,
+                "Restore failed",
+                "Could not restore deleted file(s):\n" + "\n".join(failed[:8]),
+            )
+        elif restored:
+            self._set_status_message(f"Restored {restored} deleted file(s)", 6000)
+
+    def _undo_hidden_folders(self, folders: list[Path]) -> None:
+        restored = 0
+        for folder in folders:
+            path = Path(folder)
+            if not path.is_dir():
+                continue
+            self._add_root_folder(path, unhide=True, select=False)
+            restored += 1
+        if restored:
+            self._persist_workspace()
+            label = "folder" if restored == 1 else "folders"
+            self._set_status_message(f"Restored {restored} {label} to the list", 6000)
+        else:
+            self._set_status_message("Could not restore folder(s) to the list", 5000)
+
+    def _undo_deleted_folders_batch(self, batch: list[tuple[Path, Path]]) -> None:
+        restored = 0
+        failed: list[str] = []
+        for original, trash in batch:
+            original = Path(original)
+            trash = Path(trash)
+            try:
+                if not trash.is_dir():
+                    failed.append(f"{original.name}: trash copy missing")
+                    continue
+                if original.exists():
+                    failed.append(f"{original.name}: already exists")
+                    continue
+                original.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(trash), str(original))
+                restored += 1
+                parent_item = self._find_tree_item_for_path(original.parent)
+                if parent_item is None:
+                    self._add_root_folder(original, unhide=True, select=False)
+                else:
+                    self._refresh_subfolders_under(
+                        original.parent, keep_folder=original
+                    )
+            except OSError as exc:
+                failed.append(f"{original.name}: {exc}")
+        try:
+            parent = Path(batch[0][1]).parent if batch else None
+            if parent is not None and parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass
+
+        if self._current_folder:
+            self._populate_file_list(self._current_folder)
+
+        if failed and restored:
+            QMessageBox.warning(
+                self,
+                "Restore partially failed",
+                f"Restored {restored} folder(s).\n\nFailed:\n" + "\n".join(failed[:8]),
+            )
+        elif failed:
+            QMessageBox.warning(
+                self,
+                "Restore failed",
+                "Could not restore deleted folder(s):\n" + "\n".join(failed[:8]),
+            )
+        elif restored:
+            label = "folder" if restored == 1 else "folders"
+            self._set_status_message(f"Restored {restored} deleted {label}", 6000)
+
     def _delete_selected_files(self, paths: list[Path]) -> None:
+        if not paths:
+            return
+        paths = self._expand_paths_for_delete(paths)
         if not paths:
             return
         names = "\n".join(p.name for p in paths[:10])
@@ -9369,21 +9644,15 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Delete files",
-            f"Permanently delete {len(paths)} file(s)?\n\n{names}",
+            f"Delete {len(paths)} file(s)?\n\n{names}\n\n"
+            "Press ⌘Z / Ctrl+Z afterward to restore.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        deleted = 0
-        failed: list[str] = []
-        for path in paths:
-            try:
-                path.expanduser().resolve().unlink()
-                deleted += 1
-            except OSError as exc:
-                failed.append(f"{path.name}: {exc}")
+        deleted, failed = self._soft_delete_files(paths)
 
         if self._preview_tabs is not None:
             self._preview_tabs.close_paths(paths)
@@ -9398,7 +9667,10 @@ class MainWindow(QMainWindow):
                 f"Deleted {deleted} file(s).\n\nFailed:\n" + "\n".join(failed[:8]),
             )
         else:
-            self._set_status_message(f"Deleted {deleted} file(s)", 6000)
+            self._set_status_message(
+                f"Deleted {deleted} file(s) (⌘Z / Ctrl+Z to restore)",
+                6000,
+            )
 
     def _open_files_in_preview(self, paths: list[Path]) -> None:
         """Show the selected file (first only) in the active Preview tab.

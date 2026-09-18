@@ -146,7 +146,13 @@ def _resolved_fasta_path(fasta_path: Path) -> Path:
 
 
 def sidecar_path(fasta_path: Path) -> Path:
-    """JSON sidecar next to the FASTA: ``{stem}.seqmap.json``."""
+    """JSON sidecar next to the FASTA: ``{stem}.seqmap_RV.json``."""
+    path = _resolved_fasta_path(fasta_path)
+    return path.parent / f"{path.stem}.seqmap_RV.json"
+
+
+def legacy_stem_sidecar_path(fasta_path: Path) -> Path:
+    """Previous JSON name ``{stem}.seqmap.json`` (pre-seqmap_RV)."""
     path = _resolved_fasta_path(fasta_path)
     return path.parent / f"{path.stem}.seqmap.json"
 
@@ -176,8 +182,20 @@ def legacy_stem_features_gff_path(fasta_path: Path) -> Path:
 
 
 def resolve_sidecar_path(fasta_path: Path) -> Path | None:
-    for candidate in (sidecar_path(fasta_path), legacy_sidecar_path(fasta_path)):
-        if candidate.is_file():
+    canonical = sidecar_path(fasta_path)
+    if canonical.is_file():
+        return canonical
+    for candidate in (
+        legacy_stem_sidecar_path(fasta_path),
+        legacy_sidecar_path(fasta_path),
+    ):
+        if not candidate.is_file():
+            continue
+        # Migrate legacy name to ``*.seqmap_RV.json`` when possible.
+        try:
+            candidate.replace(canonical)
+            return canonical
+        except OSError:
             return candidate
     return None
 
@@ -202,9 +220,12 @@ def _cleanup_legacy_sidecars(fasta_path: Path) -> None:
     """Drop pre-stem / pre-.RV sidecar names after writing the canonical files."""
     canonical_json = sidecar_path(fasta_path)
     canonical_gff = features_gff_path(fasta_path)
-    legacy_json = legacy_sidecar_path(fasta_path)
-    if legacy_json != canonical_json:
-        _remove_sidecar_if_exists(legacy_json)
+    for legacy_json in (
+        legacy_stem_sidecar_path(fasta_path),
+        legacy_sidecar_path(fasta_path),
+    ):
+        if legacy_json != canonical_json:
+            _remove_sidecar_if_exists(legacy_json)
     for legacy_gff in (
         legacy_features_gff_path(fasta_path),
         legacy_stem_features_gff_path(fasta_path),
@@ -214,8 +235,44 @@ def _cleanup_legacy_sidecars(fasta_path: Path) -> None:
 
 
 def is_sequence_map_hidden_file(path: Path) -> bool:
-    """True for internal JSON sidecars (hidden from the file list)."""
-    return path.name.endswith(".seqmap.json")
+    """True for sequence-map JSON sidecars (hidden from the file list)."""
+    name = path.name
+    return name.endswith(".seqmap_RV.json") or name.endswith(".seqmap.json")
+
+
+def companion_annotation_files_for_delete(path: Path) -> list[Path]:
+    """Return JSON sidecars that should be removed with an RV/features GFF3."""
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        return []
+    name = resolved.name
+    folder = resolved.parent
+    stems: list[str] = []
+    if name.endswith(".RV.gff3"):
+        stems.append(name[: -len(".RV.gff3")])
+    elif name.endswith(".features.gff3"):
+        stem = name[: -len(".features.gff3")]
+        stems.append(stem)
+        # Legacy ``demo.fa.features.gff3`` → also try ``demo.seqmap*``.
+        if stem.endswith(".fa") or stem.endswith(".fasta") or stem.endswith(".fna"):
+            stems.append(Path(stem).stem)
+    else:
+        return []
+
+    companions: list[Path] = []
+    seen: set[str] = set()
+    for stem in stems:
+        for candidate in (
+            folder / f"{stem}.seqmap_RV.json",
+            folder / f"{stem}.seqmap.json",
+        ):
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.is_file() and candidate != resolved:
+                companions.append(candidate)
+    return companions
 
 
 def load_single_sequence_fasta(path: Path) -> tuple[str, str]:
