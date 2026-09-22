@@ -1616,9 +1616,15 @@ class ExtractSequencesDialog(QDialog):
         page = QWidget(self)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(8)
 
         self._list = QListWidget(page)
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._pick_syncing = False
+        self._filter: QLineEdit | None = None
+        # Shift / Cmd (Ctrl) / click-drag rubber-band multi-select.
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._list.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self._list.setUniformItemSizes(True)
 
         if records is None:
             note = QLabel(
@@ -1640,13 +1646,29 @@ class ExtractSequencesDialog(QDialog):
                 label += f"   {description}"
             item = QListWidgetItem(label, self._list)
             item.setData(Qt.ItemDataRole.UserRole, rec_id)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsEnabled
+            )
             item.setCheckState(Qt.CheckState.Unchecked)
+
+        self._filter = QLineEdit(page)
+        self._filter.setPlaceholderText("Search sequences…")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.setToolTip(
+            "Filter the list by sequence id or description. "
+            "Select all applies to currently visible rows."
+        )
+        self._filter.textChanged.connect(self._apply_pick_filter)
 
         select_all = QPushButton("Select all", page)
         select_none = QPushButton("Select none", page)
-        select_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Checked))
-        select_none.clicked.connect(lambda: self._set_all(Qt.CheckState.Unchecked))
+        select_all.setToolTip("Select every visible (filtered) sequence")
+        select_none.setToolTip("Clear the selection")
+        select_all.clicked.connect(self._select_all_visible)
+        select_none.clicked.connect(self._select_none)
 
         top = QHBoxLayout()
         top.addWidget(QLabel(f"Sequences in {self._source_name}:", page))
@@ -1654,11 +1676,21 @@ class ExtractSequencesDialog(QDialog):
         top.addWidget(select_all)
         top.addWidget(select_none)
 
-        layout.addLayout(top)
-        layout.addWidget(self._list, stretch=1)
-        self._list.itemChanged.connect(self._sync)
-        return page
+        hint = QLabel(
+            "Click to select · Shift+click for a range · "
+            "⌘/Ctrl+click to add or remove · drag to select several",
+            page,
+        )
+        hint.setStyleSheet("color: palette(mid);")
+        hint.setWordWrap(True)
 
+        layout.addLayout(top)
+        layout.addWidget(self._filter)
+        layout.addWidget(self._list, stretch=1)
+        layout.addWidget(hint)
+        self._list.itemSelectionChanged.connect(self._on_pick_selection_changed)
+        self._list.itemChanged.connect(self._on_pick_item_changed)
+        return page
     def _build_id_tab(self, initial_ids: str, initial_column: int) -> QWidget:
         page = QWidget(self)
         layout = QVBoxLayout(page)
@@ -1727,15 +1759,92 @@ class ExtractSequencesDialog(QDialog):
 
     # -- pick tab -----------------------------------------------------------
 
-    def _set_all(self, state) -> None:
+    def _apply_pick_filter(self, text: str = "") -> None:
+        needle = str(text or "").strip().lower()
         for index in range(self._list.count()):
-            self._list.item(index).setCheckState(state)
+            item = self._list.item(index)
+            if item is None:
+                continue
+            if not needle:
+                item.setHidden(False)
+                continue
+            item.setHidden(needle not in item.text().lower())
+
+    def _visible_items(self) -> list[QListWidgetItem]:
+        items: list[QListWidgetItem] = []
+        for index in range(self._list.count()):
+            item = self._list.item(index)
+            if item is not None and not item.isHidden():
+                items.append(item)
+        return items
+
+    def _select_all_visible(self) -> None:
+        self._pick_syncing = True
+        try:
+            self._list.clearSelection()
+            for item in self._visible_items():
+                item.setSelected(True)
+                item.setCheckState(Qt.CheckState.Checked)
+            # Clear checks on hidden rows so Select all means "what you see".
+            for index in range(self._list.count()):
+                item = self._list.item(index)
+                if item is not None and item.isHidden():
+                    item.setCheckState(Qt.CheckState.Unchecked)
+                    item.setSelected(False)
+        finally:
+            self._pick_syncing = False
+        self._sync()
+
+    def _select_none(self) -> None:
+        self._pick_syncing = True
+        try:
+            self._list.clearSelection()
+            for index in range(self._list.count()):
+                item = self._list.item(index)
+                if item is not None:
+                    item.setCheckState(Qt.CheckState.Unchecked)
+        finally:
+            self._pick_syncing = False
+        self._sync()
+
+    def _on_pick_selection_changed(self) -> None:
+        if self._pick_syncing:
+            return
+        self._pick_syncing = True
+        try:
+            selected = self._list.selectedItems()
+            for index in range(self._list.count()):
+                item = self._list.item(index)
+                if item is None or item.isHidden():
+                    continue
+                want = (
+                    Qt.CheckState.Checked
+                    if item.isSelected()
+                    else Qt.CheckState.Unchecked
+                )
+                if item.checkState() != want:
+                    item.setCheckState(want)
+            del selected
+        finally:
+            self._pick_syncing = False
+        self._sync()
+
+    def _on_pick_item_changed(self, item: QListWidgetItem) -> None:
+        if self._pick_syncing or item is None:
+            return
+        self._pick_syncing = True
+        try:
+            item.setSelected(item.checkState() == Qt.CheckState.Checked)
+        finally:
+            self._pick_syncing = False
+        self._sync()
 
     def selected_ids(self) -> set[str]:
         return {
             self._list.item(i).data(Qt.ItemDataRole.UserRole)
             for i in range(self._list.count())
-            if self._list.item(i).checkState() == Qt.CheckState.Checked
+            if self._list.item(i) is not None
+            and self._list.item(i).checkState() == Qt.CheckState.Checked
         }
 
     # -- id tab -------------------------------------------------------------
@@ -1819,10 +1928,25 @@ class ExtractSequencesDialog(QDialog):
             enabled = bool(parsed.ids)
         else:
             chosen = self.selected_ids()
-            self._summary.setText(
-                f"{len(chosen)} of {self._list.count()} selected"
-                if chosen else "Nothing selected"
+            visible = sum(
+                1
+                for i in range(self._list.count())
+                if self._list.item(i) is not None and not self._list.item(i).isHidden()
             )
+            total = self._list.count()
+            if chosen:
+                if visible < total:
+                    self._summary.setText(
+                        f"{len(chosen)} selected · {visible} of {total} shown"
+                    )
+                else:
+                    self._summary.setText(f"{len(chosen)} of {total} selected")
+            else:
+                self._summary.setText(
+                    f"Nothing selected · {visible} of {total} shown"
+                    if visible < total
+                    else "Nothing selected"
+                )
             enabled = bool(chosen)
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
 
