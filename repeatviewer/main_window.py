@@ -6401,6 +6401,8 @@ class MainWindow(QMainWindow):
                 self._style_new_output_item(item)
             elif key in self._highlight_source_keys:
                 self._style_source_file_item(item)
+            else:
+                self._file_list.reapply_file_color_for_path(Path(str(raw)))
 
     def _palette_is_dark(self) -> bool:
         from PySide6.QtGui import QPalette
@@ -9051,6 +9053,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Rename failed", str(exc))
             return
 
+        from repeatviewer.widgets.file_colors import replace_file_color_path
+
+        replace_file_color_path(path, target)
+        for src, dst in companion_renames:
+            replace_file_color_path(src, dst)
+
         closed = [path, *[src for src, _dst in companion_renames]]
         if self._preview_tabs is not None:
             self._preview_tabs.close_paths(closed)
@@ -9934,6 +9942,9 @@ class MainWindow(QMainWindow):
             try:
                 if mode == "cut":
                     shutil.move(src, dest)
+                    from repeatviewer.widgets.file_colors import replace_file_color_path
+
+                    replace_file_color_path(src, dest)
                 else:
                     shutil.copy2(src, dest)
                 created.append(dest)
