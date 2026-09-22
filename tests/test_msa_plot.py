@@ -151,21 +151,28 @@ def test_x_tick_step_is_readable() -> None:
 def test_sequence_height_scales_figure() -> None:
     from repeatviewer.backends.msa_plot import _figure_size
 
-    _, h_default = _figure_size(10, 100, sequence_height_cm=0.5)
-    _, h_tall = _figure_size(10, 100, sequence_height_cm=1.0)
+    _, h_default = _figure_size(
+        20, 100, sequence_height_cm=0.5, sequence_distance_cm=0.0
+    )
+    _, h_tall = _figure_size(
+        20, 100, sequence_height_cm=1.0, sequence_distance_cm=0.0
+    )
     assert h_tall == 2 * h_default
 
 
 def test_row_gaps_insert_white_spacers() -> None:
     import numpy as np
 
-    from repeatviewer.backends.msa_plot import _GAP_ROW_PIXELS, _SEQ_ROW_PIXELS, _insert_row_gaps
+    from repeatviewer.backends.msa_plot import _SEQ_ROW_PIXELS, _gap_pixels, _insert_row_gaps
 
     numeric = np.asarray([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    display, centers = _insert_row_gaps(numeric, gap_code=0.0)
-    expected_rows = 3 * _SEQ_ROW_PIXELS + 2 * _GAP_ROW_PIXELS
+    gap_px = _gap_pixels(0.5, 0.05)
+    assert gap_px == 2  # 0.05/0.5 * 20
+    display, centers = _insert_row_gaps(numeric, gap_code=0.0, gap_pixels=gap_px)
+    expected_rows = 3 * _SEQ_ROW_PIXELS + 2 * gap_px
     assert display.shape == (expected_rows, 2)
     assert len(centers) == 3
-    # Gap rows sit between sequence blocks and use the spacer code.
     gap_start = _SEQ_ROW_PIXELS
-    assert np.all(display[gap_start : gap_start + _GAP_ROW_PIXELS] == 0.0)
+    assert np.all(display[gap_start : gap_start + gap_px] == 0.0)
+    assert _gap_pixels(0.5, 0.0) == 0
+    assert _gap_pixels(0.5, 0.01) == 1

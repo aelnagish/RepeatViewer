@@ -8030,6 +8030,7 @@ class MainWindow(QMainWindow):
             output_format=options.output_format,
             dpi=options.dpi,
             sequence_height_cm=options.sequence_height_cm,
+            sequence_distance_cm=options.sequence_distance_cm,
             nucleotide_colors=dict(options.nucleotide_colors),
             amino_acid_colors=dict(options.amino_acid_colors),
         )

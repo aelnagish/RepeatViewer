@@ -6321,6 +6321,17 @@ class MsaPlotDialog(QDialog):
             "Increase to make rows taller."
         )
 
+        self._seq_distance = QDoubleSpinBox(self)
+        self._seq_distance.setRange(0.0, 2.0)
+        self._seq_distance.setDecimals(2)
+        self._seq_distance.setSingleStep(0.01)
+        self._seq_distance.setValue(float(self._opts.sequence_distance_cm))
+        self._seq_distance.setSuffix(" cm")
+        self._seq_distance.setToolTip(
+            "White distance between consecutive sequence rows (centimeters). "
+            "Set to 0 to remove spacing."
+        )
+
         nuc_colors = dict(self._default_nuc)
         nuc_colors.update(self._opts.nucleotide_colors or {})
         if "U" in nuc_colors:
@@ -6401,6 +6412,7 @@ class MsaPlotDialog(QDialog):
         form.addRow("Output format:", self._format)
         form.addRow("Quality:", self._dpi)
         form.addRow("Sequence height:", self._seq_height)
+        form.addRow("Sequence distance:", self._seq_distance)
 
         self._colors_toggle = QPushButton("▶ Color", self)
         self._colors_toggle.setCheckable(True)
@@ -6461,6 +6473,7 @@ class MsaPlotDialog(QDialog):
             output_format=str(self._format.currentData()),
             dpi=int(self._dpi.value()),
             sequence_height_cm=float(self._seq_height.value()),
+            sequence_distance_cm=float(self._seq_distance.value()),
             nucleotide_colors=nuc,
             amino_acid_colors=self._aa_grid.colors(),
         )

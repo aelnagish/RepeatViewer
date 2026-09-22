@@ -1294,6 +1294,8 @@ def save_te_divergence_plot_options(opts: TeDivergencePlotOptions) -> None:
 DEFAULT_MSA_PLOT_DPI = 100
 # Per-sequence row height in centimeters (matplotlib figsize uses inches).
 DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM = 0.5
+# White distance between sequence rows (cm).
+DEFAULT_MSA_PLOT_SEQUENCE_DISTANCE_CM = 0.01
 # Bump when built-in nucleotide/amino defaults change so old QSettings palettes refresh.
 MSA_PLOT_COLOR_SCHEME_VERSION = 3
 
@@ -1306,6 +1308,7 @@ class MsaPlotJobOptions:
     output_format: str = "png"
     dpi: int = DEFAULT_MSA_PLOT_DPI
     sequence_height_cm: float = DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM
+    sequence_distance_cm: float = DEFAULT_MSA_PLOT_SEQUENCE_DISTANCE_CM
     nucleotide_colors: dict[str, str] = field(default_factory=dict)
     amino_acid_colors: dict[str, str] = field(default_factory=dict)
 
@@ -1386,6 +1389,18 @@ def load_msa_plot_options() -> MsaPlotJobOptions:
         output_format=fmt,
         dpi=max(50, min(600, int(v.get("dpi", DEFAULT_MSA_PLOT_DPI)))),
         sequence_height_cm=max(0.1, min(5.0, height_cm)),
+        sequence_distance_cm=max(
+            0.0,
+            min(
+                2.0,
+                float(
+                    v.get(
+                        "sequence_distance_cm",
+                        v.get("sequence_gap_cm", DEFAULT_MSA_PLOT_SEQUENCE_DISTANCE_CM),
+                    )
+                ),
+            ),
+        ),
         nucleotide_colors=nuc,
         amino_acid_colors=aa,
     )
@@ -1404,6 +1419,7 @@ def save_msa_plot_options(opts: MsaPlotJobOptions) -> None:
             "output_format": opts.output_format,
             "dpi": int(opts.dpi),
             "sequence_height_cm": float(opts.sequence_height_cm),
+            "sequence_distance_cm": float(opts.sequence_distance_cm),
             "color_scheme_version": MSA_PLOT_COLOR_SCHEME_VERSION,
             "nucleotide_colors": json.dumps(nuc, sort_keys=True),
             "amino_acid_colors": json.dumps(opts.amino_acid_colors, sort_keys=True),

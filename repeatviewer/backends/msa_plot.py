@@ -192,6 +192,8 @@ class MsaPlotOptions:
     dpi: int = 100
     # Figure centimeters per sequence row (user-adjustable; converted to inches for matplotlib).
     sequence_height_cm: float = 0.5
+    # White gap between consecutive sequence rows (cm); 0 disables gaps.
+    sequence_distance_cm: float = 0.01
     nucleotide_colors: dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_NUCLEOTIDE_COLORS)
     )
@@ -304,9 +306,22 @@ def _numeric_alignment(
     return numeric, cmap, gap_index
 
 
-# Vertical resolution of each sequence row vs the white gap between rows.
-_SEQ_ROW_PIXELS = 10
-_GAP_ROW_PIXELS = 2
+# Vertical resolution used when expanding each sequence row for white gaps.
+_SEQ_ROW_PIXELS = 20
+
+
+def _gap_pixels(
+    sequence_height_cm: float,
+    sequence_distance_cm: float,
+    *,
+    row_pixels: int = _SEQ_ROW_PIXELS,
+) -> int:
+    """Map distance cm → integer spacer rows relative to sequence row height."""
+    height = max(1e-6, float(sequence_height_cm))
+    gap = max(0.0, float(sequence_distance_cm))
+    if gap <= 0:
+        return 0
+    return max(1, int(round(row_pixels * gap / height)))
 
 
 def _insert_row_gaps(
@@ -314,7 +329,7 @@ def _insert_row_gaps(
     gap_code: float,
     *,
     row_pixels: int = _SEQ_ROW_PIXELS,
-    gap_pixels: int = _GAP_ROW_PIXELS,
+    gap_pixels: int = 1,
 ) -> tuple[np.ndarray, list[float]]:
     """Expand rows so a thin white band separates each sequence; return y-centers."""
     n_seq, n_pos = numeric.shape
@@ -335,11 +350,16 @@ def _insert_row_gaps(
     return np.vstack(blocks), centers
 
 
-def _figure_size(n_seq: int, n_pos: int, *, sequence_height_cm: float) -> tuple[float, float]:
+def _figure_size(
+    n_seq: int,
+    n_pos: int,
+    *,
+    sequence_height_cm: float,
+    sequence_distance_cm: float = 0.01,
+) -> tuple[float, float]:
     width = min(48.0, max(8.0, n_pos / 80.0))
     row_h = max(0.05, min(2.0, float(sequence_height_cm) / 2.54))
-    # Include small white gaps between sequences in the figure height.
-    gap_h = row_h * (_GAP_ROW_PIXELS / float(_SEQ_ROW_PIXELS))
+    gap_h = max(0.0, float(sequence_distance_cm) / 2.54)
     height = min(
         80.0,
         max(2.0, n_seq * row_h + max(0, n_seq - 1) * gap_h),
@@ -405,11 +425,20 @@ def write_msa_plot(
     n_seq, n_pos = numeric.shape
     dpi = max(50, min(600, int(opts.dpi)))
 
-    display, y_centers = _insert_row_gaps(numeric, float(gap_index))
+    display, y_centers = _insert_row_gaps(
+        numeric,
+        float(gap_index),
+        gap_pixels=_gap_pixels(opts.sequence_height_cm, opts.sequence_distance_cm),
+    )
     n_display = display.shape[0]
 
     fig, ax = plt.subplots(
-        figsize=_figure_size(n_seq, n_pos, sequence_height_cm=opts.sequence_height_cm),
+        figsize=_figure_size(
+            n_seq,
+            n_pos,
+            sequence_height_cm=opts.sequence_height_cm,
+            sequence_distance_cm=opts.sequence_distance_cm,
+        ),
         dpi=dpi,
         facecolor="white",
     )
