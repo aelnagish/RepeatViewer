@@ -14,6 +14,7 @@ from repeatviewer.widgets.file_colors import (
 )
 from repeatviewer.widgets.file_list_table import (
     COL_COLOR,
+    COL_LENGTH,
     _COL_NAME,
     FileListTableWidget,
 )
@@ -39,6 +40,33 @@ def test_file_color_persists_and_colors_name(tmp_path: Path, monkeypatch) -> Non
     assert color_cell.text() == "Orange"
     assert name.foreground().color().name() == "#ea580c"
     assert color_cell.foreground().color().name() == "#ea580c"
+
+    settings.clear()
+
+
+def test_changing_file_color_updates_metadata_immediately(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    settings = QSettings()
+    settings.clear()
+
+    fasta = tmp_path / "demo.fa"
+    fasta.write_text(">a\nACGT\n")
+    table = FileListTableWidget()
+    table.add_file_row(fasta, fill_metadata_columns=True)
+    length = table.item(0, COL_LENGTH)
+    assert length is not None
+    assert length.foreground().color().name() != "#16a34a"
+
+    table._set_files_color([fasta], "#16a34a")
+    assert table.item(0, _COL_NAME).foreground().color().name() == "#16a34a"
+    assert table.item(0, COL_LENGTH).foreground().color().name() == "#16a34a"
+    assert table.item(0, COL_COLOR).foreground().color().name() == "#16a34a"
+    assert table.item(0, COL_COLOR).text() == "Green"
+
+    table._clear_files_color([fasta])
+    assert table.item(0, COL_COLOR).text() == "—"
+    # Cleared brush uses the palette default (not a stored green).
+    assert table.item(0, COL_LENGTH).foreground().color().name() != "#16a34a"
 
     settings.clear()
 

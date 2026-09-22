@@ -455,9 +455,8 @@ class FileListTableWidget(QTableWidget):
         return FileListRow(self, row)
 
     def _apply_file_color_cells(self, row: int, path: Path) -> None:
-        """Apply stored file color to the Name text and Color meta column."""
+        """Apply stored file color to Name, Color, and all metadata cells."""
         from repeatviewer.widgets.file_colors import (
-            apply_name_foreground,
             color_label,
             get_file_color,
         )
@@ -465,7 +464,7 @@ class FileListTableWidget(QTableWidget):
         path = path.expanduser().resolve()
         path_text = str(path)
         color = get_file_color(path)
-        apply_name_foreground(self.item(row, _COL_NAME), path)
+        brush = QBrush(QColor(color)) if color else QBrush()
 
         label = color_label(color) if color else "—"
         # Empty colors sort last when ascending.
@@ -473,11 +472,14 @@ class FileListTableWidget(QTableWidget):
         cell = _SortableTableItem(label, sort_key=sort_key)
         cell.setData(_ROLE_PATH, path_text)
         cell.setTextAlignment(_LEFT_ALIGN)
-        if color:
-            cell.setForeground(QBrush(QColor(color)))
-        else:
-            cell.setForeground(QBrush())
+        cell.setForeground(brush)
         self.setItem(row, _COL_COLOR, cell)
+
+        # Name + every other populated cell (Length, GC, …) update immediately.
+        for column in range(self.columnCount()):
+            existing = self.item(row, column)
+            if existing is not None:
+                existing.setForeground(brush)
 
     def reapply_file_colors(self) -> None:
         """Refresh Name/Color styling from stored colors for every row."""
