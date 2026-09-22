@@ -274,6 +274,11 @@ from repeatviewer.backends.te_abundance_plot import (
     te_abundance_plot_html_path_for_sources,
     write_te_abundance_plot_html,
 )
+from repeatviewer.backends.msa_plot import (
+    MsaPlotOptions,
+    msa_plot_output_path,
+    write_msa_plot,
+)
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE, JobCancellation, JobCancelledError
 
 logger = logging.getLogger(__name__)
@@ -351,6 +356,7 @@ from repeatviewer.job_options import (
     load_teaid_options,
     load_te_genome_map_options,
     load_te_divergence_plot_options,
+    load_msa_plot_options,
     load_repeat_quantify_options,
     load_te_confusion_matrix_benchmark_options,
     load_te_library_benchmark_options,
@@ -367,12 +373,14 @@ from repeatviewer.job_options import (
     save_teaid_options,
     save_te_genome_map_options,
     save_te_divergence_plot_options,
+    save_msa_plot_options,
     save_repeat_quantify_options,
     save_te_confusion_matrix_benchmark_options,
     save_te_library_benchmark_options,
     save_tsd_search_options,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
+    MsaPlotJobOptions,
     TeConfusionMatrixBenchmarkOptions,
     TeLibraryBenchmarkOptions,
     TsdSearchOptions,
@@ -392,6 +400,7 @@ from repeatviewer.views.tool_dialogs import (
     TeDensityPlotDialog,
     TeDivergencePlotDialog,
     TeAbundancePlotDialog,
+    MsaPlotDialog,
     ConfusionMatrixBenchmarkDialog,
     TeLibraryBenchmarkDialog,
     CommandPluginDesignerDialog,
@@ -1997,6 +2006,7 @@ class MainWindow(QMainWindow):
         # Superfamily filtering is controlled on the plot page, not in settings.
         self._te_genome_map_options.superfamilies_only = None
         self._te_divergence_plot_options = load_te_divergence_plot_options()
+        self._msa_plot_options = load_msa_plot_options()
         self._consensus_options = load_consensus_options()
         self._flexidot_options = load_flexidot_options()
         self._te_annotation_options = load_te_annotation_options()
@@ -2029,6 +2039,7 @@ class MainWindow(QMainWindow):
             TeDensityPlotDialog
             | TeDivergencePlotDialog
             | TeAbundancePlotDialog
+            | MsaPlotDialog
             | RepeatQuantifyDialog
             | None
         ) = None
@@ -3969,6 +3980,7 @@ class MainWindow(QMainWindow):
             menu.addAction("TE density plot", self._open_te_density_plot_dialog)
         menu.addAction("TE divergence plot", self._open_te_divergence_plot_dialog)
         menu.addAction("TE abundance plot", self._open_te_abundance_plot_dialog)
+        menu.addAction("MSA plot", self._open_msa_plot_dialog)
 
     def _populate_benchmarking_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -7943,6 +7955,115 @@ class MainWindow(QMainWindow):
 
         dialog = TeAbundancePlotDialog(input_files=initial_files or None, parent=self)
         self._present_te_viz_dialog(dialog, _on_accept)
+
+    def _open_msa_plot_dialog(self, *, input_file: Path | None = None) -> None:
+        if input_file is None:
+            selected = [
+                p for p in self._selected_files()
+                if p.is_file() and self._is_fasta_file(p)
+            ]
+            input_file = selected[0] if selected else None
+
+        # Reload so palette migrations (Default colours) apply without restart.
+        self._msa_plot_options = load_msa_plot_options()
+
+        def _on_accept(dialog: MsaPlotDialog) -> None:
+            self._msa_plot_options = dialog.options()
+            save_msa_plot_options(self._msa_plot_options)
+            if not dialog.should_run():
+                self._set_status_message("MSA plot settings saved", 4000)
+                return
+            files = dialog.input_files()
+            if not files:
+                QMessageBox.warning(self, "MSA plot", "Select an aligned FASTA file.")
+                return
+            source = files[0].expanduser().resolve()
+            if not source.is_file() or not self._is_fasta_file(source):
+                QMessageBox.warning(
+                    self,
+                    "MSA plot",
+                    f"Select a valid FASTA alignment.\n\nInvalid: {source}",
+                )
+                return
+            self._start_msa_plot(source, options=self._msa_plot_options)
+
+        dialog = MsaPlotDialog(
+            initial=self._msa_plot_options,
+            input_file=input_file,
+            parent=self,
+        )
+        self._present_te_viz_dialog(dialog, _on_accept)
+
+    def _start_msa_plot(self, source: Path, *, options: MsaPlotJobOptions) -> None:
+        proposed = msa_plot_output_path(source, output_format=options.output_format)
+        output_path = self._confirm_plot_output_path(proposed, title="MSA plot")
+        if output_path is None:
+            return
+        self._start_background_job(
+            FunctionWorker(
+                self._run_msa_plot_job,
+                "msa_plot",
+                [source],
+                {"options": options, "output_path": output_path},
+            ),
+            job_title="msa_plot",
+            total_steps=1,
+            source_files=[source],
+            on_finished=self._on_msa_plot_finished,
+            on_failed=self._on_worker_failed,
+        )
+
+    def _run_msa_plot_job(
+        self,
+        func_name: str,
+        sources: list[Path],
+        progress,
+        *,
+        options: MsaPlotJobOptions,
+        output_path: Path | None = None,
+    ) -> dict:
+        progress(0, "Building MSA plot…")
+        if self._job_cancel.requested:
+            raise JobCancelledError()
+        plot_opts = MsaPlotOptions(
+            sequence_type=options.sequence_type,
+            output_format=options.output_format,
+            dpi=options.dpi,
+            sequence_height_cm=options.sequence_height_cm,
+            nucleotide_colors=dict(options.nucleotide_colors),
+            amino_acid_colors=dict(options.amino_acid_colors),
+        )
+        written = write_msa_plot(sources[0], output_path, options=plot_opts)
+        if self._job_cancel.requested:
+            raise JobCancelledError()
+        progress(1, f"Finished: {written.name}")
+        return {
+            "func_name": func_name,
+            "created_outputs": [str(written.resolve())],
+            "source_files": [str(p.resolve()) for p in sources],
+            "total": 1,
+            "failures": [],
+        }
+
+    @Slot(dict)
+    def _on_msa_plot_finished(self, result: dict) -> None:
+        created = [
+            Path(str(raw)).expanduser().resolve()
+            for raw in result.get("created_outputs", [])
+        ]
+        created = [p for p in created if p.is_file()]
+        sources = [
+            Path(str(raw)).expanduser().resolve()
+            for raw in result.get("source_files", [])
+        ]
+        if not created:
+            self._set_status_message("MSA plot finished", 8000, override_file_link=True)
+            return
+        out = created[0]
+        self._refresh_folders_after_job(created, sources)
+        if out.suffix.lower() == ".png":
+            self._open_divergence_in_preview(out)
+        self._set_status_message(f"MSA plot: {out.name}", 8000, override_file_link=True)
 
     def _start_te_abundance_plot(
         self,

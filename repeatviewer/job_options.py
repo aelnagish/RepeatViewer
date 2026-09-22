@@ -1291,6 +1291,126 @@ def save_te_divergence_plot_options(opts: TeDivergencePlotOptions) -> None:
     )
 
 
+DEFAULT_MSA_PLOT_DPI = 100
+# Per-sequence row height in centimeters (matplotlib figsize uses inches).
+DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM = 0.5
+# Bump when built-in nucleotide/amino defaults change so old QSettings palettes refresh.
+MSA_PLOT_COLOR_SCHEME_VERSION = 3
+
+
+@dataclass
+class MsaPlotJobOptions:
+    """MSA overview plot (Visualization → MSA plot)."""
+
+    sequence_type: str = "auto"
+    output_format: str = "png"
+    dpi: int = DEFAULT_MSA_PLOT_DPI
+    sequence_height_cm: float = DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM
+    nucleotide_colors: dict[str, str] = field(default_factory=dict)
+    amino_acid_colors: dict[str, str] = field(default_factory=dict)
+
+
+def _parse_color_map_setting(raw: object) -> dict[str, str]:
+    if not raw:
+        return {}
+    text = str(raw).strip()
+    if not text:
+        return {}
+    try:
+        import json
+
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    colors: dict[str, str] = {}
+    for key, value in decoded.items():
+        color = str(value).strip()
+        if key and color.startswith("#") and len(color) >= 4:
+            colors[str(key).upper()] = color
+    return colors
+
+
+def load_msa_plot_options() -> MsaPlotJobOptions:
+    from repeatviewer.backends.msa_plot import (
+        DEFAULT_AMINO_ACID_COLORS,
+        DEFAULT_NUCLEOTIDE_COLORS,
+        MSA_PLOT_FORMAT_PDF,
+        MSA_PLOT_FORMAT_PNG,
+        MSA_PLOT_SEQ_AUTO,
+        MSA_PLOT_SEQ_NUCLEOTIDE,
+        MSA_PLOT_SEQ_PROTEIN,
+    )
+
+    v = _load_settings_group("msa_plot")
+    seq_type = str(v.get("sequence_type", MSA_PLOT_SEQ_AUTO)).lower()
+    if seq_type not in {
+        MSA_PLOT_SEQ_AUTO,
+        MSA_PLOT_SEQ_NUCLEOTIDE,
+        MSA_PLOT_SEQ_PROTEIN,
+    }:
+        seq_type = MSA_PLOT_SEQ_AUTO
+    fmt = str(v.get("output_format", MSA_PLOT_FORMAT_PNG)).lower()
+    if fmt not in {MSA_PLOT_FORMAT_PNG, MSA_PLOT_FORMAT_PDF}:
+        fmt = MSA_PLOT_FORMAT_PNG
+
+    try:
+        scheme_version = int(v.get("color_scheme_version", 0))
+    except (TypeError, ValueError):
+        scheme_version = 0
+
+    if scheme_version < MSA_PLOT_COLOR_SCHEME_VERSION:
+        # Refresh built-in palettes after Default / Color-blind updates.
+        nuc = dict(DEFAULT_NUCLEOTIDE_COLORS)
+        aa = dict(DEFAULT_AMINO_ACID_COLORS)
+    else:
+        nuc = dict(DEFAULT_NUCLEOTIDE_COLORS)
+        nuc.update(_parse_color_map_setting(v.get("nucleotide_colors")))
+        aa = dict(DEFAULT_AMINO_ACID_COLORS)
+        aa.update(_parse_color_map_setting(v.get("amino_acid_colors")))
+    # DNA/RNA: keep T and U identical in the UI and plot.
+    if "U" in nuc:
+        nuc["T"] = nuc["U"]
+
+    # Prefer cm; migrate legacy inch values (sequence_height without _cm).
+    if "sequence_height_cm" in v:
+        height_cm = float(v.get("sequence_height_cm", DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM))
+    elif "sequence_height" in v:
+        height_cm = float(v.get("sequence_height")) * 2.54
+    else:
+        height_cm = DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM
+
+    return MsaPlotJobOptions(
+        sequence_type=seq_type,
+        output_format=fmt,
+        dpi=max(50, min(600, int(v.get("dpi", DEFAULT_MSA_PLOT_DPI)))),
+        sequence_height_cm=max(0.1, min(5.0, height_cm)),
+        nucleotide_colors=nuc,
+        amino_acid_colors=aa,
+    )
+
+
+def save_msa_plot_options(opts: MsaPlotJobOptions) -> None:
+    import json
+
+    nuc = dict(opts.nucleotide_colors)
+    if "U" in nuc:
+        nuc["T"] = nuc["U"]
+    _save_settings_group(
+        "msa_plot",
+        {
+            "sequence_type": opts.sequence_type,
+            "output_format": opts.output_format,
+            "dpi": int(opts.dpi),
+            "sequence_height_cm": float(opts.sequence_height_cm),
+            "color_scheme_version": MSA_PLOT_COLOR_SCHEME_VERSION,
+            "nucleotide_colors": json.dumps(nuc, sort_keys=True),
+            "amino_acid_colors": json.dumps(opts.amino_acid_colors, sort_keys=True),
+        },
+    )
+
+
 REPEAT_QUANTIFY_ENGINES = ("blastn", "repeatmasker", "both")
 REPEAT_QUANTIFY_SENSITIVITIES = ("sensitive", "default", "quick")
 

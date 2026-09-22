@@ -178,6 +178,7 @@ from repeatviewer.job_options import (
     CHROMOSOME_SORT_SIZE_DESC,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
+    MsaPlotJobOptions,
     RepeatQuantifyOptions,
     TeConfusionMatrixBenchmarkOptions,
     TeLibraryBenchmarkOptions,
@@ -6137,6 +6138,332 @@ class TeAbundancePlotDialog(QDialog):
 
     def apply_path_from_panel(self, path: Path) -> bool:
         return self._input.set_path_at_focus(path)
+
+
+class _ResidueColorGrid(QWidget):
+    """Residue → color buttons, optionally laid out by category."""
+
+    # Keep in sync with MsaPlotDialog preset rows so Default/Clustal line up with A.
+    LABEL_WIDTH = 130
+
+    def __init__(
+        self,
+        parent: QWidget,
+        *,
+        residues: list[str] | None = None,
+        colors: dict[str, str],
+        categories: list[tuple[str, list[str] | tuple[str, ...]]] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._buttons: dict[str, QPushButton] = {}
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+
+        if categories:
+            for category_name, group in categories:
+                row = QHBoxLayout()
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(6)
+                label = QLabel(category_name, self)
+                label.setFixedWidth(self.LABEL_WIDTH)
+                label.setStyleSheet("color: #444;")
+                row.addWidget(label)
+                for residue in group:
+                    row.addWidget(self._make_residue_button(residue, colors))
+                row.addStretch(1)
+                outer.addLayout(row)
+        else:
+            grid = QGridLayout()
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(4)
+            items = list(residues or [])
+            columns = 8 if len(items) > 8 else max(1, len(items))
+            for index, residue in enumerate(items):
+                grid.addWidget(
+                    self._make_residue_button(residue, colors),
+                    index // columns,
+                    index % columns,
+                )
+            outer.addLayout(grid)
+
+    def _make_residue_button(self, residue: str, colors: dict[str, str]) -> QPushButton:
+        color = colors.get(residue, "#c7d1d0")
+        button = QPushButton(residue, self)
+        button.setFixedSize(QSize(34, 28))
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(f"Choose color for {residue}")
+        self._apply_button_color(button, color)
+        button.clicked.connect(lambda checked=False, r=residue: self._pick_color(r))
+        self._buttons[residue] = button
+        return button
+
+    @staticmethod
+    def _contrast_text_color(background: QColor) -> str:
+        """Black or white text for readable letters on light yellows etc."""
+
+        def _channel(value: int) -> float:
+            x = value / 255.0
+            return x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4
+
+        luminance = (
+            0.2126 * _channel(background.red())
+            + 0.7152 * _channel(background.green())
+            + 0.0722 * _channel(background.blue())
+        )
+        return "#111111" if luminance > 0.45 else "#ffffff"
+
+    @classmethod
+    def _apply_button_color(cls, button: QPushButton, color: str) -> None:
+        qcolor = QColor(color)
+        if not qcolor.isValid():
+            qcolor = QColor("#c7d1d0")
+        text = cls._contrast_text_color(qcolor)
+        button.setStyleSheet(
+            f"QPushButton {{ background-color: {qcolor.name()}; color: {text}; "
+            f"border: 1px solid #777; border-radius: 3px; font-weight: 600; }}"
+        )
+        button.setProperty("hex_color", qcolor.name())
+
+    def _pick_color(self, residue: str) -> None:
+        button = self._buttons[residue]
+        current = QColor(str(button.property("hex_color") or "#c7d1d0"))
+        picked = QColorDialog.getColor(current, self.window(), f"Color for {residue}")
+        if picked.isValid():
+            self._apply_button_color(button, picked.name())
+
+    def colors(self) -> dict[str, str]:
+        return {
+            residue: str(button.property("hex_color") or "#c7d1d0")
+            for residue, button in self._buttons.items()
+        }
+
+    def set_colors(self, colors: dict[str, str]) -> None:
+        for residue, button in self._buttons.items():
+            if residue in colors:
+                self._apply_button_color(button, colors[residue])
+
+
+class MsaPlotDialog(QDialog):
+    """MSA overview plot (nucleotide or protein) with custom residue colors."""
+
+    def __init__(
+        self,
+        *,
+        initial: MsaPlotJobOptions | None = None,
+        input_file: Path | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        from repeatviewer.backends.msa_plot import (
+            AMINO_ACID_CATEGORIES,
+            AMINO_ACID_COLOR_PRESETS,
+            DEFAULT_AMINO_ACID_COLORS,
+            DEFAULT_NUCLEOTIDE_COLORS,
+            MSA_PLOT_FORMAT_PDF,
+            MSA_PLOT_FORMAT_PNG,
+            MSA_PLOT_SEQ_AUTO,
+            MSA_PLOT_SEQ_NUCLEOTIDE,
+            MSA_PLOT_SEQ_PROTEIN,
+            NUCLEOTIDE_CATEGORIES,
+            NUCLEOTIDE_COLOR_PRESETS,
+        )
+
+        _prepare_option_dialog(self)
+        self.setWindowTitle("MSA plot")
+        self.setMinimumWidth(640)
+        self._opts = initial or MsaPlotJobOptions()
+        self._default_nuc = dict(DEFAULT_NUCLEOTIDE_COLORS)
+        self._default_aa = dict(DEFAULT_AMINO_ACID_COLORS)
+
+        self._input = TeMultiInputFilesWidget(
+            self,
+            initial=[input_file] if input_file is not None else None,
+            allow_multiple=False,
+            placeholder="Aligned FASTA (.fa / .fasta / .faa)",
+            browse_title="Select MSA FASTA",
+            file_filter="FASTA (*.fa *.fasta *.fas *.fna *.faa);;All files (*)",
+        )
+        self._focused_file_input: TeMultiInputFilesWidget | None = None
+        self._input.field_activated.connect(self._on_file_input_field_activated)
+
+        self._seq_type = QComboBox(self)
+        self._seq_type.addItem("Auto-detect", MSA_PLOT_SEQ_AUTO)
+        self._seq_type.addItem("Nucleotide (DNA/RNA)", MSA_PLOT_SEQ_NUCLEOTIDE)
+        self._seq_type.addItem("Protein", MSA_PLOT_SEQ_PROTEIN)
+        idx = self._seq_type.findData(self._opts.sequence_type)
+        if idx >= 0:
+            self._seq_type.setCurrentIndex(idx)
+
+        self._format = QComboBox(self)
+        self._format.addItem("PNG", MSA_PLOT_FORMAT_PNG)
+        self._format.addItem("PDF", MSA_PLOT_FORMAT_PDF)
+        idx_fmt = self._format.findData(self._opts.output_format)
+        if idx_fmt >= 0:
+            self._format.setCurrentIndex(idx_fmt)
+
+        self._dpi = QSpinBox(self)
+        self._dpi.setRange(50, 600)
+        self._dpi.setSingleStep(25)
+        self._dpi.setValue(int(self._opts.dpi))
+        self._dpi.setSuffix(" DPI")
+        self._dpi.setToolTip("Image resolution / quality (higher = larger file).")
+
+        self._seq_height = QDoubleSpinBox(self)
+        self._seq_height.setRange(0.1, 5.0)
+        self._seq_height.setDecimals(2)
+        self._seq_height.setSingleStep(0.05)
+        self._seq_height.setValue(float(self._opts.sequence_height_cm))
+        self._seq_height.setSuffix(" cm")
+        self._seq_height.setToolTip(
+            "Figure height reserved for each sequence row (centimeters). "
+            "Increase to make rows taller."
+        )
+
+        nuc_colors = dict(self._default_nuc)
+        nuc_colors.update(self._opts.nucleotide_colors or {})
+        if "U" in nuc_colors:
+            nuc_colors["T"] = nuc_colors["U"]
+        aa_colors = dict(self._default_aa)
+        aa_colors.update(self._opts.amino_acid_colors or {})
+        self._nuc_grid = _ResidueColorGrid(
+            self,
+            colors=nuc_colors,
+            categories=list(NUCLEOTIDE_CATEGORIES),
+        )
+        self._aa_grid = _ResidueColorGrid(
+            self,
+            colors=aa_colors,
+            categories=list(AMINO_ACID_CATEGORIES),
+        )
+
+        nuc_presets = QHBoxLayout()
+        nuc_presets.setContentsMargins(0, 0, 0, 0)
+        nuc_presets.setSpacing(6)
+        nuc_preset_label = QLabel("Preset:", self)
+        nuc_preset_label.setFixedWidth(_ResidueColorGrid.LABEL_WIDTH)
+        nuc_presets.addWidget(nuc_preset_label)
+        nuc_tips = {
+            "Default": "Standard A/C/G/T colours",
+            "Color-blind": "Wong / Paul Tol palette (same as Preferences → Color-blind nucleotide)",
+        }
+        for label, palette in NUCLEOTIDE_COLOR_PRESETS:
+            btn = QPushButton(label, self)
+            btn.setToolTip(nuc_tips.get(label, f"Apply {label} nucleotide colours"))
+
+            def _apply_nuc(colors: dict[str, str] = dict(palette)) -> None:
+                synced = dict(colors)
+                if "U" in synced:
+                    synced["T"] = synced["U"]
+                self._nuc_grid.set_colors(synced)
+
+            btn.clicked.connect(lambda checked=False, apply=_apply_nuc: apply())
+            nuc_presets.addWidget(btn)
+        nuc_presets.addStretch(1)
+
+        aa_presets = QHBoxLayout()
+        aa_presets.setContentsMargins(0, 0, 0, 0)
+        aa_presets.setSpacing(6)
+        aa_preset_label = QLabel("Preset:", self)
+        aa_preset_label.setFixedWidth(_ResidueColorGrid.LABEL_WIDTH)
+        aa_presets.addWidget(aa_preset_label)
+        aa_tips = {
+            "Clustal": "Most common MSA colouring (ClustalX / Jalview)",
+            "Zappo": "Clear physicochemical property groups",
+            "Taylor": "High-contrast, almost one colour per residue",
+        }
+        for label, palette in AMINO_ACID_COLOR_PRESETS:
+            btn = QPushButton(label, self)
+            btn.setToolTip(aa_tips.get(label, f"Apply {label} amino-acid colours"))
+            btn.clicked.connect(
+                lambda checked=False, colors=dict(palette): self._aa_grid.set_colors(
+                    colors
+                )
+            )
+            aa_presets.addWidget(btn)
+        aa_presets.addStretch(1)
+
+        nuc_box = QGroupBox("Nucleotide colors", self)
+        nuc_layout = QVBoxLayout(nuc_box)
+        nuc_layout.addLayout(nuc_presets)
+        nuc_layout.addWidget(self._nuc_grid)
+
+        aa_box = QGroupBox("Amino-acid colors", self)
+        aa_layout = QVBoxLayout(aa_box)
+        aa_layout.addLayout(aa_presets)
+        aa_layout.addWidget(self._aa_grid)
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.addRow("MSA FASTA:", self._input)
+        form.addRow("Sequence type:", self._seq_type)
+        form.addRow("Output format:", self._format)
+        form.addRow("Quality:", self._dpi)
+        form.addRow("Sequence height:", self._seq_height)
+
+        self._colors_toggle = QPushButton("▶ Color", self)
+        self._colors_toggle.setCheckable(True)
+        self._colors_toggle.setChecked(False)
+        self._colors_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._colors_toggle.setToolTip("Show or hide nucleotide / amino-acid colour settings")
+        self._colors_toggle.toggled.connect(self._on_colors_section_toggled)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        colors_host = QWidget()
+        colors_layout = QVBoxLayout(colors_host)
+        colors_layout.setContentsMargins(0, 0, 0, 0)
+        colors_layout.addWidget(nuc_box)
+        colors_layout.addWidget(aa_box)
+        scroll.setWidget(colors_host)
+        scroll.setMinimumHeight(260)
+        scroll.setVisible(False)
+        self._colors_panel = scroll
+
+        buttons = make_cancel_save_run_bar(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+        layout.addLayout(form)
+        layout.addWidget(self._colors_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self._colors_panel, stretch=1)
+        layout.addWidget(buttons)
+
+    def should_run(self) -> bool:
+        return dialog_should_run(self)
+
+    def _on_colors_section_toggled(self, checked: bool) -> None:
+        self._colors_panel.setVisible(checked)
+        self._colors_toggle.setText("▼ Color" if checked else "▶ Color")
+        self.adjustSize()
+
+    def _on_file_input_field_activated(self) -> None:
+        sender = self.sender()
+        if isinstance(sender, TeMultiInputFilesWidget):
+            self._focused_file_input = sender
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self._focused_file_input is None:
+            return self._input.set_path_at_focus(path)
+        return self._focused_file_input.set_path_at_focus(path)
+
+    def input_files(self) -> list[Path]:
+        return self._input.paths()
+
+    def options(self) -> MsaPlotJobOptions:
+        nuc = self._nuc_grid.colors()
+        if "U" in nuc:
+            nuc["T"] = nuc["U"]
+        return MsaPlotJobOptions(
+            sequence_type=str(self._seq_type.currentData()),
+            output_format=str(self._format.currentData()),
+            dpi=int(self._dpi.value()),
+            sequence_height_cm=float(self._seq_height.value()),
+            nucleotide_colors=nuc,
+            amino_acid_colors=self._aa_grid.colors(),
+        )
 
 
 def _browse_file_line(
