@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize, QTimer, QRect
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QMouseEvent
-from repeatviewer.ui.window_geometry import clamp_frame_to_screens, ensure_widget_on_screen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QComboBox,
@@ -57,10 +56,7 @@ class BrowserDockTitleBar(QWidget):
 
         self._title = QLabel(title, self)
         self._title.setObjectName("BrowserDockTitleLabel")
-        self._title.setToolTip(
-            "Double-click to detach this panel to a separate window "
-            "(uses a second screen when available)"
-        )
+        self._title.setToolTip("Drag to detach this panel from the main window")
         layout.addWidget(self._title, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._leading = leading
@@ -147,41 +143,5 @@ class BrowserDockTitleBar(QWidget):
         event.ignore()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
-        if self._is_interactive(self.childAt(pos)):
-            event.accept()
-            return
-        self._toggle_dock_float()
+        # Detach only by dragging — double-click must not float/redock panels.
         event.accept()
-
-    def _toggle_dock_float(self) -> None:
-        dock = self._dock
-        if dock.isFloating():
-            dock.setFloating(False)
-            return
-        size = dock.size()
-        dock.setFloating(True)
-        dock.resize(max(size.width(), 320), max(size.height(), 240))
-        dock.show()
-        QTimer.singleShot(0, lambda: self._place_floating_dock(dock))
-
-    @staticmethod
-    def _place_floating_dock(dock: QDockWidget) -> None:
-        from PySide6.QtGui import QGuiApplication
-
-        screens = QGuiApplication.screens()
-        screen = screens[1] if len(screens) > 1 else QGuiApplication.primaryScreen()
-        if screen is None:
-            return
-        geo = screen.availableGeometry()
-        width = min(max(dock.width(), 320), geo.width())
-        height = min(max(dock.height(), 240), geo.height())
-        x = geo.x() + max(0, (geo.width() - width) // 2)
-        y = geo.y() + max(0, (geo.height() - height) // 2)
-        frame = clamp_frame_to_screens(QRect(x, y, width, height))
-        window = dock.window()
-        handle = window.windowHandle() if window is not None else None
-        if handle is not None:
-            handle.setScreen(screen)
-        dock.setGeometry(frame)
-        ensure_widget_on_screen(dock)
