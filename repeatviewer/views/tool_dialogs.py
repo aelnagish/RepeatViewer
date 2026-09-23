@@ -3655,11 +3655,7 @@ class _CheckboxFlowWidget(QWidget):
 
 
 class TeAnnotationDialog(QDialog):
-    """Batch TE annotation: Parameters select modules; Options holds settings/colors.
-
-    Left-click the toolbar button opens this dialog. Setting / Color buttons stay
-    on Parameters but jump to the Options tab, where the same content is expanded.
-    """
+    """Batch TE annotation: Parameters select modules; Options holds settings/colors."""
 
     def __init__(
         self,
@@ -3706,24 +3702,7 @@ class TeAnnotationDialog(QDialog):
         auto_outer = QVBoxLayout(auto_section)
         auto_outer.setContentsMargins(0, 0, 0, 0)
         auto_outer.setSpacing(6)
-
-        auto_header = QHBoxLayout()
-        auto_title = _section_title_label("Auto annotation", auto_section)
-        auto_header.addWidget(auto_title, 0, Qt.AlignmentFlag.AlignVCenter)
-        auto_settings_btn = QPushButton("Setting", auto_section)
-        auto_settings_btn.setToolTip(
-            "Open the Options tab for LTR, TIR, tandem, and ORF detection settings"
-        )
-        auto_settings_btn.clicked.connect(self._show_auto_settings_on_options)
-        auto_header.addWidget(auto_settings_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        auto_color_btn = QPushButton("Color", auto_section)
-        auto_color_btn.setToolTip(
-            "Open the Options tab for feature-type and database colors"
-        )
-        auto_color_btn.clicked.connect(self._show_colors_on_options)
-        auto_header.addWidget(auto_color_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        auto_header.addStretch(1)
-        auto_outer.addLayout(auto_header)
+        auto_outer.addWidget(_section_title_label("Auto annotation", auto_section))
 
         auto_checks_row = QHBoxLayout()
         auto_checks_row.setSpacing(10)
@@ -3752,18 +3731,7 @@ class TeAnnotationDialog(QDialog):
         sim_outer = QVBoxLayout(sim_section)
         sim_outer.setContentsMargins(0, 0, 0, 0)
         sim_outer.setSpacing(6)
-
-        sim_header = QHBoxLayout()
-        sim_title = _section_title_label("Similarity annotation", sim_section)
-        sim_header.addWidget(sim_title, 0, Qt.AlignmentFlag.AlignVCenter)
-        sim_settings_btn = QPushButton("Setting", sim_section)
-        sim_settings_btn.setToolTip(
-            "Open the Options tab for similarity search parameters"
-        )
-        sim_settings_btn.clicked.connect(self._show_similarity_settings_on_options)
-        sim_header.addWidget(sim_settings_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        sim_header.addStretch(1)
-        sim_outer.addLayout(sim_header)
+        sim_outer.addWidget(_section_title_label("Similarity annotation", sim_section))
 
         self._similarity_ann_all_check = QCheckBox("All", sim_section)
         self._similarity_ann_all_check.setToolTip("Select or clear all similarity databases")
@@ -3840,17 +3808,14 @@ class TeAnnotationDialog(QDialog):
         auto_box = QGroupBox("Auto annotation settings", self)
         auto_box_layout = QVBoxLayout(auto_box)
         auto_box_layout.addWidget(self._auto_settings_panel)
-        self._auto_settings_anchor = auto_box
 
         sim_box = QGroupBox("Similarity annotation settings", self)
         sim_box_layout = QVBoxLayout(sim_box)
         sim_box_layout.addWidget(self._similarity_settings_panel)
-        self._similarity_settings_anchor = sim_box
 
         color_box = QGroupBox("Element colors", self)
         color_box_layout = QVBoxLayout(color_box)
         color_box_layout.addWidget(self._colors_panel)
-        self._colors_anchor = color_box
 
         options_body = QWidget(self)
         options_layout = QVBoxLayout(options_body)
@@ -3867,7 +3832,6 @@ class TeAnnotationDialog(QDialog):
         options_scroll.setFrameShape(QFrame.Shape.NoFrame)
         options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         options_scroll.setWidget(options_body)
-        self._options_scroll = options_scroll
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
@@ -3936,19 +3900,6 @@ class TeAnnotationDialog(QDialog):
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
-
-    def _show_options_section(self, widget: QWidget) -> None:
-        self._tabs.setCurrentIndex(1)
-        QTimer.singleShot(0, lambda: self._options_scroll.ensureWidgetVisible(widget))
-
-    def _show_auto_settings_on_options(self) -> None:
-        self._show_options_section(self._auto_settings_anchor)
-
-    def _show_similarity_settings_on_options(self) -> None:
-        self._show_options_section(self._similarity_settings_anchor)
-
-    def _show_colors_on_options(self) -> None:
-        self._show_options_section(self._colors_anchor)
 
     def _make_similarity_db_check(
         self,
