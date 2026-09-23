@@ -440,7 +440,7 @@ from repeatviewer.widgets.browser_icons import (
     browser_folder_icon,
     browser_folder_spacer_icon,
 )
-from repeatviewer.widgets.browser_dock import PreviewDockWidget, ZeroDockTitleBar
+from repeatviewer.widgets.browser_dock import PreviewDockWidget
 from repeatviewer.widgets.browser_panel_settings import load_browser_panel_font_size
 from repeatviewer.ui.platform import reveal_in_file_manager
 from repeatviewer.ui.text_editor import open_in_text_editor
@@ -2851,8 +2851,10 @@ class MainWindow(QMainWindow):
             leading_stretch=1,
             trailing=preview_zoom_host,
         )
-        self._dock_preview.setTitleBarWidget(ZeroDockTitleBar(self._dock_preview))
-        preview_layout.insertWidget(0, preview_title_bar)
+        # Use a real dock title bar (same as Folders/Files) so Qt can drag, float,
+        # and redock Preview. A ZeroDockTitleBar left nothing to grab.
+        self._dock_preview.setTitleBarWidget(preview_title_bar)
+        self._preview_title_bar = preview_title_bar
         self._dock_folders.setTitleBarWidget(
             BrowserDockTitleBar(self._dock_folders, "Folders", trailing=folders_trailing)
         )
