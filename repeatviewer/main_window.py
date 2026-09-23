@@ -2167,6 +2167,9 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self._stop_btn)
         self._build_menu()
         self._install_shortcuts()
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._ensure_floating_docks_stay_visible)
         QTimer.singleShot(0, self._deferred_window_startup)
 
     def _deferred_window_startup(self) -> None:
@@ -2684,8 +2687,9 @@ class MainWindow(QMainWindow):
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
-        # Floating docks default to Qt::Tool and stay tied to the main window, so
-        # they vanish when another app covers RepeatViewer. Keep them independent.
+        # Floating docks default to Qt::Tool and hide when another app covers
+        # the main window on macOS. Promote them to independent windows.
+        dock.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
         dock.topLevelChanged.connect(self._on_browser_dock_floating_changed)
         return dock
 
@@ -2694,29 +2698,69 @@ class MainWindow(QMainWindow):
         if not isinstance(dock, QDockWidget):
             return
         if floating:
-            # Defer until Qt finishes creating the floating window handle.
+            # Wait until Qt finishes its own float/show, then promote once.
             QTimer.singleShot(0, lambda d=dock: self._make_floating_dock_independent(d))
+            QTimer.singleShot(100, lambda d=dock: self._detach_floating_dock_transient(d))
         else:
-            dock.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, False)
+            dock.setProperty("_rv_float_independent", False)
 
-    @staticmethod
-    def _make_floating_dock_independent(dock: QDockWidget) -> None:
-        """Keep a dragged-out panel visible when another app covers the main window.
-
-        Avoid setWindowFlags/show() here — that races Qt's own float show and
-        logs ``qt.qpa.window: Already setting window visible!``.
-        """
+    def _make_floating_dock_independent(self, dock: QDockWidget) -> None:
+        """Turn a floated dock into a normal top-level window (not a Tool panel)."""
         if not dock.isFloating():
             return
-        # macOS: tool windows normally hide when the app is inactive.
+        if bool(dock.property("_rv_float_independent")):
+            self._detach_floating_dock_transient(dock)
+            return
+
+        geo = QRect(dock.geometry())
+        dock.setProperty("_rv_float_independent", True)
         dock.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+
+        # hide → setWindowFlags → show on the next tick avoids
+        # ``qt.qpa.window: Already setting window visible!``.
+        dock.hide()
+        dock.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        )
+        dock.setGeometry(geo)
+
+        def _show_independent() -> None:
+            if not dock.isFloating():
+                dock.setProperty("_rv_float_independent", False)
+                return
+            dock.show()
+            self._detach_floating_dock_transient(dock)
+
+        QTimer.singleShot(0, _show_independent)
+
+    @staticmethod
+    def _detach_floating_dock_transient(dock: QDockWidget) -> None:
+        if not dock.isFloating():
+            return
         handle = dock.windowHandle()
         if handle is None:
             win = dock.window()
             handle = win.windowHandle() if win is not None else None
-        if handle is not None:
-            # Drop the transient link so the panel is not stacked/hidden with MainWindow.
-            handle.setTransientParent(None)
+        if handle is None:
+            return
+        handle.setTransientParent(None)
+        # Reinforce non-Tool at the QWindow level (macOS window group).
+        flags = handle.flags()
+        if flags & Qt.WindowType.Tool:
+            handle.setFlags(
+                (flags & ~Qt.WindowType.Tool)
+                | Qt.WindowType.Window
+                | Qt.WindowType.FramelessWindowHint
+            )
+
+    def _ensure_floating_docks_stay_visible(self, state=None) -> None:
+        """If macOS hid floated panels when the app deactivated, show them again."""
+        for dock in (self._dock_folders, self._dock_files, self._dock_preview):
+            if dock is None or not dock.isFloating():
+                continue
+            if not dock.isVisible():
+                dock.setVisible(True)
+            self._detach_floating_dock_transient(dock)
 
     def _build_dock_panels(self) -> None:
         # --- Folders (nav + filter live on the dock title bar) ---
