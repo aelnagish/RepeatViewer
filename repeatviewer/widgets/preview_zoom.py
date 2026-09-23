@@ -154,16 +154,26 @@ _COLORBLIND_BASE_COLORS: dict[str, tuple[str, str]] = {
     "G": ("#000000", "#FFFFFF"),
     "T": ("#009E73", "#FFFFFF"),
     "U": ("#009E73", "#FFFFFF"),
-    "N": ("#FFFFFF", "#000000"),
+    "N": ("#C8C8C8", "#000000"),
 }
 
+# Same MSA "Default" palette used by Element colors / MSA plot (figure 2).
 _STANDARD_BASE_COLORS: dict[str, tuple[str, str]] = {
-    "A": ("#00FF00", "#000000"),
-    "C": ("#0000FF", "#FFFFFF"),
+    "A": ("#00C800", "#000000"),
+    "C": ("#7040E8", "#FFFFFF"),
     "G": ("#000000", "#FFFFFF"),
-    "T": ("#FF0000", "#000000"),
-    "U": ("#FF0000", "#000000"),
-    "N": ("#FFFFFF", "#000000"),
+    "T": ("#F06090", "#FFFFFF"),
+    "U": ("#F06090", "#FFFFFF"),
+    "N": ("#C8C8C8", "#000000"),
+}
+
+# Pre–MSA-default AliView ACGT colours; ignore if still stored as "custom".
+_LEGACY_ALIVIEW_ACGT: dict[str, str] = {
+    "A": "#00FF00",
+    "C": "#0000FF",
+    "G": "#000000",
+    "T": "#FF0000",
+    "U": "#FF0000",
 }
 
 
@@ -188,26 +198,68 @@ def _scheme_base_colors() -> dict[str, tuple[str, str]]:
     return dict(_STANDARD_BASE_COLORS)
 
 
+def _strip_legacy_aliview_overrides(colors: dict[str, str]) -> dict[str, str]:
+    """Drop old AliView ACGT custom values so MSA Default is the true default."""
+    cleaned = dict(colors)
+    for base, legacy in _LEGACY_ALIVIEW_ACGT.items():
+        if cleaned.get(base, "").upper() == legacy.upper():
+            cleaned.pop(base, None)
+    return cleaned
+
+
 def load_custom_nucleotide_backgrounds() -> dict[str, str]:
+    """Load custom nucleotide colours (full alphabet JSON)."""
+    import json
+
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
-    custom: dict[str, str] = {}
+    raw = s.value("nucleotide_colors_json", "")
+    # Drop legacy per-base keys so old AliView saves do not override MSA Default.
     for base in ("A", "C", "G", "T"):
-        raw = s.value(f"nucleotide_{base}_bg")
-        if raw:
-            custom[base] = str(raw)
+        s.remove(f"nucleotide_{base}_bg")
     s.endGroup()
+
+    custom: dict[str, str] = {}
+    text = str(raw or "").strip()
+    if text:
+        try:
+            decoded = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            decoded = None
+        if isinstance(decoded, dict):
+            for key, value in decoded.items():
+                color = str(value).strip()
+                if key and color.startswith("#") and len(color) >= 4:
+                    custom[str(key).upper()] = color
+    custom = _strip_legacy_aliview_overrides(custom)
+    if "U" in custom:
+        custom["T"] = custom["U"]
+    elif "T" in custom:
+        custom["U"] = custom["T"]
     return custom
 
 
 def save_custom_nucleotide_backgrounds(colors: dict[str, str]) -> None:
+    import json
+
+    cleaned: dict[str, str] = {}
+    for key, value in colors.items():
+        color = str(value).strip()
+        if key and color.startswith("#") and len(color) >= 4:
+            cleaned[str(key).upper()] = color
+    if "U" in cleaned:
+        cleaned["T"] = cleaned["U"]
+    elif "T" in cleaned:
+        cleaned["U"] = cleaned["T"]
+
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
     for base in ("A", "C", "G", "T"):
         s.remove(f"nucleotide_{base}_bg")
-    for base, bg in colors.items():
-        if base in {"A", "C", "G", "T"} and bg:
-            s.setValue(f"nucleotide_{base}_bg", str(bg))
+    if cleaned:
+        s.setValue("nucleotide_colors_json", json.dumps(cleaned, sort_keys=True))
+    else:
+        s.remove("nucleotide_colors_json")
     s.endGroup()
 
 
@@ -216,15 +268,92 @@ def clear_custom_nucleotide_backgrounds() -> None:
 
 
 def default_nucleotide_backgrounds() -> dict[str, str]:
-    return {base: colors[0] for base, colors in _scheme_base_colors().items() if base in "ACGT"}
+    """MSA-style Default palette (figure 2 / Element colors Default preset)."""
+    from repeatviewer.backends.msa_plot import DEFAULT_NUCLEOTIDE_COLORS
+
+    return dict(DEFAULT_NUCLEOTIDE_COLORS)
 
 
 def nucleotide_base_color_map() -> dict[str, tuple[str, str]]:
-    """Return bg/fg hex colors for A/C/G/T/U/N."""
-    colors = _scheme_base_colors()
-    for base, bg in load_custom_nucleotide_backgrounds().items():
-        if base in colors:
-            colors[base] = (bg, colors[base][1])
-    if "T" in colors:
-        colors["U"] = colors["T"]
+    """Return bg/fg hex colors for nucleotide letters in the Annotation view."""
+    from repeatviewer.backends.msa_plot import (
+        DEFAULT_NUCLEOTIDE_COLORS,
+        NUCLEOTIDE_COLORS_COLORBLIND,
+    )
+
+    if load_color_blind_nucleotide_scheme():
+        merged = dict(NUCLEOTIDE_COLORS_COLORBLIND)
+    else:
+        merged = dict(DEFAULT_NUCLEOTIDE_COLORS)
+    merged.update(load_custom_nucleotide_backgrounds())
+    if "U" in merged:
+        merged["T"] = merged["U"]
+    elif "T" in merged:
+        merged["U"] = merged["T"]
+    return {base: (bg, _contrast_fg_for_bg(bg)) for base, bg in merged.items()}
+
+
+def _contrast_fg_for_bg(bg_hex: str) -> str:
+    from PySide6.QtGui import QColor
+
+    from repeatviewer.widgets.residue_color_grid import ResidueColorGrid
+
+    return ResidueColorGrid.contrast_text_color(QColor(bg_hex))
+
+
+def default_amino_acid_backgrounds() -> dict[str, str]:
+    from repeatviewer.backends.msa_plot import DEFAULT_AMINO_ACID_COLORS
+
+    return dict(DEFAULT_AMINO_ACID_COLORS)
+
+
+def load_custom_amino_acid_backgrounds() -> dict[str, str]:
+    import json
+
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    raw = s.value("amino_acid_colors_json", "")
+    s.endGroup()
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    colors: dict[str, str] = {}
+    for key, value in decoded.items():
+        color = str(value).strip()
+        if key and color.startswith("#") and len(color) >= 4:
+            colors[str(key).upper()] = color
     return colors
+
+
+def save_custom_amino_acid_backgrounds(colors: dict[str, str]) -> None:
+    import json
+
+    cleaned: dict[str, str] = {}
+    for key, value in colors.items():
+        color = str(value).strip()
+        if key and color.startswith("#") and len(color) >= 4:
+            cleaned[str(key).upper()] = color
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    if cleaned:
+        s.setValue("amino_acid_colors_json", json.dumps(cleaned, sort_keys=True))
+    else:
+        s.remove("amino_acid_colors_json")
+    s.endGroup()
+
+
+def clear_custom_amino_acid_backgrounds() -> None:
+    save_custom_amino_acid_backgrounds({})
+
+
+def amino_acid_color_map() -> dict[str, tuple[str, str]]:
+    """Return bg/fg hex colors for amino-acid residues (Annotation protein view)."""
+    merged = default_amino_acid_backgrounds()
+    merged.update(load_custom_amino_acid_backgrounds())
+    return {aa: (bg, _contrast_fg_for_bg(bg)) for aa, bg in merged.items()}
