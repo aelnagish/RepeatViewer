@@ -63,6 +63,19 @@ def save_restore_geometry(enabled: bool) -> None:
     _set_value("restore_geometry", bool(enabled))
 
 
+def load_cyto_experimenter() -> str:
+    """Default experimenter name for attached cytogenetic images."""
+    s = QSettings()
+    s.beginGroup(APP_SETTINGS_GROUP)
+    value = s.value("cyto_experimenter", "")
+    s.endGroup()
+    return str(value or "").strip()
+
+
+def save_cyto_experimenter(name: str) -> None:
+    _set_value("cyto_experimenter", str(name or "").strip())
+
+
 def load_verbose_logging() -> bool:
     return _get_bool("verbose_logging", DEFAULT_VERBOSE_LOGGING)
 

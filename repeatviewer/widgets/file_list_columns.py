@@ -9,6 +9,7 @@ from repeatviewer.widgets.file_list_table import (
     COL_COLOR,
     COL_DESCRIPTION,
     COL_GC,
+    COL_IMAGES,
     COL_LENGTH,
     COL_MODIFIED,
     COL_NAME,
@@ -31,6 +32,7 @@ TOGGLEABLE_COLUMNS: dict[int, str] = {
     COL_MODIFIED: "Modified",
     COL_SIZE: "Size",
     COL_COLOR: "Color",
+    COL_IMAGES: "Cytogenetic images",
 }
 
 DEFAULT_VISIBLE_COLUMNS = frozenset(
@@ -42,7 +44,8 @@ def metadata_columns_visible(visible: set[int] | None = None) -> bool:
     """True when any optional metadata column is shown."""
     if visible is None:
         visible = load_visible_file_columns()
-    return bool(set(visible) & set(TOGGLEABLE_COLUMNS.keys()))
+    # The images tick column is filled from the image store, not file metadata.
+    return bool(set(visible) & (set(TOGGLEABLE_COLUMNS.keys()) - {COL_IMAGES}))
 
 
 def load_visible_file_columns() -> set[int]:
@@ -62,7 +65,31 @@ def load_visible_file_columns() -> set[int]:
     visible = set(ALWAYS_VISIBLE_COLUMNS) | {
         column for column in values if column in TOGGLEABLE_COLUMNS
     }
+    if not _images_column_migration_done():
+        # One-shot: the images column did not exist when this list was saved,
+        # so show it once. Later hides by the user are respected.
+        visible.add(COL_IMAGES)
+        save_visible_file_columns(visible)
+        _mark_images_column_migration_done()
     return visible
+
+
+_IMAGES_COLUMN_MIGRATION_KEY = "images_column_migrated_v1"
+
+
+def _images_column_migration_done() -> bool:
+    s = QSettings()
+    s.beginGroup(FILES_SETTINGS_GROUP)
+    done = s.value(_IMAGES_COLUMN_MIGRATION_KEY, False)
+    s.endGroup()
+    return str(done).lower() in {"1", "true"}
+
+
+def _mark_images_column_migration_done() -> None:
+    s = QSettings()
+    s.beginGroup(FILES_SETTINGS_GROUP)
+    s.setValue(_IMAGES_COLUMN_MIGRATION_KEY, True)
+    s.endGroup()
 
 
 def save_visible_file_columns(columns: set[int]) -> None:

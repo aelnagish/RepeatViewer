@@ -433,7 +433,7 @@ PREVIEW_HEADER_HEIGHT = 24
 
 
 class FastaTabStrip(QWidget):
-    """Text / Annotation switcher for the preview header."""
+    """Text / Annotation / Dotplot / Cytogenetics switcher for the preview header."""
 
     tab_changed = Signal(int)
 
@@ -448,7 +448,7 @@ class FastaTabStrip(QWidget):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons: list[QPushButton] = []
-        for index, label in enumerate(("Text", "Annotation", "Dotplot (Self)")):
+        for index, label in enumerate(("Text", "Annotation", "Dotplot (Self)", "Cytogenetics")):
             btn = QPushButton(label)
             btn.setObjectName("FastaPreviewTab")
             btn.setCheckable(True)

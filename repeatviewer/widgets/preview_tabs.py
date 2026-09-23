@@ -630,6 +630,12 @@ class FilePreviewPage(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
+        self._fasta_cyto_holder = QWidget(self)
+        self._fasta_cyto_holder.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self._cyto_panel = None  # built lazily on first view
         # Selection dragged on the dotplot, waiting to be applied to the
         # Annotation view. select_by_position() only retries for ~2 s while the
         # tab is hidden, so hold it here until Annotation is actually opened.
@@ -637,6 +643,7 @@ class FilePreviewPage(QWidget):
         self._fasta_stack.addWidget(self._fasta_text_scroll)
         self._fasta_stack.addWidget(self._fasta_annotation_holder)
         self._fasta_stack.addWidget(self._fasta_dotplot_holder)
+        self._fasta_stack.addWidget(self._fasta_cyto_holder)
         self._fasta_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self._sequence_info_bar = QLabel(self)
@@ -747,6 +754,47 @@ class FilePreviewPage(QWidget):
     def is_annotation_preview_active(self) -> bool:
         return self._single_fasta_mode and self._fasta_stack.currentIndex() == 1
 
+    def is_cyto_preview_active(self) -> bool:
+        return self._single_fasta_mode and self._fasta_stack.currentIndex() == 3
+
+    def _ensure_cyto_panel(self):
+        from repeatviewer.widgets.cyto_images_ui import CytogeneticsPanel
+
+        if self._cyto_panel is None:
+            self._cyto_panel = CytogeneticsPanel(self.path, self)
+            self._cyto_panel.showSourceRequested.connect(self._show_cyto_source)
+            holder_layout = self._fasta_cyto_holder.layout()
+            if holder_layout is None:
+                holder_layout = QVBoxLayout(self._fasta_cyto_holder)
+                holder_layout.setContentsMargins(0, 0, 0, 0)
+                holder_layout.setSpacing(0)
+            holder_layout.addWidget(self._cyto_panel, stretch=1)
+        elif self._cyto_panel.path() != self.path:
+            self._cyto_panel.set_path(self.path)
+        return self._cyto_panel
+
+    def _open_cyto_tab(self) -> None:
+        self._ensure_cyto_panel().reload()
+
+    def open_cyto_tab(self) -> None:
+        """Switch this page to the Cytogenetics sub-tab."""
+        if not self._single_fasta_mode:
+            return
+        self._ensure_cyto_panel()
+        self.set_fasta_tab_index(3)
+        self._notify_preview_host()
+
+    def _show_cyto_source(self, ref) -> None:
+        """Show source: Annotation tab, jumped to the probe (whole sequence if none)."""
+        panel = self._ensure_annotation_panel()
+        tab_host = self._preview_tab_host()
+        if tab_host is not None and tab_host._annotation_zoom_bar is not None:
+            panel.bind_annotation_zoom_bar(tab_host._annotation_zoom_bar)
+        self.set_fasta_tab_index(1)
+        self._notify_preview_host()
+        if ref is not None:
+            QTimer.singleShot(0, lambda r=ref: panel.show_feature(r))
+
     def is_dotplot_preview_active(self) -> bool:
         if self._single_fasta_mode:
             return self._fasta_stack.currentIndex() == 2
@@ -784,6 +832,7 @@ class FilePreviewPage(QWidget):
         if kind == "image":
             return PreviewZoomKind.IMAGE
         return PreviewZoomKind.TEXT
+
     def _on_fasta_tab_changed(self, index: int) -> None:
         if not self._single_fasta_mode:
             return
@@ -794,6 +843,8 @@ class FilePreviewPage(QWidget):
             QTimer.singleShot(0, self._open_annotation_tab)
         elif index == 2:
             QTimer.singleShot(0, self._open_dotplot_tab)
+        elif index == 3:
+            QTimer.singleShot(0, self._open_cyto_tab)
         tab_host = self.parent()
         while tab_host is not None and not isinstance(tab_host, PreviewTabWidget):
             tab_host = tab_host.parent()
@@ -810,6 +861,8 @@ class FilePreviewPage(QWidget):
                 self._open_annotation_tab()
             elif index == 2:
                 self._open_dotplot_tab()
+            elif index == 3:
+                self._open_cyto_tab()
             self._notify_preview_host()
             return
         current = self._stack.currentWidget()
@@ -1312,6 +1365,8 @@ class FilePreviewPage(QWidget):
             self._dotplot_panel.clear_selection()
         if self._annotation_panel is not None:
             self._annotation_panel.load_path(path)
+        if self._cyto_panel is not None:
+            self._cyto_panel.set_path(path)
         self._activate_fasta_tab(load_default_fasta_preview_tab())
         self._refresh_sequence_info_bar()
 
@@ -1952,11 +2007,13 @@ class PreviewTabWidget(QTabWidget):
         is_pdf = False
         is_annotation = False
         is_dotplot = False
+        is_cyto = False
         is_media = False
         zoom_kind = None
         if isinstance(widget, FilePreviewPage):
             is_annotation = widget.is_annotation_preview_active()
             is_dotplot = widget.is_dotplot_preview_active()
+            is_cyto = widget.is_cyto_preview_active()
             zoom_kind = widget.preview_zoom_kind()
             if is_annotation:
                 is_text = False
@@ -1975,7 +2032,10 @@ class PreviewTabWidget(QTabWidget):
                 )
 
         if isinstance(self._header_bar, PreviewHeaderBar):
-            if is_annotation:
+            if is_cyto:
+                # Cytogenetics has its own image controls; no text/annotation zoom.
+                self._header_bar.set_header_zoom_mode("hidden")
+            elif is_annotation:
                 self._header_bar.set_header_zoom_mode("annotation")
             else:
                 self._header_bar.set_header_zoom_mode("preview")
@@ -1999,12 +2059,13 @@ class PreviewTabWidget(QTabWidget):
             and hasattr(self._zoom_bar, "set_zoom_kind")
             and not is_annotation
             and not is_dotplot
+            and not is_cyto
         ):
             previous = self._zoom_bar.current_zoom_kind()
             self._zoom_bar.set_zoom_kind(zoom_kind)
             kind_changed = previous != zoom_kind
 
-        show_preview_chrome = not is_annotation
+        show_preview_chrome = not is_annotation and not is_cyto
         for control in (
             self._zoom_bar._spin,
             self._zoom_bar._actions_btn,
