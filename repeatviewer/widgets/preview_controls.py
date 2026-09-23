@@ -573,6 +573,10 @@ class FastaTabStrip(QWidget):
     def current_index(self) -> int:
         return self._group.checkedId()
 
+    def set_tab_visible(self, index: int, visible: bool) -> None:
+        if 0 <= index < len(self._buttons):
+            self._buttons[index].setVisible(bool(visible))
+
 
 class PreviewHeaderBar(QWidget):
     """FASTA Text/Annotation switcher. Zoom controls live on the Preview dock title."""
@@ -638,6 +642,9 @@ class PreviewHeaderBar(QWidget):
 
     def sync_fasta_tab(self, index: int) -> None:
         self._fasta_tabs.set_current_index(index)
+
+    def set_fasta_tab_visible(self, index: int, visible: bool) -> None:
+        self._fasta_tabs.set_tab_visible(index, visible)
 
     def current_fasta_tab(self) -> int:
         return self._fasta_tabs.current_index()
