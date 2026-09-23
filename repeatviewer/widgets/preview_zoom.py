@@ -33,25 +33,89 @@ class DefaultFastaPreviewTab(str, Enum):
     DOTPLOT = "dotplot"
 
 
+class PreviewZoomKind(str, Enum):
+    """Independent preview scale buckets (changing one does not affect the others)."""
+
+    TEXT = "text"
+    HTML = "html"
+    PDF = "pdf"
+    IMAGE = "image"
+
+
 DEFAULT_FASTA_PREVIEW_TAB = DefaultFastaPreviewTab.ANNOTATION
 
+_PREVIEW_ZOOM_KIND_KEYS: dict[PreviewZoomKind, str] = {
+    PreviewZoomKind.TEXT: "zoom_percent_text",
+    PreviewZoomKind.HTML: "zoom_percent_html",
+    PreviewZoomKind.PDF: "zoom_percent_pdf",
+    PreviewZoomKind.IMAGE: "zoom_percent_image",
+}
 
-def load_preview_zoom_percent() -> int:
+
+def _clamp_preview_zoom_percent(percent: int) -> int:
+    return max(MIN_PREVIEW_ZOOM_PERCENT, min(MAX_PREVIEW_ZOOM_PERCENT, int(percent)))
+
+
+def _coerce_preview_zoom_kind(
+    kind: PreviewZoomKind | str | None,
+) -> PreviewZoomKind | None:
+    if kind is None:
+        return None
+    if isinstance(kind, PreviewZoomKind):
+        return kind
+    try:
+        return PreviewZoomKind(str(kind))
+    except ValueError:
+        return PreviewZoomKind.TEXT
+
+
+def load_preview_zoom_percent(kind: PreviewZoomKind | str | None = None) -> int:
+    """Load zoom for a preview kind.
+
+    ``kind=None`` returns the legacy shared value (migration fallback / old callers).
+    Per-kind values fall back to that legacy value when not yet set.
+    """
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
-    value = int(s.value("zoom_percent", DEFAULT_PREVIEW_ZOOM_PERCENT))
-    s.endGroup()
-    return max(MIN_PREVIEW_ZOOM_PERCENT, min(MAX_PREVIEW_ZOOM_PERCENT, value))
-
-
-def save_preview_zoom_percent(percent: int) -> None:
-    s = QSettings()
-    s.beginGroup(PREVIEW_SETTINGS_GROUP)
-    s.setValue(
-        "zoom_percent",
-        max(MIN_PREVIEW_ZOOM_PERCENT, min(MAX_PREVIEW_ZOOM_PERCENT, int(percent))),
+    legacy = _clamp_preview_zoom_percent(
+        int(s.value("zoom_percent", DEFAULT_PREVIEW_ZOOM_PERCENT))
     )
+    zoom_kind = _coerce_preview_zoom_kind(kind)
+    if zoom_kind is None:
+        s.endGroup()
+        return legacy
+    key = _PREVIEW_ZOOM_KIND_KEYS[zoom_kind]
+    if s.contains(key):
+        value = int(s.value(key, legacy))
+    else:
+        value = legacy
     s.endGroup()
+    return _clamp_preview_zoom_percent(value)
+
+
+def save_preview_zoom_percent(
+    percent: int,
+    kind: PreviewZoomKind | str | None = None,
+) -> None:
+    """Save zoom for one preview kind (or the legacy shared key when ``kind`` is None)."""
+    percent = _clamp_preview_zoom_percent(percent)
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    zoom_kind = _coerce_preview_zoom_kind(kind)
+    if zoom_kind is None:
+        s.setValue("zoom_percent", percent)
+    else:
+        s.setValue(_PREVIEW_ZOOM_KIND_KEYS[zoom_kind], percent)
+    s.endGroup()
+
+
+def load_all_preview_zoom_percents() -> dict[PreviewZoomKind, int]:
+    return {kind: load_preview_zoom_percent(kind) for kind in PreviewZoomKind}
+
+
+def save_all_preview_zoom_percents(values: dict[PreviewZoomKind, int]) -> None:
+    for kind, percent in values.items():
+        save_preview_zoom_percent(percent, kind)
 
 
 def load_preview_fit_mode() -> PreviewFitMode:

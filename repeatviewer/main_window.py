@@ -5351,10 +5351,15 @@ class MainWindow(QMainWindow):
                     load_preview_zoom_percent,
                 )
 
-                self._preview_tabs.zoom_bar.set_values(
-                    load_preview_zoom_percent(),
-                    load_preview_fit_mode(),
-                )
+                zoom_bar = self._preview_tabs.zoom_bar
+                kind = getattr(zoom_bar, "current_zoom_kind", lambda: None)()
+                if kind is not None and hasattr(zoom_bar, "set_zoom_kind"):
+                    zoom_bar.set_zoom_kind(kind)
+                else:
+                    zoom_bar.set_values(
+                        load_preview_zoom_percent(),
+                        load_preview_fit_mode(),
+                    )
                 self._preview_tabs._apply_zoom_to_current_tab()
                 from repeatviewer.widgets.preview_zoom import load_preview_font_size
 

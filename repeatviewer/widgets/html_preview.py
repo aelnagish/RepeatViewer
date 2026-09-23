@@ -171,7 +171,7 @@ class LazyHtmlPreview(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._inner: QWidget | None = None
-        self._zoom_percent = load_preview_zoom_percent()
+        self._zoom_percent = load_preview_zoom_percent("html")
         self._fit_mode = load_preview_fit_mode()
         self._status = QLabel("HTML preview loads when you open a .html file.")
         self._status.setWordWrap(True)
@@ -387,7 +387,7 @@ class HtmlWebEnginePreview(QWidget):
         self._current_url: str | None = None
         self._last_load_ok = False
         self._used_html_fallback = False
-        self._zoom_percent = load_preview_zoom_percent()
+        self._zoom_percent = load_preview_zoom_percent("html")
         self._fit_mode = load_preview_fit_mode()
         self._content_w = TEAID_NOMINAL_WIDTH
         self._content_h = TEAID_NOMINAL_HEIGHT
