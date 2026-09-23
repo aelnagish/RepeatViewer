@@ -198,7 +198,7 @@ def _protein_records_from_orfs(
 
 
 def _cdd_domain_label(stitle: str, sseqid: str = "") -> str:
-    """Extract the CDD domain name from rpstblastn stitle (same rule as TEAid)."""
+    """Extract the CDD domain name from rpstblastn stitle (same rule as TE-Aid)."""
     description = (stitle or sseqid or "hit").strip()
     if not description:
         return "hit"

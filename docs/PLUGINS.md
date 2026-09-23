@@ -1,6 +1,6 @@
 # RepeatViewer plugins
 
-Plugins add **new toolbar tools** that use the same file list and job flow as Blast, TEAid, Flexidot, etc.
+Plugins add **new toolbar tools** that use the same file list and job flow as Blast, TE-Aid, Flexidot, etc.
 
 > **Note:** Plugin loading is enabled in the current build. Install additional plugins with their own `pip install -e .` packages (see examples below).
 

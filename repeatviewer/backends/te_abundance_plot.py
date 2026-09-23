@@ -22,7 +22,12 @@ from repeatviewer.backends.blast_genome_plot import (
 
 
 def te_abundance_plot_html_path_for_sources(sources: list[Path] | Path) -> Path:
-    """Expected abundance-plot HTML path for one or more RepeatMasker .out files."""
+    """Expected abundance-plot HTML path for one or more RepeatMasker .out files.
+
+    Unlike density/divergence plots, the output stem drops a trailing sequence
+    extension (``.fa`` / ``.fasta`` / …) so ``EDTA_RB3.fa.out`` becomes
+    ``EDTA_RB3_RM_abund_plot.html`` rather than ``EDTA_RB3.fa_RM_abund_plot.html``.
+    """
     paths = (
         [sources.expanduser().resolve()]
         if isinstance(sources, Path)
@@ -30,9 +35,23 @@ def te_abundance_plot_html_path_for_sources(sources: list[Path] | Path) -> Path:
     )
     if not paths:
         raise ValueError("Select at least one RepeatMasker .out file.")
-    stem = te_hit_table_stem(paths[0])
+    stem = _abundance_plot_stem(paths[0])
     suffix = te_plot_output_suffix(paths, kind="abund")
     return paths[0].parent / f"{stem}{suffix}"
+
+
+_ABUNDANCE_STRIP_SUFFIXES = (".fasta", ".fna", ".faa", ".fas", ".fa")
+
+
+def _abundance_plot_stem(path: Path) -> str:
+    """Hit-table stem without a trailing sequence extension."""
+    stem = te_hit_table_stem(path)
+    lower = stem.lower()
+    for ext in _ABUNDANCE_STRIP_SUFFIXES:
+        if lower.endswith(ext) and len(stem) > len(ext):
+            return stem[: -len(ext)]
+    return stem
+
 
 TE_ABUNDANCE_PERCENT = "percent"
 TE_ABUNDANCE_BP = "bp"

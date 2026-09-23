@@ -40,16 +40,26 @@ def test_separate_sequences_subfolder_sanitizes_hash(tmp_path: Path) -> None:
     assert "#" not in str(created[0])
 
 
-def test_separation_output_dir_uses_input_stem_suffix(tmp_path: Path) -> None:
+def test_separate_sequences_preserves_faa_extension(tmp_path: Path) -> None:
+    src = tmp_path / "proteins.faa"
+    src.write_text(">prot1\nMKTAYI\n>prot2\nACDEFG\n", encoding="utf-8")
+    out = tmp_path / "sep"
+    created, n = separate_sequences(src, out, write_mapping=False)
+    assert n == 2
+    assert {p.suffix for p in created} == {".faa"}
+    assert {p.name for p in created} == {"prot1.faa", "prot2.faa"}
+
+
+def test_separation_output_dir_keeps_extension(tmp_path: Path) -> None:
     src = tmp_path / "my file.fa"
     src.write_text(">a\nAAAA\n", encoding="utf-8")
     out = separation_output_dir(src)
-    assert out.name == "my_file_sep"
+    assert out.name == "my_file.fa_sep"
 
 
 def test_separation_output_dir_conflict_adds_number(tmp_path: Path) -> None:
     src = tmp_path / "multi.fa"
     src.write_text(">a\nAAAA\n", encoding="utf-8")
-    (tmp_path / "multi_sep").mkdir()
+    (tmp_path / "multi.fa_sep").mkdir()
     out = separation_output_dir(src)
-    assert out.name == "multi_sep_2"
+    assert out.name == "multi.fa_sep_2"

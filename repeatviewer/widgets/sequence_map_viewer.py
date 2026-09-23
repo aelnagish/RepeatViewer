@@ -570,10 +570,17 @@ def _monospace_font(*, point_size: int | None = None) -> QFont:
 def _letter_cell_width_for_pt(point_size: int) -> int:
     font = _monospace_font(point_size=point_size)
     fm = QFontMetrics(font)
-    return max(1, max(fm.horizontalAdvance(base) for base in "ACGTUN"))
+    return max(1, max(fm.horizontalAdvance(base) for base in "ACGTUNWYF"))
 
 
-def _base_colors(base: str) -> tuple[QColor, QColor]:
+def _base_colors(base: str, *, is_protein: bool = False) -> tuple[QColor, QColor]:
+    if is_protein:
+        from repeatviewer.widgets.preview_zoom import amino_acid_color_map
+
+        palette = amino_acid_color_map()
+        key = base.upper()
+        bg, fg = palette.get(key, palette.get("X", ("#C8C8C8", "#000000")))
+        return QColor(bg), QColor(fg)
     palette = nucleotide_base_color_map()
     bg, fg = palette.get(base.upper(), palette["N"])
     return QColor(bg), QColor(fg)
@@ -1844,6 +1851,7 @@ class SequenceMapCanvas(QWidget):
         self._viewport_width = 0
         self._scroll_px = 0.0
         self._color_bases = True
+        self._is_protein = False
         self._font_point_size = _DEFAULT_NUC_FONT_PT
         self._selected_indices: set[int] = set()
         self._select_start_bp: int | None = None
@@ -1895,9 +1903,16 @@ class SequenceMapCanvas(QWidget):
         # above the bases so the DNA row can sit in the highlight's middle.
         return 0 if self.uses_wrap() else _SELECTION_HIGHLIGHT_MARGIN
 
-    def set_sequence(self, sequence: str, features: list[SequenceFeature]) -> None:
+    def set_sequence(
+        self,
+        sequence: str,
+        features: list[SequenceFeature],
+        *,
+        is_protein: bool = False,
+    ) -> None:
         self._sequence = sequence.upper()
         self._features = list(features)
+        self._is_protein = bool(is_protein)
         self._feature_rows, self._feature_row_count = _pack_feature_rows(self._features)
         self._update_geometry()
         self.update()
@@ -2013,9 +2028,10 @@ class SequenceMapCanvas(QWidget):
         return font
 
     def _font_letter_cell_size(self) -> tuple[int, int]:
-        """Minimum monospace cell size for legible nucleotide letters."""
+        """Minimum monospace cell size for legible nucleotide / amino-acid letters."""
         fm = QFontMetrics(self._sequence_font())
-        cell_w = max(1, max(fm.horizontalAdvance(base) for base in "ACGTUN"))
+        sample = "ACDEFGHIKLMNPQRSTVWYBXZ*" if self._is_protein else "ACGTUN"
+        cell_w = max(1, max(fm.horizontalAdvance(base) for base in sample))
         cell_h = max(_SEQUENCE_ROW, fm.height())
         return cell_w, max(1, cell_h)
 
@@ -2234,7 +2250,7 @@ class SequenceMapCanvas(QWidget):
 
     def _base_style(self, base: str) -> tuple[QColor, QColor]:
         if self._color_bases:
-            return _base_colors(base)
+            return _base_colors(base, is_protein=self._is_protein)
         return _NO_COLOR_BG, _NO_COLOR_FG
 
     def _base_rect_at(self, index: int) -> QRectF:
@@ -3354,7 +3370,11 @@ class SequenceMapWidget(QWidget):
             self._font_size.setValue(_DEFAULT_NUC_FONT_PT)
             self._font_size.blockSignals(False)
             self._canvas.set_font_point_size(_DEFAULT_NUC_FONT_PT)
-        self._canvas.set_sequence(data.sequence, data.features)
+        self._canvas.set_sequence(
+            data.sequence,
+            data.features,
+            is_protein=data.is_protein,
+        )
         self._canvas.clear_selection()
         self._sync_position_spins(1, 1)
         seq_len = data.length
@@ -3391,7 +3411,11 @@ class SequenceMapWidget(QWidget):
         if self._data is None:
             return
         self._data.features = list(features)
-        self._canvas.set_sequence(self._data.sequence, self._data.features)
+        self._canvas.set_sequence(
+            self._data.sequence,
+            self._data.features,
+            is_protein=self._data.is_protein,
+        )
         valid = set(range(len(self._data.features)))
         self._selected_feature_indices &= valid
         self._dirty = True
@@ -3665,9 +3689,10 @@ class SequenceMapWidget(QWidget):
         self._sync_position_spins(start, end)
         if start == end:
             self.statusMessage.emit(f"Position: {start}")
-        else:
-            a, b = sorted((start, end))
-            self.statusMessage.emit(f"Selection: {a} – {b} ({b - a + 1} bp)")
+            return
+        a, b = sorted((start, end))
+        unit = "aa" if (self._data is not None and self._data.is_protein) else "bp"
+        self.statusMessage.emit(f"Selection: {a} – {b} ({b - a + 1} {unit})")
 
     def set_selected_features(self, indices: set[int] | frozenset[int] | None) -> None:
         self._selected_feature_indices = set(indices or [])
@@ -4307,7 +4332,7 @@ class SimilarityAnnotationSettingsPanel(QWidget):
 
         intro = QLabel(
             "These E-value and output limits apply only to Similarity annotation. "
-            "They do not change TEAid, genome BLAST, or other tools in RepeatViewer.",
+            "They do not change TE-Aid, genome BLAST, or other tools in RepeatViewer.",
             self,
         )
         intro.setWordWrap(True)

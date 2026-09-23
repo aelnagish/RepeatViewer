@@ -135,10 +135,33 @@ class SequenceMapData:
     sequence_id: str
     sequence: str
     features: list[SequenceFeature] = field(default_factory=list)
+    is_protein: bool = False
 
     @property
     def length(self) -> int:
         return len(self.sequence)
+
+
+_NUCLEOTIDE_CHARS = frozenset("ACGTUN")
+_AMINO_ACID_CHARS = frozenset("ACDEFGHIKLMNPQRSTVWYBXZ*")
+
+
+def detect_sequence_is_protein(sequence: str, *, path: Path | None = None) -> bool:
+    """Guess protein vs nucleotide from suffix and residue composition."""
+    if path is not None and path.suffix.lower() == ".faa":
+        return True
+    upper = sequence.upper()
+    residues = [ch for ch in upper if ch.isalpha() or ch == "*"]
+    if not residues:
+        return False
+    sample = residues[: min(len(residues), 50_000)]
+    n_nuc = sum(1 for ch in sample if ch in _NUCLEOTIDE_CHARS)
+    n_aa = sum(1 for ch in sample if ch in _AMINO_ACID_CHARS)
+    if n_nuc / max(1, len(sample)) >= 0.95:
+        return False
+    if n_aa / max(1, len(sample)) >= 0.8:
+        return True
+    return n_aa > n_nuc
 
 
 def _resolved_fasta_path(fasta_path: Path) -> Path:
@@ -484,6 +507,7 @@ def load_sequence_map_data(path: Path) -> SequenceMapData:
         sequence_id=seq_id,
         sequence=sequence,
         features=features,
+        is_protein=detect_sequence_is_protein(sequence, path=resolved),
     )
 
 

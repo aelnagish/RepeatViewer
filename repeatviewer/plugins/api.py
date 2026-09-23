@@ -40,7 +40,7 @@ class RepeatViewerPlugin(ABC):
     Base class for third-party tools.
 
     Plugins receive the user's current file selection from the Files panel and
-    run in a background thread (same as Blast / TEAid). Write outputs next to
+    run in a background thread (same as Blast / TE-Aid). Write outputs next to
     each input file unless you have a reason to use another folder.
     """
 

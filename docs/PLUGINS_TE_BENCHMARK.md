@@ -19,7 +19,7 @@ Outputs are saved **next to each query `.out` file** (same folder as in the File
 
 1. **TEtrimmer repository** cloned locally (contains `tetrimmer/TE_anno_benchmarker.py`).
 2. **bedtools** on `PATH`.
-3. **Genome FASTA** set in RepeatViewer **File → Project settings** (same as Blast/TEAid).
+3. **Genome FASTA** set in RepeatViewer **File → Project settings** (same as Blast/TE-Aid).
 4. **Reference** RepeatMasker `.out` from your gold-standard TE library (set once in the plugin dialog).
 
 ## Install the plugin

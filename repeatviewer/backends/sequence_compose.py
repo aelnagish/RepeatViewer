@@ -260,7 +260,9 @@ def extract_records(
     written: list[Path] = []
 
     if single_file:
-        stem = safe_file_stem(combined_name or f"{path.stem}_extracted")
+        from repeatviewer.tool_output_paths import kept_input_name
+
+        stem = safe_file_stem(combined_name or f"{kept_input_name(path)}_extracted")
         out_path = _unique_path(out_dir, stem)
         with out_path.open("w", encoding="utf-8") as handle:
             for record in records:
@@ -279,11 +281,13 @@ def extract_records(
 
 def default_group_name(files: list[Path]) -> str:
     """A sensible name for the grouped file, based on the selection."""
+    from repeatviewer.tool_output_paths import kept_input_name
+
     if not files:
         return "grouped_sequences"
     if len(files) == 2:
-        return f"{files[0].stem}_and_{files[1].stem}_comb"
-    return f"{files[0].stem}_and_{len(files) - 1}_comb"
+        return f"{kept_input_name(files[0])}_and_{kept_input_name(files[1])}_comb"
+    return f"{kept_input_name(files[0])}_and_{len(files) - 1}_comb"
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +517,9 @@ def extract_records_by_ids(
     wanted_set = set(wanted)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = combined_name or f"{source.stem}_extracted"
+    from repeatviewer.tool_output_paths import kept_input_name
+
+    stem = combined_name or f"{kept_input_name(source)}_extracted"
 
     written: list[Path] = []
     seen: set[str] = set()

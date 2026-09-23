@@ -36,13 +36,26 @@ from repeatviewer.backends.annotation_colors import (
     snapshot_similarity_database_colors,
     slug_feature_type,
 )
+from repeatviewer.backends.msa_plot import (
+    AMINO_ACID_CATEGORIES,
+    AMINO_ACID_COLOR_PRESETS,
+    DEFAULT_AMINO_ACID_COLORS,
+    DEFAULT_NUCLEOTIDE_COLORS,
+    NUCLEOTIDE_CATEGORIES,
+    NUCLEOTIDE_COLOR_PRESETS,
+)
 from repeatviewer.backends.similarity_annotation import SIMILARITY_DB_COLORS
 from repeatviewer.database_settings import load_similarity_annotation_databases
 from repeatviewer.widgets.preview_zoom import (
+    default_amino_acid_backgrounds,
     default_nucleotide_backgrounds,
+    load_custom_amino_acid_backgrounds,
     load_custom_nucleotide_backgrounds,
+    save_color_blind_nucleotide_scheme,
+    save_custom_amino_acid_backgrounds,
     save_custom_nucleotide_backgrounds,
 )
+from repeatviewer.widgets.residue_color_grid import ResidueColorGrid
 
 
 class _ColorPickerRow(QWidget):
@@ -85,63 +98,136 @@ class _ColorPickerRow(QWidget):
         return self._color.name(QColor.NameFormat.HexRgb)
 
 
+def _tile_letter(label: str) -> str:
+    text = str(label or "").strip()
+    return text[0].upper() if text else "?"
+
+
 class AnnotationElementColorsPanel(QWidget):
-    """Embeddable colors for feature types, nucleotides, and similarity databases."""
+    """Embeddable colors for nucleotides, amino acids, features, and databases."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._feature_rows: dict[str, _ColorPickerRow] = {}
-        self._nucleotide_rows: dict[str, _ColorPickerRow] = {}
-        self._database_rows: dict[str, _ColorPickerRow] = {}
         databases = load_similarity_annotation_databases()
 
         body_layout = QVBoxLayout(self)
         body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(10)
+        body_layout.setSpacing(12)
 
-        body_layout.addWidget(self._section_label("Feature types"))
-        feature_form = QFormLayout()
-        feature_form.setSpacing(8)
-        for display_label, feature_type in annotation_feature_type_labels_for_colors():
-            row = _ColorPickerRow(display_label, feature_type_color(feature_type), self)
-            self._feature_rows[feature_type] = row
-            feature_form.addRow(row)
-        body_layout.addLayout(feature_form)
-
-        body_layout.addWidget(self._section_label("Nucleotides"))
-        nucleotide_form = QFormLayout()
-        nucleotide_form.setSpacing(8)
-        custom_nucleotide = load_custom_nucleotide_backgrounds()
-        scheme_nucleotide = default_nucleotide_backgrounds()
-        for base in ("A", "C", "G", "T"):
-            color = custom_nucleotide.get(base, scheme_nucleotide[base])
-            row = _ColorPickerRow(base, color, self)
-            self._nucleotide_rows[base] = row
-            nucleotide_form.addRow(row)
-        body_layout.addLayout(nucleotide_form)
-
-        body_layout.addWidget(self._section_label("Similarity databases"))
-        database_form = QFormLayout()
-        database_form.setSpacing(8)
-        if databases:
-            for index, entry in enumerate(databases):
-                row = _ColorPickerRow(
-                    entry.name,
-                    similarity_database_color(entry.name, index),
-                    self,
+        # --- Nucleotides (MSA figure-2 style) ---
+        body_layout.addWidget(self._section_label("Nucleotide colors"))
+        nuc_colors = dict(DEFAULT_NUCLEOTIDE_COLORS)
+        nuc_colors.update(load_custom_nucleotide_backgrounds())
+        if "U" in nuc_colors:
+            nuc_colors["T"] = nuc_colors["U"]
+        self._nuc_grid = ResidueColorGrid(
+            self,
+            colors=nuc_colors,
+            categories=list(NUCLEOTIDE_CATEGORIES),
+            linked_residues={"T": "U"},
+        )
+        nuc_presets = QHBoxLayout()
+        nuc_presets.setContentsMargins(0, 0, 0, 0)
+        nuc_presets.setSpacing(6)
+        nuc_preset_label = QLabel("Preset:", self)
+        nuc_preset_label.setFixedWidth(ResidueColorGrid.LABEL_WIDTH)
+        nuc_presets.addWidget(nuc_preset_label)
+        nuc_tips = {
+            "Default": "Standard A/C/G/T colours",
+            "Color-blind": "Wong / Paul Tol palette (same as Preferences → Color-blind nucleotide)",
+        }
+        for label, palette in NUCLEOTIDE_COLOR_PRESETS:
+            btn = QPushButton(label, self)
+            btn.setToolTip(nuc_tips.get(label, f"Apply {label} nucleotide colours"))
+            btn.clicked.connect(
+                lambda _checked=False, name=label, colors=palette: self._apply_nuc_preset(
+                    name, colors
                 )
-                self._database_rows[entry.name] = row
-                database_form.addRow(row)
+            )
+            nuc_presets.addWidget(btn)
+        nuc_presets.addStretch(1)
+        body_layout.addLayout(nuc_presets)
+        body_layout.addWidget(self._nuc_grid)
+
+        # --- Amino acids (MSA style) ---
+        body_layout.addWidget(self._section_label("Amino-acid colors"))
+        aa_colors = dict(DEFAULT_AMINO_ACID_COLORS)
+        aa_colors.update(load_custom_amino_acid_backgrounds())
+        self._aa_grid = ResidueColorGrid(
+            self,
+            colors=aa_colors,
+            categories=list(AMINO_ACID_CATEGORIES),
+        )
+        aa_presets = QHBoxLayout()
+        aa_presets.setContentsMargins(0, 0, 0, 0)
+        aa_presets.setSpacing(6)
+        aa_preset_label = QLabel("Preset:", self)
+        aa_preset_label.setFixedWidth(ResidueColorGrid.LABEL_WIDTH)
+        aa_presets.addWidget(aa_preset_label)
+        aa_tips = {
+            "Clustal": "Clustal X default amino-acid colours",
+            "Zappo": "Zappo physicochemical palette",
+            "Taylor": "Taylor / Lesk palette",
+        }
+        for label, palette in AMINO_ACID_COLOR_PRESETS:
+            btn = QPushButton(label, self)
+            btn.setToolTip(aa_tips.get(label, f"Apply {label} amino-acid colours"))
+            btn.clicked.connect(
+                lambda _checked=False, colors=palette: self._aa_grid.set_colors(colors)
+            )
+            aa_presets.addWidget(btn)
+        aa_presets.addStretch(1)
+        body_layout.addLayout(aa_presets)
+        body_layout.addWidget(self._aa_grid)
+
+        # --- Feature types (label + colour swatch, no letter) ---
+        body_layout.addWidget(self._section_label("Feature types"))
+        feature_labels = list(annotation_feature_type_labels_for_colors())
+        feature_categories = [
+            (display, (feature_type,)) for display, feature_type in feature_labels
+        ]
+        feature_colors = {
+            feature_type: feature_type_color(feature_type)
+            for _display, feature_type in feature_labels
+        }
+        self._feature_grid = ResidueColorGrid(
+            self,
+            colors=feature_colors,
+            categories=feature_categories,
+            button_labels={feature_type: "" for _d, feature_type in feature_labels},
+        )
+        body_layout.addWidget(self._feature_grid)
+
+        # --- Similarity databases (label + colour swatch, no letter) ---
+        body_layout.addWidget(self._section_label("Similarity databases"))
+        if databases:
+            db_categories = [(entry.name, (entry.name,)) for entry in databases]
+            db_colors = {
+                entry.name: similarity_database_color(entry.name, index)
+                for index, entry in enumerate(databases)
+            }
+            self._database_grid: ResidueColorGrid | None = ResidueColorGrid(
+                self,
+                colors=db_colors,
+                categories=db_categories,
+                button_labels={entry.name: "" for entry in databases},
+            )
+            body_layout.addWidget(self._database_grid)
         else:
-            database_form.addRow(
+            self._database_grid = None
+            body_layout.addWidget(
                 QLabel("No databases defined. Add them in File → Define database.", self)
             )
-        body_layout.addLayout(database_form)
 
         self._old_feature_colors = load_feature_type_colors()
         self._old_database_colors = snapshot_similarity_database_colors(
             [entry.name for entry in databases]
         )
+
+    def _apply_nuc_preset(self, name: str, colors: dict[str, str]) -> None:
+        self._nuc_grid.set_colors(colors)
+        # Keep Preferences colour-blind checkbox in sync with the chosen preset.
+        save_color_blind_nucleotide_scheme(name == "Color-blind")
 
     def _section_label(self, text: str) -> QLabel:
         label = QLabel(f"<b>{text}</b>")
@@ -149,23 +235,36 @@ class AnnotationElementColorsPanel(QWidget):
         return label
 
     def restore_defaults(self) -> None:
+        self._nuc_grid.set_colors(default_nucleotide_backgrounds())
+        save_color_blind_nucleotide_scheme(False)
+        self._aa_grid.set_colors(default_amino_acid_backgrounds())
         defaults = default_feature_type_colors()
-        for feature_type, row in self._feature_rows.items():
-            row.set_color_hex(defaults.get(feature_type, "#7f8c8d"))
-        for index, name in enumerate(self._database_rows):
-            row = self._database_rows[name]
-            row.set_color_hex(SIMILARITY_DB_COLORS[index % len(SIMILARITY_DB_COLORS)])
-        for base, row in self._nucleotide_rows.items():
-            row.set_color_hex(default_nucleotide_backgrounds()[base])
+        self._feature_grid.set_colors(
+            {
+                key: defaults.get(key, "#7f8c8d")
+                for key in self._feature_grid.colors()
+            }
+        )
+        if self._database_grid is not None:
+            db_defaults = {
+                name: SIMILARITY_DB_COLORS[index % len(SIMILARITY_DB_COLORS)]
+                for index, name in enumerate(self._database_grid.colors())
+            }
+            self._database_grid.set_colors(db_defaults)
 
     def new_feature_type_colors(self) -> dict[str, str]:
-        return {key: row.color_hex() for key, row in self._feature_rows.items()}
+        return self._feature_grid.colors()
 
     def new_database_colors(self) -> dict[str, str]:
-        return {name: row.color_hex() for name, row in self._database_rows.items()}
+        if self._database_grid is None:
+            return {}
+        return self._database_grid.colors()
 
     def new_nucleotide_backgrounds(self) -> dict[str, str]:
-        return {base: row.color_hex() for base, row in self._nucleotide_rows.items()}
+        return self._nuc_grid.colors()
+
+    def new_amino_acid_backgrounds(self) -> dict[str, str]:
+        return self._aa_grid.colors()
 
     def old_feature_type_colors(self) -> dict[str, str]:
         return dict(self._old_feature_colors)
@@ -177,6 +276,7 @@ class AnnotationElementColorsPanel(QWidget):
         save_feature_type_colors(self.new_feature_type_colors())
         save_similarity_database_colors(self.new_database_colors())
         save_custom_nucleotide_backgrounds(self.new_nucleotide_backgrounds())
+        save_custom_amino_acid_backgrounds(self.new_amino_acid_backgrounds())
 
 
 class AnnotationElementColorsDialog(QDialog):
@@ -190,7 +290,7 @@ class AnnotationElementColorsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Element colors")
-        self.resize(420, 520)
+        self.resize(620, 720)
 
         # Kept for compatibility with older call sites; this dialog no longer
         # exposes a per-sequence apply toggle and always applies to current sequence.
@@ -226,6 +326,9 @@ class AnnotationElementColorsDialog(QDialog):
 
     def new_nucleotide_backgrounds(self) -> dict[str, str]:
         return self._panel.new_nucleotide_backgrounds()
+
+    def new_amino_acid_backgrounds(self) -> dict[str, str]:
+        return self._panel.new_amino_acid_backgrounds()
 
     def old_feature_type_colors(self) -> dict[str, str]:
         return self._panel.old_feature_type_colors()

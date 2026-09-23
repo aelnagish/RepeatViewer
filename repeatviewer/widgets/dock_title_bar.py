@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize, QTimer, QRect
-from PySide6.QtGui import QMouseEvent
-from repeatviewer.ui.window_geometry import clamp_frame_to_screens, ensure_widget_on_screen
+from PySide6.QtCore import QRect, Qt, QSize
+from PySide6.QtGui import QGuiApplication, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
     QComboBox,
@@ -22,6 +21,11 @@ from PySide6.QtWidgets import (
 
 # Compact title row; sizeHint must match so dock content is not laid out underneath.
 BROWSER_DOCK_TITLE_HEIGHT = 24
+
+_TOOLTIP_DOCKED = "Drag to detach this panel from the main window"
+_TOOLTIP_FLOATING = (
+    "Double-click to fill the screen; double-click again to restore size"
+)
 
 
 class BrowserDockTitleBar(QWidget):
@@ -43,6 +47,8 @@ class BrowserDockTitleBar(QWidget):
     ) -> None:
         super().__init__(parent)
         self._dock = dock
+        self._floating_maximized = False
+        self._floating_restore_geo: QRect | None = None
         self.setObjectName("BrowserDockTitleBar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -57,10 +63,7 @@ class BrowserDockTitleBar(QWidget):
 
         self._title = QLabel(title, self)
         self._title.setObjectName("BrowserDockTitleLabel")
-        self._title.setToolTip(
-            "Double-click to detach this panel to a separate window "
-            "(uses a second screen when available)"
-        )
+        self._title.setToolTip(_TOOLTIP_DOCKED)
         layout.addWidget(self._title, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._leading = leading
@@ -96,6 +99,9 @@ class BrowserDockTitleBar(QWidget):
             trailing.raise_()
         self._close_btn.raise_()
 
+        dock.topLevelChanged.connect(self._on_dock_floating_changed)
+        self._on_dock_floating_changed(dock.isFloating())
+
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(max(super().sizeHint().width(), 80), BROWSER_DOCK_TITLE_HEIGHT)
 
@@ -111,6 +117,12 @@ class BrowserDockTitleBar(QWidget):
         btn.setText(text)
         btn.setFixedSize(QSize(18, 18))
         return btn
+
+    def _on_dock_floating_changed(self, floating: bool) -> None:
+        self._title.setToolTip(_TOOLTIP_FLOATING if floating else _TOOLTIP_DOCKED)
+        if not floating:
+            self._floating_maximized = False
+            self._floating_restore_geo = None
 
     @staticmethod
     def _is_interactive(widget: QWidget | None) -> bool:
@@ -151,37 +163,26 @@ class BrowserDockTitleBar(QWidget):
         if self._is_interactive(self.childAt(pos)):
             event.accept()
             return
-        self._toggle_dock_float()
+        # Docked: do nothing (detach only by drag). Floating: maximize / restore.
+        if self._dock.isFloating():
+            self._toggle_floating_maximize()
         event.accept()
 
-    def _toggle_dock_float(self) -> None:
+    def _toggle_floating_maximize(self) -> None:
         dock = self._dock
-        if dock.isFloating():
-            dock.setFloating(False)
+        if not dock.isFloating():
             return
-        size = dock.size()
-        dock.setFloating(True)
-        dock.resize(max(size.width(), 320), max(size.height(), 240))
-        dock.show()
-        QTimer.singleShot(0, lambda: self._place_floating_dock(dock))
-
-    @staticmethod
-    def _place_floating_dock(dock: QDockWidget) -> None:
-        from PySide6.QtGui import QGuiApplication
-
-        screens = QGuiApplication.screens()
-        screen = screens[1] if len(screens) > 1 else QGuiApplication.primaryScreen()
+        if self._floating_maximized:
+            geo = self._floating_restore_geo
+            if geo is not None and geo.isValid():
+                dock.setGeometry(geo)
+            self._floating_maximized = False
+            return
+        self._floating_restore_geo = QRect(dock.geometry())
+        screen = dock.screen()
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
         if screen is None:
             return
-        geo = screen.availableGeometry()
-        width = min(max(dock.width(), 320), geo.width())
-        height = min(max(dock.height(), 240), geo.height())
-        x = geo.x() + max(0, (geo.width() - width) // 2)
-        y = geo.y() + max(0, (geo.height() - height) // 2)
-        frame = clamp_frame_to_screens(QRect(x, y, width, height))
-        window = dock.window()
-        handle = window.windowHandle() if window is not None else None
-        if handle is not None:
-            handle.setScreen(screen)
-        dock.setGeometry(frame)
-        ensure_widget_on_screen(dock)
+        dock.setGeometry(screen.availableGeometry())
+        self._floating_maximized = True

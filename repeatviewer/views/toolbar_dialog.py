@@ -104,7 +104,7 @@ TOOLBAR_LABELS: dict[str, str] = {
     "repeat_quantify": "Repeat Quantify",
     "blast": "BLAST",
     "extend": "MSA Extend",
-    "teaid": "TEAid",
+    "teaid": "TE-Aid",
     "msa_clean": "MSA Clean",
     "consensus": "Consensus",
     "flexidot": "Flexidot",

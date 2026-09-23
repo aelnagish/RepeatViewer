@@ -4725,9 +4725,9 @@ def _inject_plotly_controls(
 
 
 def blast_txt_path_for_query(query_fasta: Path) -> Path:
-    """Path to ``{fasta_basename}_blast.txt`` next to the query FASTA."""
+    """Path to ``{fasta_basename}_b.txt`` next to the query FASTA."""
     query_fasta = query_fasta.expanduser().resolve()
-    return query_fasta.parent / f"{query_fasta.name}_blast.txt"
+    return query_fasta.parent / f"{query_fasta.name}_b.txt"
 
 
 def _legacy_repeatviewer_dir(query_fasta: Path) -> Path:
@@ -4736,13 +4736,38 @@ def _legacy_repeatviewer_dir(query_fasta: Path) -> Path:
     return query_fasta.parent / f"{query_fasta.stem}.repeatviewer"
 
 
+# BLASTN hit tables use ``_b`` (short); older runs used ``_blast``.
+_BLAST_TABLE_SUFFIXES = (
+    "_b.txt",
+    "_blast.txt",
+    "_blastp.txt",
+    "_blastx.txt",
+)
+
+
+def blast_table_name_suffixes() -> tuple[str, ...]:
+    """Filename endings recognized as BLAST hit tables (canonical first)."""
+    return _BLAST_TABLE_SUFFIXES
+
+
+def strip_blast_table_suffix(name: str) -> str | None:
+    """If ``name`` is a BLAST table, return the query basename; else ``None``."""
+    lower = name.lower()
+    for suffix in _BLAST_TABLE_SUFFIXES:
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    return None
+
+
 def blast_table_candidates_for_query(query_fasta: Path) -> list[Path]:
-    """Possible BLAST table paths for a query FASTA (canonical name first)."""
+    """Possible BLAST table paths for a query FASTA (canonical ``_b`` name first)."""
     query_fasta = query_fasta.expanduser().resolve()
     parent = query_fasta.parent
     legacy = _legacy_repeatviewer_dir(query_fasta)
     names = (
+        f"{query_fasta.name}_b.txt",
         f"{query_fasta.name}_blast.txt",
+        f"{query_fasta.stem}_b.txt",
         f"{query_fasta.stem}_blast.txt",
     )
     seen: set[str] = set()
@@ -4778,15 +4803,16 @@ _LEGACY_GENOME_MAP_SUFFIXES = (
 
 
 def te_hit_source_tag(path: Path) -> str:
-    """Return ``RM`` or ``blast`` for TE hit-table naming.
+    """Return ``RM`` or ``b`` for TE hit-table naming.
 
     Naming uses the file extension so plot outputs stay consistent even when the
     path is only being predicted. Content validation still happens at read time.
+    Older outputs used ``blast`` instead of ``b``; preview still recognizes both.
     """
     name = path.name.lower()
-    if name.endswith(".out") and not name.endswith("_blast.txt"):
+    if name.endswith(".out") and strip_blast_table_suffix(path.name) is None:
         return "RM"
-    return "blast"
+    return "b"
 
 
 def te_plot_output_suffix(
@@ -4795,7 +4821,7 @@ def te_plot_output_suffix(
     kind: str,
     region: bool = False,
 ) -> str:
-    """Build a plot HTML suffix: ``_{blast|RM|multi}_{kind}_plot[.region].html``."""
+    """Build a plot HTML suffix: ``_{b|RM|multi}_{kind}_plot[.region].html``."""
     te_paths = (
         [te_input_files.expanduser().resolve()]
         if isinstance(te_input_files, Path)
@@ -4806,7 +4832,7 @@ def te_plot_output_suffix(
     elif te_paths:
         tag = te_hit_source_tag(te_paths[0])
     else:
-        tag = "blast"
+        tag = "b"
     kind = str(kind).strip("_") or "plot"
     # Multi-source density plots use ``dens`` (``_multi_dens_plot.html``).
     if tag == "multi" and kind in {"den", "density"}:
@@ -4818,7 +4844,7 @@ def te_plot_output_suffix(
 
 def is_blast_table_file(path: Path) -> bool:
     """True if ``path`` looks like a BLAST hit table from RepeatViewer/Blast."""
-    return path.name.lower().endswith("blast.txt")
+    return strip_blast_table_suffix(path.name) is not None
 
 
 def is_genome_map_html_file(path: Path) -> bool:
@@ -4986,8 +5012,9 @@ def is_te_hit_table_file(path: Path) -> bool:
 def te_hit_table_stem(path: Path) -> str:
     """Base name for plot HTML outputs derived from a hit table path."""
     name = path.name
-    if name.endswith("_blast.txt"):
-        return name[: -len("_blast.txt")]
+    stripped = strip_blast_table_suffix(name)
+    if stripped is not None:
+        return stripped
     if name.lower().endswith(".out"):
         return name[: -len(".out")]
     return path.stem

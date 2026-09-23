@@ -6,9 +6,11 @@ import platform
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QMimeData, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QDrag, QFont, QMouseEvent
+from PySide6.QtGui import QBrush, QColor, QDrag, QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QColorDialog,
+    QDialog,
     QHeaderView,
     QMenu,
     QTableView,
@@ -41,7 +43,8 @@ _COL_TYPE = 5
 _COL_DESCRIPTION = 6
 _COL_MODIFIED = 7
 _COL_SIZE = 8
-_COL_IMAGES = 9
+_COL_COLOR = 9
+_COL_IMAGES = 10
 
 # Public aliases for column visibility settings.
 COL_CHECK = _COL_CHECK
@@ -53,6 +56,7 @@ COL_TYPE = _COL_TYPE
 COL_DESCRIPTION = _COL_DESCRIPTION
 COL_MODIFIED = _COL_MODIFIED
 COL_SIZE = _COL_SIZE
+COL_COLOR = _COL_COLOR
 COL_IMAGES = _COL_IMAGES
 
 _HEADERS = (
@@ -65,6 +69,7 @@ _HEADERS = (
     "Description",
     "Modified",
     "Size",
+    "Color",
     "\U0001F52C",  # microscope: sequences with cytogenetic images
 )
 _CHECKBOX_COLUMN_WIDTH = 22
@@ -77,6 +82,7 @@ _DEFAULT_COLUMN_WIDTHS = {
     _COL_DESCRIPTION: 220,
     _COL_MODIFIED: 150,
     _COL_SIZE: 72,
+    _COL_COLOR: 80,
     _COL_IMAGES: 34,
 }
 _LEFT_ALIGN = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
@@ -293,7 +299,7 @@ class FileListTableWidget(QTableWidget):
 
         s = QSettings()
         s.beginGroup(FILES_SETTINGS_GROUP)
-        done = str(s.value("images_column_placed_v1", False)).lower() in {"1", "true"}
+        done = str(s.value("images_column_placed_v2", False)).lower() in {"1", "true"}
         s.endGroup()
         if done:
             return
@@ -304,7 +310,7 @@ class FileListTableWidget(QTableWidget):
             header.moveSection(current, target)
         s = QSettings()
         s.beginGroup(FILES_SETTINGS_GROUP)
-        s.setValue("images_column_placed_v1", True)
+        s.setValue("images_column_placed_v2", True)
         s.endGroup()
 
     def apply_visible_columns(self, visible: set[int]) -> None:
@@ -429,6 +435,7 @@ class FileListTableWidget(QTableWidget):
     def setCurrentItem(self, row_item: FileListRow | None) -> None:
         if row_item is None:
             self.clearSelection()
+            self.setCurrentCell(-1, -1)
             return
         self.selectRow(row_item._row)
         self.setCurrentCell(row_item._row, _COL_NAME)
@@ -488,11 +495,68 @@ class FileListTableWidget(QTableWidget):
         name_item.setTextAlignment(_LEFT_ALIGN)
         self.setItem(row, _COL_NAME, name_item)
 
+        self._apply_file_color_cells(row, path)
         if fill_metadata_columns:
             self._apply_metadata_cells(row, path_text, meta)
         self._apply_cyto_cell(row, path)
         self.setSortingEnabled(was_sorting)
         return FileListRow(self, row)
+
+    def _apply_file_color_cells(self, row: int, path: Path) -> None:
+        """Apply stored file color to Name, Color, and all metadata cells.
+
+        Also clears job highlight backgrounds/bold so previous green/blue tints
+        do not linger after a new tool run.
+        """
+        from repeatviewer.widgets.file_colors import (
+            color_label,
+            get_file_color,
+        )
+
+        path = path.expanduser().resolve()
+        path_text = str(path)
+        color = get_file_color(path)
+        brush = QBrush(QColor(color)) if color else QBrush()
+        clear_bg = QBrush()
+
+        label = color_label(color) if color else "—"
+        # Empty colors sort last when ascending.
+        sort_key = color.lower() if color else "\uffff"
+        cell = _SortableTableItem(label, sort_key=sort_key)
+        cell.setData(_ROLE_PATH, path_text)
+        cell.setTextAlignment(_LEFT_ALIGN)
+        cell.setForeground(brush)
+        cell.setBackground(clear_bg)
+        self.setItem(row, _COL_COLOR, cell)
+
+        # Name + every other populated cell (Length, GC, …) update immediately.
+        for column in range(self.columnCount()):
+            existing = self.item(row, column)
+            if existing is None:
+                continue
+            existing.setBackground(clear_bg)
+            existing.setForeground(brush)
+            font = existing.font()
+            if font.bold():
+                font.setBold(False)
+                existing.setFont(font)
+        name_item = self.item(row, _COL_NAME)
+        if name_item is not None:
+            name_item.setToolTip("")
+
+    def reapply_file_colors(self) -> None:
+        """Refresh Name/Color styling from stored colors for every row."""
+        for row in range(self.rowCount()):
+            raw = self._path_for_row(row)
+            if not raw:
+                continue
+            self._apply_file_color_cells(row, Path(raw))
+
+    def reapply_file_color_for_path(self, path: Path) -> None:
+        key = str(path.expanduser().resolve())
+        row = self._path_row_index().get(key)
+        if row is not None:
+            self._apply_file_color_cells(row, Path(key))
 
     # -- cytogenetic images ------------------------------------------------
 
@@ -961,6 +1025,8 @@ class FileListTableWidget(QTableWidget):
                     )
                     menu.addAction(label, lambda: self._reveal_paths(paths))
                 menu.addSeparator()
+                self._add_file_color_menu(menu, paths)
+                menu.addSeparator()
                 if len(paths) == 1:
                     menu.addAction("Delete", lambda: self.delete_files_requested.emit(paths))
                 else:
@@ -983,6 +1049,86 @@ class FileListTableWidget(QTableWidget):
         finally:
             # Keep suppress through this event-loop turn (deferred preview opens).
             QTimer.singleShot(0, self._clear_suppress_selection_preview)
+
+    def _add_file_color_menu(self, menu: QMenu, paths: list[Path]) -> None:
+        from repeatviewer.widgets.file_colors import FILE_COLOR_PRESETS
+
+        color_menu = menu.addMenu("File color")
+        color_menu.addAction(
+            "Choose color…",
+            lambda ps=list(paths): self._choose_files_color(ps),
+        )
+        for label, hex_color in FILE_COLOR_PRESETS:
+            color_menu.addAction(
+                label,
+                lambda checked=False, c=hex_color, ps=list(paths): self._set_files_color(
+                    ps, c
+                ),
+            )
+        color_menu.addSeparator()
+        color_menu.addAction(
+            "Clear color",
+            lambda ps=list(paths): self._clear_files_color(ps),
+        )
+
+    def _set_files_color(self, paths: list[Path], color: str) -> None:
+        from repeatviewer.widgets.file_colors import set_file_color
+
+        row_index = self._path_row_index()
+        was_sorting = self.isSortingEnabled()
+        self.setSortingEnabled(False)
+        try:
+            for path in paths:
+                resolved = path.expanduser().resolve()
+                set_file_color(resolved, color)
+                row = row_index.get(str(resolved))
+                if row is not None:
+                    self._apply_file_color_cells(row, resolved)
+        finally:
+            self.setSortingEnabled(was_sorting)
+        if self._sort_column == _COL_COLOR:
+            self.apply_default_sort()
+
+    def _choose_files_color(self, paths: list[Path]) -> None:
+        from repeatviewer.widgets.file_colors import (
+            FILE_COLOR_PRESETS,
+            get_file_color,
+        )
+
+        if not paths:
+            return
+        stored = get_file_color(paths[0])
+        initial = QColor(stored) if stored else QColor(FILE_COLOR_PRESETS[0][1])
+        if not initial.isValid():
+            initial = QColor(FILE_COLOR_PRESETS[0][1])
+
+        dialog = QColorDialog(initial, self.window())
+        dialog.setWindowTitle("File color")
+        dialog.setStyleSheet("")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        picked = dialog.selectedColor()
+        if not picked.isValid():
+            return
+        self._set_files_color(paths, picked.name())
+
+    def _clear_files_color(self, paths: list[Path]) -> None:
+        from repeatviewer.widgets.file_colors import set_file_color
+
+        row_index = self._path_row_index()
+        was_sorting = self.isSortingEnabled()
+        self.setSortingEnabled(False)
+        try:
+            for path in paths:
+                resolved = path.expanduser().resolve()
+                set_file_color(resolved, None)
+                row = row_index.get(str(resolved))
+                if row is not None:
+                    self._apply_file_color_cells(row, resolved)
+        finally:
+            self.setSortingEnabled(was_sorting)
+        if self._sort_column == _COL_COLOR:
+            self.apply_default_sort()
 
     def _context_open_aliview(self) -> None:
         window = self.window()

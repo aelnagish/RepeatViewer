@@ -274,6 +274,11 @@ from repeatviewer.backends.te_abundance_plot import (
     te_abundance_plot_html_path_for_sources,
     write_te_abundance_plot_html,
 )
+from repeatviewer.backends.msa_plot import (
+    MsaPlotOptions,
+    msa_plot_output_path,
+    write_msa_plot,
+)
 from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE, JobCancellation, JobCancelledError
 
 logger = logging.getLogger(__name__)
@@ -351,6 +356,7 @@ from repeatviewer.job_options import (
     load_teaid_options,
     load_te_genome_map_options,
     load_te_divergence_plot_options,
+    load_msa_plot_options,
     load_repeat_quantify_options,
     load_te_confusion_matrix_benchmark_options,
     load_te_library_benchmark_options,
@@ -367,12 +373,14 @@ from repeatviewer.job_options import (
     save_teaid_options,
     save_te_genome_map_options,
     save_te_divergence_plot_options,
+    save_msa_plot_options,
     save_repeat_quantify_options,
     save_te_confusion_matrix_benchmark_options,
     save_te_library_benchmark_options,
     save_tsd_search_options,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
+    MsaPlotJobOptions,
     TeConfusionMatrixBenchmarkOptions,
     TeLibraryBenchmarkOptions,
     TsdSearchOptions,
@@ -392,6 +400,7 @@ from repeatviewer.views.tool_dialogs import (
     TeDensityPlotDialog,
     TeDivergencePlotDialog,
     TeAbundancePlotDialog,
+    MsaPlotDialog,
     ConfusionMatrixBenchmarkDialog,
     TeLibraryBenchmarkDialog,
     CommandPluginDesignerDialog,
@@ -431,7 +440,7 @@ from repeatviewer.widgets.browser_icons import (
     browser_folder_icon,
     browser_folder_spacer_icon,
 )
-from repeatviewer.widgets.browser_dock import PreviewDockWidget, ZeroDockTitleBar
+from repeatviewer.widgets.browser_dock import PreviewDockWidget
 from repeatviewer.widgets.browser_panel_settings import load_browser_panel_font_size
 from repeatviewer.ui.platform import reveal_in_file_manager
 from repeatviewer.ui.text_editor import open_in_text_editor
@@ -536,7 +545,7 @@ _TOOLBAR_TOOLTIPS = {
     "te_genome_map": "TE density plot using default parameters",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
     "extend": "Extend MSA ends using default parameters",
-    "teaid": "TEAid interactive HTML report using default parameters",
+    "teaid": "TE-Aid interactive HTML report using default parameters",
     "msa_clean": "Trim or clean MSA using default parameters",
     "flexidot": "Dotplot comparison of selected sequences using default parameters",
     "consensus": "Click: set consensus parameters and run. Right-click: run with saved settings.",
@@ -544,7 +553,7 @@ _TOOLBAR_TOOLTIPS = {
 }
 
 _JOB_DISPLAY_TITLES = {
-    "teaid": "TEAid",
+    "teaid": "TE-Aid",
     "blast": "BLAST",
     "extend": "MSA Extend",
     "msa_clean": "MSA Clean",
@@ -961,7 +970,7 @@ class RepeatQuantifyWorker(QObject):
                 )
                 summary = write_summary_html(
                     results,
-                    out_dir / f"{target.stem}_repeat_quant.html",
+                    out_dir / f"{target.name}_repeat_quant.html",
                     target_label=target.name,
                     warnings=lib_warnings,
                 )
@@ -972,7 +981,7 @@ class RepeatQuantifyWorker(QObject):
                             str(
                                 write_landscape_html(
                                     result,
-                                    out_dir / f"{target.stem}_repeat_landscape.html",
+                                    out_dir / f"{target.name}_repeat_landscape.html",
                                     target_label=target.name,
                                 )
                             )
@@ -1997,6 +2006,7 @@ class MainWindow(QMainWindow):
         # Superfamily filtering is controlled on the plot page, not in settings.
         self._te_genome_map_options.superfamilies_only = None
         self._te_divergence_plot_options = load_te_divergence_plot_options()
+        self._msa_plot_options = load_msa_plot_options()
         self._consensus_options = load_consensus_options()
         self._flexidot_options = load_flexidot_options()
         self._te_annotation_options = load_te_annotation_options()
@@ -2029,6 +2039,7 @@ class MainWindow(QMainWindow):
             TeDensityPlotDialog
             | TeDivergencePlotDialog
             | TeAbundancePlotDialog
+            | MsaPlotDialog
             | RepeatQuantifyDialog
             | None
         ) = None
@@ -2161,6 +2172,9 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self._stop_btn)
         self._build_menu()
         self._install_shortcuts()
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._ensure_floating_docks_stay_visible)
         QTimer.singleShot(0, self._deferred_window_startup)
 
     def _deferred_window_startup(self) -> None:
@@ -2461,6 +2475,9 @@ class MainWindow(QMainWindow):
         if self._preview_tabs is not None:
             self._preview_tabs.teardown_all_html_previews()
         self._persist_workspace()
+        # Detached docks can outlive the main window (independent tool windows).
+        # Redock/close them before saving layout so they vanish on quit.
+        self._close_detached_panels()
         from repeatviewer.ui.window_geometry import ensure_floating_docks_on_screen
 
         ensure_floating_docks_on_screen(self)
@@ -2470,6 +2487,32 @@ class MainWindow(QMainWindow):
         settings.setValue("geometry", self.saveGeometry())
         settings.endGroup()
         super().closeEvent(event)
+
+    def _close_detached_panels(self) -> None:
+        """Close every floating browser dock and standalone preview window."""
+        for dock in self.findChildren(QDockWidget):
+            if not dock.isFloating():
+                continue
+            dock.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, False)
+            dock.setFloating(False)
+            if dock.isFloating():
+                dock.hide()
+                dock.close()
+        from repeatviewer.widgets.preview_duplicate_window import PreviewDuplicateWindow
+
+        app = QApplication.instance()
+        if app is None:
+            return
+        for widget in list(app.topLevelWidgets()):
+            if isinstance(widget, PreviewDuplicateWindow):
+                widget.close()
+            elif (
+                isinstance(widget, QDockWidget)
+                and widget.isFloating()
+                and widget is not self
+            ):
+                widget.hide()
+                widget.close()
 
     def _shutdown_background_threads(self, *, wait_ms: int = 30_000) -> None:
         """Stop and join background QThreads before teardown or window close."""
@@ -2649,7 +2692,80 @@ class MainWindow(QMainWindow):
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
+        # Floating docks default to Qt::Tool and hide when another app covers
+        # the main window on macOS. Promote them to independent windows.
+        dock.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+        dock.topLevelChanged.connect(self._on_browser_dock_floating_changed)
         return dock
+
+    def _on_browser_dock_floating_changed(self, floating: bool) -> None:
+        dock = self.sender()
+        if not isinstance(dock, QDockWidget):
+            return
+        if floating:
+            # Wait until Qt finishes its own float/show, then promote once.
+            QTimer.singleShot(0, lambda d=dock: self._make_floating_dock_independent(d))
+            QTimer.singleShot(100, lambda d=dock: self._detach_floating_dock_transient(d))
+        else:
+            dock.setProperty("_rv_float_independent", False)
+
+    def _make_floating_dock_independent(self, dock: QDockWidget) -> None:
+        """Turn a floated dock into a normal top-level window (not a Tool panel)."""
+        if not dock.isFloating():
+            return
+        if bool(dock.property("_rv_float_independent")):
+            self._detach_floating_dock_transient(dock)
+            return
+
+        geo = QRect(dock.geometry())
+        dock.setProperty("_rv_float_independent", True)
+        dock.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+
+        # hide → setWindowFlags → show on the next tick avoids
+        # ``qt.qpa.window: Already setting window visible!``.
+        dock.hide()
+        dock.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        )
+        dock.setGeometry(geo)
+
+        def _show_independent() -> None:
+            if not dock.isFloating():
+                dock.setProperty("_rv_float_independent", False)
+                return
+            dock.show()
+            self._detach_floating_dock_transient(dock)
+
+        QTimer.singleShot(0, _show_independent)
+
+    @staticmethod
+    def _detach_floating_dock_transient(dock: QDockWidget) -> None:
+        if not dock.isFloating():
+            return
+        handle = dock.windowHandle()
+        if handle is None:
+            win = dock.window()
+            handle = win.windowHandle() if win is not None else None
+        if handle is None:
+            return
+        handle.setTransientParent(None)
+        # Reinforce non-Tool at the QWindow level (macOS window group).
+        flags = handle.flags()
+        if flags & Qt.WindowType.Tool:
+            handle.setFlags(
+                (flags & ~Qt.WindowType.Tool)
+                | Qt.WindowType.Window
+                | Qt.WindowType.FramelessWindowHint
+            )
+
+    def _ensure_floating_docks_stay_visible(self, state=None) -> None:
+        """If macOS hid floated panels when the app deactivated, show them again."""
+        for dock in (self._dock_folders, self._dock_files, self._dock_preview):
+            if dock is None or not dock.isFloating():
+                continue
+            if not dock.isVisible():
+                dock.setVisible(True)
+            self._detach_floating_dock_transient(dock)
 
     def _build_dock_panels(self) -> None:
         # --- Folders (nav + filter live on the dock title bar) ---
@@ -2845,8 +2961,10 @@ class MainWindow(QMainWindow):
             leading_stretch=1,
             trailing=preview_zoom_host,
         )
-        self._dock_preview.setTitleBarWidget(ZeroDockTitleBar(self._dock_preview))
-        preview_layout.insertWidget(0, preview_title_bar)
+        # Use a real dock title bar (same as Folders/Files) so Qt can drag, float,
+        # and redock Preview. A ZeroDockTitleBar left nothing to grab.
+        self._dock_preview.setTitleBarWidget(preview_title_bar)
+        self._preview_title_bar = preview_title_bar
         self._dock_folders.setTitleBarWidget(
             BrowserDockTitleBar(self._dock_folders, "Folders", trailing=folders_trailing)
         )
@@ -3056,7 +3174,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Combine Sequences to One File", str(exc))
             return
         self._refresh_after_compose(
-            [written], f"Combined {count} sequences into {written.name}"
+            [written],
+            f"Combined {count} sequences into {written.name}",
+            source_files=files,
         )
 
     def _extract_sequences_from_list(
@@ -3160,7 +3280,7 @@ class MainWindow(QMainWindow):
                 dialog.selected_ids(),
                 source.parent,
                 single_file=dialog.single_file(),
-                combined_name=f"{source.stem}_extracted",
+                combined_name=f"{source.name}_extracted",
             )
         except SequenceComposeError as exc:
             QMessageBox.warning(self, "Extract Sequences from File", str(exc))
@@ -3168,7 +3288,11 @@ class MainWindow(QMainWindow):
         names = ", ".join(p.name for p in written[:4])
         if len(written) > 4:
             names += ", …"
-        self._refresh_after_compose(written, f"Extracted {len(written)} file(s): {names}")
+        self._refresh_after_compose(
+            written,
+            f"Extracted {len(written)} file(s): {names}",
+            source_files=[source],
+        )
 
     def _run_id_list_extraction(self, source: Path, dialog) -> None:
         """ID-list path: one streaming pass in the background, with cancel."""
@@ -3237,6 +3361,8 @@ class MainWindow(QMainWindow):
         self._extract_count_only = count_only
         self._extract_source = source
         title = "Checking sequence IDs" if count_only else "Extracting sequences"
+        if not count_only:
+            self._clear_job_file_highlights()
         self._set_status_message(f"{title} in {source.name}…", 0)
         if not count_only:
             self._job_running = True
@@ -3319,7 +3445,8 @@ class MainWindow(QMainWindow):
         outputs = list(summary.written)
         if summary.missing_path is not None:
             outputs.append(summary.missing_path)
-        self._refresh_after_compose(outputs, message)
+        sources = [self._extract_source] if getattr(self, "_extract_source", None) else []
+        self._refresh_after_compose(outputs, message, source_files=sources)
 
         detail = message
         if summary.missing_path is not None:
@@ -3360,7 +3487,7 @@ class MainWindow(QMainWindow):
             self._extract_thread = None
 
     def _extract_sequences_from_hit_table(self, blast_txt: object = None) -> None:
-        """Right-click a *_blast.txt: extract the genome sequences it hit.
+        """Right-click a *_b.txt: extract the genome sequences it hit.
 
         Reads the ``sseqid`` column itself, so no ID list has to be made by
         hand. The subject FASTA is the genome the BLAST ran against -- taken
@@ -3380,7 +3507,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "Extract subject sequences",
-                    "Select one BLAST hit table (*_blast.txt).",
+                    "Select one BLAST hit table (*_b.txt).",
                 )
                 return
             table = selected[0].resolve()
@@ -3430,9 +3557,24 @@ class MainWindow(QMainWindow):
             return None
         return Path(path).expanduser().resolve()
 
-    def _refresh_after_compose(self, created: list[Path], message: str) -> None:
+    def _refresh_after_compose(
+        self,
+        created: list[Path],
+        message: str,
+        *,
+        source_files: list[Path] | None = None,
+    ) -> None:
         if self._current_folder:
-            self._populate_file_list(self._current_folder, new_outputs=created)
+            # Leave opening/selection to ``_auto_open_outputs`` so the new
+            # file (not the input) becomes the deep-blue opened row.
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created,
+                source_files=list(source_files or []),
+                open_preview=False,
+            )
+        if created:
+            self._auto_open_outputs(created)
         self._set_status_message(message, 8000)
 
     def _populate_fastga_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
@@ -3603,7 +3745,7 @@ class MainWindow(QMainWindow):
 
         intro = QLabel(
             "Some folder or file names contain spaces. Import is allowed, but "
-            "tools such as BLAST and TEAid can fail on paths with spaces."
+            "tools such as BLAST and TE-Aid can fail on paths with spaces."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -3856,7 +3998,10 @@ class MainWindow(QMainWindow):
                 self._current_folder,
                 new_outputs=created_paths,
                 source_files=getattr(self, "_last_job_source_files", []),
+                open_preview=False,
             )
+        if created_paths:
+            self._auto_open_outputs(created_paths)
         names = ", ".join(p.name for p in created_paths)
         self._set_status_message(f"FastGA completed — {names}", 12000, override_file_link=True)
 
@@ -3974,6 +4119,7 @@ class MainWindow(QMainWindow):
             menu.addAction("TE density plot", self._open_te_density_plot_dialog)
         menu.addAction("TE divergence plot", self._open_te_divergence_plot_dialog)
         menu.addAction("TE abundance plot", self._open_te_abundance_plot_dialog)
+        menu.addAction("MSA plot", self._open_msa_plot_dialog)
 
     def _populate_benchmarking_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
@@ -3994,9 +4140,9 @@ class MainWindow(QMainWindow):
 
     def _populate_teaid_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("TEAid with default parameters", self._run_teaid)
+            menu.addAction("TE-Aid with default parameters", self._run_teaid)
         menu.addSeparator()
-        menu.addAction("Change TEAid parameters", self._modify_teaid_parameters)
+        menu.addAction("Change TE-Aid parameters", self._modify_teaid_parameters)
 
     def _populate_msa_clean_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         del skip_default
@@ -4114,7 +4260,7 @@ class MainWindow(QMainWindow):
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_fastga_menu(tools_menu.addMenu("Fast&GA"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
-        self._populate_teaid_menu(tools_menu.addMenu("&TEAid"))
+        self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
         self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
         self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
@@ -4578,7 +4724,7 @@ class MainWindow(QMainWindow):
         if right_click_slot is not None:
             btn.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
             # Run on the next event-loop tick so the release event fully
-            # finishes before a modal dialog (e.g. TEAid params) opens.
+            # finishes before a modal dialog (e.g. TE-Aid params) opens.
             btn.rightClicked.connect(
                 lambda s=right_click_slot: QTimer.singleShot(0, s)
             )
@@ -4852,7 +4998,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "teaid":
             self._add_toolbar_action_button(
                 bar,
-                "TEAid",
+                "TE-Aid",
                 self._open_teaid_dialog,
                 tooltip=(
                     "Click: set parameters and run.\n"
@@ -5210,10 +5356,15 @@ class MainWindow(QMainWindow):
                     load_preview_zoom_percent,
                 )
 
-                self._preview_tabs.zoom_bar.set_values(
-                    load_preview_zoom_percent(),
-                    load_preview_fit_mode(),
-                )
+                zoom_bar = self._preview_tabs.zoom_bar
+                kind = getattr(zoom_bar, "current_zoom_kind", lambda: None)()
+                if kind is not None and hasattr(zoom_bar, "set_zoom_kind"):
+                    zoom_bar.set_zoom_kind(kind)
+                else:
+                    zoom_bar.set_values(
+                        load_preview_zoom_percent(),
+                        load_preview_fit_mode(),
+                    )
                 self._preview_tabs._apply_zoom_to_current_tab()
                 from repeatviewer.widgets.preview_zoom import load_preview_font_size
 
@@ -6276,8 +6427,11 @@ class MainWindow(QMainWindow):
             key = str(resolved)
             if as_output:
                 self._highlight_output_keys.add(key)
+                self._highlight_source_keys.discard(key)
             else:
-                self._highlight_source_keys.add(key)
+                # Prefer output tint when a path is both source and result.
+                if key not in self._highlight_output_keys:
+                    self._highlight_source_keys.add(key)
             highlight_paths.append(resolved)
 
         if new_outputs:
@@ -6286,6 +6440,10 @@ class MainWindow(QMainWindow):
         if source_files:
             for path in source_files:
                 _track(path, as_output=False)
+
+        # Apply green (outputs) / light blue (inputs) before any selection.
+        if self._highlight_output_keys or self._highlight_source_keys:
+            self._refresh_file_list_highlights()
 
         new_cache_keys = {str(path.expanduser().resolve()) for path in self._cached_folder_files}
         added_keys = new_cache_keys - prev_cached_keys
@@ -6394,6 +6552,12 @@ class MainWindow(QMainWindow):
             self._sync_folder_tree_labels()
         self._folder_tree.set_active_folder(self._current_folder)
 
+    def _clear_job_file_highlights(self) -> None:
+        """Drop previous job green/blue tints (called when a new job starts)."""
+        self._highlight_output_keys = set()
+        self._highlight_source_keys = set()
+        self._refresh_file_list_highlights()
+
     def _refresh_file_list_highlights(self) -> None:
         """Re-apply new-output / source tint after metadata or sort updates."""
         for index in range(self._file_list.count()):
@@ -6406,6 +6570,8 @@ class MainWindow(QMainWindow):
                 self._style_new_output_item(item)
             elif key in self._highlight_source_keys:
                 self._style_source_file_item(item)
+            else:
+                self._file_list.reapply_file_color_for_path(Path(str(raw)))
 
     def _palette_is_dark(self) -> bool:
         from PySide6.QtGui import QPalette
@@ -6452,33 +6618,46 @@ class MainWindow(QMainWindow):
         *,
         open_preview: bool = True,
     ) -> None:
+        """Scroll job results into view; keep green/light-blue tints (no multi-select).
+
+        The opened file is selected separately (deep blue) by ``_auto_open_outputs``.
+        """
         path_set = {str(p.expanduser().resolve()) for p in paths}
         first_item: FileListRow | None = None
         preferred_item: FileListRow | None = None
-        preferred_rank = 99
+        preferred_key: tuple[int, int] | None = None
+        # Do not select every input/output — that would paint them all deep blue.
         self._file_list.clearSelection()
+        self._file_list.setCurrentItem(None)
+        self._refresh_file_list_highlights()
         for index in range(self._file_list.count()):
             item = self._file_list.item(index)
             raw = item.data(ROLE_PATH)
             if raw and str(Path(str(raw)).resolve()) in path_set:
-                item.setSelected(True)
                 if first_item is None:
                     first_item = item
                 candidate = Path(str(raw)).resolve()
-                rank = preview_path_priority(candidate)
-                if rank < preferred_rank:
-                    preferred_rank = rank
+                key = str(candidate)
+                # Prefer new outputs over inputs when preview ranks match (both FASTA).
+                rank = (
+                    preview_path_priority(candidate),
+                    0 if key in self._highlight_output_keys else 1,
+                )
+                if preferred_key is None or rank < preferred_key:
+                    preferred_key = rank
                     preferred_item = item
         focus_item = preferred_item or first_item
         if focus_item is not None:
-            self._reveal_file_list_item(
+            self._file_list.scrollToItem(
                 focus_item,
-                scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
+                QAbstractItemView.ScrollHint.EnsureVisible,
             )
         if open_preview and focus_item is not None:
             path = self._preview_path_from_item(focus_item)
             if path is not None and is_previewable_file(path):
                 self._open_file_in_preview(path)
+                self._reveal_file_list_item(focus_item)
+                self._refresh_file_list_highlights()
 
     def _open_best_preview_path(self, paths: list[Path]) -> None:
         candidates = [
@@ -6488,7 +6667,13 @@ class MainWindow(QMainWindow):
         ]
         if not candidates:
             return
-        best = min(candidates, key=preview_path_priority)
+
+        def _rank(path: Path) -> tuple[int, int]:
+            # Prefer new outputs over job inputs when priorities tie (e.g. both FASTA).
+            is_output = str(path) in self._highlight_output_keys
+            return (preview_path_priority(path), 0 if is_output else 1)
+
+        best = min(candidates, key=_rank)
         self._open_file_in_preview(best)
 
     def _select_path_in_file_list(self, path: Path) -> None:
@@ -6503,6 +6688,7 @@ class MainWindow(QMainWindow):
                     item,
                     scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
                 )
+                self._refresh_file_list_highlights()
                 return
 
     def _selected_files(self) -> list[Path]:
@@ -6865,16 +7051,53 @@ class MainWindow(QMainWindow):
     def _resolve_te_viz_hit_paths_and_kinds(
         self,
         pending: _PendingTeVizBuild,
+        *,
+        created_paths: list[Path] | None = None,
     ) -> tuple[list[Path], list[str]] | None:
         te_paths = list(pending.masking_paths)
         kinds = [TE_INPUT_KIND_MASKING] * len(pending.masking_paths)
         for fasta in pending.consensus_fastas:
-            blast_txt = find_blast_table_for_query(fasta)
+            blast_txt = self._find_blast_table_after_job(
+                fasta,
+                created_paths=created_paths,
+            )
             if blast_txt is None:
                 return None
             te_paths.append(blast_txt.expanduser().resolve())
             kinds.append(TE_INPUT_KIND_CONSENSUS)
         return te_paths, kinds
+
+    def _find_blast_table_after_job(
+        self,
+        fasta: Path,
+        *,
+        created_paths: list[Path] | None = None,
+    ) -> Path | None:
+        """Locate ``*_b.txt`` (or legacy ``*_blast.txt``) for a query after Blast."""
+        from repeatviewer.backends.blast_genome_plot import strip_blast_table_suffix
+
+        found = find_blast_table_for_query(fasta)
+        if found is not None:
+            return found
+        if not created_paths:
+            return None
+        fasta = fasta.expanduser().resolve()
+        expected_names = {
+            f"{fasta.name}_b.txt",
+            f"{fasta.name}_blast.txt",
+            f"{fasta.stem}_b.txt",
+            f"{fasta.stem}_blast.txt",
+        }
+        for path in created_paths:
+            resolved = path.expanduser().resolve()
+            if not resolved.is_file():
+                continue
+            if resolved.name in expected_names:
+                return resolved
+            stripped = strip_blast_table_suffix(resolved.name)
+            if stripped in {fasta.name, fasta.stem}:
+                return resolved
+        return None
 
     def _resolve_te_viz_hit_paths(self, pending: _PendingTeVizBuild) -> list[Path] | None:
         resolved = self._resolve_te_viz_hit_paths_and_kinds(pending)
@@ -6907,10 +7130,12 @@ class MainWindow(QMainWindow):
             self._pending_te_genome_map = map_options
             self._pending_te_genome_map_fastas = list(need_blast)
             self._set_status_message("Running Blast on TE consensus, then TE genome map…", 0)
+            # Density plot needs the *_b.txt table even if the user turned off
+            # "Export BLAST text file" for ordinary Blast runs.
             self._apply_function(
                 "blast",
                 preselected=need_blast,
-                blast_options=self._blast_options,
+                blast_options=replace(self._blast_options, write_text=True),
             )
             return
         te_paths = list(masking_paths)
@@ -6949,7 +7174,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Visualization",
-                    "Each TE input must be a RepeatMasker .out file or BLAST hit table (*_blast.txt).",
+                    "Each TE input must be a RepeatMasker .out file or BLAST hit table (*_b.txt).",
                 )
                 return None
             resolved.append(hit_path.expanduser().resolve())
@@ -6987,7 +7212,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Visualization",
-                "Input must be a RepeatMasker .out file or BLAST hit table (*_blast.txt).",
+                "Input must be a RepeatMasker .out file or BLAST hit table (*_b.txt).",
             )
             return None
         return hit_path.expanduser().resolve()
@@ -7247,6 +7472,7 @@ class MainWindow(QMainWindow):
                 self._current_folder,
                 new_outputs=created_paths,
                 source_files=source_paths,
+                open_preview=False,
             )
         self._auto_open_outputs(created_paths)
         names = ", ".join(p.name for p in created_paths[:6])
@@ -7424,7 +7650,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "TE genome map",
-                "Select one FASTA (with *_blast.txt) or a hit table (*_blast.txt / RepeatMasker .out).",
+                "Select one FASTA (with *_b.txt) or a hit table (*_b.txt / RepeatMasker .out).",
             )
             return
         blast_targets: list[Path] = []
@@ -7457,7 +7683,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "TE genome map",
-                "Select FASTA files, *_blast.txt tables, or RepeatMasker .out files.",
+                "Select FASTA files, *_b.txt tables, or RepeatMasker .out files.",
             )
 
     def _enqueue_genome_map_jobs(
@@ -7483,7 +7709,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "TE divergence plot",
-                "Select one FASTA (with *_blast.txt) or a hit table (*_blast.txt / RepeatMasker .out).",
+                "Select one FASTA (with *_b.txt) or a hit table (*_b.txt / RepeatMasker .out).",
             )
             return
         if len(selected) > 1:
@@ -7504,7 +7730,7 @@ class MainWindow(QMainWindow):
                     "TE divergence plot",
                     f"No BLAST table found for:\n{path.name}\n\n"
                     f"Expected {blast_txt_path_for_query(path).name} "
-                    f"(or {path.stem}_blast.txt). Run Blast first.",
+                    f"(or {path.name}_b.txt). Run Blast first.",
                 )
             return
         if is_te_hit_table_file(path):
@@ -7513,7 +7739,7 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(
             self,
             "TE divergence plot",
-            "Select a FASTA with BLAST results, a *_blast.txt table, or a RepeatMasker .out file.",
+            "Select a FASTA with BLAST results, a *_b.txt table, or a RepeatMasker .out file.",
         )
 
     def _open_blast_divergence_plot(
@@ -7755,6 +7981,7 @@ class MainWindow(QMainWindow):
             return
 
         self._last_benchmark_source_files = list(source_files)
+        self._clear_job_file_highlights()
         self._job_cancel.reset()
         self._show_job_progress(job_title, total_steps)
         self._set_job_actions_enabled(False)
@@ -7947,6 +8174,116 @@ class MainWindow(QMainWindow):
         dialog = TeAbundancePlotDialog(input_files=initial_files or None, parent=self)
         self._present_te_viz_dialog(dialog, _on_accept)
 
+    def _open_msa_plot_dialog(self, *, input_file: Path | None = None) -> None:
+        if input_file is None:
+            selected = [
+                p for p in self._selected_files()
+                if p.is_file() and self._is_fasta_file(p)
+            ]
+            input_file = selected[0] if selected else None
+
+        # Reload so palette migrations (Default colours) apply without restart.
+        self._msa_plot_options = load_msa_plot_options()
+
+        def _on_accept(dialog: MsaPlotDialog) -> None:
+            self._msa_plot_options = dialog.options()
+            save_msa_plot_options(self._msa_plot_options)
+            if not dialog.should_run():
+                self._set_status_message("MSA plot settings saved", 4000)
+                return
+            files = dialog.input_files()
+            if not files:
+                QMessageBox.warning(self, "MSA plot", "Select an aligned FASTA file.")
+                return
+            source = files[0].expanduser().resolve()
+            if not source.is_file() or not self._is_fasta_file(source):
+                QMessageBox.warning(
+                    self,
+                    "MSA plot",
+                    f"Select a valid FASTA alignment.\n\nInvalid: {source}",
+                )
+                return
+            self._start_msa_plot(source, options=self._msa_plot_options)
+
+        dialog = MsaPlotDialog(
+            initial=self._msa_plot_options,
+            input_file=input_file,
+            parent=self,
+        )
+        self._present_te_viz_dialog(dialog, _on_accept)
+
+    def _start_msa_plot(self, source: Path, *, options: MsaPlotJobOptions) -> None:
+        proposed = msa_plot_output_path(source, output_format=options.output_format)
+        output_path = self._confirm_plot_output_path(proposed, title="MSA plot")
+        if output_path is None:
+            return
+        self._start_background_job(
+            FunctionWorker(
+                self._run_msa_plot_job,
+                "msa_plot",
+                [source],
+                {"options": options, "output_path": output_path},
+            ),
+            job_title="msa_plot",
+            total_steps=1,
+            source_files=[source],
+            on_finished=self._on_msa_plot_finished,
+            on_failed=self._on_worker_failed,
+        )
+
+    def _run_msa_plot_job(
+        self,
+        func_name: str,
+        sources: list[Path],
+        progress,
+        *,
+        options: MsaPlotJobOptions,
+        output_path: Path | None = None,
+    ) -> dict:
+        progress(0, "Building MSA plot…")
+        if self._job_cancel.requested:
+            raise JobCancelledError()
+        plot_opts = MsaPlotOptions(
+            sequence_type=options.sequence_type,
+            output_format=options.output_format,
+            dpi=options.dpi,
+            sequence_height_cm=options.sequence_height_cm,
+            sequence_distance_cm=options.sequence_distance_cm,
+            nucleotide_colors=dict(options.nucleotide_colors),
+            amino_acid_colors=dict(options.amino_acid_colors),
+        )
+        written = write_msa_plot(sources[0], output_path, options=plot_opts)
+        if self._job_cancel.requested:
+            raise JobCancelledError()
+        progress(1, f"Finished: {written.name}")
+        return {
+            "func_name": func_name,
+            "created_outputs": [str(written.resolve())],
+            "source_files": [str(p.resolve()) for p in sources],
+            "total": 1,
+            "failures": [],
+        }
+
+    @Slot(dict)
+    def _on_msa_plot_finished(self, result: dict) -> None:
+        created = [
+            Path(str(raw)).expanduser().resolve()
+            for raw in result.get("created_outputs", [])
+        ]
+        created = [p for p in created if p.is_file()]
+        sources = [
+            Path(str(raw)).expanduser().resolve()
+            for raw in result.get("source_files", [])
+        ]
+        if not created:
+            self._set_status_message("MSA plot finished", 8000, override_file_link=True)
+            return
+        out = created[0]
+        self._refresh_folders_after_job(created, sources)
+        if out.suffix.lower() == ".png":
+            self._open_divergence_in_preview(out)
+        self._set_status_message(f"MSA plot: {out.name}", 8000, override_file_link=True)
+
     def _start_te_abundance_plot(
         self,
         sources: list[Path],
@@ -8071,7 +8408,8 @@ class MainWindow(QMainWindow):
         self._apply_function(
             "blast",
             preselected=self._pending_te_genome_map_fastas,
-            blast_options=self._blast_options,
+            # Keep *_b.txt so the density plot can find the hit table after Blast.
+            blast_options=replace(self._blast_options, write_text=True),
         )
 
     def _open_blast_genome_map(
@@ -8283,6 +8621,7 @@ class MainWindow(QMainWindow):
         self._set_job_actions_enabled(False)
         workers = max(1, min(self._project.batch_workers, 8))
         worker_note = f" ({workers} workers)" if workers > 1 else ""
+        self._clear_job_file_highlights()
         self._set_status_message(f"Building TE genome map{worker_note}…", 0)
         if self._task_progress is not None:
             self._task_progress.start(self._running_job_title("TE genome map"), 6)
@@ -8416,14 +8755,13 @@ class MainWindow(QMainWindow):
             self._navigate_to_folder(folder, new_outputs=outputs, source_files=sources)
 
     def _fasta_for_blast_table(self, blast_txt: Path) -> Path | None:
-        """Infer query FASTA from a ``*_blast.txt`` path when the table is missing."""
+        """Infer query FASTA from a ``*_b.txt`` path when the table is missing."""
+        from repeatviewer.backends.blast_genome_plot import strip_blast_table_suffix
+
         name = blast_txt.name
-        if not name.lower().endswith("blast.txt"):
+        stem = strip_blast_table_suffix(name)
+        if stem is None:
             return None
-        if name.endswith("_blast.txt"):
-            stem = name[: -len("_blast.txt")]
-        else:
-            stem = Path(name).stem
         parent = blast_txt.parent
         candidates = [
             parent / stem,
@@ -8502,7 +8840,7 @@ class MainWindow(QMainWindow):
         self._apply_function("teaid", teaid_options=self._teaid_options)
 
     def _open_teaid_dialog(self) -> None:
-        """Click TEAid: parameters dialog. Run runs; Save (Options tab) stores only."""
+        """Click TE-Aid: parameters dialog. Run runs; Save (Options tab) stores only."""
         dialog = TeaAidParamsDialog(
             initial=self._teaid_options,
             parent=self,
@@ -8519,17 +8857,17 @@ class MainWindow(QMainWindow):
         if run_after:
             self._run_teaid()
         else:
-            self._set_status_message("TEAid settings saved", 4000)
+            self._set_status_message("TE-Aid settings saved", 4000)
 
     def _quick_teaid_right_click(self) -> None:
-        """Right-click TEAid: run with saved settings, or open the dialog."""
+        """Right-click TE-Aid: run with saved settings, or open the dialog."""
         if self._teaid_options.right_click_action == TEAID_RIGHT_CLICK_DIALOG:
             self._open_teaid_dialog()
         else:
             self._run_teaid()
 
     def _modify_teaid_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the TEAid toolbar button."""
+        """Menu: same Cancel / Save / Run dialog as the TE-Aid toolbar button."""
         self._open_teaid_dialog()
 
     def _modify_extend_parameters(self) -> None:
@@ -9083,6 +9421,12 @@ class MainWindow(QMainWindow):
             except OSError:
                 logger.exception("Could not move cytogenetic image links to %s", target.name)
 
+        from repeatviewer.widgets.file_colors import replace_file_color_path
+
+        replace_file_color_path(path, target)
+        for src, dst in companion_renames:
+            replace_file_color_path(src, dst)
+
         closed = [path, *[src for src, _dst in companion_renames]]
         if self._preview_tabs is not None:
             self._preview_tabs.close_paths(closed)
@@ -9440,13 +9784,13 @@ class MainWindow(QMainWindow):
 
         output_dir = separation_output_dir(path)
         mapping_note = (
-            f"Sequence_name_mapping_{sanitize_name(path.stem)}.txt will be written next to the input file."
+            f"Sequence_name_mapping_{sanitize_name(path.name)}.txt will be written next to the input file."
         )
         if subfolder_per_sequence:
             title = "Separate into subfolders"
             layout_note = (
                 f"Each sequence will be written to its own subfolder under:\n{output_dir}\n"
-                f"(e.g. {output_dir.name}/sequence_name/sequence_name.fa)\n\n"
+                f"(e.g. {output_dir.name}/sequence_name/sequence_name{path.suffix.lower() or '.fa'})\n\n"
             )
             done_title = "Separate into subfolders completed"
         else:
@@ -9966,6 +10310,9 @@ class MainWindow(QMainWindow):
             try:
                 if mode == "cut":
                     shutil.move(src, dest)
+                    from repeatviewer.widgets.file_colors import replace_file_color_path
+
+                    replace_file_color_path(src, dest)
                 else:
                     shutil.copy2(src, dest)
                 created.append(dest)
@@ -10859,6 +11206,7 @@ class MainWindow(QMainWindow):
                     worker._job_kwargs["seq_files"] = list(prepared_sources)
 
         self._last_job_source_files = list(prepared_sources)
+        self._clear_job_file_highlights()
         self._job_cancel.reset()
         self._show_job_progress(job_title, total_steps)
         self._set_job_actions_enabled(False)
@@ -11009,12 +11357,23 @@ class MainWindow(QMainWindow):
             self._pending_te_viz = None
             self._pending_te_genome_map_fastas = []
             self._pending_te_genome_map = None
-            resolved = self._resolve_te_viz_hit_paths_and_kinds(pending_viz)
+            resolved = self._resolve_te_viz_hit_paths_and_kinds(
+                pending_viz,
+                created_paths=created_paths,
+            )
             if resolved is None:
+                example = (
+                    f"{pending_viz.consensus_fastas[0].name}_b.txt"
+                    if pending_viz.consensus_fastas
+                    else "query.fa_b.txt"
+                )
                 QMessageBox.warning(
                     self,
                     "TE genome map",
-                    "Blast finished but a BLAST table for the TE consensus was not found.",
+                    "Blast finished but a BLAST table for the TE consensus was not found.\n\n"
+                    "Expected a hit table named like:\n"
+                    f"  {example}\n"
+                    "next to the consensus FASTA (legacy *_blast.txt is also accepted).",
                 )
             else:
                 te_paths, te_kinds = resolved
@@ -11044,7 +11403,7 @@ class MainWindow(QMainWindow):
             if len(created_paths) > 4:
                 names += ", …"
             summary += f" — created: {names}"
-        # TEAid opens its HTML in Preview and sets the file link; a timed
+        # TE-Aid opens its HTML in Preview and sets the file link; a timed
         # "finished" banner only flashes then covers that link.
         if func_name != "teaid":
             self._set_status_message(summary, 12000, override_file_link=True)
@@ -11137,7 +11496,13 @@ class MainWindow(QMainWindow):
         for fasta in fasta_paths:
             if fasta.name in failed_names:
                 continue
-            blast_txt = find_blast_table_for_query(fasta)
+            blast_txt = self._find_blast_table_after_job(
+                fasta,
+                created_paths=[
+                    Path(str(raw)).expanduser().resolve()
+                    for raw in result.get("created_outputs", [])
+                ],
+            )
             if blast_txt is not None:
                 queued.append(blast_txt)
         if queued:
@@ -11150,7 +11515,7 @@ class MainWindow(QMainWindow):
             )
 
     def _pick_preview_output(self, created_paths: list[Path]) -> Path | None:
-        """Prefer HTML/PDF/images for preview after TEAid / Flexidot / genome map."""
+        """Prefer HTML/PDF/images for preview after TE-Aid / Flexidot / genome map."""
         if not created_paths:
             return None
         files = [p.resolve() for p in created_paths if p.is_file()]
@@ -11180,18 +11545,35 @@ class MainWindow(QMainWindow):
         search = in_folder if in_folder else files
         previewable = [p for p in search if is_previewable_file(p)]
         if not previewable:
-            return None
+            # Still return a created file so the Files list can select it.
+            return search[-1] if search else files[-1]
         for suffix in (".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".svg"):
             for path in previewable:
                 if path.suffix.lower() == suffix:
                     return path
-        return min(previewable, key=preview_path_priority)
+        # Among equal priorities, prefer the last created path (newest output).
+        order = {str(p): index for index, p in enumerate(files)}
+        return min(
+            previewable,
+            key=lambda p: (preview_path_priority(p), -order.get(str(p), 0)),
+        )
 
     def _auto_open_outputs(self, created_paths: list[Path]) -> None:
+        """Open the best new output and select it (deep blue); others stay green."""
         target = self._pick_preview_output(created_paths)
         if target is None:
             return
-        self._open_preview_tab(target, replace=True)
+        # Select first so the deep-blue opened row is correct even if preview fails.
+        self._file_list.clearSelection()
+        self._file_list.setCurrentItem(None)
+        self._refresh_file_list_highlights()
+        self._select_path_in_file_list(target)
+        self._refresh_file_list_highlights()
+        if is_previewable_file(target):
+            self._open_preview_tab(target, replace=True)
+            # Re-assert selection after preview (some preview loads reshuffle focus).
+            self._select_path_in_file_list(target)
+            self._refresh_file_list_highlights()
 
     def _update_status(self) -> None:
         if self._job_running:
@@ -11233,11 +11615,18 @@ class MainWindow(QMainWindow):
         icon_label.setPixmap(icon_pix)
         icon_label.setFixedSize(64, 64)
 
-        text_label = QLabel(f"<b>{APP_DISPLAY_NAME}</b> {__version__}")
+        text_label = QLabel(
+            f"<b>{APP_DISPLAY_NAME}</b> {__version__}<br/>"
+            "<span style='color:#555555; font-weight:normal;'>"
+            "Developed at the Chair of Molecular Botany,<br/>"
+            "RWTH Aachen University"
+            "</span>"
+        )
         text_label.setTextFormat(Qt.TextFormat.RichText)
         text_label.setAlignment(
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
         )
+        text_label.setWordWrap(True)
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)

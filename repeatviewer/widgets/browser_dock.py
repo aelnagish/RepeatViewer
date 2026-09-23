@@ -25,35 +25,16 @@ class ZeroDockTitleBar(QWidget):
 
 
 class PreviewDockWidget(QDockWidget):
-    """Preview dock that keeps panel content aligned with mouse hit-testing on macOS.
+    """Preview dock that lays content out in the client area under the title bar.
 
-    QDockWidget can reserve ~24px for a title strip while painting the content
-    widget from y=0, so clicks land below visible controls. Force the panel to
-    fill the dock client rect and never install a custom title-bar widget.
+    Older builds forced the content widget to ``self.rect()`` (full-bleed) and used
+    a zero-height title bar so clicks lined up on macOS. That also removed Qt's
+    drag handle, so Preview could not be moved like Folders/Files. With a real
+    ``BrowserDockTitleBar``, keep normal QDockWidget layout.
     """
 
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(title, parent)
-        self._layout_content_full_bleed()
-
-    def setWidget(self, widget: QWidget | None) -> None:  # noqa: N802
-        super().setWidget(widget)
-        self._layout_content_full_bleed()
-
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._layout_content_full_bleed()
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        self._layout_content_full_bleed()
-
-    def _layout_content_full_bleed(self) -> None:
-        content = self.widget()
-        if content is None:
-            return
-        content.setGeometry(self.rect())
-        content.raise_()
 
 
 class PreviewClickDebugFilter(QObject):

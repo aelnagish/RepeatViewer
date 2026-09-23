@@ -119,7 +119,7 @@ These are optional and are detected on `PATH` at runtime:
 
 | Program | Needed for |
 |---------|------------|
-| Reference **genome FASTA** | BLAST, MSA Extend, genome maps, genome-aware TEAid |
+| Reference **genome FASTA** | BLAST, MSA Extend, genome maps, genome-aware TE-Aid |
 | **RepeatMasker** | Repeat Quantify (RepeatMasker engine), TE library benchmarking |
 | **FastGA** | The FastGA alignment tool |
 | **bedtools** | Some extension and extraction paths |
@@ -164,7 +164,7 @@ root* and is remembered between sessions.
 
 Select the reference genome FASTA these TEs came from. Several tools refuse to
 run without it — BLAST against the genome, MSA Extend, genome maps, and the
-genome tracks in TEAid — because they need somewhere to look the copies up.
+genome tracks in TE-Aid — because they need somewhere to look the copies up.
 
 You can define a **pan-genome** instead: a list of several genome FASTAs,
 searched together.
@@ -184,8 +184,8 @@ sub-tabs:
 
 With the file selected, click **BLAST** on the toolbar. RepeatViewer searches
 your consensus against the reference genome and writes two files beside the
-source: `<yourfile>_blast.txt`, the hit table you can read, and
-`<yourfile>_blast.txt.fa`, the hit sequences pulled out of the genome. The
+source: `<yourfile>_b.txt`, the hit table you can read, and
+`<yourfile>_b.txt.fa`, the hit sequences pulled out of the genome. The
 second one is what you align in the next step.
 
 New outputs are highlighted **green** in the Files panel; the inputs that
@@ -195,7 +195,7 @@ appeared.
 ### Step 5 — Build and clean an alignment
 
 Click **Align** to align the BLAST hits into a multiple sequence alignment
-(`<yourfile>_msa.fa`).
+(`<yourfile>_msa.fa`, keeping the original extension — e.g. `hits.fa_msa.fa`).
 
 Real alignments of genomic copies contain rows that should not be there —
 fragments, unrelated insertions, mostly-gap sequences. Click **MSA Clean** to
@@ -218,7 +218,7 @@ sequence, using a majority threshold you control.
 
 ### Step 8 — Check your work
 
-Run **TEAid** for an interactive HTML report of the new consensus — coverage,
+Run **TE-Aid** for an interactive HTML report of the new consensus — coverage,
 terminal repeats, ORFs, genome hits — and **Flexidot** for a dotplot comparing
 the old and new versions.
 
@@ -269,7 +269,7 @@ individual files or adding the file as a BLAST database.
 Shows whatever you have selected:
 
 - **FASTA** — Text, Annotation and Dotplot sub-tabs
-- **HTML reports** — TEAid, Flexidot, genome maps, quantification reports,
+- **HTML reports** — TE-Aid, Flexidot, genome maps, quantification reports,
   rendered live and interactive
 - **Alignments**, **PDFs**, **images**, **plain text**
 
@@ -289,7 +289,7 @@ job. While a job runs it shows progress and a **Stop** button.
 ### Toolbar
 
 The tools you use most, as buttons. The default set is BLAST, Align, Flexidot,
-TEAid, MSA Clean, MSA Extend, Consensus and Visualization.
+TE-Aid, MSA Clean, MSA Extend, Consensus and Visualization.
 
 Change which buttons appear and in what order under **File → Setting →
 Toolbar**. Every built-in tool can be shown, hidden or reordered, and
@@ -446,9 +446,9 @@ Three programs, each on its own tab: **BLASTn** (nucleotide), **BLASTp** and
 
 | File | Contents |
 |------|----------|
-| `<name>_blast.txt` | Tabular hit table |
-| `<name>_blast.txt.fa` | Hit sequences extracted from the genome — the input to Align |
-| `<name>_blast.txt.gff` | Hit positions, when GFF output is enabled |
+| `<name>_b.txt` | Tabular hit table |
+| `<name>_b.txt.fa` | Hit sequences extracted from the genome — the input to Align |
+| `<name>_b.gff` | Hit positions, when GFF output is enabled |
 
 The hit table is ordinary tabular BLAST output — readable in the preview pane,
 and the input for the TE density and divergence plots. **Max MSA lines** and
@@ -548,9 +548,9 @@ a message telling you to align it first.
 records the threshold, e.g. `CroSat2.fasta_0.8_co.fa`. Several thresholds can
 therefore coexist in one folder and be compared.
 
-### TEAid
+### TE-Aid
 
-**Toolbar: TEAid · Tools → TEAid**
+**Toolbar: TE-Aid · Tools → TE-Aid**
 
 An interactive HTML report for one consensus: self-alignment structure,
 terminal repeats, ORFs, and genome hit coverage in one page. This is the
@@ -834,7 +834,7 @@ Each tool declares what it accepts and what it produces, in three logical
 formats: **fasta**, **html** and **plot**. RepeatViewer only lets you connect
 steps whose formats match, so an invalid chain cannot be built.
 
-Tools producing `html` or `plot` are *terminal* — TEAid and Flexidot end a
+Tools producing `html` or `plot` are *terminal* — TE-Aid and Flexidot end a
 workflow, because nothing consumes their output.
 
 | Tool | Accepts | Produces | Needs genome |
@@ -846,7 +846,7 @@ workflow, because nothing consumes their output.
 | Consensus | fasta | fasta | no |
 | ORF Prediction | fasta | fasta | no |
 | Reverse Complement | fasta | fasta | no |
-| TEAid | fasta | html | yes |
+| TE-Aid | fasta | html | yes |
 | Flexidot | fasta | plot | yes |
 
 Steps using the genome will not run unless one is defined.
@@ -912,7 +912,7 @@ runs.
 ### Toolbar
 
 Choose which tools appear on the toolbar, in what order, with separators.
-**Reset to default** restores BLAST, Align, Flexidot, TEAid, MSA Clean, MSA
+**Reset to default** restores BLAST, Align, Flexidot, TE-Aid, MSA Clean, MSA
 Extend, Consensus and Visualization.
 
 ---
@@ -952,18 +952,20 @@ everyday use.
 ## 15. Output file reference
 
 All outputs are written beside their input file unless noted.
+`<name>` is the **full input filename including its extension** (same pattern
+as BLAST), e.g. `reads.fa` → `reads.fa_msa.fa`, `reads.fa_flexidot.html`.
 
 | Pattern | Produced by | Contents |
 |---------|-------------|----------|
-| `<name>_blast.txt` | BLAST | Tabular hit table |
-| `<name>_blast.txt.fa` | BLAST | Hit sequences extracted from the genome |
-| `<name>_blast.txt.gff` | BLAST | Hit positions (optional) |
+| `<name>_b.txt` | BLAST | Tabular hit table |
+| `<name>_b.txt.fa` | BLAST | Hit sequences extracted from the genome |
+| `<name>_b.gff` | BLAST | Hit positions (optional) |
 | `<name>_msa.fa` | Align | Multiple sequence alignment |
 | `<name>_gap.fa` | MSA Clean | Gappy columns removed |
 | `<name>_rowdiv.fa` | MSA Clean | Divergent rows removed |
 | `<name>_rowgap.fa` | MSA Clean | Gappy rows removed |
 | `<file.fasta>_<threshold>_co.fa` | Consensus | Consensus sequence |
-| `<name>_TEAid.html` | TEAid | Interactive TE report |
+| `<name>_TEAid.html` | TE-Aid | Interactive TE report |
 | `<name>_flexidot.html` | Flexidot | Interactive dotplot |
 | `<name>_flexidot.gff` | Flexidot | Match coordinates |
 | `<name>_flexidot_legend.png` | Flexidot | Plot legend |
@@ -993,7 +995,7 @@ All outputs are written beside their input file unless noted.
 ## 16. Troubleshooting
 
 **A tool says the genome is not set.** **File → Define genome**. BLAST, MSA
-Extend, genome maps and genome-aware TEAid all need it.
+Extend, genome maps and genome-aware TE-Aid all need it.
 
 **RepeatMasker or FastGA is not found.** They are not bundled. Install them
 and either put them on `PATH` or point **File → Setting → External tools** at

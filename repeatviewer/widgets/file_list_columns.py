@@ -6,6 +6,7 @@ from PySide6.QtCore import QSettings
 
 from repeatviewer.widgets.file_list_table import (
     COL_CHECK,
+    COL_COLOR,
     COL_DESCRIPTION,
     COL_GC,
     COL_IMAGES,
@@ -30,6 +31,7 @@ TOGGLEABLE_COLUMNS: dict[int, str] = {
     COL_DESCRIPTION: "Description",
     COL_MODIFIED: "Modified",
     COL_SIZE: "Size",
+    COL_COLOR: "Color",
     COL_IMAGES: "Cytogenetic images",
 }
 

@@ -29,7 +29,7 @@ def configure_qt_runtime() -> None:
 
     Set REPEATVIEWER_QUIET_QT=0 to disable these defaults when debugging.
     On macOS, harmless TSM/IMK stderr lines are filtered by default; set
-    REPEATVIEWER_FILTER_STDERR_FD=0 if the HTML preview (TEAid / genome map) misbehaves.
+    REPEATVIEWER_FILTER_STDERR_FD=0 if the HTML preview (TE-Aid / genome map) misbehaves.
     """
     # Windows/Python 3.12: pandas → python-dateutil → six.moves can trip
     # Shiboken's import hook if PySide6 loaded first

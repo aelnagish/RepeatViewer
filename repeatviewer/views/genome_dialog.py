@@ -364,7 +364,7 @@ class PanGenomeListWidget(QWidget):
 
 
 class GenomeDialog(QDialog):
-    """Select single or pan-genome mode for Blast, Extend, TEAid, and Flexidot."""
+    """Select single or pan-genome mode for Blast, Extend, TE-Aid, and Flexidot."""
 
     def __init__(
         self,
@@ -383,11 +383,11 @@ class GenomeDialog(QDialog):
         self._mode_single = QRadioButton("Single genome mode")
         self._mode_pan = QRadioButton("Pan-genome mode (Beta)")
         self._mode_single.setToolTip(
-            "One reference genome for Blast, MSA Extend, TEAid, Flexidot, and Visualization."
+            "One reference genome for Blast, MSA Extend, TE-Aid, Flexidot, and Visualization."
         )
         self._mode_pan.setToolTip(
             "Several genomes with short names (max 10 characters). "
-            "Blast, TEAid, and Flexidot run against each genome; Extend uses the genome you pick."
+            "Blast, TE-Aid, and Flexidot run against each genome; Extend uses the genome you pick."
         )
 
         self._genome = QComboBox()
@@ -560,7 +560,7 @@ class GenomeDialog(QDialog):
                 "Pan-genome mode: at least two genomes, each with a unique name (≤10 characters). "
                 "Click in a Genome FASTA field, then click a file in the Files panel, or drag "
                 "FASTA files onto a path field or browse. "
-                "Blast, TEAid, and Flexidot run against every genome; Extend uses the genome you pick. "
+                "Blast, TE-Aid, and Flexidot run against every genome; Extend uses the genome you pick. "
                 "Visualization is available only in single-genome mode."
             )
         else:

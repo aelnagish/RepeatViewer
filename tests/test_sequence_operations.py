@@ -22,7 +22,7 @@ def test_reverse_complement_fasta(tmp_path: Path) -> None:
     output = write_reverse_complement_fasta(source)
 
     record = next(SeqIO.parse(output, "fasta"))
-    assert output.name == "input_rc.fa"
+    assert output.name == "input.fa_rc.fa"
     assert str(record.seq) == "GCAT"
 
 
@@ -44,4 +44,4 @@ def test_orf_prediction_and_translation_use_detected_strand(
     protein = next(SeqIO.parse(protein_output, "fasta"))
     assert str(dna.seq) == "ATGAAATAA"
     assert str(protein.seq) == "MK"
-    assert protein_output.name == "input_translated.faa"
+    assert protein_output.name == "input.fa_translated.faa"

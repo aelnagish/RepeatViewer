@@ -25,6 +25,7 @@ from repeatviewer.widgets.preview_zoom import (
     PREVIEW_WHEEL_ZOOM_STEP_PERCENT,
     DefaultFastaPreviewTab,
     PreviewFitMode,
+    PreviewZoomKind,
     load_default_fasta_preview_tab,
     load_preview_fit_mode,
     load_preview_zoom_percent,
@@ -201,18 +202,60 @@ class PreviewZoomBar(QWidget):
         self._save_text_action.setToolTip("Save Preview text changes to disk")
         self._save_text_action.triggered.connect(self.save_text_requested.emit)
         self._actions_menu.addAction(self._reset_scale_action)
-        self._actions_menu.addSeparator()
+        self._text_actions_sep = self._actions_menu.addSeparator()
         self._actions_menu.addAction(self._edit_text_action)
         self._actions_menu.addAction(self._save_text_action)
-        self._actions_menu.addSeparator()
+        self._default_tab_sep = self._actions_menu.addSeparator()
         _add_default_fasta_tab_menu(self._actions_menu)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
 
         self._block = False
         self._fit_mode = load_preview_fit_mode()
-        self.set_values(load_preview_zoom_percent(), self._fit_mode)
+        self._zoom_kind = PreviewZoomKind.TEXT
+        self.set_values(load_preview_zoom_percent(PreviewZoomKind.TEXT), self._fit_mode)
         self.set_text_actions_enabled(can_edit=False, can_save=False)
+        self.set_chrome_mode("text")
+
+    def set_chrome_mode(self, mode: str) -> None:
+        """Configure title-bar chrome for the active preview kind.
+
+        ``text`` — % spin + Reset scale / Edit text / Save text + default tab.
+        ``media`` — % spin + Reset scale + default tab (HTML / image).
+        ``dotplot`` — Actions only (default FASTA tab); no % or text tools.
+        """
+        show_percent = mode in {"text", "media"}
+        show_reset = mode in {"text", "media"}
+        show_text_tools = mode == "text"
+        self._spin.setVisible(show_percent)
+        self._reset_scale_action.setVisible(show_reset)
+        self._text_actions_sep.setVisible(show_text_tools)
+        self._edit_text_action.setVisible(show_text_tools)
+        self._save_text_action.setVisible(show_text_tools)
+        self._default_tab_sep.setVisible(show_reset)
+
+    def set_zoom_kind(self, kind: PreviewZoomKind | str) -> None:
+        """Switch the % spin to the saved scale for this preview file type."""
+        try:
+            zoom_kind = kind if isinstance(kind, PreviewZoomKind) else PreviewZoomKind(str(kind))
+        except ValueError:
+            zoom_kind = PreviewZoomKind.TEXT
+        if zoom_kind == self._zoom_kind and not self._block:
+            # Still refresh from disk in case Settings changed the value.
+            percent = load_preview_zoom_percent(zoom_kind)
+            if percent != self._spin.value():
+                self._block = True
+                self._spin.setValue(percent)
+                self._block = False
+            return
+        self._zoom_kind = zoom_kind
+        percent = load_preview_zoom_percent(zoom_kind)
+        self._block = True
+        self._spin.setValue(percent)
+        self._block = False
+
+    def current_zoom_kind(self) -> PreviewZoomKind:
+        return self._zoom_kind
 
     def set_text_actions_enabled(self, *, can_edit: bool, can_save: bool) -> None:
         self._edit_text_action.setEnabled(can_edit)
@@ -233,7 +276,7 @@ class PreviewZoomBar(QWidget):
     def _on_spin(self, value: int) -> None:
         if self._block:
             return
-        save_preview_zoom_percent(value)
+        save_preview_zoom_percent(value, self._zoom_kind)
         self.zoom_changed.emit(value)
 
     def _reset_zoom(self) -> None:
@@ -251,7 +294,7 @@ class PreviewZoomBar(QWidget):
 
 
 class AnnotationZoomBar(QWidget):
-    """Sequence-map zoom controls for the Preview title bar (Annotation tab)."""
+    """Annotation title-bar Actions (default FASTA view); zoom lives on the map toolbar."""
 
     fit_mode_changed = Signal(str)
     reset_requested = Signal()
@@ -264,6 +307,7 @@ class AnnotationZoomBar(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
+        # Hidden spin kept for sequence-map bind API (embedded maps ignore it).
         self._spin = _make_zoom_percent_spin(
             minimum=0,
             maximum=100,
@@ -271,18 +315,13 @@ class AnnotationZoomBar(QWidget):
         )
         self._spin.setSingleStep(5)
         self._spin.setValue(0)
+        self._spin.hide()
         self._spin.valueChanged.connect(self._on_spin)
-        layout.addWidget(self._spin)
 
         self._actions_btn = _make_preview_actions_button(
             tooltip="Annotation actions",
         )
         self._actions_menu = QMenu(self._actions_btn)
-        self._reset_scale_action = QAction("Reset scale", self._actions_menu)
-        self._reset_scale_action.setToolTip("Fit the full sequence in the window")
-        self._reset_scale_action.triggered.connect(self.reset_requested.emit)
-        self._actions_menu.addAction(self._reset_scale_action)
-        self._actions_menu.addSeparator()
         _add_default_fasta_tab_menu(self._actions_menu)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)

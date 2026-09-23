@@ -35,9 +35,12 @@ from repeatviewer.widgets.html_preview import _qobject_alive, create_html_previe
 from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel, _is_delete_key
 from repeatviewer.widgets.preview_zoom import (
     MAX_PREVIEW_FONT_SIZE,
+    MAX_PREVIEW_ZOOM_PERCENT,
     MIN_PREVIEW_FONT_SIZE,
+    MIN_PREVIEW_ZOOM_PERCENT,
     DefaultFastaPreviewTab,
     PreviewFitMode,
+    PreviewZoomKind,
     load_default_fasta_preview_tab,
     load_preview_fit_mode,
     load_show_sequence_summary,
@@ -165,7 +168,7 @@ def _is_text_like_preview(path: Path) -> bool:
     name = path.name.lower()
     if is_bismark_cov_file(path):
         return True
-    return suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith("blast.txt")
+    return suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith(("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt"))
 
 
 def _format_byte_size(num_bytes: int) -> str:
@@ -234,7 +237,7 @@ def is_previewable_file(path: Path) -> bool:
         return False
     if suffix in _HTML_PREVIEW_SUFFIXES | {".pdf"} | _IMAGE_PREVIEW_SUFFIXES:
         return True
-    if suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith("blast.txt"):
+    if suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith(("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt")):
         return True
     return False
 
@@ -247,11 +250,13 @@ def preview_path_priority(path: Path) -> int:
         if "divergence" in name or "genome_map" in name:
             return 0
         return 1
+    if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
+        return 2
     if suffix == ".pdf":
         return 3
     if suffix in _IMAGE_PREVIEW_SUFFIXES:
         return 4
-    if suffix in _FASTA_SUFFIXES or name.endswith("blast.txt"):
+    if suffix in _FASTA_SUFFIXES or name.endswith(("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt")):
         return 5
     if is_bismark_cov_file(path):
         return 5
@@ -277,7 +282,7 @@ class ScaledImagePreview(QWidget):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._original: QPixmap | None = None
-        self._zoom_percent = load_preview_zoom_percent()
+        self._zoom_percent = load_preview_zoom_percent("image")
         self._fit_mode = PreviewFitMode.FIT_WINDOW
         self._scale_pending = False
         self._last_physical_w = 0
@@ -429,7 +434,7 @@ class ScaledImagePreview(QWidget):
 
 
 class PdfPreviewWidget(QWidget):
-    """PDF preview: fit-to-width pages at device resolution (ignores plot zoom settings)."""
+    """PDF preview: fit-to-width pages, scaled by the PDF preview zoom percent."""
 
     _PAGE_GAP_PX = 10
 
@@ -439,6 +444,7 @@ class PdfPreviewWidget(QWidget):
 
         self._doc = QPdfDocument(self)
         self._render_generation = 0
+        self._zoom_percent = load_preview_zoom_percent(PreviewZoomKind.PDF)
 
         self._scroll = QScrollArea(self)
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -465,6 +471,13 @@ class PdfPreviewWidget(QWidget):
         self._doc.statusChanged.connect(self._on_doc_status)
         if hasattr(self._doc, "pageCountChanged"):
             self._doc.pageCountChanged.connect(self._schedule_render)
+
+    def set_zoom_percent(self, percent: int) -> None:
+        self._zoom_percent = max(
+            MIN_PREVIEW_ZOOM_PERCENT,
+            min(MAX_PREVIEW_ZOOM_PERCENT, int(percent)),
+        )
+        self._schedule_render()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
         if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
@@ -504,7 +517,10 @@ class PdfPreviewWidget(QWidget):
         if page_count < 1:
             return
 
-        logical_w = max(200, self._scroll.viewport().width())
+        viewport_w = max(200, self._scroll.viewport().width())
+        zoom = max(0.25, self._zoom_percent / 100.0)
+        # 100% = fit viewport width; other values scale that base width.
+        logical_w = max(200, int(viewport_w * zoom))
         dpr = max(1.0, self.devicePixelRatioF())
         render_w = max(1, int(logical_w * dpr))
 
@@ -541,7 +557,7 @@ class PdfPreviewWidget(QWidget):
         return status
 
     def refresh(self) -> None:
-        """Re-render fit-to-width after tab show or resize."""
+        """Re-render after tab show, resize, or zoom change."""
         self._schedule_render()
 
 
@@ -558,6 +574,8 @@ class FilePreviewPage(QWidget):
         self.path = path.expanduser().resolve()
         self._single_fasta_mode = False
         self._annotation_panel: SequenceMapPanel | None = None
+        self._dotplot_panel = None  # built lazily on first view
+        self._alignment_dotplot = None  # PAF/.1aln viewer, built on first use
         self._stack = QStackedWidget(self)
         self._stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._placeholder = QLabel("Loading…")
@@ -594,12 +612,13 @@ class FilePreviewPage(QWidget):
         self._fasta_text_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._fasta_text_scroll.setWidget(self._fasta_text)
 
-        self.apply_text_font_size(self._base_text_font_pt)
         self._pdf = PdfPreviewWidget(self)
         self._html = create_html_preview_widget(self)
         if hasattr(self._html, "dotplotRegionSelected"):
             self._html.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
         self._image = ScaledImagePreview(self)
+        # After _pdf/_html/_image exist — apply_text_font_size → preview_zoom_kind.
+        self.apply_text_font_size(self._base_text_font_pt)
         self._fasta_stack = QStackedWidget(self)
         self._fasta_annotation_holder = QWidget(self)
         self._fasta_annotation_holder.setSizePolicy(
@@ -617,8 +636,6 @@ class FilePreviewPage(QWidget):
             QSizePolicy.Policy.Expanding,
         )
         self._cyto_panel = None  # built lazily on first view
-        self._dotplot_panel = None  # built lazily on first view
-        self._alignment_dotplot = None  # PAF/.1aln viewer, built on first use
         # Selection dragged on the dotplot, waiting to be applied to the
         # Annotation view. select_by_position() only retries for ~2 s while the
         # tab is hidden, so hold it here until Annotation is actually opened.
@@ -778,6 +795,44 @@ class FilePreviewPage(QWidget):
         if ref is not None:
             QTimer.singleShot(0, lambda r=ref: panel.show_feature(r))
 
+    def is_dotplot_preview_active(self) -> bool:
+        if self._single_fasta_mode:
+            return self._fasta_stack.currentIndex() == 2
+        alignment = getattr(self, "_alignment_dotplot", None)
+        return alignment is not None and self._stack.currentWidget() is alignment
+
+
+    def preview_zoom_kind(self):
+        """Which persisted scale bucket applies to the current view."""
+        from repeatviewer.widgets.preview_zoom import PreviewZoomKind
+
+        if self.is_annotation_preview_active() or self.is_dotplot_preview_active():
+            return PreviewZoomKind.TEXT
+        if not self._single_fasta_mode:
+            current = self._stack.currentWidget()
+            pdf = getattr(self, "_pdf", None)
+            html = getattr(self, "_html", None)
+            image = getattr(self, "_image", None)
+            text_scroll = getattr(self, "_text_scroll", None)
+            if pdf is not None and current is pdf:
+                return PreviewZoomKind.PDF
+            if html is not None and current is html:
+                return PreviewZoomKind.HTML
+            if image is not None and current is image:
+                return PreviewZoomKind.IMAGE
+            if (text_scroll is not None and current is text_scroll) or self._uses_text_preview():
+                return PreviewZoomKind.TEXT
+        elif self.is_text_preview_active():
+            return PreviewZoomKind.TEXT
+        kind = _preview_kind(self.path)
+        if kind == "html":
+            return PreviewZoomKind.HTML
+        if kind == "pdf":
+            return PreviewZoomKind.PDF
+        if kind == "image":
+            return PreviewZoomKind.IMAGE
+        return PreviewZoomKind.TEXT
+
     def _on_fasta_tab_changed(self, index: int) -> None:
         if not self._single_fasta_mode:
             return
@@ -826,7 +881,7 @@ class FilePreviewPage(QWidget):
             index = self._fasta_stack.currentIndex()
             if index == 0:
                 self.apply_preview_zoom(
-                    load_preview_zoom_percent(),
+                    load_preview_zoom_percent(self.preview_zoom_kind()),
                     load_preview_fit_mode(),
                 )
                 QTimer.singleShot(0, self._open_text_tab)
@@ -834,9 +889,9 @@ class FilePreviewPage(QWidget):
                 QTimer.singleShot(0, self._open_annotation_tab)
             return
         current = self._stack.currentWidget()
-        if current in (self._html, self._image, self._text_scroll):
+        if current in (self._html, self._image, self._text_scroll, self._pdf):
             self.apply_preview_zoom(
-                load_preview_zoom_percent(),
+                load_preview_zoom_percent(self.preview_zoom_kind()),
                 load_preview_fit_mode(),
             )
         if current is self._html:
@@ -871,7 +926,7 @@ class FilePreviewPage(QWidget):
             MIN_PREVIEW_FONT_SIZE,
             min(MAX_PREVIEW_FONT_SIZE, int(point_size)),
         )
-        self._apply_text_zoom(load_preview_zoom_percent())
+        self._apply_text_zoom(load_preview_zoom_percent(self.preview_zoom_kind()))
 
     def _uses_text_preview(self) -> bool:
         return _is_text_like_preview(self.path)
@@ -904,6 +959,8 @@ class FilePreviewPage(QWidget):
             self._html.set_zoom_percent(percent)
         if hasattr(self._html, "set_fit_mode"):
             self._html.set_fit_mode(fit_mode)
+        if hasattr(self._pdf, "set_zoom_percent"):
+            self._pdf.set_zoom_percent(percent)
         if self._uses_text_preview() or self.is_text_preview_active():
             self._apply_text_zoom(percent)
 
@@ -1918,12 +1975,17 @@ class PreviewTabWidget(QTabWidget):
         *,
         percent: int | None = None,
         fit_mode: str | None = None,
+        sync_chrome: bool = True,
     ) -> None:
         from repeatviewer.widgets.preview_zoom import load_preview_fit_mode
 
+        widget = self.currentWidget()
         if percent is None:
-            percent = load_preview_zoom_percent()
-            if self._zoom_bar.isVisible():
+            if isinstance(widget, FilePreviewPage) and hasattr(self._zoom_bar, "current_zoom_kind"):
+                percent = load_preview_zoom_percent(widget.preview_zoom_kind())
+            else:
+                percent = load_preview_zoom_percent()
+            if self._zoom_bar.isVisible() and self._zoom_bar._spin.isVisible():
                 percent = self._zoom_bar.current_zoom_percent()
         if fit_mode is None:
             fit_mode = load_preview_fit_mode().value
@@ -1932,51 +1994,94 @@ class PreviewTabWidget(QTabWidget):
         else:
             fit_mode = str(fit_mode)
 
-        widget = self.currentWidget()
         if isinstance(widget, FilePreviewPage):
             widget.apply_preview_zoom(percent, fit_mode)
-        self._sync_zoom_bar_enabled()
+        if sync_chrome:
+            self._sync_zoom_bar_enabled()
 
     def _sync_zoom_bar_enabled(self, _index: int | None = None) -> None:
         from repeatviewer.widgets.preview_controls import PreviewHeaderBar
 
         widget = self.currentWidget()
         is_text = False
-        is_media = False
         is_pdf = False
         is_annotation = False
+        is_dotplot = False
+        is_cyto = False
+        is_media = False
+        zoom_kind = None
         if isinstance(widget, FilePreviewPage):
-            is_annotation = widget.is_annotation_preview_active() or widget.is_cyto_preview_active()
+            is_annotation = widget.is_annotation_preview_active()
+            is_dotplot = widget.is_dotplot_preview_active()
+            is_cyto = widget.is_cyto_preview_active()
+            zoom_kind = widget.preview_zoom_kind()
             if is_annotation:
                 is_text = False
-                is_media = False
                 is_pdf = False
             elif widget.is_single_fasta_preview():
                 is_text = widget.is_text_preview_active()
-                is_media = False
                 is_pdf = False
             else:
                 current = widget._stack.currentWidget()
                 is_text = current is widget._text_scroll
-                is_media = current in (widget._html, widget._image)
                 is_pdf = current is widget._pdf
-        show_controls = not is_pdf and not is_annotation
+                is_media = current in (widget._html, widget._image)
+                is_dotplot = is_dotplot or (
+                    getattr(widget, "_alignment_dotplot", None) is not None
+                    and current is widget._alignment_dotplot
+                )
+
         if isinstance(self._header_bar, PreviewHeaderBar):
-            # Zoom controls live in the Preview header for Text/HTML/images.
-            # For Annotation mode, zoom/position/font live on the embedded map toolbar.
-            self._header_bar.set_header_zoom_mode("preview" if show_controls else "hidden")
+            if is_cyto:
+                # Cytogenetics has its own image controls; no text/annotation zoom.
+                self._header_bar.set_header_zoom_mode("hidden")
+            elif is_annotation:
+                self._header_bar.set_header_zoom_mode("annotation")
+            else:
+                self._header_bar.set_header_zoom_mode("preview")
         else:
-            self._zoom_bar.setVisible(show_controls)
-        # Fit mode is configured in Preferences; title bar has % / Actions.
+            self._zoom_bar.setVisible(not is_annotation)
+
+        if hasattr(self._zoom_bar, "set_chrome_mode"):
+            if is_dotplot:
+                self._zoom_bar.set_chrome_mode("dotplot")
+            elif is_text or (
+                isinstance(widget, FilePreviewPage) and widget._uses_text_preview()
+            ):
+                self._zoom_bar.set_chrome_mode("text")
+            else:
+                # HTML, image, and PDF share % / Reset / default-tab Actions.
+                self._zoom_bar.set_chrome_mode("media")
+
+        kind_changed = False
+        if (
+            zoom_kind is not None
+            and hasattr(self._zoom_bar, "set_zoom_kind")
+            and not is_annotation
+            and not is_dotplot
+            and not is_cyto
+        ):
+            previous = self._zoom_bar.current_zoom_kind()
+            self._zoom_bar.set_zoom_kind(zoom_kind)
+            kind_changed = previous != zoom_kind
+
+        show_preview_chrome = not is_annotation and not is_cyto
         for control in (
             self._zoom_bar._spin,
             self._zoom_bar._actions_btn,
         ):
-            control.setEnabled(show_controls)
+            control.setEnabled(show_preview_chrome)
+        if is_dotplot and hasattr(self._zoom_bar, "_actions_btn"):
+            self._zoom_bar._actions_btn.setEnabled(True)
         self._sync_text_tool_actions()
         self._sync_header_from_current_page()
         if isinstance(widget, FilePreviewPage):
             self._wheel_zoom_filter.register_page(widget)
+        if kind_changed and isinstance(widget, FilePreviewPage):
+            widget.apply_preview_zoom(
+                self._zoom_bar.current_zoom_percent(),
+                self._zoom_bar.current_fit_mode(),
+            )
 
     def _sync_text_tool_actions(self) -> None:
         if not hasattr(self._zoom_bar, "set_text_actions_enabled"):

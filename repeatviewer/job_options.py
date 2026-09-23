@@ -429,6 +429,10 @@ DEFAULT_FLEXIDOT_ONLY_VS_FIRST = False
 DEFAULT_FLEXIDOT_LINE_WIDTH = 1.0
 DEFAULT_FLEXIDOT_LENGTH_SCALING = False
 DEFAULT_FLEXIDOT_COMBINED = True
+DEFAULT_FLEXIDOT_SEQUENCE_TYPE = "nuc"
+FLEXIDOT_SEQUENCE_NUC = "nuc"
+FLEXIDOT_SEQUENCE_AA = "aa"
+FLEXIDOT_SEQUENCE_TYPES = (FLEXIDOT_SEQUENCE_NUC, FLEXIDOT_SEQUENCE_AA)
 # Flexidot comparison modes (-m): "0"=self, "1"=pairwise, "2"=all-vs-all.
 # Empty tuple means automatic via ``auto_flexidot_mode`` (self / pairwise /
 # all-vs-all from sequence count). Not exposed in the Flexidot dialog.
@@ -437,6 +441,14 @@ DEFAULT_FLEXIDOT_MODES: tuple[str, ...] = ()
 FLEXIDOT_RIGHT_CLICK_RUN = "run"
 FLEXIDOT_RIGHT_CLICK_DIALOG = "dialog"
 FLEXIDOT_RIGHT_CLICK_ACTIONS = (FLEXIDOT_RIGHT_CLICK_RUN, FLEXIDOT_RIGHT_CLICK_DIALOG)
+
+
+def normalize_flexidot_sequence_type(raw: object) -> str:
+    """Return ``nuc`` or ``aa`` (Flexidot ``-t``); default DNA."""
+    value = str(raw or DEFAULT_FLEXIDOT_SEQUENCE_TYPE).strip().lower()
+    if value in {"aa", "protein", "amino", "aminoacid", "amino_acid"}:
+        return FLEXIDOT_SEQUENCE_AA
+    return FLEXIDOT_SEQUENCE_NUC
 
 
 def auto_flexidot_mode(sequence_count: int) -> str:
@@ -479,6 +491,8 @@ class FlexidotOptions:
     """Saved matching, display, and output parameters for Flexidot."""
 
     wordsize: int = DEFAULT_FLEXIDOT_WORDSIZE
+    # Flexidot -t: ``nuc`` (DNA, default) or ``aa`` (protein).
+    sequence_type: str = DEFAULT_FLEXIDOT_SEQUENCE_TYPE
     lcs_shading: bool = DEFAULT_FLEXIDOT_LCS_SHADING
     use_gff: bool = DEFAULT_FLEXIDOT_USE_GFF
     output_format: str = DEFAULT_FLEXIDOT_OUTPUT_FORMAT
@@ -522,7 +536,7 @@ class TeAnnotationJobOptions:
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
 DEFAULT_TEAID_THREADS = 1
 DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 6
-# Text written on the consensus (x-)axis of the TEAid panels. Configurable so
+# Text written on the consensus (x-)axis of the TE-Aid panels. Configurable so
 # non-TE users (e.g. tandem repeats) can relabel it.
 DEFAULT_TEAID_X_AXIS_LABEL = "TE consensus (bp)"
 MIN_TEAID_SELF_BLAST_WORD_SIZE = 4
@@ -538,7 +552,7 @@ TEAID_RIGHT_CLICK_ACTIONS = (TEAID_RIGHT_CLICK_RUN, TEAID_RIGHT_CLICK_DIALOG)
 
 
 def clamp_teaid_self_blast_word_size(requested: int) -> int:
-    """Clamp TEAid self-BLAST ``-word_size`` to 4–25."""
+    """Clamp TE-Aid self-BLAST ``-word_size`` to 4–25."""
     return max(
         MIN_TEAID_SELF_BLAST_WORD_SIZE,
         min(MAX_TEAID_SELF_BLAST_WORD_SIZE, int(requested)),
@@ -1291,6 +1305,142 @@ def save_te_divergence_plot_options(opts: TeDivergencePlotOptions) -> None:
     )
 
 
+DEFAULT_MSA_PLOT_DPI = 100
+# Per-sequence row height in centimeters (matplotlib figsize uses inches).
+DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM = 0.5
+# White distance between sequence rows (cm).
+DEFAULT_MSA_PLOT_SEQUENCE_DISTANCE_CM = 0.01
+# Bump when built-in nucleotide/amino defaults change so old QSettings palettes refresh.
+MSA_PLOT_COLOR_SCHEME_VERSION = 3
+
+
+@dataclass
+class MsaPlotJobOptions:
+    """MSA overview plot (Visualization → MSA plot)."""
+
+    sequence_type: str = "auto"
+    output_format: str = "png"
+    dpi: int = DEFAULT_MSA_PLOT_DPI
+    sequence_height_cm: float = DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM
+    sequence_distance_cm: float = DEFAULT_MSA_PLOT_SEQUENCE_DISTANCE_CM
+    nucleotide_colors: dict[str, str] = field(default_factory=dict)
+    amino_acid_colors: dict[str, str] = field(default_factory=dict)
+
+
+def _parse_color_map_setting(raw: object) -> dict[str, str]:
+    if not raw:
+        return {}
+    text = str(raw).strip()
+    if not text:
+        return {}
+    try:
+        import json
+
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    colors: dict[str, str] = {}
+    for key, value in decoded.items():
+        color = str(value).strip()
+        if key and color.startswith("#") and len(color) >= 4:
+            colors[str(key).upper()] = color
+    return colors
+
+
+def load_msa_plot_options() -> MsaPlotJobOptions:
+    from repeatviewer.backends.msa_plot import (
+        DEFAULT_AMINO_ACID_COLORS,
+        DEFAULT_NUCLEOTIDE_COLORS,
+        MSA_PLOT_FORMAT_PDF,
+        MSA_PLOT_FORMAT_PNG,
+        MSA_PLOT_SEQ_AUTO,
+        MSA_PLOT_SEQ_NUCLEOTIDE,
+        MSA_PLOT_SEQ_PROTEIN,
+    )
+
+    v = _load_settings_group("msa_plot")
+    seq_type = str(v.get("sequence_type", MSA_PLOT_SEQ_AUTO)).lower()
+    if seq_type not in {
+        MSA_PLOT_SEQ_AUTO,
+        MSA_PLOT_SEQ_NUCLEOTIDE,
+        MSA_PLOT_SEQ_PROTEIN,
+    }:
+        seq_type = MSA_PLOT_SEQ_AUTO
+    fmt = str(v.get("output_format", MSA_PLOT_FORMAT_PNG)).lower()
+    if fmt not in {MSA_PLOT_FORMAT_PNG, MSA_PLOT_FORMAT_PDF}:
+        fmt = MSA_PLOT_FORMAT_PNG
+
+    try:
+        scheme_version = int(v.get("color_scheme_version", 0))
+    except (TypeError, ValueError):
+        scheme_version = 0
+
+    if scheme_version < MSA_PLOT_COLOR_SCHEME_VERSION:
+        # Refresh built-in palettes after Default / Color-blind updates.
+        nuc = dict(DEFAULT_NUCLEOTIDE_COLORS)
+        aa = dict(DEFAULT_AMINO_ACID_COLORS)
+    else:
+        nuc = dict(DEFAULT_NUCLEOTIDE_COLORS)
+        nuc.update(_parse_color_map_setting(v.get("nucleotide_colors")))
+        aa = dict(DEFAULT_AMINO_ACID_COLORS)
+        aa.update(_parse_color_map_setting(v.get("amino_acid_colors")))
+    # DNA/RNA: keep T and U identical in the UI and plot.
+    if "U" in nuc:
+        nuc["T"] = nuc["U"]
+
+    # Prefer cm; migrate legacy inch values (sequence_height without _cm).
+    if "sequence_height_cm" in v:
+        height_cm = float(v.get("sequence_height_cm", DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM))
+    elif "sequence_height" in v:
+        height_cm = float(v.get("sequence_height")) * 2.54
+    else:
+        height_cm = DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM
+
+    return MsaPlotJobOptions(
+        sequence_type=seq_type,
+        output_format=fmt,
+        dpi=max(50, min(600, int(v.get("dpi", DEFAULT_MSA_PLOT_DPI)))),
+        sequence_height_cm=max(0.1, min(5.0, height_cm)),
+        sequence_distance_cm=max(
+            0.0,
+            min(
+                2.0,
+                float(
+                    v.get(
+                        "sequence_distance_cm",
+                        v.get("sequence_gap_cm", DEFAULT_MSA_PLOT_SEQUENCE_DISTANCE_CM),
+                    )
+                ),
+            ),
+        ),
+        nucleotide_colors=nuc,
+        amino_acid_colors=aa,
+    )
+
+
+def save_msa_plot_options(opts: MsaPlotJobOptions) -> None:
+    import json
+
+    nuc = dict(opts.nucleotide_colors)
+    if "U" in nuc:
+        nuc["T"] = nuc["U"]
+    _save_settings_group(
+        "msa_plot",
+        {
+            "sequence_type": opts.sequence_type,
+            "output_format": opts.output_format,
+            "dpi": int(opts.dpi),
+            "sequence_height_cm": float(opts.sequence_height_cm),
+            "sequence_distance_cm": float(opts.sequence_distance_cm),
+            "color_scheme_version": MSA_PLOT_COLOR_SCHEME_VERSION,
+            "nucleotide_colors": json.dumps(nuc, sort_keys=True),
+            "amino_acid_colors": json.dumps(opts.amino_acid_colors, sort_keys=True),
+        },
+    )
+
+
 REPEAT_QUANTIFY_ENGINES = ("blastn", "repeatmasker", "both")
 REPEAT_QUANTIFY_SENSITIVITIES = ("sensitive", "default", "quick")
 
@@ -1404,6 +1554,9 @@ def load_flexidot_options() -> FlexidotOptions:
         right_click_action = FLEXIDOT_RIGHT_CLICK_RUN
     return FlexidotOptions(
         wordsize=wordsize,
+        sequence_type=normalize_flexidot_sequence_type(
+            v.get("sequence_type", DEFAULT_FLEXIDOT_SEQUENCE_TYPE)
+        ),
         lcs_shading=str(v.get("lcs_shading", "true")).lower() in {"1", "true", "yes"},
         use_gff=str(v.get("use_gff", "false")).lower() in {"1", "true", "yes"},
         output_format=normalize_flexidot_output_format(
@@ -1434,6 +1587,7 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
         "flexidot",
         {
             "wordsize": opts.wordsize,
+            "sequence_type": normalize_flexidot_sequence_type(opts.sequence_type),
             "lcs_shading": opts.lcs_shading,
             "use_gff": opts.use_gff,
             "output_format": normalize_flexidot_output_format(opts.output_format),

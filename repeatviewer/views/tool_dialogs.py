@@ -178,6 +178,7 @@ from repeatviewer.job_options import (
     CHROMOSOME_SORT_SIZE_DESC,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
+    MsaPlotJobOptions,
     RepeatQuantifyOptions,
     TeConfusionMatrixBenchmarkOptions,
     TeLibraryBenchmarkOptions,
@@ -205,6 +206,8 @@ from repeatviewer.job_options import (
     DEFAULT_FLEXIDOT_OUTPUT_FORMAT,
     DEFAULT_FLEXIDOT_WORDSIZE,
     DEFAULT_FLEXIDOT_MODES,
+    FLEXIDOT_SEQUENCE_AA,
+    FLEXIDOT_SEQUENCE_NUC,
     FLEXIDOT_RIGHT_CLICK_RUN,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     TE_ANNOTATION_RIGHT_CLICK_RUN,
@@ -271,6 +274,7 @@ from repeatviewer.job_options import (
     TsdSearchOptions,
     normalize_blast_evalue,
     normalize_flexidot_output_format,
+    normalize_flexidot_sequence_type,
 )
 from repeatviewer.plugins.custom_command import (
     CommandVarDef,
@@ -1616,9 +1620,15 @@ class ExtractSequencesDialog(QDialog):
         page = QWidget(self)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(8)
 
         self._list = QListWidget(page)
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._pick_syncing = False
+        self._filter: QLineEdit | None = None
+        # Shift / Cmd (Ctrl) / click-drag rubber-band multi-select.
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._list.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self._list.setUniformItemSizes(True)
 
         if records is None:
             note = QLabel(
@@ -1640,13 +1650,29 @@ class ExtractSequencesDialog(QDialog):
                 label += f"   {description}"
             item = QListWidgetItem(label, self._list)
             item.setData(Qt.ItemDataRole.UserRole, rec_id)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsEnabled
+            )
             item.setCheckState(Qt.CheckState.Unchecked)
+
+        self._filter = QLineEdit(page)
+        self._filter.setPlaceholderText("Search sequences…")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.setToolTip(
+            "Filter the list by sequence id or description. "
+            "Select all applies to currently visible rows."
+        )
+        self._filter.textChanged.connect(self._apply_pick_filter)
 
         select_all = QPushButton("Select all", page)
         select_none = QPushButton("Select none", page)
-        select_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Checked))
-        select_none.clicked.connect(lambda: self._set_all(Qt.CheckState.Unchecked))
+        select_all.setToolTip("Select every visible (filtered) sequence")
+        select_none.setToolTip("Clear the selection")
+        select_all.clicked.connect(self._select_all_visible)
+        select_none.clicked.connect(self._select_none)
 
         top = QHBoxLayout()
         top.addWidget(QLabel(f"Sequences in {self._source_name}:", page))
@@ -1654,11 +1680,21 @@ class ExtractSequencesDialog(QDialog):
         top.addWidget(select_all)
         top.addWidget(select_none)
 
-        layout.addLayout(top)
-        layout.addWidget(self._list, stretch=1)
-        self._list.itemChanged.connect(self._sync)
-        return page
+        hint = QLabel(
+            "Click to select · Shift+click for a range · "
+            "⌘/Ctrl+click to add or remove · drag to select several",
+            page,
+        )
+        hint.setStyleSheet("color: palette(mid);")
+        hint.setWordWrap(True)
 
+        layout.addLayout(top)
+        layout.addWidget(self._filter)
+        layout.addWidget(self._list, stretch=1)
+        layout.addWidget(hint)
+        self._list.itemSelectionChanged.connect(self._on_pick_selection_changed)
+        self._list.itemChanged.connect(self._on_pick_item_changed)
+        return page
     def _build_id_tab(self, initial_ids: str, initial_column: int) -> QWidget:
         page = QWidget(self)
         layout = QVBoxLayout(page)
@@ -1727,15 +1763,92 @@ class ExtractSequencesDialog(QDialog):
 
     # -- pick tab -----------------------------------------------------------
 
-    def _set_all(self, state) -> None:
+    def _apply_pick_filter(self, text: str = "") -> None:
+        needle = str(text or "").strip().lower()
         for index in range(self._list.count()):
-            self._list.item(index).setCheckState(state)
+            item = self._list.item(index)
+            if item is None:
+                continue
+            if not needle:
+                item.setHidden(False)
+                continue
+            item.setHidden(needle not in item.text().lower())
+
+    def _visible_items(self) -> list[QListWidgetItem]:
+        items: list[QListWidgetItem] = []
+        for index in range(self._list.count()):
+            item = self._list.item(index)
+            if item is not None and not item.isHidden():
+                items.append(item)
+        return items
+
+    def _select_all_visible(self) -> None:
+        self._pick_syncing = True
+        try:
+            self._list.clearSelection()
+            for item in self._visible_items():
+                item.setSelected(True)
+                item.setCheckState(Qt.CheckState.Checked)
+            # Clear checks on hidden rows so Select all means "what you see".
+            for index in range(self._list.count()):
+                item = self._list.item(index)
+                if item is not None and item.isHidden():
+                    item.setCheckState(Qt.CheckState.Unchecked)
+                    item.setSelected(False)
+        finally:
+            self._pick_syncing = False
+        self._sync()
+
+    def _select_none(self) -> None:
+        self._pick_syncing = True
+        try:
+            self._list.clearSelection()
+            for index in range(self._list.count()):
+                item = self._list.item(index)
+                if item is not None:
+                    item.setCheckState(Qt.CheckState.Unchecked)
+        finally:
+            self._pick_syncing = False
+        self._sync()
+
+    def _on_pick_selection_changed(self) -> None:
+        if self._pick_syncing:
+            return
+        self._pick_syncing = True
+        try:
+            selected = self._list.selectedItems()
+            for index in range(self._list.count()):
+                item = self._list.item(index)
+                if item is None or item.isHidden():
+                    continue
+                want = (
+                    Qt.CheckState.Checked
+                    if item.isSelected()
+                    else Qt.CheckState.Unchecked
+                )
+                if item.checkState() != want:
+                    item.setCheckState(want)
+            del selected
+        finally:
+            self._pick_syncing = False
+        self._sync()
+
+    def _on_pick_item_changed(self, item: QListWidgetItem) -> None:
+        if self._pick_syncing or item is None:
+            return
+        self._pick_syncing = True
+        try:
+            item.setSelected(item.checkState() == Qt.CheckState.Checked)
+        finally:
+            self._pick_syncing = False
+        self._sync()
 
     def selected_ids(self) -> set[str]:
         return {
             self._list.item(i).data(Qt.ItemDataRole.UserRole)
             for i in range(self._list.count())
-            if self._list.item(i).checkState() == Qt.CheckState.Checked
+            if self._list.item(i) is not None
+            and self._list.item(i).checkState() == Qt.CheckState.Checked
         }
 
     # -- id tab -------------------------------------------------------------
@@ -1819,10 +1932,25 @@ class ExtractSequencesDialog(QDialog):
             enabled = bool(parsed.ids)
         else:
             chosen = self.selected_ids()
-            self._summary.setText(
-                f"{len(chosen)} of {self._list.count()} selected"
-                if chosen else "Nothing selected"
+            visible = sum(
+                1
+                for i in range(self._list.count())
+                if self._list.item(i) is not None and not self._list.item(i).isHidden()
             )
+            total = self._list.count()
+            if chosen:
+                if visible < total:
+                    self._summary.setText(
+                        f"{len(chosen)} selected · {visible} of {total} shown"
+                    )
+                else:
+                    self._summary.setText(f"{len(chosen)} of {total} selected")
+            else:
+                self._summary.setText(
+                    f"Nothing selected · {visible} of {total} shown"
+                    if visible < total
+                    else "Nothing selected"
+                )
             enabled = bool(chosen)
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
 
@@ -3183,10 +3311,25 @@ class FlexidotParamsDialog(QDialog):
             "Larger values are faster but less sensitive."
         )
 
+        self._sequence_type = QComboBox()
+        self._sequence_type.addItem("DNA / nucleotide (-t nuc)", FLEXIDOT_SEQUENCE_NUC)
+        self._sequence_type.addItem("Protein (-t aa)", FLEXIDOT_SEQUENCE_AA)
+        seq_type = normalize_flexidot_sequence_type(opts.sequence_type)
+        seq_idx = self._sequence_type.findData(seq_type)
+        self._sequence_type.setCurrentIndex(seq_idx if seq_idx >= 0 else 0)
+        self._sequence_type.setToolTip(
+            "Flexidot -t: sequence alphabet. DNA (nuc) is the default; "
+            "choose Protein (aa) for amino-acid FASTA such as .faa files."
+        )
+        self._sequence_type.currentIndexChanged.connect(self._on_sequence_type_changed)
+
         self._use_gff = QCheckBox("Show GFF features on dotplot (-g)")
         self._use_gff.setChecked(opts.use_gff)
         self._use_gff.setToolTip(
-            "Shade the dotplot with companion GFF features when available."
+            "Shade the dotplot with companion annotation GFF next to each FASTA "
+            "(e.g. Name.RV.gff3 from the Annotation tab). "
+            "BLAST hit tables (*_b.gff) are not used. "
+            "If no companion GFF is found, Flexidot runs without shading."
         )
 
         self._output_format = QComboBox()
@@ -3256,6 +3399,7 @@ class FlexidotParamsDialog(QDialog):
 
         for field in (
             self._wordsize,
+            self._sequence_type,
             self._output_format,
             self._substitutions,
             self._max_n,
@@ -3326,6 +3470,7 @@ class FlexidotParamsDialog(QDialog):
         params_form.setHorizontalSpacing(12)
         params_form.setVerticalSpacing(10)
         params_form.addRow("Word size (k-mer, -k):", self._wordsize)
+        params_form.addRow("Sequence type (-t):", self._sequence_type)
         params_form.addRow("Output format (-f):", self._output_format)
         params_form.addRow("Allowed substitutions (-S):", self._substitutions)
         params_form.addRow("Maximum N content (--max_n):", self._max_n)
@@ -3350,13 +3495,26 @@ class FlexidotParamsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
         layout.addWidget(self._button_box)
+        self._on_sequence_type_changed()
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
+    def _on_sequence_type_changed(self, *_args) -> None:
+        is_protein = (
+            str(self._sequence_type.currentData()) == FLEXIDOT_SEQUENCE_AA
+        )
+        # Reverse-complement matching only applies to DNA.
+        self._include_reverse.setEnabled(not is_protein)
+        if is_protein:
+            self._include_reverse.setChecked(False)
+
     def _restore_defaults(self) -> None:
         defaults = FlexidotOptions()
         self._wordsize.setValue(defaults.wordsize)
+        self._sequence_type.setCurrentIndex(
+            max(0, self._sequence_type.findData(defaults.sequence_type))
+        )
         self._output_format.setCurrentIndex(
             max(0, self._output_format.findData(defaults.output_format))
         )
@@ -3372,6 +3530,7 @@ class FlexidotParamsDialog(QDialog):
         self._combined.setChecked(defaults.combined)
         self._show_process_window.setChecked(defaults.show_process_window)
         self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
+        self._on_sequence_type_changed()
 
     def options(self) -> FlexidotOptions:
         fmt = self._output_format.currentData()
@@ -3380,8 +3539,13 @@ class FlexidotParamsDialog(QDialog):
             if radio.isChecked():
                 right_click_action = value
                 break
+        seq_type = normalize_flexidot_sequence_type(self._sequence_type.currentData())
+        include_reverse = self._include_reverse.isChecked()
+        if seq_type == FLEXIDOT_SEQUENCE_AA:
+            include_reverse = False
         return FlexidotOptions(
             wordsize=self._wordsize.value(),
+            sequence_type=seq_type,
             lcs_shading=self._lcs_shading,
             use_gff=self._use_gff.isChecked(),
             output_format=normalize_flexidot_output_format(
@@ -3390,7 +3554,7 @@ class FlexidotParamsDialog(QDialog):
             substitution_count=self._substitutions.value(),
             wobble_conversion=self._wobble.isChecked(),
             max_n_percentage=self._max_n.value(),
-            include_reverse=self._include_reverse.isChecked(),
+            include_reverse=include_reverse,
             only_vs_first=self._only_vs_first_value,
             line_width=self._line_width.value(),
             length_scaling=self._length_scaling.isChecked(),
@@ -3530,11 +3694,7 @@ class _CheckboxFlowWidget(QWidget):
 
 
 class TeAnnotationDialog(QDialog):
-    """Batch TE annotation: Parameters select modules; Options holds settings/colors.
-
-    Left-click the toolbar button opens this dialog. Setting / Color buttons stay
-    on Parameters but jump to the Options tab, where the same content is expanded.
-    """
+    """Batch TE annotation: Parameters select modules; Options holds settings/colors."""
 
     def __init__(
         self,
@@ -3581,24 +3741,7 @@ class TeAnnotationDialog(QDialog):
         auto_outer = QVBoxLayout(auto_section)
         auto_outer.setContentsMargins(0, 0, 0, 0)
         auto_outer.setSpacing(6)
-
-        auto_header = QHBoxLayout()
-        auto_title = _section_title_label("Auto annotation", auto_section)
-        auto_header.addWidget(auto_title, 0, Qt.AlignmentFlag.AlignVCenter)
-        auto_settings_btn = QPushButton("Setting", auto_section)
-        auto_settings_btn.setToolTip(
-            "Open the Options tab for LTR, TIR, tandem, and ORF detection settings"
-        )
-        auto_settings_btn.clicked.connect(self._show_auto_settings_on_options)
-        auto_header.addWidget(auto_settings_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        auto_color_btn = QPushButton("Color", auto_section)
-        auto_color_btn.setToolTip(
-            "Open the Options tab for feature-type and database colors"
-        )
-        auto_color_btn.clicked.connect(self._show_colors_on_options)
-        auto_header.addWidget(auto_color_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        auto_header.addStretch(1)
-        auto_outer.addLayout(auto_header)
+        auto_outer.addWidget(_section_title_label("Auto annotation", auto_section))
 
         auto_checks_row = QHBoxLayout()
         auto_checks_row.setSpacing(10)
@@ -3627,18 +3770,7 @@ class TeAnnotationDialog(QDialog):
         sim_outer = QVBoxLayout(sim_section)
         sim_outer.setContentsMargins(0, 0, 0, 0)
         sim_outer.setSpacing(6)
-
-        sim_header = QHBoxLayout()
-        sim_title = _section_title_label("Similarity annotation", sim_section)
-        sim_header.addWidget(sim_title, 0, Qt.AlignmentFlag.AlignVCenter)
-        sim_settings_btn = QPushButton("Setting", sim_section)
-        sim_settings_btn.setToolTip(
-            "Open the Options tab for similarity search parameters"
-        )
-        sim_settings_btn.clicked.connect(self._show_similarity_settings_on_options)
-        sim_header.addWidget(sim_settings_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        sim_header.addStretch(1)
-        sim_outer.addLayout(sim_header)
+        sim_outer.addWidget(_section_title_label("Similarity annotation", sim_section))
 
         self._similarity_ann_all_check = QCheckBox("All", sim_section)
         self._similarity_ann_all_check.setToolTip("Select or clear all similarity databases")
@@ -3715,17 +3847,14 @@ class TeAnnotationDialog(QDialog):
         auto_box = QGroupBox("Auto annotation settings", self)
         auto_box_layout = QVBoxLayout(auto_box)
         auto_box_layout.addWidget(self._auto_settings_panel)
-        self._auto_settings_anchor = auto_box
 
         sim_box = QGroupBox("Similarity annotation settings", self)
         sim_box_layout = QVBoxLayout(sim_box)
         sim_box_layout.addWidget(self._similarity_settings_panel)
-        self._similarity_settings_anchor = sim_box
 
         color_box = QGroupBox("Element colors", self)
         color_box_layout = QVBoxLayout(color_box)
         color_box_layout.addWidget(self._colors_panel)
-        self._colors_anchor = color_box
 
         options_body = QWidget(self)
         options_layout = QVBoxLayout(options_body)
@@ -3742,7 +3871,6 @@ class TeAnnotationDialog(QDialog):
         options_scroll.setFrameShape(QFrame.Shape.NoFrame)
         options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         options_scroll.setWidget(options_body)
-        self._options_scroll = options_scroll
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
@@ -3811,19 +3939,6 @@ class TeAnnotationDialog(QDialog):
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
-
-    def _show_options_section(self, widget: QWidget) -> None:
-        self._tabs.setCurrentIndex(1)
-        QTimer.singleShot(0, lambda: self._options_scroll.ensureWidgetVisible(widget))
-
-    def _show_auto_settings_on_options(self) -> None:
-        self._show_options_section(self._auto_settings_anchor)
-
-    def _show_similarity_settings_on_options(self) -> None:
-        self._show_options_section(self._similarity_settings_anchor)
-
-    def _show_colors_on_options(self) -> None:
-        self._show_options_section(self._colors_anchor)
 
     def _make_similarity_db_check(
         self,
@@ -4118,7 +4233,7 @@ class OrfPredictionParamsDialog(QDialog):
 
 
 class TeaAidParamsDialog(QDialog):
-    """TEAid parameters.
+    """TE-Aid parameters.
 
     Left-click the toolbar button opens this dialog. The Parameters tab holds
     BLAST settings and hit colors; the Options tab sets right-click behavior.
@@ -4132,7 +4247,7 @@ class TeaAidParamsDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("TEAid parameters")
+        self.setWindowTitle("TE-Aid parameters")
         opts = initial or TeaAidOptions()
         self._for_run = for_run
         self._run_after = False
@@ -4148,7 +4263,7 @@ class TeaAidParamsDialog(QDialog):
         )
         self._evalue.setFixedWidth(120)
         self._evalue.setToolTip(
-            "Reporting E-value for the TEAid genome BLAST search only."
+            "Reporting E-value for the TE-Aid genome BLAST search only."
         )
 
         self._word_size = QSpinBox()
@@ -4163,7 +4278,7 @@ class TeaAidParamsDialog(QDialog):
         )
         self._word_size.setFixedWidth(120)
         self._word_size.setToolTip(
-            "BLASTN word size (-word_size) for the TEAid self-BLAST dot plot only (4–25)."
+            "BLASTN word size (-word_size) for the TE-Aid self-BLAST dot plot only (4–25)."
         )
 
         self._hit_high_pct = QDoubleSpinBox()
@@ -4237,7 +4352,7 @@ class TeaAidParamsDialog(QDialog):
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
-            ("Run TEAid with saved parameters", TEAID_RIGHT_CLICK_RUN),
+            ("Run TE-Aid with saved parameters", TEAID_RIGHT_CLICK_RUN),
             ("Open this dialog", TEAID_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
@@ -4250,7 +4365,7 @@ class TeaAidParamsDialog(QDialog):
         rc_box = QGroupBox("Right-click action", self)
         rc_box_layout = QVBoxLayout(rc_box)
         rc_box_layout.setSpacing(6)
-        rc_box_layout.addWidget(QLabel("Right-clicking the TEAid button does:", self))
+        rc_box_layout.addWidget(QLabel("Right-clicking the TE-Aid button does:", self))
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 
@@ -5112,7 +5227,7 @@ class _TeInputFileRow(QWidget):
         removable: bool = True,
         placeholder: str = "RepeatMasker .out or BLAST hit table",
         browse_title: str = "Select RepeatMasker .out or BLAST hit table",
-        file_filter: str = "TE hit tables (*.out *_blast.txt);;RepeatMasker (*.out);;All files (*)",
+        file_filter: str = "TE hit tables (*.out *_b.txt *_blast.txt);;RepeatMasker (*.out);;All files (*)",
         start_dir: str = "",
     ) -> None:
         super().__init__(parent)
@@ -5198,7 +5313,7 @@ class TeMultiInputFilesWidget(QWidget):
         start_empty: bool = False,
         placeholder: str = "RepeatMasker .out or BLAST hit table",
         browse_title: str = "Select RepeatMasker .out or BLAST hit table",
-        file_filter: str = "TE hit tables (*.out *_blast.txt);;RepeatMasker (*.out);;All files (*)",
+        file_filter: str = "TE hit tables (*.out *_b.txt *_blast.txt);;RepeatMasker (*.out);;All files (*)",
         add_button_label: str = "Add another TE file",
         add_button_tooltip: str = (
             "Add another RepeatMasker .out or BLAST hit table. "
@@ -6013,6 +6128,243 @@ class TeAbundancePlotDialog(QDialog):
 
     def apply_path_from_panel(self, path: Path) -> bool:
         return self._input.set_path_at_focus(path)
+
+
+from repeatviewer.widgets.residue_color_grid import ResidueColorGrid as _ResidueColorGrid
+
+
+class MsaPlotDialog(QDialog):
+    """MSA overview plot (nucleotide or protein) with custom residue colors."""
+
+    def __init__(
+        self,
+        *,
+        initial: MsaPlotJobOptions | None = None,
+        input_file: Path | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        from repeatviewer.backends.msa_plot import (
+            AMINO_ACID_CATEGORIES,
+            AMINO_ACID_COLOR_PRESETS,
+            DEFAULT_AMINO_ACID_COLORS,
+            DEFAULT_NUCLEOTIDE_COLORS,
+            MSA_PLOT_FORMAT_PDF,
+            MSA_PLOT_FORMAT_PNG,
+            MSA_PLOT_SEQ_AUTO,
+            MSA_PLOT_SEQ_NUCLEOTIDE,
+            MSA_PLOT_SEQ_PROTEIN,
+            NUCLEOTIDE_CATEGORIES,
+            NUCLEOTIDE_COLOR_PRESETS,
+        )
+
+        _prepare_option_dialog(self)
+        self.setWindowTitle("MSA plot")
+        self.setMinimumWidth(640)
+        self._opts = initial or MsaPlotJobOptions()
+        self._default_nuc = dict(DEFAULT_NUCLEOTIDE_COLORS)
+        self._default_aa = dict(DEFAULT_AMINO_ACID_COLORS)
+
+        self._input = TeMultiInputFilesWidget(
+            self,
+            initial=[input_file] if input_file is not None else None,
+            allow_multiple=False,
+            placeholder="Aligned FASTA (.fa / .fasta / .faa)",
+            browse_title="Select MSA FASTA",
+            file_filter="FASTA (*.fa *.fasta *.fas *.fna *.faa);;All files (*)",
+        )
+        self._focused_file_input: TeMultiInputFilesWidget | None = None
+        self._input.field_activated.connect(self._on_file_input_field_activated)
+
+        self._seq_type = QComboBox(self)
+        self._seq_type.addItem("Auto-detect", MSA_PLOT_SEQ_AUTO)
+        self._seq_type.addItem("Nucleotide (DNA/RNA)", MSA_PLOT_SEQ_NUCLEOTIDE)
+        self._seq_type.addItem("Protein", MSA_PLOT_SEQ_PROTEIN)
+        idx = self._seq_type.findData(self._opts.sequence_type)
+        if idx >= 0:
+            self._seq_type.setCurrentIndex(idx)
+
+        self._format = QComboBox(self)
+        self._format.addItem("PNG", MSA_PLOT_FORMAT_PNG)
+        self._format.addItem("PDF", MSA_PLOT_FORMAT_PDF)
+        idx_fmt = self._format.findData(self._opts.output_format)
+        if idx_fmt >= 0:
+            self._format.setCurrentIndex(idx_fmt)
+
+        self._dpi = QSpinBox(self)
+        self._dpi.setRange(50, 600)
+        self._dpi.setSingleStep(25)
+        self._dpi.setValue(int(self._opts.dpi))
+        self._dpi.setSuffix(" DPI")
+        self._dpi.setToolTip("Image resolution / quality (higher = larger file).")
+
+        self._seq_height = QDoubleSpinBox(self)
+        self._seq_height.setRange(0.1, 5.0)
+        self._seq_height.setDecimals(2)
+        self._seq_height.setSingleStep(0.05)
+        self._seq_height.setValue(float(self._opts.sequence_height_cm))
+        self._seq_height.setSuffix(" cm")
+        self._seq_height.setToolTip(
+            "Figure height reserved for each sequence row (centimeters). "
+            "Increase to make rows taller."
+        )
+
+        self._seq_distance = QDoubleSpinBox(self)
+        self._seq_distance.setRange(0.0, 2.0)
+        self._seq_distance.setDecimals(2)
+        self._seq_distance.setSingleStep(0.01)
+        self._seq_distance.setValue(float(self._opts.sequence_distance_cm))
+        self._seq_distance.setSuffix(" cm")
+        self._seq_distance.setToolTip(
+            "White distance between consecutive sequence rows (centimeters). "
+            "Set to 0 to remove spacing."
+        )
+
+        nuc_colors = dict(self._default_nuc)
+        nuc_colors.update(self._opts.nucleotide_colors or {})
+        if "U" in nuc_colors:
+            nuc_colors["T"] = nuc_colors["U"]
+        aa_colors = dict(self._default_aa)
+        aa_colors.update(self._opts.amino_acid_colors or {})
+        self._nuc_grid = _ResidueColorGrid(
+            self,
+            colors=nuc_colors,
+            categories=list(NUCLEOTIDE_CATEGORIES),
+        )
+        self._aa_grid = _ResidueColorGrid(
+            self,
+            colors=aa_colors,
+            categories=list(AMINO_ACID_CATEGORIES),
+        )
+
+        nuc_presets = QHBoxLayout()
+        nuc_presets.setContentsMargins(0, 0, 0, 0)
+        nuc_presets.setSpacing(6)
+        nuc_preset_label = QLabel("Preset:", self)
+        nuc_preset_label.setFixedWidth(_ResidueColorGrid.LABEL_WIDTH)
+        nuc_presets.addWidget(nuc_preset_label)
+        nuc_tips = {
+            "Default": "Standard A/C/G/T colours",
+            "Color-blind": "Wong / Paul Tol palette (same as Preferences → Color-blind nucleotide)",
+        }
+        for label, palette in NUCLEOTIDE_COLOR_PRESETS:
+            btn = QPushButton(label, self)
+            btn.setToolTip(nuc_tips.get(label, f"Apply {label} nucleotide colours"))
+
+            def _apply_nuc(colors: dict[str, str] = dict(palette)) -> None:
+                synced = dict(colors)
+                if "U" in synced:
+                    synced["T"] = synced["U"]
+                self._nuc_grid.set_colors(synced)
+
+            btn.clicked.connect(lambda checked=False, apply=_apply_nuc: apply())
+            nuc_presets.addWidget(btn)
+        nuc_presets.addStretch(1)
+
+        aa_presets = QHBoxLayout()
+        aa_presets.setContentsMargins(0, 0, 0, 0)
+        aa_presets.setSpacing(6)
+        aa_preset_label = QLabel("Preset:", self)
+        aa_preset_label.setFixedWidth(_ResidueColorGrid.LABEL_WIDTH)
+        aa_presets.addWidget(aa_preset_label)
+        aa_tips = {
+            "Clustal": "Most common MSA colouring (ClustalX / Jalview)",
+            "Zappo": "Clear physicochemical property groups",
+            "Taylor": "High-contrast, almost one colour per residue",
+        }
+        for label, palette in AMINO_ACID_COLOR_PRESETS:
+            btn = QPushButton(label, self)
+            btn.setToolTip(aa_tips.get(label, f"Apply {label} amino-acid colours"))
+            btn.clicked.connect(
+                lambda checked=False, colors=dict(palette): self._aa_grid.set_colors(
+                    colors
+                )
+            )
+            aa_presets.addWidget(btn)
+        aa_presets.addStretch(1)
+
+        nuc_box = QGroupBox("Nucleotide colors", self)
+        nuc_layout = QVBoxLayout(nuc_box)
+        nuc_layout.addLayout(nuc_presets)
+        nuc_layout.addWidget(self._nuc_grid)
+
+        aa_box = QGroupBox("Amino-acid colors", self)
+        aa_layout = QVBoxLayout(aa_box)
+        aa_layout.addLayout(aa_presets)
+        aa_layout.addWidget(self._aa_grid)
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.addRow("MSA FASTA:", self._input)
+        form.addRow("Sequence type:", self._seq_type)
+        form.addRow("Output format:", self._format)
+        form.addRow("Quality:", self._dpi)
+        form.addRow("Sequence height:", self._seq_height)
+        form.addRow("Sequence distance:", self._seq_distance)
+
+        self._colors_toggle = QPushButton("▶ Color", self)
+        self._colors_toggle.setCheckable(True)
+        self._colors_toggle.setChecked(False)
+        self._colors_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._colors_toggle.setToolTip("Show or hide nucleotide / amino-acid colour settings")
+        self._colors_toggle.toggled.connect(self._on_colors_section_toggled)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        colors_host = QWidget()
+        colors_layout = QVBoxLayout(colors_host)
+        colors_layout.setContentsMargins(0, 0, 0, 0)
+        colors_layout.addWidget(nuc_box)
+        colors_layout.addWidget(aa_box)
+        scroll.setWidget(colors_host)
+        scroll.setMinimumHeight(260)
+        scroll.setVisible(False)
+        self._colors_panel = scroll
+
+        buttons = make_cancel_save_run_bar(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+        layout.addLayout(form)
+        layout.addWidget(self._colors_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self._colors_panel, stretch=1)
+        layout.addWidget(buttons)
+
+    def should_run(self) -> bool:
+        return dialog_should_run(self)
+
+    def _on_colors_section_toggled(self, checked: bool) -> None:
+        self._colors_panel.setVisible(checked)
+        self._colors_toggle.setText("▼ Color" if checked else "▶ Color")
+        self.adjustSize()
+
+    def _on_file_input_field_activated(self) -> None:
+        sender = self.sender()
+        if isinstance(sender, TeMultiInputFilesWidget):
+            self._focused_file_input = sender
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self._focused_file_input is None:
+            return self._input.set_path_at_focus(path)
+        return self._focused_file_input.set_path_at_focus(path)
+
+    def input_files(self) -> list[Path]:
+        return self._input.paths()
+
+    def options(self) -> MsaPlotJobOptions:
+        nuc = self._nuc_grid.colors()
+        if "U" in nuc:
+            nuc["T"] = nuc["U"]
+        return MsaPlotJobOptions(
+            sequence_type=str(self._seq_type.currentData()),
+            output_format=str(self._format.currentData()),
+            dpi=int(self._dpi.value()),
+            sequence_height_cm=float(self._seq_height.value()),
+            sequence_distance_cm=float(self._seq_distance.value()),
+            nucleotide_colors=nuc,
+            amino_acid_colors=self._aa_grid.colors(),
+        )
 
 
 def _browse_file_line(

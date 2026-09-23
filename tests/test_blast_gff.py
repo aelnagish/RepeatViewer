@@ -48,7 +48,7 @@ def _write_blast_table(path: Path) -> None:
 
 
 def test_blast_hits_to_gff_rows_filters_bit_score(tmp_path: Path) -> None:
-    blast_txt = tmp_path / "reads.fasta_blast.txt"
+    blast_txt = tmp_path / "reads.fasta_b.txt"
     _write_blast_table(blast_txt)
     rows = blast_hits_to_gff_rows(blast_txt, minimum_bit_score=100.0)
     assert len(rows) == 1
@@ -57,10 +57,11 @@ def test_blast_hits_to_gff_rows_filters_bit_score(tmp_path: Path) -> None:
 
 
 def test_write_blast_gff(tmp_path: Path) -> None:
-    blast_txt = tmp_path / "reads.fasta_blast.txt"
+    blast_txt = tmp_path / "reads.fasta_b.txt"
     _write_blast_table(blast_txt)
     gff_path = write_blast_gff(blast_txt, minimum_bit_score=0.0)
     text = gff_path.read_text(encoding="utf-8")
     assert text.startswith("##gff-version 3")
     assert "TE1" in text
     assert "chr1" in text
+    assert gff_path.name == "reads.fasta_b.gff"

@@ -1,4 +1,4 @@
-"""Embedded HTML preview (TEAid Plotly reports, genome maps)."""
+"""Embedded HTML preview (TE-Aid Plotly reports, genome maps)."""
 
 from __future__ import annotations
 
@@ -86,11 +86,11 @@ def _local_file_url(path: Path) -> QUrl:
 
 
 def _webengine_safe_html_path(path: Path) -> Path:
-    """Return a load path without ``#`` when needed (WebEngine + large TEAid HTML).
+    """Return a load path without ``#`` when needed (WebEngine + large TE-Aid HTML).
 
     ``QUrl.fromLocalFile`` encodes ``#`` as ``%23``, but some macOS WebEngine builds
     still fail to render large Plotly reports from those URLs. Copying/linking to a
-    temp name without ``#`` keeps ``file://`` loading (needed for multi‑MB TEAid
+    temp name without ``#`` keeps ``file://`` loading (needed for multi‑MB TE-Aid
     HTML) instead of stuffing the whole file into ``setHtml``.
     """
     resolved = path.expanduser().resolve()
@@ -171,7 +171,7 @@ class LazyHtmlPreview(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._inner: QWidget | None = None
-        self._zoom_percent = load_preview_zoom_percent()
+        self._zoom_percent = load_preview_zoom_percent("html")
         self._fit_mode = load_preview_fit_mode()
         self._status = QLabel("HTML preview loads when you open a .html file.")
         self._status.setWordWrap(True)
@@ -335,7 +335,7 @@ class LazyHtmlPreview(QWidget):
 
 
 class HtmlWebEnginePreview(QWidget):
-    """In-app viewer for Plotly HTML (TEAid, genome maps)."""
+    """In-app viewer for Plotly HTML (TE-Aid, genome maps)."""
 
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
 
@@ -387,7 +387,7 @@ class HtmlWebEnginePreview(QWidget):
         self._current_url: str | None = None
         self._last_load_ok = False
         self._used_html_fallback = False
-        self._zoom_percent = load_preview_zoom_percent()
+        self._zoom_percent = load_preview_zoom_percent("html")
         self._fit_mode = load_preview_fit_mode()
         self._content_w = TEAID_NOMINAL_WIDTH
         self._content_h = TEAID_NOMINAL_HEIGHT
@@ -658,7 +658,7 @@ class HtmlWebEnginePreview(QWidget):
                 return
             return
 
-        # Prefer file:// (works for multi‑MB TEAid Plotly). For names with ``#``,
+        # Prefer file:// (works for multi‑MB TE-Aid Plotly). For names with ``#``,
         # load via a temp path without ``#`` so WebEngine does not blank the page.
         load_path = _webengine_safe_html_path(resolved)
         try:
@@ -667,7 +667,7 @@ class HtmlWebEnginePreview(QWidget):
             return
 
     def _load_html_via_set_html(self, resolved: Path) -> None:
-        # Only for small files — large TEAid reports must use file:// loading.
+        # Only for small files — large TE-Aid reports must use file:// loading.
         try:
             size = resolved.stat().st_size
         except OSError:

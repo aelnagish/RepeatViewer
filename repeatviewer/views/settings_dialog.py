@@ -92,6 +92,7 @@ from repeatviewer.widgets.preview_zoom import (
     MAX_PREVIEW_ZOOM_PERCENT,
     MIN_PREVIEW_ZOOM_PERCENT,
     PreviewFitMode,
+    PreviewZoomKind,
     DefaultFastaPreviewTab,
     load_color_blind_nucleotide_scheme,
     load_default_fasta_preview_tab,
@@ -463,7 +464,7 @@ class SettingsDialog(QDialog):
         self._batch_workers.setValue(project.batch_workers)
         self._batch_workers.setToolTip(
             "When several FASTA files are selected, run this many sequences in parallel. "
-            "BLAST and TEAid thread counts are derived from CPU cores minus a small "
+            "BLAST and TE-Aid thread counts are derived from CPU cores minus a small "
             f"reserve for {APP_DISPLAY_NAME}, divided by this worker count."
         )
         self._browser_panel_font = NoWheelSpinBox()
@@ -473,13 +474,19 @@ class SettingsDialog(QDialog):
         self._browser_panel_font.setToolTip(
             "Font size for folder and file names in the Browser panel."
         )
-        self._preview_zoom = NoWheelSpinBox()
-        self._preview_zoom.setRange(MIN_PREVIEW_ZOOM_PERCENT, MAX_PREVIEW_ZOOM_PERCENT)
-        self._preview_zoom.setValue(load_preview_zoom_percent())
-        self._preview_zoom.setSuffix(" %")
-        self._preview_zoom.setToolTip(
-            "Default scale for HTML plots, images, and text files in the Preview panel."
-        )
+        self._preview_zoom_spins: dict[PreviewZoomKind, NoWheelSpinBox] = {}
+        for kind, tip in (
+            (PreviewZoomKind.TEXT, "Scale for text / FASTA Text preview"),
+            (PreviewZoomKind.HTML, "Scale for HTML plots (TE-Aid, etc.)"),
+            (PreviewZoomKind.PDF, "Scale for PDF preview (100% = fit page width)"),
+            (PreviewZoomKind.IMAGE, "Scale for PNG / figure image preview"),
+        ):
+            spin = NoWheelSpinBox()
+            spin.setRange(MIN_PREVIEW_ZOOM_PERCENT, MAX_PREVIEW_ZOOM_PERCENT)
+            spin.setValue(load_preview_zoom_percent(kind))
+            spin.setSuffix(" %")
+            spin.setToolTip(tip)
+            self._preview_zoom_spins[kind] = spin
         self._fasta_default_tab = NoWheelComboBox()
         for label, tab in (
             ("Text", DefaultFastaPreviewTab.TEXT),
@@ -542,7 +549,7 @@ class SettingsDialog(QDialog):
         self._ui_thread_reserve.setValue(load_ui_thread_reserve())
         self._ui_thread_reserve.setSpecialValueText("Auto")
         self._ui_thread_reserve.setToolTip(
-            "CPU threads kept free for the interface while BLAST/TEAid jobs run. "
+            "CPU threads kept free for the interface while BLAST/TE-Aid jobs run. "
             "Auto reserves a small default. Raise it if the UI feels sluggish during "
             "heavy analyses; lower it to give jobs more cores."
         )
@@ -648,7 +655,7 @@ class SettingsDialog(QDialog):
         for widget in (
             self._batch_workers,
             self._browser_panel_font,
-            self._preview_zoom,
+            *self._preview_zoom_spins.values(),
             self._ui_thread_reserve,
             self._preview_fit,
             self._fasta_default_tab,
@@ -693,7 +700,10 @@ class SettingsDialog(QDialog):
         ])
         files_preview = _group("Files && preview", [
             ("Folders / Files font:", self._browser_panel_font),
-            ("Default preview zoom:", self._preview_zoom),
+            ("Preview zoom — text:", self._preview_zoom_spins[PreviewZoomKind.TEXT]),
+            ("Preview zoom — HTML:", self._preview_zoom_spins[PreviewZoomKind.HTML]),
+            ("Preview zoom — PDF:", self._preview_zoom_spins[PreviewZoomKind.PDF]),
+            ("Preview zoom — image:", self._preview_zoom_spins[PreviewZoomKind.IMAGE]),
             ("Default preview fit:", self._preview_fit),
             ("Default FASTA preview tab:", self._fasta_default_tab),
         ])
@@ -843,7 +853,8 @@ class SettingsDialog(QDialog):
         self._project.use_system_sequence_viewer = self._system_viewer.isChecked()
         self._project.batch_workers = self._batch_workers.value()
         save_browser_panel_font_size(self._browser_panel_font.value())
-        save_preview_zoom_percent(self._preview_zoom.value())
+        for kind, spin in self._preview_zoom_spins.items():
+            save_preview_zoom_percent(spin.value(), kind)
         save_preview_fit_mode(PreviewFitMode(str(self._preview_fit.currentData())))
         save_show_sequence_summary(self._show_sequence_summary.isChecked())
         save_default_fasta_preview_tab(
@@ -1071,7 +1082,8 @@ class SettingsDialog(QDialog):
     def _save_settings(self) -> None:
         s = self._settings
         s.beginGroup(SETTINGS_GROUP)
-        s.setValue("preview_zoom_percent", self._preview_zoom.value())
+        for kind, spin in self._preview_zoom_spins.items():
+            s.setValue(f"preview_zoom_percent_{kind.value}", spin.value())
         s.setValue("preview_fit_mode", str(self._preview_fit.currentData()))
         s.endGroup()
         save_workspace(self._project)

@@ -110,7 +110,7 @@ class RepeatViewerProject:
     use_system_mafft: bool = False
     use_system_muscle: bool = False
     use_system_sequence_viewer: bool = False
-    # How many sequences to process at once in batch jobs (Blast, TEAid, etc.)
+    # How many sequences to process at once in batch jobs (Blast, TE-Aid, etc.)
     batch_workers: int = 4
 
     def __post_init__(self) -> None:
