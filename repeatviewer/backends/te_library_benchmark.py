@@ -11,6 +11,8 @@ from repeatviewer.external_process import run_logged_process
 from dataclasses import dataclass
 from pathlib import Path
 
+from repeatviewer.tool_output_paths import kept_input_name
+
 import pandas as pd
 
 from repeatviewer.backends.blast_genome_plot import read_repeatmasker_out
@@ -392,7 +394,7 @@ def run_te_library_benchmark(
     """Full library benchmark: optional RepeatMasker, then summary + plot."""
     query_fasta = query_fasta.expanduser().resolve()
     standard_fasta = standard_fasta.expanduser().resolve()
-    work_dir = (output_dir or query_fasta.parent / f"{query_fasta.stem}_lib_benchmark").resolve()
+    work_dir = (output_dir or query_fasta.parent / f"{kept_input_name(query_fasta)}_lib_benchmark").resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
     out_file = rm_out.expanduser().resolve() if rm_out else None
@@ -418,7 +420,7 @@ def run_te_library_benchmark(
     )
     plot_html = write_library_benchmark_plot_html(
         counts,
-        work_dir / f"{query_fasta.stem}_library_benchmark.html",
+        work_dir / f"{kept_input_name(query_fasta)}_library_benchmark.html",
         query_label=query_fasta.name,
         standard_label=standard_fasta.name,
     )

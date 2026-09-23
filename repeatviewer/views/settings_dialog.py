@@ -461,7 +461,7 @@ class SettingsDialog(QDialog):
         self._batch_workers.setValue(project.batch_workers)
         self._batch_workers.setToolTip(
             "When several FASTA files are selected, run this many sequences in parallel. "
-            "BLAST and TEAid thread counts are derived from CPU cores minus a small "
+            "BLAST and TE-Aid thread counts are derived from CPU cores minus a small "
             f"reserve for {APP_DISPLAY_NAME}, divided by this worker count."
         )
         self._browser_panel_font = NoWheelSpinBox()
@@ -540,7 +540,7 @@ class SettingsDialog(QDialog):
         self._ui_thread_reserve.setValue(load_ui_thread_reserve())
         self._ui_thread_reserve.setSpecialValueText("Auto")
         self._ui_thread_reserve.setToolTip(
-            "CPU threads kept free for the interface while BLAST/TEAid jobs run. "
+            "CPU threads kept free for the interface while BLAST/TE-Aid jobs run. "
             "Auto reserves a small default. Raise it if the UI feels sluggish during "
             "heavy analyses; lower it to give jobs more cores."
         )

@@ -21,8 +21,10 @@ def _records(path: Path) -> list[SeqRecord]:
 
 def write_reverse_complement_fasta(path: Path) -> Path:
     """Reverse-complement every FASTA record and preserve its identifier."""
+    from repeatviewer.tool_output_paths import kept_input_name
+
     source = path.expanduser().resolve()
-    output = source.with_name(f"{source.stem}_rc.fa")
+    output = source.with_name(f"{kept_input_name(source)}_rc.fa")
     transformed = [
         SeqRecord(
             record.seq.reverse_complement(),
@@ -76,8 +78,10 @@ def write_predicted_orfs_fasta(
     settings: OrfSettings | None = None,
 ) -> Path:
     """Write predicted ORF nucleotide sequences to a FASTA file."""
+    from repeatviewer.tool_output_paths import kept_input_name
+
     source = path.expanduser().resolve()
-    output = source.with_name(f"{source.stem}_orfs.fa")
+    output = source.with_name(f"{kept_input_name(source)}_orfs.fa")
     SeqIO.write(predicted_orf_records(source, settings=settings), str(output), "fasta")
     return output
 
@@ -88,8 +92,10 @@ def write_translated_orfs_fasta(
     settings: OrfSettings | None = None,
 ) -> Path:
     """Predict ORFs, then translate them with Biopython into protein FASTA."""
+    from repeatviewer.tool_output_paths import kept_input_name
+
     source = path.expanduser().resolve()
-    output = source.with_name(f"{source.stem}_translated.faa")
+    output = source.with_name(f"{kept_input_name(source)}_translated.faa")
     SeqIO.write(
         predicted_orf_records(source, translate=True, settings=settings),
         str(output),

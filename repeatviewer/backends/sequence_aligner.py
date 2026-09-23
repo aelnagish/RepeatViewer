@@ -138,9 +138,10 @@ def _fasta_sequence_count(path: Path) -> int:
 
 
 def combined_alignment_output_stem(seq_files: list[Path]) -> str:
-    """Basename for combined MSA: ``{first_stem}_msa_multi`` (same pattern as Flexidot multi)."""
-    stem = seq_files[0].expanduser().resolve().stem
-    return f"{stem}_msa_multi"
+    """Basename for combined MSA: ``{first.name}_msa_multi`` (same pattern as Flexidot multi)."""
+    from repeatviewer.tool_output_paths import kept_input_name
+
+    return f"{kept_input_name(seq_files[0].expanduser().resolve())}_msa_multi"
 
 
 def _next_available_fasta(parent: Path, stem_base: str) -> Path:
@@ -176,10 +177,13 @@ def run_alignment(
     cancel=None,
 ) -> Path:
     """
-    Align a FASTA/MSA file. Writes ``<stem>_msa.fa`` next to the input.
+    Align a FASTA/MSA file. Writes ``<name>_msa.fa`` next to the input
+    (keeps the original extension, e.g. ``reads.fa_msa.fa``).
 
     ``engine`` selects MAFFT or MUSCLE 5.
     """
+    from repeatviewer.tool_output_paths import kept_input_name
+
     input_fasta = input_fasta.expanduser().resolve()
     if input_fasta.suffix.lower() not in {".fa", ".fasta", ".fas", ".faa"}:
         raise ValueError("Align only works on .fa / .fasta files.")
@@ -189,7 +193,7 @@ def run_alignment(
             "Alignment needs at least two sequences."
         )
 
-    output_file = input_fasta.parent / f"{input_fasta.stem}_msa.fa"
+    output_file = input_fasta.parent / f"{kept_input_name(input_fasta)}_msa.fa"
     if engine == ALIGNER_MUSCLE:
         resolved = muscle_command(use_system_muscle=use_system_muscle)
         system_selected = use_system_muscle

@@ -46,7 +46,7 @@ TEAID_PAN_X_TICKANGLE = -45
 
 
 class TeaidInputError(ValueError):
-    """Input FASTA is not suitable for TEAid consensus generation."""
+    """Input FASTA is not suitable for TE-Aid consensus generation."""
 
 
 def _pan_blast_subplot_title(genome_name: str, blast_plot_title: str) -> str:
@@ -69,7 +69,7 @@ def _pan_genome_panel_px(num_genomes: int) -> int:
 
 def con_generater(input_file, output_dir, threshold=0.8, ambiguous='N'):
     """
-    Build a consensus sequence for TEAid.
+    Build a consensus sequence for TE-Aid.
 
     Accepts a single-sequence FASTA or a multiple sequence alignment (all rows
     the same length). Unaligned multi-FASTA files are rejected with a clear error.
@@ -90,7 +90,7 @@ def con_generater(input_file, output_dir, threshold=0.8, ambiguous='N'):
             raise TeaidInputError(
                 f"{os.path.basename(input_file)} contains {len(records)} sequences "
                 f"with different lengths ({min_len}–{max_len} bp). "
-                "TEAid requires a multiple sequence alignment (all rows the same length). "
+                "TE-Aid requires a multiple sequence alignment (all rows the same length). "
                 "Align the sequences first (Align menu) or use a single-sequence FASTA."
             )
 
@@ -170,13 +170,13 @@ def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads
     # Used global variable: os_type
 
     if genome_file is None:
-        logging.error("WARNING: Genome file not found. TEAid can't perform genome blast.")
+        logging.error("WARNING: Genome file not found. TE-Aid can't perform genome blast.")
         return False
 
     # Check if provided genome file exist
     elif not os.path.isfile(genome_file):
         logging.error(
-            "WARNING: You provided genome file not found. TEAid can't perform genome blast."
+            "WARNING: You provided genome file not found. TE-Aid can't perform genome blast."
         )
         return False
 
@@ -188,14 +188,14 @@ def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads
     # Check if makeblastdb is correctly installed
     if blast_database == 'makeblastdb_not_found':
         logging.error(
-            "Error: makeblastdb command not found. TEAid can't perform genome blast."
+            "Error: makeblastdb command not found. TE-Aid can't perform genome blast."
         )
         return False
 
     # Check if error happened
     elif blast_database == 'makeblastdb_got_error':
         logging.error(
-            "Error: BLAST database can't be established for the genome. TEAid can't perform genome blast."
+            "Error: BLAST database can't be established for the genome. TE-Aid can't perform genome blast."
         )
         return False
 
@@ -213,12 +213,12 @@ def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads
     )
 
     if genome_blast_out == 'blastn_not_found':
-        logging.error("Error: BLAST command not found. TEAid can't perform genome blast.")
+        logging.error("Error: BLAST command not found. TE-Aid can't perform genome blast.")
         return False
 
     elif genome_blast_out == 'blastn_got_error':
         logging.error(
-            "TEAid can't perform genome blast. Refer to terminal for more information."
+            "TE-Aid can't perform genome blast. Refer to terminal for more information."
         )
         return False
 
@@ -228,7 +228,7 @@ def teaid_genome_blast(input_file, genome_file, output_dir, e_value, num_threads
 
     elif not genome_blast_out:
         logging.error(
-            "TEAid can't perform genome blast. Refer to terminal for more information."
+            "TE-Aid can't perform genome blast. Refer to terminal for more information."
         )
         return False
 
@@ -272,14 +272,14 @@ def self_blast(input_file, output_dir, use_system_blast=False, word_size=11, can
     # Check if makeblastdb is correctly installed
     if blast_database == 'makeblastdb_not_found':
         logging.error(
-            "Error: makeblastdb command not found. TEAid can't perform self blast."
+            "Error: makeblastdb command not found. TE-Aid can't perform self blast."
         )
         return False, work_dir
 
     # Check if error happened
     elif blast_database == 'makeblastdb_got_error':
         logging.error(
-            "Error: BLAST database can't be established for the genome. TEAid can't perform self blast."
+            "Error: BLAST database can't be established for the genome. TE-Aid can't perform self blast."
         )
         return False, work_dir
 
@@ -296,12 +296,12 @@ def self_blast(input_file, output_dir, use_system_blast=False, word_size=11, can
     )
 
     if self_blast_out == 'blastn_not_found':
-        logging.error("Error: BLAST command not found. TEAid can't perform self blast.")
+        logging.error("Error: BLAST command not found. TE-Aid can't perform self blast.")
         return False, work_dir
 
     elif self_blast_out == 'blastn_got_error':
         logging.error(
-            "TEAid can't perform self blast. Refer to terminal for more information."
+            "TE-Aid can't perform self blast. Refer to terminal for more information."
         )
         return False, work_dir
 
@@ -311,7 +311,7 @@ def self_blast(input_file, output_dir, use_system_blast=False, word_size=11, can
 
     elif not self_blast_out:
         logging.error(
-            "TEAid can't perform self blast. Refer to terminal for more information."
+            "TE-Aid can't perform self blast. Refer to terminal for more information."
         )
         return False, work_dir
 
@@ -787,7 +787,7 @@ def render_self_dotplot_png(
     *,
     title: str = "Self dot plot",
 ) -> str:
-    """Render TEAid self-BLAST hits to a static PNG (no WebEngine)."""
+    """Render TE-Aid self-BLAST hits to a static PNG (no WebEngine)."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -892,7 +892,7 @@ def generate_preview_self_dotplot_png(
     use_system_blast: bool = False,
     work_dir: os.PathLike[str] | str | None = None,
 ) -> str:
-    """Build a TEAid self-BLAST dotplot PNG (used by TEAid / export helpers)."""
+    """Build a TE-Aid self-BLAST dotplot PNG (used by TE-Aid / export helpers)."""
     input_path, cons_len, output_path, scratch_dir = _preview_self_dotplot_paths(
         input_file,
         output_png,
@@ -1363,7 +1363,7 @@ def _assemble_teaid_pan_genome_figure(
     """
     n = len(genome_panels)
     if n < 1:
-        raise ValueError('Pan-genome TEAid requires at least one genome.')
+        raise ValueError('Pan-genome TE-Aid requires at least one genome.')
 
     specs = [[{} for _ in range(n)] for _ in range(4)]
     specs[3] = [{}] + [None] * (n - 1)
@@ -1527,12 +1527,12 @@ def teaid_pan_genome_plotter(
     hit_color_mid='#1f77b4',
 ):
     """
-    Combined TEAid report for pan-genome mode.
+    Combined TE-Aid report for pan-genome mode.
 
     ``genome_targets`` is a list of ``(short_name, genome_fasta_path)`` pairs.
     """
     logging.info(
-        'TEAid pan-genome is running for:%s (%d genomes)',
+        'TE-Aid pan-genome is running for:%s (%d genomes)',
         os.path.basename(input_file),
         len(genome_targets),
     )
@@ -1583,7 +1583,7 @@ def teaid_pan_genome_plotter(
         x_axis_label=x_axis_label,
     )
     _write_teaid_html(fig, output_dir, input_file)
-    logging.info('TEAid pan-genome finished: %s.', os.path.basename(input_file))
+    logging.info('TE-Aid pan-genome finished: %s.', os.path.basename(input_file))
     return True
 
 
@@ -1612,14 +1612,14 @@ def teaid_plotter(
 
     run_succeed = True
 
-    logging.info(f'TEAid is running for:{os.path.basename(input_file)}')
+    logging.info(f'TE-Aid is running for:{os.path.basename(input_file)}')
 
     try:
         # Generate consensus sequence
         con_seq, cons_len = con_generater(input_file, output_dir, threshold=0.3)
 
     except TeaidInputError as e:
-        logging.error("TEAid input: %s", e)
+        logging.error("TE-Aid input: %s", e)
         raise
     except Exception as e:
         logging.error(
@@ -1662,6 +1662,6 @@ def teaid_plotter(
     )
     _write_teaid_html(fig, output_dir, input_file, output_name_tag=output_name_tag)
 
-    logging.info(f'TEAid finished: {os.path.basename(input_file)}.')
+    logging.info(f'TE-Aid finished: {os.path.basename(input_file)}.')
     # fig.show()
     return run_succeed

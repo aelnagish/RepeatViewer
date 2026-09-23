@@ -213,7 +213,7 @@ RepeatViewer/
   repeatviewer/
     main_window.py         # browser UI, menus, job runner
     project.py             # genome, pan-genome, database settings
-    backends/              # analysis engines (BLAST, TEAid, Flexidot, …)
+    backends/              # analysis engines (BLAST, TE-Aid, Flexidot, …)
     views/                 # tool and settings dialogs
     widgets/               # folder tree, file table, preview tabs
     plugins/               # plugin API

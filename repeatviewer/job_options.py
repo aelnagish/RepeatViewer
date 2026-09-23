@@ -536,7 +536,7 @@ class TeAnnotationJobOptions:
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
 DEFAULT_TEAID_THREADS = 1
 DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 6
-# Text written on the consensus (x-)axis of the TEAid panels. Configurable so
+# Text written on the consensus (x-)axis of the TE-Aid panels. Configurable so
 # non-TE users (e.g. tandem repeats) can relabel it.
 DEFAULT_TEAID_X_AXIS_LABEL = "TE consensus (bp)"
 MIN_TEAID_SELF_BLAST_WORD_SIZE = 4
@@ -552,7 +552,7 @@ TEAID_RIGHT_CLICK_ACTIONS = (TEAID_RIGHT_CLICK_RUN, TEAID_RIGHT_CLICK_DIALOG)
 
 
 def clamp_teaid_self_blast_word_size(requested: int) -> int:
-    """Clamp TEAid self-BLAST ``-word_size`` to 4–25."""
+    """Clamp TE-Aid self-BLAST ``-word_size`` to 4–25."""
     return max(
         MIN_TEAID_SELF_BLAST_WORD_SIZE,
         min(MAX_TEAID_SELF_BLAST_WORD_SIZE, int(requested)),

@@ -6,6 +6,15 @@ import os
 from pathlib import Path
 
 
+def kept_input_name(path: Path | str) -> str:
+    """Basename kept in derived tool outputs (same convention as BLAST).
+
+    Example: ``reads.fa`` → ``reads.fa_msa.fa``, ``reads.fa_flexidot.png``.
+    Always use the full filename (including extension), never ``Path.stem``.
+    """
+    return Path(path).name
+
+
 def write_genome_reference_link(
     out_dir: Path,
     genome_fasta: Path,
@@ -27,7 +36,7 @@ def write_genome_reference_link(
     if suffix:
         link_name = f"{suffix.lstrip('_')}.lnk.fa"
     else:
-        link_name = f"{genome_fasta.stem}.lnk.fa"
+        link_name = f"{kept_input_name(genome_fasta)}.lnk.fa"
 
     link_path = out_dir / link_name
     if link_path.exists() or link_path.is_symlink():

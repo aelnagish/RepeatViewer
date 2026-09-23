@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from repeatviewer.tool_output_paths import kept_input_name
+
 from Bio import SeqIO
 
 from repeatviewer.app_preferences import cache_dir
@@ -391,7 +393,7 @@ def quantify_library_blastn(
         target_fasta.name,
         db_dir,
     )
-    tab_path = out_dir / f"{target_fasta.stem}_vs_{library_fasta.stem}.blastn.tsv"
+    tab_path = out_dir / f"{kept_input_name(target_fasta)}_vs_{kept_input_name(library_fasta)}.blastn.tsv"
     db = check_database(
         str(target_fasta),
         str(db_dir),
@@ -432,10 +434,10 @@ def quantify_library_blastn(
         ),
     )
     result.summary_tsv = _write_summary_tsv(
-        result, out_dir / f"{target_fasta.stem}_repeat_quant.tsv"
+        result, out_dir / f"{kept_input_name(target_fasta)}_repeat_quant.tsv"
     )
     result.gff = _write_arrays_gff(
-        tab_path, out_dir / f"{target_fasta.stem}_repeat_quant.gff"
+        tab_path, out_dir / f"{kept_input_name(target_fasta)}_repeat_quant.gff"
     )
     return result
 
@@ -770,8 +772,8 @@ def quantify_library_repeatmasker(
     if rm_out is None:
         # RepeatMasker's FastaDB caps ids at 50 chars, so feed it short ids and
         # map the family (library) names back afterward.
-        short_lib = out_dir / f"{target_fasta.stem}_rm_lib.fa"
-        short_query = out_dir / f"{target_fasta.stem}_rm.fa"
+        short_lib = out_dir / f"{kept_input_name(target_fasta)}_rm_lib.fa"
+        short_query = out_dir / f"{kept_input_name(target_fasta)}_rm.fa"
         library_map = _sanitize_fasta_ids(library_fasta, short_lib, "L")
         _sanitize_fasta_ids(target_fasta, short_query, "q")
         rm_out = run_repeatmasker_lib_benchmark(
@@ -818,7 +820,7 @@ def quantify_library_repeatmasker(
         landscape_unmatched_hits=unmatched,
     )
     result.summary_tsv = _write_summary_tsv(
-        result, out_dir / f"{target_fasta.stem}_repeat_quant_rm.tsv"
+        result, out_dir / f"{kept_input_name(target_fasta)}_repeat_quant_rm.tsv"
     )
     bin_width = 1.0
     result.landscape = _landscape_from_rows(
@@ -829,7 +831,7 @@ def quantify_library_repeatmasker(
     result.landscape_bin_width = bin_width
     result.landscape_tsv = _write_landscape_tsv(
         result.landscape,
-        out_dir / f"{target_fasta.stem}_repeat_landscape.tsv",
+        out_dir / f"{kept_input_name(target_fasta)}_repeat_landscape.tsv",
         bin_width=bin_width,
         metric=metric,
     )
@@ -1086,7 +1088,7 @@ def repeat_quant_output_dir(
     """Planned run folder for one genome (not created, no clash handling)."""
     target_fasta = Path(target_fasta).expanduser()
     parent = Path(base_dir).expanduser() if base_dir else target_fasta.parent
-    return parent / f"{target_fasta.stem}_repeat_quant_{stamp}"
+    return parent / f"{kept_input_name(target_fasta)}_repeat_quant_{stamp}"
 
 
 def create_repeat_quant_output_dir(

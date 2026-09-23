@@ -86,7 +86,7 @@ WORKFLOW_TOOLS: dict[str, WorkflowToolInfo] = {
     ),
     "teaid": WorkflowToolInfo(
         "teaid",
-        "TEAid",
+        "TE-Aid",
         frozenset({FMT_FASTA}),
         frozenset({FMT_HTML}),
         needs_genome=True,
@@ -334,11 +334,11 @@ class WorkflowSpec:
         )
 
 
-def default_bee_workflow() -> WorkflowSpec:
-    """Built-in BEE pipeline: BLAST → MSA Extend → Align (MAFFT)."""
+def default_beea_workflow() -> WorkflowSpec:
+    """Built-in BEEA pipeline: BLAST → MSA Extend → Align (MAFFT)."""
     return WorkflowSpec(
         id="bee",
-        name="BEE",
+        name="Blast-Extract-Extend-Align (BEEA)",
         steps=[
             WorkflowStep(tool_id="blast"),
             WorkflowStep(tool_id="extend"),
@@ -347,22 +347,78 @@ def default_bee_workflow() -> WorkflowSpec:
     )
 
 
+def default_bee_workflow() -> WorkflowSpec:
+    """Backward-compatible alias for :func:`default_beea_workflow`."""
+    return default_beea_workflow()
+
+
+def _normalize_beea_steps(steps: list[WorkflowStep]) -> list[WorkflowStep]:
+    """Ensure the built-in BEEA chain ends with Align."""
+    tool_ids = [step.tool_id for step in steps]
+    if tool_ids == ["blast", "extend", "align"]:
+        return list(steps)
+    if tool_ids == ["blast", "extend"]:
+        return [*steps, WorkflowStep(tool_id="align")]
+    if not tool_ids:
+        return list(default_beea_workflow().steps)
+    if "align" not in tool_ids:
+        return [*steps, WorkflowStep(tool_id="align")]
+    return list(steps)
+
+
 def ensure_default_workflows() -> list[WorkflowSpec]:
-    """Seed the default BEE workflow once when none are stored yet."""
+    """Seed / refresh the default BEEA workflow and keep it first in the menu."""
+    desired = default_beea_workflow()
     specs = load_workflow_specs()
-    if specs:
-        return specs
-    s = QSettings()
-    s.beginGroup(_GROUP)
-    already_seeded = bool(s.value(_KEY_DEFAULTS_SEEDED, False))
-    if already_seeded:
+    if not specs:
+        s = QSettings()
+        s.beginGroup(_GROUP)
+        already_seeded = bool(s.value(_KEY_DEFAULTS_SEEDED, False))
+        if already_seeded:
+            s.endGroup()
+            return []
+        s.setValue(_KEY_DEFAULTS_SEEDED, True)
         s.endGroup()
-        return []
-    s.setValue(_KEY_DEFAULTS_SEEDED, True)
-    s.endGroup()
-    bee = default_bee_workflow()
-    _write_all([bee])
-    return [bee]
+        _write_all([desired])
+        return [desired]
+
+    changed = False
+    bee_index = next(
+        (
+            index
+            for index, spec in enumerate(specs)
+            if spec.id == "bee"
+            or spec.name.strip()
+            in {
+                "BEE",
+                "BEEA",
+                "Blast-Extract-Extend-Align (BEEA)",
+            }
+        ),
+        None,
+    )
+    if bee_index is None:
+        specs.insert(0, desired)
+        changed = True
+    else:
+        old = specs[bee_index]
+        steps = _normalize_beea_steps(list(old.steps))
+        updated = WorkflowSpec(id="bee", name=desired.name, steps=steps)
+        if (
+            old.id != updated.id
+            or old.name != updated.name
+            or [step.tool_id for step in old.steps]
+            != [step.tool_id for step in updated.steps]
+        ):
+            specs[bee_index] = updated
+            changed = True
+        if bee_index != 0:
+            specs.insert(0, specs.pop(bee_index))
+            changed = True
+
+    if changed:
+        _write_all(specs)
+    return specs
 
 
 def load_workflow_specs() -> list[WorkflowSpec]:

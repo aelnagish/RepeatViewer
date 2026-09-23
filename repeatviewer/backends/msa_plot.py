@@ -207,10 +207,12 @@ def default_msa_plot_options() -> MsaPlotOptions:
 
 
 def msa_plot_output_path(input_fasta: Path, *, output_format: str) -> Path:
-    """Default output next to the input MSA."""
+    """Default output next to the input MSA (keeps the original filename)."""
+    from repeatviewer.tool_output_paths import kept_input_name
+
     path = input_fasta.expanduser().resolve()
     ext = "pdf" if str(output_format).lower() == MSA_PLOT_FORMAT_PDF else "png"
-    return path.parent / f"{path.stem}_msa_plot.{ext}"
+    return path.parent / f"{kept_input_name(path)}_msa_plot.{ext}"
 
 
 def fasta_to_alignment_array(path: Path) -> tuple[np.ndarray, list[str]]:

@@ -41,7 +41,7 @@ def analysis_threads_per_job(
     parallel_jobs: int = 1,
 ) -> int:
     """
-    Threads for one BLAST/TEAid job.
+    Threads for one BLAST/TE-Aid job.
 
     ``batch_workers`` is the parallel sequence count from Preferences.
     ``parallel_jobs`` is how many analysis processes run at once (e.g. similarity DBs).

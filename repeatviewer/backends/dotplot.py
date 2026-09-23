@@ -13,7 +13,7 @@ points. Nothing is recomputed while zooming; only a change of word size or the
 reverse-complement setting triggers a new pass.
 
 This module is deliberately Qt-free so it can be tested and profiled on its own.
-It does not touch the Flexidot or TEAid code paths.
+It does not touch the Flexidot or TE-Aid code paths.
 """
 
 from __future__ import annotations

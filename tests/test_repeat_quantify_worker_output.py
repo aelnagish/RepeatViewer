@@ -23,7 +23,7 @@ def fastas(tmp_path):
 
 
 def _fake_quantify(library, target, out_dir, **kwargs):
-    (Path(out_dir) / f"{Path(target).stem}_repeat_quant.tsv").write_text("x\n")
+    (Path(out_dir) / f"{Path(target).name}_repeat_quant.tsv").write_text("x\n")
     return []
 
 
@@ -50,16 +50,16 @@ def test_repeat_runs_get_separate_folders(qapp, fastas, monkeypatch):
             params={"blast_word_size": 11, "rm_div": 40}, stamp=STAMP,
         ))
         assert "failed" not in got
-    first = genome.parent / f"genome_repeat_quant_{STAMP}"
-    second = genome.parent / f"genome_repeat_quant_{STAMP}_2"
+    first = genome.parent / f"genome.fa_repeat_quant_{STAMP}"
+    second = genome.parent / f"genome.fa_repeat_quant_{STAMP}_2"
     for folder in (first, second):
         record = json.loads((folder / "run_parameters.json").read_text())
         assert record["status"] == "completed"
         assert record["parameters"] == {"blast_word_size": 11}
         assert sorted(record["outputs"]) == [
-            "genome_repeat_quant.html", "genome_repeat_quant.tsv",
+            "genome.fa_repeat_quant.html", "genome.fa_repeat_quant.tsv",
         ]
-    assert got["finished"] == [str(second / "genome_repeat_quant.html")]
+    assert got["finished"] == [str(second / "genome.fa_repeat_quant.html")]
 
 
 def test_chosen_output_base_is_used(qapp, fastas, tmp_path, monkeypatch):
@@ -70,7 +70,7 @@ def test_chosen_output_base_is_used(qapp, fastas, tmp_path, monkeypatch):
     _run(mw.RepeatQuantifyWorker(
         lib, [genome], engine="blastn", threads=1, stamp=STAMP, output_base=base,
     ))
-    assert (base / f"genome_repeat_quant_{STAMP}" / "run_parameters.json").is_file()
+    assert (base / f"genome.fa_repeat_quant_{STAMP}" / "run_parameters.json").is_file()
 
 
 @pytest.mark.parametrize(
@@ -85,7 +85,7 @@ def test_failed_or_cancelled_runs_are_recorded(qapp, fastas, monkeypatch, error,
     monkeypatch.setattr(rq, "quantify_library", _raise)
     _run(mw.RepeatQuantifyWorker(lib, [genome], engine="blastn", threads=1, stamp=STAMP))
     record = json.loads(
-        (genome.parent / f"genome_repeat_quant_{STAMP}" / "run_parameters.json").read_text()
+        (genome.parent / f"genome.fa_repeat_quant_{STAMP}" / "run_parameters.json").read_text()
     )
     assert record["status"] == status
     assert record["finished"]

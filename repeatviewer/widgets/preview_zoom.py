@@ -1,4 +1,4 @@
-"""Persisted zoom / fit settings for TEAid HTML and Flexidot image previews."""
+"""Persisted zoom / fit settings for TE-Aid HTML and Flexidot image previews."""
 
 from __future__ import annotations
 

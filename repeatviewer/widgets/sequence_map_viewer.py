@@ -4184,7 +4184,7 @@ class SimilarityAnnotationSettingsPanel(QWidget):
 
         intro = QLabel(
             "These E-value and output limits apply only to Similarity annotation. "
-            "They do not change TEAid, genome BLAST, or other tools in RepeatViewer.",
+            "They do not change TE-Aid, genome BLAST, or other tools in RepeatViewer.",
             self,
         )
         intro.setWordWrap(True)

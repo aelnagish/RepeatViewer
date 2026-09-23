@@ -1,4 +1,4 @@
-"""Validate user databases and build BLAST / CDD / HMM indexes (TEAid-style)."""
+"""Validate user databases and build BLAST / CDD / HMM indexes (TE-Aid-style)."""
 
 from __future__ import annotations
 

@@ -545,7 +545,7 @@ _TOOLBAR_TOOLTIPS = {
     "te_genome_map": "TE density plot using default parameters",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
     "extend": "Extend MSA ends using default parameters",
-    "teaid": "TEAid interactive HTML report using default parameters",
+    "teaid": "TE-Aid interactive HTML report using default parameters",
     "msa_clean": "Trim or clean MSA using default parameters",
     "flexidot": "Dotplot comparison of selected sequences using default parameters",
     "consensus": "Click: set consensus parameters and run. Right-click: run with saved settings.",
@@ -553,7 +553,7 @@ _TOOLBAR_TOOLTIPS = {
 }
 
 _JOB_DISPLAY_TITLES = {
-    "teaid": "TEAid",
+    "teaid": "TE-Aid",
     "blast": "BLAST",
     "extend": "MSA Extend",
     "msa_clean": "MSA Clean",
@@ -970,7 +970,7 @@ class RepeatQuantifyWorker(QObject):
                 )
                 summary = write_summary_html(
                     results,
-                    out_dir / f"{target.stem}_repeat_quant.html",
+                    out_dir / f"{target.name}_repeat_quant.html",
                     target_label=target.name,
                     warnings=lib_warnings,
                 )
@@ -981,7 +981,7 @@ class RepeatQuantifyWorker(QObject):
                             str(
                                 write_landscape_html(
                                     result,
-                                    out_dir / f"{target.stem}_repeat_landscape.html",
+                                    out_dir / f"{target.name}_repeat_landscape.html",
                                     target_label=target.name,
                                 )
                             )
@@ -3166,7 +3166,7 @@ class MainWindow(QMainWindow):
                 dialog.selected_ids(),
                 source.parent,
                 single_file=dialog.single_file(),
-                combined_name=f"{source.stem}_extracted",
+                combined_name=f"{source.name}_extracted",
             )
         except SequenceComposeError as exc:
             QMessageBox.warning(self, "Extract Sequences from File", str(exc))
@@ -3609,7 +3609,7 @@ class MainWindow(QMainWindow):
 
         intro = QLabel(
             "Some folder or file names contain spaces. Import is allowed, but "
-            "tools such as BLAST and TEAid can fail on paths with spaces."
+            "tools such as BLAST and TE-Aid can fail on paths with spaces."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -4001,9 +4001,9 @@ class MainWindow(QMainWindow):
 
     def _populate_teaid_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("TEAid with default parameters", self._run_teaid)
+            menu.addAction("TE-Aid with default parameters", self._run_teaid)
         menu.addSeparator()
-        menu.addAction("Change TEAid parameters", self._modify_teaid_parameters)
+        menu.addAction("Change TE-Aid parameters", self._modify_teaid_parameters)
 
     def _populate_msa_clean_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         del skip_default
@@ -4121,7 +4121,7 @@ class MainWindow(QMainWindow):
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_fastga_menu(tools_menu.addMenu("Fast&GA"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
-        self._populate_teaid_menu(tools_menu.addMenu("&TEAid"))
+        self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
         self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
         self._populate_flexidot_menu(tools_menu.addMenu("&Flexidot"))
@@ -4585,7 +4585,7 @@ class MainWindow(QMainWindow):
         if right_click_slot is not None:
             btn.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
             # Run on the next event-loop tick so the release event fully
-            # finishes before a modal dialog (e.g. TEAid params) opens.
+            # finishes before a modal dialog (e.g. TE-Aid params) opens.
             btn.rightClicked.connect(
                 lambda s=right_click_slot: QTimer.singleShot(0, s)
             )
@@ -4859,7 +4859,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "teaid":
             self._add_toolbar_action_button(
                 bar,
-                "TEAid",
+                "TE-Aid",
                 self._open_teaid_dialog,
                 tooltip=(
                     "Click: set parameters and run.\n"
@@ -8621,7 +8621,7 @@ class MainWindow(QMainWindow):
         self._apply_function("teaid", teaid_options=self._teaid_options)
 
     def _open_teaid_dialog(self) -> None:
-        """Click TEAid: parameters dialog. Run runs; Save (Options tab) stores only."""
+        """Click TE-Aid: parameters dialog. Run runs; Save (Options tab) stores only."""
         dialog = TeaAidParamsDialog(
             initial=self._teaid_options,
             parent=self,
@@ -8638,17 +8638,17 @@ class MainWindow(QMainWindow):
         if run_after:
             self._run_teaid()
         else:
-            self._set_status_message("TEAid settings saved", 4000)
+            self._set_status_message("TE-Aid settings saved", 4000)
 
     def _quick_teaid_right_click(self) -> None:
-        """Right-click TEAid: run with saved settings, or open the dialog."""
+        """Right-click TE-Aid: run with saved settings, or open the dialog."""
         if self._teaid_options.right_click_action == TEAID_RIGHT_CLICK_DIALOG:
             self._open_teaid_dialog()
         else:
             self._run_teaid()
 
     def _modify_teaid_parameters(self) -> None:
-        """Menu: same Cancel / Save / Run dialog as the TEAid toolbar button."""
+        """Menu: same Cancel / Save / Run dialog as the TE-Aid toolbar button."""
         self._open_teaid_dialog()
 
     def _modify_extend_parameters(self) -> None:
@@ -9538,7 +9538,7 @@ class MainWindow(QMainWindow):
 
         output_dir = separation_output_dir(path)
         mapping_note = (
-            f"Sequence_name_mapping_{sanitize_name(path.stem)}.txt will be written next to the input file."
+            f"Sequence_name_mapping_{sanitize_name(path.name)}.txt will be written next to the input file."
         )
         if subfolder_per_sequence:
             title = "Separate into subfolders"
@@ -11145,7 +11145,7 @@ class MainWindow(QMainWindow):
             if len(created_paths) > 4:
                 names += ", …"
             summary += f" — created: {names}"
-        # TEAid opens its HTML in Preview and sets the file link; a timed
+        # TE-Aid opens its HTML in Preview and sets the file link; a timed
         # "finished" banner only flashes then covers that link.
         if func_name != "teaid":
             self._set_status_message(summary, 12000, override_file_link=True)
@@ -11251,7 +11251,7 @@ class MainWindow(QMainWindow):
             )
 
     def _pick_preview_output(self, created_paths: list[Path]) -> Path | None:
-        """Prefer HTML/PDF/images for preview after TEAid / Flexidot / genome map."""
+        """Prefer HTML/PDF/images for preview after TE-Aid / Flexidot / genome map."""
         if not created_paths:
             return None
         files = [p.resolve() for p in created_paths if p.is_file()]
@@ -11334,11 +11334,18 @@ class MainWindow(QMainWindow):
         icon_label.setPixmap(icon_pix)
         icon_label.setFixedSize(64, 64)
 
-        text_label = QLabel(f"<b>{APP_DISPLAY_NAME}</b> {__version__}")
+        text_label = QLabel(
+            f"<b>{APP_DISPLAY_NAME}</b> {__version__}<br/>"
+            "<span style='color:#555555; font-weight:normal;'>"
+            "Developed at the Chair of Molecular Botany,<br/>"
+            "RWTH Aachen University"
+            "</span>"
+        )
         text_label.setTextFormat(Qt.TextFormat.RichText)
         text_label.setAlignment(
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
         )
+        text_label.setWordWrap(True)
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)

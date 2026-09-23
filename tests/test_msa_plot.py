@@ -44,7 +44,7 @@ def test_write_msa_plot_png_and_pdf(tmp_path: Path) -> None:
     )
     assert png.is_file()
     assert png.suffix == ".png"
-    assert png.name == "aln_msa_plot.png"
+    assert png.name == "aln.fa_msa_plot.png"
 
     pdf = write_msa_plot(
         msa,
@@ -71,7 +71,7 @@ def test_write_msa_plot_png_and_pdf(tmp_path: Path) -> None:
 
 def test_msa_plot_output_path() -> None:
     path = msa_plot_output_path(Path("/tmp/demo.fa"), output_format="pdf")
-    assert path.name == "demo_msa_plot.pdf"
+    assert path.name == "demo.fa_msa_plot.pdf"
 
 
 def test_clustal_is_default_amino_palette() -> None:

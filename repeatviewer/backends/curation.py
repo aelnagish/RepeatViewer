@@ -75,7 +75,7 @@ from repeatviewer.backends.database_prepare import blast_database_is_ready
 ProgressCallback = Callable[[int, str], None]
 
 _DISPLAY_NAMES = {
-    "teaid": "TEAid",
+    "teaid": "TE-Aid",
     "blast": "BLAST",
     "extend": "MSA Extend",
     "msa_clean": "MSA Clean",
@@ -116,9 +116,9 @@ def cleanup_teaid_side_files(
     keep_html: Path,
 ) -> None:
     """
-    Remove intermediate TEAid files for one input only.
+    Remove intermediate TE-Aid files for one input only.
 
-    Keeps the input FASTA and this run's HTML report. Safe when several TEAid
+    Keeps the input FASTA and this run's HTML report. Safe when several TE-Aid
     jobs run in parallel in the same folder (does not delete other sequences'
     HTML reports or their source files).
     """
@@ -172,12 +172,14 @@ def _png_paths_in_dir(folder: Path) -> set[Path]:
 
 
 def flexidot_output_stem(seq_files: list[Path], genome_label: str = "") -> str:
-    """Output basename: ``{first_stem}_flexidot`` or ``{first_stem}_flexidot_multi``."""
-    stem = seq_files[0].expanduser().resolve().stem
+    """Output basename: ``{first.name}_flexidot`` or ``{first.name}_flexidot_multi``."""
+    from repeatviewer.tool_output_paths import kept_input_name
+
+    base = kept_input_name(seq_files[0].expanduser().resolve())
     suffix = genome_output_suffix(genome_label)
     if len(seq_files) >= 2:
-        return f"{stem}_flexidot_multi{suffix}"
-    return f"{stem}_flexidot{suffix}"
+        return f"{base}_flexidot_multi{suffix}"
+    return f"{base}_flexidot{suffix}"
 
 
 def is_flexidot_html_file(path: Path) -> bool:
@@ -308,8 +310,13 @@ def _flexidot_outputs_for_run(
         reverse=True,
     )
     if len(seq_files) == 1:
-        stem = seq_files[0].stem
-        owned = [p for p in new_files if stem in p.name]
+        # Flexidot may name intermediates from stem or full basename.
+        markers = {seq_files[0].stem, seq_files[0].name}
+        owned = [
+            p
+            for p in new_files
+            if any(marker and marker in p.name for marker in markers)
+        ]
         if owned:
             return owned
     return new_files
@@ -450,7 +457,7 @@ def finalize_flexidot_outputs(
     use_gff: bool = False,
     gff_source_fastas: list[Path] | None = None,
 ) -> list[str]:
-    """Keep the primary Flexidot output as ``{stem}_flexidot.{ext}``; drop extra panels.
+    """Keep the primary Flexidot output as ``{name}_flexidot.{ext}``; drop extra panels.
 
     ``before`` must be the snapshot taken with the same ``ext`` (e.g. via
     ``_output_paths_in_dir(out_dir, ext)``) right before the run.
@@ -724,11 +731,13 @@ def run_on_sequence(
         extend_opts = extend or ExtendOptions()
         left = extend_opts.left
         right = extend_opts.right
-        stem = seq_path.stem
+        from repeatviewer.tool_output_paths import kept_input_name
+
+        base = kept_input_name(seq_path)
         tag = f"{label_suffix}_L{left}_R{right}"
-        in_bed = out_dir / f"{stem}{tag}_hdr.bed"
-        ext_bed = out_dir / f"{stem}{tag}.bed"
-        ext_fa = out_dir / f"{stem}{tag}.fa"
+        in_bed = out_dir / f"{base}{tag}_hdr.bed"
+        ext_bed = out_dir / f"{base}{tag}.bed"
+        ext_fa = out_dir / f"{base}{tag}.fa"
         fasta_header_to_bed(str(seq_path), str(in_bed))
         extend_bed_regions(str(in_bed), left, right, chrom_sizes, str(ext_bed))
         extract_fasta_from_bed(str(active_genome), str(ext_bed), str(ext_fa))
@@ -800,7 +809,7 @@ def run_on_sequence(
         if not run_ok:
             if scratch_dir is not None:
                 shutil.rmtree(scratch_dir, ignore_errors=True)
-            raise RuntimeError("TEAid returned failure.")
+            raise RuntimeError("TE-Aid returned failure.")
         scratch_name = f"{seq_path.name}_TEAid.html" if pan_genome_run else (
             f"{seq_path.name}{label_suffix}_TEAid.html"
         )
@@ -808,7 +817,7 @@ def run_on_sequence(
         if scratch_dir is not None:
             if not scratch_html.is_file():
                 shutil.rmtree(scratch_dir, ignore_errors=True)
-                raise RuntimeError(f"TEAid HTML not created: {scratch_html}")
+                raise RuntimeError(f"TE-Aid HTML not created: {scratch_html}")
             if html_path.exists():
                 html_path.unlink()
             shutil.move(str(scratch_html), str(html_path))
@@ -816,7 +825,7 @@ def run_on_sequence(
             shutil.rmtree(scratch_dir, ignore_errors=True)
         else:
             if not html_path.is_file():
-                raise RuntimeError(f"TEAid HTML not created: {html_path}")
+                raise RuntimeError(f"TE-Aid HTML not created: {html_path}")
             cleanup_teaid_side_files(out_dir, seq_path, html_path)
         created.append(str(html_path.resolve()))
 
@@ -999,7 +1008,9 @@ def run_on_sequence(
             )
         if tsd_opts.left_boundary >= tsd_opts.right_boundary:
             raise RuntimeError("Left boundary must be less than the right boundary.")
-        out_file = out_dir / f"{seq_path.stem}.tsd_search.txt"
+        from repeatviewer.tool_output_paths import kept_input_name
+
+        out_file = out_dir / f"{kept_input_name(seq_path)}.tsd_search.txt"
         TSD_identifier(
             tsd_opts.left_boundary,
             tsd_opts.right_boundary,

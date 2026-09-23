@@ -4230,7 +4230,7 @@ class OrfPredictionParamsDialog(QDialog):
 
 
 class TeaAidParamsDialog(QDialog):
-    """TEAid parameters.
+    """TE-Aid parameters.
 
     Left-click the toolbar button opens this dialog. The Parameters tab holds
     BLAST settings and hit colors; the Options tab sets right-click behavior.
@@ -4244,7 +4244,7 @@ class TeaAidParamsDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("TEAid parameters")
+        self.setWindowTitle("TE-Aid parameters")
         opts = initial or TeaAidOptions()
         self._for_run = for_run
         self._run_after = False
@@ -4260,7 +4260,7 @@ class TeaAidParamsDialog(QDialog):
         )
         self._evalue.setFixedWidth(120)
         self._evalue.setToolTip(
-            "Reporting E-value for the TEAid genome BLAST search only."
+            "Reporting E-value for the TE-Aid genome BLAST search only."
         )
 
         self._word_size = QSpinBox()
@@ -4275,7 +4275,7 @@ class TeaAidParamsDialog(QDialog):
         )
         self._word_size.setFixedWidth(120)
         self._word_size.setToolTip(
-            "BLASTN word size (-word_size) for the TEAid self-BLAST dot plot only (4–25)."
+            "BLASTN word size (-word_size) for the TE-Aid self-BLAST dot plot only (4–25)."
         )
 
         self._hit_high_pct = QDoubleSpinBox()
@@ -4349,7 +4349,7 @@ class TeaAidParamsDialog(QDialog):
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
-            ("Run TEAid with saved parameters", TEAID_RIGHT_CLICK_RUN),
+            ("Run TE-Aid with saved parameters", TEAID_RIGHT_CLICK_RUN),
             ("Open this dialog", TEAID_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
@@ -4362,7 +4362,7 @@ class TeaAidParamsDialog(QDialog):
         rc_box = QGroupBox("Right-click action", self)
         rc_box_layout = QVBoxLayout(rc_box)
         rc_box_layout.setSpacing(6)
-        rc_box_layout.addWidget(QLabel("Right-clicking the TEAid button does:", self))
+        rc_box_layout.addWidget(QLabel("Right-clicking the TE-Aid button does:", self))
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 

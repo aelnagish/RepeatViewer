@@ -302,7 +302,7 @@ def blast(
         query_path, cleanup_query = _blast_safe_fasta_for_makeblastdb(query_path)
 
     # When the caller’s output dir has spaces, BLAST ``-out`` must use a
-    # space-free temp file; final header/TEAid tables are written from that file.
+    # space-free temp file; final header/TE-Aid tables are written from that file.
     blast_run_out_dir = str(blast_out_dir)
     if _blast_path_has_unsafe_chars(os.path.abspath(blast_run_out_dir)):
         blast_run_out_dir = _blast_safe_db_parent(str(blast_out_dir))
