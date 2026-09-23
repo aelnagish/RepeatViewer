@@ -201,6 +201,8 @@ _SIMILARITY_DB_CHIP_SPACING = 4
 _MARQUEE_DRAG_THRESHOLD = 3.0
 _ANNOT_TRACK_VPAD = 8
 _ANNOT_FEATURE_HEIGHT = 18
+logger = logging.getLogger(__name__)
+_IMAGE_MARKER_SIZE = 12  # cytogenetic-image dot on annotation features
 _ANNOT_MIN_VIEWPORT_HEIGHT = 56
 _OVERVIEW_SYNC_MS = 16
 _RULER_HEIGHT = 20
@@ -1096,12 +1098,21 @@ class AnnotationTrackWidget(QWidget):
     modifyRequested = Signal()
     changeColorRequested = Signal()
     tracksMoved = Signal(object)  # list[SequenceFeature]
+    attachImageRequested = Signal()  # selected feature
+    openImagesRequested = Signal(int)  # feature index with images
+    imagesDropped = Signal(int, list)  # feature index, image paths
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
+        # Returns indices of features that carry cytogenetic images (see
+        # SequenceMapPanel._marked_feature_indices); evaluated once per paint.
+        self._image_marker_lookup = None
+        self._marked_indices: set[int] = set()
+        self._drop_hover_idx: int | None = None
         self._features: list[SequenceFeature] = []
         self._feature_rows: list[int] = []
         self._scroll_px = 0.0
@@ -1413,12 +1424,104 @@ class AnnotationTrackWidget(QWidget):
     def has_content(self) -> bool:
         return self._row_count > 0
 
+    # -- cytogenetic image markers ---------------------------------------
+
+    def set_image_marker_lookup(self, lookup) -> None:
+        """``lookup(features) -> set[int]`` of feature indices with images."""
+        self._image_marker_lookup = lookup
+        self.update()
+
+    def _refresh_marked_indices(self) -> None:
+        lookup = self._image_marker_lookup
+        if lookup is None or not self._features:
+            self._marked_indices = set()
+            return
+        try:
+            self._marked_indices = set(lookup(self._features))
+        except Exception:  # noqa: BLE001 - never break painting over images
+            logger.exception("Could not look up cytogenetic image markers")
+            self._marked_indices = set()
+
+    def has_images(self, idx: int) -> bool:
+        return idx in self._marked_indices
+
+    def _image_marker_rect(self, idx: int) -> QRectF:
+        rect = self._feature_rect(idx)
+        d = float(_IMAGE_MARKER_SIZE)
+        x = rect.right() - d - 2.0 if rect.width() >= d + 6.0 else rect.right() + 2.0
+        return QRectF(x, rect.center().y() - d / 2.0, d, d)
+
+    def _image_marker_hit(self, pos: QPointF) -> int | None:
+        for idx in sorted(self._marked_indices, reverse=True):
+            if 0 <= idx < len(self._features) and self._image_marker_rect(idx).adjusted(-2, -2, 2, 2).contains(pos):
+                return idx
+        return None
+
+    def _draw_image_marker(self, painter: QPainter, idx: int) -> None:
+        rect = self._image_marker_rect(idx)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor("#1f1f1f"), 1.2))
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(rect)
+        inner = rect.adjusted(3.0, 3.0, -3.0, -3.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#e0282e"))
+        painter.drawEllipse(inner)
+        painter.restore()
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        from repeatviewer.widgets.cyto_images_ui import image_paths_from_mime
+
+        if self._features and image_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        from repeatviewer.widgets.cyto_images_ui import image_paths_from_mime
+
+        if not image_paths_from_mime(event.mimeData()):
+            event.ignore()
+            return
+        hit = self._hit_test_feature(event.position())
+        if hit != self._drop_hover_idx:
+            self._drop_hover_idx = hit
+            self.update()
+        if hit is None:
+            event.ignore()
+        else:
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        if self._drop_hover_idx is not None:
+            self._drop_hover_idx = None
+            self.update()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        from repeatviewer.widgets.cyto_images_ui import image_paths_from_mime
+
+        paths = image_paths_from_mime(event.mimeData())
+        hit = self._hit_test_feature(event.position())
+        self._drop_hover_idx = None
+        self.update()
+        if not paths or hit is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._selected_indices = {hit}
+        self._emit_selection()
+        QTimer.singleShot(0, lambda i=hit, p=list(paths): self.imagesDropped.emit(i, p))
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#f5f5f5"))
         if not self._features:
+            self._marked_indices = set()
             painter.end()
             return
+        self._refresh_marked_indices()
         ppb = self._ppb
         scroll = self._scroll_px
         vw = self._viewport_w
@@ -1445,6 +1548,19 @@ class AnnotationTrackWidget(QWidget):
             )
             if selected:
                 _draw_feature_selection_chrome(painter, rect)
+            if idx == self._drop_hover_idx:
+                painter.save()
+                painter.setPen(QPen(QColor("#2c6fad"), 2, Qt.PenStyle.DashLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect.adjusted(-1, -1, 1, 1))
+                painter.restore()
+                painter.setPen(Qt.PenStyle.NoPen)
+
+        for idx in sorted(self._marked_indices):
+            if 0 <= idx < len(self._features):
+                marker = self._image_marker_rect(idx)
+                if marker.right() >= _LEFT_MARGIN and marker.left() <= vw:
+                    self._draw_image_marker(painter, idx)
 
         if self._move_active and self._move_ghost_y is not None and self._move_indices:
             for idx in sorted(self._move_indices):
@@ -1522,6 +1638,14 @@ class AnnotationTrackWidget(QWidget):
             super().mousePressEvent(event)
             return
         pos = event.position()
+        marker_hit = self._image_marker_hit(pos)
+        if marker_hit is not None:
+            self._selected_indices = {marker_hit}
+            self._emit_selection()
+            self.update()
+            self.openImagesRequested.emit(marker_hit)
+            event.accept()
+            return
         self._press_pos = pos
         self._press_hit = self._hit_test_feature(pos)
         self._marquee_active = False
@@ -1682,6 +1806,15 @@ class AnnotationTrackWidget(QWidget):
             modify_action.triggered.connect(
                 lambda _checked=False, idx=hit: self._request_modify(idx)
             )
+        if len(self._selected_indices) == 1:
+            menu.addSeparator()
+            attach_action = menu.addAction("Attach cytogenetic image…")
+            attach_action.triggered.connect(self.attachImageRequested.emit)
+            if hit in self._marked_indices:
+                show_action = menu.addAction("Show cytogenetic images")
+                show_action.triggered.connect(
+                    lambda _checked=False, idx=hit: self.openImagesRequested.emit(idx)
+                )
         menu.exec(event.globalPos())
         event.accept()
 
@@ -2496,6 +2629,9 @@ class SequenceMapCanvas(QWidget):
             menu.addAction("Modify").triggered.connect(
                 lambda _checked=False: self.featureActionRequested.emit("modify")
             )
+            menu.addAction("Attach cytogenetic image…").triggered.connect(
+                lambda _checked=False: self.featureActionRequested.emit("attach_image")
+            )
             menu.addSeparator()
 
         add_menu = menu.addMenu("Add annotation")
@@ -2644,6 +2780,9 @@ class SequenceMapWidget(QWidget):
     modifyFeatureRequested = Signal()
     changeFeatureColorRequested = Signal()
     annotationTracksMoveRequested = Signal(object)  # list[SequenceFeature]
+    attachFeatureImageRequested = Signal()
+    openFeatureImagesRequested = Signal(int)  # feature index
+    featureImagesDropped = Signal(int, list)  # feature index, image paths
 
     def __init__(self, parent: QWidget | None = None, *, embedded: bool = False) -> None:
         super().__init__(parent)
@@ -2865,6 +3004,9 @@ class SequenceMapWidget(QWidget):
         self._annot_track.modifyRequested.connect(self._request_modify_feature)
         self._annot_track.changeColorRequested.connect(self._request_change_feature_color)
         self._annot_track.tracksMoved.connect(self._on_annot_tracks_moved)
+        self._annot_track.attachImageRequested.connect(self._request_attach_feature_image)
+        self._annot_track.openImagesRequested.connect(self.openFeatureImagesRequested.emit)
+        self._annot_track.imagesDropped.connect(self.featureImagesDropped.emit)
         self._overview = OverviewWidget(self)
         self._overview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._overview.viewportChanged.connect(self._scroll_to_fraction)
@@ -3620,6 +3762,12 @@ class SequenceMapWidget(QWidget):
             self.extractFeatureSequencesRequested.emit()
         elif kind == "modify":
             self.modifyFeatureRequested.emit()
+        elif kind == "attach_image":
+            self.attachFeatureImageRequested.emit()
+
+    def _request_attach_feature_image(self) -> None:
+        self._sync_feature_selection_from_annot_track()
+        self.attachFeatureImageRequested.emit()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if _is_delete_key(event.key()):
@@ -4290,6 +4438,13 @@ class SequenceMapPanel(QWidget):
         self._map.modifyFeatureRequested.connect(self._modify_feature)
         self._map.changeFeatureColorRequested.connect(self._change_selected_feature_colors)
         self._map.annotationTracksMoveRequested.connect(self._apply_annotation_track_move)
+        self._map.attachFeatureImageRequested.connect(self._attach_image_to_selected_feature)
+        self._map.openFeatureImagesRequested.connect(self._open_feature_images)
+        self._map.featureImagesDropped.connect(self._on_feature_images_dropped)
+        self._map._annot_track.set_image_marker_lookup(self._marked_feature_indices)
+        from repeatviewer.widgets.cyto_images_ui import cyto_notifier
+
+        cyto_notifier().changed.connect(self._on_cyto_images_changed)
         self.annotationJobProgress.connect(self._set_annotation_job_status)
         self._auto_ann_thread: QThread | None = None
         self._auto_ann_worker: Worker | None = None
@@ -4785,6 +4940,118 @@ class SequenceMapPanel(QWidget):
             QTimer.singleShot(50, self._map.refresh_layout)
         else:
             QTimer.singleShot(0, self._map.refresh_layout)
+
+    # -- cytogenetic images ------------------------------------------------
+
+    @staticmethod
+    def _feature_ref(feat: SequenceFeature):
+        from repeatviewer.backends.cyto_images import FeatureRef
+
+        return FeatureRef(feat.name or feat.feature_type, feat.start, feat.end)
+
+    def _marked_feature_indices(self, features: list[SequenceFeature]) -> set[int]:
+        """Indices of ``features`` that carry cytogenetic images.
+
+        Exact name + coordinates first; a link whose annotation was moved or
+        resized still marks it when exactly one annotation has that name.
+        """
+        from repeatviewer.backends.cyto_images import images_for_sequence
+
+        images = images_for_sequence(self._path)
+        refs = [
+            target.feature
+            for image in images
+            for target in image.targets_for_sequence(self._path.name)
+            if target.feature is not None
+        ]
+        if not refs:
+            return set()
+        exact: dict[tuple[str, int, int], int] = {}
+        by_name: dict[str, list[int]] = {}
+        for idx, feat in enumerate(features):
+            name = feat.name or feat.feature_type
+            exact.setdefault((name, feat.start, feat.end), idx)
+            by_name.setdefault(name, []).append(idx)
+        marked: set[int] = set()
+        for ref in refs:
+            idx = exact.get((ref.name, ref.start, ref.end))
+            if idx is not None:
+                marked.add(idx)
+                continue
+            candidates = by_name.get(ref.name, [])
+            if len(candidates) == 1:
+                marked.add(candidates[0])
+        return marked
+
+    def _on_cyto_images_changed(self, folder: str) -> None:
+        if folder == str(self._path.parent):
+            self._map._annot_track.update()
+
+    def _single_selected_feature(self) -> SequenceFeature | None:
+        data = self._map.data()
+        if data is None:
+            return None
+        self._map._sync_feature_selection_from_annot_track()
+        indices = sorted(self._map.selected_feature_indices())
+        if len(indices) != 1 or not (0 <= indices[0] < len(data.features)):
+            return None
+        return data.features[indices[0]]
+
+    def _attach_image_to_selected_feature(self) -> None:
+        from repeatviewer.widgets.cyto_images_ui import attach_images
+
+        feat = self._single_selected_feature()
+        if feat is None:
+            QMessageBox.information(
+                self, "Attach cytogenetic image", "Select a single annotation first."
+            )
+            return
+        attach_images(self, self._path, [], feature=self._feature_ref(feat))
+
+    def _on_feature_images_dropped(self, index: int, paths: list) -> None:
+        from repeatviewer.widgets.cyto_images_ui import attach_images
+
+        data = self._map.data()
+        if data is None or not (0 <= index < len(data.features)):
+            return
+        feat = data.features[index]
+        attach_images(self, self._path, [Path(p) for p in paths], feature=self._feature_ref(feat))
+
+    def _open_feature_images(self, index: int) -> None:
+        from repeatviewer.widgets.cyto_images_ui import open_images_for_feature
+
+        data = self._map.data()
+        if data is None or not (0 <= index < len(data.features)):
+            return
+        ref = self._feature_ref(data.features[index])
+        open_images_for_feature(self, self._path, ref.name, ref.start, ref.end)
+
+    def show_feature(self, ref) -> bool:
+        """Select and jump to the annotation ``ref`` (a FeatureRef). True if found."""
+        if self._map.data() is None:
+            self.load_path(self._path, fit_after_load=False)
+        data = self._map.data()
+        if data is None or ref is None:
+            return False
+        marked_exact = None
+        same_name = []
+        for idx, feat in enumerate(data.features):
+            name = feat.name or feat.feature_type
+            if (name, feat.start, feat.end) == (ref.name, ref.start, ref.end):
+                marked_exact = idx
+                break
+            if name == ref.name:
+                same_name.append(idx)
+        idx = marked_exact if marked_exact is not None else (same_name[0] if len(same_name) == 1 else None)
+        if idx is None:
+            self.jump_to_region(ref.start, ref.end)
+            return False
+        feat = data.features[idx]
+        self.jump_to_region(feat.start, feat.end)
+        self._map.set_selected_features({idx})
+        self._map._annot_track._selected_indices = {idx}
+        self._map._annot_track.update()
+        return True
 
     def jump_to_region(self, start: int, end: int) -> None:
         """Zoom/scroll to a bp range without reloading or fit-to-window reset."""
