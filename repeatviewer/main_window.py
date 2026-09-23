@@ -3366,7 +3366,7 @@ class MainWindow(QMainWindow):
             self._extract_thread = None
 
     def _extract_sequences_from_hit_table(self, blast_txt: object = None) -> None:
-        """Right-click a *_blast.txt: extract the genome sequences it hit.
+        """Right-click a *_b.txt: extract the genome sequences it hit.
 
         Reads the ``sseqid`` column itself, so no ID list has to be made by
         hand. The subject FASTA is the genome the BLAST ran against -- taken
@@ -3386,7 +3386,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "Extract subject sequences",
-                    "Select one BLAST hit table (*_blast.txt).",
+                    "Select one BLAST hit table (*_b.txt).",
                 )
                 return
             table = selected[0].resolve()
@@ -6958,7 +6958,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Visualization",
-                    "Each TE input must be a RepeatMasker .out file or BLAST hit table (*_blast.txt).",
+                    "Each TE input must be a RepeatMasker .out file or BLAST hit table (*_b.txt).",
                 )
                 return None
             resolved.append(hit_path.expanduser().resolve())
@@ -6996,7 +6996,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Visualization",
-                "Input must be a RepeatMasker .out file or BLAST hit table (*_blast.txt).",
+                "Input must be a RepeatMasker .out file or BLAST hit table (*_b.txt).",
             )
             return None
         return hit_path.expanduser().resolve()
@@ -7433,7 +7433,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "TE genome map",
-                "Select one FASTA (with *_blast.txt) or a hit table (*_blast.txt / RepeatMasker .out).",
+                "Select one FASTA (with *_b.txt) or a hit table (*_b.txt / RepeatMasker .out).",
             )
             return
         blast_targets: list[Path] = []
@@ -7466,7 +7466,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "TE genome map",
-                "Select FASTA files, *_blast.txt tables, or RepeatMasker .out files.",
+                "Select FASTA files, *_b.txt tables, or RepeatMasker .out files.",
             )
 
     def _enqueue_genome_map_jobs(
@@ -7492,7 +7492,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "TE divergence plot",
-                "Select one FASTA (with *_blast.txt) or a hit table (*_blast.txt / RepeatMasker .out).",
+                "Select one FASTA (with *_b.txt) or a hit table (*_b.txt / RepeatMasker .out).",
             )
             return
         if len(selected) > 1:
@@ -7513,7 +7513,7 @@ class MainWindow(QMainWindow):
                     "TE divergence plot",
                     f"No BLAST table found for:\n{path.name}\n\n"
                     f"Expected {blast_txt_path_for_query(path).name} "
-                    f"(or {path.stem}_blast.txt). Run Blast first.",
+                    f"(or {path.name}_b.txt). Run Blast first.",
                 )
             return
         if is_te_hit_table_file(path):
@@ -7522,7 +7522,7 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(
             self,
             "TE divergence plot",
-            "Select a FASTA with BLAST results, a *_blast.txt table, or a RepeatMasker .out file.",
+            "Select a FASTA with BLAST results, a *_b.txt table, or a RepeatMasker .out file.",
         )
 
     def _open_blast_divergence_plot(
@@ -8535,14 +8535,13 @@ class MainWindow(QMainWindow):
             self._navigate_to_folder(folder, new_outputs=outputs, source_files=sources)
 
     def _fasta_for_blast_table(self, blast_txt: Path) -> Path | None:
-        """Infer query FASTA from a ``*_blast.txt`` path when the table is missing."""
+        """Infer query FASTA from a ``*_b.txt`` path when the table is missing."""
+        from repeatviewer.backends.blast_genome_plot import strip_blast_table_suffix
+
         name = blast_txt.name
-        if not name.lower().endswith("blast.txt"):
+        stem = strip_blast_table_suffix(name)
+        if stem is None:
             return None
-        if name.endswith("_blast.txt"):
-            stem = name[: -len("_blast.txt")]
-        else:
-            stem = Path(name).stem
         parent = blast_txt.parent
         candidates = [
             parent / stem,

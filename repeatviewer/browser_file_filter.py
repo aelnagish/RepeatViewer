@@ -16,13 +16,13 @@ def is_tool_output_file(path: Path) -> bool:
     name = path.name.lower()
     if name.endswith("_blastp.txt"):
         return True
-    if name.endswith("_blast.gff"):
+    if name.endswith(("_b.gff", "_blast.gff", "_blastp.gff", "_blastx.gff")):
         return True
     if name.endswith(".gff.colors.config"):
         return True
     if name.endswith("_legend.png") and "_flexidot" in name:
         return True
-    if name.endswith("_blast.txt.fa"):
+    if name.endswith(("_b.txt.fa", "_blast.txt.fa", "_blastp.txt.fa", "_blastx.txt.fa")):
         return True
     if name.endswith(".tsd_search.txt"):
         return True
@@ -48,6 +48,6 @@ def is_tool_output_file(path: Path) -> bool:
         return True
     if name.endswith(".out"):
         return True
-    if name.endswith(".bed") and "_blast" in name:
+    if name.endswith(".bed") and ("_b_" in name or "_blast" in name):
         return True
     return False

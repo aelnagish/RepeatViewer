@@ -54,27 +54,47 @@ class GffFeature:
 
 
 def find_companion_gff(sequence_path: Path) -> Path | None:
-    """Look for a GFF/GTF next to the sequence file (same stem or common names)."""
+    """Look for a companion GFF/GTF next to the sequence file (same stem/name).
+
+    Only exact companion names are accepted. A folder-wide ``*.gff`` scan is
+    intentionally avoided — it would pick up BLAST hit tables (``*_b.gff``) and
+    other unrelated annotations that do not shade the Flexidot sequence.
+    """
     folder = sequence_path.parent
     stem = sequence_path.stem
+    name = sequence_path.name
     candidates = [
         folder / f"{stem}.RV.gff3",
         folder / f"{stem}.features.gff3",
-        folder / f"{sequence_path.name}.features.gff3",
+        folder / f"{name}.features.gff3",
+        folder / f"{name}.RV.gff3",
         folder / f"{stem}.gff3",
         folder / f"{stem}.gff",
         folder / f"{stem}.gtf",
         folder / f"{stem}.annotations.gff3",
         folder / f"{stem}.annotations.gff",
+        folder / f"{name}.gff3",
+        folder / f"{name}.gff",
+        folder / f"{name}.gtf",
     ]
     for path in candidates:
-        if path.is_file():
+        if path.is_file() and not _is_tool_output_gff(path):
             return path
-    for suffix in _GFF_SUFFIXES:
-        for path in sorted(folder.glob(f"*{suffix}")):
-            if path.is_file():
-                return path
     return None
+
+
+def _is_tool_output_gff(path: Path) -> bool:
+    """True for RepeatViewer-generated GFF that should not shade Flexidot."""
+    name = path.name.lower()
+    if name.endswith((".gff.colors.config",)):
+        return True
+    if "_flexidot" in name:
+        return True
+    # BLAST hit tables are genome coordinates, not TE-consensus features.
+    for token in ("_b.gff", "_blast.gff", "_blastp.gff", "_blastx.gff"):
+        if name.endswith(token):
+            return True
+    return False
 
 
 def fasta_record_ids(fasta_path: Path, *, limit: int = 200) -> list[str]:

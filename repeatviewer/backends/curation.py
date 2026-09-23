@@ -357,14 +357,16 @@ def cleanup_blast_scratch_files(
     output_dir = output_dir.expanduser().resolve()
     label_suffix = genome_output_suffix(genome_label)
     base_name = seq_path.name
-    for name in (
-        f"{base_name}{label_suffix}_no_header.b",
-        f"{base_name}{label_suffix}_no_header.b.bed",
-    ):
-        try:
-            (output_dir / name).unlink(missing_ok=True)
-        except OSError:
-            pass
+    # Current blastn tag is ``b``; keep legacy ``blast`` and protein program tags.
+    for tag in ("b", "blast", "blastp", "blastx"):
+        for name in (
+            f"{base_name}{label_suffix}_{tag}_no_header.b",
+            f"{base_name}{label_suffix}_{tag}_no_header.b.bed",
+        ):
+            try:
+                (output_dir / name).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _new_flexidot_legend_pngs(output_dir: Path, before: set[Path]) -> list[Path]:
@@ -490,14 +492,17 @@ def finalize_flexidot_outputs(
     outputs = [str(dest.resolve())]
     if use_gff:
         gff_paths = resolve_gff_paths_for_fastas(gff_source_fastas or seq_files)
-        sidecar_paths, sidecar_keep = _finalize_flexidot_gff_sidecars(
-            output_dir,
-            base,
-            before,
-            gff_paths=gff_paths,
-        )
-        outputs.extend(sidecar_paths)
-        keep_paths.extend(sidecar_keep)
+        # Only keep color-config / legend when a companion GFF was actually used.
+        # Otherwise those files look like Flexidot outputs but have no meaning.
+        if gff_paths:
+            sidecar_paths, sidecar_keep = _finalize_flexidot_gff_sidecars(
+                output_dir,
+                base,
+                before,
+                gff_paths=gff_paths,
+            )
+            outputs.extend(sidecar_paths)
+            keep_paths.extend(sidecar_keep)
 
     cleanup_flexidot_intermediates(output_dir, keep_paths)
     return outputs

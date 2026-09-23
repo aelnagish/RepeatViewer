@@ -63,9 +63,10 @@ def test_flexidot_sidecar_paths_use_output_stem_once(tmp_path: Path) -> None:
 def test_blast_paths_next_to_query(tmp_path: Path) -> None:
     fasta = tmp_path / "reads.fasta"
     fasta.write_text(">a\nA\n")
-    assert blast_txt_path_for_query(fasta) == tmp_path / "reads.fasta_blast.txt"
+    assert blast_txt_path_for_query(fasta) == tmp_path / "reads.fasta_b.txt"
     candidates = blast_table_candidates_for_query(fasta)
-    assert candidates[0] == tmp_path / "reads.fasta_blast.txt"
+    assert candidates[0] == tmp_path / "reads.fasta_b.txt"
+    assert tmp_path / "reads.fasta_blast.txt" in candidates
 
 
 def test_blast_paths_include_legacy_repeatviewer_folder(tmp_path: Path) -> None:
@@ -79,8 +80,10 @@ def test_blast_paths_include_legacy_repeatviewer_folder(tmp_path: Path) -> None:
 
 
 def test_blast_gff_output_path() -> None:
-    blast_txt = Path("/tmp/reads.fasta_blast.txt")
-    assert blast_gff_output_path(blast_txt).name == "reads.fasta_blast.gff"
+    blast_txt = Path("/tmp/reads.fasta_b.txt")
+    assert blast_gff_output_path(blast_txt).name == "reads.fasta_b.gff"
+    legacy = Path("/tmp/reads.fasta_blast.txt")
+    assert blast_gff_output_path(legacy).name == "reads.fasta_blast.gff"
 
 
 def test_kept_input_name_used_by_align_and_combine(tmp_path: Path) -> None:
@@ -116,21 +119,26 @@ def test_cleanup_flexidot_intermediates(tmp_path: Path) -> None:
 def test_cleanup_blast_scratch_files(tmp_path: Path) -> None:
     fasta = tmp_path / "reads.fasta"
     fasta.write_text(">a\nA\n")
-    scratch = tmp_path / "reads.fasta_no_header.b"
+    scratch = tmp_path / "reads.fasta_b_no_header.b"
     scratch.write_text("x")
+    legacy = tmp_path / "reads.fasta_blast_no_header.b"
+    legacy.write_text("x")
     cleanup_blast_scratch_files(tmp_path, fasta)
     assert not scratch.exists()
+    assert not legacy.exists()
 
 
 @pytest.mark.parametrize(
     "name",
     [
-        "reads.fasta_blast.txt",
-        "reads.fasta_blast.gff",
+        "reads.fasta_b.txt",
+        "reads.fasta_b.gff",
         "reads.fasta_flexidot.png",
         "reads.fasta_flexidot.gff.colors.config",
-        "reads.fasta_blast.txt.fa",
+        "reads.fasta_b.txt.fa",
         "reads.fa.tsd_search.txt",
+        "reads.fasta_blast.txt",
+        "reads.fasta_blast.gff",
     ],
 )
 def test_is_tool_output_file(name: str, tmp_path: Path) -> None:

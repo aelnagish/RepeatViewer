@@ -1,19 +1,22 @@
-"""Write genome-coordinate GFF3 from BLAST tabular output (*_blast.txt)."""
+"""Write genome-coordinate GFF3 from BLAST tabular output (*_b.txt)."""
 
 from __future__ import annotations
 
 from operator import itemgetter
 from pathlib import Path
 
-from repeatviewer.backends.blast_genome_plot import read_blast_table
+from repeatviewer.backends.blast_genome_plot import (
+    read_blast_table,
+    strip_blast_table_suffix,
+)
 from repeatviewer.backends.flexidot_gff import distinct_feature_color
 
 
 def blast_gff_output_path(blast_txt: Path) -> Path:
-    """``{query}_blast.txt`` → ``{query}_blast.gff`` (same pattern as manual m8 → gff)."""
+    """``{query}_b.txt`` → ``{query}_b.gff`` (also accepts legacy ``*_blast.txt``)."""
     blast_txt = blast_txt.expanduser().resolve()
     name = blast_txt.name
-    if name.endswith("_blast.txt"):
+    if strip_blast_table_suffix(name) is not None and name.endswith(".txt"):
         return blast_txt.with_name(name[:-4] + ".gff")
     if name.endswith(".txt"):
         return blast_txt.with_suffix(".gff")

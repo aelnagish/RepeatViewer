@@ -3326,7 +3326,10 @@ class FlexidotParamsDialog(QDialog):
         self._use_gff = QCheckBox("Show GFF features on dotplot (-g)")
         self._use_gff.setChecked(opts.use_gff)
         self._use_gff.setToolTip(
-            "Shade the dotplot with companion GFF features when available."
+            "Shade the dotplot with companion annotation GFF next to each FASTA "
+            "(e.g. Name.RV.gff3 from the Annotation tab). "
+            "BLAST hit tables (*_b.gff) are not used. "
+            "If no companion GFF is found, Flexidot runs without shading."
         )
 
         self._output_format = QComboBox()
@@ -5224,7 +5227,7 @@ class _TeInputFileRow(QWidget):
         removable: bool = True,
         placeholder: str = "RepeatMasker .out or BLAST hit table",
         browse_title: str = "Select RepeatMasker .out or BLAST hit table",
-        file_filter: str = "TE hit tables (*.out *_blast.txt);;RepeatMasker (*.out);;All files (*)",
+        file_filter: str = "TE hit tables (*.out *_b.txt *_blast.txt);;RepeatMasker (*.out);;All files (*)",
         start_dir: str = "",
     ) -> None:
         super().__init__(parent)
@@ -5310,7 +5313,7 @@ class TeMultiInputFilesWidget(QWidget):
         start_empty: bool = False,
         placeholder: str = "RepeatMasker .out or BLAST hit table",
         browse_title: str = "Select RepeatMasker .out or BLAST hit table",
-        file_filter: str = "TE hit tables (*.out *_blast.txt);;RepeatMasker (*.out);;All files (*)",
+        file_filter: str = "TE hit tables (*.out *_b.txt *_blast.txt);;RepeatMasker (*.out);;All files (*)",
         add_button_label: str = "Add another TE file",
         add_button_tooltip: str = (
             "Add another RepeatMasker .out or BLAST hit table. "

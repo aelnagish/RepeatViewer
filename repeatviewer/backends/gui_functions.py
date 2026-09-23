@@ -307,7 +307,7 @@ def blast(
     if _blast_path_has_unsafe_chars(os.path.abspath(blast_run_out_dir)):
         blast_run_out_dir = _blast_safe_db_parent(str(blast_out_dir))
 
-    output_tag = {"blastn": "blast", "blastp": "blastp", "blastx": "blastx"}[program]
+    output_tag = {"blastn": "b", "blastp": "blastp", "blastx": "blastx"}[program]
     # Define BLAST output without header.
     blast_out_file = os.path.join(
         blast_run_out_dir, f'{base_name}{label_suffix}_{output_tag}_no_header.b'
@@ -986,7 +986,9 @@ def run_flexidot(
         )
         if prepared is None:
             logging.warning(
-                "Flexidot GFF shading enabled but no companion GFF found for %s",
+                "Flexidot GFF shading enabled but no companion annotation GFF "
+                "(.RV.gff3 / .features.gff3 / matching .gff) found for %s. "
+                "Running without -g. BLAST hit tables (*_b.gff) are ignored.",
                 original_name,
             )
         else:

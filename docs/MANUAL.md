@@ -184,8 +184,8 @@ sub-tabs:
 
 With the file selected, click **BLAST** on the toolbar. RepeatViewer searches
 your consensus against the reference genome and writes two files beside the
-source: `<yourfile>_blast.txt`, the hit table you can read, and
-`<yourfile>_blast.txt.fa`, the hit sequences pulled out of the genome. The
+source: `<yourfile>_b.txt`, the hit table you can read, and
+`<yourfile>_b.txt.fa`, the hit sequences pulled out of the genome. The
 second one is what you align in the next step.
 
 New outputs are highlighted **green** in the Files panel; the inputs that
@@ -446,9 +446,9 @@ Three programs, each on its own tab: **BLASTn** (nucleotide), **BLASTp** and
 
 | File | Contents |
 |------|----------|
-| `<name>_blast.txt` | Tabular hit table |
-| `<name>_blast.txt.fa` | Hit sequences extracted from the genome — the input to Align |
-| `<name>_blast.txt.gff` | Hit positions, when GFF output is enabled |
+| `<name>_b.txt` | Tabular hit table |
+| `<name>_b.txt.fa` | Hit sequences extracted from the genome — the input to Align |
+| `<name>_b.gff` | Hit positions, when GFF output is enabled |
 
 The hit table is ordinary tabular BLAST output — readable in the preview pane,
 and the input for the TE density and divergence plots. **Max MSA lines** and
@@ -957,9 +957,9 @@ as BLAST), e.g. `reads.fa` → `reads.fa_msa.fa`, `reads.fa_flexidot.html`.
 
 | Pattern | Produced by | Contents |
 |---------|-------------|----------|
-| `<name>_blast.txt` | BLAST | Tabular hit table |
-| `<name>_blast.txt.fa` | BLAST | Hit sequences extracted from the genome |
-| `<name>_blast.txt.gff` | BLAST | Hit positions (optional) |
+| `<name>_b.txt` | BLAST | Tabular hit table |
+| `<name>_b.txt.fa` | BLAST | Hit sequences extracted from the genome |
+| `<name>_b.gff` | BLAST | Hit positions (optional) |
 | `<name>_msa.fa` | Align | Multiple sequence alignment |
 | `<name>_gap.fa` | MSA Clean | Gappy columns removed |
 | `<name>_rowdiv.fa` | MSA Clean | Divergent rows removed |
