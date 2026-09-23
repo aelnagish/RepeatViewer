@@ -2467,6 +2467,9 @@ class MainWindow(QMainWindow):
         if self._preview_tabs is not None:
             self._preview_tabs.teardown_all_html_previews()
         self._persist_workspace()
+        # Detached docks can outlive the main window (independent tool windows).
+        # Redock/close them before saving layout so they vanish on quit.
+        self._close_detached_panels()
         from repeatviewer.ui.window_geometry import ensure_floating_docks_on_screen
 
         ensure_floating_docks_on_screen(self)
@@ -2476,6 +2479,32 @@ class MainWindow(QMainWindow):
         settings.setValue("geometry", self.saveGeometry())
         settings.endGroup()
         super().closeEvent(event)
+
+    def _close_detached_panels(self) -> None:
+        """Close every floating browser dock and standalone preview window."""
+        for dock in self.findChildren(QDockWidget):
+            if not dock.isFloating():
+                continue
+            dock.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, False)
+            dock.setFloating(False)
+            if dock.isFloating():
+                dock.hide()
+                dock.close()
+        from repeatviewer.widgets.preview_duplicate_window import PreviewDuplicateWindow
+
+        app = QApplication.instance()
+        if app is None:
+            return
+        for widget in list(app.topLevelWidgets()):
+            if isinstance(widget, PreviewDuplicateWindow):
+                widget.close()
+            elif (
+                isinstance(widget, QDockWidget)
+                and widget.isFloating()
+                and widget is not self
+            ):
+                widget.hide()
+                widget.close()
 
     def _shutdown_background_threads(self, *, wait_ms: int = 30_000) -> None:
         """Stop and join background QThreads before teardown or window close."""
@@ -2655,7 +2684,39 @@ class MainWindow(QMainWindow):
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
+        # Floating docks default to Qt::Tool and stay tied to the main window, so
+        # they vanish when another app covers RepeatViewer. Keep them independent.
+        dock.topLevelChanged.connect(self._on_browser_dock_floating_changed)
         return dock
+
+    def _on_browser_dock_floating_changed(self, floating: bool) -> None:
+        dock = self.sender()
+        if not isinstance(dock, QDockWidget):
+            return
+        if floating:
+            # Defer until Qt finishes creating the floating window handle.
+            QTimer.singleShot(0, lambda d=dock: self._make_floating_dock_independent(d))
+        else:
+            dock.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, False)
+
+    @staticmethod
+    def _make_floating_dock_independent(dock: QDockWidget) -> None:
+        """Keep a dragged-out panel visible when another app covers the main window.
+
+        Avoid setWindowFlags/show() here — that races Qt's own float show and
+        logs ``qt.qpa.window: Already setting window visible!``.
+        """
+        if not dock.isFloating():
+            return
+        # macOS: tool windows normally hide when the app is inactive.
+        dock.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+        handle = dock.windowHandle()
+        if handle is None:
+            win = dock.window()
+            handle = win.windowHandle() if win is not None else None
+        if handle is not None:
+            # Drop the transient link so the panel is not stacked/hidden with MainWindow.
+            handle.setTransientParent(None)
 
     def _build_dock_panels(self) -> None:
         # --- Folders (nav + filter live on the dock title bar) ---
