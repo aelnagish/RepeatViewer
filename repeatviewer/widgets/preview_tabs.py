@@ -247,6 +247,8 @@ def preview_path_priority(path: Path) -> int:
         if "divergence" in name or "genome_map" in name:
             return 0
         return 1
+    if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
+        return 2
     if suffix == ".pdf":
         return 3
     if suffix in _IMAGE_PREVIEW_SUFFIXES:

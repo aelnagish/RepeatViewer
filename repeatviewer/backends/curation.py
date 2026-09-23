@@ -708,10 +708,11 @@ def run_on_sequence(
                     minimum_bit_score=blast_opts.minimum_bit_score,
                 )
                 created.append(str(gff_path.resolve()))
+            # Always keep the hit table on disk: TE density / divergence look it up
+            # by ``*_b.txt`` next to the query. Only skip UI highlighting when the
+            # user turned off "Export BLAST text file".
             if blast_opts.write_text:
                 created.append(str(blast_txt_path))
-            else:
-                blast_txt_path.unlink(missing_ok=True)
         # Remove temporary BED intermediates.
         for tmp in (Path(str(blast_bed)), Path(str(blast_bed_filtered))):
             try:

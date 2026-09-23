@@ -389,6 +389,7 @@ class FileListTableWidget(QTableWidget):
     def setCurrentItem(self, row_item: FileListRow | None) -> None:
         if row_item is None:
             self.clearSelection()
+            self.setCurrentCell(-1, -1)
             return
         self.selectRow(row_item._row)
         self.setCurrentCell(row_item._row, _COL_NAME)
@@ -455,7 +456,11 @@ class FileListTableWidget(QTableWidget):
         return FileListRow(self, row)
 
     def _apply_file_color_cells(self, row: int, path: Path) -> None:
-        """Apply stored file color to Name, Color, and all metadata cells."""
+        """Apply stored file color to Name, Color, and all metadata cells.
+
+        Also clears job highlight backgrounds/bold so previous green/blue tints
+        do not linger after a new tool run.
+        """
         from repeatviewer.widgets.file_colors import (
             color_label,
             get_file_color,
@@ -465,6 +470,7 @@ class FileListTableWidget(QTableWidget):
         path_text = str(path)
         color = get_file_color(path)
         brush = QBrush(QColor(color)) if color else QBrush()
+        clear_bg = QBrush()
 
         label = color_label(color) if color else "—"
         # Empty colors sort last when ascending.
@@ -473,13 +479,23 @@ class FileListTableWidget(QTableWidget):
         cell.setData(_ROLE_PATH, path_text)
         cell.setTextAlignment(_LEFT_ALIGN)
         cell.setForeground(brush)
+        cell.setBackground(clear_bg)
         self.setItem(row, _COL_COLOR, cell)
 
         # Name + every other populated cell (Length, GC, …) update immediately.
         for column in range(self.columnCount()):
             existing = self.item(row, column)
-            if existing is not None:
-                existing.setForeground(brush)
+            if existing is None:
+                continue
+            existing.setBackground(clear_bg)
+            existing.setForeground(brush)
+            font = existing.font()
+            if font.bold():
+                font.setBold(False)
+                existing.setFont(font)
+        name_item = self.item(row, _COL_NAME)
+        if name_item is not None:
+            name_item.setToolTip("")
 
     def reapply_file_colors(self) -> None:
         """Refresh Name/Color styling from stored colors for every row."""

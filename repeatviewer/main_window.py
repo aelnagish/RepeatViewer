@@ -3062,7 +3062,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Combine Sequences to One File", str(exc))
             return
         self._refresh_after_compose(
-            [written], f"Combined {count} sequences into {written.name}"
+            [written],
+            f"Combined {count} sequences into {written.name}",
+            source_files=files,
         )
 
     def _extract_sequences_from_list(
@@ -3174,7 +3176,11 @@ class MainWindow(QMainWindow):
         names = ", ".join(p.name for p in written[:4])
         if len(written) > 4:
             names += ", …"
-        self._refresh_after_compose(written, f"Extracted {len(written)} file(s): {names}")
+        self._refresh_after_compose(
+            written,
+            f"Extracted {len(written)} file(s): {names}",
+            source_files=[source],
+        )
 
     def _run_id_list_extraction(self, source: Path, dialog) -> None:
         """ID-list path: one streaming pass in the background, with cancel."""
@@ -3243,6 +3249,8 @@ class MainWindow(QMainWindow):
         self._extract_count_only = count_only
         self._extract_source = source
         title = "Checking sequence IDs" if count_only else "Extracting sequences"
+        if not count_only:
+            self._clear_job_file_highlights()
         self._set_status_message(f"{title} in {source.name}…", 0)
         if not count_only:
             self._job_running = True
@@ -3325,7 +3333,8 @@ class MainWindow(QMainWindow):
         outputs = list(summary.written)
         if summary.missing_path is not None:
             outputs.append(summary.missing_path)
-        self._refresh_after_compose(outputs, message)
+        sources = [self._extract_source] if getattr(self, "_extract_source", None) else []
+        self._refresh_after_compose(outputs, message, source_files=sources)
 
         detail = message
         if summary.missing_path is not None:
@@ -3436,9 +3445,24 @@ class MainWindow(QMainWindow):
             return None
         return Path(path).expanduser().resolve()
 
-    def _refresh_after_compose(self, created: list[Path], message: str) -> None:
+    def _refresh_after_compose(
+        self,
+        created: list[Path],
+        message: str,
+        *,
+        source_files: list[Path] | None = None,
+    ) -> None:
         if self._current_folder:
-            self._populate_file_list(self._current_folder, new_outputs=created)
+            # Leave opening/selection to ``_auto_open_outputs`` so the new
+            # file (not the input) becomes the deep-blue opened row.
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created,
+                source_files=list(source_files or []),
+                open_preview=False,
+            )
+        if created:
+            self._auto_open_outputs(created)
         self._set_status_message(message, 8000)
 
     def _populate_fastga_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
@@ -3862,7 +3886,10 @@ class MainWindow(QMainWindow):
                 self._current_folder,
                 new_outputs=created_paths,
                 source_files=getattr(self, "_last_job_source_files", []),
+                open_preview=False,
             )
+        if created_paths:
+            self._auto_open_outputs(created_paths)
         names = ", ".join(p.name for p in created_paths)
         self._set_status_message(f"FastGA completed — {names}", 12000, override_file_link=True)
 
@@ -6283,8 +6310,11 @@ class MainWindow(QMainWindow):
             key = str(resolved)
             if as_output:
                 self._highlight_output_keys.add(key)
+                self._highlight_source_keys.discard(key)
             else:
-                self._highlight_source_keys.add(key)
+                # Prefer output tint when a path is both source and result.
+                if key not in self._highlight_output_keys:
+                    self._highlight_source_keys.add(key)
             highlight_paths.append(resolved)
 
         if new_outputs:
@@ -6293,6 +6323,10 @@ class MainWindow(QMainWindow):
         if source_files:
             for path in source_files:
                 _track(path, as_output=False)
+
+        # Apply green (outputs) / light blue (inputs) before any selection.
+        if self._highlight_output_keys or self._highlight_source_keys:
+            self._refresh_file_list_highlights()
 
         new_cache_keys = {str(path.expanduser().resolve()) for path in self._cached_folder_files}
         added_keys = new_cache_keys - prev_cached_keys
@@ -6401,6 +6435,12 @@ class MainWindow(QMainWindow):
             self._sync_folder_tree_labels()
         self._folder_tree.set_active_folder(self._current_folder)
 
+    def _clear_job_file_highlights(self) -> None:
+        """Drop previous job green/blue tints (called when a new job starts)."""
+        self._highlight_output_keys = set()
+        self._highlight_source_keys = set()
+        self._refresh_file_list_highlights()
+
     def _refresh_file_list_highlights(self) -> None:
         """Re-apply new-output / source tint after metadata or sort updates."""
         for index in range(self._file_list.count()):
@@ -6461,33 +6501,46 @@ class MainWindow(QMainWindow):
         *,
         open_preview: bool = True,
     ) -> None:
+        """Scroll job results into view; keep green/light-blue tints (no multi-select).
+
+        The opened file is selected separately (deep blue) by ``_auto_open_outputs``.
+        """
         path_set = {str(p.expanduser().resolve()) for p in paths}
         first_item: FileListRow | None = None
         preferred_item: FileListRow | None = None
-        preferred_rank = 99
+        preferred_key: tuple[int, int] | None = None
+        # Do not select every input/output — that would paint them all deep blue.
         self._file_list.clearSelection()
+        self._file_list.setCurrentItem(None)
+        self._refresh_file_list_highlights()
         for index in range(self._file_list.count()):
             item = self._file_list.item(index)
             raw = item.data(ROLE_PATH)
             if raw and str(Path(str(raw)).resolve()) in path_set:
-                item.setSelected(True)
                 if first_item is None:
                     first_item = item
                 candidate = Path(str(raw)).resolve()
-                rank = preview_path_priority(candidate)
-                if rank < preferred_rank:
-                    preferred_rank = rank
+                key = str(candidate)
+                # Prefer new outputs over inputs when preview ranks match (both FASTA).
+                rank = (
+                    preview_path_priority(candidate),
+                    0 if key in self._highlight_output_keys else 1,
+                )
+                if preferred_key is None or rank < preferred_key:
+                    preferred_key = rank
                     preferred_item = item
         focus_item = preferred_item or first_item
         if focus_item is not None:
-            self._reveal_file_list_item(
+            self._file_list.scrollToItem(
                 focus_item,
-                scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
+                QAbstractItemView.ScrollHint.EnsureVisible,
             )
         if open_preview and focus_item is not None:
             path = self._preview_path_from_item(focus_item)
             if path is not None and is_previewable_file(path):
                 self._open_file_in_preview(path)
+                self._reveal_file_list_item(focus_item)
+                self._refresh_file_list_highlights()
 
     def _open_best_preview_path(self, paths: list[Path]) -> None:
         candidates = [
@@ -6497,7 +6550,13 @@ class MainWindow(QMainWindow):
         ]
         if not candidates:
             return
-        best = min(candidates, key=preview_path_priority)
+
+        def _rank(path: Path) -> tuple[int, int]:
+            # Prefer new outputs over job inputs when priorities tie (e.g. both FASTA).
+            is_output = str(path) in self._highlight_output_keys
+            return (preview_path_priority(path), 0 if is_output else 1)
+
+        best = min(candidates, key=_rank)
         self._open_file_in_preview(best)
 
     def _select_path_in_file_list(self, path: Path) -> None:
@@ -6512,6 +6571,7 @@ class MainWindow(QMainWindow):
                     item,
                     scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
                 )
+                self._refresh_file_list_highlights()
                 return
 
     def _selected_files(self) -> list[Path]:
@@ -6874,16 +6934,53 @@ class MainWindow(QMainWindow):
     def _resolve_te_viz_hit_paths_and_kinds(
         self,
         pending: _PendingTeVizBuild,
+        *,
+        created_paths: list[Path] | None = None,
     ) -> tuple[list[Path], list[str]] | None:
         te_paths = list(pending.masking_paths)
         kinds = [TE_INPUT_KIND_MASKING] * len(pending.masking_paths)
         for fasta in pending.consensus_fastas:
-            blast_txt = find_blast_table_for_query(fasta)
+            blast_txt = self._find_blast_table_after_job(
+                fasta,
+                created_paths=created_paths,
+            )
             if blast_txt is None:
                 return None
             te_paths.append(blast_txt.expanduser().resolve())
             kinds.append(TE_INPUT_KIND_CONSENSUS)
         return te_paths, kinds
+
+    def _find_blast_table_after_job(
+        self,
+        fasta: Path,
+        *,
+        created_paths: list[Path] | None = None,
+    ) -> Path | None:
+        """Locate ``*_b.txt`` (or legacy ``*_blast.txt``) for a query after Blast."""
+        from repeatviewer.backends.blast_genome_plot import strip_blast_table_suffix
+
+        found = find_blast_table_for_query(fasta)
+        if found is not None:
+            return found
+        if not created_paths:
+            return None
+        fasta = fasta.expanduser().resolve()
+        expected_names = {
+            f"{fasta.name}_b.txt",
+            f"{fasta.name}_blast.txt",
+            f"{fasta.stem}_b.txt",
+            f"{fasta.stem}_blast.txt",
+        }
+        for path in created_paths:
+            resolved = path.expanduser().resolve()
+            if not resolved.is_file():
+                continue
+            if resolved.name in expected_names:
+                return resolved
+            stripped = strip_blast_table_suffix(resolved.name)
+            if stripped in {fasta.name, fasta.stem}:
+                return resolved
+        return None
 
     def _resolve_te_viz_hit_paths(self, pending: _PendingTeVizBuild) -> list[Path] | None:
         resolved = self._resolve_te_viz_hit_paths_and_kinds(pending)
@@ -6916,10 +7013,12 @@ class MainWindow(QMainWindow):
             self._pending_te_genome_map = map_options
             self._pending_te_genome_map_fastas = list(need_blast)
             self._set_status_message("Running Blast on TE consensus, then TE genome map…", 0)
+            # Density plot needs the *_b.txt table even if the user turned off
+            # "Export BLAST text file" for ordinary Blast runs.
             self._apply_function(
                 "blast",
                 preselected=need_blast,
-                blast_options=self._blast_options,
+                blast_options=replace(self._blast_options, write_text=True),
             )
             return
         te_paths = list(masking_paths)
@@ -7256,6 +7355,7 @@ class MainWindow(QMainWindow):
                 self._current_folder,
                 new_outputs=created_paths,
                 source_files=source_paths,
+                open_preview=False,
             )
         self._auto_open_outputs(created_paths)
         names = ", ".join(p.name for p in created_paths[:6])
@@ -7764,6 +7864,7 @@ class MainWindow(QMainWindow):
             return
 
         self._last_benchmark_source_files = list(source_files)
+        self._clear_job_file_highlights()
         self._job_cancel.reset()
         self._show_job_progress(job_title, total_steps)
         self._set_job_actions_enabled(False)
@@ -8190,7 +8291,8 @@ class MainWindow(QMainWindow):
         self._apply_function(
             "blast",
             preselected=self._pending_te_genome_map_fastas,
-            blast_options=self._blast_options,
+            # Keep *_b.txt so the density plot can find the hit table after Blast.
+            blast_options=replace(self._blast_options, write_text=True),
         )
 
     def _open_blast_genome_map(
@@ -8402,6 +8504,7 @@ class MainWindow(QMainWindow):
         self._set_job_actions_enabled(False)
         workers = max(1, min(self._project.batch_workers, 8))
         worker_note = f" ({workers} workers)" if workers > 1 else ""
+        self._clear_job_file_highlights()
         self._set_status_message(f"Building TE genome map{worker_note}…", 0)
         if self._task_progress is not None:
             self._task_progress.start(self._running_job_title("TE genome map"), 6)
@@ -10959,6 +11062,7 @@ class MainWindow(QMainWindow):
                     worker._job_kwargs["seq_files"] = list(prepared_sources)
 
         self._last_job_source_files = list(prepared_sources)
+        self._clear_job_file_highlights()
         self._job_cancel.reset()
         self._show_job_progress(job_title, total_steps)
         self._set_job_actions_enabled(False)
@@ -11109,12 +11213,23 @@ class MainWindow(QMainWindow):
             self._pending_te_viz = None
             self._pending_te_genome_map_fastas = []
             self._pending_te_genome_map = None
-            resolved = self._resolve_te_viz_hit_paths_and_kinds(pending_viz)
+            resolved = self._resolve_te_viz_hit_paths_and_kinds(
+                pending_viz,
+                created_paths=created_paths,
+            )
             if resolved is None:
+                example = (
+                    f"{pending_viz.consensus_fastas[0].name}_b.txt"
+                    if pending_viz.consensus_fastas
+                    else "query.fa_b.txt"
+                )
                 QMessageBox.warning(
                     self,
                     "TE genome map",
-                    "Blast finished but a BLAST table for the TE consensus was not found.",
+                    "Blast finished but a BLAST table for the TE consensus was not found.\n\n"
+                    "Expected a hit table named like:\n"
+                    f"  {example}\n"
+                    "next to the consensus FASTA (legacy *_blast.txt is also accepted).",
                 )
             else:
                 te_paths, te_kinds = resolved
@@ -11237,7 +11352,13 @@ class MainWindow(QMainWindow):
         for fasta in fasta_paths:
             if fasta.name in failed_names:
                 continue
-            blast_txt = find_blast_table_for_query(fasta)
+            blast_txt = self._find_blast_table_after_job(
+                fasta,
+                created_paths=[
+                    Path(str(raw)).expanduser().resolve()
+                    for raw in result.get("created_outputs", [])
+                ],
+            )
             if blast_txt is not None:
                 queued.append(blast_txt)
         if queued:
@@ -11280,18 +11401,35 @@ class MainWindow(QMainWindow):
         search = in_folder if in_folder else files
         previewable = [p for p in search if is_previewable_file(p)]
         if not previewable:
-            return None
+            # Still return a created file so the Files list can select it.
+            return search[-1] if search else files[-1]
         for suffix in (".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".svg"):
             for path in previewable:
                 if path.suffix.lower() == suffix:
                     return path
-        return min(previewable, key=preview_path_priority)
+        # Among equal priorities, prefer the last created path (newest output).
+        order = {str(p): index for index, p in enumerate(files)}
+        return min(
+            previewable,
+            key=lambda p: (preview_path_priority(p), -order.get(str(p), 0)),
+        )
 
     def _auto_open_outputs(self, created_paths: list[Path]) -> None:
+        """Open the best new output and select it (deep blue); others stay green."""
         target = self._pick_preview_output(created_paths)
         if target is None:
             return
-        self._open_preview_tab(target, replace=True)
+        # Select first so the deep-blue opened row is correct even if preview fails.
+        self._file_list.clearSelection()
+        self._file_list.setCurrentItem(None)
+        self._refresh_file_list_highlights()
+        self._select_path_in_file_list(target)
+        self._refresh_file_list_highlights()
+        if is_previewable_file(target):
+            self._open_preview_tab(target, replace=True)
+            # Re-assert selection after preview (some preview loads reshuffle focus).
+            self._select_path_in_file_list(target)
+            self._refresh_file_list_highlights()
 
     def _update_status(self) -> None:
         if self._job_running:

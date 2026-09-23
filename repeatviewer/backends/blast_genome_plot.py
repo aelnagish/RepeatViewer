@@ -4803,15 +4803,16 @@ _LEGACY_GENOME_MAP_SUFFIXES = (
 
 
 def te_hit_source_tag(path: Path) -> str:
-    """Return ``RM`` or ``blast`` for TE hit-table naming.
+    """Return ``RM`` or ``b`` for TE hit-table naming.
 
     Naming uses the file extension so plot outputs stay consistent even when the
     path is only being predicted. Content validation still happens at read time.
+    Older outputs used ``blast`` instead of ``b``; preview still recognizes both.
     """
     name = path.name.lower()
     if name.endswith(".out") and strip_blast_table_suffix(path.name) is None:
         return "RM"
-    return "blast"
+    return "b"
 
 
 def te_plot_output_suffix(
@@ -4820,7 +4821,7 @@ def te_plot_output_suffix(
     kind: str,
     region: bool = False,
 ) -> str:
-    """Build a plot HTML suffix: ``_{blast|RM|multi}_{kind}_plot[.region].html``."""
+    """Build a plot HTML suffix: ``_{b|RM|multi}_{kind}_plot[.region].html``."""
     te_paths = (
         [te_input_files.expanduser().resolve()]
         if isinstance(te_input_files, Path)
@@ -4831,7 +4832,7 @@ def te_plot_output_suffix(
     elif te_paths:
         tag = te_hit_source_tag(te_paths[0])
     else:
-        tag = "blast"
+        tag = "b"
     kind = str(kind).strip("_") or "plot"
     # Multi-source density plots use ``dens`` (``_multi_dens_plot.html``).
     if tag == "multi" and kind in {"den", "density"}:

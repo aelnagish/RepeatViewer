@@ -6,8 +6,16 @@ from repeatviewer.backends.te_abundance_plot import (
     TE_ABUNDANCE_PERCENT,
     _merged_interval_bp,
     family_occupied_bp,
+    te_abundance_plot_html_path_for_sources,
     write_te_abundance_plot_html,
 )
+
+
+def test_abundance_plot_name_drops_sequence_extension(tmp_path: Path) -> None:
+    source = tmp_path / "EDTA_RB3.fa.out"
+    source.write_text("", encoding="utf-8")
+    out = te_abundance_plot_html_path_for_sources(source)
+    assert out.name == "EDTA_RB3_RM_abund_plot.html"
 
 
 def test_repeatmasker_query_coordinates_are_inclusive() -> None:
