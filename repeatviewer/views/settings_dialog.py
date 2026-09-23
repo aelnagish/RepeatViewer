@@ -55,6 +55,7 @@ from repeatviewer.app_preferences import (
     config_dir,
     human_size,
     load_blast_db_base_dir,
+    load_cyto_experimenter,
     load_reopen_last_folder,
     load_restore_geometry,
     load_ui_thread_reserve,
@@ -62,6 +63,7 @@ from repeatviewer.app_preferences import (
     log_file_path,
     reset_all_preferences,
     save_blast_db_base_dir,
+    save_cyto_experimenter,
     save_reopen_last_folder,
     save_restore_geometry,
     save_ui_thread_reserve,
@@ -570,6 +572,13 @@ class SettingsDialog(QDialog):
         self._restore_geometry.setChecked(load_restore_geometry())
         self._restore_geometry.setToolTip("Restore the window size and position from the last session.")
 
+        # Cytogenetic images
+        self._cyto_experimenter = QLineEdit(load_cyto_experimenter())
+        self._cyto_experimenter.setPlaceholderText("Your name")
+        self._cyto_experimenter.setToolTip(
+            "Filled in automatically when you attach a cytogenetic image to a sequence."
+        )
+
         # BLAST databases
         self._blast_db_base_dir = QLineEdit(str(load_blast_db_base_dir()))
         self._blast_db_base_dir.setMinimumWidth(_PATH_FIELD_MIN_WIDTH)
@@ -717,6 +726,9 @@ class SettingsDialog(QDialog):
             ("Reopen last folder:", self._reopen_last),
             ("Restore window size:", self._restore_geometry),
         ])
+        cytogenetics = _group("Cytogenetic images", [
+            ("Experimenter:", self._cyto_experimenter),
+        ])
         blast_databases = _group("BLAST databases", [
             ("Base folder:", _path_browse_row(
                 self._blast_db_base_dir,
@@ -760,6 +772,7 @@ class SettingsDialog(QDialog):
             files_preview,
             performance,
             startup,
+            cytogenetics,
             blast_databases,
             conda_tools,
             diagnostics,
@@ -866,6 +879,7 @@ class SettingsDialog(QDialog):
         save_ui_thread_reserve(self._ui_thread_reserve.value())
         save_reopen_last_folder(self._reopen_last.isChecked())
         save_restore_geometry(self._restore_geometry.isChecked())
+        save_cyto_experimenter(self._cyto_experimenter.text())
         save_verbose_logging(self._verbose_logging.isChecked())
         base_dir_text = self._blast_db_base_dir.text().strip()
         if base_dir_text:

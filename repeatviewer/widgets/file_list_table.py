@@ -25,6 +25,7 @@ from repeatviewer.backends.blast_genome_plot import (
     is_blast_table_file,
     is_te_hit_table_file,
 )
+from repeatviewer.backends.cyto_images import image_count_for_sequence
 from repeatviewer.backends.separate_fasta import count_fasta_sequences
 from repeatviewer.browser_file_metadata import BrowserFileMetadata
 from repeatviewer.widgets.browser_icons import browser_file_icon
@@ -43,6 +44,7 @@ _COL_DESCRIPTION = 6
 _COL_MODIFIED = 7
 _COL_SIZE = 8
 _COL_COLOR = 9
+_COL_IMAGES = 10
 
 # Public aliases for column visibility settings.
 COL_CHECK = _COL_CHECK
@@ -55,6 +57,7 @@ COL_DESCRIPTION = _COL_DESCRIPTION
 COL_MODIFIED = _COL_MODIFIED
 COL_SIZE = _COL_SIZE
 COL_COLOR = _COL_COLOR
+COL_IMAGES = _COL_IMAGES
 
 _HEADERS = (
     "",
@@ -67,6 +70,7 @@ _HEADERS = (
     "Modified",
     "Size",
     "Color",
+    "\U0001F52C",  # microscope: sequences with cytogenetic images
 )
 _CHECKBOX_COLUMN_WIDTH = 22
 _DEFAULT_COLUMN_WIDTHS = {
@@ -79,6 +83,7 @@ _DEFAULT_COLUMN_WIDTHS = {
     _COL_MODIFIED: 150,
     _COL_SIZE: 72,
     _COL_COLOR: 80,
+    _COL_IMAGES: 34,
 }
 _LEFT_ALIGN = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
@@ -170,6 +175,8 @@ class FileListTableWidget(QTableWidget):
     blast_divergence_requested = Signal(Path)
     add_blast_database_requested = Signal(Path)
     add_annotation_requested = Signal(Path)
+    cyto_images_requested = Signal(Path)             # open the image(s) of a sequence
+    attach_cyto_image_requested = Signal(Path, list)  # FASTA, image paths ([] = ask)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -187,6 +194,11 @@ class FileListTableWidget(QTableWidget):
         self.setSortingEnabled(True)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        # Image files dropped from Finder / Explorer onto a FASTA row are attached
+        # as cytogenetic images (see dragEnterEvent / dropEvent).
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self._cyto_drop_row: int | None = None
         self.verticalHeader().setVisible(False)
 
         header = self.horizontalHeader()
@@ -225,6 +237,7 @@ class FileListTableWidget(QTableWidget):
 
         self.apply_visible_columns(load_visible_file_columns())
         self._restore_column_layout()
+        self._place_images_column_once()
 
     def _schedule_save_column_layout(self, *_args) -> None:
         if self._restoring_column_layout:
@@ -274,6 +287,32 @@ class FileListTableWidget(QTableWidget):
             header.blockSignals(False)
             self._restoring_column_layout = False
 
+    def _place_images_column_once(self) -> None:
+        """First run with the images column: put it right after Name, where it is seen.
+
+        One-shot (QSettings flag), so a user who later drags it elsewhere keeps
+        their order.
+        """
+        from PySide6.QtCore import QSettings
+
+        from repeatviewer.widgets.file_list_columns import FILES_SETTINGS_GROUP
+
+        s = QSettings()
+        s.beginGroup(FILES_SETTINGS_GROUP)
+        done = str(s.value("images_column_placed_v2", False)).lower() in {"1", "true"}
+        s.endGroup()
+        if done:
+            return
+        header = self.horizontalHeader()
+        target = header.visualIndex(_COL_NAME) + 1
+        current = header.visualIndex(_COL_IMAGES)
+        if current >= 0 and current != target:
+            header.moveSection(current, target)
+        s = QSettings()
+        s.beginGroup(FILES_SETTINGS_GROUP)
+        s.setValue("images_column_placed_v2", True)
+        s.endGroup()
+
     def apply_visible_columns(self, visible: set[int]) -> None:
         """Show/hide optional columns (checkbox + name always stay visible)."""
         from repeatviewer.widgets.file_list_columns import (
@@ -292,12 +331,19 @@ class FileListTableWidget(QTableWidget):
             self.setColumnCount(expected)
         if force:
             self.setHorizontalHeaderLabels(list(_HEADERS))
+            images_header = self.horizontalHeaderItem(_COL_IMAGES)
+            if images_header is not None:
+                images_header.setToolTip("Cytogenetic images attached (click a tick to open)")
             return
         for column, label in enumerate(_HEADERS):
             item = self.horizontalHeaderItem(column)
             if item is None or item.text() != label:
                 self.setHorizontalHeaderLabels(list(_HEADERS))
                 break
+        images_header = self.horizontalHeaderItem(_COL_IMAGES)
+        if images_header is not None:
+            images_header.setToolTip("Cytogenetic images attached (click a tick to open)")
+            images_header.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
     def _reapply_cell_alignment(self) -> None:
         for row in range(self.rowCount()):
@@ -305,7 +351,7 @@ class FileListTableWidget(QTableWidget):
                 cell = super().item(row, column)
                 if cell is None:
                     continue
-                if column == _COL_CHECK:
+                if column in (_COL_CHECK, _COL_IMAGES):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 else:
                     cell.setTextAlignment(_LEFT_ALIGN)
@@ -452,6 +498,7 @@ class FileListTableWidget(QTableWidget):
         self._apply_file_color_cells(row, path)
         if fill_metadata_columns:
             self._apply_metadata_cells(row, path_text, meta)
+        self._apply_cyto_cell(row, path)
         self.setSortingEnabled(was_sorting)
         return FileListRow(self, row)
 
@@ -510,6 +557,97 @@ class FileListTableWidget(QTableWidget):
         row = self._path_row_index().get(key)
         if row is not None:
             self._apply_file_color_cells(row, Path(key))
+
+    # -- cytogenetic images ------------------------------------------------
+
+    def _apply_cyto_cell(self, row: int, path: Path) -> None:
+        count = 0
+        if path.suffix.lower() in _FASTA_SUFFIXES:
+            try:
+                count = image_count_for_sequence(path)
+            except Exception:  # noqa: BLE001 - never break the listing over images
+                count = 0
+        cell = _SortableTableItem("\u2713" if count else "", sort_key=count)
+        cell.setData(_ROLE_PATH, str(path))
+        cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if count:
+            cell.setToolTip(
+                f"{count} cytogenetic image{'s' if count != 1 else ''} \u2014 click to open"
+            )
+            bold = cell.font()
+            bold.setBold(True)
+            cell.setFont(bold)
+        self.setItem(row, _COL_IMAGES, cell)
+
+    def cyto_image_count(self, row: int) -> int:
+        cell = super().item(row, _COL_IMAGES)
+        if cell is None:
+            return 0
+        value = cell.data(_ROLE_SORT)
+        return int(value) if isinstance(value, int) else 0
+
+    def refresh_cyto_images(self) -> None:
+        """Re-read the tick column (after an image was attached or removed)."""
+        was_sorting = self.isSortingEnabled()
+        self.setSortingEnabled(False)
+        try:
+            for row in range(self.rowCount()):
+                raw = self._path_for_row(row)
+                if raw:
+                    self._apply_cyto_cell(row, Path(raw))
+        finally:
+            self.setSortingEnabled(was_sorting)
+
+    def _fasta_row_at(self, pos) -> int | None:
+        index = self.indexAt(pos)
+        if not index.isValid():
+            return None
+        raw = self._path_for_row(index.row())
+        if not raw or Path(raw).suffix.lower() not in _FASTA_SUFFIXES:
+            return None
+        return index.row()
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        from repeatviewer.widgets.cyto_images_ui import image_paths_from_mime
+
+        if event.source() is None and image_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        from repeatviewer.widgets.cyto_images_ui import image_paths_from_mime
+
+        if event.source() is not None or not image_paths_from_mime(event.mimeData()):
+            event.ignore()
+            return
+        row = self._fasta_row_at(event.position().toPoint())
+        if row is None:
+            self._cyto_drop_row = None
+            event.ignore()
+            return
+        if row != self._cyto_drop_row:
+            self._cyto_drop_row = row
+            self.selectRow(row)
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        self._cyto_drop_row = None
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        from repeatviewer.widgets.cyto_images_ui import image_paths_from_mime
+
+        self._cyto_drop_row = None
+        paths = image_paths_from_mime(event.mimeData()) if event.source() is None else []
+        row = self._fasta_row_at(event.position().toPoint())
+        if not paths or row is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        fasta = Path(str(self._path_for_row(row)))
+        # Open the dialog after the drop returns (Finder waits for the drop otherwise).
+        QTimer.singleShot(0, lambda: self.attach_cyto_image_requested.emit(fasta, list(paths)))
 
     def _row_decoration(self, row: int) -> tuple[QBrush | None, QBrush | None, QFont | None]:
         """Background/foreground/font already applied to this row (if any)."""
@@ -720,6 +858,11 @@ class FileListTableWidget(QTableWidget):
     def _on_cell_clicked(self, row: int, column: int) -> None:
         if column == _COL_CHECK:
             return
+        if column == _COL_IMAGES and self.cyto_image_count(row) > 0:
+            raw = self._path_for_row(row)
+            if raw:
+                self.cyto_images_requested.emit(Path(raw))
+                return
         row_item = self.item(row)
         if row_item is not None:
             self.itemClicked.emit(row_item)
@@ -784,6 +927,19 @@ class FileListTableWidget(QTableWidget):
                             "Add annotation…",
                             lambda p=path: self.add_annotation_requested.emit(p),
                         )
+                        menu.addAction(
+                            "Attach cytogenetic image…",
+                            lambda p=path: self.attach_cyto_image_requested.emit(p, []),
+                        )
+                        try:
+                            n_images = image_count_for_sequence(path)
+                        except Exception:  # noqa: BLE001
+                            n_images = 0
+                        if n_images:
+                            menu.addAction(
+                                f"Show cytogenetic images ({n_images})",
+                                lambda p=path: self.cyto_images_requested.emit(p),
+                            )
                         try:
                             seq_n = count_fasta_sequences(path)
                         except Exception:  # noqa: BLE001

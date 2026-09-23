@@ -2114,6 +2114,11 @@ class MainWindow(QMainWindow):
         )
         self._file_list.add_blast_database_requested.connect(self._add_fasta_as_blast_database)
         self._file_list.add_annotation_requested.connect(self._add_annotation_for_fasta)
+        self._file_list.attach_cyto_image_requested.connect(self._attach_cyto_images)
+        self._file_list.cyto_images_requested.connect(self._open_cyto_images)
+        from repeatviewer.widgets.cyto_images_ui import cyto_notifier
+
+        cyto_notifier().changed.connect(self._on_cyto_images_changed)
         self._folder_tree.rename_folder_requested.connect(self._rename_folder)
         self._folder_tree.delete_folders_requested.connect(self._delete_folders)
         self._folder_tree.clear_root_folders_requested.connect(self._clear_root_folders)
@@ -9351,6 +9356,26 @@ class MainWindow(QMainWindow):
         ok = dialog.exec() == QDialog.DialogCode.Accepted
         return dialog.textValue(), ok
 
+    # -- cytogenetic images -------------------------------------------------
+
+    def _attach_cyto_images(self, fasta: Path, images: list) -> None:
+        from repeatviewer.widgets.cyto_images_ui import attach_images
+
+        saved = attach_images(self, Path(fasta), [Path(p) for p in images or []])
+        if saved:
+            noun = "image" if saved == 1 else "images"
+            self._set_status_message(f"Attached {saved} cytogenetic {noun} to {Path(fasta).name}", 5000)
+
+    def _open_cyto_images(self, fasta: Path) -> None:
+        from repeatviewer.widgets.cyto_images_ui import open_images_for_sequence
+
+        open_images_for_sequence(self, Path(fasta))
+
+    def _on_cyto_images_changed(self, folder: str) -> None:
+        current = getattr(self, "_current_folder", None)
+        if current is not None and str(Path(current).expanduser().resolve()) == folder:
+            self._file_list.refresh_cyto_images()
+
     def _rename_file(self, path: Path) -> None:
         from repeatviewer.backends.sequence_features import (
             companion_annotation_renames_for_fasta,
@@ -9391,6 +9416,13 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.critical(self, "Rename failed", str(exc))
             return
+        if path.suffix.lower() in _FASTA_SUFFIXES and target.parent == path.parent:
+            from repeatviewer.backends.cyto_images import rename_sequence
+
+            try:
+                rename_sequence(path.parent, path.name, target.name)
+            except OSError:
+                logger.exception("Could not move cytogenetic image links to %s", target.name)
 
         from repeatviewer.widgets.file_colors import replace_file_color_path
 
