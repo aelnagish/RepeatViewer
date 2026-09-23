@@ -36,6 +36,7 @@ from repeatviewer.backends.html_preview_policy import (
 )
 from repeatviewer.plot_preferences import save_view_state, sidecar_prefs_path, view_state_from_dict
 from repeatviewer.widgets.preview_zoom import (
+    MAX_PREVIEW_ZOOM_PERCENT,
     PreviewFitMode,
     load_preview_fit_mode,
     load_preview_zoom_percent,
@@ -178,7 +179,7 @@ class LazyHtmlPreview(QWidget):
         self._layout.addWidget(self._status)
 
     def set_zoom_percent(self, percent: int) -> None:
-        self._zoom_percent = max(25, min(200, int(percent)))
+        self._zoom_percent = max(25, min(MAX_PREVIEW_ZOOM_PERCENT, int(percent)))
         if self._inner is not None and hasattr(self._inner, "set_zoom_percent"):
             if hasattr(self._inner, "is_view_active") and not self._inner.is_view_active():
                 return
@@ -525,7 +526,7 @@ class HtmlWebEnginePreview(QWidget):
     def set_zoom_percent(self, percent: int) -> None:
         if not self._view_active():
             return
-        self._zoom_percent = max(25, min(200, int(percent)))
+        self._zoom_percent = max(25, min(MAX_PREVIEW_ZOOM_PERCENT, int(percent)))
         self._apply_zoom()
 
     def set_fit_mode(self, mode: PreviewFitMode | str) -> None:

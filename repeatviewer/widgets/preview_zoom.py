@@ -1,4 +1,4 @@
-"""Persisted zoom / fit settings for TE-Aid HTML and Flexidot image previews."""
+"""Persisted zoom / font / fit settings for Preview (text, HTML, PDF, images)."""
 
 from __future__ import annotations
 
@@ -10,11 +10,12 @@ from PySide6.QtGui import QWheelEvent
 PREVIEW_SETTINGS_GROUP = "preview"
 DEFAULT_PREVIEW_ZOOM_PERCENT = 100
 MIN_PREVIEW_ZOOM_PERCENT = 25
-MAX_PREVIEW_ZOOM_PERCENT = 200
+MAX_PREVIEW_ZOOM_PERCENT = 500
 PREVIEW_WHEEL_ZOOM_STEP_PERCENT = 5
+PREVIEW_WHEEL_FONT_STEP_PT = 1
 DEFAULT_PREVIEW_FONT_SIZE = 11
 MIN_PREVIEW_FONT_SIZE = 8
-MAX_PREVIEW_FONT_SIZE = 24
+MAX_PREVIEW_FONT_SIZE = 72
 
 
 class PreviewFitMode(str, Enum):
@@ -34,7 +35,11 @@ class DefaultFastaPreviewTab(str, Enum):
 
 
 class PreviewZoomKind(str, Enum):
-    """Independent preview scale buckets (changing one does not affect the others)."""
+    """Preview content kind for chrome / persistence.
+
+    HTML, PDF, and image each keep an independent zoom %. Text uses font size
+    (pt), not a percent scale.
+    """
 
     TEXT = "text"
     HTML = "html"
@@ -45,7 +50,6 @@ class PreviewZoomKind(str, Enum):
 DEFAULT_FASTA_PREVIEW_TAB = DefaultFastaPreviewTab.ANNOTATION
 
 _PREVIEW_ZOOM_KIND_KEYS: dict[PreviewZoomKind, str] = {
-    PreviewZoomKind.TEXT: "zoom_percent_text",
     PreviewZoomKind.HTML: "zoom_percent_html",
     PreviewZoomKind.PDF: "zoom_percent_pdf",
     PreviewZoomKind.IMAGE: "zoom_percent_image",
@@ -70,10 +74,10 @@ def _coerce_preview_zoom_kind(
 
 
 def load_preview_zoom_percent(kind: PreviewZoomKind | str | None = None) -> int:
-    """Load zoom for a preview kind.
+    """Load zoom for a media preview kind (HTML / PDF / image).
 
-    ``kind=None`` returns the legacy shared value (migration fallback / old callers).
-    Per-kind values fall back to that legacy value when not yet set.
+    ``kind=None`` returns the legacy shared value. Text preview uses font size
+    (see ``load_preview_font_size``), not a percent scale.
     """
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
@@ -84,7 +88,10 @@ def load_preview_zoom_percent(kind: PreviewZoomKind | str | None = None) -> int:
     if zoom_kind is None:
         s.endGroup()
         return legacy
-    key = _PREVIEW_ZOOM_KIND_KEYS[zoom_kind]
+    key = _PREVIEW_ZOOM_KIND_KEYS.get(zoom_kind)
+    if key is None:
+        s.endGroup()
+        return legacy
     if s.contains(key):
         value = int(s.value(key, legacy))
     else:
@@ -97,7 +104,7 @@ def save_preview_zoom_percent(
     percent: int,
     kind: PreviewZoomKind | str | None = None,
 ) -> None:
-    """Save zoom for one preview kind (or the legacy shared key when ``kind`` is None)."""
+    """Save zoom for one media preview kind (or the legacy shared key)."""
     percent = _clamp_preview_zoom_percent(percent)
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
@@ -105,17 +112,27 @@ def save_preview_zoom_percent(
     if zoom_kind is None:
         s.setValue("zoom_percent", percent)
     else:
-        s.setValue(_PREVIEW_ZOOM_KIND_KEYS[zoom_kind], percent)
+        key = _PREVIEW_ZOOM_KIND_KEYS.get(zoom_kind)
+        if key is not None:
+            s.setValue(key, percent)
     s.endGroup()
 
 
 def load_all_preview_zoom_percents() -> dict[PreviewZoomKind, int]:
-    return {kind: load_preview_zoom_percent(kind) for kind in PreviewZoomKind}
+    return {
+        kind: load_preview_zoom_percent(kind)
+        for kind in (PreviewZoomKind.HTML, PreviewZoomKind.PDF, PreviewZoomKind.IMAGE)
+    }
 
 
 def save_all_preview_zoom_percents(values: dict[PreviewZoomKind, int]) -> None:
     for kind, percent in values.items():
-        save_preview_zoom_percent(percent, kind)
+        if kind in _PREVIEW_ZOOM_KIND_KEYS:
+            save_preview_zoom_percent(percent, kind)
+
+
+def _clamp_preview_font_size(size: int) -> int:
+    return max(MIN_PREVIEW_FONT_SIZE, min(MAX_PREVIEW_FONT_SIZE, int(size)))
 
 
 def load_preview_fit_mode() -> PreviewFitMode:
@@ -154,16 +171,13 @@ def load_preview_font_size() -> int:
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
     value = int(s.value("text_font_size", DEFAULT_PREVIEW_FONT_SIZE))
     s.endGroup()
-    return max(MIN_PREVIEW_FONT_SIZE, min(MAX_PREVIEW_FONT_SIZE, value))
+    return _clamp_preview_font_size(value)
 
 
 def save_preview_font_size(size: int) -> None:
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
-    s.setValue(
-        "text_font_size",
-        max(MIN_PREVIEW_FONT_SIZE, min(MAX_PREVIEW_FONT_SIZE, int(size))),
-    )
+    s.setValue("text_font_size", _clamp_preview_font_size(size))
     s.endGroup()
 
 

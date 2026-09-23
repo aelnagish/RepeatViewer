@@ -87,7 +87,9 @@ from repeatviewer.widgets.browser_panel_settings import (
     save_browser_panel_font_size,
 )
 from repeatviewer.widgets.preview_zoom import (
+    MAX_PREVIEW_FONT_SIZE,
     MAX_PREVIEW_ZOOM_PERCENT,
+    MIN_PREVIEW_FONT_SIZE,
     MIN_PREVIEW_ZOOM_PERCENT,
     PreviewFitMode,
     PreviewZoomKind,
@@ -95,11 +97,13 @@ from repeatviewer.widgets.preview_zoom import (
     load_color_blind_nucleotide_scheme,
     load_default_fasta_preview_tab,
     load_preview_fit_mode,
+    load_preview_font_size,
     load_preview_zoom_percent,
     load_show_sequence_summary,
     save_color_blind_nucleotide_scheme,
     save_default_fasta_preview_tab,
     save_preview_fit_mode,
+    save_preview_font_size,
     save_preview_zoom_percent,
     save_show_sequence_summary,
 )
@@ -472,9 +476,15 @@ class SettingsDialog(QDialog):
         self._browser_panel_font.setToolTip(
             "Font size for folder and file names in the Browser panel."
         )
+        self._preview_text_font = NoWheelSpinBox()
+        self._preview_text_font.setRange(MIN_PREVIEW_FONT_SIZE, MAX_PREVIEW_FONT_SIZE)
+        self._preview_text_font.setValue(load_preview_font_size())
+        self._preview_text_font.setSuffix(" pt")
+        self._preview_text_font.setToolTip(
+            "Font size for text / FASTA Text preview (not a percent scale)."
+        )
         self._preview_zoom_spins: dict[PreviewZoomKind, NoWheelSpinBox] = {}
         for kind, tip in (
-            (PreviewZoomKind.TEXT, "Scale for text / FASTA Text preview"),
             (PreviewZoomKind.HTML, "Scale for HTML plots (TE-Aid, etc.)"),
             (PreviewZoomKind.PDF, "Scale for PDF preview (100% = fit page width)"),
             (PreviewZoomKind.IMAGE, "Scale for PNG / figure image preview"),
@@ -646,6 +656,7 @@ class SettingsDialog(QDialog):
         for widget in (
             self._batch_workers,
             self._browser_panel_font,
+            self._preview_text_font,
             *self._preview_zoom_spins.values(),
             self._ui_thread_reserve,
             self._preview_fit,
@@ -691,7 +702,7 @@ class SettingsDialog(QDialog):
         ])
         files_preview = _group("Files && preview", [
             ("Folders / Files font:", self._browser_panel_font),
-            ("Preview zoom — text:", self._preview_zoom_spins[PreviewZoomKind.TEXT]),
+            ("Preview font — text:", self._preview_text_font),
             ("Preview zoom — HTML:", self._preview_zoom_spins[PreviewZoomKind.HTML]),
             ("Preview zoom — PDF:", self._preview_zoom_spins[PreviewZoomKind.PDF]),
             ("Preview zoom — image:", self._preview_zoom_spins[PreviewZoomKind.IMAGE]),
@@ -840,6 +851,7 @@ class SettingsDialog(QDialog):
         self._project.use_system_sequence_viewer = self._system_viewer.isChecked()
         self._project.batch_workers = self._batch_workers.value()
         save_browser_panel_font_size(self._browser_panel_font.value())
+        save_preview_font_size(self._preview_text_font.value())
         for kind, spin in self._preview_zoom_spins.items():
             save_preview_zoom_percent(spin.value(), kind)
         save_preview_fit_mode(PreviewFitMode(str(self._preview_fit.currentData())))
@@ -1068,6 +1080,7 @@ class SettingsDialog(QDialog):
     def _save_settings(self) -> None:
         s = self._settings
         s.beginGroup(SETTINGS_GROUP)
+        s.setValue("preview_text_font_size", self._preview_text_font.value())
         for kind, spin in self._preview_zoom_spins.items():
             s.setValue(f"preview_zoom_percent_{kind.value}", spin.value())
         s.setValue("preview_fit_mode", str(self._preview_fit.currentData()))

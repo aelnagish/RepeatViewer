@@ -5348,6 +5348,7 @@ class MainWindow(QMainWindow):
             if self._preview_tabs is not None:
                 from repeatviewer.widgets.preview_zoom import (
                     load_preview_fit_mode,
+                    load_preview_font_size,
                     load_preview_zoom_percent,
                 )
 
@@ -5360,9 +5361,11 @@ class MainWindow(QMainWindow):
                         load_preview_zoom_percent(),
                         load_preview_fit_mode(),
                     )
+                if hasattr(zoom_bar, "_font_spin"):
+                    zoom_bar._block = True
+                    zoom_bar._font_spin.setValue(load_preview_font_size())
+                    zoom_bar._block = False
                 self._preview_tabs._apply_zoom_to_current_tab()
-                from repeatviewer.widgets.preview_zoom import load_preview_font_size
-
                 self._preview_tabs.apply_preview_font_size(load_preview_font_size())
                 self._preview_tabs.refresh_nucleotide_color_scheme()
 

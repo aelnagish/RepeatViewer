@@ -352,7 +352,7 @@ class ScaledImagePreview(QWidget):
             QTimer.singleShot(0, lambda: self.refresh_scale(immediate=True))
 
     def set_zoom_percent(self, percent: int) -> None:
-        self._zoom_percent = max(25, min(200, int(percent)))
+        self._zoom_percent = max(25, min(MAX_PREVIEW_ZOOM_PERCENT, int(percent)))
         self.refresh_scale(immediate=True, reset_scroll=False)
 
     def set_fit_mode(self, mode: PreviewFitMode | str) -> None:
@@ -755,7 +755,10 @@ class FilePreviewPage(QWidget):
 
 
     def preview_zoom_kind(self):
-        """Which persisted scale bucket applies to the current view."""
+        """Which persisted size setting applies to the current view.
+
+        Text → font size (pt). HTML / PDF / image → zoom percent.
+        """
         from repeatviewer.widgets.preview_zoom import PreviewZoomKind
 
         if self.is_annotation_preview_active() or self.is_dotplot_preview_active():
@@ -827,16 +830,17 @@ class FilePreviewPage(QWidget):
         if self._single_fasta_mode:
             index = self._fasta_stack.currentIndex()
             if index == 0:
-                self.apply_preview_zoom(
-                    load_preview_zoom_percent(self.preview_zoom_kind()),
-                    load_preview_fit_mode(),
-                )
+                self.apply_text_font_size(load_preview_font_size())
                 QTimer.singleShot(0, self._open_text_tab)
             elif index == 1:
                 QTimer.singleShot(0, self._open_annotation_tab)
             return
         current = self._stack.currentWidget()
-        if current in (self._html, self._image, self._text_scroll, self._pdf):
+        if current is self._text_scroll:
+            self.apply_text_font_size(load_preview_font_size())
+            QTimer.singleShot(0, self._refresh_text_view)
+            return
+        if current in (self._html, self._image, self._pdf):
             self.apply_preview_zoom(
                 load_preview_zoom_percent(self.preview_zoom_kind()),
                 load_preview_fit_mode(),
@@ -845,8 +849,6 @@ class FilePreviewPage(QWidget):
             QTimer.singleShot(0, self._reload_html_if_needed)
         elif current is self._image:
             QTimer.singleShot(0, self._image.refresh_scale)
-        elif current is self._text_scroll:
-            QTimer.singleShot(0, self._refresh_text_view)
         elif current is self._pdf:
             QTimer.singleShot(0, self._pdf.refresh)
 
@@ -873,22 +875,16 @@ class FilePreviewPage(QWidget):
             MIN_PREVIEW_FONT_SIZE,
             min(MAX_PREVIEW_FONT_SIZE, int(point_size)),
         )
-        self._apply_text_zoom(load_preview_zoom_percent(self.preview_zoom_kind()))
+        self._apply_text_font()
 
     def _uses_text_preview(self) -> bool:
         return _is_text_like_preview(self.path)
 
-    def _apply_text_zoom(self, percent: int) -> None:
-        scaled = max(
-            MIN_PREVIEW_FONT_SIZE,
-            min(
-                MAX_PREVIEW_FONT_SIZE,
-                int(round(self._base_text_font_pt * int(percent) / 100)),
-            ),
-        )
-        mono = QFont("Courier New", scaled)
+    def _apply_text_font(self) -> None:
+        size = self._base_text_font_pt
+        mono = QFont("Courier New", size)
         if not mono.exactMatch():
-            mono = QFont("Menlo", scaled)
+            mono = QFont("Menlo", size)
         self._text.setFont(mono)
         self._fasta_text.setFont(mono)
         scroll = getattr(self, "_text_scroll", None)
@@ -909,7 +905,7 @@ class FilePreviewPage(QWidget):
         if hasattr(self._pdf, "set_zoom_percent"):
             self._pdf.set_zoom_percent(percent)
         if self._uses_text_preview() or self.is_text_preview_active():
-            self._apply_text_zoom(percent)
+            self._apply_text_font()
 
     def reload_from_disk(self) -> None:
         """Refresh the current view after the file on disk changed."""
@@ -1593,6 +1589,8 @@ class PreviewTabWidget(QTabWidget):
             self._annotation_zoom_bar = self._header_bar._annotation_zoom_bar
         self._zoom_bar.zoom_changed.connect(self._on_preview_zoom_changed)
         self._zoom_bar.fit_mode_changed.connect(self._on_preview_fit_changed)
+        if hasattr(self._zoom_bar, "font_size_changed"):
+            self._zoom_bar.font_size_changed.connect(self._on_preview_font_size_changed)
         if hasattr(self._zoom_bar, "edit_text_requested"):
             self._zoom_bar.edit_text_requested.connect(self._on_edit_text_requested)
         if hasattr(self._zoom_bar, "save_text_requested"):
@@ -1893,6 +1891,11 @@ class PreviewTabWidget(QTabWidget):
     def _on_preview_zoom_changed(self, percent: int) -> None:
         self._apply_zoom_to_current_tab(percent=percent)
 
+    def _on_preview_font_size_changed(self, point_size: int) -> None:
+        widget = self.currentWidget()
+        if isinstance(widget, FilePreviewPage):
+            widget.apply_text_font_size(point_size)
+
     def _on_preview_fit_changed(self, fit_mode: str) -> None:
         self._apply_zoom_to_current_tab(fit_mode=fit_mode)
 
@@ -1925,6 +1928,25 @@ class PreviewTabWidget(QTabWidget):
         from repeatviewer.widgets.preview_zoom import load_preview_fit_mode
 
         widget = self.currentWidget()
+        if isinstance(widget, FilePreviewPage) and (
+            widget.is_text_preview_active()
+            or (
+                widget._uses_text_preview()
+                and not widget.is_annotation_preview_active()
+                and not widget.is_dotplot_preview_active()
+                and widget.preview_zoom_kind() == PreviewZoomKind.TEXT
+            )
+        ):
+            if hasattr(self._zoom_bar, "current_font_size") and getattr(
+                self._zoom_bar, "_font_spin", None
+            ) is not None and self._zoom_bar._font_spin.isVisible():
+                widget.apply_text_font_size(self._zoom_bar.current_font_size())
+            else:
+                widget.apply_text_font_size(load_preview_font_size())
+            if sync_chrome:
+                self._sync_zoom_bar_enabled()
+            return
+
         if percent is None:
             if isinstance(widget, FilePreviewPage) and hasattr(self._zoom_bar, "current_zoom_kind"):
                 percent = load_preview_zoom_percent(widget.preview_zoom_kind())
@@ -2007,9 +2029,11 @@ class PreviewTabWidget(QTabWidget):
         show_preview_chrome = not is_annotation
         for control in (
             self._zoom_bar._spin,
+            getattr(self._zoom_bar, "_font_spin", None),
             self._zoom_bar._actions_btn,
         ):
-            control.setEnabled(show_preview_chrome)
+            if control is not None:
+                control.setEnabled(show_preview_chrome)
         if is_dotplot and hasattr(self._zoom_bar, "_actions_btn"):
             self._zoom_bar._actions_btn.setEnabled(True)
         self._sync_text_tool_actions()
@@ -2017,10 +2041,16 @@ class PreviewTabWidget(QTabWidget):
         if isinstance(widget, FilePreviewPage):
             self._wheel_zoom_filter.register_page(widget)
         if kind_changed and isinstance(widget, FilePreviewPage):
-            widget.apply_preview_zoom(
-                self._zoom_bar.current_zoom_percent(),
-                self._zoom_bar.current_fit_mode(),
-            )
+            if zoom_kind == PreviewZoomKind.TEXT:
+                if hasattr(self._zoom_bar, "current_font_size"):
+                    widget.apply_text_font_size(self._zoom_bar.current_font_size())
+                else:
+                    widget.apply_text_font_size(load_preview_font_size())
+            else:
+                widget.apply_preview_zoom(
+                    self._zoom_bar.current_zoom_percent(),
+                    self._zoom_bar.current_fit_mode(),
+                )
 
     def _sync_text_tool_actions(self) -> None:
         if not hasattr(self._zoom_bar, "set_text_actions_enabled"):

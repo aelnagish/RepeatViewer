@@ -19,17 +19,23 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.widgets.preview_zoom import (
+    DEFAULT_PREVIEW_FONT_SIZE,
     DEFAULT_PREVIEW_ZOOM_PERCENT,
+    MAX_PREVIEW_FONT_SIZE,
     MAX_PREVIEW_ZOOM_PERCENT,
+    MIN_PREVIEW_FONT_SIZE,
     MIN_PREVIEW_ZOOM_PERCENT,
+    PREVIEW_WHEEL_FONT_STEP_PT,
     PREVIEW_WHEEL_ZOOM_STEP_PERCENT,
     DefaultFastaPreviewTab,
     PreviewFitMode,
     PreviewZoomKind,
     load_default_fasta_preview_tab,
     load_preview_fit_mode,
+    load_preview_font_size,
     load_preview_zoom_percent,
     save_default_fasta_preview_tab,
+    save_preview_font_size,
     save_preview_zoom_percent,
     wheel_zoom_steps_from_event,
 )
@@ -148,6 +154,31 @@ def _make_zoom_percent_spin(
     return spin
 
 
+def _make_font_size_spin(
+    *,
+    minimum: int,
+    maximum: int,
+    tooltip: str,
+) -> NoWheelSpinBox:
+    """Font-size spinbox for text preview (``pt`` suffix)."""
+    spin = NoWheelSpinBox()
+    spin.setObjectName("previewZoomSpin")
+    spin.setRange(minimum, maximum)
+    spin.setSuffix(" pt")
+    spin.setFrame(False)
+    spin.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+    spin.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+    spin.setFixedWidth(ZOOM_SPIN_WIDTH)
+    spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    spin.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+    spin.setToolTip(tooltip)
+    spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    spin.setSingleStep(PREVIEW_WHEEL_FONT_STEP_PT)
+    spin.setKeyboardTracking(False)
+    return spin
+
+
 def _make_preview_actions_button(*, tooltip: str) -> QToolButton:
     """Bordered Actions menu control matching the preview zoom spinbox."""
     btn = QToolButton()
@@ -165,9 +196,13 @@ def _make_preview_actions_button(*, tooltip: str) -> QToolButton:
 
 
 class PreviewZoomBar(QWidget):
-    """Compact preview scale controls (% spin / Actions) for the Preview title bar."""
+    """Compact preview controls for the Preview title bar.
+
+    Text preview uses a font-size (pt) spin; HTML / PDF / image use zoom %.
+    """
 
     zoom_changed = Signal(int)
+    font_size_changed = Signal(int)
     fit_mode_changed = Signal(str)
     edit_text_requested = Signal()
     save_text_requested = Signal()
@@ -183,10 +218,18 @@ class PreviewZoomBar(QWidget):
         self._spin = _make_zoom_percent_spin(
             minimum=MIN_PREVIEW_ZOOM_PERCENT,
             maximum=MAX_PREVIEW_ZOOM_PERCENT,
-            tooltip="Preview zoom",
+            tooltip="Preview zoom (Shift+scroll, or trackpad pinch)",
         )
         self._spin.valueChanged.connect(self._on_spin)
         layout.addWidget(self._spin)
+
+        self._font_spin = _make_font_size_spin(
+            minimum=MIN_PREVIEW_FONT_SIZE,
+            maximum=MAX_PREVIEW_FONT_SIZE,
+            tooltip="Preview font size (Shift+scroll, or trackpad pinch)",
+        )
+        self._font_spin.valueChanged.connect(self._on_font_spin)
+        layout.addWidget(self._font_spin)
 
         self._actions_btn = _make_preview_actions_button(
             tooltip="Preview actions",
@@ -213,33 +256,62 @@ class PreviewZoomBar(QWidget):
         self._block = False
         self._fit_mode = load_preview_fit_mode()
         self._zoom_kind = PreviewZoomKind.TEXT
-        self.set_values(load_preview_zoom_percent(PreviewZoomKind.TEXT), self._fit_mode)
+        self._chrome_mode = "text"
+        self.set_values(DEFAULT_PREVIEW_ZOOM_PERCENT, self._fit_mode)
+        self._block = True
+        self._font_spin.setValue(load_preview_font_size())
+        self._block = False
         self.set_text_actions_enabled(can_edit=False, can_save=False)
         self.set_chrome_mode("text")
 
     def set_chrome_mode(self, mode: str) -> None:
         """Configure title-bar chrome for the active preview kind.
 
-        ``text`` — % spin + Reset scale / Edit text / Save text + default tab.
-        ``media`` — % spin + Reset scale + default tab (HTML / image).
-        ``dotplot`` — Actions only (default FASTA tab); no % or text tools.
+        ``text`` — font-size (pt) spin + Reset / Edit text / Save text + default tab.
+        ``media`` — % spin + Reset scale + default tab (HTML / PDF / image).
+        ``dotplot`` — Actions only (default FASTA tab); no size controls.
         """
-        show_percent = mode in {"text", "media"}
+        self._chrome_mode = mode
+        show_percent = mode == "media"
+        show_font = mode == "text"
         show_reset = mode in {"text", "media"}
         show_text_tools = mode == "text"
         self._spin.setVisible(show_percent)
+        self._font_spin.setVisible(show_font)
         self._reset_scale_action.setVisible(show_reset)
         self._text_actions_sep.setVisible(show_text_tools)
         self._edit_text_action.setVisible(show_text_tools)
         self._save_text_action.setVisible(show_text_tools)
         self._default_tab_sep.setVisible(show_reset)
+        if mode == "text":
+            self._reset_scale_action.setText("Reset font size")
+            self._reset_scale_action.setToolTip(
+                f"Restore default preview font size ({DEFAULT_PREVIEW_FONT_SIZE} pt)"
+            )
+        else:
+            self._reset_scale_action.setText("Reset scale")
+            self._reset_scale_action.setToolTip("Restore default preview zoom (100%)")
 
     def set_zoom_kind(self, kind: PreviewZoomKind | str) -> None:
-        """Switch the % spin to the saved scale for this preview file type."""
+        """Load the saved font size (text) or zoom % (media) for this kind."""
         try:
             zoom_kind = kind if isinstance(kind, PreviewZoomKind) else PreviewZoomKind(str(kind))
         except ValueError:
             zoom_kind = PreviewZoomKind.TEXT
+        if zoom_kind == PreviewZoomKind.TEXT:
+            size = load_preview_font_size()
+            if zoom_kind == self._zoom_kind and not self._block:
+                if size != self._font_spin.value():
+                    self._block = True
+                    self._font_spin.setValue(size)
+                    self._block = False
+                self._zoom_kind = zoom_kind
+                return
+            self._zoom_kind = zoom_kind
+            self._block = True
+            self._font_spin.setValue(size)
+            self._block = False
+            return
         if zoom_kind == self._zoom_kind and not self._block:
             # Still refresh from disk in case Settings changed the value.
             percent = load_preview_zoom_percent(zoom_kind)
@@ -270,20 +342,45 @@ class PreviewZoomBar(QWidget):
     def current_zoom_percent(self) -> int:
         return self._spin.value()
 
+    def current_font_size(self) -> int:
+        return self._font_spin.value()
+
     def current_fit_mode(self) -> PreviewFitMode:
         return self._fit_mode
+
+    def _size_control_active(self) -> bool:
+        return (
+            (self._spin.isVisible() and self._spin.isEnabled())
+            or (self._font_spin.isVisible() and self._font_spin.isEnabled())
+        )
 
     def _on_spin(self, value: int) -> None:
         if self._block:
             return
+        if self._zoom_kind == PreviewZoomKind.TEXT:
+            return
         save_preview_zoom_percent(value, self._zoom_kind)
         self.zoom_changed.emit(value)
 
+    def _on_font_spin(self, value: int) -> None:
+        if self._block:
+            return
+        save_preview_font_size(value)
+        self.font_size_changed.emit(value)
+
     def _reset_zoom(self) -> None:
-        self._spin.setValue(DEFAULT_PREVIEW_ZOOM_PERCENT)
+        if self._chrome_mode == "text" or self._zoom_kind == PreviewZoomKind.TEXT:
+            self._font_spin.setValue(DEFAULT_PREVIEW_FONT_SIZE)
+        else:
+            self._spin.setValue(DEFAULT_PREVIEW_ZOOM_PERCENT)
 
     def step_zoom(self, steps: int) -> None:
         if steps == 0:
+            return
+        if self._font_spin.isVisible():
+            value = self._font_spin.value() + steps * PREVIEW_WHEEL_FONT_STEP_PT
+            value = max(MIN_PREVIEW_FONT_SIZE, min(MAX_PREVIEW_FONT_SIZE, value))
+            self._font_spin.setValue(value)
             return
         value = self._spin.value() + steps * PREVIEW_WHEEL_ZOOM_STEP_PERCENT
         value = max(MIN_PREVIEW_ZOOM_PERCENT, min(MAX_PREVIEW_ZOOM_PERCENT, value))
@@ -350,7 +447,7 @@ class AnnotationZoomBar(QWidget):
 
 
 class PreviewWheelZoomFilter(QObject):
-    """Scroll-wheel zoom for preview content (image/dotplot: wheel; text/html: Ctrl/Cmd+wheel)."""
+    """Shift+scroll (or trackpad pinch) zooms; plain two-finger scroll navigates."""
 
     def __init__(self, tabs: QWidget, zoom_bar: PreviewZoomBar) -> None:
         super().__init__(tabs)
@@ -389,24 +486,24 @@ class PreviewWheelZoomFilter(QObject):
         widget = self._tabs.currentWidget()
         return widget if isinstance(widget, FilePreviewPage) else None
 
-    def _allows_plain_wheel(self, page, obj: QWidget) -> bool:
-        if self._is_descendant_of(obj, page._image):
-            return True
-        return False
-
     def _can_zoom(self, page, obj: QWidget, wheel: QWheelEvent) -> bool:
-        if not self._zoom_bar.isVisible() or not self._zoom_bar._spin.isEnabled():
+        # Need the shared size control (font pt for text, % for HTML / PDF / image).
+        if not self._zoom_bar.isVisible() or not self._zoom_bar._size_control_active():
             return False
-        if page.is_annotation_preview_active():
+        if page.is_annotation_preview_active() or page.is_dotplot_preview_active():
             return False
         if isinstance(obj, QSpinBox) or self._is_descendant_of(obj, page._sequence_info_bar):
             return False
-        mod = wheel.modifiers() & (
-            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
-        )
-        if mod:
+        mods = wheel.modifiers()
+        # Shift+scroll zooms. Trackpad pinch often arrives as Ctrl/Cmd+wheel on macOS.
+        if mods & Qt.KeyboardModifier.ShiftModifier:
             return True
-        return self._allows_plain_wheel(page, obj)
+        if mods & (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        ):
+            return True
+        # Plain two-finger scroll → leave for navigation (up/down).
+        return False
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
         if event.type() != QEvent.Type.Wheel:
