@@ -35,9 +35,12 @@ from repeatviewer.widgets.html_preview import _qobject_alive, create_html_previe
 from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel, _is_delete_key
 from repeatviewer.widgets.preview_zoom import (
     MAX_PREVIEW_FONT_SIZE,
+    MAX_PREVIEW_ZOOM_PERCENT,
     MIN_PREVIEW_FONT_SIZE,
+    MIN_PREVIEW_ZOOM_PERCENT,
     DefaultFastaPreviewTab,
     PreviewFitMode,
+    PreviewZoomKind,
     load_default_fasta_preview_tab,
     load_preview_fit_mode,
     load_show_sequence_summary,
@@ -431,7 +434,7 @@ class ScaledImagePreview(QWidget):
 
 
 class PdfPreviewWidget(QWidget):
-    """PDF preview: fit-to-width pages at device resolution (ignores plot zoom settings)."""
+    """PDF preview: fit-to-width pages, scaled by the PDF preview zoom percent."""
 
     _PAGE_GAP_PX = 10
 
@@ -441,6 +444,7 @@ class PdfPreviewWidget(QWidget):
 
         self._doc = QPdfDocument(self)
         self._render_generation = 0
+        self._zoom_percent = load_preview_zoom_percent(PreviewZoomKind.PDF)
 
         self._scroll = QScrollArea(self)
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -467,6 +471,13 @@ class PdfPreviewWidget(QWidget):
         self._doc.statusChanged.connect(self._on_doc_status)
         if hasattr(self._doc, "pageCountChanged"):
             self._doc.pageCountChanged.connect(self._schedule_render)
+
+    def set_zoom_percent(self, percent: int) -> None:
+        self._zoom_percent = max(
+            MIN_PREVIEW_ZOOM_PERCENT,
+            min(MAX_PREVIEW_ZOOM_PERCENT, int(percent)),
+        )
+        self._schedule_render()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
         if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
@@ -506,7 +517,10 @@ class PdfPreviewWidget(QWidget):
         if page_count < 1:
             return
 
-        logical_w = max(200, self._scroll.viewport().width())
+        viewport_w = max(200, self._scroll.viewport().width())
+        zoom = max(0.25, self._zoom_percent / 100.0)
+        # 100% = fit viewport width; other values scale that base width.
+        logical_w = max(200, int(viewport_w * zoom))
         dpr = max(1.0, self.devicePixelRatioF())
         render_w = max(1, int(logical_w * dpr))
 
@@ -543,7 +557,7 @@ class PdfPreviewWidget(QWidget):
         return status
 
     def refresh(self) -> None:
-        """Re-render fit-to-width after tab show or resize."""
+        """Re-render after tab show, resize, or zoom change."""
         self._schedule_render()
 
 
@@ -822,7 +836,7 @@ class FilePreviewPage(QWidget):
                 QTimer.singleShot(0, self._open_annotation_tab)
             return
         current = self._stack.currentWidget()
-        if current in (self._html, self._image, self._text_scroll):
+        if current in (self._html, self._image, self._text_scroll, self._pdf):
             self.apply_preview_zoom(
                 load_preview_zoom_percent(self.preview_zoom_kind()),
                 load_preview_fit_mode(),
@@ -892,6 +906,8 @@ class FilePreviewPage(QWidget):
             self._html.set_zoom_percent(percent)
         if hasattr(self._html, "set_fit_mode"):
             self._html.set_fit_mode(fit_mode)
+        if hasattr(self._pdf, "set_zoom_percent"):
+            self._pdf.set_zoom_percent(percent)
         if self._uses_text_preview() or self.is_text_preview_active():
             self._apply_text_zoom(percent)
 
@@ -1959,14 +1975,12 @@ class PreviewTabWidget(QTabWidget):
                 )
 
         if isinstance(self._header_bar, PreviewHeaderBar):
-            if is_pdf:
-                self._header_bar.set_header_zoom_mode("hidden")
-            elif is_annotation:
+            if is_annotation:
                 self._header_bar.set_header_zoom_mode("annotation")
             else:
                 self._header_bar.set_header_zoom_mode("preview")
         else:
-            self._zoom_bar.setVisible(not is_pdf and not is_annotation)
+            self._zoom_bar.setVisible(not is_annotation)
 
         if hasattr(self._zoom_bar, "set_chrome_mode"):
             if is_dotplot:
@@ -1976,6 +1990,7 @@ class PreviewTabWidget(QTabWidget):
             ):
                 self._zoom_bar.set_chrome_mode("text")
             else:
+                # HTML, image, and PDF share % / Reset / default-tab Actions.
                 self._zoom_bar.set_chrome_mode("media")
 
         kind_changed = False
@@ -1984,13 +1999,12 @@ class PreviewTabWidget(QTabWidget):
             and hasattr(self._zoom_bar, "set_zoom_kind")
             and not is_annotation
             and not is_dotplot
-            and not is_pdf
         ):
             previous = self._zoom_bar.current_zoom_kind()
             self._zoom_bar.set_zoom_kind(zoom_kind)
             kind_changed = previous != zoom_kind
 
-        show_preview_chrome = not is_pdf and not is_annotation
+        show_preview_chrome = not is_annotation
         for control in (
             self._zoom_bar._spin,
             self._zoom_bar._actions_btn,

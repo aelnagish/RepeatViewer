@@ -476,7 +476,7 @@ class SettingsDialog(QDialog):
         for kind, tip in (
             (PreviewZoomKind.TEXT, "Scale for text / FASTA Text preview"),
             (PreviewZoomKind.HTML, "Scale for HTML plots (TE-Aid, etc.)"),
-            (PreviewZoomKind.PDF, "Stored scale for PDF preview"),
+            (PreviewZoomKind.PDF, "Scale for PDF preview (100% = fit page width)"),
             (PreviewZoomKind.IMAGE, "Scale for PNG / figure image preview"),
         ):
             spin = NoWheelSpinBox()
