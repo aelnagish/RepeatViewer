@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QFont, QFontMetrics, QWheelEvent
+from PySide6.QtGui import QAction, QActionGroup, QFont, QFontMetrics, QGuiApplication, QWheelEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -25,6 +25,7 @@ from repeatviewer.widgets.preview_zoom import (
     MAX_PREVIEW_ZOOM_PERCENT,
     MIN_PREVIEW_FONT_SIZE,
     MIN_PREVIEW_ZOOM_PERCENT,
+    PREVIEW_WHEEL_DELTA_PER_STEP,
     PREVIEW_WHEEL_FONT_STEP_PT,
     PREVIEW_WHEEL_ZOOM_STEP_PERCENT,
     DefaultFastaPreviewTab,
@@ -37,7 +38,7 @@ from repeatviewer.widgets.preview_zoom import (
     save_default_fasta_preview_tab,
     save_preview_font_size,
     save_preview_zoom_percent,
-    wheel_zoom_steps_from_event,
+    wheel_zoom_delta_from_event,
 )
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
 
@@ -349,6 +350,13 @@ class PreviewZoomBar(QWidget):
         return self._fit_mode
 
     def _size_control_active(self) -> bool:
+        """True when text font or media % control should handle Shift+zoom."""
+        if self._chrome_mode == "dotplot":
+            return False
+        if self._chrome_mode == "text":
+            return self._font_spin.isEnabled()
+        if self._chrome_mode == "media":
+            return self._spin.isEnabled()
         return (
             (self._spin.isVisible() and self._spin.isEnabled())
             or (self._font_spin.isVisible() and self._font_spin.isEnabled())
@@ -454,6 +462,7 @@ class PreviewWheelZoomFilter(QObject):
         self._tabs = tabs
         self._zoom_bar = zoom_bar
         self._watched: set[int] = set()
+        self._zoom_accum = 0
 
     def register_page(self, page: QWidget) -> None:
         self._watch_widget(page)
@@ -487,15 +496,17 @@ class PreviewWheelZoomFilter(QObject):
         return widget if isinstance(widget, FilePreviewPage) else None
 
     def _can_zoom(self, page, obj: QWidget, wheel: QWheelEvent) -> bool:
-        # Need the shared size control (font pt for text, % for HTML / PDF / image).
+        # Text / HTML / PDF / image all share the title-bar size control.
         if not self._zoom_bar.isVisible() or not self._zoom_bar._size_control_active():
             return False
         if page.is_annotation_preview_active() or page.is_dotplot_preview_active():
             return False
         if isinstance(obj, QSpinBox) or self._is_descendant_of(obj, page._sequence_info_bar):
             return False
-        mods = wheel.modifiers()
-        # Shift+scroll zooms. Trackpad pinch often arrives as Ctrl/Cmd+wheel on macOS.
+        # macOS often strips Shift from the wheel event after remapping a
+        # vertical trackpad drag to horizontal — also read the live keyboard.
+        mods = wheel.modifiers() | QGuiApplication.keyboardModifiers()
+        # Shift+scroll zooms. Trackpad pinch often arrives as Ctrl/Cmd+wheel.
         if mods & Qt.KeyboardModifier.ShiftModifier:
             return True
         if mods & (
@@ -506,6 +517,12 @@ class PreviewWheelZoomFilter(QObject):
         return False
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        # Catch widgets created after the page was first registered (e.g. web view).
+        if event.type() == QEvent.Type.ChildAdded:
+            child = event.child() if hasattr(event, "child") else None
+            if isinstance(child, QWidget):
+                self._watch_widget(child)
+            return False
         if event.type() != QEvent.Type.Wheel:
             return False
         wheel = event
@@ -513,14 +530,24 @@ class PreviewWheelZoomFilter(QObject):
             return False
         page = self._current_page()
         if page is None:
+            self._zoom_accum = 0
             return False
         obj = watched if isinstance(watched, QWidget) else None
         if obj is None or not self._can_zoom(page, obj, wheel):
+            self._zoom_accum = 0
             return False
-        steps = wheel_zoom_steps_from_event(wheel)
-        if steps == 0:
-            return False
-        self._zoom_bar.step_zoom(steps)
+        delta = wheel_zoom_delta_from_event(wheel)
+        if delta != 0:
+            # Accumulate so the same trackpad drag is slower than one-step-per-tick,
+            # but still reaches a step within a short Shift+drag gesture.
+            self._zoom_accum += delta
+            threshold = PREVIEW_WHEEL_DELTA_PER_STEP
+            steps = int(self._zoom_accum / threshold)
+            if steps != 0:
+                self._zoom_accum -= steps * threshold
+                self._zoom_bar.step_zoom(steps)
+        # Always consume while Shift/pinch-zooming so the view does not pan
+        # horizontally (macOS Shift+scroll remap) instead of zooming.
         wheel.accept()
         return True
 

@@ -11,8 +11,10 @@ PREVIEW_SETTINGS_GROUP = "preview"
 DEFAULT_PREVIEW_ZOOM_PERCENT = 100
 MIN_PREVIEW_ZOOM_PERCENT = 25
 MAX_PREVIEW_ZOOM_PERCENT = 500
-PREVIEW_WHEEL_ZOOM_STEP_PERCENT = 5
+PREVIEW_WHEEL_ZOOM_STEP_PERCENT = 2
 PREVIEW_WHEEL_FONT_STEP_PT = 1
+# Accumulated scroll units per zoom step. Classic mouse notch = 120.
+PREVIEW_WHEEL_DELTA_PER_STEP = 80
 DEFAULT_PREVIEW_FONT_SIZE = 11
 MIN_PREVIEW_FONT_SIZE = 8
 MAX_PREVIEW_FONT_SIZE = 72
@@ -146,14 +148,37 @@ def load_preview_fit_mode() -> PreviewFitMode:
         return PreviewFitMode.FIT_WINDOW
 
 
+def wheel_zoom_delta_from_event(event: QWheelEvent) -> int:
+    """Signed raw scroll delta for zoom (positive = zoom in).
+
+    On macOS, Shift+two-finger scroll is remapped to a horizontal delta, so
+    use the dominant axis (prefer Y, fall back to X). Trackpad events often
+    only set ``pixelDelta``; scale those so they accumulate like angle notches.
+    """
+    angle = event.angleDelta()
+    pixel = event.pixelDelta()
+    ax, ay = int(angle.x()), int(angle.y())
+    if ay or ax:
+        return ay if abs(ay) >= abs(ax) else ax
+    px, py = int(pixel.x()), int(pixel.y())
+    if py or px:
+        # ~30 px ≈ one classic 120-unit notch after scaling.
+        scaled_y = py * 4
+        scaled_x = px * 4
+        return scaled_y if abs(scaled_y) >= abs(scaled_x) else scaled_x
+    return 0
+
+
 def wheel_zoom_steps_from_event(event: QWheelEvent) -> int:
-    """Return signed zoom steps from a wheel event (positive = zoom in)."""
-    delta = event.angleDelta().y()
-    if delta == 0:
-        delta = event.pixelDelta().y()
+    """Return signed zoom steps from a single wheel event (no accumulation).
+
+    Prefer :func:`wheel_zoom_delta_from_event` with a running accumulator for
+    trackpad gestures so the same drag distance does not jump too quickly.
+    """
+    delta = wheel_zoom_delta_from_event(event)
     if delta == 0:
         return 0
-    steps = int(round(delta / 120.0))
+    steps = int(round(delta / float(PREVIEW_WHEEL_DELTA_PER_STEP)))
     if steps == 0:
         steps = 1 if delta > 0 else -1
     return steps
