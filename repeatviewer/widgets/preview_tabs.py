@@ -757,6 +757,14 @@ class FilePreviewPage(QWidget):
     def is_cyto_preview_active(self) -> bool:
         return self._single_fasta_mode and self._fasta_stack.currentIndex() == 3
 
+    def has_cyto_images(self) -> bool:
+        from repeatviewer.backends.cyto_images import image_count_for_sequence
+
+        try:
+            return image_count_for_sequence(self.path) > 0
+        except Exception:  # noqa: BLE001
+            return False
+
     def _ensure_cyto_panel(self):
         from repeatviewer.widgets.cyto_images_ui import CytogeneticsPanel
 
@@ -1677,6 +1685,9 @@ class PreviewTabWidget(QTabWidget):
         self.setMinimumHeight(120)
 
         self.currentChanged.connect(self._on_preview_tab_changed)
+        from repeatviewer.widgets.cyto_images_ui import cyto_notifier
+
+        cyto_notifier().changed.connect(self._on_cyto_images_changed)
         self._apply_zoom_to_current_tab()
         self._install_annotation_delete_shortcuts()
         self._sync_tab_bar_visible()
@@ -1805,10 +1816,20 @@ class PreviewTabWidget(QTabWidget):
             return
         widget = self.currentWidget()
         if isinstance(widget, FilePreviewPage) and widget.is_single_fasta_preview():
+            # Cytogenetics tab only for sequences that have attached images.
+            has_images = widget.has_cyto_images()
+            if hasattr(self._header_bar, "set_fasta_tab_visible"):
+                self._header_bar.set_fasta_tab_visible(3, has_images)
+            if not has_images and widget.current_fasta_tab_index() == 3:
+                widget.set_fasta_tab_index(1)  # last image removed: back to Annotation
+                return
             self._header_bar.set_fasta_tabs_visible(True)
             self._header_bar.sync_fasta_tab(widget.current_fasta_tab_index())
         else:
             self._header_bar.set_fasta_tabs_visible(False)
+
+    def _on_cyto_images_changed(self, _folder: str) -> None:
+        self._sync_header_from_current_page()
 
     def _sync_tab_bar_visible(self) -> None:
         """Show filename tabs only when more than one file is open."""
