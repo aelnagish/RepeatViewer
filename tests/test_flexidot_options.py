@@ -2,6 +2,7 @@ from repeatviewer.job_options import (
     FlexidotOptions,
     load_flexidot_options,
     normalize_flexidot_output_format,
+    normalize_flexidot_sequence_type,
     save_flexidot_options,
 )
 
@@ -12,6 +13,14 @@ def test_normalize_flexidot_output_format() -> None:
     assert normalize_flexidot_output_format("html") == "html"
     # Unknown values fall back to the project default (png).
     assert normalize_flexidot_output_format("unknown") == "png"
+
+
+def test_normalize_flexidot_sequence_type() -> None:
+    assert normalize_flexidot_sequence_type("nuc") == "nuc"
+    assert normalize_flexidot_sequence_type("DNA") == "nuc"
+    assert normalize_flexidot_sequence_type("aa") == "aa"
+    assert normalize_flexidot_sequence_type("protein") == "aa"
+    assert normalize_flexidot_sequence_type("") == "nuc"
 
 
 def test_save_and_load_flexidot_output_format(monkeypatch) -> None:
@@ -29,6 +38,7 @@ def test_save_and_load_flexidot_output_format(monkeypatch) -> None:
     save_flexidot_options(
         FlexidotOptions(
             wordsize=5,
+            sequence_type="aa",
             lcs_shading=False,
             use_gff=True,
             output_format="png",
@@ -43,6 +53,7 @@ def test_save_and_load_flexidot_output_format(monkeypatch) -> None:
     loaded = load_flexidot_options()
     assert loaded.output_format == "png"
     assert loaded.wordsize == 5
+    assert loaded.sequence_type == "aa"
     assert loaded.use_gff is True
     assert loaded.substitution_count == 2
     assert loaded.wobble_conversion is True

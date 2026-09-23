@@ -429,6 +429,10 @@ DEFAULT_FLEXIDOT_ONLY_VS_FIRST = False
 DEFAULT_FLEXIDOT_LINE_WIDTH = 1.0
 DEFAULT_FLEXIDOT_LENGTH_SCALING = False
 DEFAULT_FLEXIDOT_COMBINED = True
+DEFAULT_FLEXIDOT_SEQUENCE_TYPE = "nuc"
+FLEXIDOT_SEQUENCE_NUC = "nuc"
+FLEXIDOT_SEQUENCE_AA = "aa"
+FLEXIDOT_SEQUENCE_TYPES = (FLEXIDOT_SEQUENCE_NUC, FLEXIDOT_SEQUENCE_AA)
 # Flexidot comparison modes (-m): "0"=self, "1"=pairwise, "2"=all-vs-all.
 # Empty tuple means automatic via ``auto_flexidot_mode`` (self / pairwise /
 # all-vs-all from sequence count). Not exposed in the Flexidot dialog.
@@ -437,6 +441,14 @@ DEFAULT_FLEXIDOT_MODES: tuple[str, ...] = ()
 FLEXIDOT_RIGHT_CLICK_RUN = "run"
 FLEXIDOT_RIGHT_CLICK_DIALOG = "dialog"
 FLEXIDOT_RIGHT_CLICK_ACTIONS = (FLEXIDOT_RIGHT_CLICK_RUN, FLEXIDOT_RIGHT_CLICK_DIALOG)
+
+
+def normalize_flexidot_sequence_type(raw: object) -> str:
+    """Return ``nuc`` or ``aa`` (Flexidot ``-t``); default DNA."""
+    value = str(raw or DEFAULT_FLEXIDOT_SEQUENCE_TYPE).strip().lower()
+    if value in {"aa", "protein", "amino", "aminoacid", "amino_acid"}:
+        return FLEXIDOT_SEQUENCE_AA
+    return FLEXIDOT_SEQUENCE_NUC
 
 
 def auto_flexidot_mode(sequence_count: int) -> str:
@@ -479,6 +491,8 @@ class FlexidotOptions:
     """Saved matching, display, and output parameters for Flexidot."""
 
     wordsize: int = DEFAULT_FLEXIDOT_WORDSIZE
+    # Flexidot -t: ``nuc`` (DNA, default) or ``aa`` (protein).
+    sequence_type: str = DEFAULT_FLEXIDOT_SEQUENCE_TYPE
     lcs_shading: bool = DEFAULT_FLEXIDOT_LCS_SHADING
     use_gff: bool = DEFAULT_FLEXIDOT_USE_GFF
     output_format: str = DEFAULT_FLEXIDOT_OUTPUT_FORMAT
@@ -1540,6 +1554,9 @@ def load_flexidot_options() -> FlexidotOptions:
         right_click_action = FLEXIDOT_RIGHT_CLICK_RUN
     return FlexidotOptions(
         wordsize=wordsize,
+        sequence_type=normalize_flexidot_sequence_type(
+            v.get("sequence_type", DEFAULT_FLEXIDOT_SEQUENCE_TYPE)
+        ),
         lcs_shading=str(v.get("lcs_shading", "true")).lower() in {"1", "true", "yes"},
         use_gff=str(v.get("use_gff", "false")).lower() in {"1", "true", "yes"},
         output_format=normalize_flexidot_output_format(
@@ -1570,6 +1587,7 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
         "flexidot",
         {
             "wordsize": opts.wordsize,
+            "sequence_type": normalize_flexidot_sequence_type(opts.sequence_type),
             "lcs_shading": opts.lcs_shading,
             "use_gff": opts.use_gff,
             "output_format": normalize_flexidot_output_format(opts.output_format),

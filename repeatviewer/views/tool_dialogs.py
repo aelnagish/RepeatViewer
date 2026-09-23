@@ -206,6 +206,8 @@ from repeatviewer.job_options import (
     DEFAULT_FLEXIDOT_OUTPUT_FORMAT,
     DEFAULT_FLEXIDOT_WORDSIZE,
     DEFAULT_FLEXIDOT_MODES,
+    FLEXIDOT_SEQUENCE_AA,
+    FLEXIDOT_SEQUENCE_NUC,
     FLEXIDOT_RIGHT_CLICK_RUN,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     TE_ANNOTATION_RIGHT_CLICK_RUN,
@@ -272,6 +274,7 @@ from repeatviewer.job_options import (
     TsdSearchOptions,
     normalize_blast_evalue,
     normalize_flexidot_output_format,
+    normalize_flexidot_sequence_type,
 )
 from repeatviewer.plugins.custom_command import (
     CommandVarDef,
@@ -3308,6 +3311,18 @@ class FlexidotParamsDialog(QDialog):
             "Larger values are faster but less sensitive."
         )
 
+        self._sequence_type = QComboBox()
+        self._sequence_type.addItem("DNA / nucleotide (-t nuc)", FLEXIDOT_SEQUENCE_NUC)
+        self._sequence_type.addItem("Protein (-t aa)", FLEXIDOT_SEQUENCE_AA)
+        seq_type = normalize_flexidot_sequence_type(opts.sequence_type)
+        seq_idx = self._sequence_type.findData(seq_type)
+        self._sequence_type.setCurrentIndex(seq_idx if seq_idx >= 0 else 0)
+        self._sequence_type.setToolTip(
+            "Flexidot -t: sequence alphabet. DNA (nuc) is the default; "
+            "choose Protein (aa) for amino-acid FASTA such as .faa files."
+        )
+        self._sequence_type.currentIndexChanged.connect(self._on_sequence_type_changed)
+
         self._use_gff = QCheckBox("Show GFF features on dotplot (-g)")
         self._use_gff.setChecked(opts.use_gff)
         self._use_gff.setToolTip(
@@ -3381,6 +3396,7 @@ class FlexidotParamsDialog(QDialog):
 
         for field in (
             self._wordsize,
+            self._sequence_type,
             self._output_format,
             self._substitutions,
             self._max_n,
@@ -3451,6 +3467,7 @@ class FlexidotParamsDialog(QDialog):
         params_form.setHorizontalSpacing(12)
         params_form.setVerticalSpacing(10)
         params_form.addRow("Word size (k-mer, -k):", self._wordsize)
+        params_form.addRow("Sequence type (-t):", self._sequence_type)
         params_form.addRow("Output format (-f):", self._output_format)
         params_form.addRow("Allowed substitutions (-S):", self._substitutions)
         params_form.addRow("Maximum N content (--max_n):", self._max_n)
@@ -3475,13 +3492,26 @@ class FlexidotParamsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
         layout.addWidget(self._button_box)
+        self._on_sequence_type_changed()
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
+    def _on_sequence_type_changed(self, *_args) -> None:
+        is_protein = (
+            str(self._sequence_type.currentData()) == FLEXIDOT_SEQUENCE_AA
+        )
+        # Reverse-complement matching only applies to DNA.
+        self._include_reverse.setEnabled(not is_protein)
+        if is_protein:
+            self._include_reverse.setChecked(False)
+
     def _restore_defaults(self) -> None:
         defaults = FlexidotOptions()
         self._wordsize.setValue(defaults.wordsize)
+        self._sequence_type.setCurrentIndex(
+            max(0, self._sequence_type.findData(defaults.sequence_type))
+        )
         self._output_format.setCurrentIndex(
             max(0, self._output_format.findData(defaults.output_format))
         )
@@ -3497,6 +3527,7 @@ class FlexidotParamsDialog(QDialog):
         self._combined.setChecked(defaults.combined)
         self._show_process_window.setChecked(defaults.show_process_window)
         self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
+        self._on_sequence_type_changed()
 
     def options(self) -> FlexidotOptions:
         fmt = self._output_format.currentData()
@@ -3505,8 +3536,13 @@ class FlexidotParamsDialog(QDialog):
             if radio.isChecked():
                 right_click_action = value
                 break
+        seq_type = normalize_flexidot_sequence_type(self._sequence_type.currentData())
+        include_reverse = self._include_reverse.isChecked()
+        if seq_type == FLEXIDOT_SEQUENCE_AA:
+            include_reverse = False
         return FlexidotOptions(
             wordsize=self._wordsize.value(),
+            sequence_type=seq_type,
             lcs_shading=self._lcs_shading,
             use_gff=self._use_gff.isChecked(),
             output_format=normalize_flexidot_output_format(
@@ -3515,7 +3551,7 @@ class FlexidotParamsDialog(QDialog):
             substitution_count=self._substitutions.value(),
             wobble_conversion=self._wobble.isChecked(),
             max_n_percentage=self._max_n.value(),
-            include_reverse=self._include_reverse.isChecked(),
+            include_reverse=include_reverse,
             only_vs_first=self._only_vs_first_value,
             line_width=self._line_width.value(),
             length_scaling=self._length_scaling.isChecked(),

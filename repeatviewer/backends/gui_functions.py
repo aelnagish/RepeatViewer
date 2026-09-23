@@ -879,6 +879,7 @@ def run_flexidot(
     mode='0',
     *,
     filetype: str = "html",
+    sequence_type: str = "nuc",
     lcs_shading: bool = True,
     use_gff: bool = False,
     substitution_count: int = 0,
@@ -902,6 +903,7 @@ def run_flexidot(
         Multiple modes are passed as repeated ``-m`` flags (Flexidot requirement).
     :param filetype: str, Flexidot output format (-f): 'html' (interactive,
         default), 'png', 'pdf', or 'svg'
+    :param sequence_type: str, Flexidot ``-t``: ``nuc`` (DNA, default) or ``aa``
     :param lcs_shading: bool, add -x (LCS shading) for multi-sequence plots
     :param use_gff: bool, pass companion GFF files to Flexidot (-g / -G)
     :param gff_source_fastas: FASTA paths used to locate companion GFF3 files
@@ -922,6 +924,10 @@ def run_flexidot(
 
     logging.info("FlexiDot is running for %s...", original_name)
 
+    seq_type = str(sequence_type or "nuc").strip().lower()
+    if seq_type not in {"nuc", "aa"}:
+        seq_type = "nuc"
+
     modes = _normalize_flexidot_modes(mode)
     flexidot_argv: list[str] = [
         "-i",
@@ -933,6 +939,8 @@ def run_flexidot(
         [
             "-k",
             str(wordsize),
+            "-t",
+            seq_type,
             "-f",
             filetype,
             "--outdir",
@@ -950,7 +958,8 @@ def run_flexidot(
         flexidot_argv.extend(["-S", str(int(substitution_count))])
     if wobble_conversion:
         flexidot_argv.extend(["-w", "--max_n", str(float(max_n_percentage))])
-    if not include_reverse:
+    # Reverse-complement matching is DNA-only.
+    if seq_type == "aa" or not include_reverse:
         flexidot_argv.append("-r")
     if only_vs_first and "1" in mode_set:
         flexidot_argv.append("-O")
