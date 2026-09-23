@@ -76,7 +76,8 @@ def separate_sequences(
     Write one FASTA file per sequence (TEtrimmerGUI ``separate_sequences`` behaviour).
 
     When ``subfolder_per_sequence`` is True, each sequence is written to
-    ``{output_dir}/{sanitized_id}/{sanitized_id}.fa``.
+    ``{output_dir}/{sanitized_id}/{sanitized_id}{ext}`` where ``ext`` matches
+    the input suffix (e.g. ``.faa`` for protein FASTA).
 
     Returns (list of created file paths, number of sequences written).
     """
@@ -117,12 +118,13 @@ def separate_sequences(
                 if mapping_handle is not None:
                     mapping_handle.write(f"{original_id}\t{sanitized_id}\n")
 
+                ext = input_file.suffix.lower() or ".fa"
                 if subfolder_per_sequence:
                     seq_dir = output_dir / sanitized_id
                     seq_dir.mkdir(parents=True, exist_ok=True)
-                    output_filename = seq_dir / f"{sanitized_id}.fa"
+                    output_filename = seq_dir / f"{sanitized_id}{ext}"
                 else:
-                    output_filename = output_dir / f"{sanitized_id}.fa"
+                    output_filename = output_dir / f"{sanitized_id}{ext}"
                 # Keep biological header naming (including '/') in FASTA output.
                 # Only the file name itself is sanitized.
                 record.id = header_id

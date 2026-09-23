@@ -9544,7 +9544,7 @@ class MainWindow(QMainWindow):
             title = "Separate into subfolders"
             layout_note = (
                 f"Each sequence will be written to its own subfolder under:\n{output_dir}\n"
-                f"(e.g. {output_dir.name}/sequence_name/sequence_name.fa)\n\n"
+                f"(e.g. {output_dir.name}/sequence_name/sequence_name{path.suffix.lower() or '.fa'})\n\n"
             )
             done_title = "Separate into subfolders completed"
         else:
