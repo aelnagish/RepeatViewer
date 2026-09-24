@@ -515,7 +515,7 @@ def render_tree(tree, out_base: Path, *, title: str = "") -> list[Path]:
 
 
 # --------------------------------------------------------------------------
-# Run folder and reporting
+# Output layout and reporting
 # --------------------------------------------------------------------------
 
 
@@ -621,6 +621,19 @@ def reference_phrase(opts: TreeOptions) -> str:
             else "median sequence length")
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def _rooting_sentence(rooting: str) -> str:
+    if rooting.startswith("Rooted with outgroup "):
+        names = rooting.removeprefix("Rooted with outgroup ").rstrip(".")
+        return f"The tree was rooted with {names} as outgroup."
+    if rooting.startswith("Midpoint"):
+        return "The tree was midpoint-rooted."
+    return "The tree is unrooted."
+
+
 def methods_paragraph(r: TreeRunReport, opts: TreeOptions) -> str:
     """A methods-section paragraph describing exactly what was run."""
     parts: list[str] = []
@@ -629,49 +642,69 @@ def methods_paragraph(r: TreeRunReport, opts: TreeOptions) -> str:
         direction = (" with automatic strand adjustment (--adjustdirectionaccurately)"
                      if opts.adjust_direction and r.dna else "")
         parts.append(
-            f"{r.n_used} {seq_word} sequences were aligned with MAFFT"
+            f"{_plural(r.n_used, seq_word + ' sequence')} were aligned with MAFFT"
             f"{(' ' + r.mafft_version) if r.mafft_version else ''} "
-            f"({r.aligned_by}){direction}."
+            f"using the {r.aligned_by} strategy{direction}."
         )
     else:
-        parts.append(f"The provided alignment of {r.n_used} {seq_word} sequences was used.")
+        parts.append(f"The provided alignment of {_plural(r.n_used, seq_word + ' sequence')} "
+                     "was used.")
     if r.excluded:
+        n = len(r.excluded)
         parts.append(
-            f"{len(r.excluded)} sequence(s) covering less than "
-            f"{opts.min_coverage:.0%} of the {reference_phrase(opts)} were excluded."
+            f"{_plural(n, 'sequence')} shorter than {opts.min_coverage:.0%} of the "
+            f"{reference_phrase(opts)} {'was' if n == 1 else 'were'} excluded."
         )
     if r.stats:
         parts.append(
             f"The alignment comprised {r.stats.length} columns, "
-            f"{r.stats.informative_sites} of them parsimony-informative."
+            f"{r.stats.informative_sites} of which were parsimony-informative."
         )
     ver = f" {r.engine_version}" if r.engine_version else ""
     if r.engine == TREE_ENGINE_IQTREE:
-        model = (f"the best-fit model {r.model} selected by ModelFinder according to BIC"
+        model = (f"the best-fit model {r.model}, selected by ModelFinder according to the "
+                 "Bayesian information criterion"
                  if opts.model.upper() == TREE_MODEL_FINDER else f"the {r.model or opts.model} model")
-        parts.append(
-            f"A maximum-likelihood tree was inferred with IQ-TREE{ver} under {model}, "
-            f"keeping the best of {r.runs} independent search(es) (seed {r.seed})."
-        )
+        parts.append(f"A maximum-likelihood tree was inferred with IQ-TREE{ver} under {model}.")
+        if r.runs > 1:
+            parts.append(
+                f"The tree with the highest likelihood from {r.runs} independent searches "
+                f"(random seeds {r.seed}–{r.seed + r.runs - 1}) was retained."
+            )
+        else:
+            parts.append(f"A single tree search was run (random seed {r.seed}).")
+        measures = []
+        if opts.alrt:
+            measures.append(f"{opts.alrt} SH-aLRT replicates")
+        if opts.ufboot:
+            measures.append(f"{max(1000, opts.ufboot)} ultrafast bootstrap replicates "
+                            f"(UFBoot2{', with the -bnni correction' if opts.bnni else ''})")
+        if measures:
+            parts.append("Branch support was assessed with " + " and ".join(measures) + ".")
     elif r.engine == TREE_ENGINE_FASTME:
+        dist = "Tamura–Nei (TN93) distances" if r.dna else "LG protein distances"
         parts.append(
-            f"A balanced minimum-evolution tree was inferred with FastME{ver} from "
-            f"Tamura-Nei (TN93) distances, with NNI and SPR tree rearrangements."
+            f"A balanced minimum-evolution tree was inferred with FastME{ver} from {dist}, "
+            "with NNI and SPR tree rearrangements."
         )
+        if opts.distance_bootstrap:
+            parts.append(f"Branch support was assessed with "
+                         f"{_plural(opts.distance_bootstrap, 'bootstrap replicate')}.")
     else:
         model = "GTR" if r.dna else "LG"
         parts.append(
-            f"An approximately-maximum-likelihood tree was inferred with FastTree{ver} "
-            f"under the {model}+CAT model with Gamma20 rescaling."
+            f"An approximately maximum-likelihood tree was inferred with FastTree{ver} "
+            f"under the {model}+CAT model with Gamma20 rescaling; branch support is given as "
+            "SH-like local support values."
         )
-    parts.append(r.support)
-    parts.append(r.rooting)
+    parts.append(_rooting_sentence(r.rooting))
     return " ".join(p for p in parts if p)
 
 
 CITATIONS = {
     "mafft": "Katoh K, Standley DM (2013) MAFFT multiple sequence alignment software version 7. Mol Biol Evol 30:772-780.",
-    TREE_ENGINE_IQTREE: "Minh BQ et al. (2020) IQ-TREE 2. Mol Biol Evol 37:1530-1534.",
+    TREE_ENGINE_IQTREE: "Minh BQ et al. (2020) IQ-TREE 2: new models and efficient methods for phylogenetic inference in the genomic era. Mol Biol Evol 37:1530-1534.",
+    "iqtree3": "Wong T et al. (2026) IQ-TREE 3: phylogenomic inference software using complex evolutionary models. Mol Biol Evol 43:msag117.",
     "modelfinder": "Kalyaanamoorthy S et al. (2017) ModelFinder. Nat Methods 14:587-589.",
     "ufboot": "Hoang DT et al. (2018) UFBoot2: improving the ultrafast bootstrap approximation. Mol Biol Evol 35:518-522.",
     "alrt": "Guindon S et al. (2010) New algorithms and methods to estimate maximum-likelihood phylogenies: PhyML 3.0. Syst Biol 59:307-321.",
@@ -684,7 +717,10 @@ def citations_for(r: TreeRunReport, opts: TreeOptions) -> list[str]:
     out = []
     if r.aligned_by:
         out.append(CITATIONS["mafft"])
-    out.append(CITATIONS[r.engine])
+    if r.engine == TREE_ENGINE_IQTREE and r.engine_version.startswith("3"):
+        out.append(CITATIONS["iqtree3"])
+    else:
+        out.append(CITATIONS[r.engine])
     if r.engine == TREE_ENGINE_IQTREE:
         if opts.model.upper() == TREE_MODEL_FINDER:
             out.append(CITATIONS["modelfinder"])
@@ -893,6 +929,12 @@ def build_tree_run(
         dropped = [r.name for r, _c in excluded if r.name in outgroup]
         if dropped:
             warnings.append("Outgroup sequence(s) excluded as fragments: " + ", ".join(dropped))
+        present = {r.name for r in records} | set(dropped)
+        missing = [o for o in outgroup if o not in present]
+        if missing:
+            # The outgroup is saved with the settings; it may belong to another file.
+            warnings.append("Outgroup sequence(s) not in this input: " + ", ".join(missing)
+                            + ". Choose the outgroup again in the Support and rooting tab.")
         if not outgroup:
             warnings.append("Outgroup rooting was selected, but no outgroup was chosen.")
 

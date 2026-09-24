@@ -196,11 +196,17 @@ def _report(**kw):
 
 def test_methods_paragraph_iqtree():
     text = tb.methods_paragraph(_report(), TreeOptions())
-    for piece in ("MAFFT v7.505 (L-INS-i)", "--adjustdirectionaccurately",
-                  "2 sequence(s) covering less than 70%", "60 of them parsimony-informative",
-                  "IQ-TREE 2.3.6", "TN+F+G4 selected by ModelFinder according to BIC",
-                  "best of 5 independent search(es) (seed 12345)", "Rooted with outgroup o."):
-        assert piece in text
+    for piece in ("18 nucleotide sequences were aligned with MAFFT v7.505 using the L-INS-i strategy",
+                  "--adjustdirectionaccurately",
+                  "2 sequences shorter than 70% of the median sequence length were excluded",
+                  "60 of which were parsimony-informative", "IQ-TREE 2.3.6",
+                  "TN+F+G4, selected by ModelFinder according to the Bayesian information criterion",
+                  "from 5 independent searches (random seeds 12345–12349) was retained",
+                  "1000 SH-aLRT replicates and 1000 ultrafast bootstrap replicates "
+                  "(UFBoot2, with the -bnni correction)",
+                  "The tree was rooted with o as outgroup."):
+        assert piece in text, piece
+    assert "(s)" not in text and ")(" not in text and ") (" not in text
 
 
 def test_methods_paragraph_fastme_and_citations():
@@ -208,6 +214,7 @@ def test_methods_paragraph_fastme_and_citations():
     opts = TreeOptions(engine=TREE_ENGINE_FASTME)
     text = tb.methods_paragraph(r, opts)
     assert "provided alignment" in text and "FastME 2.3.6" in text and "TN93" in text
+    assert "100 bootstrap replicates" in text and "The tree was rooted with o as outgroup." in text
     cites = tb.citations_for(r, opts)
     assert any("FastME 2.0" in c for c in cites) and not any("MAFFT" in c for c in cites)
 
@@ -429,3 +436,28 @@ def test_one_failed_search_is_skipped_with_warning(tmp_path, monkeypatch):
     run_dir, files, report = tb.build_tree_run([fa], opts, stamp="t")
     html = report.read_text()
     assert "1 of 3 IQ-TREE searches failed" in html
+
+
+
+def test_iqtree_citation_follows_installed_version():
+    opts = TreeOptions()
+    c3 = tb.citations_for(_report(engine_version="3.1.3"), opts)
+    c2 = tb.citations_for(_report(engine_version="2.3.6"), opts)
+    assert any("IQ-TREE 3" in c for c in c3) and not any("IQ-TREE 2" in c for c in c3)
+    assert any("IQ-TREE 2" in c for c in c2)
+
+
+def test_methods_single_search_and_unrooted():
+    text = tb.methods_paragraph(_report(runs=1, rooting="Unrooted (x)."), TreeOptions(runs=1))
+    assert "A single tree search was run (random seed 12345)." in text
+    assert text.endswith("The tree is unrooted.")
+
+
+
+def test_outgroup_from_another_file_is_reported(tmp_path, monkeypatch):
+    fa, _log = _fake_iqtree(tmp_path, monkeypatch)
+    opts = TreeOptions(use_system_path=True, threads=1, runs=1,
+                       root_mode=TREE_ROOT_OUTGROUP, outgroup=["CroSat9"])
+    _details, _files, report = tb.build_tree_run([fa], opts, stamp="t")
+    html = report.read_text()
+    assert "not in this input: CroSat9" in html and "Unrooted" in html

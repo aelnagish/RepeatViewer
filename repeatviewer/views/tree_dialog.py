@@ -1,9 +1,10 @@
-"""Tree dialog (Tools → Tree): input check, Alignment / Tree / Support and
-rooting / Options tabs, and the Cancel / Save / Run footer.
+"""Tree dialog (Tools → Tree): Alignment / Tree / Support and rooting / Options
+tabs and the Cancel / Save / Run footer.
 
 Follows the RepeatViewer tool-dialog rules: Cancel, Save, Run in that order;
 an Options tab with the right-click action, the process window and "use from
-PATH"; the input is the file selection from the file panel.
+PATH"; the input is the file selection from the file panel; help uses the
+round "?" button of the other tool dialogs.
 """
 
 from __future__ import annotations
@@ -22,9 +23,11 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -97,16 +100,31 @@ MODEL_INFO = (
 )
 
 
-def _info_icon(html_text: str, parent: QWidget) -> QLabel:
-    """Small (i) marker whose tooltip explains the neighbouring option."""
-    icon = QLabel("ⓘ", parent)
-    icon.setToolTip(f"<div style='max-width:420px'>{html_text}</div>")
-    icon.setCursor(Qt.CursorShape.WhatsThisCursor)
-    icon.setStyleSheet("QLabel { color: palette(mid); font-size: 15px; padding: 0 2px; }")
-    return icon
+def _help_button(parent: QWidget, title: str, html_text: str) -> QToolButton:
+    """Round "?" help button, same look and behaviour as the other tool dialogs
+    (tool_dialogs ``_field_with_help``): hover shows the text, click opens it."""
+    button = QToolButton(parent)
+    button.setText("?")
+    button.setToolTip(f"<div style='max-width:420px'>{html_text}</div>")
+    button.setAutoRaise(False)
+    button.setFixedSize(22, 22)
+    button.setStyleSheet(
+        "QToolButton {"
+        "  border: 1px solid palette(mid);"
+        "  border-radius: 10px;"
+        "  background: palette(base);"
+        "  font-weight: 600;"
+        "  padding: 0px;"
+        "}"
+        "QToolButton:hover { background: palette(alternate-base); }"
+    )
+    button.clicked.connect(
+        lambda checked=False: QMessageBox.information(parent, title, html_text)
+    )
+    return button
 
 
-def _with_info(field: QWidget, info: QLabel, parent: QWidget, *, top: bool = False) -> QWidget:
+def _with_info(field: QWidget, info: QWidget, parent: QWidget, *, top: bool = False) -> QWidget:
     row = QWidget(parent)
     lay = QHBoxLayout(row)
     lay.setContentsMargins(0, 0, 0, 0)
@@ -209,7 +227,7 @@ class TreeParamsDialog(QDialog):
         align_tab = QWidget(self)
         af = _form(align_tab)
         af.addRow("Alignment:", self._align_mode)
-        af.addRow("MAFFT strategy:", _with_info(self._strategy, _info_icon(MAFFT_INFO, self), self))
+        af.addRow("MAFFT strategy:", _with_info(self._strategy, _help_button(self, "MAFFT strategy", MAFFT_INFO), self))
         af.addRow("", self._adjust_direction)
         cov_row = QWidget(self)
         cov_lay = QHBoxLayout(cov_row)
@@ -269,8 +287,8 @@ class TreeParamsDialog(QDialog):
         self._runs.setRange(1, 100)
         self._runs.setValue(opts.runs)
         self._runs.setToolTip(
-            "IQ-TREE --runs: independent tree searches; the best is kept and the report "
-            "says how many found the same topology."
+            "Independent IQ-TREE searches (seed, seed+1, …); the tree with the highest "
+            "likelihood is kept and the report says how many found the same topology."
         )
         self._seed = QSpinBox(self)
         self._seed.setRange(1, 2_000_000_000)
@@ -290,9 +308,9 @@ class TreeParamsDialog(QDialog):
 
         tree_tab = QWidget(self)
         tf = _form(tree_tab)
-        tf.addRow("Method:", _with_info(engine_box, _info_icon(METHOD_INFO, self), self, top=True))
+        tf.addRow("Method:", _with_info(engine_box, _help_button(self, "Method", METHOD_INFO), self, top=True))
         tf.addRow("", self._engine_status)
-        tf.addRow("Substitution model:", _with_info(self._model, _info_icon(MODEL_INFO, self), self))
+        tf.addRow("Substitution model:", _with_info(self._model, _help_button(self, "Substitution model", MODEL_INFO), self))
         tf.addRow("Independent searches:", self._runs)
         tf.addRow("Random seed:", self._seed)
         tf.addRow("Threads:", self._threads)

@@ -3712,11 +3712,11 @@ class MainWindow(QMainWindow):
 
     def _populate_tree_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("Build tree with saved parameters", self._run_tree_default)
+            menu.addAction("Tree with default parameters", self._run_tree_default)
         menu.addSeparator()
         # Settings can be changed without a selection (Run then asks for one).
         menu.addAction(
-            "Change tree parameters", lambda: self._open_tree_dialog(require_selection=False)
+            "Change Tree parameters", lambda: self._open_tree_dialog(require_selection=False)
         )
 
     def _tree_candidate_files(self) -> list[Path]:
@@ -3753,7 +3753,7 @@ class MainWindow(QMainWindow):
         """Click Tree → parameters dialog (Cancel / Save / Run).
 
         Without a FASTA selection the toolbar click only shows a message; the
-        Tools → Tree → Change tree parameters entry still opens the dialog."""
+        Tools → Tree → Change Tree parameters entry still opens the dialog."""
         from repeatviewer.views.tree_dialog import TreeParamsDialog
 
         files = self._tree_candidate_files()

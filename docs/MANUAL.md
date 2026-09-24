@@ -726,10 +726,12 @@ falls back silently to a weaker method.
 
 Left-click opens the dialog; right-click builds with saved parameters (or
 opens the dialog, chosen in the Options tab). Without a FASTA selection the
-button only asks you to select one; **Tools → Tree → Change tree parameters**
-opens the dialog anyway, to adjust settings in advance. The ⓘ markers next to
-the MAFFT strategy, the method and the substitution model explain the choices;
-options that do not apply to the current choices are greyed out.
+button only asks you to select one; **Tools → Tree → Change Tree parameters**
+opens the dialog anyway, to adjust settings in advance. **Tools → Tree → Tree
+with default parameters** runs with the saved settings, like TE-Aid. The round
+**?** buttons next to the MAFFT strategy, the method and the substitution model
+explain the choices; options that do not apply to the current choices are
+greyed out.
 
 | Tab | Setting | Default | Why |
 |-----|---------|---------|-----|
@@ -771,7 +773,7 @@ Rooting keeps each support value on its branch (a common mistake when
 rerooting Newick trees). If several outgroup sequences do not form one clade,
 the report warns that the root position is uncertain.
 
-**If a run fails**, no half-finished run folder is left. The message gives the
+**If a run fails**, no half-finished results are left. The message gives the
 reason in plain words, and the full log (commands and program output) is saved
 next to the input as `<input>_tree_failed.log`, ready to send with a bug report.
 

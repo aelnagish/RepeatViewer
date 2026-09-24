@@ -65,16 +65,20 @@ def test_fragment_hint_and_outgroup_list(qapp, tmp_path):
     assert "None of the 4" in dlg._frag_hint.text()
 
 
-def test_professional_labels_and_info_icons(qapp, tmp_path):
-    from PySide6.QtWidgets import QLabel, QRadioButton
+def test_professional_labels_and_question_mark_help(qapp, tmp_path):
+    from PySide6.QtWidgets import QLabel, QRadioButton, QToolButton
 
     dlg = _dialog(qapp, tmp_path)
     radios = [r.text() for r in dlg.findChildren(QRadioButton)]
     assert "Maximum likelihood (IQ-TREE)" in radios
     assert "Minimum evolution (FastME)" in radios
     assert not any("recommended" in r.lower() and "IQ-TREE" in r for r in radios)
-    tips = [l.toolTip() for l in dlg.findChildren(QLabel) if l.text() == "ⓘ"]
-    assert len(tips) == 3
+    assert not [l for l in dlg.findChildren(QLabel) if l.text() == "ⓘ"]
+    helps = [b for b in dlg.findChildren(QToolButton) if b.text() == "?"]
+    assert len(helps) == 3
+    for b in helps:  # same round style as tool_dialogs._field_with_help
+        assert b.size().width() == 22 and "border-radius: 10px" in b.styleSheet()
+    tips = [b.toolTip() for b in helps]
     joined = " ".join(tips)
     for piece in ("L-INS-i", "G-INS-i", "E-INS-i", "FFT-NS-2", "ModelFinder", "TN93", "HKY", "K2P"):
         assert piece in joined
