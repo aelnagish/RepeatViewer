@@ -2350,6 +2350,138 @@ class FastGaParamsDialog(QDialog):
         )
 
 
+class GenomeBlastDatabaseRow(QWidget):
+    """Genome combo matching Blast Database: current genome + nucleotide DBs + Manage."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        project: RepeatViewerProject | None = None,
+        project_genome: Path | None = None,
+        selected_path: str | None = None,
+        manage_title: str = "Manage BLAST databases",
+    ) -> None:
+        super().__init__(parent)
+        self._project = project
+        self._project_genome = (
+            project_genome.expanduser().resolve()
+            if project_genome is not None and project_genome.is_file()
+            else None
+        )
+        self._manage_title = manage_title
+        self._blast_manager_dialog = None
+
+        self._combo = QComboBox(self)
+        self._combo.setMinimumWidth(260)
+        self._combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._combo.setMinimumContentsLength(28)
+        self.refresh(selected_path=selected_path)
+
+        manage = QPushButton("Add/Manage databases", self)
+        manage.clicked.connect(self._manage_databases)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        # Keep the button next to the combo (do not stretch the combo across the row).
+        layout.addWidget(self._combo)
+        layout.addWidget(manage)
+        layout.addStretch(1)
+
+    def selected_path(self) -> str | None:
+        return self._combo.currentData() or None
+
+    def reset_to_default(self) -> None:
+        if self._combo.count() > 0:
+            self._combo.setCurrentIndex(0)
+
+    def refresh(self, *, selected_path: str | None = None) -> None:
+        """Fill combo like Blast Database (current genome + nucleotide DBs)."""
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+
+        target = selected_path
+        if target is None and self._combo.count() > 0:
+            target = self._combo.currentData()
+
+        if self._project is not None:
+            reload_blast_databases_into_project(self._project)
+
+        self._combo.clear()
+        if self._project_genome is not None:
+            self._combo.addItem(
+                f"Current genome ({self._project_genome.name})",
+                None,
+            )
+        else:
+            self._combo.addItem("Current genome (not configured)", None)
+
+        model = self._combo.model()
+        databases = (
+            list(self._project.blast_databases) if self._project is not None else []
+        )
+        for db in databases:
+            if db.molecule_type != BLAST_MOLECULE_NUCL:
+                continue
+            ready = blast_database_is_ready(db)
+            label = db.name if ready else f"{db.name} (unavailable — index files missing)"
+            data = str(Path(db.source_fasta).expanduser().resolve())
+            self._combo.addItem(label, data)
+            if not ready and isinstance(model, QStandardItemModel):
+                item = model.item(self._combo.count() - 1)
+                if item is not None:
+                    item.setEnabled(False)
+
+        if target:
+            resolved = str(Path(str(target)).expanduser().resolve())
+            index = self._combo.findData(resolved)
+            if index < 0 and self._project_genome is not None:
+                if resolved == str(self._project_genome):
+                    index = 0
+            if index < 0:
+                self._combo.addItem(Path(resolved).name, resolved)
+                index = self._combo.count() - 1
+            self._combo.setCurrentIndex(index)
+        else:
+            self._combo.setCurrentIndex(0)
+
+    def _manage_databases(self) -> None:
+        from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
+
+        if self._project is None:
+            QMessageBox.information(
+                self,
+                self._manage_title,
+                "No project is available to manage BLAST databases.",
+            )
+            return
+        existing = self._blast_manager_dialog
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        # Parent to the owning dialog so Manage stays interactive under ApplicationModal.
+        host: QWidget = self
+        parent = self.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QDialog):
+                host = parent
+                break
+            parent = parent.parentWidget()
+        dialog = BlastDatabaseManagerDialog(self._project, parent=host)
+        self._blast_manager_dialog = dialog
+        dialog.finished.connect(self._on_manager_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_manager_finished(self, _result: int = 0) -> None:
+        self._blast_manager_dialog = None
+        self.refresh(selected_path=self._combo.currentData())
+
+
 class ExtendParamsDialog(QDialog):
     """Extend MSA ends.
 
@@ -2358,14 +2490,13 @@ class ExtendParamsDialog(QDialog):
     toolbar button does.
     """
 
-    _FASTA_FILTER = "FASTA (*.fa *.fasta *.fna *.fas);;All files (*)"
-
     def __init__(
         self,
         *,
         initial: ExtendOptions | None = None,
         title: str = "MSA Extend parameters",
         pan_genome_names: list[str] | None = None,
+        project: RepeatViewerProject | None = None,
         project_genome: Path | None = None,
         genome_history: list[Path] | None = None,
         for_run: bool = True,
@@ -2376,6 +2507,8 @@ class ExtendParamsDialog(QDialog):
         opts = initial or ExtendOptions()
         self._for_run = for_run
         self._run_after = False
+        # genome_history kept for call-site compatibility; Genome list uses BLAST DBs.
+        _ = genome_history
 
         self._left = QSpinBox()
         self._left.setRange(0, 500_000)
@@ -2395,43 +2528,13 @@ class ExtendParamsDialog(QDialog):
             if index >= 0:
                 self._pan_genome.setCurrentIndex(index)
 
-        # Genome selector (single-genome mode only): empty means use the
-        # project genome from Define Genome.
-        self._genome_combo = QComboBox()
-        self._genome_combo.setFixedWidth(320)
-        self._genome_combo.addItem("Default (project genome)", "")
-        project_genome_str = (
-            str(project_genome.expanduser().resolve())
-            if project_genome is not None and project_genome.is_file()
-            else ""
+        self._genome_row = GenomeBlastDatabaseRow(
+            self,
+            project=project,
+            project_genome=project_genome,
+            selected_path=opts.genome_path,
+            manage_title="MSA Extend parameters",
         )
-        if project_genome_str:
-            self._genome_combo.addItem(project_genome.name, project_genome_str)
-        for path in genome_history or []:
-            if not path.is_file():
-                continue
-            resolved = str(path.expanduser().resolve())
-            if resolved == project_genome_str:
-                continue
-            self._genome_combo.addItem(path.name, resolved)
-        if opts.genome_path:
-            index = self._genome_combo.findData(opts.genome_path)
-            if index >= 0:
-                self._genome_combo.setCurrentIndex(index)
-            else:
-                self._genome_combo.addItem(Path(opts.genome_path).name, opts.genome_path)
-                self._genome_combo.setCurrentIndex(self._genome_combo.count() - 1)
-
-        genome_browse = QPushButton("Browse", self)
-        genome_browse.setFixedWidth(88)
-        genome_browse.clicked.connect(self._browse_genome)
-
-        genome_row = QWidget(self)
-        genome_layout = QHBoxLayout(genome_row)
-        genome_layout.setContentsMargins(0, 0, 0, 0)
-        genome_layout.setSpacing(6)
-        genome_layout.addWidget(self._genome_combo, stretch=1)
-        genome_layout.addWidget(genome_browse)
 
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
@@ -2472,7 +2575,7 @@ class ExtendParamsDialog(QDialog):
         if self._pan_genome_names:
             params_form.addRow("Pan-genome:", self._pan_genome)
         else:
-            params_form.addRow("Genome:", genome_row)
+            params_form.addRow("Genome:", self._genome_row)
         params_form.addRow("Extend left of MSA:", self._left)
         params_form.addRow("Extend right of MSA:", self._right)
         self._tabs.addTab(params_tab, "Parameters")
@@ -2495,25 +2598,8 @@ class ExtendParamsDialog(QDialog):
     def _restore_defaults(self) -> None:
         self._left.setValue(DEFAULT_EXTEND_LEFT)
         self._right.setValue(DEFAULT_EXTEND_RIGHT)
-        self._genome_combo.setCurrentIndex(0)
+        self._genome_row.reset_to_default()
         self._right_click_buttons[EXTEND_RIGHT_CLICK_RUN].setChecked(True)
-
-    def _browse_genome(self) -> None:
-        chosen, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select genome FASTA",
-            str(Path.home()),
-            self._FASTA_FILTER,
-        )
-        if not chosen:
-            return
-        resolved = str(Path(chosen).expanduser().resolve())
-        index = self._genome_combo.findData(resolved)
-        if index >= 0:
-            self._genome_combo.setCurrentIndex(index)
-        else:
-            self._genome_combo.addItem(Path(chosen).name, resolved)
-            self._genome_combo.setCurrentIndex(self._genome_combo.count() - 1)
 
     def options(self) -> ExtendOptions:
         pan_name = None
@@ -2521,7 +2607,7 @@ class ExtendParamsDialog(QDialog):
             pan_name = self._pan_genome.currentText().strip() or None
         genome_path = None
         if not self._pan_genome_names:
-            genome_path = self._genome_combo.currentData() or None
+            genome_path = self._genome_row.selected_path()
         right_click_action = EXTEND_RIGHT_CLICK_RUN
         for value, radio in self._right_click_buttons.items():
             if radio.isChecked():
@@ -4406,8 +4492,6 @@ class TeaAidParamsDialog(QDialog):
         opts = initial or TeaAidOptions()
         self._for_run = for_run
         self._run_after = False
-        self._project = project
-        self._blast_manager_dialog = None
         # genome_history kept for call-site compatibility; Genome list uses BLAST DBs.
         _ = genome_history
 
@@ -4415,31 +4499,14 @@ class TeaAidParamsDialog(QDialog):
             opts.hit_len_high_pct, opts.hit_len_mid_pct
         )
 
-        # Genome: same chrome as Blast "Database:" — combo + Add/Manage databases.
-        # Empty selection = project genome from Define Genome.
-        self._project_genome = (
-            project_genome.expanduser().resolve()
-            if project_genome is not None and project_genome.is_file()
-            else None
+        # Genome: same chrome as Blast / Extend — current genome + nucleotide DBs.
+        self._genome_row = GenomeBlastDatabaseRow(
+            self,
+            project=project,
+            project_genome=project_genome,
+            selected_path=opts.genome_path,
+            manage_title="TE-Aid parameters",
         )
-        self._genome_combo = QComboBox(self)
-        self._genome_combo.setMinimumWidth(260)
-        self._genome_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self._genome_combo.setMinimumContentsLength(28)
-        self._refresh_genome_combo(selected_path=opts.genome_path)
-
-        genome_manage = QPushButton("Add/Manage databases", self)
-        genome_manage.clicked.connect(self._manage_genome_databases)
-        genome_row = QWidget(self)
-        genome_layout = QHBoxLayout(genome_row)
-        genome_layout.setContentsMargins(0, 0, 0, 0)
-        genome_layout.setSpacing(6)
-        # Keep the button next to the combo (do not stretch the combo across the row).
-        genome_layout.addWidget(self._genome_combo)
-        genome_layout.addWidget(genome_manage)
-        genome_layout.addStretch(1)
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
@@ -4589,7 +4656,7 @@ class TeaAidParamsDialog(QDialog):
         )
         params_form.setHorizontalSpacing(12)
         params_form.setVerticalSpacing(8)
-        params_form.addRow("Genome:", genome_row)
+        params_form.addRow("Genome:", self._genome_row)
         params_form.addRow("Genome BLAST E-value:", self._evalue)
         params_form.addRow("Self BLAST word size:", self._word_size)
         params_form.addRow("Line transparency:", self._line_transparency)
@@ -4693,7 +4760,7 @@ class TeaAidParamsDialog(QDialog):
             self._hit_mid_pct.blockSignals(False)
 
     def _restore_defaults(self) -> None:
-        self._genome_combo.setCurrentIndex(0)
+        self._genome_row.reset_to_default()
         self._evalue.setValue(DEFAULT_TEAID_EVALUE)
         self._word_size.setValue(DEFAULT_TEAID_SELF_BLAST_WORD_SIZE)
         self._hit_high_pct.blockSignals(True)
@@ -4709,84 +4776,6 @@ class TeaAidParamsDialog(QDialog):
         self._line_transparency.setValue(DEFAULT_TEAID_HIT_LINE_TRANSPARENCY * 100.0)
         self._right_click_buttons[TEAID_RIGHT_CLICK_RUN].setChecked(True)
 
-    def _refresh_genome_combo(self, *, selected_path: str | None = None) -> None:
-        """Fill Genome combo like Blast Database (current genome + nucleotide DBs)."""
-        from repeatviewer.database_settings import reload_blast_databases_into_project
-        from repeatviewer.project import BLAST_MOLECULE_NUCL
-
-        target = selected_path
-        if target is None and self._genome_combo.count() > 0:
-            target = self._genome_combo.currentData()
-
-        if self._project is not None:
-            reload_blast_databases_into_project(self._project)
-
-        self._genome_combo.clear()
-        if self._project_genome is not None:
-            self._genome_combo.addItem(
-                f"Current genome ({self._project_genome.name})",
-                None,
-            )
-        else:
-            self._genome_combo.addItem("Current genome (not configured)", None)
-
-        model = self._genome_combo.model()
-        databases = (
-            list(self._project.blast_databases) if self._project is not None else []
-        )
-        for db in databases:
-            if db.molecule_type != BLAST_MOLECULE_NUCL:
-                continue
-            ready = blast_database_is_ready(db)
-            label = db.name if ready else f"{db.name} (unavailable — index files missing)"
-            # Store source FASTA path so TE-Aid can BLAST against it.
-            data = str(Path(db.source_fasta).expanduser().resolve())
-            self._genome_combo.addItem(label, data)
-            if not ready and isinstance(model, QStandardItemModel):
-                item = model.item(self._genome_combo.count() - 1)
-                if item is not None:
-                    item.setEnabled(False)
-
-        if target:
-            resolved = str(Path(str(target)).expanduser().resolve())
-            index = self._genome_combo.findData(resolved)
-            if index < 0 and self._project_genome is not None:
-                if resolved == str(self._project_genome):
-                    index = 0
-            if index < 0:
-                self._genome_combo.addItem(Path(resolved).name, resolved)
-                index = self._genome_combo.count() - 1
-            self._genome_combo.setCurrentIndex(index)
-        else:
-            self._genome_combo.setCurrentIndex(0)
-
-    def _manage_genome_databases(self) -> None:
-        from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
-
-        if self._project is None:
-            QMessageBox.information(
-                self,
-                "TE-Aid parameters",
-                "No project is available to manage BLAST databases.",
-            )
-            return
-        existing = self._blast_manager_dialog
-        if existing is not None and existing.isVisible():
-            existing.raise_()
-            existing.activateWindow()
-            return
-        dialog = BlastDatabaseManagerDialog(self._project, parent=self)
-        self._blast_manager_dialog = dialog
-        dialog.finished.connect(self._on_genome_manager_finished)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-
-    def _on_genome_manager_finished(self, _result: int = 0) -> None:
-        self._blast_manager_dialog = None
-        selected = self._genome_combo.currentData()
-        self._refresh_genome_combo(selected_path=selected)
-
     def options(self) -> TeaAidOptions:
         high_pct, mid_pct = clamp_teaid_hit_len_pct(
             self._hit_high_pct.value(), self._hit_mid_pct.value()
@@ -4796,7 +4785,6 @@ class TeaAidParamsDialog(QDialog):
             if radio.isChecked():
                 right_click_action = value
                 break
-        genome_path = self._genome_combo.currentData() or None
         return TeaAidOptions(
             e_value=normalize_blast_evalue(
                 self._evalue.value(),
@@ -4812,7 +4800,7 @@ class TeaAidParamsDialog(QDialog):
                 self._line_transparency.value() / 100.0
             ),
             right_click_action=right_click_action,
-            genome_path=genome_path,
+            genome_path=self._genome_row.selected_path(),
         )
 
 
