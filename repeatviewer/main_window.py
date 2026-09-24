@@ -1356,7 +1356,7 @@ class FolderTreeWidget(QTreeWidget):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.horizontalScrollBar().setSingleStep(12)
         self.verticalScrollBar().setSingleStep(12)
-        self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.setWordWrap(False)
         self.setUniformRowHeights(False)
         self.setAnimated(False)
@@ -2041,6 +2041,8 @@ class MainWindow(QMainWindow):
         self._genome_dialog: GenomeDialog | None = None
         self._define_database_dialog: DefineDatabaseDialog | None = None
         self._add_annotation_dialog = None
+        self._blast_params_dialog = None
+        self._add_blast_database_dialog = None
         self._command_plugin_dialog: CommandPluginDesignerDialog | None = None
         self._plugin_run_dialog: UserCommandRunDialog | None = None
         self._msa_clean_options = load_msa_clean_options()
@@ -7400,6 +7402,7 @@ class MainWindow(QMainWindow):
             self._sync_te_viz_dialog_input_from_files(panel_path)
             self._sync_define_database_dialog_from_files(panel_path)
             self._sync_add_annotation_dialog_from_files(panel_path)
+            self._sync_add_blast_database_dialog_from_files(panel_path)
 
     def _on_file_double_clicked(self, item: FileListRow) -> None:
         raw = item.data(ROLE_PATH)
@@ -7679,25 +7682,42 @@ class MainWindow(QMainWindow):
     def _open_blast_dialog(self) -> None:
         """Click BLAST -> parameters dialog. Run launches the active tab's program.
 
-        The dialog's tabs (blastn / blastp) are the program choice, so the one
-        Run button covers both. Cancel keeps the last saved settings; Run saves
-        the edits and starts the job.
+        Non-modal so Add/Manage BLAST can receive Files-panel clicks for FASTA
+        paths. Cancel discards; Save/Run persist settings (and Run starts the job).
         """
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+
+        if self._blast_params_dialog is not None and self._blast_params_dialog.isVisible():
+            self._blast_params_dialog.raise_()
+            self._blast_params_dialog.activateWindow()
+            return
+
+        reload_blast_databases_into_project(self._project)
         dialog = BlastParamsDialog(
             project=self._project, initial=self._blast_options, parent=self
         )
-        try:
-            if not dialog.exec():
-                return  # Cancel: nothing changes, saved settings stay put.
-            self._blast_options = dialog.options()
-            save_blast_options(self._blast_options)
-            self._project.use_system_blast = dialog.use_system_blast()
-            self._persist_workspace()
-            run_after = dialog.should_run()
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
-        # The Right Click tab only saves the preference; the program tabs run.
-        if run_after:
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self._blast_params_dialog = dialog
+        dialog.finished.connect(self._on_blast_params_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_blast_params_dialog_finished(self, result: int) -> None:
+        dialog = self._blast_params_dialog
+        self._blast_params_dialog = None
+        QTimer.singleShot(0, self._repair_browser_chrome)
+        if dialog is None:
+            return
+        if result != int(QDialog.DialogCode.Accepted):
+            return
+        self._blast_options = dialog.options()
+        save_blast_options(self._blast_options)
+        self._project.use_system_blast = dialog.use_system_blast()
+        self._persist_workspace()
+        if dialog.should_run():
             self._apply_function("blast", blast_options=self._blast_options)
         else:
             self._set_status_message("BLAST settings saved", 4000)
@@ -7706,9 +7726,44 @@ class MainWindow(QMainWindow):
         """Menu: same Cancel / Save / Run dialog as the BLAST toolbar button."""
         self._open_blast_dialog()
 
+    def _sync_add_blast_database_dialog_from_files(
+        self, clicked_path: Path | None = None
+    ) -> None:
+        """Fill Add BLAST database FASTA from a Files-panel click."""
+        if clicked_path is None:
+            return
+        from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
+
+        direct = getattr(self, "_add_blast_database_dialog", None)
+        if direct is not None and direct.isVisible():
+            if direct.apply_path_from_panel(clicked_path):
+                return
+
+        managers: list[BlastDatabaseManagerDialog] = []
+        params = self._blast_params_dialog
+        if params is not None:
+            mgr = getattr(params, "_blast_manager_dialog", None)
+            if isinstance(mgr, BlastDatabaseManagerDialog):
+                managers.append(mgr)
+        for mgr in self.findChildren(BlastDatabaseManagerDialog):
+            if mgr not in managers:
+                managers.append(mgr)
+
+        for manager in managers:
+            if manager.isVisible() and manager.apply_path_from_panel(clicked_path):
+                # Manager forwards to Add and keeps Add in front — do not raise Manage.
+                return
+
     def _add_fasta_as_blast_database(self, path: Path) -> None:
         from repeatviewer.database_settings import save_blast_databases_to_settings
         from repeatviewer.views.blast_database_dialog import AddBlastDatabaseDialog
+
+        existing = getattr(self, "_add_blast_database_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.apply_path_from_panel(path)
+            existing.raise_()
+            existing.activateWindow()
+            return
 
         existing_names = {db.name for db in self._project.blast_databases}
         dialog = AddBlastDatabaseDialog(
@@ -7717,14 +7772,33 @@ class MainWindow(QMainWindow):
             initial_fasta=path,
             parent=self,
         )
-        if not exec_modal_dialog(dialog):
+        self._add_blast_database_dialog = dialog
+        dialog.finished.connect(self._on_add_blast_database_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_add_blast_database_dialog_finished(self, result: int) -> None:
+        from repeatviewer.database_settings import save_blast_databases_to_settings
+
+        dialog = getattr(self, "_add_blast_database_dialog", None)
+        self._add_blast_database_dialog = None
+        if dialog is None:
+            return
+        if result != int(QDialog.DialogCode.Accepted):
             return
         db = dialog.result_database()
         if db is None:
             return
         self._project.blast_databases.append(db)
         save_blast_databases_to_settings(self._project.blast_databases)
+        self._persist_workspace()
         self._set_status_message(f"Added BLAST database “{db.name}”", 4000)
+        params = self._blast_params_dialog
+        if params is not None and params.isVisible():
+            refresh = getattr(params, "_refresh_database_combos", None)
+            if callable(refresh):
+                refresh()
 
     def _add_annotation_for_fasta(self, path: Path) -> None:
         """Open a non-modal Add annotation dialog for ``path``.
@@ -9013,6 +9087,9 @@ class MainWindow(QMainWindow):
         """Click TE-Aid: parameters dialog. Run runs; Save (Options tab) stores only."""
         dialog = TeaAidParamsDialog(
             initial=self._teaid_options,
+            project=self._project,
+            project_genome=self._genome_path_resolved(),
+            genome_history=load_genome_history(),
             parent=self,
         )
         try:
@@ -10564,6 +10641,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid selection", "Selected files do not include FASTA sequence files.")
             return
         blast_opts_for_gate = job_kwargs.get("blast_options")
+        if func_name == "blast":
+            from repeatviewer.database_settings import reload_blast_databases_into_project
+
+            # Keep Run / right-click in sync with Manage BLAST add/remove.
+            reload_blast_databases_into_project(self._project)
         uses_saved_blast_database = (
             func_name == "blast"
             and blast_opts_for_gate is not None

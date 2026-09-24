@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QRect, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QRect, QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -34,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
+from repeatviewer.widgets.path_browse import PathBrowseRow
 
 if TYPE_CHECKING:
     from repeatviewer.plugins.registry import PluginRegistry
@@ -96,13 +96,11 @@ from repeatviewer.widgets.preview_zoom import (
     PreviewFitMode,
     PreviewZoomKind,
     DefaultFastaPreviewTab,
-    load_color_blind_nucleotide_scheme,
     load_default_fasta_preview_tab,
     load_preview_fit_mode,
     load_preview_font_size,
     load_preview_zoom_percent,
     load_show_sequence_summary,
-    save_color_blind_nucleotide_scheme,
     save_default_fasta_preview_tab,
     save_preview_fit_mode,
     save_preview_font_size,
@@ -328,6 +326,13 @@ def _genome_history_label(path: Path) -> str:
     return f"{path.name}  —  {parent}"
 
 
+# Uniform column sizing so every field lines up across all groups.
+_FIELD_WIDTH = 170
+_PATH_FIELD_MIN_WIDTH = 320
+_LABEL_WIDTH = 200
+_CONDA_STATUS_MAX_LINES = 4
+
+
 def _path_browse_row(
     line_edit: QLineEdit,
     *,
@@ -335,50 +340,21 @@ def _path_browse_row(
     is_dir: bool,
     browse_title: str,
     file_filter: str = "All files (*)",
+    placeholder: str = "",
     on_changed=None,
 ) -> QWidget:
-    container = QWidget(parent)
-    container.setSizePolicy(
-        QSizePolicy.Policy.Expanding,
-        QSizePolicy.Policy.Fixed,
+    row = PathBrowseRow(
+        parent,
+        placeholder=placeholder or line_edit.placeholderText(),
+        browse_title=browse_title,
+        file_filter=file_filter,
+        mode="directory" if is_dir else "file",
+        line_edit=line_edit,
+        minimum_width=_PATH_FIELD_MIN_WIDTH,
     )
-    layout = QHBoxLayout(container)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(6)
-    line_edit.setSizePolicy(
-        QSizePolicy.Policy.Expanding,
-        QSizePolicy.Policy.Fixed,
-    )
-    layout.addWidget(line_edit, stretch=1)
-
-    def browse() -> None:
-        start = line_edit.text().strip() or str(Path.home())
-        if is_dir:
-            chosen = QFileDialog.getExistingDirectory(parent, browse_title, start)
-            if chosen:
-                line_edit.setText(chosen)
-                if on_changed is not None:
-                    on_changed()
-        else:
-            chosen, _ = QFileDialog.getOpenFileName(
-                parent,
-                browse_title,
-                start,
-                file_filter,
-            )
-            if chosen:
-                line_edit.setText(chosen)
-                if on_changed is not None:
-                    on_changed()
-
-    browse_btn = QPushButton("Browse", container)
-    browse_btn.setSizePolicy(
-        QSizePolicy.Policy.Fixed,
-        QSizePolicy.Policy.Fixed,
-    )
-    browse_btn.clicked.connect(browse)
-    layout.addWidget(browse_btn)
-    return container
+    if on_changed is not None:
+        row.path_changed.connect(on_changed)
+    return row
 
 
 def _section_label(text: str, parent: QWidget) -> QLabel:
@@ -387,13 +363,6 @@ def _section_label(text: str, parent: QWidget) -> QLabel:
     font.setBold(True)
     label.setFont(font)
     return label
-
-
-# Uniform column sizing so every field lines up across all groups.
-_FIELD_WIDTH = 170
-_PATH_FIELD_MIN_WIDTH = 320
-_LABEL_WIDTH = 200
-_CONDA_STATUS_MAX_LINES = 4
 
 
 class _CondaStatusLabel(QLabel):
@@ -436,8 +405,6 @@ class _CondaStatusLabel(QLabel):
 
 
 class SettingsDialog(QDialog):
-    colorBlindToggled = Signal(bool)  # emitted immediately when the checkbox is clicked
-
     def __init__(
         self,
         project: RepeatViewerProject,
@@ -456,13 +423,6 @@ class SettingsDialog(QDialog):
 
         self._system_viewer = QCheckBox()
         self._system_viewer.setChecked(project.use_system_sequence_viewer)
-        self._color_blind_scheme = QCheckBox()
-        self._color_blind_scheme.setChecked(load_color_blind_nucleotide_scheme())
-        self._color_blind_scheme.setToolTip(
-            "Use an orange/blue/teal nucleotide palette in the Annotation sequence view "
-            "(AliView-style green/blue/red when off)."
-        )
-        self._color_blind_scheme.toggled.connect(self._on_color_blind_toggled)
         self._batch_workers = NoWheelSpinBox()
         self._batch_workers.setRange(1, 32)
         self._batch_workers.setValue(project.batch_workers)
@@ -579,11 +539,24 @@ class SettingsDialog(QDialog):
             "Filled in automatically when you attach a cytogenetic image to a sequence."
         )
 
-        # BLAST databases
+        # BLAST databases — default Documents/RepeatViewer/blast_databases (all OSes)
         self._blast_db_base_dir = QLineEdit(str(load_blast_db_base_dir()))
         self._blast_db_base_dir.setMinimumWidth(_PATH_FIELD_MIN_WIDTH)
-        self._open_blast_db_btn = QPushButton("Open BLAST databases folder")
-        self._open_blast_db_btn.clicked.connect(self._open_blast_db_folder)
+        self._blast_db_base_dir.setPlaceholderText(
+            "Documents/RepeatViewer/blast_databases"
+        )
+        self._blast_db_base_dir.setToolTip(
+            "Folder for named BLAST indexes (Manage BLAST databases).\n"
+            "Default on macOS, Linux, and Windows:\n"
+            "  Documents/RepeatViewer/blast_databases\n"
+            "Existing databases keep their stored paths; this folder is used for new ones."
+        )
+        self._open_blast_db_btn = QPushButton("Manage BLAST database")
+        self._open_blast_db_btn.setToolTip(
+            "Open the Manage BLAST databases window to add or remove named databases.\n"
+            "New indexes are written to the Base folder above."
+        )
+        self._open_blast_db_btn.clicked.connect(self._manage_blast_databases)
 
         # External tools via conda (RepeatMasker, FastGA, bedtools, …)
         self._conda_tools_env = QLineEdit(load_conda_tools_env())
@@ -707,7 +680,6 @@ class SettingsDialog(QDialog):
         ])
         seq_tools = _group("Sequence tools", [
             ("Use system sequence viewer:", self._system_viewer),
-            ("Color-blind nucleotide:", self._color_blind_scheme),
         ])
         files_preview = _group("Files && preview", [
             ("Folders / Files font:", self._browser_panel_font),
@@ -735,6 +707,7 @@ class SettingsDialog(QDialog):
                 parent=self,
                 is_dir=True,
                 browse_title="Choose BLAST databases folder",
+                placeholder="Documents/RepeatViewer/blast_databases",
             )),
             ("", self._open_blast_db_btn),
         ])
@@ -837,12 +810,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs)
         layout.addWidget(buttons)
 
-    def _on_color_blind_toggled(self, checked: bool) -> None:
-        """Persist and broadcast immediately so open Annotation views recolor live,
-        without waiting for OK - this is the kind of setting you want to preview."""
-        save_color_blind_nucleotide_scheme(checked)
-        self.colorBlindToggled.emit(checked)
-
     def accept(self) -> None:
         if not self._toolbar_panel.has_visible_tools():
             QMessageBox.warning(
@@ -872,7 +839,6 @@ class SettingsDialog(QDialog):
         save_default_fasta_preview_tab(
             DefaultFastaPreviewTab(str(self._fasta_default_tab.currentData()))
         )
-        save_color_blind_nucleotide_scheme(self._color_blind_scheme.isChecked())
         save_theme_mode(str(self._theme_mode.currentData()))
         save_accent_color(self._accent_color)
         save_corner_shape("rounded")
@@ -949,11 +915,49 @@ class SettingsDialog(QDialog):
         folder.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
-    def _open_blast_db_folder(self) -> None:
-        text = self._blast_db_base_dir.text().strip()
-        folder = Path(text).expanduser() if text else load_blast_db_base_dir()
-        folder.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+    def _manage_blast_databases(self) -> None:
+        """Open Manage BLAST databases (same window as BLAST parameters → Manage)."""
+        from repeatviewer.database_settings import (
+            reload_blast_databases_into_project,
+            save_blast_databases_to_settings,
+        )
+        from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
+
+        # Persist Base folder first so "Add Database" uses the path shown here.
+        base_dir_text = self._blast_db_base_dir.text().strip()
+        if base_dir_text:
+            save_blast_db_base_dir(Path(base_dir_text).expanduser())
+
+        reload_blast_databases_into_project(self._project)
+        existing = getattr(self, "_blast_manager_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        # Parent stays this Preferences dialog so the manager remains interactive
+        # while Preferences is ApplicationModal; flags/behavior match BLAST's manager.
+        dialog = BlastDatabaseManagerDialog(self._project, parent=self)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        self._blast_manager_dialog = dialog
+
+        def _on_finished(_result: int = 0) -> None:
+            self._blast_manager_dialog = None
+            save_blast_databases_to_settings(self._project.blast_databases)
+            # Refresh BLAST params dropdown if that dialog is open under the same project.
+            main = self.parentWidget()
+            params = getattr(main, "_blast_params_dialog", None) if main is not None else None
+            if params is not None and params.isVisible():
+                refresh = getattr(params, "_refresh_database_combos", None)
+                if callable(refresh):
+                    refresh()
+
+        dialog.finished.connect(_on_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _refresh_conda_tools_status(self) -> None:
         status = describe_conda_tools_status(self._conda_tools_env.text())

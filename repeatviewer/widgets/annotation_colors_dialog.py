@@ -134,7 +134,7 @@ class AnnotationElementColorsPanel(QWidget):
         nuc_presets.addWidget(nuc_preset_label)
         nuc_tips = {
             "Default": "Standard A/C/G/T colours",
-            "Color-blind": "Wong / Paul Tol palette (same as Preferences → Color-blind nucleotide)",
+            "Color-blind": "Wong / Paul Tol palette (same as Annotation → nucleotide Color-blind)",
         }
         for label, palette in NUCLEOTIDE_COLOR_PRESETS:
             btn = QPushButton(label, self)
@@ -226,7 +226,7 @@ class AnnotationElementColorsPanel(QWidget):
 
     def _apply_nuc_preset(self, name: str, colors: dict[str, str]) -> None:
         self._nuc_grid.set_colors(colors)
-        # Keep Preferences colour-blind checkbox in sync with the chosen preset.
+        # Keep the Annotation sequence-view scheme flag in sync with this preset.
         save_color_blind_nucleotide_scheme(name == "Color-blind")
 
     def _section_label(self, text: str) -> QLabel:

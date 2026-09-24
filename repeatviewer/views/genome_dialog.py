@@ -39,6 +39,7 @@ from repeatviewer.views.settings_dialog import (
     load_genome_history,
     save_workspace,
 )
+from repeatviewer.widgets.path_browse import PathBrowseRow
 
 _GENOME_SUFFIXES = {".fa", ".fasta", ".fna"}
 _FASTA_FILTER = "FASTA (*.fa *.fasta *.fna);;All files (*)"
@@ -131,9 +132,15 @@ class _PanGenomeRow(QWidget):
 
         self.path = GenomeFastaDropLineEdit()
         self.path.set_on_path_dropped(self._maybe_fill_name_from_path)
-
-        browse = QPushButton("Browse")
-        browse.clicked.connect(self._browse)
+        self._path_row = PathBrowseRow(
+            self,
+            placeholder="Drop a genome FASTA here, browse, or pick from Files",
+            browse_title="Select genome FASTA",
+            file_filter=_FASTA_FILTER,
+            mode="file",
+            line_edit=self.path,
+            browse_handler=self._browse,
+        )
 
         self._remove_btn = QPushButton("Remove")
         self._remove_btn.setToolTip("Remove this genome from the list")
@@ -142,8 +149,7 @@ class _PanGenomeRow(QWidget):
         layout.addWidget(QLabel("Name:"))
         layout.addWidget(self.name)
         layout.addWidget(QLabel("Genome FASTA:"))
-        layout.addWidget(self.path, stretch=1)
-        layout.addWidget(browse)
+        layout.addWidget(self._path_row, stretch=1)
         layout.addWidget(self._remove_btn)
 
         self._on_remove = None

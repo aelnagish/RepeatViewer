@@ -6,7 +6,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.app_preferences import load_blast_db_base_dir
 from repeatviewer.backends.database_prepare import (
-    blast_database_is_ready,
     build_named_blast_database,
     format_prepare_error,
 )
@@ -40,12 +39,32 @@ from repeatviewer.project import (
     BlastDatabase,
     RepeatViewerProject,
 )
-from repeatviewer.views.tool_dialogs import exec_modal_dialog
+from repeatviewer.widgets.path_browse import PathBrowseRow
 
 _MOLECULE_LABELS = {
     BLAST_MOLECULE_NUCL: "Nucleotide",
     BLAST_MOLECULE_PROT: "Protein",
 }
+
+_FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".faa"}
+
+_COL_NAME = 0
+_COL_TYPE = 1
+_COL_SOURCE = 2
+_COL_CREATED = 3
+_NAME_COLUMN_DEFAULT_WIDTH = 280
+
+
+def _format_created_date(value: str) -> str:
+    """Show YYYY-MM-DD only (drop ``T`` and time)."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if "T" in text:
+        return text.split("T", 1)[0]
+    if " " in text:
+        return text.split(" ", 1)[0]
+    return text[:10] if len(text) >= 10 else text
 
 
 class _BuildDatabaseWorker(QObject):
@@ -85,7 +104,11 @@ class _BuildDatabaseWorker(QObject):
 
 
 class AddBlastDatabaseDialog(QDialog):
-    """Pick a FASTA + name, build the BLAST index in the background."""
+    """Pick a FASTA + name, build the BLAST index in the background.
+
+    Non-modal so a click in the Files panel can fill the FASTA path (same
+    pattern as Add annotation / Define database).
+    """
 
     def __init__(
         self,
@@ -99,6 +122,9 @@ class AddBlastDatabaseDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Add BLAST database")
         self.setMinimumWidth(480)
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self._existing_names = {n.strip().lower() for n in existing_names}
         self._use_system_blast = use_system_blast
         self._result_db: BlastDatabase | None = None
@@ -111,15 +137,18 @@ class AddBlastDatabaseDialog(QDialog):
 
         self._name = QLineEdit(self)
         self._name.setPlaceholderText("Database name")
-        self._fasta = QLineEdit(self)
-        self._fasta.setPlaceholderText("FASTA file")
-        browse_btn = QPushButton("Browse", self)
-        browse_btn.clicked.connect(self._browse)
-        fasta_row = QWidget(self)
-        fasta_h = QHBoxLayout(fasta_row)
-        fasta_h.setContentsMargins(0, 0, 0, 0)
-        fasta_h.addWidget(self._fasta, 1)
-        fasta_h.addWidget(browse_btn)
+        self._fasta_row = PathBrowseRow(
+            self,
+            placeholder="Click a FASTA in Files, or Browse",
+            browse_title="Choose FASTA file",
+            file_filter="FASTA (*.fa *.fasta *.fna *.fas *.faa);;All files (*)",
+            mode="file",
+            browse_handler=self._browse,
+        )
+        self._fasta = self._fasta_row.line_edit()
+        self._fasta_row.set_default_tooltip(
+            "Click a FASTA file in the Files panel to fill this path, or use Browse."
+        )
 
         # blastn uses nucleotide databases; blastp uses protein databases.
         self._molecule_type: QComboBox | None = None
@@ -130,8 +159,7 @@ class AddBlastDatabaseDialog(QDialog):
             self._molecule_type = combo
 
         if initial_fasta is not None:
-            self._fasta.setText(str(initial_fasta))
-            self._name.setText(initial_fasta.stem)
+            self.apply_path_from_panel(initial_fasta)
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -139,7 +167,7 @@ class AddBlastDatabaseDialog(QDialog):
         if self._molecule_type is not None:
             form.addRow("Type:", self._molecule_type)
         form.addRow("Name:", self._name)
-        form.addRow("FASTA:", fasta_row)
+        form.addRow("FASTA:", self._fasta_row)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -153,17 +181,59 @@ class AddBlastDatabaseDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(self._buttons)
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # Prefer FASTA for Files-panel / Browse fill; defer so layout is ready.
+        QTimer.singleShot(0, self._focus_fasta_field)
+
+    def _focus_fasta_field(self) -> None:
+        if self.isVisible():
+            self._fasta_row.focus_field()
+
+    def _keep_in_front(self) -> None:
+        if not self.isVisible():
+            return
+        self.raise_()
+        self.activateWindow()
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        """Fill FASTA (and default Name) from a Files-panel click."""
+        resolved = path.expanduser().resolve()
+        if not resolved.is_file():
+            return False
+        if resolved.suffix.lower() not in _FASTA_SUFFIXES:
+            return False
+        current = self._fasta.text().strip()
+        if current and Path(current).expanduser().resolve() == resolved:
+            self._keep_in_front()
+            QTimer.singleShot(0, self._keep_in_front)
+            return True
+        self._fasta.setText(str(resolved))
+        if not self._name.text().strip():
+            self._name.setText(resolved.stem)
+        # Protein FASTA often uses .faa — switch type when obvious.
+        if (
+            self._molecule_type is not None
+            and resolved.suffix.lower() == ".faa"
+        ):
+            index = self._molecule_type.findData(BLAST_MOLECULE_PROT)
+            if index >= 0:
+                self._molecule_type.setCurrentIndex(index)
+        self._keep_in_front()
+        QTimer.singleShot(0, self._keep_in_front)
+        return True
+
     def _browse(self) -> None:
+        start = self._fasta.text().strip()
+        start_dir = str(Path(start).expanduser().parent) if start else str(Path.home())
         chosen, _ = QFileDialog.getOpenFileName(
             self,
             "Choose FASTA file",
-            str(Path.home()),
-            "FASTA (*.fa *.fasta *.fna *.faa);;All files (*)",
+            start_dir,
+            "FASTA (*.fa *.fasta *.fna *.fas *.faa);;All files (*)",
         )
         if chosen:
-            self._fasta.setText(chosen)
-            if not self._name.text().strip():
-                self._name.setText(Path(chosen).stem)
+            self.apply_path_from_panel(Path(chosen))
 
     def result_database(self) -> BlastDatabase | None:
         return self._result_db
@@ -271,15 +341,25 @@ class BlastDatabaseManagerDialog(QDialog):
     def __init__(self, project: RepeatViewerProject, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Manage BLAST databases")
-        self.setMinimumWidth(640)
+        self.setMinimumWidth(720)
         self.setMinimumHeight(360)
+        # Non-modal so Add Database can receive Files-panel clicks underneath.
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self._project = project
+        self._add_dialog: AddBlastDatabaseDialog | None = None
 
-        self._table = QTableWidget(0, 5, self)
+        self._table = QTableWidget(0, 4, self)
         self._table.setHorizontalHeaderLabels(
-            ["Name", "Type", "Source FASTA", "Created", "Status"]
+            ["Name", "Type", "Source FASTA", "Created"]
         )
-        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(_COL_NAME, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(_COL_NAME, _NAME_COLUMN_DEFAULT_WIDTH)
+        header.setSectionResizeMode(_COL_TYPE, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(_COL_SOURCE, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(_COL_CREATED, QHeaderView.ResizeMode.ResizeToContents)
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -310,22 +390,34 @@ class BlastDatabaseManagerDialog(QDialog):
         self._populate()
         self._update_buttons()
 
+    def apply_path_from_panel(self, path: Path) -> bool:
+        """Forward Files-panel clicks to an open Add dialog."""
+        dialog = self._add_dialog
+        if dialog is None or not dialog.isVisible():
+            return False
+        if not dialog.apply_path_from_panel(path):
+            return False
+        # Always re-assert Add on top (manage window must not cover it).
+        dialog.raise_()
+        dialog.activateWindow()
+        QTimer.singleShot(0, dialog._keep_in_front)
+        return True
+
     def _populate(self) -> None:
         self._table.setRowCount(0)
         for db in self._project.blast_databases:
             row = self._table.rowCount()
             self._table.insertRow(row)
-            ready = blast_database_is_ready(db)
-            self._table.setItem(row, 0, QTableWidgetItem(db.name))
+            self._table.setItem(row, _COL_NAME, QTableWidgetItem(db.name))
             self._table.setItem(
-                row, 1, QTableWidgetItem(_MOLECULE_LABELS.get(db.molecule_type, db.molecule_type))
+                row,
+                _COL_TYPE,
+                QTableWidgetItem(_MOLECULE_LABELS.get(db.molecule_type, db.molecule_type)),
             )
-            self._table.setItem(row, 2, QTableWidgetItem(str(db.source_fasta)))
-            self._table.setItem(row, 3, QTableWidgetItem(db.created_at))
-            status_item = QTableWidgetItem("Ready" if ready else "Missing index files")
-            if not ready:
-                status_item.setForeground(Qt.GlobalColor.red)
-            self._table.setItem(row, 4, status_item)
+            self._table.setItem(row, _COL_SOURCE, QTableWidgetItem(str(db.source_fasta)))
+            self._table.setItem(
+                row, _COL_CREATED, QTableWidgetItem(_format_created_date(db.created_at))
+            )
 
     def _selected_indices(self) -> list[int]:
         rows = {idx.row() for idx in self._table.selectedIndexes()}
@@ -338,13 +430,30 @@ class BlastDatabaseManagerDialog(QDialog):
         save_blast_databases_to_settings(self._project.blast_databases)
 
     def _add_database(self) -> None:
+        if self._add_dialog is not None and self._add_dialog.isVisible():
+            self._add_dialog.raise_()
+            self._add_dialog.activateWindow()
+            self._add_dialog._focus_fasta_field()
+            return
         existing_names = {db.name for db in self._project.blast_databases}
         dialog = AddBlastDatabaseDialog(
             existing_names=existing_names,
             use_system_blast=self._project.use_system_blast,
             parent=self,
         )
-        if not exec_modal_dialog(dialog):
+        self._add_dialog = dialog
+        dialog.finished.connect(self._on_add_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog._focus_fasta_field()
+
+    def _on_add_dialog_finished(self, result: int) -> None:
+        dialog = self._add_dialog
+        self._add_dialog = None
+        if dialog is None:
+            return
+        if result != int(QDialog.DialogCode.Accepted):
             return
         db = dialog.result_database()
         if db is None:

@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QStandardItemModel
+from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QMouseEvent, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
+    QStyleOptionViewItem,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -48,6 +50,7 @@ from repeatviewer.widgets.spin_boxes import (  # noqa: E402
     NoWheelSpinBox as QSpinBox,
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox  # noqa: E402
+from repeatviewer.widgets.path_browse import PathBrowseRow  # noqa: E402
 
 
 def exec_modal_dialog(dialog: QDialog) -> bool:
@@ -162,6 +165,7 @@ from repeatviewer.branding import APP_DISPLAY_NAME
 from repeatviewer.backends.blast_genome_plot import format_genome_length_bp
 from repeatviewer.backends.database_prepare import blast_database_is_ready
 from repeatviewer.project import BLAST_MOLECULE_NUCL, BLAST_MOLECULE_PROT, RepeatViewerProject
+from repeatviewer.ui.theme import item_view_checkbox_stylesheet
 from repeatviewer.job_options import (
     ALIGNER_MAFFT,
     ALIGNER_MUSCLE,
@@ -240,11 +244,13 @@ from repeatviewer.job_options import (
     DEFAULT_TEAID_HIT_LEN_MID_PCT,
     DEFAULT_TEAID_HIT_COLOR_HIGH,
     DEFAULT_TEAID_HIT_COLOR_MID,
+    DEFAULT_TEAID_HIT_LINE_TRANSPARENCY,
     MAX_TEAID_SELF_BLAST_WORD_SIZE,
     MIN_TEAID_SELF_BLAST_WORD_SIZE,
     TEAID_RIGHT_CLICK_RUN,
     TEAID_RIGHT_CLICK_DIALOG,
     clamp_teaid_hit_len_pct,
+    clamp_teaid_hit_line_transparency,
     BlastOptions,
     ConsensusOptions,
     normalize_consensus_ambiguous,
@@ -1550,6 +1556,82 @@ class NewSequenceDialog(QDialog):
         }
 
 
+class _CheckboxToggleListWidget(QListWidget):
+    """List where checkbox clicks toggle one row without range-select side effects.
+
+    ``ExtendedSelection`` + selection↔check sync meant a normal click replaced
+    the selection (wiping earlier ticks). Handling the indicator ourselves fixed
+    that, but press/move/release could still apply a shift-style range and tick
+    the gap (tick 1–3, then 5 → 4 also checked). Steal the full click gesture
+    on the checkbox and let the dialog rebuild selection from checks only.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._checkbox_gesture = False
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            item = self.itemAt(pos)
+            if item is not None and self._hit_checkbox(item, pos):
+                self._checkbox_gesture = True
+                dialog = self._extract_dialog()
+                if dialog is not None:
+                    dialog._toggle_pick_checkbox(item)
+                else:
+                    checked = item.checkState() != Qt.CheckState.Checked
+                    item.setCheckState(
+                        Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+                    )
+                event.accept()
+                return
+        self._checkbox_gesture = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._checkbox_gesture:
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._checkbox_gesture and event.button() == Qt.MouseButton.LeftButton:
+            self._checkbox_gesture = False
+            event.accept()
+            return
+        self._checkbox_gesture = False
+        super().mouseReleaseEvent(event)
+
+    def _extract_dialog(self) -> ExtractSequencesDialog | None:
+        parent = self.parent()
+        while parent is not None:
+            if isinstance(parent, ExtractSequencesDialog):
+                return parent
+            parent = parent.parent()
+        return None
+
+    def _hit_checkbox(self, item: QListWidgetItem, pos: QPoint) -> bool:
+        # Prefer a fixed left strip: stylesheet indicator images often make
+        # SE_ItemViewItemCheckIndicator unreliable (empty or oversized).
+        row = self.visualItemRect(item)
+        if not row.contains(pos):
+            return False
+        if pos.x() <= row.left() + 24:
+            return True
+        opt = QStyleOptionViewItem()
+        self.initViewItemOption(opt)
+        opt.rect = row
+        opt.features |= QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        opt.checkState = item.checkState()
+        if item.isSelected():
+            opt.state |= QStyle.StateFlag.State_Selected
+        check_rect = self.style().subElementRect(
+            QStyle.SubElement.SE_ItemViewItemCheckIndicator, opt, self
+        )
+        return check_rect.isValid() and check_rect.adjusted(-1, -1, 1, 1).contains(pos)
+
+
 class ExtractSequencesDialog(QDialog):
     """Pick records out of a multi-FASTA, by hand or from a list of names.
 
@@ -1622,7 +1704,8 @@ class ExtractSequencesDialog(QDialog):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
-        self._list = QListWidget(page)
+        self._list = _CheckboxToggleListWidget(page)
+        self._list.setStyleSheet(item_view_checkbox_stylesheet())
         self._pick_syncing = False
         self._filter: QLineEdit | None = None
         # Shift / Cmd (Ctrl) / click-drag rubber-band multi-select.
@@ -1681,8 +1764,9 @@ class ExtractSequencesDialog(QDialog):
         top.addWidget(select_none)
 
         hint = QLabel(
-            "Click to select · Shift+click for a range · "
-            "⌘/Ctrl+click to add or remove · drag to select several",
+            "Tick boxes to add or remove · Click a name to select · "
+            "Shift+click for a range · ⌘/Ctrl+click to add or remove · "
+            "drag to select several",
             page,
         )
         hint.setStyleSheet("color: palette(mid);")
@@ -1816,7 +1900,6 @@ class ExtractSequencesDialog(QDialog):
             return
         self._pick_syncing = True
         try:
-            selected = self._list.selectedItems()
             for index in range(self._list.count()):
                 item = self._list.item(index)
                 if item is None or item.isHidden():
@@ -1828,20 +1911,52 @@ class ExtractSequencesDialog(QDialog):
                 )
                 if item.checkState() != want:
                     item.setCheckState(want)
-            del selected
         finally:
             self._pick_syncing = False
         self._sync()
 
     def _on_pick_item_changed(self, item: QListWidgetItem) -> None:
+        """Keep row highlight in sync when a check changes (e.g. keyboard)."""
         if self._pick_syncing or item is None:
             return
         self._pick_syncing = True
         try:
-            item.setSelected(item.checkState() == Qt.CheckState.Checked)
+            self._selection_from_checks()
         finally:
             self._pick_syncing = False
         self._sync()
+
+    def _toggle_pick_checkbox(self, item: QListWidgetItem) -> None:
+        """Toggle one checkbox and reselect exactly the checked rows (no gaps)."""
+        if item is None:
+            return
+        self._pick_syncing = True
+        try:
+            checked = item.checkState() != Qt.CheckState.Checked
+            item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
+            self._selection_from_checks()
+            # Move focus without changing the selection set.
+            self._list.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
+        finally:
+            self._pick_syncing = False
+        self._sync()
+
+    def _selection_from_checks(self) -> None:
+        """Make the highlight match the checkboxes exactly (non-contiguous OK)."""
+        model = self._list.selectionModel()
+        if model is None:
+            return
+        model.clearSelection()
+        for index in range(self._list.count()):
+            item = self._list.item(index)
+            if item is None or item.checkState() != Qt.CheckState.Checked:
+                continue
+            model.select(
+                self._list.indexFromItem(item),
+                QItemSelectionModel.SelectionFlag.Select,
+            )
 
     def selected_ids(self) -> set[str]:
         return {
@@ -2307,7 +2422,7 @@ class ExtendParamsDialog(QDialog):
                 self._genome_combo.addItem(Path(opts.genome_path).name, opts.genome_path)
                 self._genome_combo.setCurrentIndex(self._genome_combo.count() - 1)
 
-        genome_browse = QPushButton("Browse…", self)
+        genome_browse = QPushButton("Browse", self)
         genome_browse.setFixedWidth(88)
         genome_browse.clicked.connect(self._browse_genome)
 
@@ -2513,6 +2628,11 @@ class BlastParamsDialog(QDialog):
         self._for_run = for_run
         opts = initial or BlastOptions()
         self._initial_program = opts.program
+
+        # Always show the latest Manage-BLAST list (and current genome name).
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+
+        reload_blast_databases_into_project(self._project)
 
         self._tabs = QTabWidget()
         self._blastn_database = QComboBox()
@@ -2863,9 +2983,28 @@ class BlastParamsDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        # Refresh in case Manage / Add ran while this dialog was constructed,
+        # and pick up a newly defined genome for the "Current genome" row.
+        self._refresh_database_combos()
         # After dialog polish's adjustSize(), shrink to the active tab so the
         # wider Options page does not leave blank space on BLASTn/p/x.
         QTimer.singleShot(0, self._fit_to_content)
+
+    def _refresh_database_combos(
+        self,
+        *,
+        blastn_name=_KEEP_CURRENT,
+        blastp_name=_KEEP_CURRENT,
+        blastx_name=_KEEP_CURRENT,
+    ) -> None:
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+
+        reload_blast_databases_into_project(self._project)
+        self._populate_database_combos(
+            blastn_name=blastn_name,
+            blastp_name=blastp_name,
+            blastx_name=blastx_name,
+        )
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -3015,9 +3154,22 @@ class BlastParamsDialog(QDialog):
     def _manage_databases(self) -> None:
         from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
 
-        dialog = BlastDatabaseManagerDialog(self._project, parent=self)
-        exec_modal_dialog(dialog)
-        self._populate_database_combos()
+        # Non-modal manager (and Add dialog) so Files-panel clicks can fill FASTA.
+        existing = getattr(self, "_blast_manager_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = BlastDatabaseManagerDialog(self._project, parent=self.window())
+        self._blast_manager_dialog = dialog
+        dialog.finished.connect(self._on_blast_manager_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_blast_manager_finished(self, _result: int = 0) -> None:
+        self._blast_manager_dialog = None
+        self._refresh_database_combos()
 
     def _restore_defaults(self) -> None:
         defaults = BlastOptions()
@@ -4243,6 +4395,9 @@ class TeaAidParamsDialog(QDialog):
         self,
         *,
         initial: TeaAidOptions | None = None,
+        project: RepeatViewerProject | None = None,
+        project_genome: Path | None = None,
+        genome_history: list[Path] | None = None,
         for_run: bool = True,
         parent=None,
     ) -> None:
@@ -4251,10 +4406,40 @@ class TeaAidParamsDialog(QDialog):
         opts = initial or TeaAidOptions()
         self._for_run = for_run
         self._run_after = False
+        self._project = project
+        self._blast_manager_dialog = None
+        # genome_history kept for call-site compatibility; Genome list uses BLAST DBs.
+        _ = genome_history
 
         high_pct, mid_pct = clamp_teaid_hit_len_pct(
             opts.hit_len_high_pct, opts.hit_len_mid_pct
         )
+
+        # Genome: same chrome as Blast "Database:" — combo + Add/Manage databases.
+        # Empty selection = project genome from Define Genome.
+        self._project_genome = (
+            project_genome.expanduser().resolve()
+            if project_genome is not None and project_genome.is_file()
+            else None
+        )
+        self._genome_combo = QComboBox(self)
+        self._genome_combo.setMinimumWidth(260)
+        self._genome_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._genome_combo.setMinimumContentsLength(28)
+        self._refresh_genome_combo(selected_path=opts.genome_path)
+
+        genome_manage = QPushButton("Add/Manage databases", self)
+        genome_manage.clicked.connect(self._manage_genome_databases)
+        genome_row = QWidget(self)
+        genome_layout = QHBoxLayout(genome_row)
+        genome_layout.setContentsMargins(0, 0, 0, 0)
+        genome_layout.setSpacing(6)
+        # Keep the button next to the combo (do not stretch the combo across the row).
+        genome_layout.addWidget(self._genome_combo)
+        genome_layout.addWidget(genome_manage)
+        genome_layout.addStretch(1)
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
@@ -4279,6 +4464,20 @@ class TeaAidParamsDialog(QDialog):
         self._word_size.setFixedWidth(120)
         self._word_size.setToolTip(
             "BLASTN word size (-word_size) for the TE-Aid self-BLAST dot plot only (4–25)."
+        )
+
+        self._line_transparency = QDoubleSpinBox()
+        self._line_transparency.setRange(0.0, 100.0)
+        self._line_transparency.setDecimals(0)
+        self._line_transparency.setSingleStep(5.0)
+        self._line_transparency.setSuffix(" %")
+        self._line_transparency.setFixedWidth(120)
+        self._line_transparency.setValue(
+            clamp_teaid_hit_line_transparency(opts.hit_line_transparency) * 100.0
+        )
+        self._line_transparency.setToolTip(
+            "Transparency of all genome BLAST hit lines (black, mid, and full-length). "
+            "0% = fully opaque; 100% = invisible."
         )
 
         self._hit_high_pct = QDoubleSpinBox()
@@ -4386,12 +4585,14 @@ class TeaAidParamsDialog(QDialog):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         params_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
         params_form.setHorizontalSpacing(12)
         params_form.setVerticalSpacing(8)
+        params_form.addRow("Genome:", genome_row)
         params_form.addRow("Genome BLAST E-value:", self._evalue)
         params_form.addRow("Self BLAST word size:", self._word_size)
+        params_form.addRow("Line transparency:", self._line_transparency)
         params_layout.addLayout(params_form)
         params_layout.addWidget(colors_box)
         self._tabs.addTab(params_tab, "Parameters")
@@ -4492,6 +4693,7 @@ class TeaAidParamsDialog(QDialog):
             self._hit_mid_pct.blockSignals(False)
 
     def _restore_defaults(self) -> None:
+        self._genome_combo.setCurrentIndex(0)
         self._evalue.setValue(DEFAULT_TEAID_EVALUE)
         self._word_size.setValue(DEFAULT_TEAID_SELF_BLAST_WORD_SIZE)
         self._hit_high_pct.blockSignals(True)
@@ -4504,7 +4706,86 @@ class TeaAidParamsDialog(QDialog):
         self._hit_color_mid = DEFAULT_TEAID_HIT_COLOR_MID
         self._update_hit_color_button(self._hit_color_high_btn, self._hit_color_high)
         self._update_hit_color_button(self._hit_color_mid_btn, self._hit_color_mid)
+        self._line_transparency.setValue(DEFAULT_TEAID_HIT_LINE_TRANSPARENCY * 100.0)
         self._right_click_buttons[TEAID_RIGHT_CLICK_RUN].setChecked(True)
+
+    def _refresh_genome_combo(self, *, selected_path: str | None = None) -> None:
+        """Fill Genome combo like Blast Database (current genome + nucleotide DBs)."""
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+        from repeatviewer.project import BLAST_MOLECULE_NUCL
+
+        target = selected_path
+        if target is None and self._genome_combo.count() > 0:
+            target = self._genome_combo.currentData()
+
+        if self._project is not None:
+            reload_blast_databases_into_project(self._project)
+
+        self._genome_combo.clear()
+        if self._project_genome is not None:
+            self._genome_combo.addItem(
+                f"Current genome ({self._project_genome.name})",
+                None,
+            )
+        else:
+            self._genome_combo.addItem("Current genome (not configured)", None)
+
+        model = self._genome_combo.model()
+        databases = (
+            list(self._project.blast_databases) if self._project is not None else []
+        )
+        for db in databases:
+            if db.molecule_type != BLAST_MOLECULE_NUCL:
+                continue
+            ready = blast_database_is_ready(db)
+            label = db.name if ready else f"{db.name} (unavailable — index files missing)"
+            # Store source FASTA path so TE-Aid can BLAST against it.
+            data = str(Path(db.source_fasta).expanduser().resolve())
+            self._genome_combo.addItem(label, data)
+            if not ready and isinstance(model, QStandardItemModel):
+                item = model.item(self._genome_combo.count() - 1)
+                if item is not None:
+                    item.setEnabled(False)
+
+        if target:
+            resolved = str(Path(str(target)).expanduser().resolve())
+            index = self._genome_combo.findData(resolved)
+            if index < 0 and self._project_genome is not None:
+                if resolved == str(self._project_genome):
+                    index = 0
+            if index < 0:
+                self._genome_combo.addItem(Path(resolved).name, resolved)
+                index = self._genome_combo.count() - 1
+            self._genome_combo.setCurrentIndex(index)
+        else:
+            self._genome_combo.setCurrentIndex(0)
+
+    def _manage_genome_databases(self) -> None:
+        from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
+
+        if self._project is None:
+            QMessageBox.information(
+                self,
+                "TE-Aid parameters",
+                "No project is available to manage BLAST databases.",
+            )
+            return
+        existing = self._blast_manager_dialog
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = BlastDatabaseManagerDialog(self._project, parent=self)
+        self._blast_manager_dialog = dialog
+        dialog.finished.connect(self._on_genome_manager_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_genome_manager_finished(self, _result: int = 0) -> None:
+        self._blast_manager_dialog = None
+        selected = self._genome_combo.currentData()
+        self._refresh_genome_combo(selected_path=selected)
 
     def options(self) -> TeaAidOptions:
         high_pct, mid_pct = clamp_teaid_hit_len_pct(
@@ -4515,6 +4796,7 @@ class TeaAidParamsDialog(QDialog):
             if radio.isChecked():
                 right_click_action = value
                 break
+        genome_path = self._genome_combo.currentData() or None
         return TeaAidOptions(
             e_value=normalize_blast_evalue(
                 self._evalue.value(),
@@ -4526,7 +4808,11 @@ class TeaAidParamsDialog(QDialog):
             hit_len_mid_pct=mid_pct,
             hit_color_high=self._hit_color_high or DEFAULT_TEAID_HIT_COLOR_HIGH,
             hit_color_mid=self._hit_color_mid or DEFAULT_TEAID_HIT_COLOR_MID,
+            hit_line_transparency=clamp_teaid_hit_line_transparency(
+                self._line_transparency.value() / 100.0
+            ),
             right_click_action=right_click_action,
+            genome_path=genome_path,
         )
 
 
@@ -4571,7 +4857,8 @@ class MsaCleanParamsDialog(QDialog):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._method_order.setStyleSheet(
-            "QListWidget { padding-top: 4px; padding-bottom: 4px; }"
+            "QListWidget { padding-top: 4px; padding-bottom: 4px; }\n"
+            + item_view_checkbox_stylesheet()
         )
         self._method_order.setToolTip(
             "Check steps to include in Combined MSA clean. Drag to set execution order."
@@ -5231,24 +5518,18 @@ class _TeInputFileRow(QWidget):
         start_dir: str = "",
     ) -> None:
         super().__init__(parent)
-        self._browse_title = browse_title
-        self._file_filter = file_filter
-        self._start_dir = start_dir
-        self._path = QLineEdit(self)
-        self._path.setObjectName("PathField")  # framed via the app stylesheet
-        self._path.setPlaceholderText(placeholder)
-        self._path.setMinimumWidth(280)
-        self._path.setClearButtonEnabled(True)
-        self._path.installEventFilter(self)
-        # A long path is wider than the field: hovering shows all of it.
-        self._path.textChanged.connect(self._sync_path_tooltip)
-        if initial is not None:
-            self._path.setText(str(initial.expanduser().resolve()))
-
-        self._path.editingFinished.connect(self._emit_path_changed)
-
-        browse_btn = QPushButton("Browse", self)
-        browse_btn.clicked.connect(self._browse)
+        self._row = PathBrowseRow(
+            self,
+            initial=initial,
+            placeholder=placeholder,
+            browse_title=browse_title,
+            file_filter=file_filter,
+            start_dir=start_dir,
+            mode="file",
+        )
+        self._path = self._row.line_edit()
+        self._row.activated.connect(lambda _w: self.activated.emit(self))
+        self._row.path_changed.connect(self.path_changed.emit)
 
         remove_btn = QPushButton("Remove", self)
         remove_btn.setVisible(removable)
@@ -5258,45 +5539,17 @@ class _TeInputFileRow(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(self._path, stretch=1)
-        layout.addWidget(browse_btn)
+        layout.addWidget(self._row, stretch=1)
         layout.addWidget(remove_btn)
-
-    def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if obj is self._path and event.type() == QEvent.Type.FocusIn:
-            self.activated.emit(self)
-        return super().eventFilter(obj, event)
-
-    def _sync_path_tooltip(self, text: str) -> None:
-        self._path.setToolTip(text.strip())
 
     def set_removable(self, removable: bool) -> None:
         self._remove_btn.setVisible(removable)
 
     def set_path(self, path: Path) -> None:
-        self._path.setText(str(path.expanduser().resolve()))
-        self._emit_path_changed()
-
-    def _emit_path_changed(self) -> None:
-        self.path_changed.emit()
+        self._row.set_path(path)
 
     def path(self) -> Path | None:
-        text = self._path.text().strip()
-        if not text:
-            return None
-        return Path(text).expanduser()
-
-    def _browse(self) -> None:
-        start = self._path.text().strip() or self._start_dir or str(Path.home())
-        picked, _ = QFileDialog.getOpenFileName(
-            self,
-            self._browse_title,
-            start,
-            self._file_filter,
-        )
-        if picked:
-            self._path.setText(picked)
-            self._emit_path_changed()
+        return self._row.path()
 
 
 class TeMultiInputFilesWidget(QWidget):
@@ -5449,41 +5702,25 @@ class GeneInputFileWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None, *, initial: Path | None = None) -> None:
         super().__init__(parent)
-        self._path = QLineEdit(self)
-        self._path.setPlaceholderText("Optional GFF/GTF/BED/VCF annotation")
-        self._path.setMinimumWidth(280)
-        if initial is not None:
-            self._path.setText(str(initial.expanduser().resolve()))
-        browse_btn = QPushButton("Browse", self)
-        browse_btn.clicked.connect(self._browse)
+        self._row = PathBrowseRow(
+            self,
+            initial=initial,
+            placeholder="Optional GFF/GTF/BED/VCF annotation",
+            browse_title="Select annotation file",
+            file_filter=(
+                "Annotations (*.gff *.gff3 *.gtf *.bed *.vcf *.vcf.gz);;All files (*)"
+            ),
+            mode="file",
+        )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._path, stretch=1)
-        layout.addWidget(browse_btn)
+        layout.addWidget(self._row, stretch=1)
 
     def set_path(self, path: Path | None) -> None:
-        if path is None:
-            self._path.clear()
-        else:
-            self._path.setText(str(path.expanduser().resolve()))
+        self._row.set_path(path)
 
     def path(self) -> Path | None:
-        text = self._path.text().strip()
-        if not text:
-            return None
-        return Path(text).expanduser()
-
-    def _browse(self) -> None:
-        start = self._path.text().strip() or str(Path.home())
-        picked, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select annotation file",
-            start,
-            "Annotations (*.gff *.gff3 *.gtf *.bed *.vcf *.vcf.gz);;All files (*)",
-        )
-        if picked:
-            self._path.setText(picked)
+        return self._row.path()
 
 
 def _form_section_separator() -> QWidget:
@@ -6245,7 +6482,7 @@ class MsaPlotDialog(QDialog):
         nuc_presets.addWidget(nuc_preset_label)
         nuc_tips = {
             "Default": "Standard A/C/G/T colours",
-            "Color-blind": "Wong / Paul Tol palette (same as Preferences → Color-blind nucleotide)",
+            "Color-blind": "Wong / Paul Tol palette (same as Annotation → nucleotide Color-blind)",
         }
         for label, palette in NUCLEOTIDE_COLOR_PRESETS:
             btn = QPushButton(label, self)
@@ -6373,47 +6610,32 @@ def _browse_file_line(
     *,
     title: str,
     filt: str,
+    placeholder: str = "",
 ) -> QWidget:
-    row = QWidget(parent)
-    h = QHBoxLayout(row)
-    h.setContentsMargins(0, 0, 0, 0)
-    h.addWidget(line)
-
-    def browse() -> None:
-        chosen, _ = QFileDialog.getOpenFileName(
-            row,
-            title,
-            line.text() or str(Path.home()),
-            filt,
-        )
-        if chosen:
-            line.setText(chosen)
-
-    btn = QPushButton("Browse", row)
-    btn.clicked.connect(browse)
-    h.addWidget(btn)
-    return row
+    return PathBrowseRow(
+        parent,
+        placeholder=placeholder or line.placeholderText(),
+        browse_title=title,
+        file_filter=filt,
+        mode="file",
+        line_edit=line,
+    )
 
 
-def _browse_dir_line(parent: QWidget, line: QLineEdit, *, title: str) -> QWidget:
-    row = QWidget(parent)
-    h = QHBoxLayout(row)
-    h.setContentsMargins(0, 0, 0, 0)
-    h.addWidget(line)
-
-    def browse() -> None:
-        chosen = QFileDialog.getExistingDirectory(
-            row,
-            title,
-            line.text() or str(Path.home()),
-        )
-        if chosen:
-            line.setText(chosen)
-
-    btn = QPushButton("Browse", row)
-    btn.clicked.connect(browse)
-    h.addWidget(btn)
-    return row
+def _browse_dir_line(
+    parent: QWidget,
+    line: QLineEdit,
+    *,
+    title: str,
+    placeholder: str = "",
+) -> QWidget:
+    return PathBrowseRow(
+        parent,
+        placeholder=placeholder or line.placeholderText(),
+        browse_title=title,
+        mode="directory",
+        line_edit=line,
+    )
 
 
 class ConfusionMatrixBenchmarkDialog(QDialog):
@@ -6431,7 +6653,9 @@ class ConfusionMatrixBenchmarkDialog(QDialog):
         opts = initial or TeConfusionMatrixBenchmarkOptions()
 
         self._tetrimmer_home = QLineEdit(opts.tetrimmer_home)
+        self._tetrimmer_home.setPlaceholderText("TEtrimmer repository root folder")
         self._reference = QLineEdit(opts.reference_out)
+        self._reference.setPlaceholderText("Reference RepeatMasker .out")
         self._less_class = QCheckBox("Simpler TE classes (merge LINE/SINE to Non-LTR)")
         self._less_class.setChecked(opts.less_classification)
         self._debug = QCheckBox("Keep intermediate files (debug)")
@@ -6440,7 +6664,12 @@ class ConfusionMatrixBenchmarkDialog(QDialog):
         form = QFormLayout()
         form.addRow(
             "TEtrimmer folder:",
-            _browse_dir_line(self, self._tetrimmer_home, title="Select TEtrimmer repository root"),
+            _browse_dir_line(
+                self,
+                self._tetrimmer_home,
+                title="Select TEtrimmer repository root",
+                placeholder="TEtrimmer repository root folder",
+            ),
         )
         form.addRow(
             "Reference RM .out:",
@@ -6449,6 +6678,7 @@ class ConfusionMatrixBenchmarkDialog(QDialog):
                 self._reference,
                 title="Reference RepeatMasker .out",
                 filt="RepeatMasker out (*.out);;All files (*)",
+                placeholder="Reference RepeatMasker .out",
             ),
         )
         form.addRow("", self._less_class)
@@ -6494,8 +6724,11 @@ class TeLibraryBenchmarkDialog(QDialog):
             )
 
         self._query = QLineEdit(opts.query_fasta)
+        self._query.setPlaceholderText("Query TE library FASTA (.fa / .fasta)")
         self._standard = QLineEdit(opts.standard_fasta)
+        self._standard.setPlaceholderText("Standard / curated library FASTA")
         self._rm_out = QLineEdit(opts.rm_out)
+        self._rm_out.setPlaceholderText("Optional existing RepeatMasker .out")
         self._run_rm = QCheckBox("Run RepeatMasker (-lib standard query)")
         self._run_rm.setChecked(opts.run_repeatmasker)
         self._threads = QSpinBox()
@@ -6510,6 +6743,7 @@ class TeLibraryBenchmarkDialog(QDialog):
                 self._query,
                 title="Query TE library FASTA",
                 filt="FASTA (*.fa *.fasta *.fas);;All files (*)",
+                placeholder="Query TE library FASTA (.fa / .fasta)",
             ),
         )
         form.addRow(
@@ -6519,6 +6753,7 @@ class TeLibraryBenchmarkDialog(QDialog):
                 self._standard,
                 title="Standard TE library FASTA",
                 filt="FASTA (*.fa *.fasta *.fas);;All files (*)",
+                placeholder="Standard / curated library FASTA",
             ),
         )
         form.addRow(
@@ -6528,6 +6763,7 @@ class TeLibraryBenchmarkDialog(QDialog):
                 self._rm_out,
                 title="Existing lib-vs-lib RepeatMasker .out",
                 filt="RepeatMasker out (*.out);;All files (*)",
+                placeholder="Optional existing RepeatMasker .out",
             ),
         )
         form.addRow("", self._run_rm)
@@ -6718,27 +6954,20 @@ class RepeatQuantifyDialog(QDialog):
     def _make_output_controls(self) -> QWidget:
         """Output folder field + Browse, with a preview of the run folder below."""
         self._output_focused = False
-        self._output_path = QLineEdit(self)
-        self._output_path.setObjectName("PathField")  # framed like the file fields
-        self._output_path.setPlaceholderText("Auto — a new folder next to each genome")
-        self._output_path.setMinimumWidth(280)
-        self._output_path.setClearButtonEnabled(True)  # clearing = back to Auto
-        self._output_path.setToolTip(
+        self._output_row = PathBrowseRow(
+            self,
+            placeholder="Auto — a new folder next to each genome",
+            browse_title="Select output folder",
+            mode="directory",
+        )
+        self._output_path = self._output_row.line_edit()
+        self._output_row.set_default_tooltip(
             "Leave empty to write each genome's results to a new folder next to "
             "that genome. Choose a folder to create the run folders inside it "
             "instead. Every run gets its own timestamped folder."
         )
         self._output_path.installEventFilter(self)
-        self._output_path.textChanged.connect(self._update_output_preview)
-
-        browse = QPushButton("Browse", self)
-        browse.clicked.connect(self._browse_output_dir)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        row.addWidget(self._output_path, stretch=1)
-        row.addWidget(browse)
+        self._output_row.text_changed.connect(lambda _t: self._update_output_preview())
 
         # One line, path shortened in the middle; full path on hover.
         self._output_preview = _ElidedPathLabel(self)
@@ -6748,7 +6977,7 @@ class RepeatQuantifyDialog(QDialog):
         box = QVBoxLayout(host)
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(3)
-        box.addLayout(row)
+        box.addWidget(self._output_row)
         box.addWidget(self._output_preview)
 
         self._genome_input.paths_changed.connect(self._update_output_preview)
@@ -6773,17 +7002,8 @@ class RepeatQuantifyDialog(QDialog):
             name = f"<genome>_repeat_quant_{stamp}"
             path = str(base / name) if base else f"<genome folder>/{name}"
         self._output_preview.set_parts("→ ", path, suffix)
-
-    def _browse_output_dir(self) -> None:
-        start = self._output_path.text().strip()
-        if not start:
-            targets = self.targets()
-            start = str(targets[0].parent) if targets else (
-                self._start_dir or str(Path.home())
-            )
-        picked = QFileDialog.getExistingDirectory(self, "Select output folder", start)
-        if picked:
-            self.set_output_dir(Path(picked))
+        if not self._output_path.text().strip() and targets:
+            self._output_row.set_start_dir(str(targets[0].parent))
 
     def set_output_dir(self, folder: Path | None) -> None:
         """Set the output folder (None = Auto)."""
