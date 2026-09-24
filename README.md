@@ -19,7 +19,7 @@ repetitive DNAs, especially transposable elements (TEs). It works on Linux, macO
 ## Installation
 
 **Requirements:** Python **3.10 or later**.
-
+  
 Command-line install from source is the **recommended** way to run RepeatViewer for now.
 Prebuilt packages (macOS / Windows / Linux) are in preparation and will be linked here when ready.
 
@@ -67,13 +67,18 @@ full path to the env).
 ### Windows
 
 Install RepeatViewer with **native Windows Python** (not inside WSL). Follow these
-steps in **PowerShell** (Start → type `PowerShell`, or open Windows Terminal
-and choose a **PowerShell** tab — not Command Prompt and not Ubuntu/WSL).
+steps in **PowerShell** (Start → type `PowerShell`, or open Windows Terminal and choose a **PowerShell** tab — not Command Prompt and not Ubuntu/WSL).
+On Windows, it is recommended to place the repository in a user-writable directory, such as `Documents` or another personal project folder, rather than under `C:\Program Files`.
 
 #### 1. Prerequisites
 
 - [Python 3.10 or later](https://www.python.org/downloads/) for Windows  
   During setup, enable **“Add python.exe to PATH”**.
+- Microsoft Visual Studio Build Tools with the C++ workload are required to install orfipy, which is used as a dependency by this repository.
+  The required build tools can be installed from a PowerShell terminal using:
+  ```bash
+  winget install -e --id Microsoft.VisualStudio.BuildTools --override "--passive --add Microsoft.VisualS
+  ```
 
 #### 2. Download RepeatViewer from GitHub
 
