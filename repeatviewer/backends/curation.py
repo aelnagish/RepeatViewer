@@ -795,6 +795,7 @@ def run_on_sequence(
                     hit_len_mid_pct=teaid_opts.hit_len_mid_pct,
                     hit_color_high=teaid_opts.hit_color_high,
                     hit_color_mid=teaid_opts.hit_color_mid,
+                    hit_line_transparency=teaid_opts.hit_line_transparency,
                 )
             else:
                 run_ok = teaid_plotter(
@@ -812,6 +813,7 @@ def run_on_sequence(
                     hit_len_mid_pct=teaid_opts.hit_len_mid_pct,
                     hit_color_high=teaid_opts.hit_color_high,
                     hit_color_mid=teaid_opts.hit_color_mid,
+                    hit_line_transparency=teaid_opts.hit_line_transparency,
                     cancel=cancel,
                 )
         except TeaidInputError as exc:

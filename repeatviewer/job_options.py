@@ -546,6 +546,7 @@ DEFAULT_TEAID_HIT_LEN_HIGH_PCT = 80.0
 DEFAULT_TEAID_HIT_LEN_MID_PCT = 50.0
 DEFAULT_TEAID_HIT_COLOR_HIGH = "#ff0000"
 DEFAULT_TEAID_HIT_COLOR_MID = "#1f77b4"
+DEFAULT_TEAID_HIT_LINE_TRANSPARENCY = 0.2
 TEAID_RIGHT_CLICK_RUN = "run"
 TEAID_RIGHT_CLICK_DIALOG = "dialog"
 TEAID_RIGHT_CLICK_ACTIONS = (TEAID_RIGHT_CLICK_RUN, TEAID_RIGHT_CLICK_DIALOG)
@@ -566,6 +567,11 @@ def clamp_teaid_hit_len_pct(high: float, mid: float) -> tuple[float, float]:
     if mid_pct >= high_pct:
         mid_pct = max(0.0, high_pct - 1.0) if high_pct > 0 else 0.0
     return high_pct, mid_pct
+
+
+def clamp_teaid_hit_line_transparency(value: float) -> float:
+    """Keep hit-line transparency in 0–1 (0 = opaque, 1 = invisible)."""
+    return max(0.0, min(1.0, float(value)))
 
 
 def configure_report_evalue_spinbox(spin) -> None:
@@ -597,6 +603,8 @@ class TeaAidOptions:
     hit_len_mid_pct: float = DEFAULT_TEAID_HIT_LEN_MID_PCT
     hit_color_high: str = DEFAULT_TEAID_HIT_COLOR_HIGH
     hit_color_mid: str = DEFAULT_TEAID_HIT_COLOR_MID
+    # 0 = opaque, 1 = fully transparent; applies to all genome BLAST hit lines.
+    hit_line_transparency: float = DEFAULT_TEAID_HIT_LINE_TRANSPARENCY
     right_click_action: str = TEAID_RIGHT_CLICK_RUN
     # Single-genome mode: empty means use the project genome from Define Genome.
     genome_path: str | None = None
@@ -1021,9 +1029,34 @@ def load_teaid_options() -> TeaAidOptions:
             str(v.get("hit_color_mid", DEFAULT_TEAID_HIT_COLOR_MID)).strip()
             or DEFAULT_TEAID_HIT_COLOR_MID
         ),
+        hit_line_transparency=_load_teaid_line_transparency(v),
         right_click_action=right_click_action,
         genome_path=str(genome_path).strip() if genome_path else None,
     )
+
+
+def _load_teaid_line_transparency(values: dict) -> float:
+    """Load line transparency; migrate older per-band opacity settings if needed."""
+    if "hit_line_transparency" in values:
+        return clamp_teaid_hit_line_transparency(
+            float(values.get("hit_line_transparency", DEFAULT_TEAID_HIT_LINE_TRANSPARENCY))
+        )
+    # Older builds stored opacity (1 = opaque). Convert the stronger of the two.
+    legacy_high = values.get("hit_opacity_high")
+    legacy_mid = values.get("hit_opacity_mid")
+    if legacy_high is None and legacy_mid is None:
+        return DEFAULT_TEAID_HIT_LINE_TRANSPARENCY
+    opacities = []
+    for raw in (legacy_high, legacy_mid):
+        if raw is None:
+            continue
+        try:
+            opacities.append(max(0.0, min(1.0, float(raw))))
+        except (TypeError, ValueError):
+            continue
+    if not opacities:
+        return DEFAULT_TEAID_HIT_LINE_TRANSPARENCY
+    return clamp_teaid_hit_line_transparency(1.0 - min(opacities))
 
 
 def save_teaid_options(opts: TeaAidOptions) -> None:
@@ -1040,6 +1073,9 @@ def save_teaid_options(opts: TeaAidOptions) -> None:
             "hit_len_mid_pct": mid_pct,
             "hit_color_high": opts.hit_color_high,
             "hit_color_mid": opts.hit_color_mid,
+            "hit_line_transparency": clamp_teaid_hit_line_transparency(
+                opts.hit_line_transparency
+            ),
             "right_click_action": (
                 opts.right_click_action
                 if opts.right_click_action in TEAID_RIGHT_CLICK_ACTIONS

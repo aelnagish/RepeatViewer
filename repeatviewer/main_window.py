@@ -8922,6 +8922,7 @@ class MainWindow(QMainWindow):
         """Click TE-Aid: parameters dialog. Run runs; Save (Options tab) stores only."""
         dialog = TeaAidParamsDialog(
             initial=self._teaid_options,
+            project=self._project,
             project_genome=self._genome_path_resolved(),
             genome_history=load_genome_history(),
             parent=self,

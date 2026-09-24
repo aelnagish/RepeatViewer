@@ -386,6 +386,56 @@ def create_hovertext(row):
     return f'Start: {row["V7"]}<br>End: {row["V8"]}<br>Divergence: {divergence:.2f}%'
 
 
+def _plotly_rgba(color, opacity=1.0) -> str:
+    """Convert a color name/hex to ``rgba(r,g,b,a)`` for Plotly line opacity."""
+    opacity = max(0.0, min(1.0, float(opacity)))
+    text = str(color or "").strip()
+    if not text:
+        return f"rgba(0, 0, 0, {opacity})"
+    if text.startswith("rgba(") or text.startswith("rgb("):
+        return text
+    named = {
+        "red": (255, 0, 0),
+        "blue": (0, 0, 255),
+        "green": (0, 128, 0),
+        "black": (0, 0, 0),
+        "white": (255, 255, 255),
+        "orange": (255, 165, 0),
+        "purple": (128, 0, 128),
+        "cyan": (0, 255, 255),
+        "magenta": (255, 0, 255),
+        "yellow": (255, 255, 0),
+        "gray": (128, 128, 128),
+        "grey": (128, 128, 128),
+    }
+    lower = text.lower()
+    if lower in named:
+        r, g, b = named[lower]
+        return f"rgba({r}, {g}, {b}, {opacity})"
+    if text.startswith("#"):
+        hex_body = text[1:]
+        if len(hex_body) == 3:
+            hex_body = "".join(ch * 2 for ch in hex_body)
+        if len(hex_body) >= 6:
+            try:
+                r = int(hex_body[0:2], 16)
+                g = int(hex_body[2:4], 16)
+                b = int(hex_body[4:6], 16)
+                return f"rgba({r}, {g}, {b}, {opacity})"
+            except ValueError:
+                pass
+    try:
+        from matplotlib.colors import to_rgb
+
+        r, g, b = to_rgb(text)
+        return (
+            f"rgba({int(round(r * 255))}, {int(round(g * 255))}, "
+            f"{int(round(b * 255))}, {opacity})"
+        )
+    except Exception:
+        return text
+
+
 def blast_plot(
     df,
     cons_len,
@@ -393,6 +443,7 @@ def blast_plot(
     mid_len_thr=0.5,
     full_color='red',
     mid_color='#1f77b4',
+    line_transparency=0.0,
 ):
     # Length bands as fractions of consensus / input length.
     hit_len = (df['V7'] - df['V8']).abs()
@@ -400,23 +451,29 @@ def blast_plot(
     mid = df[
         (hit_len >= mid_len_thr * cons_len) & (hit_len < full_len_thr * cons_len)
     ]
+    short = df[hit_len < mid_len_thr * cons_len]
 
     # Calculate the max number of divergence for the y-axis range
     y_max = max(100 - df['V3'])
 
     # Create a figure
     fig = go.Figure()
+    # Transparency 0 = opaque, 1 = invisible. Apply to every hit line color.
+    opacity = max(0.0, min(1.0, 1.0 - float(line_transparency)))
+    short_line_color = _plotly_rgba('black', opacity)
+    mid_line_color = _plotly_rgba(mid_color, opacity)
+    full_line_color = _plotly_rgba(full_color, opacity)
 
-    # Add segments for all blast hits
-    for i in df.index:
+    # Short hits (below mid threshold) — black only, no opaque underlay.
+    for i in short.index:
         fig.add_trace(
             go.Scatter(
-                x=[df.loc[i, 'V7'], df.loc[i, 'V8']],
-                y=[100 - df.loc[i, 'V3'], 100 - df.loc[i, 'V3']],
+                x=[short.loc[i, 'V7'], short.loc[i, 'V8']],
+                y=[100 - short.loc[i, 'V3'], 100 - short.loc[i, 'V3']],
                 mode='lines',
-                line={'color': 'black'},
+                line={'color': short_line_color, 'width': 1},
                 hoverinfo='text',
-                text=create_hovertext(df.loc[i]),
+                text=create_hovertext(short.loc[i]),
                 showlegend=False,
             )
         )
@@ -428,7 +485,7 @@ def blast_plot(
                 x=[mid.loc[i, 'V7'], mid.loc[i, 'V8']],
                 y=[100 - mid.loc[i, 'V3'], 100 - mid.loc[i, 'V3']],
                 mode='lines',
-                line={'color': mid_color, 'width': 2},
+                line={'color': mid_line_color, 'width': 2},
                 hoverinfo='text',
                 text=create_hovertext(mid.loc[i]),
                 showlegend=False,
@@ -442,7 +499,7 @@ def blast_plot(
                 x=[full.loc[i, 'V7'], full.loc[i, 'V8']],
                 y=[100 - full.loc[i, 'V3'], 100 - full.loc[i, 'V3']],
                 mode='lines',
-                line={'color': full_color, 'width': 3},
+                line={'color': full_line_color, 'width': 3},
                 hoverinfo='text',
                 text=create_hovertext(full.loc[i]),
                 showlegend=False,
@@ -946,6 +1003,7 @@ def _build_genome_teaid_panels(
     hit_len_mid_pct=50.0,
     hit_color_high='red',
     hit_color_mid='#1f77b4',
+    hit_line_transparency=0.0,
     cancel=None,
 ):
     """BLAST hits, coverage, and divergence panels for one genome."""
@@ -985,6 +1043,7 @@ def _build_genome_teaid_panels(
                 mid_len_thr=mid_thr,
                 full_color=hit_color_high,
                 mid_color=hit_color_mid,
+                line_transparency=hit_line_transparency,
             )
             fig_coverage, coverage_max = coverage_plot(df_genome_blast_out, cons_len)
             fig_div_hist, div_hist_max = divergence_histogram_plot(df_genome_blast_out)
@@ -1525,6 +1584,7 @@ def teaid_pan_genome_plotter(
     hit_len_mid_pct=50.0,
     hit_color_high='red',
     hit_color_mid='#1f77b4',
+    hit_line_transparency=0.0,
 ):
     """
     Combined TE-Aid report for pan-genome mode.
@@ -1565,6 +1625,7 @@ def teaid_pan_genome_plotter(
             hit_len_mid_pct=hit_len_mid_pct,
             hit_color_high=hit_color_high,
             hit_color_mid=hit_color_mid,
+            hit_line_transparency=hit_line_transparency,
         )
         genome_panels.append((name, panels))
 
@@ -1604,6 +1665,7 @@ def teaid_plotter(
     hit_len_mid_pct=50.0,
     hit_color_high='red',
     hit_color_mid='#1f77b4',
+    hit_line_transparency=0.0,
     cancel=None,
 ):
     # Used global variable: os_type
@@ -1647,6 +1709,7 @@ def teaid_plotter(
         hit_len_mid_pct=hit_len_mid_pct,
         hit_color_high=hit_color_high,
         hit_color_mid=hit_color_mid,
+        hit_line_transparency=hit_line_transparency,
         cancel=cancel,
     )
     fig_dot = _build_self_dot_figure(
