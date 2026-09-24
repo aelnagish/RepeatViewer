@@ -1801,6 +1801,10 @@ TREE_ALIGN_ALWAYS = "always"
 TREE_ALIGN_NEVER = "never"    # input must already be aligned
 TREE_ALIGN_MODES = (TREE_ALIGN_AUTO, TREE_ALIGN_ALWAYS, TREE_ALIGN_NEVER)
 
+TREE_COVERAGE_MEDIAN = "median"    # length filter relative to the median length
+TREE_COVERAGE_LONGEST = "longest"  # ... or to the longest sequence
+TREE_COVERAGE_REFERENCES = (TREE_COVERAGE_MEDIAN, TREE_COVERAGE_LONGEST)
+
 TREE_ROOT_NONE = "none"
 TREE_ROOT_OUTGROUP = "outgroup"
 TREE_ROOT_MIDPOINT = "midpoint"
@@ -1828,7 +1832,8 @@ class TreeOptions:
     adjust_direction: bool = True
     mafft_gap_open: float = 1.53
     mafft_offset: float = 0.0
-    min_coverage: float = 0.7          # fraction of the median length; 0 = off
+    min_coverage: float = 0.7          # fraction of the reference length; 0 = off
+    coverage_reference: str = TREE_COVERAGE_MEDIAN
     # Tree
     engine: str = TREE_ENGINE_IQTREE
     model: str = TREE_MODEL_FINDER
@@ -1873,6 +1878,8 @@ def load_tree_options() -> TreeOptions:
         mafft_gap_open=_num("mafft_gap_open", d.mafft_gap_open, float, 0.0, 20.0),
         mafft_offset=_num("mafft_offset", d.mafft_offset, float, 0.0, 10.0),
         min_coverage=_num("min_coverage", d.min_coverage, float, 0.0, 1.0),
+        coverage_reference=_pick("coverage_reference", TREE_COVERAGE_REFERENCES,
+                                 d.coverage_reference),
         engine=_pick("engine", TREE_ENGINES, d.engine),
         model=str(v.get("model", d.model) or d.model).strip(),
         runs=_num("runs", d.runs, int, 1, 100),
@@ -1903,6 +1910,7 @@ def save_tree_options(opts: TreeOptions) -> None:
             "mafft_gap_open": opts.mafft_gap_open,
             "mafft_offset": opts.mafft_offset,
             "min_coverage": opts.min_coverage,
+            "coverage_reference": opts.coverage_reference,
             "engine": opts.engine,
             "model": opts.model,
             "runs": opts.runs,

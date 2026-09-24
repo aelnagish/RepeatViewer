@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.backends import tree_builder as tb
 from repeatviewer.job_options import (
+    TREE_COVERAGE_LONGEST,
+    TREE_COVERAGE_MEDIAN,
     TREE_ALIGN_ALWAYS,
     TREE_ALIGN_AUTO,
     TREE_ALIGN_NEVER,
@@ -67,6 +69,54 @@ def _form(parent: QWidget) -> QFormLayout:
     return form
 
 
+MAFFT_INFO = (
+    "<b>L-INS-i</b> — most accurate; copies share one alignable core but differ "
+    "at the ends (e.g. truncated TE copies).<br>"
+    "<b>G-INS-i</b> — sequences alignable over their full length (e.g. monomers "
+    "of one satellite family).<br>"
+    "<b>E-INS-i</b> — conserved blocks separated by long unalignable regions.<br>"
+    "The INS-i methods suit up to ~200 sequences; above that use <b>FFT-NS-2</b>."
+)
+METHOD_INFO = (
+    "<b>Maximum likelihood (IQ-TREE)</b> — model-based inference with "
+    "SH-aLRT / UFBoot2 support; the standard for publication.<br>"
+    "<b>Minimum evolution (FastME)</b> — distance-based (TN93); fast, with a "
+    "conservative bootstrap. Useful as a cross-check.<br>"
+    "<b>Approximate maximum likelihood (FastTree)</b> — for very large sets "
+    "(more than ~1,000 sequences)."
+)
+MODEL_INFO = (
+    "<b>ModelFinder</b> — tests the models and selects the best by BIC (recommended).<br>"
+    "<b>GTR</b> — all six substitution types at their own rate.<br>"
+    "<b>TN (TN93)</b> — two transition rates (A↔G, C↔T), one transversion rate.<br>"
+    "<b>HKY</b> — one transition and one transversion rate, unequal base frequencies.<br>"
+    "<b>K2P (K80)</b> — as HKY, with equal base frequencies.<br>"
+    "<b>LG</b> — protein model.<br>"
+    "<b>+F</b> empirical base frequencies · <b>+G4</b> rate variation among sites "
+    "(4 gamma categories)."
+)
+
+
+def _info_icon(html_text: str, parent: QWidget) -> QLabel:
+    """Small (i) marker whose tooltip explains the neighbouring option."""
+    icon = QLabel("ⓘ", parent)
+    icon.setToolTip(f"<div style='max-width:420px'>{html_text}</div>")
+    icon.setCursor(Qt.CursorShape.WhatsThisCursor)
+    icon.setStyleSheet("QLabel { color: palette(mid); font-size: 15px; padding: 0 2px; }")
+    return icon
+
+
+def _with_info(field: QWidget, info: QLabel, parent: QWidget, *, top: bool = False) -> QWidget:
+    row = QWidget(parent)
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(6)
+    lay.addWidget(field)
+    lay.addWidget(info, 0, Qt.AlignmentFlag.AlignTop if top else Qt.AlignmentFlag.AlignVCenter)
+    lay.addStretch(1)
+    return row
+
+
 def _note(text: str, parent: QWidget) -> QLabel:
     label = QLabel(text, parent)
     label.setWordWrap(True)
@@ -90,14 +140,6 @@ class TreeParamsDialog(QDialog):
         opts = initial or TreeOptions()
         self._files = [Path(p) for p in (files or [])]
         self._outgroup_saved = list(opts.outgroup)
-
-        # --- input check strip ------------------------------------------------
-        self._check = QLabel(self)
-        self._check.setWordWrap(True)
-        self._check.setTextFormat(Qt.TextFormat.RichText)
-        self._check.setStyleSheet(
-            "QLabel { background: palette(alternate-base); border-radius: 6px; padding: 8px 10px; }"
-        )
 
         # --- Alignment tab ----------------------------------------------------
         self._align_mode = QComboBox(self)
@@ -125,14 +167,26 @@ class TreeParamsDialog(QDialog):
         )
         self._min_cov = QSpinBox(self)
         self._min_cov.setRange(0, 100)
-        self._min_cov.setSuffix(" % of median length")
+        self._min_cov.setSuffix(" %")
         self._min_cov.setValue(round(opts.min_coverage * 100))
         self._min_cov.setToolTip(
-            "Exclude fragments shorter than this share of the median sequence length "
+            "Exclude fragments shorter than this share of the reference length "
             "(e.g. 5'-truncated copies). 0 turns the filter off. Excluded sequences are "
             "listed in the report and saved to <input>_tree.excluded.fa."
         )
         self._min_cov.valueChanged.connect(self._update_check)
+        self._cov_ref = QComboBox(self)
+        self._cov_ref.addItem("of the median length", TREE_COVERAGE_MEDIAN)
+        self._cov_ref.addItem("of the longest sequence", TREE_COVERAGE_LONGEST)
+        self._set_combo(self._cov_ref, opts.coverage_reference)
+        self._cov_ref.setToolTip(
+            "Median: robust when most sequences are complete.\n"
+            "Longest: when many sequences may be fragments, or all should be about "
+            "the same length (e.g. satellite monomers)."
+        )
+        self._cov_ref.currentIndexChanged.connect(self._update_check)
+        self._frag_hint = _note("", self)
+        self._frag_hint.setWordWrap(False)
         self._gap_open = QDoubleSpinBox(self)
         self._gap_open.setRange(0.0, 20.0)
         self._gap_open.setDecimals(2)
@@ -145,17 +199,27 @@ class TreeParamsDialog(QDialog):
         self._offset.setSingleStep(0.05)
         self._offset.setValue(opts.mafft_offset)
         self._offset.setToolTip("MAFFT --ep (offset, acts like a gap extension penalty). Default: 0.")
-        for w in (self._align_mode, self._strategy, self._min_cov):
+        for w in (self._align_mode, self._strategy):
             w.setFixedWidth(_FIELD_WIDTH)
+        self._min_cov.setFixedWidth(90)
+        self._cov_ref.setFixedWidth(_FIELD_WIDTH - 90 - 6)
         for w in (self._gap_open, self._offset):
             w.setFixedWidth(120)
 
         align_tab = QWidget(self)
         af = _form(align_tab)
         af.addRow("Alignment:", self._align_mode)
-        af.addRow("MAFFT strategy:", self._strategy)
+        af.addRow("MAFFT strategy:", _with_info(self._strategy, _info_icon(MAFFT_INFO, self), self))
         af.addRow("", self._adjust_direction)
-        af.addRow("Minimum length:", self._min_cov)
+        cov_row = QWidget(self)
+        cov_lay = QHBoxLayout(cov_row)
+        cov_lay.setContentsMargins(0, 0, 0, 0)
+        cov_lay.setSpacing(6)
+        cov_lay.addWidget(self._min_cov)
+        cov_lay.addWidget(self._cov_ref)
+        cov_lay.addStretch(1)
+        af.addRow("Minimum length:", cov_row)
+        af.addRow("", self._frag_hint)
         more = QGroupBox("More options", align_tab)
         mf = QFormLayout(more)
         mf.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -166,6 +230,7 @@ class TreeParamsDialog(QDialog):
         self._more_form = mf
         more.toggled.connect(self._show_more)
         self._show_more(more.isChecked())
+        self._more_box = more
         af.addRow(more)
         self._align_mode.currentIndexChanged.connect(self._sync_enabled)
 
@@ -177,10 +242,7 @@ class TreeParamsDialog(QDialog):
         eb.setContentsMargins(0, 0, 0, 0)
         eb.setSpacing(4)
         for value in (TREE_ENGINE_IQTREE, TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE):
-            label = tb.ENGINE_LABELS[value]
-            if value == TREE_ENGINE_IQTREE:
-                label += "  — recommended"
-            radio = QRadioButton(label, self)
+            radio = QRadioButton(tb.ENGINE_LABELS[value], self)
             radio.setChecked(opts.engine == value)
             self._engine_group.addButton(radio)
             self._engine_buttons[value] = radio
@@ -217,6 +279,10 @@ class TreeParamsDialog(QDialog):
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 256)
         self._threads.setValue(max(1, opts.threads))
+        self._threads.setToolTip(
+            "Maximum number of threads. IQ-TREE picks the best number up to this "
+            "(-T AUTO); short alignments usually run fastest on one thread."
+        )
         for w in (self._model,):
             w.setFixedWidth(_FIELD_WIDTH)
         for w in (self._runs, self._seed, self._threads):
@@ -224,9 +290,9 @@ class TreeParamsDialog(QDialog):
 
         tree_tab = QWidget(self)
         tf = _form(tree_tab)
-        tf.addRow("Method:", engine_box)
+        tf.addRow("Method:", _with_info(engine_box, _info_icon(METHOD_INFO, self), self, top=True))
         tf.addRow("", self._engine_status)
-        tf.addRow("Substitution model:", self._model)
+        tf.addRow("Substitution model:", _with_info(self._model, _info_icon(MODEL_INFO, self), self))
         tf.addRow("Independent searches:", self._runs)
         tf.addRow("Random seed:", self._seed)
         tf.addRow("Threads:", self._threads)
@@ -243,6 +309,7 @@ class TreeParamsDialog(QDialog):
         self._ufboot.setValue(opts.ufboot)
         self._ufboot.setToolTip("IQ-TREE -B: ultrafast bootstrap replicates (0 = off, "
                                 "minimum 1000). Trust ≥ 95 — not the classic 70.")
+        self._ufboot.valueChanged.connect(self._sync_enabled)
         self._bnni = QCheckBox("Reduce UFBoot overestimation (-bnni)", self)
         self._bnni.setChecked(opts.bnni)
         self._dist_boot = QSpinBox(self)
@@ -350,7 +417,6 @@ class TreeParamsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(12)
-        layout.addWidget(self._check)
         layout.addWidget(self._tabs)
         layout.addWidget(self._button_box)
 
@@ -410,33 +476,19 @@ class TreeParamsDialog(QDialog):
                 out.append(item.text())
         return out
 
-    def _update_check(self) -> None:
+    def _update_check(self, *_args) -> None:
+        """One grey line under Minimum length: how many sequences it excludes."""
         s = self._summary
-        if not self._files:
-            self._check.setText("No FASTA file selected. Select one or more FASTA files in "
-                                "the file panel; several files are combined into one tree.")
+        if not self._files or s is None or s.error or not s.lengths:
+            self._frag_hint.setVisible(False)
             return
-        if s is None or s.error:
-            self._check.setText(f"<b>Input</b>: could not read the selection ({(s.error if s else '')}).")
-            return
-        frag = tb.fragment_count(s.lengths, self._min_cov.value() / 100.0)
-        names = ", ".join(p.name for p in self._files[:3]) + ("…" if len(self._files) > 3 else "")
-        parts = [f"<b>{s.n_sequences}</b> sequences", "DNA" if s.dna else "protein"]
-        if s.aligned:
-            parts.append(f"aligned, <b>{s.length}</b> columns, "
-                         f"<b>{s.informative_sites}</b> parsimony-informative")
-        else:
-            parts.append("unaligned — MAFFT will align them")
-        if frag:
-            parts.append(f"<span style='color:#b25d00'><b>{frag}</b> fragment(s) below "
-                         f"{self._min_cov.value()}% will be excluded</span>")
-        warn = ""
-        if s.n_sequences < tb.MIN_TAXA:
-            warn = f"<br><span style='color:#b00020'>A tree needs at least {tb.MIN_TAXA} sequences.</span>"
-        elif s.aligned and s.informative_sites is not None and s.informative_sites < 10:
-            warn = ("<br><span style='color:#b25d00'>Very few informative sites: expect "
-                    "poorly supported branches.</span>")
-        self._check.setText(f"<b>Input</b> · {names}<br>" + " · ".join(parts) + warn)
+        frag = tb.fragment_count(s.lengths, self._min_cov.value() / 100.0,
+                                 str(self._cov_ref.currentData()))
+        self._frag_hint.setText(
+            f"{frag} of {s.n_sequences} sequences fall below this and will be excluded."
+            if frag else f"None of the {s.n_sequences} sequences fall below this."
+        )
+        self._frag_hint.setVisible(True)
 
     def _sync_enabled(self, *_args) -> None:
         engine = self._engine()
@@ -448,8 +500,13 @@ class TreeParamsDialog(QDialog):
         self._outgroup_list.setEnabled(outgroup)
         self._outgroup_filter.setEnabled(outgroup)
         aligning = self._align_mode.currentData() != TREE_ALIGN_NEVER
-        for w in (self._strategy, self._adjust_direction):
-            w.setEnabled(aligning)
+        protein = bool(self._summary and not self._summary.error and not self._summary.dna)
+        self._strategy.setEnabled(aligning)
+        self._more_box.setEnabled(aligning)
+        self._adjust_direction.setEnabled(aligning and not protein)
+        if protein:
+            self._adjust_direction.setToolTip("Only for DNA: the selected sequences are protein.")
+        self._bnni.setEnabled(iq and self._ufboot.value() > 0)
         exe = tb.engine_executable(engine, system_path_only=self._use_system_path.isChecked())
         if exe:
             self._engine_status.setText(f"Found: {exe}")
@@ -466,6 +523,7 @@ class TreeParamsDialog(QDialog):
         self._set_combo(self._strategy, d.mafft_strategy)
         self._adjust_direction.setChecked(d.adjust_direction)
         self._min_cov.setValue(round(d.min_coverage * 100))
+        self._set_combo(self._cov_ref, d.coverage_reference)
         self._gap_open.setValue(d.mafft_gap_open)
         self._offset.setValue(d.mafft_offset)
         self._engine_buttons[d.engine].setChecked(True)
@@ -508,6 +566,7 @@ class TreeParamsDialog(QDialog):
             mafft_gap_open=self._gap_open.value(),
             mafft_offset=self._offset.value(),
             min_coverage=self._min_cov.value() / 100.0,
+            coverage_reference=str(self._cov_ref.currentData()),
             engine=self._engine(),
             model=model,
             runs=self._runs.value(),

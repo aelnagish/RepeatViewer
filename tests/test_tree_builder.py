@@ -317,3 +317,110 @@ def test_root_branch_support_shown_once():
     tb.apply_rooting(tree, TREE_ROOT_MIDPOINT, [])
     labels = [c.name for c in tree.get_nonterminals() if c.name]
     assert len(labels) == len(set(labels)) == 3
+
+
+
+# --- round 2: crash handling, separate searches, length reference -------------
+
+
+def test_coverage_filter_longest_reference():
+    recs = [_rec("a", "A" * 800), _rec("b", "A" * 200), _rec("c", "A" * 150),
+            _rec("d", "A" * 120), _rec("e", "A" * 790)]
+    kept, excluded = tb.coverage_filter(recs, 0.7, "median")
+    # The median (200 bp) is itself a fragment length, so only d (120 bp) goes.
+    assert [r.name for r, _ in excluded] == ["d"]
+    kept, excluded = tb.coverage_filter(recs, 0.7, "longest")
+    assert [r.name for r, _ in excluded] == ["b", "c", "d"]
+    assert tb.fragment_count([r.seq.__len__() for r in recs], 0.7, "longest") == 3
+
+
+def test_iqtree_thread_args():
+    assert tb.iqtree_thread_args(1) == ["-T", "1"]
+    assert tb.iqtree_thread_args(4) == ["-T", "AUTO", "--threads-max", "4"]
+
+
+def test_summarize_tool_error_openmp_and_stack_traces():
+    omp = ("Run 5 gave best log-likelihood\nOMP: Error #34: System unable to allocate "
+           "necessary resources for OMP thread:\nERROR: STACK TRACE FOR DEBUGGING:\n"
+           "ERROR: 2   _sigtramp()\nERROR: *** IQ-TREE CRASHES WITH SIGNAL ABORTED")
+    msg = tb.summarize_tool_error("IQ-TREE", -6, omp)
+    assert "could not create more threads" in msg and "_sigtramp" not in msg
+    msg = tb.summarize_tool_error("IQ-TREE", 2, "ERROR: Sequence S00003 contains too many characters\n")
+    assert msg.endswith("ERROR: Sequence S00003 contains too many characters")
+
+
+FAKE_IQTREE = """#!/usr/bin/env python3
+import sys, os
+a = sys.argv
+prefix = a[a.index("--prefix") + 1]
+seed = int(a[a.index("--seed") + 1])
+model = a[a.index("-m") + 1]
+open(os.environ["FAKE_LOG"], "a").write(" ".join(a[1:]) + "\\n")
+if "--version" in a:
+    print("IQ-TREE version 3.1.3"); sys.exit(0)
+if os.environ.get("FAKE_CRASH") == str(seed):
+    print("OMP: Error #34: System unable to allocate necessary resources for OMP thread")
+    sys.exit(134)
+names = [l[1:].strip() for l in open(a[a.index("-s") + 1]) if l.startswith(">")]
+tree = "(" + ",".join(names[:2]) + ",(" + ",".join(names[2:]) + "));"
+if seed % 2 == 0:
+    tree = "(" + names[0] + "," + names[2] + ",(" + ",".join([names[1]] + names[3:]) + "));"
+open(prefix + ".treefile", "w").write(tree + "\\n")
+best = "TN+F+G4" if model == "MFP" else model
+open(prefix + ".iqtree", "w").write(
+    f"Best-fit model according to BIC: {best}\\nLog-likelihood of the tree: {-100 - seed % 7}.5\\n")
+open(prefix + ".log", "w").write("log " + str(seed))
+"""
+
+
+def _fake_iqtree(tmp_path, monkeypatch, crash_seed=None):
+    fake = tmp_path / "bin" / "iqtree3"
+    fake.parent.mkdir(exist_ok=True)
+    fake.write_text(FAKE_IQTREE.replace("\\\\n", "\\n"))
+    fake.chmod(0o755)
+    log = tmp_path / "calls.txt"
+    monkeypatch.setenv("FAKE_LOG", str(log))
+    if crash_seed is not None:
+        monkeypatch.setenv("FAKE_CRASH", str(crash_seed))
+    monkeypatch.setenv("PATH", f"{fake.parent}:" + __import__("os").environ["PATH"])
+    fa = tmp_path / "aln.fa"
+    fa.write_text(">s1\nACGTACGTAA\n>s2\nACGTACGTTA\n>s3\nACGAACGTTT\n"
+                  ">s4\nACGAACCTTT\n>s5\nTCGAACCTTT\n")
+    return fa, log
+
+
+def test_independent_searches_are_separate_processes(tmp_path, monkeypatch):
+    fa, log = _fake_iqtree(tmp_path, monkeypatch)
+    opts = TreeOptions(use_system_path=True, threads=4, runs=3, seed=10)
+    run_dir, files, report = tb.build_tree_run([fa], opts, stamp="t")
+    calls = [c for c in log.read_text().splitlines() if "--prefix" in c]
+    assert len(calls) == 3
+    assert "-m MFP" in calls[0] and "-m TN+F+G4" in calls[1] and "-m TN+F+G4" in calls[2]
+    assert all("--runs" not in c for c in calls)
+    assert all("-T AUTO --threads-max 4" in c for c in calls)
+    assert [c.split("--seed ")[1].split()[0] for c in calls] == ["10", "11", "12"]
+    html = report.read_text()
+    assert "of 3 found the same topology" in html
+    assert (run_dir / "aln.fa_tree.iqtree").is_file()
+
+
+def test_failed_run_writes_log_next_to_input(tmp_path, monkeypatch):
+    fa, _log = _fake_iqtree(tmp_path, monkeypatch, crash_seed=12345)
+    opts = TreeOptions(use_system_path=True, threads=2, runs=1)
+    with pytest.raises(tb.TreeBuildError) as err:
+        tb.build_tree_run([fa], opts, stamp="t")
+    msg = str(err.value)
+    assert "could not create more threads" in msg
+    failed = tmp_path / "aln.fa_tree_failed.log"
+    assert failed.is_file() and f"Full log: {failed}" in msg
+    text = failed.read_text()
+    assert "iqtree3" in text and "Reason:" in text
+    assert not any(tmp_path.glob("aln.fa_tree_t*"))  # no half-finished run folder
+
+
+def test_one_failed_search_is_skipped_with_warning(tmp_path, monkeypatch):
+    fa, _log = _fake_iqtree(tmp_path, monkeypatch, crash_seed=11)
+    opts = TreeOptions(use_system_path=True, threads=1, runs=3, seed=10)
+    run_dir, files, report = tb.build_tree_run([fa], opts, stamp="t")
+    html = report.read_text()
+    assert "1 of 3 IQ-TREE searches failed" in html

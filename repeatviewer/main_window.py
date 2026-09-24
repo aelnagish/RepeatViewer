@@ -3714,7 +3714,10 @@ class MainWindow(QMainWindow):
         if not skip_default:
             menu.addAction("Build tree with saved parameters", self._run_tree_default)
         menu.addSeparator()
-        menu.addAction("Change tree parameters", self._open_tree_dialog)
+        # Settings can be changed without a selection (Run then asks for one).
+        menu.addAction(
+            "Change tree parameters", lambda: self._open_tree_dialog(require_selection=False)
+        )
 
     def _tree_candidate_files(self) -> list[Path]:
         """Selected FASTA files (several files are combined into one tree). No UI."""
@@ -3729,8 +3732,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Tree",
-                "Select a FASTA file (or several: they are combined into one tree) "
-                "in the file panel.",
+                "Select one or more FASTA files in the file panel first.\n"
+                "Several selected files are combined into one tree.",
             )
         return files
 
@@ -3746,13 +3749,20 @@ class MainWindow(QMainWindow):
             return
         self._run_tree_default()
 
-    def _open_tree_dialog(self) -> None:
-        """Click Tree → parameters dialog (Cancel / Save / Run)."""
+    def _open_tree_dialog(self, *, require_selection: bool = True) -> None:
+        """Click Tree → parameters dialog (Cancel / Save / Run).
+
+        Without a FASTA selection the toolbar click only shows a message; the
+        Tools → Tree → Change tree parameters entry still opens the dialog."""
         from repeatviewer.views.tree_dialog import TreeParamsDialog
 
+        files = self._tree_candidate_files()
+        if require_selection and not files:
+            self._selected_files_for_tree()  # shows the "select a FASTA file" message
+            return
         dialog = TreeParamsDialog(
             initial=self._tree_options,
-            files=self._tree_candidate_files(),
+            files=files,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -5110,7 +5120,7 @@ class MainWindow(QMainWindow):
             self._add_toolbar_action_button(
                 bar,
                 "Tree",
-                self._open_tree_dialog,
+                lambda: self._open_tree_dialog(),
                 tooltip=(
                     "Click: set parameters and run.\n"
                     "Right-click: action chosen in the Options tab "

@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from repeatviewer.job_options import (
+    TREE_COVERAGE_LONGEST,
     TREE_ALIGN_ALWAYS,
     TREE_ALIGN_NEVER,
     TREE_ENGINE_FASTME,
@@ -66,8 +67,8 @@ ENGINE_NAMES = {  # for reports and methods text
 }
 ENGINE_LABELS = {  # for the dialog
     TREE_ENGINE_IQTREE: "Maximum likelihood (IQ-TREE)",
-    TREE_ENGINE_FASTME: "Distance, minimum evolution (FastME)",
-    TREE_ENGINE_FASTTREE: "Fast approximate ML (FastTree, > 1,000 sequences)",
+    TREE_ENGINE_FASTME: "Minimum evolution (FastME)",
+    TREE_ENGINE_FASTTREE: "Approximate maximum likelihood (FastTree)",
 }
 _CONDA_PACKAGE = {
     TREE_ENGINE_IQTREE: "iqtree",
@@ -199,18 +200,28 @@ def ungapped_length(seq: str) -> int:
     return sum(c not in _GAP_CHARS for c in seq)
 
 
-def coverage_filter(
-    records: list[SeqRecordLite], min_coverage: float
-) -> tuple[list[SeqRecordLite], list[tuple[SeqRecordLite, float]]]:
-    """Drop fragments shorter than ``min_coverage`` x the median length.
+def _reference_length(lengths: list[int], reference: str) -> float:
+    if not lengths:
+        return 0.0
+    return float(max(lengths)) if reference == TREE_COVERAGE_LONGEST else float(
+        statistics.median(lengths))
 
+
+def coverage_filter(
+    records: list[SeqRecordLite], min_coverage: float, reference: str = "median"
+) -> tuple[list[SeqRecordLite], list[tuple[SeqRecordLite, float]]]:
+    """Drop fragments shorter than ``min_coverage`` x the reference length.
+
+    ``reference`` is the median length (default; robust when most sequences are
+    complete) or the longest sequence (when most sequences may be fragments, or
+    all should be about the same length, e.g. satellite monomers).
     Returns (kept, excluded-with-coverage). ``min_coverage`` 0 disables.
     Fragments (5'-truncated copies, partial monomers) otherwise land at random
     places in the tree and pull down support for everything else.
     """
     if min_coverage <= 0 or not records:
         return list(records), []
-    median = statistics.median(ungapped_length(r.seq) for r in records)
+    median = _reference_length([ungapped_length(r.seq) for r in records], reference)
     if median <= 0:
         return list(records), []
     kept: list[SeqRecordLite] = []
@@ -274,11 +285,11 @@ class InputSummary:
     lengths: list[int] = field(default_factory=list)   # ungapped, for live recounts
 
 
-def fragment_count(lengths: list[int], min_coverage: float) -> int:
+def fragment_count(lengths: list[int], min_coverage: float, reference: str = "median") -> int:
     """How many sequences ``coverage_filter`` would exclude."""
     if min_coverage <= 0 or not lengths:
         return 0
-    median = statistics.median(lengths)
+    median = _reference_length(lengths, reference)
     return 0 if median <= 0 else sum(1 for n in lengths if n / median < min_coverage)
 
 
@@ -582,6 +593,11 @@ class TreeRunReport:
     commands: list[str] = field(default_factory=list)
 
 
+def reference_phrase(opts: TreeOptions) -> str:
+    return ("longest sequence" if opts.coverage_reference == TREE_COVERAGE_LONGEST
+            else "median sequence length")
+
+
 def methods_paragraph(r: TreeRunReport, opts: TreeOptions) -> str:
     """A methods-section paragraph describing exactly what was run."""
     parts: list[str] = []
@@ -599,7 +615,7 @@ def methods_paragraph(r: TreeRunReport, opts: TreeOptions) -> str:
     if r.excluded:
         parts.append(
             f"{len(r.excluded)} sequence(s) covering less than "
-            f"{opts.min_coverage:.0%} of the median sequence length were excluded."
+            f"{opts.min_coverage:.0%} of the {reference_phrase(opts)} were excluded."
         )
     if r.stats:
         parts.append(
@@ -684,7 +700,8 @@ def report_html(r: TreeRunReport, opts: TreeOptions, svg_text: str, files: list[
              ("Seed", str(r.seed))]
     table = "\n".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in rows)
     warn = "".join(f"<li>{e(w)}</li>" for w in r.warnings)
-    excl = "".join(f"<li>{e(n)} ({c:.0%} of median length)</li>" for n, c in r.excluded)
+    excl = "".join(f"<li>{e(n)} ({c:.0%} of the {e(reference_phrase(opts))})</li>"
+                   for n, c in r.excluded)
     flist = "".join(f"<li>{e(p.name)}</li>" for p in files)
     cites = "".join(f"<li>{e(c)}</li>" for c in citations_for(r, opts))
     methods = e(methods_paragraph(r, opts))
@@ -708,6 +725,72 @@ ul{{font-size:13px;margin:4px 0 0 18px;padding:0}} small{{color:#666}}
 <p><small>Support values are shown as SH-aLRT / UFBoot2 for IQ-TREE (commonly
 trusted at ≥ 80 / ≥ 95), bootstrap % for FastME and SH-like local support for FastTree.</small></p>
 </body></html>"""
+
+
+def iqtree_thread_args(threads: int) -> list[str]:
+    """``-T AUTO`` capped at the user's thread count; ``-T 1`` for one thread.
+
+    AUTO lets IQ-TREE use a single thread on short alignments, where more
+    threads only slow it down (and trigger its 'too many threads' warning)."""
+    threads = max(1, int(threads))
+    return ["-T", "1"] if threads == 1 else ["-T", "AUTO", "--threads-max", str(threads)]
+
+
+_STACK_LINE = re.compile(r"^ERROR:\s*(\d+\s|\*{3}|STACK TRACE|$)")
+
+
+def summarize_tool_error(tool: str, returncode: int, output: str) -> str:
+    """A readable one-paragraph reason for a failed external program."""
+    text = output or ""
+    if "OMP: Error" in text or "unable to allocate necessary resources for OMP" in text:
+        return (
+            f"{tool} stopped because the system could not create more threads "
+            f"(OpenMP). Lower 'Threads' in the Tree tab or close other heavy programs, "
+            f"then run again."
+        )
+    if "bad_alloc" in text or "Not enough memory" in text or "out of memory" in text.lower():
+        return f"{tool} ran out of memory. Reduce the number of sequences or threads."
+    errors = [line.strip() for line in text.splitlines()
+              if line.strip().startswith("ERROR") and not _STACK_LINE.match(line.strip())]
+    if errors:
+        return f"{tool} failed (exit {returncode}): " + " ".join(errors[:3])
+    tail = [line.strip() for line in text.splitlines() if line.strip()][-4:]
+    return f"{tool} failed (exit {returncode})." + ("\n" + "\n".join(tail) if tail else "")
+
+
+def _add_command(work: Path, commands: list[str], text: str) -> None:
+    """Record a command line (also on disk, so a failure log can include it)."""
+    commands.append(text)
+    try:
+        with (work / "commands.txt").open("a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    except OSError:
+        pass
+
+
+def failure_log_path(inputs: list[Path]) -> Path:
+    """``<input>_tree_failed.log`` next to the (first) input."""
+    first = Path(inputs[0]).expanduser().resolve()
+    return first.parent / f"{output_base_name(inputs)}_tree_failed.log"
+
+
+def _write_failure_log(inputs: list[Path], run_dir: Path, error: str) -> Path | None:
+    parts = [f"RepeatViewer tree builder — failed run ({datetime.now():%Y-%m-%d %H:%M})",
+             "", "Reason:", error, ""]
+    work = run_dir / ".work"
+    for name in ("commands.txt",):
+        f = work / name
+        if f.is_file():
+            parts += [f"== {name} ==", f.read_text(encoding="utf-8", errors="replace"), ""]
+    for log in sorted(work.rglob("*.log")) if work.is_dir() else []:
+        parts += [f"== {log.relative_to(work)} ==",
+                  log.read_text(encoding="utf-8", errors="replace"), ""]
+    path = failure_log_path(inputs)
+    try:
+        path.write_text("\n".join(parts), encoding="utf-8")
+        return path
+    except OSError:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -770,11 +853,11 @@ def build_tree_run(
         )
     dna = looks_like_dna(records)
     warnings: list[str] = []
-    records, excluded = coverage_filter(records, opts.min_coverage)
+    records, excluded = coverage_filter(records, opts.min_coverage, opts.coverage_reference)
     if len(records) < MIN_TAXA:
         raise TreeBuildError(
             f"Only {len(records)} sequence(s) remain after excluding fragments shorter than "
-            f"{opts.min_coverage:.0%} of the median length. Lower 'Minimum length' in the "
+            f"{opts.min_coverage:.0%} of the {reference_phrase(opts)}. Lower 'Minimum length' in the "
             "Alignment tab or check the input."
         )
     outgroup = [o for o in opts.outgroup if o]
@@ -787,13 +870,20 @@ def build_tree_run(
 
     stamp = stamp or run_stamp()
     run_dir = create_run_dir(inputs, stamp)
+    from repeatviewer.backends.job_cancel import JobCancelledError
+
     try:
         return _run_in_dir(run_dir, inputs, records, n_input, excluded, dna, outgroup,
                            warnings, opts, stamp, say, cancel)
-    except BaseException:
-        # Failed or stopped: no half-finished run folder is left behind.
-        shutil.rmtree(run_dir, ignore_errors=True)
+    except JobCancelledError:
+        shutil.rmtree(run_dir, ignore_errors=True)  # stopped by the user: no leftovers
         raise
+    except Exception as exc:  # noqa: BLE001 - reported with a saved log
+        message = str(exc) if isinstance(exc, TreeBuildError) else f"{type(exc).__name__}: {exc}"
+        log = _write_failure_log(inputs, run_dir, message)
+        shutil.rmtree(run_dir, ignore_errors=True)
+        suffix = f"\n\nFull log: {log}" if log else ""
+        raise TreeBuildError(message + suffix) from exc
 
 
 def _check_cancel(cancel) -> None:
@@ -867,7 +957,7 @@ def _run_in_dir(run_dir, inputs, records, n_input, excluded, dna, outgroup, warn
             adjust_direction=bool(opts.adjust_direction and dna), cancel=cancel,
         )
         _check_cancel(cancel)
-        commands.append(
+        _add_command(work, commands, 
             "mafft " + {"linsi": "--localpair --maxiterate 1000", "ginsi": "--globalpair --maxiterate 1000",
                         "einsi": "--genafpair --maxiterate 1000", "fft_ns_2": "--retree 2 --maxiterate 0",
                         "auto": "--auto"}.get(strategy, strategy)
@@ -920,40 +1010,61 @@ def _run_in_dir(run_dir, inputs, records, n_input, excluded, dna, outgroup, warn
     support = ""
     say(f"Building the tree ({ENGINE_NAMES[opts.engine]})…")
     if opts.engine == TREE_ENGINE_IQTREE:
-        prefix = work / "iq"
-        cmd = [exe, "-s", str(safe_aln), "-m", opts.model or TREE_MODEL_FINDER,
-               "--seed", str(opts.seed), "-T", str(max(1, opts.threads)),
-               "--prefix", str(prefix), "-redo"]
-        if opts.runs > 1:
-            cmd += ["--runs", str(opts.runs)]
-        if opts.ufboot:
-            cmd += ["-B", str(max(1000, opts.ufboot))]
-            if opts.bnni:
-                cmd.append("-bnni")
-        if opts.alrt:
-            cmd += ["--alrt", str(opts.alrt)]
-        if opts.root_mode == TREE_ROOT_OUTGROUP and safe_outgroup:
-            cmd += ["-o", ",".join(safe_outgroup)]
-        commands.append(" ".join(Path(c).name if i == 0 else c for i, c in enumerate(cmd))
-                        .replace(str(work) + "/", ""))
-        result = run_logged_process(cmd, tool="IQ-TREE", inputs=[safe_aln], cwd=work,
-                                    check=False, cancel=cancel)
-        _check_cancel(cancel)
-        treefile = prefix.with_suffix(".treefile")
-        if result.returncode != 0 or not treefile.is_file():
-            tail = (result.stderr or result.stdout or "").strip()[-800:]
-            raise TreeBuildError(f"IQ-TREE failed (exit {result.returncode}).\n{tail}")
-        report_text = prefix.with_suffix(".iqtree").read_text(encoding="utf-8", errors="replace")
-        model = iqtree_model_from_report(report_text) or opts.model
-        loglik = iqtree_loglik_from_report(report_text)
-        tree_text = treefile.read_text(encoding="utf-8")
-        runtrees = prefix.with_suffix(".runtrees")
-        if opts.runs > 1 and runtrees.is_file():
-            best = read_newick(tree_text)
-            runs_same = sum(
-                1 for _lh, nwk in parse_runtrees(runtrees.read_text(encoding="utf-8"))
-                if rf_distance(best, read_newick(nwk)) == 0
-            )
+        # Independent searches run as separate IQ-TREE processes (seed, seed+1, …)
+        # rather than one ``--runs N`` process: IQ-TREE 3 on macOS exhausts OpenMP
+        # threads when many searches share one process, and a crash in one search
+        # must not lose the others. ModelFinder runs once, in the first search;
+        # later searches reuse the selected model.
+        n_runs = max(1, opts.runs)
+        results: list[tuple[float, str, Path]] = []  # (logL, newick, prefix)
+        model = ""
+        failures: list[str] = []
+        for i in range(n_runs):
+            _check_cancel(cancel)
+            prefix = work / f"run{i + 1}" / "iq"
+            prefix.parent.mkdir()
+            run_model = (opts.model or TREE_MODEL_FINDER) if i == 0 or not model else model
+            cmd = [exe, "-s", str(safe_aln), "-m", run_model, "--seed", str(opts.seed + i),
+                   "--prefix", str(prefix), "-redo"]
+            cmd += iqtree_thread_args(opts.threads)
+            if opts.ufboot:
+                cmd += ["-B", str(max(1000, opts.ufboot))]
+                if opts.bnni:
+                    cmd.append("-bnni")
+            if opts.alrt:
+                cmd += ["--alrt", str(opts.alrt)]
+            if opts.root_mode == TREE_ROOT_OUTGROUP and safe_outgroup:
+                cmd += ["-o", ",".join(safe_outgroup)]
+            _add_command(work, commands, " ".join(Path(c).name if k == 0 else c for k, c in enumerate(cmd))
+                            .replace(str(work) + "/", ""))
+            if n_runs > 1:
+                say(f"Building the tree — search {i + 1} of {n_runs}…")
+            result = run_logged_process(cmd, tool="IQ-TREE", inputs=[safe_aln], cwd=work,
+                                        check=False, cancel=cancel)
+            _check_cancel(cancel)
+            treefile = prefix.with_suffix(".treefile")
+            report_file = prefix.with_suffix(".iqtree")
+            if result.returncode != 0 or not treefile.is_file() or not report_file.is_file():
+                failures.append(summarize_tool_error(
+                    "IQ-TREE", result.returncode, (result.stdout or "") + "\n" + (result.stderr or "")
+                ))
+                if i == 0:
+                    break  # the first search also selects the model; nothing to reuse
+                continue
+            report_text = report_file.read_text(encoding="utf-8", errors="replace")
+            if i == 0:
+                model = iqtree_model_from_report(report_text) or opts.model
+            lnl = iqtree_loglik_from_report(report_text)
+            results.append((lnl if lnl is not None else float("-inf"),
+                            treefile.read_text(encoding="utf-8"), prefix))
+        if not results:
+            raise TreeBuildError(failures[0] if failures else "IQ-TREE produced no tree.")
+        if failures:
+            warnings.append(f"{len(failures)} of {n_runs} IQ-TREE searches failed and were "
+                            f"skipped: {failures[0].splitlines()[0]}")
+        loglik, tree_text, best_prefix = max(results, key=lambda r: r[0])
+        best = read_newick(tree_text)
+        runs_same = sum(1 for _l, nwk, _p in results if rf_distance(best, read_newick(nwk)) == 0)
         parts = []
         if opts.alrt:
             parts.append(f"{opts.alrt} SH-aLRT replicates")
@@ -962,14 +1073,22 @@ def _run_in_dir(run_dir, inputs, records, n_input, excluded, dna, outgroup, warn
                          + (", -bnni" if opts.bnni else "") + ")")
         support = ("Branch support: " + " and ".join(parts) + " (shown as SH-aLRT/UFBoot)."
                    if parts else "No branch support computed.")
-        for ext, suffix in ((".iqtree", ".iqtree"), (".log", ".log")):
-            src = prefix.with_suffix(ext)
-            if src.is_file():
-                text = src.read_text(encoding="utf-8", errors="replace")
-                for sid, name in safe_to_name.items():
-                    text = text.replace(sid, name)
-                out(suffix).write_text(text, encoding="utf-8")
-                created.append(out(suffix))
+        # Keep the report and log of the best search, plus the model selection
+        # (first search) when that was a different one.
+        first_prefix = work / "run1" / "iq"
+        keep = [(best_prefix, "")]
+        if best_prefix != first_prefix and first_prefix.with_suffix(".iqtree").is_file():
+            keep.append((first_prefix, ".modelfinder"))
+        for src_prefix, tag in keep:
+            for ext in (".iqtree", ".log"):
+                src = src_prefix.with_suffix(ext)
+                if src.is_file():
+                    text = src.read_text(encoding="utf-8", errors="replace")
+                    for sid, name in safe_to_name.items():
+                        text = text.replace(sid, name)
+                    dest = out(f"{tag}{ext}")
+                    dest.write_text(text, encoding="utf-8")
+                    created.append(dest)
     elif opts.engine == TREE_ENGINE_FASTME:
         phy = work / "aln.phy"
         _write_phylip(phy, aln_pairs)
@@ -980,30 +1099,30 @@ def _run_in_dir(run_dir, inputs, records, n_input, excluded, dna, outgroup, warn
                f"--seed={opts.seed}", f"--nb_threads={max(1, opts.threads)}"]
         if opts.distance_bootstrap:
             cmd += [f"--bootstrap={opts.distance_bootstrap}", "-B", str(boot_out)]
-        commands.append(" ".join(cmd).replace(str(work) + "/", ""))
+        _add_command(work, commands, " ".join(cmd).replace(str(work) + "/", ""))
         result = run_logged_process(cmd, tool="FastME", inputs=[phy], cwd=work,
                                     check=False, cancel=cancel)
         _check_cancel(cancel)
         if result.returncode != 0 or not main_out.is_file():
-            tail = (result.stderr or result.stdout or "").strip()[-800:]
-            raise TreeBuildError(f"FastME failed (exit {result.returncode}).\n{tail}")
+            raise TreeBuildError(summarize_tool_error(
+                "FastME", result.returncode, (result.stdout or "") + "\n" + (result.stderr or "")))
         tree_text = main_out.read_text(encoding="utf-8").strip().splitlines()[0]
         model = "TN93" if dna else "LG"
         support = (f"Branch support: {opts.distance_bootstrap} nonparametric bootstrap replicates."
                    if opts.distance_bootstrap else "No branch support computed.")
     else:  # FastTree
-        cmd = [exe, "-quiet", "-nopr", "-gamma"]
+        cmd = [exe, "-quiet", "-nopr", "-gamma", "-seed", str(opts.seed)]
         cmd += ["-nt", "-gtr"] if dna else ["-lg"]
         cmd.append(str(safe_aln))
-        commands.append(" ".join(Path(c).name if i == 0 else c for i, c in enumerate(cmd))
+        _add_command(work, commands, " ".join(Path(c).name if i == 0 else c for i, c in enumerate(cmd))
                         .replace(str(work) + "/", "") + " > tree.nwk")
         result = run_logged_process(cmd, tool="FastTree", inputs=[safe_aln], cwd=work,
                                     check=False, cancel=cancel, stdout_is_result=True)
         _check_cancel(cancel)
         tree_text = (result.stdout or "").strip()
         if result.returncode != 0 or not tree_text:
-            tail = (result.stderr or "").strip()[-800:]
-            raise TreeBuildError(f"FastTree failed (exit {result.returncode}).\n{tail}")
+            raise TreeBuildError(summarize_tool_error("FastTree", result.returncode,
+                                                      result.stderr or ""))
         model = "GTR+CAT+Gamma20" if dna else "LG+CAT+Gamma20"
         support = "Branch support: FastTree SH-like local support values (0-1)."
 
