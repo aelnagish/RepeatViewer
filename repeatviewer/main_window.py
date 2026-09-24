@@ -1308,7 +1308,7 @@ class FolderTreeWidget(QTreeWidget):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.horizontalScrollBar().setSingleStep(12)
         self.verticalScrollBar().setSingleStep(12)
-        self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.setWordWrap(False)
         self.setUniformRowHeights(False)
         self.setAnimated(False)

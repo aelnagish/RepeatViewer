@@ -191,6 +191,8 @@ class FileListTableWidget(QTableWidget):
         self.setShowGrid(False)
         self.setAlternatingRowColors(False)
         self.setWordWrap(False)
+        # Long names: keep start + end (extension), elide the middle — like Finder.
+        self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.setSortingEnabled(True)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
@@ -493,6 +495,7 @@ class FileListTableWidget(QTableWidget):
         name_item.setData(_ROLE_PATH, path_text)
         name_item.setIcon(browser_file_icon(self, path))
         name_item.setTextAlignment(_LEFT_ALIGN)
+        name_item.setToolTip(path.name)
         self.setItem(row, _COL_NAME, name_item)
 
         self._apply_file_color_cells(row, path)
