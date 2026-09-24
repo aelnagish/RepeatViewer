@@ -1744,3 +1744,138 @@ def save_msa_clean_options(opts: MsaCleanOptions) -> None:
     s.setValue("gap_row_gap_threshold", gr.gap_threshold)
     s.setValue("gap_row_window_size", gr.window_size)
     s.endGroup()
+
+
+# --------------------------------------------------------------------------
+# Tree (phylogenetic tree builder)
+# --------------------------------------------------------------------------
+
+TREE_ENGINE_IQTREE = "iqtree"
+TREE_ENGINE_FASTME = "fastme"
+TREE_ENGINE_FASTTREE = "fasttree"
+TREE_ENGINES = (TREE_ENGINE_IQTREE, TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE)
+
+TREE_ALIGN_AUTO = "auto"      # align unless the input is already an alignment
+TREE_ALIGN_ALWAYS = "always"
+TREE_ALIGN_NEVER = "never"    # input must already be aligned
+TREE_ALIGN_MODES = (TREE_ALIGN_AUTO, TREE_ALIGN_ALWAYS, TREE_ALIGN_NEVER)
+
+TREE_ROOT_NONE = "none"
+TREE_ROOT_OUTGROUP = "outgroup"
+TREE_ROOT_MIDPOINT = "midpoint"
+TREE_ROOT_MODES = (TREE_ROOT_NONE, TREE_ROOT_OUTGROUP, TREE_ROOT_MIDPOINT)
+
+TREE_MODEL_FINDER = "MFP"      # IQ-TREE ModelFinder, best model by BIC
+
+TREE_RIGHT_CLICK_RUN = "run"
+TREE_RIGHT_CLICK_DIALOG = "dialog"
+TREE_RIGHT_CLICK_ACTIONS = (TREE_RIGHT_CLICK_RUN, TREE_RIGHT_CLICK_DIALOG)
+
+
+@dataclass
+class TreeOptions:
+    """Phylogenetic tree building (Tools → Tree).
+
+    Defaults follow current practice for a publishable tree: MAFFT L-INS-i with
+    strand adjustment, IQ-TREE with ModelFinder (BIC), several independent
+    searches, SH-aLRT + UFBoot2 (-bnni) branch support and a fixed seed.
+    """
+
+    # Alignment
+    align_mode: str = TREE_ALIGN_AUTO
+    mafft_strategy: str = "linsi"
+    adjust_direction: bool = True
+    mafft_gap_open: float = 1.53
+    mafft_offset: float = 0.0
+    min_coverage: float = 0.7          # fraction of the median length; 0 = off
+    # Tree
+    engine: str = TREE_ENGINE_IQTREE
+    model: str = TREE_MODEL_FINDER
+    runs: int = 5
+    seed: int = 12345
+    threads: int = field(default_factory=_default_tool_threads)
+    # Support and rooting
+    ufboot: int = 1000
+    alrt: int = 1000
+    bnni: bool = True
+    distance_bootstrap: int = 100      # FastME bootstrap replicates
+    root_mode: str = TREE_ROOT_NONE
+    outgroup: list[str] = field(default_factory=list)
+    # Options tab
+    right_click_action: str = TREE_RIGHT_CLICK_RUN
+    show_process_window: bool = False
+    use_system_mafft: bool = False
+    use_system_path: bool = False      # tree programs: system PATH only
+
+
+def load_tree_options() -> TreeOptions:
+    v = _load_settings_group("tree")
+    d = TreeOptions()
+
+    def _pick(key: str, allowed: tuple[str, ...], default: str) -> str:
+        value = str(v.get(key, default))
+        return value if value in allowed else default
+
+    def _num(key: str, default, cast, lo, hi):
+        try:
+            return max(lo, min(hi, cast(v.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    outgroup = v.get("outgroup") or []
+    if isinstance(outgroup, str):
+        outgroup = [x for x in outgroup.split(",") if x]
+    return TreeOptions(
+        align_mode=_pick("align_mode", TREE_ALIGN_MODES, d.align_mode),
+        mafft_strategy=str(v.get("mafft_strategy", d.mafft_strategy)),
+        adjust_direction=_to_bool(v.get("adjust_direction"), d.adjust_direction),
+        mafft_gap_open=_num("mafft_gap_open", d.mafft_gap_open, float, 0.0, 20.0),
+        mafft_offset=_num("mafft_offset", d.mafft_offset, float, 0.0, 10.0),
+        min_coverage=_num("min_coverage", d.min_coverage, float, 0.0, 1.0),
+        engine=_pick("engine", TREE_ENGINES, d.engine),
+        model=str(v.get("model", d.model) or d.model).strip(),
+        runs=_num("runs", d.runs, int, 1, 100),
+        seed=_num("seed", d.seed, int, 1, 2_000_000_000),
+        threads=_num("threads", _default_tool_threads(), int, 1, 256),
+        ufboot=_num("ufboot", d.ufboot, int, 0, 100_000),
+        alrt=_num("alrt", d.alrt, int, 0, 100_000),
+        bnni=_to_bool(v.get("bnni"), d.bnni),
+        distance_bootstrap=_num("distance_bootstrap", d.distance_bootstrap, int, 0, 10_000),
+        root_mode=_pick("root_mode", TREE_ROOT_MODES, d.root_mode),
+        outgroup=[str(x) for x in outgroup],
+        right_click_action=_pick(
+            "right_click_action", TREE_RIGHT_CLICK_ACTIONS, d.right_click_action
+        ),
+        show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
+        use_system_mafft=_to_bool(v.get("use_system_mafft"), d.use_system_mafft),
+        use_system_path=_to_bool(v.get("use_system_path"), d.use_system_path),
+    )
+
+
+def save_tree_options(opts: TreeOptions) -> None:
+    _save_settings_group(
+        "tree",
+        {
+            "align_mode": opts.align_mode,
+            "mafft_strategy": opts.mafft_strategy,
+            "adjust_direction": opts.adjust_direction,
+            "mafft_gap_open": opts.mafft_gap_open,
+            "mafft_offset": opts.mafft_offset,
+            "min_coverage": opts.min_coverage,
+            "engine": opts.engine,
+            "model": opts.model,
+            "runs": opts.runs,
+            "seed": opts.seed,
+            "threads": opts.threads,
+            "ufboot": opts.ufboot,
+            "alrt": opts.alrt,
+            "bnni": opts.bnni,
+            "distance_bootstrap": opts.distance_bootstrap,
+            "root_mode": opts.root_mode,
+            "outgroup": list(opts.outgroup),
+            "right_click_action": opts.right_click_action,
+            "show_process_window": opts.show_process_window,
+            "use_system_mafft": opts.use_system_mafft,
+            "use_system_path": opts.use_system_path,
+        },
+    )

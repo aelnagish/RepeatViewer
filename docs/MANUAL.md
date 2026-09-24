@@ -701,6 +701,70 @@ slow. Requires FastGA on `PATH`.
 | Repeat cutoff (`-f`) | Repeat masking threshold |
 | Threads | Parallelism |
 
+### Tree
+
+**Toolbar: Tree (add it in File → Setting → Toolbar) · Tools → Tree**
+
+Builds a phylogenetic tree from the selected FASTA file(s). Several selected
+files are combined into one tree. RepeatViewer prepares the input, checks it
+and writes the report; established programs do the computing:
+
+- **MAFFT** (bundled) aligns unaligned input.
+- **IQ-TREE** (maximum likelihood, recommended), **FastME** (balanced minimum
+  evolution) or **FastTree** (approximate ML, for more than ~1,000 sequences)
+  builds the tree.
+
+The tree programs are not bundled. Install them into the conda environment
+set in **File → Setting → External tools**:
+
+```bash
+conda install -c bioconda iqtree fastme fasttree
+```
+
+If the chosen program is missing, the run stops with this hint. It never
+falls back silently to a weaker method.
+
+Left-click opens the dialog; right-click builds with saved parameters (or
+opens the dialog, chosen in the Options tab). The strip at the top of the
+dialog checks the input before anything runs: number of sequences, whether
+they are already aligned, informative sites, and how many fragments the
+length filter will exclude.
+
+| Tab | Setting | Default | Why |
+|-----|---------|---------|-----|
+| Alignment | Alignment | Align if not already aligned | Equal-length input is used as an alignment |
+| | MAFFT strategy | L-INS-i | Accurate up to ~200 sequences; FFT-NS-2 for larger sets |
+| | Adjust direction | On | TE/satellite copies from the other strand are reverse-complemented instead of looking extremely divergent |
+| | Minimum length | 70 % of the median | Fragments (5'-truncated copies) are excluded, listed in the report and saved to `.excluded.fa` |
+| | More options: `--op` / `--ep` | 1.53 / 0 | MAFFT defaults; change only with a reason |
+| Tree | Method | IQ-TREE | |
+| | Substitution model | ModelFinder, best by BIC | The chosen model goes into the report |
+| | Independent searches | 5 | IQ-TREE `--runs`; the report says how many found the same topology |
+| | Random seed | 12345 | Recorded, so the run can be repeated exactly |
+| Support and rooting | SH-aLRT / UFBoot2 | 1000 / 1000, `-bnni` | Shown as SH-aLRT/UFBoot; commonly trusted at ≥ 80 / ≥ 95 |
+| | Bootstrap (FastME) | 100 | Trusted at ≥ 70 |
+| | Root | None | Outgroup (tick one or more sequences) or midpoint |
+| Options | Right-click action, process window, MAFFT / tree programs from `PATH` | | |
+
+**Output** — every run writes a new folder next to the input,
+`<input>_tree_<date>_<time>/`. All files keep the full input name:
+
+| File | Content |
+|------|---------|
+| `<input>_tree_report.html` | Tree, run report, warnings, methods text, citations (opened automatically) |
+| `<input>_tree.treefile` | Newick with support values, for FigTree / iTOL / ggtree |
+| `<input>_tree.svg` / `.pdf` / `.png` | Tree figure |
+| `<input>_tree.aln.fa` | The alignment the tree was built from |
+| `<input>_tree.iqtree` / `.log` | IQ-TREE report and log (IQ-TREE only) |
+| `<input>_tree_methods.txt` | Ready-to-edit methods paragraph with references |
+| `<input>_tree_commands.txt` | Program versions and exact command lines |
+| `<input>_tree.names.tsv` | Tree names ↔ original FASTA headers |
+| `<input>_tree.excluded.fa` | Fragments removed by the length filter (if any) |
+
+Rooting keeps each support value on its branch (a common mistake when
+rerooting Newick trees). If several outgroup sequences do not form one clade,
+the report warns that the root position is uncertain.
+
 ### Open in AliView
 
 **Tools → Open in AliView**
