@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -427,9 +428,8 @@ class SettingsDialog(QDialog):
         self._batch_workers.setRange(1, 32)
         self._batch_workers.setValue(project.batch_workers)
         self._batch_workers.setToolTip(
-            "When several FASTA files are selected, run this many sequences in parallel. "
-            "BLAST and TE-Aid thread counts are derived from CPU cores minus a small "
-            f"reserve for {APP_DISPLAY_NAME}, divided by this worker count."
+            "How many selected sequences can run at the same time (not CPU threads "
+            "inside one BLAST)."
         )
         self._browser_panel_font = NoWheelSpinBox()
         self._browser_panel_font.setRange(8, 16)
@@ -647,6 +647,45 @@ class SettingsDialog(QDialog):
         ):
             widget.setFixedWidth(_FIELD_WIDTH)
 
+        def _help_button(title: str, help_text: str) -> QToolButton:
+            """Circular ? control matching MSA clean dialogs."""
+            button = QToolButton(self)
+            button.setText("?")
+            button.setToolTip(help_text)
+            button.setAutoRaise(False)
+            button.setFixedSize(22, 22)
+            button.setStyleSheet(
+                "QToolButton {"
+                "  border: 1px solid palette(mid);"
+                "  border-radius: 10px;"
+                "  background: palette(base);"
+                "  font-weight: 600;"
+                "  padding: 0px;"
+                "}"
+                "QToolButton:hover { background: palette(alternate-base); }"
+            )
+            button.clicked.connect(
+                lambda checked=False, t=title, text=help_text: QMessageBox.information(
+                    self, t, text
+                )
+            )
+            return button
+
+        def _field_with_help(
+            field: QWidget,
+            *,
+            help_title: str,
+            help_text: str,
+        ) -> QWidget:
+            wrap = QWidget(self)
+            row = QHBoxLayout(wrap)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            row.addWidget(field, 0)
+            row.addWidget(_help_button(help_title, help_text), 0)
+            row.addStretch(1)
+            return wrap
+
         def _group(title: str, rows: list) -> QGroupBox:
             box = QGroupBox(title)
             f = QFormLayout(box)
@@ -690,8 +729,24 @@ class SettingsDialog(QDialog):
             ("Default preview fit:", self._preview_fit),
             ("Default FASTA preview tab:", self._fasta_default_tab),
         ])
+        parallel_jobs_help = (
+            "How many selected sequences can run at the same time.\n\n"
+            "Example — BLAST:\n"
+            "If you select 10 FASTA files and set this to 3, RepeatViewer starts "
+            "BLAST on three sequences in parallel. When one finishes, the next "
+            "waiting sequence starts, until all 10 are done.\n\n"
+            "This is not the Threads setting in the BLAST dialog, which controls "
+            "CPU threads inside each individual BLAST process."
+        )
         performance = _group("Performance", [
-            ("Threads for tools:", self._batch_workers),
+            (
+                "Max. parallel jobs:",
+                _field_with_help(
+                    self._batch_workers,
+                    help_title="Maximum parallel jobs",
+                    help_text=parallel_jobs_help,
+                ),
+            ),
             ("Threads for the UI:", self._ui_thread_reserve),
         ])
         startup = _group("Startup", [

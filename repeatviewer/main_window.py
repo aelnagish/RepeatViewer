@@ -2243,6 +2243,11 @@ class MainWindow(QMainWindow):
     def _on_watched_directory_changed(self, directory: str) -> None:
         if time.monotonic() < self._watcher_refresh_suppressed_until:
             return
+        # Tool jobs write many files into the open folder. Rebuilding a large
+        # file list on every change slows the job (disk + CPU) and freezes browsing.
+        # Refresh once when the job finishes instead.
+        if self._any_background_job_running():
+            return
         self._pending_fs_refresh_dir = directory
         self._fs_refresh_timer.start()
 
@@ -2250,6 +2255,8 @@ class MainWindow(QMainWindow):
         directory = self._pending_fs_refresh_dir
         self._pending_fs_refresh_dir = None
         if directory is None:
+            return
+        if self._any_background_job_running():
             return
         changed = Path(directory).expanduser().resolve()
         refreshed = False
@@ -6242,7 +6249,7 @@ class MainWindow(QMainWindow):
             len(visible),
             len(self._cached_folder_files),
         )
-        if fill_metadata:
+        if fill_metadata and not self._any_background_job_running():
             self._start_metadata_enrichment(visible)
 
     def _stop_metadata_enrichment(self) -> None:
@@ -11296,6 +11303,7 @@ class MainWindow(QMainWindow):
 
         self._last_job_source_files = list(prepared_sources)
         self._clear_job_file_highlights()
+        self._stop_metadata_enrichment()
         self._job_cancel.reset()
         self._show_job_progress(job_title, total_steps)
         self._set_job_actions_enabled(False)
