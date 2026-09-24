@@ -44,7 +44,7 @@ NUCLEOTIDE_COLORS_DEFAULT: dict[str, str] = {
     **{letter: "#FFFFFF" for letter in _NUCLEOTIDE_AMBIGUITY_LETTERS},
 }
 
-# Same Wong / Paul Tol palette as Preferences → Color-blind nucleotide.
+# Same Wong / Paul Tol palette as Annotation nucleotide Color-blind.
 NUCLEOTIDE_COLORS_COLORBLIND: dict[str, str] = {
     "A": "#E69F00",
     "C": "#0072B2",

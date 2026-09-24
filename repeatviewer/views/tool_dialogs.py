@@ -2626,6 +2626,11 @@ class BlastParamsDialog(QDialog):
         opts = initial or BlastOptions()
         self._initial_program = opts.program
 
+        # Always show the latest Manage-BLAST list (and current genome name).
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+
+        reload_blast_databases_into_project(self._project)
+
         self._tabs = QTabWidget()
         self._blastn_database = QComboBox()
         self._blastp_database = QComboBox()
@@ -2975,9 +2980,28 @@ class BlastParamsDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        # Refresh in case Manage / Add ran while this dialog was constructed,
+        # and pick up a newly defined genome for the "Current genome" row.
+        self._refresh_database_combos()
         # After dialog polish's adjustSize(), shrink to the active tab so the
         # wider Options page does not leave blank space on BLASTn/p/x.
         QTimer.singleShot(0, self._fit_to_content)
+
+    def _refresh_database_combos(
+        self,
+        *,
+        blastn_name=_KEEP_CURRENT,
+        blastp_name=_KEEP_CURRENT,
+        blastx_name=_KEEP_CURRENT,
+    ) -> None:
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+
+        reload_blast_databases_into_project(self._project)
+        self._populate_database_combos(
+            blastn_name=blastn_name,
+            blastp_name=blastp_name,
+            blastx_name=blastx_name,
+        )
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -3127,9 +3151,22 @@ class BlastParamsDialog(QDialog):
     def _manage_databases(self) -> None:
         from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
 
-        dialog = BlastDatabaseManagerDialog(self._project, parent=self)
-        exec_modal_dialog(dialog)
-        self._populate_database_combos()
+        # Non-modal manager (and Add dialog) so Files-panel clicks can fill FASTA.
+        existing = getattr(self, "_blast_manager_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = BlastDatabaseManagerDialog(self._project, parent=self.window())
+        self._blast_manager_dialog = dialog
+        dialog.finished.connect(self._on_blast_manager_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_blast_manager_finished(self, _result: int = 0) -> None:
+        self._blast_manager_dialog = None
+        self._refresh_database_combos()
 
     def _restore_defaults(self) -> None:
         defaults = BlastOptions()
@@ -4351,10 +4388,14 @@ class TeaAidParamsDialog(QDialog):
     BLAST settings and hit colors; the Options tab sets right-click behavior.
     """
 
+    _FASTA_FILTER = "FASTA (*.fa *.fasta *.fna *.fas);;All files (*)"
+
     def __init__(
         self,
         *,
         initial: TeaAidOptions | None = None,
+        project_genome: Path | None = None,
+        genome_history: list[Path] | None = None,
         for_run: bool = True,
         parent=None,
     ) -> None:
@@ -4367,6 +4408,43 @@ class TeaAidParamsDialog(QDialog):
         high_pct, mid_pct = clamp_teaid_hit_len_pct(
             opts.hit_len_high_pct, opts.hit_len_mid_pct
         )
+
+        # Genome selector: empty means use the project genome from Define Genome.
+        self._genome_combo = QComboBox()
+        self._genome_combo.setFixedWidth(320)
+        self._genome_combo.addItem("Default (project genome)", "")
+        project_genome_str = (
+            str(project_genome.expanduser().resolve())
+            if project_genome is not None and project_genome.is_file()
+            else ""
+        )
+        if project_genome_str:
+            self._genome_combo.addItem(project_genome.name, project_genome_str)
+        for path in genome_history or []:
+            if not path.is_file():
+                continue
+            resolved = str(path.expanduser().resolve())
+            if resolved == project_genome_str:
+                continue
+            self._genome_combo.addItem(path.name, resolved)
+        if opts.genome_path:
+            index = self._genome_combo.findData(opts.genome_path)
+            if index >= 0:
+                self._genome_combo.setCurrentIndex(index)
+            else:
+                self._genome_combo.addItem(Path(opts.genome_path).name, opts.genome_path)
+                self._genome_combo.setCurrentIndex(self._genome_combo.count() - 1)
+
+        genome_browse = QPushButton("Browse…", self)
+        genome_browse.setFixedWidth(88)
+        genome_browse.clicked.connect(self._browse_genome)
+
+        genome_row = QWidget(self)
+        genome_layout = QHBoxLayout(genome_row)
+        genome_layout.setContentsMargins(0, 0, 0, 0)
+        genome_layout.setSpacing(6)
+        genome_layout.addWidget(self._genome_combo, stretch=1)
+        genome_layout.addWidget(genome_browse)
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
@@ -4502,6 +4580,7 @@ class TeaAidParamsDialog(QDialog):
         )
         params_form.setHorizontalSpacing(12)
         params_form.setVerticalSpacing(8)
+        params_form.addRow("Genome:", genome_row)
         params_form.addRow("Genome BLAST E-value:", self._evalue)
         params_form.addRow("Self BLAST word size:", self._word_size)
         params_layout.addLayout(params_form)
@@ -4604,6 +4683,7 @@ class TeaAidParamsDialog(QDialog):
             self._hit_mid_pct.blockSignals(False)
 
     def _restore_defaults(self) -> None:
+        self._genome_combo.setCurrentIndex(0)
         self._evalue.setValue(DEFAULT_TEAID_EVALUE)
         self._word_size.setValue(DEFAULT_TEAID_SELF_BLAST_WORD_SIZE)
         self._hit_high_pct.blockSignals(True)
@@ -4618,6 +4698,23 @@ class TeaAidParamsDialog(QDialog):
         self._update_hit_color_button(self._hit_color_mid_btn, self._hit_color_mid)
         self._right_click_buttons[TEAID_RIGHT_CLICK_RUN].setChecked(True)
 
+    def _browse_genome(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select genome FASTA",
+            str(Path.home()),
+            self._FASTA_FILTER,
+        )
+        if not chosen:
+            return
+        resolved = str(Path(chosen).expanduser().resolve())
+        index = self._genome_combo.findData(resolved)
+        if index >= 0:
+            self._genome_combo.setCurrentIndex(index)
+        else:
+            self._genome_combo.addItem(Path(chosen).name, resolved)
+            self._genome_combo.setCurrentIndex(self._genome_combo.count() - 1)
+
     def options(self) -> TeaAidOptions:
         high_pct, mid_pct = clamp_teaid_hit_len_pct(
             self._hit_high_pct.value(), self._hit_mid_pct.value()
@@ -4627,6 +4724,7 @@ class TeaAidParamsDialog(QDialog):
             if radio.isChecked():
                 right_click_action = value
                 break
+        genome_path = self._genome_combo.currentData() or None
         return TeaAidOptions(
             e_value=normalize_blast_evalue(
                 self._evalue.value(),
@@ -4639,6 +4737,7 @@ class TeaAidParamsDialog(QDialog):
             hit_color_high=self._hit_color_high or DEFAULT_TEAID_HIT_COLOR_HIGH,
             hit_color_mid=self._hit_color_mid or DEFAULT_TEAID_HIT_COLOR_MID,
             right_click_action=right_click_action,
+            genome_path=genome_path,
         )
 
 
@@ -6358,7 +6457,7 @@ class MsaPlotDialog(QDialog):
         nuc_presets.addWidget(nuc_preset_label)
         nuc_tips = {
             "Default": "Standard A/C/G/T colours",
-            "Color-blind": "Wong / Paul Tol palette (same as Preferences → Color-blind nucleotide)",
+            "Color-blind": "Wong / Paul Tol palette (same as Annotation → nucleotide Color-blind)",
         }
         for label, palette in NUCLEOTIDE_COLOR_PRESETS:
             btn = QPushButton(label, self)

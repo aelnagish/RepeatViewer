@@ -40,12 +40,13 @@ from repeatviewer.project import (
     BlastDatabase,
     RepeatViewerProject,
 )
-from repeatviewer.views.tool_dialogs import exec_modal_dialog
 
 _MOLECULE_LABELS = {
     BLAST_MOLECULE_NUCL: "Nucleotide",
     BLAST_MOLECULE_PROT: "Protein",
 }
+
+_FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".faa"}
 
 
 class _BuildDatabaseWorker(QObject):
@@ -85,7 +86,11 @@ class _BuildDatabaseWorker(QObject):
 
 
 class AddBlastDatabaseDialog(QDialog):
-    """Pick a FASTA + name, build the BLAST index in the background."""
+    """Pick a FASTA + name, build the BLAST index in the background.
+
+    Non-modal so a click in the Files panel can fill the FASTA path (same
+    pattern as Add annotation / Define database).
+    """
 
     def __init__(
         self,
@@ -99,6 +104,9 @@ class AddBlastDatabaseDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Add BLAST database")
         self.setMinimumWidth(480)
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self._existing_names = {n.strip().lower() for n in existing_names}
         self._use_system_blast = use_system_blast
         self._result_db: BlastDatabase | None = None
@@ -112,7 +120,10 @@ class AddBlastDatabaseDialog(QDialog):
         self._name = QLineEdit(self)
         self._name.setPlaceholderText("Database name")
         self._fasta = QLineEdit(self)
-        self._fasta.setPlaceholderText("FASTA file")
+        self._fasta.setPlaceholderText("Click a FASTA in Files, or Browse")
+        self._fasta.setToolTip(
+            "Click a FASTA file in the Files panel to fill this path, or use Browse."
+        )
         browse_btn = QPushButton("Browse", self)
         browse_btn.clicked.connect(self._browse)
         fasta_row = QWidget(self)
@@ -130,8 +141,7 @@ class AddBlastDatabaseDialog(QDialog):
             self._molecule_type = combo
 
         if initial_fasta is not None:
-            self._fasta.setText(str(initial_fasta))
-            self._name.setText(initial_fasta.stem)
+            self.apply_path_from_panel(initial_fasta)
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -153,17 +163,40 @@ class AddBlastDatabaseDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(self._buttons)
 
+    def apply_path_from_panel(self, path: Path) -> bool:
+        """Fill FASTA (and default Name) from a Files-panel click."""
+        resolved = path.expanduser().resolve()
+        if not resolved.is_file():
+            return False
+        if resolved.suffix.lower() not in _FASTA_SUFFIXES:
+            return False
+        current = self._fasta.text().strip()
+        if current and Path(current).expanduser().resolve() == resolved:
+            return False
+        self._fasta.setText(str(resolved))
+        if not self._name.text().strip():
+            self._name.setText(resolved.stem)
+        # Protein FASTA often uses .faa — switch type when obvious.
+        if (
+            self._molecule_type is not None
+            and resolved.suffix.lower() == ".faa"
+        ):
+            index = self._molecule_type.findData(BLAST_MOLECULE_PROT)
+            if index >= 0:
+                self._molecule_type.setCurrentIndex(index)
+        return True
+
     def _browse(self) -> None:
+        start = self._fasta.text().strip()
+        start_dir = str(Path(start).expanduser().parent) if start else str(Path.home())
         chosen, _ = QFileDialog.getOpenFileName(
             self,
             "Choose FASTA file",
-            str(Path.home()),
-            "FASTA (*.fa *.fasta *.fna *.faa);;All files (*)",
+            start_dir,
+            "FASTA (*.fa *.fasta *.fna *.fas *.faa);;All files (*)",
         )
         if chosen:
-            self._fasta.setText(chosen)
-            if not self._name.text().strip():
-                self._name.setText(Path(chosen).stem)
+            self.apply_path_from_panel(Path(chosen))
 
     def result_database(self) -> BlastDatabase | None:
         return self._result_db
@@ -273,7 +306,12 @@ class BlastDatabaseManagerDialog(QDialog):
         self.setWindowTitle("Manage BLAST databases")
         self.setMinimumWidth(640)
         self.setMinimumHeight(360)
+        # Non-modal so Add Database can receive Files-panel clicks underneath.
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self._project = project
+        self._add_dialog: AddBlastDatabaseDialog | None = None
 
         self._table = QTableWidget(0, 5, self)
         self._table.setHorizontalHeaderLabels(
@@ -310,6 +348,17 @@ class BlastDatabaseManagerDialog(QDialog):
         self._populate()
         self._update_buttons()
 
+    def apply_path_from_panel(self, path: Path) -> bool:
+        """Forward Files-panel clicks to an open Add dialog."""
+        dialog = self._add_dialog
+        if dialog is None or not dialog.isVisible():
+            return False
+        if dialog.apply_path_from_panel(path):
+            dialog.raise_()
+            dialog.activateWindow()
+            return True
+        return False
+
     def _populate(self) -> None:
         self._table.setRowCount(0)
         for db in self._project.blast_databases:
@@ -338,13 +387,28 @@ class BlastDatabaseManagerDialog(QDialog):
         save_blast_databases_to_settings(self._project.blast_databases)
 
     def _add_database(self) -> None:
+        if self._add_dialog is not None and self._add_dialog.isVisible():
+            self._add_dialog.raise_()
+            self._add_dialog.activateWindow()
+            return
         existing_names = {db.name for db in self._project.blast_databases}
         dialog = AddBlastDatabaseDialog(
             existing_names=existing_names,
             use_system_blast=self._project.use_system_blast,
             parent=self,
         )
-        if not exec_modal_dialog(dialog):
+        self._add_dialog = dialog
+        dialog.finished.connect(self._on_add_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_add_dialog_finished(self, result: int) -> None:
+        dialog = self._add_dialog
+        self._add_dialog = None
+        if dialog is None:
+            return
+        if result != int(QDialog.DialogCode.Accepted):
             return
         db = dialog.result_database()
         if db is None:

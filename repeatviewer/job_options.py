@@ -598,6 +598,8 @@ class TeaAidOptions:
     hit_color_high: str = DEFAULT_TEAID_HIT_COLOR_HIGH
     hit_color_mid: str = DEFAULT_TEAID_HIT_COLOR_MID
     right_click_action: str = TEAID_RIGHT_CLICK_RUN
+    # Single-genome mode: empty means use the project genome from Define Genome.
+    genome_path: str | None = None
 
 
 # remove_gaps_with_similarity_check defaults (TEtrimmerGUI)
@@ -997,6 +999,7 @@ def load_teaid_options() -> TeaAidOptions:
     right_click_action = str(v.get("right_click_action", TEAID_RIGHT_CLICK_RUN))
     if right_click_action not in TEAID_RIGHT_CLICK_ACTIONS:
         right_click_action = TEAID_RIGHT_CLICK_RUN
+    genome_path = v.get("genome_path")
     return TeaAidOptions(
         e_value=normalize_blast_evalue(
             float(v.get("e_value", DEFAULT_TEAID_EVALUE)),
@@ -1019,6 +1022,7 @@ def load_teaid_options() -> TeaAidOptions:
             or DEFAULT_TEAID_HIT_COLOR_MID
         ),
         right_click_action=right_click_action,
+        genome_path=str(genome_path).strip() if genome_path else None,
     )
 
 
@@ -1041,6 +1045,7 @@ def save_teaid_options(opts: TeaAidOptions) -> None:
                 if opts.right_click_action in TEAID_RIGHT_CLICK_ACTIONS
                 else TEAID_RIGHT_CLICK_RUN
             ),
+            "genome_path": opts.genome_path or "",
         },
     )
 

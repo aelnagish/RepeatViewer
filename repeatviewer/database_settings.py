@@ -13,6 +13,7 @@ from repeatviewer.project import (
     DATABASE_TYPE_HMM,
     DATABASE_TYPE_PROTEIN,
     BlastDatabase,
+    RepeatViewerProject,
     UserDatabase,
 )
 
@@ -139,6 +140,17 @@ def load_blast_databases_from_settings() -> list[BlastDatabase]:
                 created_at=str(item.get("created_at", "")),
             )
         )
+    return databases
+
+
+def reload_blast_databases_into_project(project: RepeatViewerProject) -> list[BlastDatabase]:
+    """Replace ``project.blast_databases`` with the latest saved list.
+
+    Call before showing the BLAST Database dropdown so Manage / Add / Remove
+    (and other windows) always appear in the Run dialog.
+    """
+    databases = load_blast_databases_from_settings()
+    project.blast_databases = databases
     return databases
 
 

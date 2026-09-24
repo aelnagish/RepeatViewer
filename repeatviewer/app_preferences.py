@@ -106,13 +106,75 @@ def config_dir() -> Path:
     return Path(base) / "RepeatViewer"
 
 
+def _legacy_teviewer_blast_db_dir() -> Path:
+    """Pre-rename app stored named BLAST indexes here (not used as the default)."""
+    base = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    return Path(base) / "TEviewer" / "blast_databases"
+
+
+def _obsolete_hidden_blast_db_dirs() -> frozenset[Path]:
+    """Old defaults under ``.config`` — still readable, but not the default."""
+    paths: list[Path] = []
+    for raw in (config_dir() / "blast_databases", _legacy_teviewer_blast_db_dir()):
+        try:
+            paths.append(raw.expanduser().resolve())
+        except OSError:
+            paths.append(raw.expanduser())
+    return frozenset(paths)
+
+
+def default_blast_db_base_dir() -> Path:
+    """Named BLAST indexes: ``Documents/RepeatViewer/blast_databases`` on all OSes.
+
+    Uses the platform Documents folder (macOS / Linux / Windows), not hidden
+    ``.config`` or ``AppData``.
+    """
+    try:
+        from PySide6.QtCore import QStandardPaths
+
+        documents = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation
+        )
+        if documents:
+            return Path(documents) / "RepeatViewer" / "blast_databases"
+    except Exception:
+        pass
+    return Path.home() / "Documents" / "RepeatViewer" / "blast_databases"
+
+
+def _dir_has_entries(path: Path) -> bool:
+    try:
+        return path.is_dir() and any(path.iterdir())
+    except OSError:
+        return False
+
+
 def load_blast_db_base_dir() -> Path:
+    """Return the folder for new named BLAST databases.
+
+    Preference order:
+    1. Explicit Preferences path (unless it is an obsolete empty ``.config`` default)
+    2. ``Documents/RepeatViewer/blast_databases`` on every platform
+    """
     s = QSettings()
     s.beginGroup(APP_SETTINGS_GROUP)
     value = s.value("blast_db_base_dir")
     s.endGroup()
     text = str(value).strip() if value else ""
-    return Path(text).expanduser() if text else config_dir() / "blast_databases"
+    documents_default = default_blast_db_base_dir()
+
+    if text:
+        path = Path(text).expanduser()
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        # Migrate away from the old hidden default when that folder is unused.
+        if resolved in _obsolete_hidden_blast_db_dirs() and not _dir_has_entries(path):
+            return documents_default
+        return path
+
+    return documents_default
 
 
 def save_blast_db_base_dir(path: Path) -> None:

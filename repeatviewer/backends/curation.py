@@ -217,11 +217,17 @@ def _genome_work_items(
     project: RepeatViewerProject,
     func_name: str,
     extend: ExtendOptions | None = None,
+    teaid: TeaAidOptions | None = None,
 ) -> list[tuple[str, Path]]:
     """Return ``(label, fasta_path)`` pairs for one batch job."""
     if not project.is_pan_genome_mode:
+        override_path = None
         if func_name == "extend" and extend and extend.genome_path:
-            path = Path(extend.genome_path).expanduser().resolve()
+            override_path = extend.genome_path
+        elif func_name == "teaid" and teaid and teaid.genome_path:
+            override_path = teaid.genome_path
+        if override_path:
+            path = Path(override_path).expanduser().resolve()
             if path.is_file():
                 return [("", path)]
             raise RuntimeError(f"Genome file not found: {path}")
@@ -1085,7 +1091,9 @@ def run_batch(
     elif genome_dependent:
         if not project.has_genome_configured():
             raise RuntimeError("Genome FASTA is required for this tool.")
-        genome_items = _genome_work_items(project, func_name, extend)
+        genome_items = _genome_work_items(
+            project, func_name, extend, teaid=teaid_options
+        )
         db_cache, chrom_cache = _prepare_genome_resources(
             func_name, genome_items, project, os_type, cancel=cancel
         )
