@@ -922,7 +922,7 @@ class TreeWorker(QObject):
                 run_dir, files, report = build_tree_run(
                     self._seq_files, self._options, progress=_progress, cancel=self._cancel
                 )
-            self.finished.emit({"run_dir": str(run_dir), "files": [str(f) for f in files],
+            self.finished.emit({"details_dir": str(run_dir), "files": [str(f) for f in files],
                                 "report": str(report)})
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
@@ -3801,7 +3801,8 @@ class MainWindow(QMainWindow):
         report = Path(result["report"])
         created = [Path(p) for p in result["files"] if Path(p).is_file()]
         if self._current_folder:
-            # Each run creates a new timestamped folder; show it in the tree.
+            # New results sit next to the input (green); the report opens (deep blue).
+            # Supporting files are in a new <input>_tree_details folder.
             self._refresh_subfolders_under(self._current_folder)
             self._populate_file_list(
                 self._current_folder,
@@ -3812,7 +3813,7 @@ class MainWindow(QMainWindow):
         if report.is_file():
             self._auto_open_outputs([report])
         self._set_status_message(
-            f"Tree completed — {Path(result['run_dir']).name}", 12000, override_file_link=True
+            f"Tree completed — {report.name}", 12000, override_file_link=True
         )
 
     @Slot(str)

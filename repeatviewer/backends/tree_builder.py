@@ -12,11 +12,13 @@ RepeatViewer prepares, checks and reports; established programs compute:
 Nothing is silently downgraded: a missing engine is an error with an install
 hint, never a quiet switch to a weaker method.
 
-Every run writes a timestamped folder next to the input,
-``<input name>_tree_<stamp>/``, whose files keep the full input name:
-``<input>_tree.treefile``, ``.aln.fa``, ``.svg/.pdf/.png``, ``_report.html``,
-``.iqtree`` / ``.log`` (IQ-TREE), ``.names.tsv``, ``_methods.txt``,
-``_commands.txt``.
+Like every RepeatViewer tool, the results go next to the input and keep the
+full input name, so the file panel can show them green and open the report:
+``<input>_tree_report.html``, ``<input>_tree.treefile``, ``<input>_tree.pdf`` /
+``.svg`` / ``.png`` and ``<input>_tree.aln.fa``. Supporting files (IQ-TREE
+``.iqtree`` / ``.log``, ``.names.tsv``, ``_methods.txt``, ``_commands.txt``,
+``.excluded.fa``) go into ``<input>_tree_details/``. A second run on the same
+input becomes ``<input>_tree_2…`` — nothing is overwritten.
 
 Pure functions (checks, statistics, split handling, rooting, reports) have no
 Qt dependency and are unit-tested in ``tests/test_tree_builder.py``.
@@ -527,18 +529,39 @@ def output_base_name(inputs: list[Path]) -> str:
     return first if len(inputs) == 1 else f"{first}_multi"
 
 
-def create_run_dir(inputs: list[Path], stamp: str) -> Path:
-    """New ``<input>_tree_<stamp>`` folder next to the first input (``_2``… on a clash)."""
+# Results shown in the file panel (next to the input); everything else goes
+# into the ``<base>_details`` folder.
+MAIN_SUFFIXES = ("_report.html", ".treefile", ".pdf", ".svg", ".png", ".aln.fa")
+
+
+@dataclass
+class OutputLayout:
+    parent: Path    # folder of the (first) input: main results go here
+    base: str       # "<input>_tree" or "<input>_tree_2", …
+    details: Path   # "<base>_details" folder for supporting files
+
+    def path(self, suffix: str) -> Path:
+        folder = self.parent if suffix in MAIN_SUFFIXES else self.details
+        return folder / f"{self.base}{suffix}"
+
+
+def plan_outputs(inputs: list[Path]) -> OutputLayout:
+    """Pick ``<input>_tree`` (or ``_tree_2``, ``_tree_3``… when a previous run's
+    results exist) and create its details folder. Never overwrites."""
     parent = Path(inputs[0]).expanduser().resolve().parent
-    planned = parent / f"{output_base_name(inputs)}_tree_{stamp}"
-    candidate, n = planned, 1
+    stem = f"{output_base_name(inputs)}_tree"
+    n = 1
     while True:
-        try:
-            candidate.mkdir(parents=False, exist_ok=False)
-            return candidate
-        except FileExistsError:
-            n += 1
-            candidate = planned.with_name(f"{planned.name}_{n}")
+        base = stem if n == 1 else f"{stem}_{n}"
+        taken = any((parent / f"{base}{suf}").exists() for suf in MAIN_SUFFIXES)
+        details = parent / f"{base}_details"
+        if not taken:
+            try:
+                details.mkdir(exist_ok=False)
+                return OutputLayout(parent, base, details)
+            except FileExistsError:
+                pass
+        n += 1
 
 
 def iqtree_model_from_report(text: str) -> str:
@@ -702,7 +725,12 @@ def report_html(r: TreeRunReport, opts: TreeOptions, svg_text: str, files: list[
     warn = "".join(f"<li>{e(w)}</li>" for w in r.warnings)
     excl = "".join(f"<li>{e(n)} ({c:.0%} of the {e(reference_phrase(opts))})</li>"
                    for n, c in r.excluded)
-    flist = "".join(f"<li>{e(p.name)}</li>" for p in files)
+    main = [p for p in files if any(p.name.endswith(s) for s in MAIN_SUFFIXES)]
+    extra = [p for p in files if p not in main]
+    flist = "".join(f"<li>{e(p.name)}</li>" for p in main)
+    if extra:
+        flist += (f"<li>{e(extra[0].parent.name)}/<ul>"
+                  + "".join(f"<li>{e(p.name)}</li>" for p in extra) + "</ul></li>")
     cites = "".join(f"<li>{e(c)}</li>" for c in citations_for(r, opts))
     methods = e(methods_paragraph(r, opts))
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>{e(title)}</title>
@@ -721,7 +749,7 @@ ul{{font-size:13px;margin:4px 0 0 18px;padding:0}} small{{color:#666}}
 {f'<h2>Excluded fragments</h2><ul>{excl}</ul>' if excl else ''}
 <h2>Methods text</h2><div class="methods">{methods}</div>
 <h2>Cite</h2><ul>{cites}</ul>
-<h2>Files in this run folder</h2><ul>{flist}</ul>
+<h2>Files written</h2><ul>{flist}</ul>
 <p><small>Support values are shown as SH-aLRT / UFBoot2 for IQ-TREE (commonly
 trusted at ≥ 80 / ≥ 95), bootstrap % for FastME and SH-like local support for FastTree.</small></p>
 </body></html>"""
@@ -829,7 +857,7 @@ def build_tree_run(
     cancel=None,
     stamp: str | None = None,
 ) -> tuple[Path, list[Path], Path]:
-    """Run the whole pipeline. Returns (run folder, created files, report HTML)."""
+    """Run the whole pipeline. Returns (details folder, created files, report HTML)."""
     from repeatviewer.external_process import run_logged_process
 
     say = progress or (lambda _m: None)
@@ -869,19 +897,27 @@ def build_tree_run(
             warnings.append("Outgroup rooting was selected, but no outgroup was chosen.")
 
     stamp = stamp or run_stamp()
-    run_dir = create_run_dir(inputs, stamp)
+    layout = plan_outputs(inputs)
+    created: list[Path] = []
     from repeatviewer.backends.job_cancel import JobCancelledError
 
+    def _cleanup() -> None:
+        # Failed or stopped: no half-finished results are left behind.
+        for path in created:
+            if path.parent == layout.parent:
+                path.unlink(missing_ok=True)
+        shutil.rmtree(layout.details, ignore_errors=True)
+
     try:
-        return _run_in_dir(run_dir, inputs, records, n_input, excluded, dna, outgroup,
-                           warnings, opts, stamp, say, cancel)
+        return _run_in_dir(layout, created, inputs, records, n_input, excluded, dna,
+                           outgroup, warnings, opts, stamp, say, cancel)
     except JobCancelledError:
-        shutil.rmtree(run_dir, ignore_errors=True)  # stopped by the user: no leftovers
+        _cleanup()
         raise
     except Exception as exc:  # noqa: BLE001 - reported with a saved log
         message = str(exc) if isinstance(exc, TreeBuildError) else f"{type(exc).__name__}: {exc}"
-        log = _write_failure_log(inputs, run_dir, message)
-        shutil.rmtree(run_dir, ignore_errors=True)
+        log = _write_failure_log(inputs, layout.details, message)
+        _cleanup()
         suffix = f"\n\nFull log: {log}" if log else ""
         raise TreeBuildError(message + suffix) from exc
 
@@ -893,16 +929,14 @@ def _check_cancel(cancel) -> None:
         raise JobCancelledError("Job stopped by user")
 
 
-def _run_in_dir(run_dir, inputs, records, n_input, excluded, dna, outgroup, warnings,
-                opts, stamp, say, cancel):
+def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgroup,
+                warnings, opts, stamp, say, cancel):
     from repeatviewer.external_process import run_logged_process
 
     exe = engine_executable(opts.engine, system_path_only=opts.use_system_path)
-    base = f"{output_base_name(inputs)}_tree"
-    out = lambda suffix: run_dir / f"{base}{suffix}"  # noqa: E731
-    work = run_dir / ".work"
+    out = layout.path
+    work = layout.details / ".work"
     work.mkdir()
-    created: list[Path] = []
     commands: list[str] = []
 
     safe_to_name = {f"S{i:05d}": r.name for i, r in enumerate(records, 1)}
@@ -1150,7 +1184,7 @@ def _run_in_dir(run_dir, inputs, records, n_input, excluded, dna, outgroup, warn
 
     title = f"{output_base_name(inputs)} — {ENGINE_NAMES[opts.engine].split(' (')[0].lower()} tree"
     say("Drawing the tree…")
-    images = render_tree(tree, out(""), title="")
+    images = render_tree(tree, layout.parent / layout.base, title="")
     created.extend(images)
 
     report = TreeRunReport(
@@ -1186,4 +1220,4 @@ def _run_in_dir(run_dir, inputs, records, n_input, excluded, dna, outgroup, warn
     )
     created.append(report_path)
     shutil.rmtree(work, ignore_errors=True)
-    return run_dir, created, report_path
+    return layout.details, created, report_path

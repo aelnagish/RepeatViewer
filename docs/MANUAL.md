@@ -748,8 +748,9 @@ options that do not apply to the current choices are greyed out.
 | | Root | None | Outgroup (tick one or more sequences) or midpoint |
 | Options | Right-click action, process window, MAFFT / tree programs from `PATH` | | |
 
-**Output** — every run writes a new folder next to the input,
-`<input>_tree_<date>_<time>/`. All files keep the full input name:
+**Output** — like every tool, the results are written next to the input and
+keep its full name. When the run finishes, the input is highlighted light blue,
+the new files green, and the report opens (deep blue):
 
 | File | Content |
 |------|---------|
@@ -757,11 +758,14 @@ options that do not apply to the current choices are greyed out.
 | `<input>_tree.treefile` | Newick with support values, for FigTree / iTOL / ggtree |
 | `<input>_tree.svg` / `.pdf` / `.png` | Tree figure |
 | `<input>_tree.aln.fa` | The alignment the tree was built from |
-| `<input>_tree.iqtree` / `.log` | IQ-TREE report and log (IQ-TREE only) |
-| `<input>_tree_methods.txt` | Ready-to-edit methods paragraph with references |
-| `<input>_tree_commands.txt` | Program versions and exact command lines |
-| `<input>_tree.names.tsv` | Tree names ↔ original FASTA headers |
-| `<input>_tree.excluded.fa` | Fragments removed by the length filter (if any) |
+
+Supporting files go into `<input>_tree_details/`: the IQ-TREE report and log
+(`.iqtree` / `.log`, plus `.modelfinder.*` when the best search was not the
+first), the methods paragraph with references (`_methods.txt`), program
+versions and exact command lines (`_commands.txt`), tree names ↔ original
+FASTA headers (`.names.tsv`) and the excluded fragments (`.excluded.fa`).
+A second run on the same input writes `<input>_tree_2…`; nothing is
+overwritten.
 
 Rooting keeps each support value on its branch (a common mistake when
 rerooting Newick trees). If several outgroup sequences do not form one clade,

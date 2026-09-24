@@ -164,13 +164,17 @@ def test_parse_iqtree_report_and_runtrees():
 # --- output naming (Jiangzhao rule 1: keep the full input name) --------------
 
 
-def test_run_dir_keeps_full_input_name(tmp_path):
+def test_outputs_next_to_input_keep_full_name_and_never_overwrite(tmp_path):
     fa = tmp_path / "CroSat3_monomers.fa"
     fa.write_text(">a\nA\n")
-    d1 = tb.create_run_dir([fa], "2026-09-24_1432")
-    d2 = tb.create_run_dir([fa], "2026-09-24_1432")
-    assert d1.name == "CroSat3_monomers.fa_tree_2026-09-24_1432"
-    assert d2.name == "CroSat3_monomers.fa_tree_2026-09-24_1432_2"
+    l1 = tb.plan_outputs([fa])
+    assert l1.base == "CroSat3_monomers.fa_tree"
+    assert l1.path(".treefile") == tmp_path / "CroSat3_monomers.fa_tree.treefile"
+    assert l1.path("_report.html").parent == tmp_path
+    assert l1.path(".iqtree") == tmp_path / "CroSat3_monomers.fa_tree_details" / "CroSat3_monomers.fa_tree.iqtree"
+    l1.path(".treefile").write_text("(a);")
+    l2 = tb.plan_outputs([fa])
+    assert l2.base == "CroSat3_monomers.fa_tree_2"
     assert tb.output_base_name([fa, tmp_path / "b.fa"]) == "CroSat3_monomers.fa_multi"
 
 
@@ -236,19 +240,19 @@ def test_build_tree_run_end_to_end_with_fake_fastme(tmp_path, monkeypatch):
     fa.write_text(">s1\nACGTACGTAA\n>s2\nACGTACGTTA\n>s3\nACGAACGTTT\n>s4\nACGAACCTTT\n>s5\nTCGAACCTTT\n")
     opts = TreeOptions(engine=TREE_ENGINE_FASTME, use_system_path=True, threads=1,
                        distance_bootstrap=4, root_mode=TREE_ROOT_MIDPOINT)
-    run_dir, files, report = tb.build_tree_run([fa], opts, stamp="t")
-    names = {p.name for p in files}
-    assert run_dir.name == "aln.fa_tree_t"
-    for suffix in (".treefile", ".aln.fa", ".svg", ".pdf", ".png", "_report.html",
-                   "_methods.txt", "_commands.txt", ".names.tsv"):
-        assert f"aln.fa_tree{suffix}" in names
-    tree_text = (run_dir / "aln.fa_tree.treefile").read_text()
+    details, files, report = tb.build_tree_run([fa], opts, stamp="t")
+    assert details == tmp_path / "aln.fa_tree_details"
+    for suffix in (".treefile", ".aln.fa", ".svg", ".pdf", ".png", "_report.html"):
+        assert (tmp_path / f"aln.fa_tree{suffix}") in files  # next to the input
+    for suffix in ("_methods.txt", "_commands.txt", ".names.tsv"):
+        assert (details / f"aln.fa_tree{suffix}") in files
+    tree_text = (tmp_path / "aln.fa_tree.treefile").read_text()
     assert "s1" in tree_text and "S00001" not in tree_text  # safe IDs mapped back
     assert "100" in tree_text  # bootstrap support computed from the replicate file
     html = report.read_text()
-    assert "provided alignment" in (run_dir / "aln.fa_tree_methods.txt").read_text()
+    assert "provided alignment" in (details / "aln.fa_tree_methods.txt").read_text()
     assert "<svg" in html and "Midpoint-rooted" in html
-    assert not (run_dir / ".work").exists()
+    assert not (details / ".work").exists()
 
 
 def test_missing_engine_is_an_error_not_a_downgrade(tmp_path, monkeypatch):
@@ -257,7 +261,7 @@ def test_missing_engine_is_an_error_not_a_downgrade(tmp_path, monkeypatch):
     fa.write_text("".join(f">s{i}\nACGT\n" for i in range(5)))
     with pytest.raises(tb.TreeBuildError, match="conda install -c bioconda iqtree"):
         tb.build_tree_run([fa], TreeOptions(use_system_path=True), stamp="t")
-    assert not any(tmp_path.glob("a.fa_tree_*"))
+    assert not any(tmp_path.glob("a.fa_tree*"))
 
 
 def test_too_few_sequences(tmp_path, monkeypatch):
@@ -288,8 +292,8 @@ def test_build_tree_run_real_iqtree(tmp_path):
     fa.write_text("".join(f">m{i}\n{s}\n" for i, s in enumerate(seqs)))
     opts = TreeOptions(use_system_path=True, use_system_mafft=True, threads=1, runs=2,
                        root_mode=TREE_ROOT_OUTGROUP, outgroup=["m7"])
-    run_dir, files, report = tb.build_tree_run([fa], opts, stamp="t")
-    assert (run_dir / "sat.fa_tree.iqtree").is_file()
+    details, files, report = tb.build_tree_run([fa], opts, stamp="t")
+    assert (details / "sat.fa_tree.iqtree").is_file()
     assert "of 2 found the same topology" in report.read_text()
 
 
@@ -402,6 +406,7 @@ def test_independent_searches_are_separate_processes(tmp_path, monkeypatch):
     html = report.read_text()
     assert "of 3 found the same topology" in html
     assert (run_dir / "aln.fa_tree.iqtree").is_file()
+    assert report.parent == tmp_path
 
 
 def test_failed_run_writes_log_next_to_input(tmp_path, monkeypatch):
@@ -415,7 +420,7 @@ def test_failed_run_writes_log_next_to_input(tmp_path, monkeypatch):
     assert failed.is_file() and f"Full log: {failed}" in msg
     text = failed.read_text()
     assert "iqtree3" in text and "Reason:" in text
-    assert not any(tmp_path.glob("aln.fa_tree_t*"))  # no half-finished run folder
+    assert not any(tmp_path.glob("aln.fa_tree.*")) and not any(tmp_path.glob("aln.fa_tree_*[!g]"))
 
 
 def test_one_failed_search_is_skipped_with_warning(tmp_path, monkeypatch):
