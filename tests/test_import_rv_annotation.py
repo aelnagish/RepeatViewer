@@ -95,6 +95,47 @@ def test_resolve_still_finds_legacy_features_gff3(tmp_path: Path) -> None:
     assert found == legacy
 
 
+def test_import_multi_sequence_matches_by_seqid(tmp_path: Path) -> None:
+    fasta = tmp_path / "lib.fa"
+    fasta.write_text(
+        ">TE1\n" + ("A" * 100) + "\n"
+        ">TE2\n" + ("C" * 80) + "\n"
+        ">TE3\n" + ("G" * 60) + "\n",
+        encoding="utf-8",
+    )
+    src = tmp_path / "external.gff3"
+    src.write_text(
+        "##gff-version 3\n"
+        "##sequence-region TE1 1 100\n"
+        "##sequence-region TE2 1 80\n"
+        "TE1\to\tLTR\t1\t20\t.\t+\t.\tName=a\n"
+        "TE2\to\tORF\t5\t40\t.\t+\t.\tName=b\n"
+        "OTHER\to\tLTR\t1\t10\t.\t+\t.\tName=orphan\n",
+        encoding="utf-8",
+    )
+
+    result = import_annotation_as_rv_gff3(fasta, src, merge_existing=False)
+    assert result.feature_count == 2
+    assert result.sequence_count == 2
+    text = result.gff_path.read_text(encoding="utf-8")
+    assert "##sequence-region TE1 1 100" in text
+    assert "##sequence-region TE2 1 80" in text
+    assert "OTHER" not in text.split("\n", 1)[-1] or "Name=orphan" not in text
+    assert "Name=a" in text and "Name=b" in text
+    assert "Name=orphan" not in text
+
+    from repeatviewer.backends.sequence_features import load_sequence_map_data
+
+    data = load_sequence_map_data(fasta)
+    assert data.is_multi_sequence
+    assert len(data.record_ids) == 3
+    assert data.sequence_id in {"TE1", "TE2"}  # first with features
+    data.switch_to("TE2")
+    assert data.sequence_id == "TE2"
+    assert len(data.features) == 1
+    assert data.features[0].name == "b"
+
+
 def test_import_rejects_unsupported_suffix(tmp_path: Path) -> None:
     fasta = _write_fasta(tmp_path / "demo.fa")
     bad = tmp_path / "notes.txt"

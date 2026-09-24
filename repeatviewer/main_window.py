@@ -315,7 +315,6 @@ from repeatviewer.backends.gff_features import (
 from repeatviewer.backends.sequence_features import (
     companion_annotation_files_for_delete,
     is_sequence_map_hidden_file,
-    load_single_sequence_fasta,
 )
 from repeatviewer.plugins import get_registry, load_plugins
 from repeatviewer.plugins.custom_command import (
@@ -6175,21 +6174,30 @@ class MainWindow(QMainWindow):
             )
 
     def _find_fasta_for_sequence_id(self, seq_id: str) -> Path | None:
-        """Find a single-sequence FASTA in the current folder whose record id matches seq_id."""
+        """Find a FASTA in the current folder that contains ``seq_id``."""
+        from repeatviewer.backends.gff_features import _seqid_matches
+        from repeatviewer.backends.sequence_features import list_fasta_record_ids
+
         if not self._current_folder:
             return None
         candidates = self._cached_folder_files or [
             p for p in self._current_folder.iterdir() if p.is_file()
         ]
+        wanted = str(seq_id or "").strip()
         for path in candidates:
             if path.suffix.lower() not in _FASTA_SUFFIXES:
                 continue
             try:
-                record_id, _ = load_single_sequence_fasta(path)
+                record_ids = list_fasta_record_ids(path)
             except (OSError, ValueError):
                 continue
-            if record_id == seq_id or flexidot_sanitize_name(record_id) == seq_id:
-                return path
+            for record_id in record_ids:
+                if (
+                    record_id == wanted
+                    or flexidot_sanitize_name(record_id) == wanted
+                    or _seqid_matches(record_id, wanted)
+                ):
+                    return path
         return None
 
     def _focus_preview_widget(self) -> None:
@@ -7709,16 +7717,25 @@ class MainWindow(QMainWindow):
                 )
                 return
             try:
-                gff_path, count = import_annotation_as_rv_gff3(fasta, annotation)
+                result = import_annotation_as_rv_gff3(fasta, annotation)
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, "Add annotation", str(exc))
                 return
 
+            gff_path = result.gff_path
+            count = result.feature_count
+            seqs = result.sequence_count
             self._sync_sidecar_in_file_list(gff_path, select=False)
             if self._preview_tabs is not None:
                 self._preview_tabs.reload_paths([fasta])
+            if seqs > 1:
+                status = (
+                    f"Added {count:,} feature(s) across {seqs:,} sequences → {gff_path.name}"
+                )
+            else:
+                status = f"Added {count:,} feature(s) → {gff_path.name}"
             self._set_status_message(
-                f"Added {count:,} feature(s) → {gff_path.name}",
+                status,
                 8000,
                 override_file_link=True,
             )
