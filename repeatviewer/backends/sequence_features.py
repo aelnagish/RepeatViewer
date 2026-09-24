@@ -131,15 +131,48 @@ def remount_parent_ids(
 
 @dataclass
 class SequenceMapData:
+    """Active view of one sequence from a (possibly multi-record) FASTA.
+
+    ``record_ids`` / ``features_by_id`` hold the full map for switching;
+    ``sequence_id`` / ``sequence`` / ``features`` are the currently displayed record.
+    """
+
     fasta_path: Path
     sequence_id: str
     sequence: str
     features: list[SequenceFeature] = field(default_factory=list)
     is_protein: bool = False
+    record_ids: list[str] = field(default_factory=list)
+    features_by_id: dict[str, list[SequenceFeature]] = field(default_factory=dict)
+    lengths_by_id: dict[str, int] = field(default_factory=dict)
 
     @property
     def length(self) -> int:
         return len(self.sequence)
+
+    @property
+    def is_multi_sequence(self) -> bool:
+        return len(self.record_ids) > 1
+
+    def sync_active_features(self, features: list[SequenceFeature]) -> None:
+        """Write the canvas feature list back into ``features_by_id``."""
+        self.features = list(features)
+        if self.sequence_id:
+            self.features_by_id[self.sequence_id] = list(features)
+
+    def switch_to(self, seq_id: str) -> None:
+        """Load another FASTA record into this view (lazy; mutates in place)."""
+        rid, sequence = load_fasta_record(self.fasta_path, seq_id)
+        self.sequence_id = rid
+        self.sequence = sequence
+        self.features = list(self.features_by_id.get(rid, []))
+        self.is_protein = detect_sequence_is_protein(sequence, path=self.fasta_path)
+        if rid not in self.features_by_id:
+            self.features_by_id[rid] = []
+        if rid not in self.lengths_by_id:
+            self.lengths_by_id[rid] = len(sequence)
+        else:
+            self.lengths_by_id[rid] = len(sequence)
 
 
 _NUCLEOTIDE_CHARS = frozenset("ACGTUN")
@@ -363,6 +396,67 @@ def load_single_sequence_fasta(path: Path) -> tuple[str, str]:
     return str(record.id), seq
 
 
+def list_fasta_record_ids(path: Path) -> list[str]:
+    """Return FASTA record ids in file order (sequences are not kept in memory)."""
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    ids: list[str] = []
+    for record in SeqIO.parse(str(resolved), "fasta"):
+        rid = str(record.id).strip()
+        if rid:
+            ids.append(rid)
+    if not ids:
+        raise ValueError(f"No sequences in {resolved.name}")
+    return ids
+
+
+def fasta_record_lengths(path: Path) -> dict[str, int]:
+    """Map each FASTA record id to its sequence length."""
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    lengths: dict[str, int] = {}
+    for record in SeqIO.parse(str(resolved), "fasta"):
+        rid = str(record.id).strip()
+        if rid:
+            lengths[rid] = len(record.seq)
+    if not lengths:
+        raise ValueError(f"No sequences in {resolved.name}")
+    return lengths
+
+
+def load_fasta_record(path: Path, seq_id: str) -> tuple[str, str]:
+    """Load one record by id (exact or soft match). Returns (id, uppercase sequence)."""
+    from repeatviewer.backends.gff_features import _seqid_matches
+
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    wanted = str(seq_id or "").strip()
+    if not wanted:
+        raise ValueError("Sequence id is empty.")
+
+    index = SeqIO.index(str(resolved), "fasta")
+    try:
+        if wanted in index:
+            record = index[wanted]
+            seq = str(record.seq).upper()
+            if not seq:
+                raise ValueError(f"Empty sequence “{wanted}” in {resolved.name}")
+            return str(record.id), seq
+        for key in index:
+            if _seqid_matches(wanted, key) or _seqid_matches(key, wanted):
+                record = index[key]
+                seq = str(record.seq).upper()
+                if not seq:
+                    raise ValueError(f"Empty sequence “{key}” in {resolved.name}")
+                return str(record.id), seq
+    finally:
+        index.close()
+    raise ValueError(f"Sequence “{wanted}” not found in {resolved.name}")
+
+
 @dataclass(frozen=True)
 class SingleSequenceSummary:
     sequence_id: str
@@ -443,14 +537,17 @@ def _infer_feature_color(name: str, feature_type: str) -> str:
         db_name, _, _ = name.partition(": ")
         db_name = db_name.strip()
         if db_name:
-            from repeatviewer.backends.annotation_colors import similarity_database_color
+            try:
+                from repeatviewer.backends.annotation_colors import similarity_database_color
 
-            return similarity_database_color(db_name, 0)
+                return similarity_database_color(db_name, 0)
+            except Exception:
+                pass
     try:
         from repeatviewer.backends.annotation_colors import feature_type_color
 
         return feature_type_color(feature_type)
-    except ImportError:
+    except Exception:
         return FEATURE_TYPE_COLORS.get(feature_type, FEATURE_TYPE_COLORS["others"])
 
 
@@ -491,24 +588,142 @@ def _merge_feature_colors_from_json(
     return merged
 
 
-def load_sequence_map_data(path: Path) -> SequenceMapData:
-    seq_id, sequence = load_single_sequence_fasta(path)
+def load_sequence_map_data(
+    path: Path,
+    *,
+    active_id: str | None = None,
+) -> SequenceMapData:
+    """Load sequence-map data for a single- or multi-record FASTA.
+
+    Only the active sequence string is held in memory; annotations for all
+    record ids are loaded from the companion GFF when present.
+    """
     resolved = path.expanduser().resolve()
+    lengths = fasta_record_lengths(resolved)
+    record_ids = list(lengths.keys())
+
     gff_path = resolve_features_gff_path(resolved)
-    json_features = load_features(resolved, expected_id=seq_id)
-    if gff_path is not None:
-        features = load_features_from_gff(gff_path, expected_id=seq_id)
-        if json_features:
-            features = _merge_feature_colors_from_json(features, json_features)
+    features_by_id = (
+        load_all_features_by_id(gff_path, record_ids, lengths_by_id=lengths)
+        if gff_path is not None
+        else {rid: [] for rid in record_ids}
+    )
+
+    # JSON color overlay (single-id legacy or multi-id payload).
+    json_by_id = load_features_by_id_from_json(resolved, record_ids)
+    if json_by_id:
+        for rid, json_feats in json_by_id.items():
+            if not json_feats:
+                continue
+            current = features_by_id.get(rid) or []
+            if current:
+                features_by_id[rid] = _merge_feature_colors_from_json(current, json_feats)
+            else:
+                features_by_id[rid] = json_feats
+
+    chosen = str(active_id or "").strip()
+    if chosen and chosen in lengths:
+        seq_id = chosen
     else:
-        features = json_features
+        seq_id = next(
+            (rid for rid in record_ids if features_by_id.get(rid)),
+            record_ids[0],
+        )
+    seq_id, sequence = load_fasta_record(resolved, seq_id)
+    features = list(features_by_id.get(seq_id, []))
     return SequenceMapData(
         fasta_path=resolved,
         sequence_id=seq_id,
         sequence=sequence,
         features=features,
         is_protein=detect_sequence_is_protein(sequence, path=resolved),
+        record_ids=record_ids,
+        features_by_id=features_by_id,
+        lengths_by_id=lengths,
     )
+
+
+def load_features_by_id_from_json(
+    path: Path,
+    record_ids: list[str],
+) -> dict[str, list[SequenceFeature]]:
+    """Load JSON sidecar features keyed by sequence id (legacy or multi)."""
+    sidecar = resolve_sidecar_path(path)
+    if sidecar is None:
+        return {}
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    result: dict[str, list[SequenceFeature]] = {rid: [] for rid in record_ids}
+
+    sequences = payload.get("sequences")
+    if isinstance(sequences, dict):
+        for rid in record_ids:
+            block = sequences.get(rid)
+            if not isinstance(block, dict):
+                continue
+            raw = block.get("features")
+            if not isinstance(raw, list):
+                continue
+            feats: list[SequenceFeature] = []
+            for item in raw:
+                if isinstance(item, dict):
+                    try:
+                        feats.append(SequenceFeature.from_dict(item))
+                    except (TypeError, ValueError):
+                        continue
+            result[rid] = sorted(feats, key=lambda f: (f.start, f.end))
+        return result
+
+    # Legacy single-id payload.
+    expected = str(payload.get("sequence_id", "") or "")
+    raw = payload.get("features")
+    if not isinstance(raw, list):
+        return result
+    feats = []
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                feats.append(SequenceFeature.from_dict(item))
+            except (TypeError, ValueError):
+                continue
+    feats = sorted(feats, key=lambda f: (f.start, f.end))
+    if expected and expected in result:
+        result[expected] = feats
+    elif len(record_ids) == 1:
+        result[record_ids[0]] = feats
+    return result
+
+
+def load_all_features_by_id(
+    gff_path: Path,
+    record_ids: list[str],
+    *,
+    lengths_by_id: dict[str, int] | None = None,
+) -> dict[str, list[SequenceFeature]]:
+    """Bucket GFF features by FASTA record id (no cross-id remapping)."""
+    from repeatviewer.backends.gff_features import features_for_records, parse_gff
+
+    resolved = gff_path.expanduser().resolve()
+    result: dict[str, list[SequenceFeature]] = {rid: [] for rid in record_ids}
+    if not resolved.is_file() or not record_ids:
+        return result
+    rows = parse_gff(resolved)
+    by_rec = features_for_records(rows, record_ids)
+    lengths = lengths_by_id or {}
+    for rid, matched_rows in by_rec.items():
+        if not matched_rows:
+            continue
+        seq_len = max(1, int(lengths.get(rid, 10**9)))
+        result[rid] = _gff_rows_to_sequence_features(
+            matched_rows,
+            sequence_id=rid,
+            sequence_length=seq_len,
+            allow_remap=False,
+        )
+    return result
 
 
 def load_features(path: Path, *, expected_id: str | None = None) -> list[SequenceFeature]:
@@ -575,6 +790,23 @@ def save_features(path: Path, *, sequence_id: str, features: list[SequenceFeatur
     return sidecar
 
 
+def save_features_multi(
+    path: Path,
+    features_by_id: dict[str, list[SequenceFeature]],
+) -> Path:
+    """Write a multi-sequence JSON color/edit cache beside the FASTA."""
+    sidecar = sidecar_path(path)
+    payload = {
+        "sequences": {
+            seq_id: {"features": [f.to_dict() for f in feats]}
+            for seq_id, feats in features_by_id.items()
+            if feats
+        }
+    }
+    sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return sidecar
+
+
 def export_features_gff(
     path: Path,
     *,
@@ -582,29 +814,60 @@ def export_features_gff(
     sequence_length: int,
     features: list[SequenceFeature],
 ) -> Path:
-    """Write a simple GFF3 next to the FASTA."""
+    """Write a simple GFF3 next to the FASTA (single sequence id)."""
+    return export_features_gff_multi(
+        path,
+        features_by_id={sequence_id: features},
+        lengths_by_id={sequence_id: sequence_length},
+    )
+
+
+def _gff_feature_line(sequence_id: str, feat: SequenceFeature, sequence_length: int) -> str:
+    start = max(1, min(feat.start, sequence_length))
+    end = max(1, min(feat.end, sequence_length))
+    if start > end:
+        start, end = end, start
+    safe_name = feat.name.replace("\t", " ").replace("\n", " ").replace(";", ",")
+    safe_type = str(feat.feature_type).replace("\t", " ").replace("\n", " ").replace(";", ",")
+    strand = "-" if not feat.is_forward() else "+"
+    attrs = f"ID={safe_name};Name={safe_name};type={safe_type}"
+    if feat.parent:
+        safe_parent = feat.parent.replace("\t", " ").replace("\n", " ").replace(";", ",")
+        attrs += f";Parent={safe_parent}"
+    if feat.track:
+        attrs += f";track={feat.track}"
+    if feat.color:
+        attrs += f";color={feat.color}"
+    return f"{sequence_id}\tRepeatViewer\t{safe_type}\t{start}\t{end}\t.\t{strand}\t.\t{attrs}"
+
+
+def export_features_gff_multi(
+    path: Path,
+    *,
+    features_by_id: dict[str, list[SequenceFeature]],
+    lengths_by_id: dict[str, int],
+) -> Path:
+    """Write ``{stem}.RV.gff3`` with features for one or more sequence ids."""
     resolved = path.expanduser().resolve()
     out = features_gff_path(resolved)
     lines = ["##gff-version 3"]
-    for feat in features:
-        start = max(1, min(feat.start, sequence_length))
-        end = max(1, min(feat.end, sequence_length))
-        if start > end:
-            start, end = end, start
-        safe_name = feat.name.replace("\t", " ").replace("\n", " ").replace(";", ",")
-        safe_type = str(feat.feature_type).replace("\t", " ").replace("\n", " ").replace(";", ",")
-        strand = "-" if not feat.is_forward() else "+"
-        attrs = f"ID={safe_name};Name={safe_name};type={safe_type}"
-        if feat.parent:
-            safe_parent = feat.parent.replace("\t", " ").replace("\n", " ").replace(";", ",")
-            attrs += f";Parent={safe_parent}"
-        if feat.track:
-            attrs += f";track={feat.track}"
-        if feat.color:
-            attrs += f";color={feat.color}"
-        lines.append(
-            f"{sequence_id}\tRepeatViewer\t{safe_type}\t{start}\t{end}\t.\t{strand}\t.\t{attrs}"
-        )
+    # Prefer a stable order: lengths_by_id insertion order, then any extras.
+    ordered_ids = [sid for sid in lengths_by_id if sid in features_by_id or sid in lengths_by_id]
+    seen = set(ordered_ids)
+    for sid in features_by_id:
+        if sid not in seen:
+            ordered_ids.append(sid)
+            seen.add(sid)
+    for seq_id in ordered_ids:
+        length = max(1, int(lengths_by_id.get(seq_id, 1)))
+        lines.append(f"##sequence-region {seq_id} 1 {length}")
+    for seq_id in ordered_ids:
+        feats = features_by_id.get(seq_id) or []
+        if not feats:
+            continue
+        length = max(1, int(lengths_by_id.get(seq_id, 10**9)))
+        for feat in feats:
+            lines.append(_gff_feature_line(seq_id, feat, length))
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out
 
@@ -617,15 +880,39 @@ def save_annotations(
     features: list[SequenceFeature],
 ) -> tuple[Path, Path | None]:
     """Persist JSON sidecar and companion GFF3 when features are present."""
-    json_path = save_features(path, sequence_id=sequence_id, features=features)
+    return save_annotations_multi(
+        path,
+        features_by_id={sequence_id: features},
+        lengths_by_id={sequence_id: sequence_length},
+    )
+
+
+def save_annotations_multi(
+    path: Path,
+    *,
+    features_by_id: dict[str, list[SequenceFeature]],
+    lengths_by_id: dict[str, int],
+) -> tuple[Path, Path | None]:
+    """Persist multi-sequence annotations (JSON cache + ``.RV.gff3``)."""
+    non_empty = {sid: list(feats) for sid, feats in features_by_id.items() if feats}
+    if len(lengths_by_id) <= 1 and len(non_empty) <= 1:
+        # Keep legacy single-id JSON shape for one-record FASTA.
+        if non_empty:
+            sid, feats = next(iter(non_empty.items()))
+            json_path = save_features(path, sequence_id=sid, features=feats)
+        else:
+            sid = next(iter(lengths_by_id), "")
+            json_path = save_features(path, sequence_id=sid, features=[])
+    else:
+        json_path = save_features_multi(path, non_empty)
+
     gff_path = features_gff_path(path)
     legacy_gff = legacy_features_gff_path(path)
-    if features:
-        gff_path = export_features_gff(
+    if non_empty:
+        gff_path = export_features_gff_multi(
             path,
-            sequence_id=sequence_id,
-            sequence_length=sequence_length,
-            features=features,
+            features_by_id=non_empty,
+            lengths_by_id=lengths_by_id,
         )
         _cleanup_legacy_sidecars(path)
     else:
@@ -645,6 +932,7 @@ def _gff_rows_to_sequence_features(
     *,
     sequence_id: str,
     sequence_length: int,
+    allow_remap: bool = True,
 ) -> list[SequenceFeature]:
     """Map parsed GFF/BED rows onto SequenceFeature objects for one FASTA id."""
     from repeatviewer.backends.gff_features import _seqid_matches
@@ -652,7 +940,12 @@ def _gff_rows_to_sequence_features(
     matched = [row for row in rows if _seqid_matches(sequence_id, row.seqid)]
     # Single-consensus TE files often use a different seqid than the FASTA
     # header; remap all rows when nothing matched but rows exist.
-    use_rows = matched if matched else list(rows)
+    if matched:
+        use_rows = matched
+    elif allow_remap:
+        use_rows = list(rows)
+    else:
+        use_rows = []
     features: list[SequenceFeature] = []
     for row in use_rows:
         start = max(1, min(int(row.start), sequence_length))
@@ -684,17 +977,31 @@ def _gff_rows_to_sequence_features(
     return sorted(features, key=lambda f: (f.start, f.end))
 
 
+@dataclass(frozen=True)
+class AnnotationImportResult:
+    gff_path: Path
+    feature_count: int
+    sequence_count: int
+
+    def __iter__(self):
+        """Allow ``path, count = import_annotation_as_rv_gff3(...)``."""
+        yield self.gff_path
+        yield self.feature_count
+
+
 def import_annotation_as_rv_gff3(
     fasta_path: Path,
     annotation_path: Path,
     *,
     merge_existing: bool = True,
-) -> tuple[Path, int]:
+) -> AnnotationImportResult:
     """Convert GFF/GFF3/GTF/BED into ``{stem}.RV.gff3`` beside the FASTA.
 
-    Returns ``(written_gff_path, feature_count)``.
+    Features are matched to FASTA records by sequence id. For a one-record
+    FASTA, unmatched GFF seqids are remapped onto that record (legacy TE
+    consensus behaviour). For multi-record FASTA, remapping is disabled.
     """
-    from repeatviewer.backends.gff_features import parse_annotation
+    from repeatviewer.backends.gff_features import features_for_records, parse_annotation
 
     fasta = _resolved_fasta_path(fasta_path)
     source = annotation_path.expanduser().resolve()
@@ -709,42 +1016,71 @@ def import_annotation_as_rv_gff3(
             "Use .gff, .gff3, .gtf, or .bed."
         )
 
-    sequence_id, sequence = load_single_sequence_fasta(fasta)
+    lengths = fasta_record_lengths(fasta)
+    record_ids = list(lengths.keys())
+    multi = len(record_ids) > 1
     rows = parse_annotation(source)
     if not rows:
         raise ValueError(f"No features found in {source.name}")
 
-    imported = _gff_rows_to_sequence_features(
-        rows,
-        sequence_id=sequence_id,
-        sequence_length=len(sequence),
-    )
-    if not imported:
-        raise ValueError(
-            f"No usable features for sequence “{sequence_id}” in {source.name}"
+    features_by_id: dict[str, list[SequenceFeature]] = {rid: [] for rid in record_ids}
+    if multi:
+        by_rec = features_for_records(rows, record_ids)
+        for rid, matched_rows in by_rec.items():
+            if not matched_rows:
+                continue
+            features_by_id[rid] = _gff_rows_to_sequence_features(
+                matched_rows,
+                sequence_id=rid,
+                sequence_length=lengths[rid],
+                allow_remap=False,
+            )
+    else:
+        rid = record_ids[0]
+        features_by_id[rid] = _gff_rows_to_sequence_features(
+            rows,
+            sequence_id=rid,
+            sequence_length=lengths[rid],
+            allow_remap=True,
         )
 
-    features = list(imported)
+    imported_total = sum(len(feats) for feats in features_by_id.values())
+    if imported_total == 0:
+        raise ValueError(
+            f"No features in {source.name} matched any sequence id in {fasta.name}."
+        )
+
     if merge_existing:
         existing_path = resolve_features_gff_path(fasta)
-        existing = (
-            load_features_from_gff(existing_path, expected_id=sequence_id)
-            if existing_path is not None
-            else []
-        )
-        if existing:
-            seen = {_feature_color_key(f) for f in imported}
-            for feat in existing:
-                if _feature_color_key(feat) not in seen:
-                    features.append(feat)
-            features = sorted(features, key=lambda f: (f.start, f.end))
+        if existing_path is not None:
+            existing_by_id = load_all_features_by_id(
+                existing_path,
+                record_ids,
+                lengths_by_id=lengths,
+            )
+            for rid in record_ids:
+                imported = features_by_id.get(rid) or []
+                existing = existing_by_id.get(rid) or []
+                if not existing:
+                    continue
+                seen = {_feature_color_key(f) for f in imported}
+                merged = list(imported)
+                for feat in existing:
+                    if _feature_color_key(feat) not in seen:
+                        merged.append(feat)
+                features_by_id[rid] = sorted(merged, key=lambda f: (f.start, f.end))
 
-    _json_path, gff_path = save_annotations(
+    _json_path, gff_path = save_annotations_multi(
         fasta,
-        sequence_id=sequence_id,
-        sequence_length=len(sequence),
-        features=features,
+        features_by_id=features_by_id,
+        lengths_by_id=lengths,
     )
     if gff_path is None:
         raise RuntimeError("Failed to write RepeatViewer annotation GFF3.")
-    return gff_path, len(features)
+    feature_count = sum(len(feats) for feats in features_by_id.values())
+    sequence_count = sum(1 for feats in features_by_id.values() if feats)
+    return AnnotationImportResult(
+        gff_path=gff_path,
+        feature_count=feature_count,
+        sequence_count=sequence_count,
+    )

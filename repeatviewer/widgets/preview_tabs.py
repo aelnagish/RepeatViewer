@@ -27,7 +27,6 @@ from repeatviewer.backends.bismark_cov import is_bismark_cov_file
 from repeatviewer.backends.sequence_features import (
     format_multi_sequence_fasta_summary_text,
     format_single_sequence_summary_text,
-    load_single_sequence_fasta,
     summarize_single_sequence_fasta,
 )
 from repeatviewer.browser_file_metadata import scan_fasta_headers
@@ -90,6 +89,15 @@ def _is_single_fasta_file(path: Path) -> bool:
     return _count_fasta_sequences_fast(path, stop_at=2) == 1
 
 
+def _is_sequence_map_fasta(path: Path) -> bool:
+    """True when Annotation / Sequence Map tabs should be available."""
+    if not _is_fasta_file(path):
+        return False
+    if _is_fasta_too_large_for_preview(path):
+        return False
+    return _count_fasta_sequences_fast(path, stop_at=1) >= 1
+
+
 _TEXT_PREVIEW_SUFFIXES = _FASTA_SUFFIXES | {
     ".txt",
     ".text",
@@ -144,7 +152,7 @@ def _preview_kind(path: Path) -> str:
     if suffix in _HTML_PREVIEW_SUFFIXES:
         return "html"
     if suffix in _FASTA_SUFFIXES or path.name.lower().endswith(".fa.gz"):
-        if _is_single_fasta_file(path):
+        if _is_sequence_map_fasta(path):
             return "fasta_annotation"
         return "fasta"
     if suffix == ".pdf":
@@ -1309,13 +1317,23 @@ class FilePreviewPage(QWidget):
     def contains_sequence_id(self, seq_id: str) -> bool:
         if not self._single_fasta_mode:
             return False
+        from repeatviewer.backends.gui_functions import sanitize_name
+        from repeatviewer.backends.gff_features import _seqid_matches
+        from repeatviewer.backends.sequence_features import list_fasta_record_ids
+
         try:
-            record_id, _ = load_single_sequence_fasta(self.path)
+            record_ids = list_fasta_record_ids(self.path)
         except (OSError, ValueError):
             return False
-        from repeatviewer.backends.gui_functions import sanitize_name
-
-        return record_id == seq_id or sanitize_name(record_id) == seq_id
+        wanted = str(seq_id or "").strip()
+        for record_id in record_ids:
+            if (
+                record_id == wanted
+                or sanitize_name(record_id) == wanted
+                or _seqid_matches(record_id, wanted)
+            ):
+                return True
+        return False
 
     def matches_sequence_id_for_go_to(self, seq_id: str) -> bool:
         """True if a Go-to click on ``seq_id`` should jump this tab's Annotation view."""
@@ -1335,6 +1353,7 @@ class FilePreviewPage(QWidget):
             panel.bind_annotation_zoom_bar(tab_host._annotation_zoom_bar)
         if self._fasta_stack.currentIndex() != 1:
             self.set_fasta_tab_index(1)
+        panel.ensure_active_sequence(seq_id)
         panel.jump_to_region(start, end)
 
     def refresh_nucleotide_colors(self) -> None:
@@ -1380,7 +1399,7 @@ class FilePreviewPage(QWidget):
             self._set_single_fasta_mode(False)
             self._show_text(_FASTA_TOO_LARGE_MESSAGE)
             return
-        if _is_single_fasta_file(path):
+        if _is_sequence_map_fasta(path):
             self._load_single_fasta_preview(path)
             return
         self._set_single_fasta_mode(False)

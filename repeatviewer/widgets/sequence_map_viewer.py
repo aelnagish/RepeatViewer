@@ -112,6 +112,7 @@ from repeatviewer.backends.sequence_features import (
     summarize_loaded_sequence,
     resolve_features_gff_path,
     save_annotations,
+    save_annotations_multi,
     summarize_single_sequence_fasta,
 )
 from repeatviewer.database_settings import load_similarity_annotation_databases
@@ -4499,6 +4500,29 @@ class SequenceMapPanel(QWidget):
         self._similarity_all_updating = False
         self._add_feature_buttons: list[_AddFeatureControl] = []
         self._add_feature_button_defs: list[tuple[str, str]] = []
+        self._sequence_switch_updating = False
+
+        self._seq_row_container, seq_row = _control_band(controls)
+        self._seq_label = _annotation_row_label("Sequence:", self._seq_row_container)
+        seq_row.addWidget(self._seq_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._sequence_combo = QComboBox(self._seq_row_container)
+        self._sequence_combo.setEditable(True)
+        self._sequence_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._sequence_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._sequence_combo.setMinimumContentsLength(24)
+        self._sequence_combo.setMinimumWidth(220)
+        self._sequence_combo.setToolTip(
+            "Choose which sequence from this FASTA to show on the map"
+        )
+        self._sequence_combo.currentIndexChanged.connect(self._on_sequence_combo_changed)
+        seq_row.addWidget(self._sequence_combo, 1, Qt.AlignmentFlag.AlignVCenter)
+        self._seq_count_label = QLabel("", self._seq_row_container)
+        self._seq_count_label.setStyleSheet("color: palette(mid);")
+        seq_row.addWidget(self._seq_count_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        controls_layout.addWidget(self._seq_row_container)
+        self._seq_row_container.hide()
 
         self._add_row_container, add_row = _control_band(controls)
         self._add_feature_label = _annotation_row_label("Add feature:", self._add_row_container)
@@ -5100,12 +5124,102 @@ class SequenceMapPanel(QWidget):
             data = load_sequence_map_data(self._path)
         except (OSError, ValueError) as exc:
             self._loaded_data = None
+            self._populate_sequence_combo(None)
             self.statusMessage.emit(str(exc))
             return
         self._loaded_data = data
+        self._populate_sequence_combo(data)
         self._map.load(data, fit_after_load=fit_after_load)
         self._feature_undo_stack.clear()
         self.refresh_sequence_summary()
+
+    def _populate_sequence_combo(self, data: SequenceMapData | None) -> None:
+        self._sequence_switch_updating = True
+        try:
+            self._sequence_combo.clear()
+            if data is None or not data.record_ids:
+                self._seq_row_container.hide()
+                self._seq_count_label.clear()
+                return
+            for rid in data.record_ids:
+                n_feat = len(data.features_by_id.get(rid) or [])
+                label = rid if n_feat == 0 else f"{rid}  ({n_feat})"
+                self._sequence_combo.addItem(label, rid)
+            idx = self._sequence_combo.findData(data.sequence_id)
+            if idx < 0:
+                idx = 0
+            self._sequence_combo.setCurrentIndex(idx)
+            total = len(data.record_ids)
+            if total > 1:
+                self._seq_count_label.setText(f"{total:,} sequences")
+                self._seq_row_container.show()
+            else:
+                self._seq_count_label.clear()
+                self._seq_row_container.hide()
+            # Searchable list for large libraries.
+            completer = QCompleter(data.record_ids, self._sequence_combo)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            self._sequence_combo.setCompleter(completer)
+        finally:
+            self._sequence_switch_updating = False
+
+    @Slot(int)
+    def _on_sequence_combo_changed(self, index: int) -> None:
+        if self._sequence_switch_updating or index < 0:
+            return
+        seq_id = self._sequence_combo.itemData(index)
+        if not seq_id:
+            # Editable completer may leave text without itemData.
+            seq_id = self._sequence_combo.currentText().split("  (", 1)[0].strip()
+        if not seq_id:
+            return
+        self.ensure_active_sequence(str(seq_id))
+
+    def ensure_active_sequence(self, seq_id: str) -> bool:
+        """Switch the map to ``seq_id`` (saving in-memory edits for the previous id)."""
+        data = self._loaded_data
+        if data is None:
+            return False
+        wanted = str(seq_id or "").strip()
+        if not wanted:
+            return False
+        if data.sequence_id == wanted:
+            return True
+        # Soft-match against known ids.
+        target = wanted
+        if wanted not in data.record_ids:
+            from repeatviewer.backends.gff_features import _seqid_matches
+
+            target = next(
+                (rid for rid in data.record_ids if _seqid_matches(rid, wanted)),
+                "",
+            )
+            if not target:
+                self.statusMessage.emit(f"Sequence “{wanted}” is not in this FASTA.")
+                return False
+        if data.sequence_id == target:
+            return True
+
+        # Keep unsaved canvas edits in the multi-seq store (disk write still via Save).
+        data.sync_active_features(self._map.features())
+        try:
+            data.switch_to(target)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Sequence", str(exc))
+            return False
+        self._loaded_data = data
+        self._sequence_switch_updating = True
+        try:
+            idx = self._sequence_combo.findData(data.sequence_id)
+            if idx >= 0:
+                self._sequence_combo.setCurrentIndex(idx)
+        finally:
+            self._sequence_switch_updating = False
+        self._map.load(data, fit_after_load=True)
+        self._feature_undo_stack.clear()
+        self.refresh_sequence_summary()
+        return True
 
     def _next_extraction_name(self, seq_id: str) -> str:
         """Default name: <seq>_extraction_N, skipping names already on disk."""
@@ -5301,17 +5415,36 @@ class SequenceMapPanel(QWidget):
         data = self._map.data()
         if data is None:
             return False
+        # Sync canvas edits into the multi-seq store before writing.
+        if self._loaded_data is not None:
+            self._loaded_data.sync_active_features(self._map.features())
+            data = self._loaded_data
+        else:
+            data.sync_active_features(self._map.features())
         try:
-            _json_path, gff_path = save_annotations(
-                self._path,
-                sequence_id=data.sequence_id,
-                sequence_length=data.length,
-                features=self._map.features(),
-            )
+            if data.record_ids and (
+                data.is_multi_sequence or len(data.features_by_id) > 1
+            ):
+                lengths = dict(data.lengths_by_id)
+                lengths[data.sequence_id] = data.length
+                _json_path, gff_path = save_annotations_multi(
+                    self._path,
+                    features_by_id=data.features_by_id,
+                    lengths_by_id=lengths,
+                )
+            else:
+                _json_path, gff_path = save_annotations(
+                    self._path,
+                    sequence_id=data.sequence_id,
+                    sequence_length=data.length,
+                    features=self._map.features(),
+                )
         except OSError as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             return False
         self._map.mark_clean()
+        if self._loaded_data is not None:
+            self._populate_sequence_combo(self._loaded_data)
         if gff_path is not None:
             if show_message:
                 self.statusMessage.emit(f"Saved annotations: {gff_path}")
