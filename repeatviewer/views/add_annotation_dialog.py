@@ -11,13 +11,13 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
-    QHBoxLayout,
     QLineEdit,
     QMessageBox,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
+
+from repeatviewer.widgets.path_browse import PathBrowseRow
 
 _ANNOTATION_TYPES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("GFF", (".gff", ".gff3")),
@@ -61,21 +61,24 @@ class AddAnnotationDialog(QDialog):
             self._type.addItem(label, label)
         self._type.currentIndexChanged.connect(self._on_type_changed)
 
-        self._file = QLineEdit(self)
-        self._file.setPlaceholderText("Click a file in Files, or Browse")
-        browse_btn = QPushButton("Browse", self)
-        browse_btn.clicked.connect(self._browse)
-        file_row = QWidget(self)
-        file_h = QHBoxLayout(file_row)
-        file_h.setContentsMargins(0, 0, 0, 0)
-        file_h.addWidget(self._file, 1)
-        file_h.addWidget(browse_btn)
+        self._file_row = PathBrowseRow(
+            self,
+            placeholder="Click a file in Files, or Browse",
+            browse_title="Choose annotation file",
+            start_dir=str(self._start_dir),
+            mode="file",
+            browse_handler=self._browse,
+        )
+        self._file = self._file_row.line_edit()
+        self._file_row.set_default_tooltip(
+            "Click a file in the Files panel to fill this path, or use Browse."
+        )
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setSpacing(8)
         form.addRow("Type:", self._type)
-        form.addRow("File:", file_row)
+        form.addRow("File:", self._file_row)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -168,6 +171,7 @@ class AddAnnotationDialog(QDialog):
         if label is not None:
             self._set_type_label(label)
         self._file.setText(str(path))
+        self._file_row.set_file_filter(self._file_filter())
 
     def _on_ok(self) -> None:
         text = self._file.text().strip()

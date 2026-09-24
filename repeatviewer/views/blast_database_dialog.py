@@ -40,6 +40,7 @@ from repeatviewer.project import (
     BlastDatabase,
     RepeatViewerProject,
 )
+from repeatviewer.widgets.path_browse import PathBrowseRow
 
 _MOLECULE_LABELS = {
     BLAST_MOLECULE_NUCL: "Nucleotide",
@@ -119,18 +120,18 @@ class AddBlastDatabaseDialog(QDialog):
 
         self._name = QLineEdit(self)
         self._name.setPlaceholderText("Database name")
-        self._fasta = QLineEdit(self)
-        self._fasta.setPlaceholderText("Click a FASTA in Files, or Browse")
-        self._fasta.setToolTip(
+        self._fasta_row = PathBrowseRow(
+            self,
+            placeholder="Click a FASTA in Files, or Browse",
+            browse_title="Choose FASTA file",
+            file_filter="FASTA (*.fa *.fasta *.fna *.fas *.faa);;All files (*)",
+            mode="file",
+            browse_handler=self._browse,
+        )
+        self._fasta = self._fasta_row.line_edit()
+        self._fasta_row.set_default_tooltip(
             "Click a FASTA file in the Files panel to fill this path, or use Browse."
         )
-        browse_btn = QPushButton("Browse", self)
-        browse_btn.clicked.connect(self._browse)
-        fasta_row = QWidget(self)
-        fasta_h = QHBoxLayout(fasta_row)
-        fasta_h.setContentsMargins(0, 0, 0, 0)
-        fasta_h.addWidget(self._fasta, 1)
-        fasta_h.addWidget(browse_btn)
 
         # blastn uses nucleotide databases; blastp uses protein databases.
         self._molecule_type: QComboBox | None = None
@@ -149,7 +150,7 @@ class AddBlastDatabaseDialog(QDialog):
         if self._molecule_type is not None:
             form.addRow("Type:", self._molecule_type)
         form.addRow("Name:", self._name)
-        form.addRow("FASTA:", fasta_row)
+        form.addRow("FASTA:", self._fasta_row)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel

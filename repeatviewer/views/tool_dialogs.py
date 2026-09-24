@@ -50,6 +50,7 @@ from repeatviewer.widgets.spin_boxes import (  # noqa: E402
     NoWheelSpinBox as QSpinBox,
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox  # noqa: E402
+from repeatviewer.widgets.path_browse import PathBrowseRow  # noqa: E402
 
 
 def exec_modal_dialog(dialog: QDialog) -> bool:
@@ -2419,7 +2420,7 @@ class ExtendParamsDialog(QDialog):
                 self._genome_combo.addItem(Path(opts.genome_path).name, opts.genome_path)
                 self._genome_combo.setCurrentIndex(self._genome_combo.count() - 1)
 
-        genome_browse = QPushButton("Browse…", self)
+        genome_browse = QPushButton("Browse", self)
         genome_browse.setFixedWidth(88)
         genome_browse.clicked.connect(self._browse_genome)
 
@@ -4435,7 +4436,7 @@ class TeaAidParamsDialog(QDialog):
                 self._genome_combo.addItem(Path(opts.genome_path).name, opts.genome_path)
                 self._genome_combo.setCurrentIndex(self._genome_combo.count() - 1)
 
-        genome_browse = QPushButton("Browse…", self)
+        genome_browse = QPushButton("Browse", self)
         genome_browse.setFixedWidth(88)
         genome_browse.clicked.connect(self._browse_genome)
 
@@ -5443,24 +5444,18 @@ class _TeInputFileRow(QWidget):
         start_dir: str = "",
     ) -> None:
         super().__init__(parent)
-        self._browse_title = browse_title
-        self._file_filter = file_filter
-        self._start_dir = start_dir
-        self._path = QLineEdit(self)
-        self._path.setObjectName("PathField")  # framed via the app stylesheet
-        self._path.setPlaceholderText(placeholder)
-        self._path.setMinimumWidth(280)
-        self._path.setClearButtonEnabled(True)
-        self._path.installEventFilter(self)
-        # A long path is wider than the field: hovering shows all of it.
-        self._path.textChanged.connect(self._sync_path_tooltip)
-        if initial is not None:
-            self._path.setText(str(initial.expanduser().resolve()))
-
-        self._path.editingFinished.connect(self._emit_path_changed)
-
-        browse_btn = QPushButton("Browse", self)
-        browse_btn.clicked.connect(self._browse)
+        self._row = PathBrowseRow(
+            self,
+            initial=initial,
+            placeholder=placeholder,
+            browse_title=browse_title,
+            file_filter=file_filter,
+            start_dir=start_dir,
+            mode="file",
+        )
+        self._path = self._row.line_edit()
+        self._row.activated.connect(lambda _w: self.activated.emit(self))
+        self._row.path_changed.connect(self.path_changed.emit)
 
         remove_btn = QPushButton("Remove", self)
         remove_btn.setVisible(removable)
@@ -5470,45 +5465,17 @@ class _TeInputFileRow(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(self._path, stretch=1)
-        layout.addWidget(browse_btn)
+        layout.addWidget(self._row, stretch=1)
         layout.addWidget(remove_btn)
-
-    def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if obj is self._path and event.type() == QEvent.Type.FocusIn:
-            self.activated.emit(self)
-        return super().eventFilter(obj, event)
-
-    def _sync_path_tooltip(self, text: str) -> None:
-        self._path.setToolTip(text.strip())
 
     def set_removable(self, removable: bool) -> None:
         self._remove_btn.setVisible(removable)
 
     def set_path(self, path: Path) -> None:
-        self._path.setText(str(path.expanduser().resolve()))
-        self._emit_path_changed()
-
-    def _emit_path_changed(self) -> None:
-        self.path_changed.emit()
+        self._row.set_path(path)
 
     def path(self) -> Path | None:
-        text = self._path.text().strip()
-        if not text:
-            return None
-        return Path(text).expanduser()
-
-    def _browse(self) -> None:
-        start = self._path.text().strip() or self._start_dir or str(Path.home())
-        picked, _ = QFileDialog.getOpenFileName(
-            self,
-            self._browse_title,
-            start,
-            self._file_filter,
-        )
-        if picked:
-            self._path.setText(picked)
-            self._emit_path_changed()
+        return self._row.path()
 
 
 class TeMultiInputFilesWidget(QWidget):
@@ -5661,41 +5628,25 @@ class GeneInputFileWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None, *, initial: Path | None = None) -> None:
         super().__init__(parent)
-        self._path = QLineEdit(self)
-        self._path.setPlaceholderText("Optional GFF/GTF/BED/VCF annotation")
-        self._path.setMinimumWidth(280)
-        if initial is not None:
-            self._path.setText(str(initial.expanduser().resolve()))
-        browse_btn = QPushButton("Browse", self)
-        browse_btn.clicked.connect(self._browse)
+        self._row = PathBrowseRow(
+            self,
+            initial=initial,
+            placeholder="Optional GFF/GTF/BED/VCF annotation",
+            browse_title="Select annotation file",
+            file_filter=(
+                "Annotations (*.gff *.gff3 *.gtf *.bed *.vcf *.vcf.gz);;All files (*)"
+            ),
+            mode="file",
+        )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._path, stretch=1)
-        layout.addWidget(browse_btn)
+        layout.addWidget(self._row, stretch=1)
 
     def set_path(self, path: Path | None) -> None:
-        if path is None:
-            self._path.clear()
-        else:
-            self._path.setText(str(path.expanduser().resolve()))
+        self._row.set_path(path)
 
     def path(self) -> Path | None:
-        text = self._path.text().strip()
-        if not text:
-            return None
-        return Path(text).expanduser()
-
-    def _browse(self) -> None:
-        start = self._path.text().strip() or str(Path.home())
-        picked, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select annotation file",
-            start,
-            "Annotations (*.gff *.gff3 *.gtf *.bed *.vcf *.vcf.gz);;All files (*)",
-        )
-        if picked:
-            self._path.setText(picked)
+        return self._row.path()
 
 
 def _form_section_separator() -> QWidget:
@@ -6585,47 +6536,32 @@ def _browse_file_line(
     *,
     title: str,
     filt: str,
+    placeholder: str = "",
 ) -> QWidget:
-    row = QWidget(parent)
-    h = QHBoxLayout(row)
-    h.setContentsMargins(0, 0, 0, 0)
-    h.addWidget(line)
-
-    def browse() -> None:
-        chosen, _ = QFileDialog.getOpenFileName(
-            row,
-            title,
-            line.text() or str(Path.home()),
-            filt,
-        )
-        if chosen:
-            line.setText(chosen)
-
-    btn = QPushButton("Browse", row)
-    btn.clicked.connect(browse)
-    h.addWidget(btn)
-    return row
+    return PathBrowseRow(
+        parent,
+        placeholder=placeholder or line.placeholderText(),
+        browse_title=title,
+        file_filter=filt,
+        mode="file",
+        line_edit=line,
+    )
 
 
-def _browse_dir_line(parent: QWidget, line: QLineEdit, *, title: str) -> QWidget:
-    row = QWidget(parent)
-    h = QHBoxLayout(row)
-    h.setContentsMargins(0, 0, 0, 0)
-    h.addWidget(line)
-
-    def browse() -> None:
-        chosen = QFileDialog.getExistingDirectory(
-            row,
-            title,
-            line.text() or str(Path.home()),
-        )
-        if chosen:
-            line.setText(chosen)
-
-    btn = QPushButton("Browse", row)
-    btn.clicked.connect(browse)
-    h.addWidget(btn)
-    return row
+def _browse_dir_line(
+    parent: QWidget,
+    line: QLineEdit,
+    *,
+    title: str,
+    placeholder: str = "",
+) -> QWidget:
+    return PathBrowseRow(
+        parent,
+        placeholder=placeholder or line.placeholderText(),
+        browse_title=title,
+        mode="directory",
+        line_edit=line,
+    )
 
 
 class ConfusionMatrixBenchmarkDialog(QDialog):
@@ -6643,7 +6579,9 @@ class ConfusionMatrixBenchmarkDialog(QDialog):
         opts = initial or TeConfusionMatrixBenchmarkOptions()
 
         self._tetrimmer_home = QLineEdit(opts.tetrimmer_home)
+        self._tetrimmer_home.setPlaceholderText("TEtrimmer repository root folder")
         self._reference = QLineEdit(opts.reference_out)
+        self._reference.setPlaceholderText("Reference RepeatMasker .out")
         self._less_class = QCheckBox("Simpler TE classes (merge LINE/SINE to Non-LTR)")
         self._less_class.setChecked(opts.less_classification)
         self._debug = QCheckBox("Keep intermediate files (debug)")
@@ -6652,7 +6590,12 @@ class ConfusionMatrixBenchmarkDialog(QDialog):
         form = QFormLayout()
         form.addRow(
             "TEtrimmer folder:",
-            _browse_dir_line(self, self._tetrimmer_home, title="Select TEtrimmer repository root"),
+            _browse_dir_line(
+                self,
+                self._tetrimmer_home,
+                title="Select TEtrimmer repository root",
+                placeholder="TEtrimmer repository root folder",
+            ),
         )
         form.addRow(
             "Reference RM .out:",
@@ -6661,6 +6604,7 @@ class ConfusionMatrixBenchmarkDialog(QDialog):
                 self._reference,
                 title="Reference RepeatMasker .out",
                 filt="RepeatMasker out (*.out);;All files (*)",
+                placeholder="Reference RepeatMasker .out",
             ),
         )
         form.addRow("", self._less_class)
@@ -6706,8 +6650,11 @@ class TeLibraryBenchmarkDialog(QDialog):
             )
 
         self._query = QLineEdit(opts.query_fasta)
+        self._query.setPlaceholderText("Query TE library FASTA (.fa / .fasta)")
         self._standard = QLineEdit(opts.standard_fasta)
+        self._standard.setPlaceholderText("Standard / curated library FASTA")
         self._rm_out = QLineEdit(opts.rm_out)
+        self._rm_out.setPlaceholderText("Optional existing RepeatMasker .out")
         self._run_rm = QCheckBox("Run RepeatMasker (-lib standard query)")
         self._run_rm.setChecked(opts.run_repeatmasker)
         self._threads = QSpinBox()
@@ -6722,6 +6669,7 @@ class TeLibraryBenchmarkDialog(QDialog):
                 self._query,
                 title="Query TE library FASTA",
                 filt="FASTA (*.fa *.fasta *.fas);;All files (*)",
+                placeholder="Query TE library FASTA (.fa / .fasta)",
             ),
         )
         form.addRow(
@@ -6731,6 +6679,7 @@ class TeLibraryBenchmarkDialog(QDialog):
                 self._standard,
                 title="Standard TE library FASTA",
                 filt="FASTA (*.fa *.fasta *.fas);;All files (*)",
+                placeholder="Standard / curated library FASTA",
             ),
         )
         form.addRow(
@@ -6740,6 +6689,7 @@ class TeLibraryBenchmarkDialog(QDialog):
                 self._rm_out,
                 title="Existing lib-vs-lib RepeatMasker .out",
                 filt="RepeatMasker out (*.out);;All files (*)",
+                placeholder="Optional existing RepeatMasker .out",
             ),
         )
         form.addRow("", self._run_rm)
@@ -6930,27 +6880,20 @@ class RepeatQuantifyDialog(QDialog):
     def _make_output_controls(self) -> QWidget:
         """Output folder field + Browse, with a preview of the run folder below."""
         self._output_focused = False
-        self._output_path = QLineEdit(self)
-        self._output_path.setObjectName("PathField")  # framed like the file fields
-        self._output_path.setPlaceholderText("Auto — a new folder next to each genome")
-        self._output_path.setMinimumWidth(280)
-        self._output_path.setClearButtonEnabled(True)  # clearing = back to Auto
-        self._output_path.setToolTip(
+        self._output_row = PathBrowseRow(
+            self,
+            placeholder="Auto — a new folder next to each genome",
+            browse_title="Select output folder",
+            mode="directory",
+        )
+        self._output_path = self._output_row.line_edit()
+        self._output_row.set_default_tooltip(
             "Leave empty to write each genome's results to a new folder next to "
             "that genome. Choose a folder to create the run folders inside it "
             "instead. Every run gets its own timestamped folder."
         )
         self._output_path.installEventFilter(self)
-        self._output_path.textChanged.connect(self._update_output_preview)
-
-        browse = QPushButton("Browse", self)
-        browse.clicked.connect(self._browse_output_dir)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        row.addWidget(self._output_path, stretch=1)
-        row.addWidget(browse)
+        self._output_row.text_changed.connect(lambda _t: self._update_output_preview())
 
         # One line, path shortened in the middle; full path on hover.
         self._output_preview = _ElidedPathLabel(self)
@@ -6960,7 +6903,7 @@ class RepeatQuantifyDialog(QDialog):
         box = QVBoxLayout(host)
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(3)
-        box.addLayout(row)
+        box.addWidget(self._output_row)
         box.addWidget(self._output_preview)
 
         self._genome_input.paths_changed.connect(self._update_output_preview)
@@ -6985,17 +6928,8 @@ class RepeatQuantifyDialog(QDialog):
             name = f"<genome>_repeat_quant_{stamp}"
             path = str(base / name) if base else f"<genome folder>/{name}"
         self._output_preview.set_parts("→ ", path, suffix)
-
-    def _browse_output_dir(self) -> None:
-        start = self._output_path.text().strip()
-        if not start:
-            targets = self.targets()
-            start = str(targets[0].parent) if targets else (
-                self._start_dir or str(Path.home())
-            )
-        picked = QFileDialog.getExistingDirectory(self, "Select output folder", start)
-        if picked:
-            self.set_output_dir(Path(picked))
+        if not self._output_path.text().strip() and targets:
+            self._output_row.set_start_dir(str(targets[0].parent))
 
     def set_output_dir(self, folder: Path | None) -> None:
         """Set the output folder (None = Auto)."""

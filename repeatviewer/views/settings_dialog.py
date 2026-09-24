@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -34,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
+from repeatviewer.widgets.path_browse import PathBrowseRow
 
 if TYPE_CHECKING:
     from repeatviewer.plugins.registry import PluginRegistry
@@ -326,6 +326,13 @@ def _genome_history_label(path: Path) -> str:
     return f"{path.name}  —  {parent}"
 
 
+# Uniform column sizing so every field lines up across all groups.
+_FIELD_WIDTH = 170
+_PATH_FIELD_MIN_WIDTH = 320
+_LABEL_WIDTH = 200
+_CONDA_STATUS_MAX_LINES = 4
+
+
 def _path_browse_row(
     line_edit: QLineEdit,
     *,
@@ -333,50 +340,21 @@ def _path_browse_row(
     is_dir: bool,
     browse_title: str,
     file_filter: str = "All files (*)",
+    placeholder: str = "",
     on_changed=None,
 ) -> QWidget:
-    container = QWidget(parent)
-    container.setSizePolicy(
-        QSizePolicy.Policy.Expanding,
-        QSizePolicy.Policy.Fixed,
+    row = PathBrowseRow(
+        parent,
+        placeholder=placeholder or line_edit.placeholderText(),
+        browse_title=browse_title,
+        file_filter=file_filter,
+        mode="directory" if is_dir else "file",
+        line_edit=line_edit,
+        minimum_width=_PATH_FIELD_MIN_WIDTH,
     )
-    layout = QHBoxLayout(container)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(6)
-    line_edit.setSizePolicy(
-        QSizePolicy.Policy.Expanding,
-        QSizePolicy.Policy.Fixed,
-    )
-    layout.addWidget(line_edit, stretch=1)
-
-    def browse() -> None:
-        start = line_edit.text().strip() or str(Path.home())
-        if is_dir:
-            chosen = QFileDialog.getExistingDirectory(parent, browse_title, start)
-            if chosen:
-                line_edit.setText(chosen)
-                if on_changed is not None:
-                    on_changed()
-        else:
-            chosen, _ = QFileDialog.getOpenFileName(
-                parent,
-                browse_title,
-                start,
-                file_filter,
-            )
-            if chosen:
-                line_edit.setText(chosen)
-                if on_changed is not None:
-                    on_changed()
-
-    browse_btn = QPushButton("Browse", container)
-    browse_btn.setSizePolicy(
-        QSizePolicy.Policy.Fixed,
-        QSizePolicy.Policy.Fixed,
-    )
-    browse_btn.clicked.connect(browse)
-    layout.addWidget(browse_btn)
-    return container
+    if on_changed is not None:
+        row.path_changed.connect(on_changed)
+    return row
 
 
 def _section_label(text: str, parent: QWidget) -> QLabel:
@@ -385,13 +363,6 @@ def _section_label(text: str, parent: QWidget) -> QLabel:
     font.setBold(True)
     label.setFont(font)
     return label
-
-
-# Uniform column sizing so every field lines up across all groups.
-_FIELD_WIDTH = 170
-_PATH_FIELD_MIN_WIDTH = 320
-_LABEL_WIDTH = 200
-_CONDA_STATUS_MAX_LINES = 4
 
 
 class _CondaStatusLabel(QLabel):
@@ -571,6 +542,9 @@ class SettingsDialog(QDialog):
         # BLAST databases — default Documents/RepeatViewer/blast_databases (all OSes)
         self._blast_db_base_dir = QLineEdit(str(load_blast_db_base_dir()))
         self._blast_db_base_dir.setMinimumWidth(_PATH_FIELD_MIN_WIDTH)
+        self._blast_db_base_dir.setPlaceholderText(
+            "Documents/RepeatViewer/blast_databases"
+        )
         self._blast_db_base_dir.setToolTip(
             "Folder for named BLAST indexes (Manage BLAST databases).\n"
             "Default on macOS, Linux, and Windows:\n"
@@ -733,6 +707,7 @@ class SettingsDialog(QDialog):
                 parent=self,
                 is_dir=True,
                 browse_title="Choose BLAST databases folder",
+                placeholder="Documents/RepeatViewer/blast_databases",
             )),
             ("", self._open_blast_db_btn),
         ])

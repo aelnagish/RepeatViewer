@@ -31,6 +31,7 @@ from repeatviewer.widgets.spin_boxes import (
     NoWheelDoubleSpinBox as QDoubleSpinBox,
     NoWheelSpinBox as QSpinBox,
 )
+from repeatviewer.widgets.path_browse import PathBrowseRow
 
 
 from repeatviewer.plugins.api import RepeatViewerPlugin
@@ -986,20 +987,23 @@ class _FileInputRow(QWidget):
     ) -> None:
         super().__init__(parent)
         self._allow_multiple = allow_multiple
-        self._edit = QLineEdit(initial, self)
-        self._browse = QPushButton("Browse", self)
-        self._browse.clicked.connect(self._pick_path)
-        self._edit.installEventFilter(self)
-        self._edit.textChanged.connect(self.path_changed.emit)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(self._edit, 1)
-        row.addWidget(self._browse, 0)
-
-    def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if event.type() == QEvent.Type.FocusIn and obj is self._edit:
-            self.activated.emit(self)
-        return super().eventFilter(obj, event)
+        self._row = PathBrowseRow(
+            self,
+            placeholder=(
+                "Select one or more files" if allow_multiple else "Select a file"
+            ),
+            browse_title="Select files" if allow_multiple else "Select file",
+            mode="file",
+            browse_handler=self._pick_path,
+        )
+        if initial:
+            self._row.set_text(initial, emit=False)
+        self._edit = self._row.line_edit()
+        self._row.activated.connect(lambda _w: self.activated.emit(self))
+        self._row.text_changed.connect(self.path_changed.emit)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._row, stretch=1)
 
     def _pick_path(self) -> None:
         start = self._edit.text().strip().split()[0] if self._edit.text().strip() else str(Path.home())
@@ -1033,7 +1037,7 @@ class _FileInputRow(QWidget):
         return True
 
     def focus_field(self) -> None:
-        self._edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._row.focus_field()
 
     def set_value(self, text: str) -> None:
         self._edit.setText(text)
@@ -1048,20 +1052,21 @@ class _FolderInputRow(QWidget):
 
     def __init__(self, *, initial: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._edit = QLineEdit(initial, self)
-        self._browse = QPushButton("Browse", self)
-        self._browse.clicked.connect(self._pick_path)
-        self._edit.installEventFilter(self)
-        self._edit.textChanged.connect(self.path_changed.emit)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(self._edit, 1)
-        row.addWidget(self._browse, 0)
-
-    def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if event.type() == QEvent.Type.FocusIn and obj is self._edit:
-            self.activated.emit(self)
-        return super().eventFilter(obj, event)
+        self._row = PathBrowseRow(
+            self,
+            placeholder="Select a folder",
+            browse_title="Select folder",
+            mode="directory",
+            browse_handler=self._pick_path,
+        )
+        if initial:
+            self._row.set_text(initial, emit=False)
+        self._edit = self._row.line_edit()
+        self._row.activated.connect(lambda _w: self.activated.emit(self))
+        self._row.text_changed.connect(self.path_changed.emit)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._row, stretch=1)
 
     def _pick_path(self) -> None:
         start = self._edit.text().strip() or str(Path.home())
@@ -1077,7 +1082,7 @@ class _FolderInputRow(QWidget):
         return True
 
     def focus_field(self) -> None:
-        self._edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._row.focus_field()
 
     def set_value(self, text: str) -> None:
         self._edit.setText(text)

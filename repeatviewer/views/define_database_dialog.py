@@ -44,6 +44,7 @@ from repeatviewer.views.settings_dialog import (
     save_workspace,
 )
 from repeatviewer.widgets.database_index_runner import find_database_index_runner
+from repeatviewer.widgets.path_browse import PathBrowseRow
 _BLAST_DNA_INDEX_SUFFIXES = frozenset(
     {".nhr", ".nin", ".nsq", ".nog", ".nos", ".nod", ".not", ".ndb", ".nto", ".ntf", ".nni"}
 )
@@ -141,20 +142,21 @@ class _UserDatabaseRow(QWidget):
                 self._type.setCurrentIndex(type_index)
             self._hmm.setChecked(initial.is_hmm)
 
-        browse_btn = QPushButton("Browse", self)
-        browse_btn.clicked.connect(self._browse)
         self._remove_btn = QPushButton("Remove", self)
         self._remove_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._remove_btn.setVisible(removable)
         self._remove_btn.clicked.connect(self.remove_requested.emit)
         self._path.editingFinished.connect(self._apply_inferred_defaults)
 
-        path_container = QWidget(self)
-        path_layout = QHBoxLayout(path_container)
-        path_layout.setContentsMargins(0, 0, 0, 0)
-        path_layout.setSpacing(6)
-        path_layout.addWidget(self._path, stretch=1)
-        path_layout.addWidget(browse_btn)
+        self._path_row = PathBrowseRow(
+            self,
+            placeholder="Database file path",
+            browse_title="Select database file",
+            mode="file",
+            line_edit=self._path,
+            minimum_width=140,
+            browse_handler=self._browse,
+        )
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -162,7 +164,7 @@ class _UserDatabaseRow(QWidget):
         layout.addWidget(QLabel("Name", self))
         layout.addWidget(self._name)
         layout.addWidget(QLabel("Path", self))
-        layout.addWidget(path_container, stretch=1)
+        layout.addWidget(self._path_row, stretch=1)
         layout.addWidget(QLabel("Type", self))
         layout.addWidget(self._type)
         layout.addWidget(self._hmm, 0, Qt.AlignmentFlag.AlignVCenter)
