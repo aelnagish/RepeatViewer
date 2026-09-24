@@ -8887,6 +8887,7 @@ class MainWindow(QMainWindow):
         dialog = ExtendParamsDialog(
             initial=self._extend_options,
             pan_genome_names=self._pan_genome_names(),
+            project=self._project,
             project_genome=self._genome_path_resolved(),
             genome_history=load_genome_history(),
             parent=self,
@@ -9052,6 +9053,7 @@ class MainWindow(QMainWindow):
         dialog = ExtendParamsDialog(
             initial=self._extend_options,
             pan_genome_names=self._pan_genome_names(),
+            project=self._project,
             project_genome=self._genome_path_resolved(),
             genome_history=load_genome_history(),
             parent=self,
