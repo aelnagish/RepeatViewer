@@ -344,6 +344,7 @@ from repeatviewer.job_options import (
     TEAID_RIGHT_CLICK_DIALOG,
     MSA_CLEAN_RIGHT_CLICK_DIALOG,
     TE_ANNOTATION_RIGHT_CLICK_DIALOG,
+    TREE_RIGHT_CLICK_DIALOG,
     load_align_options,
     load_blast_options,
     load_consensus_options,
@@ -360,6 +361,7 @@ from repeatviewer.job_options import (
     load_te_confusion_matrix_benchmark_options,
     load_te_library_benchmark_options,
     load_tsd_search_options,
+    load_tree_options,
     msa_clean_method_description,
     save_align_options,
     save_blast_options,
@@ -377,6 +379,7 @@ from repeatviewer.job_options import (
     save_te_confusion_matrix_benchmark_options,
     save_te_library_benchmark_options,
     save_tsd_search_options,
+    save_tree_options,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
     MsaPlotJobOptions,
@@ -540,6 +543,7 @@ _TOOLBAR_TOOLTIPS = {
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
     "fastga": "FastGA whole-genome alignment (self-comparison one-by-one by default; optional all-pairs)",
+    "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
@@ -879,6 +883,50 @@ class FastGaWorker(QObject):
                     created.append(str(written))
 
             self.finished.emit(created)
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(_format_cli_failure(exc))
+
+
+class TreeWorker(QObject):
+    """Build a phylogenetic tree off the UI thread (Tools → Tree)."""
+
+    progress = Signal(int, str)
+    log_line = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, seq_files: list[Path], options, *, cancel=None) -> None:
+        super().__init__()
+        self._seq_files = list(seq_files)
+        self._options = options
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from repeatviewer.backends.tree_builder import TreeBuildError, build_tree_run
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
+        steps = {"Aligning": 1, "Building": 2, "Drawing": 3}
+
+        def _progress(message: str) -> None:
+            step = next((v for k, v in steps.items() if message.startswith(k)), 1)
+            self.progress.emit(step, message)
+            self.log_line.emit(message)
+
+        try:
+            with process_log_sink(_log):
+                run_dir, files, report = build_tree_run(
+                    self._seq_files, self._options, progress=_progress, cancel=self._cancel
+                )
+            self.finished.emit({"details_dir": str(run_dir), "files": [str(f) for f in files],
+                                "report": str(report)})
+        except JobCancelledError:
+            self.failed.emit(CANCELLED_MESSAGE)
+        except TreeBuildError as exc:
+            self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - surface to the UI
             self.failed.emit(_format_cli_failure(exc))
 
@@ -1999,6 +2047,7 @@ class MainWindow(QMainWindow):
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
         self._fastga_options = load_fastga_options()
+        self._tree_options = load_tree_options()
         self._extend_options = load_extend_options()
         self._tsd_search_options = load_tsd_search_options()
         self._teaid_options = load_teaid_options()
@@ -3665,6 +3714,120 @@ class MainWindow(QMainWindow):
         else:
             self._set_status_message("FastGA settings saved", 4000)
 
+    # ------------------------------------------------------------------ Tree
+
+    def _populate_tree_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Tree with default parameters", self._run_tree_default)
+        menu.addSeparator()
+        # Settings can be changed without a selection (Run then asks for one).
+        menu.addAction(
+            "Change Tree parameters", lambda: self._open_tree_dialog(require_selection=False)
+        )
+
+    def _tree_candidate_files(self) -> list[Path]:
+        """Selected FASTA files (several files are combined into one tree). No UI."""
+        return [
+            p for p in self._selected_files()
+            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+
+    def _selected_files_for_tree(self) -> list[Path]:
+        files = self._tree_candidate_files()
+        if not files:
+            QMessageBox.information(
+                self,
+                "Tree",
+                "Select one or more FASTA files in the file panel first.\n"
+                "Several selected files are combined into one tree.",
+            )
+        return files
+
+    def _run_tree_default(self) -> None:
+        files = self._selected_files_for_tree()
+        if files:
+            self._start_tree_job(files, self._tree_options)
+
+    def _quick_tree_right_click(self) -> None:
+        """Right-click Tree: run with saved settings or reopen the dialog (Options tab)."""
+        if self._tree_options.right_click_action == TREE_RIGHT_CLICK_DIALOG:
+            self._open_tree_dialog()
+            return
+        self._run_tree_default()
+
+    def _open_tree_dialog(self, *, require_selection: bool = True) -> None:
+        """Click Tree → parameters dialog (Cancel / Save / Run).
+
+        Without a FASTA selection the toolbar click only shows a message; the
+        Tools → Tree → Change Tree parameters entry still opens the dialog."""
+        from repeatviewer.views.tree_dialog import TreeParamsDialog
+
+        files = self._tree_candidate_files()
+        if require_selection and not files:
+            self._selected_files_for_tree()  # shows the "select a FASTA file" message
+            return
+        dialog = TreeParamsDialog(
+            initial=self._tree_options,
+            files=files,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._tree_options = dialog.options()
+        save_tree_options(self._tree_options)
+        if dialog.should_run():
+            files = self._selected_files_for_tree()
+            if files:
+                self._start_tree_job(files, self._tree_options)
+        else:
+            self._set_status_message("Tree settings saved", 4000)
+
+    def _start_tree_job(self, files: list[Path], options) -> None:
+        title = (f"Tree ({files[0].name})" if len(files) == 1
+                 else f"Tree ({len(files)} files combined)")
+        worker = TreeWorker(files, options, cancel=self._job_cancel)
+        self._attach_process_monitor(
+            worker,
+            title=title,
+            enabled=bool(options.show_process_window),
+            tool_key="tree",
+            mirror_progress=False,
+        )
+        self._start_background_job(
+            worker,
+            job_title=title,
+            total_steps=3,
+            source_files=files,
+            on_finished=self._on_tree_finished,
+            on_failed=self._on_tree_failed,
+        )
+
+    @Slot(object)
+    def _on_tree_finished(self, result) -> None:
+        report = Path(result["report"])
+        created = [Path(p) for p in result["files"] if Path(p).is_file()]
+        if self._current_folder:
+            # New results sit next to the input (green); the report opens (deep blue).
+            # Supporting files are in a new <input>_tree_details folder.
+            self._refresh_subfolders_under(self._current_folder)
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created,
+                source_files=getattr(self, "_last_job_source_files", []),
+                open_preview=False,
+            )
+        if report.is_file():
+            self._auto_open_outputs([report])
+        self._set_status_message(
+            f"Tree completed — {report.name}", 12000, override_file_link=True
+        )
+
+    @Slot(str)
+    def _on_tree_failed(self, error: str) -> None:
+        if error.strip() == CANCELLED_MESSAGE:
+            return
+        QMessageBox.warning(self, "Tree failed", error.strip() or "Unknown error.")
+
     def _attach_process_monitor(
         self,
         worker,
@@ -4269,6 +4432,7 @@ class MainWindow(QMainWindow):
         self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_fastga_menu(tools_menu.addMenu("Fast&GA"))
+        self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
@@ -4958,6 +5122,18 @@ class MainWindow(QMainWindow):
                     "Right-click: action chosen in the Options tab."
                 ),
                 right_click_slot=self._quick_fastga_right_click,
+            )
+        elif tool_id == "tree":
+            self._add_toolbar_action_button(
+                bar,
+                "Tree",
+                lambda: self._open_tree_dialog(),
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: build with saved parameters)."
+                ),
+                right_click_slot=self._quick_tree_right_click,
             )
         elif tool_id == "repeat_quantify":
             self._add_toolbar_text_action(
