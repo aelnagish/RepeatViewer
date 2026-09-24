@@ -7567,17 +7567,26 @@ class MainWindow(QMainWindow):
         """Fill Add BLAST database FASTA from a Files-panel click."""
         if clicked_path is None:
             return
-        for candidate in (
-            getattr(self, "_add_blast_database_dialog", None),
-            getattr(self._blast_params_dialog, "_blast_manager_dialog", None)
-            if self._blast_params_dialog is not None
-            else None,
-        ):
-            if candidate is None or not candidate.isVisible():
-                continue
-            apply = getattr(candidate, "apply_path_from_panel", None)
-            if callable(apply) and apply(clicked_path):
-                candidate.raise_()
+        from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
+
+        direct = getattr(self, "_add_blast_database_dialog", None)
+        if direct is not None and direct.isVisible():
+            if direct.apply_path_from_panel(clicked_path):
+                return
+
+        managers: list[BlastDatabaseManagerDialog] = []
+        params = self._blast_params_dialog
+        if params is not None:
+            mgr = getattr(params, "_blast_manager_dialog", None)
+            if isinstance(mgr, BlastDatabaseManagerDialog):
+                managers.append(mgr)
+        for mgr in self.findChildren(BlastDatabaseManagerDialog):
+            if mgr not in managers:
+                managers.append(mgr)
+
+        for manager in managers:
+            if manager.isVisible() and manager.apply_path_from_panel(clicked_path):
+                # Manager forwards to Add and keeps Add in front — do not raise Manage.
                 return
 
     def _add_fasta_as_blast_database(self, path: Path) -> None:

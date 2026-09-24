@@ -916,7 +916,7 @@ class SettingsDialog(QDialog):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def _manage_blast_databases(self) -> None:
-        """Open Manage BLAST databases (same window as BLAST parameters → Add/Manage)."""
+        """Open Manage BLAST databases (same window as BLAST parameters → Manage)."""
         from repeatviewer.database_settings import (
             reload_blast_databases_into_project,
             save_blast_databases_to_settings,
@@ -935,12 +935,24 @@ class SettingsDialog(QDialog):
             existing.activateWindow()
             return
 
+        # Parent stays this Preferences dialog so the manager remains interactive
+        # while Preferences is ApplicationModal; flags/behavior match BLAST's manager.
         dialog = BlastDatabaseManagerDialog(self._project, parent=self)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
         self._blast_manager_dialog = dialog
 
         def _on_finished(_result: int = 0) -> None:
             self._blast_manager_dialog = None
             save_blast_databases_to_settings(self._project.blast_databases)
+            # Refresh BLAST params dropdown if that dialog is open under the same project.
+            main = self.parentWidget()
+            params = getattr(main, "_blast_params_dialog", None) if main is not None else None
+            if params is not None and params.isVisible():
+                refresh = getattr(params, "_refresh_database_combos", None)
+                if callable(refresh):
+                    refresh()
 
         dialog.finished.connect(_on_finished)
         dialog.show()
