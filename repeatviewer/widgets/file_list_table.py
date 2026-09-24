@@ -28,6 +28,7 @@ from repeatviewer.backends.blast_genome_plot import (
 from repeatviewer.backends.cyto_images import image_count_for_sequence
 from repeatviewer.backends.separate_fasta import count_fasta_sequences
 from repeatviewer.browser_file_metadata import BrowserFileMetadata
+from repeatviewer.ui.theme import item_view_checkbox_stylesheet
 from repeatviewer.widgets.browser_icons import browser_file_icon
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
@@ -193,6 +194,8 @@ class FileListTableWidget(QTableWidget):
         self.setWordWrap(False)
         # Long names: keep start + end (extension), elide the middle — like Finder.
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        # Selected rows use white text; keep checkbox ticks black on the light box.
+        self.setStyleSheet(item_view_checkbox_stylesheet())
         self.setSortingEnabled(True)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)

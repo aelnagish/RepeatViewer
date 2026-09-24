@@ -12,6 +12,40 @@ def _icon_url(name: str) -> str:
     return str(path).replace("\\", "/")
 
 
+def item_view_checkbox_stylesheet() -> str:
+    """White box + black tick for list/table item checkboxes.
+
+    Selected rows set ``color: white`` (and Fusion uses HighlightedText), which
+    makes the native checkmark nearly invisible on the light checkbox face.
+    Local widget stylesheets can also block parent rules, so callers may need
+    to append this fragment on the list/table itself.
+    """
+    check_off = _icon_url("checkbox-unchecked.svg")
+    check_on = _icon_url("checkbox-checked.svg")
+    return f"""
+    QListWidget::indicator,
+    QTableWidget::indicator {{
+        width: 14px;
+        height: 14px;
+    }}
+    QListWidget::indicator:unchecked,
+    QListWidget::indicator:unchecked:selected,
+    QListWidget::indicator:unchecked:hover,
+    QTableWidget::indicator:unchecked,
+    QTableWidget::indicator:unchecked:selected,
+    QTableWidget::indicator:unchecked:hover {{
+        image: url({check_off});
+    }}
+    QListWidget::indicator:checked,
+    QListWidget::indicator:checked:selected,
+    QListWidget::indicator:checked:hover,
+    QTableWidget::indicator:checked,
+    QTableWidget::indicator:checked:selected,
+    QTableWidget::indicator:checked:hover {{
+        image: url({check_on});
+    }}
+    """
+
 
 def application_stylesheet(
     *,
@@ -26,6 +60,7 @@ def application_stylesheet(
     radius_sm = 6
     spin_up = _icon_url("spinbox-up.svg")
     spin_down = _icon_url("spinbox-down.svg")
+    item_checks = item_view_checkbox_stylesheet()
     return f"""
     QMainWindow {{
         background: palette(window);
@@ -218,6 +253,7 @@ def application_stylesheet(
         background: palette(alternate-base);
         border-radius: {radius_sm}px;
     }}
+    {item_checks}
     /* Buttons and combo boxes are deliberately left to the native Fusion style.
        Setting border-radius here makes Qt draw the widget from the stylesheet
        instead of the style; anything left unspecified (frame, drop-down arrow)

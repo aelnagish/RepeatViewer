@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QStandardItemModel
+from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QMouseEvent, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
+    QStyleOptionViewItem,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -162,6 +164,7 @@ from repeatviewer.branding import APP_DISPLAY_NAME
 from repeatviewer.backends.blast_genome_plot import format_genome_length_bp
 from repeatviewer.backends.database_prepare import blast_database_is_ready
 from repeatviewer.project import BLAST_MOLECULE_NUCL, BLAST_MOLECULE_PROT, RepeatViewerProject
+from repeatviewer.ui.theme import item_view_checkbox_stylesheet
 from repeatviewer.job_options import (
     ALIGNER_MAFFT,
     ALIGNER_MUSCLE,
@@ -1550,6 +1553,82 @@ class NewSequenceDialog(QDialog):
         }
 
 
+class _CheckboxToggleListWidget(QListWidget):
+    """List where checkbox clicks toggle one row without range-select side effects.
+
+    ``ExtendedSelection`` + selection↔check sync meant a normal click replaced
+    the selection (wiping earlier ticks). Handling the indicator ourselves fixed
+    that, but press/move/release could still apply a shift-style range and tick
+    the gap (tick 1–3, then 5 → 4 also checked). Steal the full click gesture
+    on the checkbox and let the dialog rebuild selection from checks only.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._checkbox_gesture = False
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            item = self.itemAt(pos)
+            if item is not None and self._hit_checkbox(item, pos):
+                self._checkbox_gesture = True
+                dialog = self._extract_dialog()
+                if dialog is not None:
+                    dialog._toggle_pick_checkbox(item)
+                else:
+                    checked = item.checkState() != Qt.CheckState.Checked
+                    item.setCheckState(
+                        Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+                    )
+                event.accept()
+                return
+        self._checkbox_gesture = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._checkbox_gesture:
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._checkbox_gesture and event.button() == Qt.MouseButton.LeftButton:
+            self._checkbox_gesture = False
+            event.accept()
+            return
+        self._checkbox_gesture = False
+        super().mouseReleaseEvent(event)
+
+    def _extract_dialog(self) -> ExtractSequencesDialog | None:
+        parent = self.parent()
+        while parent is not None:
+            if isinstance(parent, ExtractSequencesDialog):
+                return parent
+            parent = parent.parent()
+        return None
+
+    def _hit_checkbox(self, item: QListWidgetItem, pos: QPoint) -> bool:
+        # Prefer a fixed left strip: stylesheet indicator images often make
+        # SE_ItemViewItemCheckIndicator unreliable (empty or oversized).
+        row = self.visualItemRect(item)
+        if not row.contains(pos):
+            return False
+        if pos.x() <= row.left() + 24:
+            return True
+        opt = QStyleOptionViewItem()
+        self.initViewItemOption(opt)
+        opt.rect = row
+        opt.features |= QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        opt.checkState = item.checkState()
+        if item.isSelected():
+            opt.state |= QStyle.StateFlag.State_Selected
+        check_rect = self.style().subElementRect(
+            QStyle.SubElement.SE_ItemViewItemCheckIndicator, opt, self
+        )
+        return check_rect.isValid() and check_rect.adjusted(-1, -1, 1, 1).contains(pos)
+
+
 class ExtractSequencesDialog(QDialog):
     """Pick records out of a multi-FASTA, by hand or from a list of names.
 
@@ -1622,7 +1701,8 @@ class ExtractSequencesDialog(QDialog):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
-        self._list = QListWidget(page)
+        self._list = _CheckboxToggleListWidget(page)
+        self._list.setStyleSheet(item_view_checkbox_stylesheet())
         self._pick_syncing = False
         self._filter: QLineEdit | None = None
         # Shift / Cmd (Ctrl) / click-drag rubber-band multi-select.
@@ -1681,8 +1761,9 @@ class ExtractSequencesDialog(QDialog):
         top.addWidget(select_none)
 
         hint = QLabel(
-            "Click to select · Shift+click for a range · "
-            "⌘/Ctrl+click to add or remove · drag to select several",
+            "Tick boxes to add or remove · Click a name to select · "
+            "Shift+click for a range · ⌘/Ctrl+click to add or remove · "
+            "drag to select several",
             page,
         )
         hint.setStyleSheet("color: palette(mid);")
@@ -1816,7 +1897,6 @@ class ExtractSequencesDialog(QDialog):
             return
         self._pick_syncing = True
         try:
-            selected = self._list.selectedItems()
             for index in range(self._list.count()):
                 item = self._list.item(index)
                 if item is None or item.isHidden():
@@ -1828,20 +1908,52 @@ class ExtractSequencesDialog(QDialog):
                 )
                 if item.checkState() != want:
                     item.setCheckState(want)
-            del selected
         finally:
             self._pick_syncing = False
         self._sync()
 
     def _on_pick_item_changed(self, item: QListWidgetItem) -> None:
+        """Keep row highlight in sync when a check changes (e.g. keyboard)."""
         if self._pick_syncing or item is None:
             return
         self._pick_syncing = True
         try:
-            item.setSelected(item.checkState() == Qt.CheckState.Checked)
+            self._selection_from_checks()
         finally:
             self._pick_syncing = False
         self._sync()
+
+    def _toggle_pick_checkbox(self, item: QListWidgetItem) -> None:
+        """Toggle one checkbox and reselect exactly the checked rows (no gaps)."""
+        if item is None:
+            return
+        self._pick_syncing = True
+        try:
+            checked = item.checkState() != Qt.CheckState.Checked
+            item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
+            self._selection_from_checks()
+            # Move focus without changing the selection set.
+            self._list.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
+        finally:
+            self._pick_syncing = False
+        self._sync()
+
+    def _selection_from_checks(self) -> None:
+        """Make the highlight match the checkboxes exactly (non-contiguous OK)."""
+        model = self._list.selectionModel()
+        if model is None:
+            return
+        model.clearSelection()
+        for index in range(self._list.count()):
+            item = self._list.item(index)
+            if item is None or item.checkState() != Qt.CheckState.Checked:
+                continue
+            model.select(
+                self._list.indexFromItem(item),
+                QItemSelectionModel.SelectionFlag.Select,
+            )
 
     def selected_ids(self) -> set[str]:
         return {
@@ -4571,7 +4683,8 @@ class MsaCleanParamsDialog(QDialog):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._method_order.setStyleSheet(
-            "QListWidget { padding-top: 4px; padding-bottom: 4px; }"
+            "QListWidget { padding-top: 4px; padding-bottom: 4px; }\n"
+            + item_view_checkbox_stylesheet()
         )
         self._method_order.setToolTip(
             "Check steps to include in Combined MSA clean. Drag to set execution order."
