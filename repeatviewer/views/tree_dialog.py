@@ -81,11 +81,11 @@ MAFFT_INFO = (
     "The INS-i methods suit up to ~200 sequences; above that use <b>FFT-NS-2</b>."
 )
 METHOD_INFO = (
-    "<b>Maximum likelihood (IQ-TREE)</b> — model-based inference with "
-    "SH-aLRT / UFBoot2 support; the standard for publication.<br>"
-    "<b>Minimum evolution (FastME)</b> — distance-based (TN93); fast, with a "
-    "conservative bootstrap. Useful as a cross-check.<br>"
-    "<b>Approximate maximum likelihood (FastTree)</b> — for very large sets "
+    "<b>Maximum likelihood (IQ-TREE)</b>: model-based inference with "
+    "SH-aLRT / UFBoot2 support.<br>"
+    "<b>Minimum evolution (FastME)</b>: distance-based (TN93); fast, with a "
+    "conservative bootstrap.<br>"
+    "<b>Approximate maximum likelihood (FastTree)</b>: for very large sets "
     "(more than ~1,000 sequences)."
 )
 MODEL_INFO = (
