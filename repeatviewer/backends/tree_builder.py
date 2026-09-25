@@ -463,8 +463,9 @@ def rename_leaves(tree, mapping: dict[str, str]) -> None:
 # --------------------------------------------------------------------------
 
 
-def render_tree(tree, out_base: Path, *, title: str = "") -> list[Path]:
-    """Draw the tree to SVG, PDF and PNG with support values on branches."""
+def render_tree(tree, out_base: Path, *, title: str = "",
+                formats: tuple[str, ...] = ("svg", "pdf", "png")) -> list[Path]:
+    """Draw the tree (support values on branches) in ``formats``."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -508,7 +509,7 @@ def render_tree(tree, out_base: Path, *, title: str = "") -> list[Path]:
         ax.set_title(title, fontsize=9)
     fig.tight_layout()
     written = []
-    for ext in ("svg", "pdf", "png"):
+    for ext in formats:
         path = out_base.with_name(out_base.name + f".{ext}")
         fig.savefig(str(path), dpi=200 if ext == "png" else None)
         written.append(path)
@@ -531,10 +532,10 @@ def output_base_name(inputs: list[Path]) -> str:
     return first if len(inputs) == 1 else f"{first}_multi"
 
 
-# Results shown in the file panel (next to the input); everything else goes
-# into the ``<base>_details`` folder.
-MAIN_SUFFIXES = ("_report.html", ".treefile", ".pdf", ".svg", ".png", ".aln.fa",
-                 "_masked.treefile")
+# Only the tree files sit next to the input; the report, the alignment and
+# everything else go into the ``<base>_details`` folder (decided 25 Sep 2026).
+# Figures come from the tree viewer (Save ▾ → Figure as shown).
+MAIN_SUFFIXES = (".treefile", "_masked.treefile")
 
 
 @dataclass
@@ -1632,8 +1633,8 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
 
     title = f"{output_base_name(inputs)} — {ENGINE_NAMES[opts.engine].split(' (')[0].lower()} tree"
     say("Drawing the tree…")
-    images = render_tree(tree, layout.parent / layout.base, title="")
-    created.extend(images)
+    # Drawing for the report only (the report embeds it); not kept as files.
+    images = render_tree(tree, work / "report_tree", title="", formats=("svg",))
 
     report = TreeRunReport(
         input_files=[p.name for p in inputs], n_input=n_input, n_used=len(records),

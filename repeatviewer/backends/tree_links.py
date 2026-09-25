@@ -4,7 +4,8 @@ Pure Python, no Qt; unit-tested in ``tests/test_tree_links.py``.
 
 Where the sequences of a tree are found, first hit wins:
 
-1. a RepeatViewer tree run: ``<base>.treefile`` → ``<base>.aln.fa`` next to it;
+1. a RepeatViewer tree run: ``<base>.treefile`` → ``<base>_details/<base>.aln.fa``
+   (older runs: ``<base>.aln.fa`` next to it);
    ``<base>_masked.treefile`` → ``<base>_details/<base>_masked.aln.fa``; trees
    saved from the viewer (``<base>.treefile_rerooted.treefile`` …) use the run's;
 2. IQ-TREE's own naming: ``aln.fa.treefile`` → ``aln.fa``;
@@ -59,9 +60,11 @@ def sequences_for_tree(tree_path: Path) -> SequenceSource | None:
     if rb is not None:
         base, masked = rb
         details = folder / f"{base}_details"
-        candidate = (details / f"{base}_masked.aln.fa") if masked else (folder / f"{base}.aln.fa")
-        if candidate.is_file():
-            return SequenceSource(candidate, True)
+        name = f"{base}_masked.aln.fa" if masked else f"{base}.aln.fa"
+        # runs since 25 Sep 2026 keep the alignment in the details folder
+        for candidate in (details / name, folder / name):
+            if candidate.is_file():
+                return SequenceSource(candidate, True)
         # IQ-TREE run on an alignment: aln.fa.treefile → aln.fa
         plain = folder / base
         if plain.is_file() and plain.suffix.lower() in FASTA_SUFFIXES:

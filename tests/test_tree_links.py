@@ -141,3 +141,26 @@ def test_distance_dialog_saves_next_to_tree(qapp, tmp_path):
     dlg._source_box.setCurrentIndex(dlg._source_box.findData(SOURCE_ALIGNMENT))
     assert dlg.default_path().name.endswith("_pdistance.tsv")
     assert dlg.matrix()[1].shape == (6, 6)
+
+
+def test_alignment_in_details_folder_is_found_first(tmp_path):
+    tree = _run(tmp_path)
+    (tmp_path / "sat.fa_tree.aln.fa").rename(tmp_path / "sat.fa_tree_details" / "sat.fa_tree.aln.fa")
+    src = tk.sequences_for_tree(tree)
+    assert src.path == tmp_path / "sat.fa_tree_details" / "sat.fa_tree.aln.fa" and src.aligned
+
+
+def test_save_menu_and_report_button(qapp, tmp_path):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    tree = _run(tmp_path)
+    panel = TreePanel(tree)
+    texts = [a.text() for a in panel._save_btn.menu().actions() if a.text()]
+    assert texts == ["Figure as shown: SVG…", "Figure as shown: PDF…",
+                     "Figure as shown: PNG (300 dpi)…", "Tree as shown (.treefile)…",
+                     "Distance matrix (.tsv)…", "Copy Newick"]
+    assert panel.report_path() is None and not panel._report_btn.isEnabled()
+    report = tmp_path / "sat.fa_tree_details" / "sat.fa_tree_report.html"
+    report.write_text("<html></html>")
+    panel._update_status()
+    assert panel.report_path() == report and panel._report_btn.isEnabled()

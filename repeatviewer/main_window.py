@@ -3851,8 +3851,9 @@ class MainWindow(QMainWindow):
         report = Path(result["report"])
         created = [Path(p) for p in result["files"] if Path(p).is_file()]
         if self._current_folder:
-            # New results sit next to the input (green); the report opens (deep blue).
-            # Supporting files are in a new <input>_tree_details folder.
+            # Only the tree sits next to the input (green) and opens in the tree
+            # viewer (deep blue); the report and supporting files are in the
+            # new <input>_tree_details folder.
             self._refresh_subfolders_under(self._current_folder)
             self._populate_file_list(
                 self._current_folder,
@@ -3860,10 +3861,14 @@ class MainWindow(QMainWindow):
                 source_files=getattr(self, "_last_job_source_files", []),
                 open_preview=False,
             )
-        if report.is_file():
-            self._auto_open_outputs([report])
+        tree = next((p for p in created if p.name.endswith(".treefile")
+                     and not p.name.endswith("_masked.treefile")), None)
+        opened = tree if tree is not None else (report if report.is_file() else None)
+        if opened is not None:
+            self._auto_open_outputs([opened])
         self._set_status_message(
-            f"Tree completed — {report.name}", 12000, override_file_link=True
+            f"Tree completed — {opened.name if opened else report.name} "
+            f"(report in {report.parent.name})", 12000, override_file_link=True
         )
 
     @Slot(str)

@@ -10,9 +10,10 @@ Opens ``.treefile`` (IQ-TREE), ``.nwk``, ``.newick``, ``.tre`` and ``.tree``.
   value; undo (Cmd+Z / Ctrl+Z).
 * Keep: colours, collapsed clades and view settings are remembered in a hidden
   file next to the tree (``.<tree name>.view.json``). Rerooting and swapping
-  change the tree itself, which is never overwritten: "Save tree as…" writes a
-  new file (``<tree name>_rerooted.treefile``, rule 1).
-* Export: SVG, PDF and PNG of exactly what is shown, black on white.
+  change the tree itself, which is never overwritten: Save → "Tree as shown"
+  writes a new file (``<tree name>_rerooted.treefile``, rule 1).
+* Save ▾: figure as shown (SVG, PDF, PNG), tree as shown, distance matrix,
+  copy Newick. Tree runs no longer write figures; they come from here.
 
 The geometry and the edits come from the pure, unit-tested modules
 :mod:`repeatviewer.backends.tree_layout` and :mod:`repeatviewer.backends.tree_edit`;
@@ -138,7 +139,7 @@ COLLAPSE_HELP = (
     "into their parent, so only well-supported groupings remain.<br>"
     "IQ-TREE: the UFBoot value is used (the second number, e.g. 97 in 92/97). "
     "FastTree values (0 to 1) are read as percentages.<br>"
-    "0 = off. The tree file is not changed; use <b>Save tree as…</b> to keep the result.<br>"
+    "0 = off. The tree file is not changed; use <b>Save → Tree as shown</b> to keep the result.<br>"
     "<b>Distance below</b>: clades whose tips all lie closer than this to the clade's own "
     "node (substitutions per site) are drawn as triangles, e.g. near-identical copies. "
     "Right-click a triangle to open it. Off = 0."
@@ -150,7 +151,7 @@ EDIT_HELP = (
     "in the tree's alignment, highlighted.<br>"
     "Undo: Cmd+Z / Ctrl+Z.<br>"
     "Colours and collapsed clades are remembered for this tree. Rerooting and swapping "
-    "change the tree: the file is never overwritten, use <b>Save tree as…</b>."
+    "change the tree: the file is never overwritten, use <b>Save → Tree as shown</b>."
 )
 
 
@@ -970,14 +971,20 @@ class TreePanel(QWidget):
         fit_btn = QPushButton("Fit", self)
         fit_btn.setToolTip("Show the whole tree (or double-click an empty part of the tree).")
         fit_btn.clicked.connect(lambda: self._canvas.fit(max_scale=4.0))
-        export_btn = QPushButton("Export", self)
-        export_menu = QMenu(export_btn)
+        # One Save menu for everything written from the viewer (names: rule 1).
+        self._save_btn = QPushButton("Save", self)
+        save_menu = QMenu(self._save_btn)
         for label, ext in EXPORT_FORMATS:
-            export_menu.addAction(f"{label}…", lambda checked=False, e=ext: self._export(e))
-        export_menu.addSeparator()
-        export_menu.addAction("Copy Newick", self._copy_newick)
-        export_menu.addAction("Distance matrix…", self._open_distances)
-        export_btn.setMenu(export_menu)
+            text = f"Figure as shown: {label}{' (300 dpi)' if ext == 'png' else ''}…"
+            save_menu.addAction(text, lambda checked=False, e=ext: self._export(e))
+        save_menu.addSeparator()
+        save_menu.addAction("Tree as shown (.treefile)…", self._save_tree_as)
+        save_menu.addAction("Distance matrix (.tsv)…", self._open_distances)
+        save_menu.addSeparator()
+        save_menu.addAction("Copy Newick", self._copy_newick)
+        self._save_btn.setMenu(save_menu)
+        self._save_btn.setToolTip("Save the figure, the tree or a distance matrix "
+                                  "(next to the tree, with the tree's name).")
 
         self._edit_btn = QPushButton("Edit", self)
         self._edit_menu = QMenu(self._edit_btn)
@@ -991,9 +998,6 @@ class TreePanel(QWidget):
         self._collapse_spin.setSpecialValueText("Off")
         self._collapse_spin.setFixedWidth(70)
         self._collapse_spin.editingFinished.connect(self._on_collapse_threshold)
-        save_btn = QPushButton("Save tree as…", self)
-        save_btn.setToolTip("Write the tree as shown (rerooted, collapsed…) to a new file.")
-        save_btn.clicked.connect(self._save_tree_as)
 
         self._color_box = NoWheelComboBox(self)
         self._color_box.currentIndexChanged.connect(self._on_color_by_changed)
@@ -1074,8 +1078,7 @@ class TreePanel(QWidget):
         top.addWidget(self._undo_btn)
         top.addStretch(1)
         top.addWidget(fit_btn)
-        top.addWidget(export_btn)
-        top.addWidget(save_btn)
+        top.addWidget(self._save_btn)
         top.addSpacing(6)
         top.addWidget(self._options_btn)
 
@@ -1120,8 +1123,12 @@ class TreePanel(QWidget):
         sec.add("Length:", self._scale_len)
         sec.add("Font:", self._sfont_spin)
         pl.addWidget(sec)
+        self._report_btn = QPushButton("Open run report", self)
+        self._report_btn.setToolTip("The tree run's report (in its _details folder).")
+        self._report_btn.clicked.connect(self._open_report)
         sec = _Section("Statistics", panel, key="stats", expanded=False)
         sec.form.addRow(self._stats_label)
+        sec.form.addRow(_pair(panel, self._report_btn))
         pl.addWidget(sec)
         pl.addStretch(1)
         self._options_panel = QScrollArea(self)
@@ -1448,6 +1455,7 @@ class TreePanel(QWidget):
         if len(d.info):
             stats.append(f"Collapsed clades shown: {len(d.info)}")
         self._stats_label.setText("\n".join(stats))
+        self._report_btn.setEnabled(self.report_path() is not None)
         if not m.has_lengths:
             parts.append("no branch lengths in the file")
         if m.has_support and self._opts.branch_labels == BRANCH_LABELS_SUPPORT:
@@ -1458,7 +1466,7 @@ class TreePanel(QWidget):
         if self._state.subtree:
             parts.append(f"showing one clade ({len(self._state.subtree)} tips)")
         if self._state.edited:
-            parts.append(f"tree {self._state.edited}: use Save tree as… to keep it")
+            parts.append(f"tree {self._state.edited}: Save → Tree as shown keeps it")
         if self._selected:
             parts.append(f"selected: {len(self._selected)} tips")
         if message:
@@ -1601,7 +1609,7 @@ class TreePanel(QWidget):
         menu.addSeparator()
         act = menu.addAction("Undo", self.undo)
         act.setEnabled(bool(self._undo))
-        menu.addAction("Save tree as…", self._save_tree_as)
+        menu.addAction("Save tree as shown…", self._save_tree_as)
 
     def _fill_edit_menu(self) -> None:
         menu = self._edit_menu
@@ -1981,6 +1989,27 @@ class TreePanel(QWidget):
         out.write_text(te.to_newick(tree) + "\n", encoding="utf-8")
         return out
 
+    def report_path(self) -> Path | None:
+        """The tree run's report, if this tree came from one."""
+        from repeatviewer.backends.tree_links import run_base
+
+        if self._path is None:
+            return None
+        rb = run_base(self._path)
+        if rb is None:
+            return None
+        base = rb[0]
+        for candidate in (self._path.parent / f"{base}_details" / f"{base}_report.html",
+                          self._path.parent / f"{base}_report.html"):
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _open_report(self) -> None:
+        report = self.report_path()
+        if report is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(report)))
+
     def _current_structure(self) -> tl.TreeModel | None:
         """The tree as shown: rerooted, weak branches merged, one clade if chosen."""
         if self._model is None:
@@ -2017,7 +2046,7 @@ class TreePanel(QWidget):
             edited = f"{edited}_collapsed" if edited else "collapsed"
         default = saved_tree_default_path(self._path, edited)
         chosen, _ = QFileDialog.getSaveFileName(
-            self, "Save tree as", str(default), "Newick tree (*.treefile *.nwk *.tree)"
+            self, "Save tree as shown", str(default), "Newick tree (*.treefile *.nwk *.tree)"
         )
         if not chosen:
             return
@@ -2040,12 +2069,12 @@ class TreePanel(QWidget):
 
     def _export(self, ext: str) -> None:
         if self._display is None or self._path is None:
-            QMessageBox.information(self, "Export tree", "There is no tree to export.")
+            QMessageBox.information(self, "Save figure", "There is no tree to save.")
             return
         default = export_default_path(self._path, self._opts.layout, ext)
         label = dict((e, lab) for lab, e in EXPORT_FORMATS)[ext]
         chosen, _ = QFileDialog.getSaveFileName(
-            self, f"Export tree as {label}", str(default), f"{label} (*.{ext})"
+            self, f"Save figure as {label}", str(default), f"{label} (*.{ext})"
         )
         if not chosen:
             return
@@ -2055,7 +2084,7 @@ class TreePanel(QWidget):
         try:
             export_tree(self._display, self._opts, out, title=self._path.name)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Export tree", f"Could not write {out.name}:\n{exc}")
+            QMessageBox.warning(self, "Save figure", f"Could not write {out.name}:\n{exc}")
             return
         self._update_status(f"saved {out.name}")
         self.fileWritten.emit(out)

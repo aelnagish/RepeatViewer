@@ -170,7 +170,7 @@ def test_outputs_next_to_input_keep_full_name_and_never_overwrite(tmp_path):
     l1 = tb.plan_outputs([fa])
     assert l1.base == "CroSat3_monomers.fa_tree"
     assert l1.path(".treefile") == tmp_path / "CroSat3_monomers.fa_tree.treefile"
-    assert l1.path("_report.html").parent == tmp_path
+    assert l1.path("_report.html").parent == tmp_path / "CroSat3_monomers.fa_tree_details"
     assert l1.path(".iqtree") == tmp_path / "CroSat3_monomers.fa_tree_details" / "CroSat3_monomers.fa_tree.iqtree"
     l1.path(".treefile").write_text("(a);")
     l2 = tb.plan_outputs([fa])
@@ -249,10 +249,12 @@ def test_build_tree_run_end_to_end_with_fake_fastme(tmp_path, monkeypatch):
                        distance_bootstrap=4, root_mode=TREE_ROOT_MIDPOINT)
     details, files, report = tb.build_tree_run([fa], opts, stamp="t")
     assert details == tmp_path / "aln.fa_tree_details"
-    for suffix in (".treefile", ".aln.fa", ".svg", ".pdf", ".png", "_report.html"):
-        assert (tmp_path / f"aln.fa_tree{suffix}") in files  # next to the input
-    for suffix in ("_methods.txt", "_commands.txt", ".names.tsv"):
+    assert (tmp_path / "aln.fa_tree.treefile") in files      # only the tree next to the input
+    assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == ["aln.fa", "aln.fa_tree.treefile"]
+    for suffix in (".aln.fa", "_report.html", "_methods.txt", "_commands.txt", ".names.tsv"):
         assert (details / f"aln.fa_tree{suffix}") in files
+    assert report == details / "aln.fa_tree_report.html"
+    assert not list(details.glob("*.png")) and not list(details.glob("*.pdf"))
     tree_text = (tmp_path / "aln.fa_tree.treefile").read_text()
     assert "s1" in tree_text and "S00001" not in tree_text  # safe IDs mapped back
     assert "100" in tree_text  # bootstrap support computed from the replicate file
@@ -416,7 +418,7 @@ def test_independent_searches_are_separate_processes(tmp_path, monkeypatch):
     html = report.read_text()
     assert "of 3 found the same topology" in html
     assert (run_dir / "aln.fa_tree.iqtree").is_file()
-    assert report.parent == tmp_path
+    assert report.parent == tmp_path / "aln.fa_tree_details"   # report in the details folder
 
 
 def test_failed_run_writes_log_next_to_input(tmp_path, monkeypatch):
