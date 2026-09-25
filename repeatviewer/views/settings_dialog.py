@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QTabWidget,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +34,7 @@ from PySide6.QtWidgets import (
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
 from repeatviewer.widgets.path_browse import PathBrowseRow
+from repeatviewer.widgets.help_button import field_with_help
 
 if TYPE_CHECKING:
     from repeatviewer.plugins.registry import PluginRegistry
@@ -647,44 +647,15 @@ class SettingsDialog(QDialog):
         ):
             widget.setFixedWidth(_FIELD_WIDTH)
 
-        def _help_button(title: str, help_text: str) -> QToolButton:
-            """Circular ? control matching MSA clean dialogs."""
-            button = QToolButton(self)
-            button.setText("?")
-            button.setToolTip(help_text)
-            button.setAutoRaise(False)
-            button.setFixedSize(22, 22)
-            button.setStyleSheet(
-                "QToolButton {"
-                "  border: 1px solid palette(mid);"
-                "  border-radius: 10px;"
-                "  background: palette(base);"
-                "  font-weight: 600;"
-                "  padding: 0px;"
-                "}"
-                "QToolButton:hover { background: palette(alternate-base); }"
-            )
-            button.clicked.connect(
-                lambda checked=False, t=title, text=help_text: QMessageBox.information(
-                    self, t, text
-                )
-            )
-            return button
-
         def _field_with_help(
             field: QWidget,
             *,
             help_title: str,
             help_text: str,
         ) -> QWidget:
-            wrap = QWidget(self)
-            row = QHBoxLayout(wrap)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
-            row.addWidget(field, 0)
-            row.addWidget(_help_button(help_title, help_text), 0)
-            row.addStretch(1)
-            return wrap
+            return field_with_help(
+                field, help_title, help_text, parent=self, stretch=True
+            )
 
         def _group(title: str, rows: list) -> QGroupBox:
             box = QGroupBox(title)

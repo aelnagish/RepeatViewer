@@ -51,6 +51,7 @@ from repeatviewer.widgets.spin_boxes import (  # noqa: E402
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox  # noqa: E402
 from repeatviewer.widgets.path_browse import PathBrowseRow  # noqa: E402
+from repeatviewer.widgets.help_button import field_with_help, make_help_button  # noqa: E402
 
 
 def exec_modal_dialog(dialog: QDialog) -> bool:
@@ -539,26 +540,7 @@ class CommandPluginDesignerDialog(QDialog):
         special_hint.setWordWrap(True)
         special_hint.setStyleSheet("color: #666666;")
         help_text = special_variables_help_text()
-        help_btn = QToolButton(self)
-        help_btn.setText("?")
-        help_btn.setToolTip(help_text)
-        help_btn.setAutoRaise(False)
-        help_btn.setFixedSize(22, 22)
-        help_btn.setStyleSheet(
-            "QToolButton {"
-            "  border: 1px solid palette(mid);"
-            "  border-radius: 10px;"
-            "  background: palette(base);"
-            "  font-weight: 600;"
-            "  padding: 0px;"
-            "}"
-            "QToolButton:hover { background: palette(alternate-base); }"
-        )
-        help_btn.clicked.connect(
-            lambda checked=False, text=help_text: QMessageBox.information(
-                self, "Special variables", text
-            )
-        )
+        help_btn = make_help_button(self, "Special variables", help_text)
         special_row = QWidget(self)
         special_layout = QHBoxLayout(special_row)
         special_layout.setContentsMargins(0, 0, 0, 0)
@@ -648,26 +630,7 @@ class CommandPluginDesignerDialog(QDialog):
             "Input and Output variables must use type File or Folder."
         )
         define_label = QLabel("Define variables:", self)
-        define_help_btn = QToolButton(self)
-        define_help_btn.setText("?")
-        define_help_btn.setToolTip(define_help)
-        define_help_btn.setAutoRaise(False)
-        define_help_btn.setFixedSize(22, 22)
-        define_help_btn.setStyleSheet(
-            "QToolButton {"
-            "  border: 1px solid palette(mid);"
-            "  border-radius: 10px;"
-            "  background: palette(base);"
-            "  font-weight: 600;"
-            "  padding: 0px;"
-            "}"
-            "QToolButton:hover { background: palette(alternate-base); }"
-        )
-        define_help_btn.clicked.connect(
-            lambda checked=False, text=define_help: QMessageBox.information(
-                self, "Input / Output", text
-            )
-        )
+        define_help_btn = make_help_button(self, "Input / Output", define_help)
         define_label_col = QWidget(self)
         define_label_layout = QVBoxLayout(define_label_col)
         define_label_layout.setContentsMargins(0, 0, 0, 0)
@@ -3116,33 +3079,7 @@ class BlastParamsDialog(QDialog):
         return row
 
     def _field_with_help(self, field: QWidget, title: str, help_text: str) -> QWidget:
-        button = QToolButton()
-        button.setText("?")
-        button.setToolTip(help_text)
-        button.setAutoRaise(False)
-        button.setFixedSize(22, 22)
-        button.setStyleSheet(
-            "QToolButton {"
-            "  border: 1px solid palette(mid);"
-            "  border-radius: 10px;"
-            "  background: palette(base);"
-            "  font-weight: 600;"
-            "  padding: 0px;"
-            "}"
-            "QToolButton:hover { background: palette(alternate-base); }"
-        )
-        button.clicked.connect(
-            lambda checked=False, t=title, text=help_text: QMessageBox.information(
-                self, t, text
-            )
-        )
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(field)
-        layout.addWidget(button)
-        return row
+        return field_with_help(field, title, help_text)
 
     def _update_postprocessing_visibility(self, tab_index: int) -> None:
         self._post_box.setVisible(tab_index == 0)
@@ -5104,32 +5041,8 @@ class MsaCleanParamsDialog(QDialog):
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
-    @staticmethod
-    def _msa_help_button_style() -> str:
-        return (
-            "QToolButton {"
-            "  border: 1px solid palette(mid);"
-            "  border-radius: 10px;"
-            "  background: palette(base);"
-            "  font-weight: 600;"
-            "  padding: 0px;"
-            "}"
-            "QToolButton:hover { background: palette(alternate-base); }"
-        )
-
     def _msa_help_button(self, title: str, help_text: str) -> QToolButton:
-        button = QToolButton(self)
-        button.setText("?")
-        button.setToolTip(help_text)
-        button.setAutoRaise(False)
-        button.setFixedSize(22, 22)
-        button.setStyleSheet(self._msa_help_button_style())
-        button.clicked.connect(
-            lambda checked=False, t=title, text=help_text: QMessageBox.information(
-                self, t, text
-            )
-        )
-        return button
+        return make_help_button(self, title, help_text)
 
     def _add_method_list_item(self, method_id: str, *, checked: bool) -> None:
         label_text = self._method_labels[method_id]
