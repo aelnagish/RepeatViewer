@@ -90,7 +90,19 @@ _TRACKPAD_ZOOM_BASE = 1.0022
 _MIN_TREE_PX = 260.0       # smallest drawing size (rectangular width / radius)
 _RECT_TREE_WIDTH_PX = 520.0
 SPREAD_MIN, SPREAD_MAX = 100, 500   # % (Spread)
-TOP_BUTTON_WIDTH = 86
+PANEL_WIDTH = 244          # options panel (px); fits every open section plus a scroll bar
+# Compact action buttons: as wide as their text (the native macOS push button
+# has a large minimum width).
+_TOP_BUTTON_STYLE = (
+    "QPushButton { padding: 2px 10px; min-width: 0px; min-height: 18px;"
+    " border: 1px solid palette(mid); border-radius: 5px; background: palette(button); }"
+    "QPushButton:hover { background: palette(midlight); }"
+    "QPushButton:pressed, QPushButton:checked { background: palette(midlight); }"
+    "QPushButton:disabled { color: palette(mid); }"
+    "QPushButton[menu=\"true\"] { padding-right: 20px; }"
+    "QPushButton::menu-indicator { subcontrol-origin: padding;"
+    " subcontrol-position: right center; right: 6px; }"
+)
 _MARGIN_PX = 24.0
 _HIT_WIDTH = 7.0           # clickable width around a branch, in pixels
 _SELECTED = QColor(0, 110, 230)
@@ -797,9 +809,10 @@ class _Section(QWidget):
         self.labels: list[QLabel] = []
         self.body = QWidget(self)
         self.form = QFormLayout(self.body)
-        self.form.setContentsMargins(14, 2, 0, 6)
-        self.form.setHorizontalSpacing(8)
-        self.form.setVerticalSpacing(5)
+        self.form.setContentsMargins(12, 1, 0, 5)
+        self.form.setHorizontalSpacing(6)
+        self.form.setVerticalSpacing(3)
+        self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -996,7 +1009,7 @@ class TreePanel(QWidget):
         self._collapse_spin = NoWheelSpinBox(self)
         self._collapse_spin.setRange(0, 100)
         self._collapse_spin.setSpecialValueText("Off")
-        self._collapse_spin.setFixedWidth(70)
+        self._collapse_spin.setToolTip("Merge branches with support below this value (Off = 0).")
         self._collapse_spin.editingFinished.connect(self._on_collapse_threshold)
 
         self._color_box = NoWheelComboBox(self)
@@ -1014,66 +1027,76 @@ class TreePanel(QWidget):
         self._angle_slider.setRange(0, 71)            # steps of 5°
         self._angle_slider.setPageStep(9)
         self._angle_label = QLabel("0°", self)
-        self._angle_label.setMinimumWidth(34)
-        self._flip_check = QCheckBox("Flip left–right", self)
+        self._angle_label.setMinimumWidth(30)
+        self._flip_check = QCheckBox("Flip", self)
+        self._flip_check.setToolTip("Mirror the tree left to right.")
         self._tiplabel_box = NoWheelComboBox(self)
         self._maxchars_spin = NoWheelSpinBox(self)
         self._maxchars_spin.setRange(0, 200)
         self._maxchars_spin.setSpecialValueText("Off")
-        self._maxchars_spin.setFixedWidth(70)
+        self._maxchars_spin.setToolTip("Shorten tip names to this many characters (Off = full names).")
         self._keep_box = NoWheelComboBox(self)
-        self._keep_box.addItem("keep end", True)
-        self._keep_box.addItem("keep start", False)
+        self._keep_box.addItem("end", True)
+        self._keep_box.addItem("start", False)
+        self._keep_box.setToolTip("Which part of a shortened name to keep.")
         self._digits_spin = NoWheelSpinBox(self)
         self._digits_spin.setRange(1, 8)
-        self._digits_spin.setFixedWidth(70)
         self._bfont_spin = NoWheelSpinBox(self)
         self._bfont_spin.setRange(0, 36)
         self._bfont_spin.setSpecialValueText("Auto")
         self._bfont_spin.setSuffix(" pt")
-        self._bfont_spin.setFixedWidth(80)
         self._lw_spin = NoWheelDoubleSpinBox(self)
         self._lw_spin.setRange(0.5, 6.0)
         self._lw_spin.setSingleStep(0.25)
         self._lw_spin.setDecimals(2)
-        self._lw_spin.setFixedWidth(80)
         self._collapse_dist = NoWheelDoubleSpinBox(self)
         self._collapse_dist.setRange(0.0, 100.0)
         self._collapse_dist.setDecimals(4)
         self._collapse_dist.setSingleStep(0.005)
         self._collapse_dist.setSpecialValueText("Off")
-        self._collapse_dist.setFixedWidth(90)
         self._collapse_dist.editingFinished.connect(self._on_collapse_distance)
+        self._collapse_dist.setToolTip("Collapse clades whose tips lie closer than this (Off = 0).")
         self._scale_len = NoWheelDoubleSpinBox(self)
         self._scale_len.setRange(0.0, 1000.0)
         self._scale_len.setDecimals(4)
         self._scale_len.setSingleStep(0.01)
         self._scale_len.setSpecialValueText("Auto")
-        self._scale_len.setFixedWidth(90)
         self._sfont_spin = NoWheelSpinBox(self)
         self._sfont_spin.setRange(0, 36)
         self._sfont_spin.setSpecialValueText("Auto")
         self._sfont_spin.setSuffix(" pt")
-        self._sfont_spin.setFixedWidth(80)
         self._stats_label = QLabel(self)
         self._stats_label.setWordWrap(True)
         self._stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._tips_check.setText("Show")
         self._align_check.setText("Align")
         self._scale_check.setText("Show")
+        # Panel fields: combos fill the width, number boxes share one small width.
         for combo in (self._layout_box, self._order_box, self._lengths_box, self._branch_box,
-                      self._tiplabel_box, self._color_box):
+                      self._tiplabel_box, self._color_box, self._keep_box):
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-            combo.setMinimumContentsLength(10)
-            combo.setMaximumWidth(170)
+            combo.setMinimumContentsLength(4)
+            combo.setMaximumWidth(16777215)
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for spin in (self._spread_spin, self._maxchars_spin, self._font_spin, self._digits_spin,
+                     self._bfont_spin, self._lw_spin, self._collapse_spin, self._collapse_dist,
+                     self._scale_len, self._sfont_spin):
+            spin.setFixedWidth(64)
+        self._keep_box.setMinimumContentsLength(3)
+        self._keep_box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._keep_box.setFixedWidth(64)
 
         # --- top row: actions only ---------------------------------------------
         self._options_btn = QPushButton(self)
         self._options_btn.setCheckable(True)
         self._options_btn.setToolTip("Show or hide the options panel.")
-        # All actions on the right, one size: Fit, Edit (+ its "?"), Undo, Save, Options.
+        # All actions on the right, compact: Fit, Edit (+ its "?"), Undo, Save, Options.
         for btn in (fit_btn, self._edit_btn, self._undo_btn, self._save_btn, self._options_btn):
-            btn.setFixedWidth(TOP_BUTTON_WIDTH)
+            btn.setStyleSheet(_TOP_BUTTON_STYLE)
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        for btn in (self._edit_btn, self._save_btn):
+            btn.setProperty("menu", True)
+            btn.setStyleSheet(_TOP_BUTTON_STYLE)
         top = QHBoxLayout()
         top.setSpacing(6)
         top.addStretch(1)
@@ -1090,40 +1113,40 @@ class TreePanel(QWidget):
         pl.setContentsMargins(4, 0, 6, 0)
         pl.setSpacing(2)
         sec = _Section("Layout", panel, help_text=DRAW_HELP, key="layout")
-        sec.add("Layout:", self._layout_box)
-        sec.add("Order:", self._order_box)
-        sec.add("Branches:", self._lengths_box)
-        sec.add("Spread:", self._spread_spin)
-        sec.add("Root angle:", _pair(panel, self._angle_slider, self._angle_label))
+        sec.add("Layout", self._layout_box)
+        sec.add("Order", self._order_box)
+        sec.add("Branches", self._lengths_box)
+        sec.add("Spread", self._spread_spin)
+        sec.add("Angle", _pair(panel, self._angle_slider, self._angle_label))
         sec.add("", self._flip_check)
         pl.addWidget(sec)
         sec = _Section("Tip names", panel, help_text=TIPS_HELP, key="tips")
         sec.add("", _pair(panel, self._tips_check, self._align_check))
-        sec.add("Show:", self._tiplabel_box)
-        sec.add("Max length:", _pair(panel, self._maxchars_spin, self._keep_box))
-        sec.add("Font:", self._font_spin)
+        sec.add("Show", self._tiplabel_box)
+        sec.add("Max", _pair(panel, self._maxchars_spin, self._keep_box))
+        sec.add("Font", self._font_spin)
         pl.addWidget(sec)
         sec = _Section("Branch labels", panel, help_text=SUPPORT_HELP, key="branch_labels")
-        sec.add("Show:", self._branch_box)
-        sec.add("Digits:", self._digits_spin)
-        sec.add("Font:", self._bfont_spin)
+        sec.add("Show", self._branch_box)
+        sec.add("Digits", self._digits_spin)
+        sec.add("Font", self._bfont_spin)
         sec.add("", self._crowded_check)
         pl.addWidget(sec)
         sec = _Section("Branches", panel, key="branches")
-        sec.add("Line weight:", self._lw_spin)
+        sec.add("Width", self._lw_spin)
         pl.addWidget(sec)
         sec = _Section("Collapse", panel, help_text=COLLAPSE_HELP, key="collapse")
-        sec.add("Support below:", self._collapse_spin)
-        sec.add("Distance below:", self._collapse_dist)
+        sec.add("Support", self._collapse_spin)
+        sec.add("Distance", self._collapse_dist)
         pl.addWidget(sec)
         sec = _Section("Colour tips", panel, help_text=TRAITS_HELP, key="colour")
-        sec.add("By:", self._color_box)
+        sec.add("By", self._color_box)
         sec.add("", _pair(panel, self._traits_btn))
         pl.addWidget(sec)
         sec = _Section("Scale bar", panel, help_text=SCALE_HELP, key="scale")
         sec.add("", self._scale_check)
-        sec.add("Length:", self._scale_len)
-        sec.add("Font:", self._sfont_spin)
+        sec.add("Length", self._scale_len)
+        sec.add("Font", self._sfont_spin)
         pl.addWidget(sec)
         self._report_btn = QPushButton("Open run report", self)
         self._report_btn.setToolTip("The tree run's report (in its _details folder).")
@@ -1143,7 +1166,18 @@ class TreePanel(QWidget):
         self._options_panel.setWidgetResizable(True)
         self._options_panel.setFrameShape(QScrollArea.Shape.NoFrame)
         self._options_panel.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._options_panel.setFixedWidth(max(270, panel.sizeHint().width() + 18))
+        self._options_panel.setFixedWidth(PANEL_WIDTH)
+        # One surface: the panel shows the window's own background.
+        panel.setAutoFillBackground(False)
+        self._options_panel.viewport().setAutoFillBackground(False)
+        self._options_panel.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        # Smaller controls, as in dense macOS tool panels.
+        small = QFont(panel.font())
+        small.setPointSizeF(max(9.0, small.pointSizeF() - 1.0))
+        panel.setFont(small)
+        for w in panel.findChildren(QWidget):
+            w.setAttribute(Qt.WidgetAttribute.WA_MacSmallSize, True)
         self._options_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         show_panel = str(QSettings().value("tree_view/options_panel", True)).lower() in ("1", "true")
         self._options_btn.toggled.connect(self._show_options_panel)
@@ -1151,6 +1185,12 @@ class TreePanel(QWidget):
         self._show_options_panel(show_panel, save=False)
 
         self._canvas = TreeCanvas(self)
+        # No box and no own background: the tree sits on whatever the Preview
+        # panel paints (white in RepeatViewer's light theme, dark in dark mode).
+        self._canvas.setFrameShape(QGraphicsView.Shape.NoFrame)
+        self._canvas.setBackgroundBrush(Qt.BrushStyle.NoBrush)
+        self._canvas.viewport().setAutoFillBackground(False)
+        self._canvas.setStyleSheet("QGraphicsView { background: transparent; border: none; }")
         self._canvas.nodeClicked.connect(self._on_node_clicked)
         self._canvas.nodeContextMenu.connect(self._on_context_menu)
         self._canvas.nodeDoubleClicked.connect(self._on_node_double_clicked)
@@ -1293,6 +1333,7 @@ class TreePanel(QWidget):
     def _show_options_panel(self, on: bool, *, save: bool = True) -> None:
         self._options_panel.setVisible(on)
         self._options_btn.setText("Options ▸" if on else "◂ Options")
+        self._options_btn.setChecked(on)
         if save:
             QSettings().setValue("tree_view/options_panel", bool(on))
 
@@ -1441,7 +1482,9 @@ class TreePanel(QWidget):
         if self._model is None:
             return
         ink, muted = self._palette_colors()
-        self._canvas.setBackgroundBrush(self.palette().color(QPalette.ColorRole.Base))
+        # transparent: the Preview panel's own background shows through
+        # (figures are still black on white)
+        self._canvas.setBackgroundBrush(Qt.BrushStyle.NoBrush)
         self._display = make_display(self._model, self._opts, self._state)
         self._apply_traits(self._display)
         build_tree_scene(self._canvas.scene(), self._display, self._opts, ink=ink, muted=muted,
