@@ -87,6 +87,8 @@ MAFFT_STRATEGY_LABELS = (
     ("FFT-NS-2 (fast, large sets)", "fft_ns_2"),
     ("Auto (MAFFT decides)", "auto"),
 )
+MAFFT_CHOOSE = "choose"          # Tree window default: L-INS-i ≤ 200 sequences, else FFT-NS-2
+MAFFT_CHOOSE_LIMIT = 200
 
 _DNA_CHARS = set("ACGTUNRYSWKMBDHV-.?")
 _NUCLEOTIDES = set("ACGTU")
@@ -1452,6 +1454,9 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
         _write_fasta(raw, [(name_to_safe[r.name], r.seq.replace("-", "").replace(".", ""))
                            for r in records])
         strategy = opts.mafft_strategy
+        if strategy == MAFFT_CHOOSE:
+            # RepeatViewer picks: the accurate L-INS-i up to ~200 sequences, else FFT-NS-2.
+            strategy = "linsi" if len(records) <= MAFFT_CHOOSE_LIMIT else "fft_ns_2"
         label = dict((v, k) for k, v in MAFFT_STRATEGY_LABELS).get(strategy, strategy)
         if strategy in ("linsi", "ginsi", "einsi") and len(records) > 200:
             warnings.append(

@@ -1833,7 +1833,7 @@ class TreeOptions:
 
     # Alignment
     align_mode: str = TREE_ALIGN_AUTO
-    mafft_strategy: str = "linsi"
+    mafft_strategy: str = "choose"     # L-INS-i up to 200 sequences, else FFT-NS-2
     adjust_direction: bool = True
     rotate_monomers: bool = False      # satellite monomers: common start before aligning
     # Sequences: TREE_SEQ_AS_IS, or TREE_SEQ_RT = RT domain found in the DNA (REXdb)
