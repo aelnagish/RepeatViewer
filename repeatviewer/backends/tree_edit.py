@@ -371,3 +371,24 @@ def to_newick(model: TreeModel) -> str:
             text += f":{node.length:.10g}"
         parts[node.index] = text
     return parts[0] + ";"
+
+
+def clades_within(model: TreeModel, distance: float) -> set[int]:
+    """Collapse by distance: the largest clades whose tips all lie within
+    ``distance`` of the clade's own node (branch-length units). Not the root."""
+    if distance <= 0:
+        return set()
+    height = [0.0] * len(model.nodes)
+    for node in reversed(model.nodes):
+        if not node.is_tip:
+            height[node.index] = max(height[c] + max(0.0, model.nodes[c].length)
+                                     for c in node.children)
+    out: set[int] = set()
+    stack = [0]
+    while stack:
+        node = model.nodes[stack.pop()]
+        if node.parent is not None and not node.is_tip and height[node.index] < distance:
+            out.add(node.index)
+            continue                      # its sub-clades go with it
+        stack.extend(node.children)
+    return out

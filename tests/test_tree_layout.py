@@ -133,3 +133,18 @@ def test_branch_transforms_and_inner_space():
     assert abs(holed.extent - plain.extent - 1.0) < 1e-9
     root_r = (holed.xy[0][0] ** 2 + holed.xy[0][1] ** 2) ** 0.5
     assert abs(root_r - 1.0) < 1e-9
+
+
+def test_orient_rotates_and_mirrors():
+    m = tl.read_tree_text("((A:1,B:1):1,C:2);")
+    circ = tl.compute_layout(m, tl.LAYOUT_CIRCULAR)
+    a = next(n.index for n in m.nodes if n.name == "A")
+    turned = tl.orient(circ, 90)
+    assert abs(turned.tip_angle[a] - (circ.tip_angle[a] + 90)) < 1e-9
+    x, y = circ.xy[a]
+    tx, ty = turned.xy[a]
+    assert abs(tx ** 2 + ty ** 2 - (x ** 2 + y ** 2)) < 1e-9          # same radius
+    rect = tl.compute_layout(m, tl.LAYOUT_RECTANGULAR)
+    flipped = tl.orient(rect, 45, mirror=True)                         # angle ignored
+    assert flipped.mirrored and flipped.xy[a] == (-rect.xy[a][0], rect.xy[a][1])
+    assert tl.orient(rect) is rect

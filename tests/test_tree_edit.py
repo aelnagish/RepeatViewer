@@ -193,3 +193,16 @@ def test_layout_extent_includes_collapsed_triangles():
     assert plain.extent == pytest.approx(0.25)   # B; the triangle is not counted
     assert room.extent == pytest.approx(0.4)    # 0.1 to the node + 0.3 inside it
     assert ci.key == ("C", "D", "E")
+
+
+def test_clades_within_distance():
+    from repeatviewer.backends import tree_layout as tl
+
+    m = tl.read_tree_text("(((A:0.01,B:0.02):0.3,(C:0.01,D:0.01):0.01):0.5,E:1.0);")
+    names = te.tip_sets(m)
+    got = {tuple(sorted(names[i])) for i in te.clades_within(m, 0.05)}
+    assert got == {("A", "B"), ("C", "D")}
+    # a larger distance takes the enclosing clade instead of its parts
+    got = {tuple(sorted(names[i])) for i in te.clades_within(m, 0.5)}
+    assert got == {("A", "B", "C", "D")}
+    assert te.clades_within(m, 0) == set()
