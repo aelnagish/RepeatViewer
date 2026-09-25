@@ -1830,6 +1830,7 @@ class TreeOptions:
     align_mode: str = TREE_ALIGN_AUTO
     mafft_strategy: str = "linsi"
     adjust_direction: bool = True
+    rotate_monomers: bool = False      # satellite monomers: common start before aligning
     mafft_gap_open: float = 1.53
     mafft_offset: float = 0.0
     min_coverage: float = 0.7          # fraction of the reference length; 0 = off
@@ -1852,6 +1853,9 @@ class TreeOptions:
     show_process_window: bool = False
     use_system_mafft: bool = False
     use_system_path: bool = False      # tree programs: system PATH only
+    # Methylation check: also build a tree without CG / CHG columns and compare.
+    # Set in the Tree tab (saved) or for one run by Tools → Tree → masked run.
+    methylation_mask: str = ""         # "", "CG" or "CG_CHG"
 
 
 def load_tree_options() -> TreeOptions:
@@ -1875,6 +1879,8 @@ def load_tree_options() -> TreeOptions:
         align_mode=_pick("align_mode", TREE_ALIGN_MODES, d.align_mode),
         mafft_strategy=str(v.get("mafft_strategy", d.mafft_strategy)),
         adjust_direction=_to_bool(v.get("adjust_direction"), d.adjust_direction),
+        rotate_monomers=_to_bool(v.get("rotate_monomers"), d.rotate_monomers),
+        methylation_mask=_pick("methylation_mask", ("", "CG", "CG_CHG"), d.methylation_mask),
         mafft_gap_open=_num("mafft_gap_open", d.mafft_gap_open, float, 0.0, 20.0),
         mafft_offset=_num("mafft_offset", d.mafft_offset, float, 0.0, 10.0),
         min_coverage=_num("min_coverage", d.min_coverage, float, 0.0, 1.0),
@@ -1907,6 +1913,8 @@ def save_tree_options(opts: TreeOptions) -> None:
             "align_mode": opts.align_mode,
             "mafft_strategy": opts.mafft_strategy,
             "adjust_direction": opts.adjust_direction,
+            "rotate_monomers": opts.rotate_monomers,
+            "methylation_mask": opts.methylation_mask,
             "mafft_gap_open": opts.mafft_gap_open,
             "mafft_offset": opts.mafft_offset,
             "min_coverage": opts.min_coverage,

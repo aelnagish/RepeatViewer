@@ -88,6 +88,15 @@ METHOD_INFO = (
     "<b>Approximate maximum likelihood (FastTree)</b>: for very large sets "
     "(more than ~1,000 sequences)."
 )
+MASK_INFO = (
+    "<b>Methylation check</b>: builds a second tree without the alignment columns where any "
+    "sequence has a C or G in a CG (or CHG) context, and compares the two trees in the report.<br>"
+    "Methylated C mutates to T much more often than other bases change, so unrelated copies can "
+    "share the same C→T by chance. If the well-supported groups stay the same without these "
+    "sites, the tree does not depend on them.<br>"
+    "<b>CG</b>: CG sites only. <b>CG and CHG</b>: also CHG sites (plants).<br>"
+    "DNA only. Takes about twice as long."
+)
 MODEL_INFO = (
     "<b>ModelFinder</b>: tests the models and selects the best by BIC "
     "(Bayesian information criterion).<br>"
@@ -165,6 +174,13 @@ class TreeParamsDialog(QDialog):
             "MAFFT --adjustdirectionaccurately. Keep on for TE and satellite copies taken "
             "from both strands; otherwise they look extremely divergent and misplace in the tree."
         )
+        self._rotate = QCheckBox("Rotate satellite monomers to a common start", self)
+        self._rotate.setChecked(opts.rotate_monomers)
+        self._rotate.setToolTip(
+            "Monomers cut from an array start at arbitrary positions. This turns every "
+            "monomer to the start and strand of the median-length monomer before aligning. "
+            "Monomers too different to place are left as they are and listed in the report."
+        )
         self._min_cov = QSpinBox(self)
         self._min_cov.setRange(0, 100)
         self._min_cov.setSuffix(" %")
@@ -211,6 +227,7 @@ class TreeParamsDialog(QDialog):
         af.addRow("Alignment:", self._align_mode)
         af.addRow("MAFFT strategy:", _with_info(self._strategy, _help_button(self, "MAFFT strategy", MAFFT_INFO), self))
         af.addRow("", self._adjust_direction)
+        af.addRow("", self._rotate)
         cov_row = QWidget(self)
         cov_lay = QHBoxLayout(cov_row)
         cov_lay.setContentsMargins(0, 0, 0, 0)
@@ -287,6 +304,11 @@ class TreeParamsDialog(QDialog):
             w.setFixedWidth(_FIELD_WIDTH)
         for w in (self._runs, self._seed, self._threads):
             w.setFixedWidth(120)
+        self._mask = QComboBox(self)
+        for label, value in (("Off", ""), ("CG", "CG"), ("CG and CHG", "CG_CHG")):
+            self._mask.addItem(label, value)
+        self._set_combo(self._mask, opts.methylation_mask)
+        self._mask.setFixedWidth(_FIELD_WIDTH)
 
         tree_tab = QWidget(self)
         tf = _form(tree_tab)
@@ -296,6 +318,8 @@ class TreeParamsDialog(QDialog):
         tf.addRow("Independent searches:", self._runs)
         tf.addRow("Random seed:", self._seed)
         tf.addRow("Threads:", self._threads)
+        tf.addRow("Methylation check:",
+                  _with_info(self._mask, _help_button(self, "Methylation check", MASK_INFO), self))
 
         # --- Support and rooting tab -------------------------------------------
         self._alrt = QSpinBox(self)
@@ -504,6 +528,8 @@ class TreeParamsDialog(QDialog):
         self._strategy.setEnabled(aligning)
         self._more_box.setEnabled(aligning)
         self._adjust_direction.setEnabled(aligning and not protein)
+        self._rotate.setEnabled(aligning and not protein)
+        self._mask.setEnabled(not protein)
         if protein:
             self._adjust_direction.setToolTip("Only for DNA: the selected sequences are protein.")
         self._bnni.setEnabled(iq and self._ufboot.value() > 0)
@@ -522,6 +548,8 @@ class TreeParamsDialog(QDialog):
         self._set_combo(self._align_mode, d.align_mode)
         self._set_combo(self._strategy, d.mafft_strategy)
         self._adjust_direction.setChecked(d.adjust_direction)
+        self._rotate.setChecked(d.rotate_monomers)
+        self._set_combo(self._mask, d.methylation_mask)
         self._min_cov.setValue(round(d.min_coverage * 100))
         self._set_combo(self._cov_ref, d.coverage_reference)
         self._gap_open.setValue(d.mafft_gap_open)
@@ -563,6 +591,8 @@ class TreeParamsDialog(QDialog):
             align_mode=str(self._align_mode.currentData()),
             mafft_strategy=str(self._strategy.currentData()),
             adjust_direction=self._adjust_direction.isChecked(),
+            rotate_monomers=self._rotate.isChecked(),
+            methylation_mask=str(self._mask.currentData() or "") if self._mask.isEnabled() else "",
             mafft_gap_open=self._gap_open.value(),
             mafft_offset=self._offset.value(),
             min_coverage=self._min_cov.value() / 100.0,

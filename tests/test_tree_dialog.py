@@ -75,12 +75,13 @@ def test_professional_labels_and_question_mark_help(qapp, tmp_path):
     assert not any("recommended" in r.lower() and "IQ-TREE" in r for r in radios)
     assert not [l for l in dlg.findChildren(QLabel) if l.text() == "ⓘ"]
     helps = [b for b in dlg.findChildren(QToolButton) if b.text() == "?"]
-    assert len(helps) == 3
+    assert len(helps) == 4   # MAFFT strategy, Method, Substitution model, Methylation check
     for b in helps:  # same round style as tool_dialogs._field_with_help
         assert b.size().width() == 22 and "border-radius: 10px" in b.styleSheet()
     tips = [b.toolTip() for b in helps]
     joined = " ".join(tips)
-    for piece in ("L-INS-i", "G-INS-i", "E-INS-i", "FFT-NS-2", "ModelFinder", "TN93", "HKY", "K2P"):
+    for piece in ("L-INS-i", "G-INS-i", "E-INS-i", "FFT-NS-2", "ModelFinder", "TN93", "HKY", "K2P",
+                  "CHG"):
         assert piece in joined
 
 
@@ -125,3 +126,33 @@ def test_opens_without_selection(qapp):
     dlg = TreeParamsDialog(files=[])
     assert not dlg._frag_hint.isVisible()
     assert dlg.options().outgroup == []
+
+
+def test_rotate_monomers_round_trips_and_needs_alignment(qapp, tmp_path):
+    dlg = _dialog(qapp, tmp_path, initial=TreeOptions(rotate_monomers=True))
+    assert dlg._rotate.isChecked()
+    assert dlg.options().rotate_monomers is True
+    dlg._align_mode.setCurrentIndex(dlg._align_mode.findData("never"))
+    assert not dlg._rotate.isEnabled()      # rotation needs a new alignment
+    dlg._restore_defaults()
+    assert dlg.options().rotate_monomers is False
+
+
+def test_methylation_check_in_the_tree_tab(qapp, tmp_path):
+    dlg = _dialog(qapp, tmp_path, initial=TreeOptions(methylation_mask="CG_CHG"))
+    assert dlg._mask.currentText() == "CG and CHG"
+    assert dlg.options().methylation_mask == "CG_CHG"
+    dlg._mask.setCurrentIndex(dlg._mask.findData("CG"))
+    assert dlg.options().methylation_mask == "CG"
+    dlg._restore_defaults()
+    assert dlg.options().methylation_mask == ""
+
+
+def test_methylation_check_is_off_for_protein(qapp, tmp_path):
+    from repeatviewer.views.tree_dialog import TreeParamsDialog
+
+    fa = tmp_path / "prot.fa"
+    fa.write_text(">p1\nMKLVWQERTY\n>p2\nMKLVWQERSY\n>p3\nMKLIWQERSY\n>p4\nMRLIWQERSY\n")
+    dlg = TreeParamsDialog(files=[fa], initial=TreeOptions(methylation_mask="CG"))
+    assert not dlg._mask.isEnabled()
+    assert dlg.options().methylation_mask == ""

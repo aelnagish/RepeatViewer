@@ -3725,6 +3725,20 @@ class MainWindow(QMainWindow):
         menu.addAction(
             "Change Tree parameters", lambda: self._open_tree_dialog(require_selection=False)
         )
+        menu.addSeparator()
+        menu.addAction(
+            "Methylation-masked sensitivity run (CG and CHG)", self._run_tree_methylation_masked
+        )
+
+    def _run_tree_methylation_masked(self) -> None:
+        """Saved settings, plus a second tree without CG/CHG columns, compared in the report."""
+        from dataclasses import replace
+
+        from repeatviewer.backends.methylation_mask import MASK_CG_CHG
+
+        files = self._selected_files_for_tree()
+        if files:
+            self._start_tree_job(files, replace(self._tree_options, methylation_mask=MASK_CG_CHG))
 
     def _tree_candidate_files(self) -> list[Path]:
         """Selected FASTA files (several files are combined into one tree). No UI."""

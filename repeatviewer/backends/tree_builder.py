@@ -26,6 +26,7 @@ Qt dependency and are unit-tested in ``tests/test_tree_builder.py``.
 
 from __future__ import annotations
 
+import functools
 import html
 import io
 import re
@@ -531,7 +532,8 @@ def output_base_name(inputs: list[Path]) -> str:
 
 # Results shown in the file panel (next to the input); everything else goes
 # into the ``<base>_details`` folder.
-MAIN_SUFFIXES = ("_report.html", ".treefile", ".pdf", ".svg", ".png", ".aln.fa")
+MAIN_SUFFIXES = ("_report.html", ".treefile", ".pdf", ".svg", ".png", ".aln.fa",
+                 "_masked.treefile")
 
 
 @dataclass
@@ -545,11 +547,22 @@ class OutputLayout:
         return folder / f"{self.base}{suffix}"
 
 
-def plan_outputs(inputs: list[Path]) -> OutputLayout:
-    """Pick ``<input>_tree`` (or ``_tree_2``, ``_tree_3``… when a previous run's
+def run_tag(opts: TreeOptions, *, dna: bool = True) -> str:
+    """Name tag for runs that differ from a plain tree, so they stand apart:
+    ``_rot`` (monomers rotated), ``_cg`` / ``_cgchg`` (methylation check)."""
+    tag = ""
+    if opts.rotate_monomers and dna and opts.align_mode != TREE_ALIGN_NEVER:
+        tag += "_rot"
+    if opts.methylation_mask and dna:
+        tag += "_cgchg" if opts.methylation_mask == "CG_CHG" else "_cg"
+    return tag
+
+
+def plan_outputs(inputs: list[Path], tag: str = "") -> OutputLayout:
+    """Pick ``<input>_tree<tag>`` (or ``…_2``, ``…_3`` when a previous run's
     results exist) and create its details folder. Never overwrites."""
     parent = Path(inputs[0]).expanduser().resolve().parent
-    stem = f"{output_base_name(inputs)}_tree"
+    stem = f"{output_base_name(inputs)}_tree{tag}"
     n = 1
     while True:
         base = stem if n == 1 else f"{stem}_{n}"
@@ -614,6 +627,10 @@ class TreeRunReport:
     seed: int
     warnings: list[str] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
+    rotation: str = ""              # monomer rotation summary ("" = not run)
+    rotation_reference: str = ""
+    masking: str = ""               # sensitivity paragraph ("" = not run)
+    masked_lost: list[list[str]] = field(default_factory=list)
 
 
 def reference_phrase(opts: TreeOptions) -> str:
@@ -638,6 +655,12 @@ def methods_paragraph(r: TreeRunReport, opts: TreeOptions) -> str:
     """A methods-section paragraph describing exactly what was run."""
     parts: list[str] = []
     seq_word = "nucleotide" if r.dna else "protein"
+    if r.rotation:
+        parts.append(
+            "Before alignment, monomers were rotated to a common start and orientation "
+            f"relative to the monomer of median length ({r.rotation_reference}), using "
+            "shared k-mer diagonals (RepeatViewer)."
+        )
     if r.aligned_by:
         direction = (" with automatic strand adjustment (--adjustdirectionaccurately)"
                      if opts.adjust_direction and r.dna else "")
@@ -698,6 +721,8 @@ def methods_paragraph(r: TreeRunReport, opts: TreeOptions) -> str:
             "SH-like local support values."
         )
     parts.append(_rooting_sentence(r.rooting))
+    if r.masking:
+        parts.append(r.masking)
     return " ".join(p for p in parts if p)
 
 
@@ -757,17 +782,26 @@ def report_html(r: TreeRunReport, opts: TreeOptions, svg_text: str, files: list[
     support = r.support.removeprefix("Branch support: ")
     rows += [("Branch support", support[:1].upper() + support[1:]), ("Root", r.rooting),
              ("Seed", str(r.seed))]
+    if r.rotation:
+        rows.insert(3, ("Monomer rotation", r.rotation))
     table = "\n".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in rows)
     warn = "".join(f"<li>{e(w)}</li>" for w in r.warnings)
     excl = "".join(f"<li>{e(n)} ({c:.0%} of the {e(reference_phrase(opts))})</li>"
                    for n, c in r.excluded)
-    main = [p for p in files if any(p.name.endswith(s) for s in MAIN_SUFFIXES)]
+    # Main results sit next to the input; everything else is in <base>_details/.
+    main = [p for p in files if not p.parent.name.endswith("_details")]
     extra = [p for p in files if p not in main]
     flist = "".join(f"<li>{e(p.name)}</li>" for p in main)
     if extra:
         flist += (f"<li>{e(extra[0].parent.name)}/<ul>"
                   + "".join(f"<li>{e(p.name)}</li>" for p in extra) + "</ul></li>")
     cites = "".join(f"<li>{e(c)}</li>" for c in citations_for(r, opts))
+    masking = ""
+    if r.masking:
+        lost = "".join(f"<li>{e(', '.join(names))}</li>" for names in r.masked_lost)
+        masking = (f'<h2>Methylation-masked sensitivity run</h2><p class="methods">{e(r.masking)}</p>'
+                   + (f"<p>Well-supported groupings of the full tree not recovered:</p><ul>{lost}</ul>"
+                      if lost else ""))
     methods = e(methods_paragraph(r, opts))
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>{e(title)}</title>
 <style>
@@ -783,6 +817,7 @@ ul{{font-size:13px;margin:4px 0 0 18px;padding:0}} small{{color:#666}}
 <div class="tree">{svg_text}</div>
 <h2>Run report</h2><table>{table}</table>
 {f'<h2>Excluded fragments</h2><ul>{excl}</ul>' if excl else ''}
+{masking}
 <h2>Methods text</h2><div class="methods">{methods}</div>
 <h2>Cite</h2><ul>{cites}</ul>
 <h2>Files written</h2><ul>{flist}</ul>
@@ -803,6 +838,64 @@ def iqtree_thread_args(threads: int) -> list[str]:
 _STACK_LINE = re.compile(r"^ERROR:\s*(\d+\s|\*{3}|STACK TRACE|$)")
 
 
+@functools.lru_cache(maxsize=8)
+def fastme_supports_threads(executable: str) -> bool:
+    """FastME builds without OpenMP reject --nb_threads; ask its --help first."""
+    try:
+        from repeatviewer.conda_tools import prepare_command
+
+        result = subprocess.run(prepare_command([executable, "--help"]), capture_output=True,
+                                text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "nb_threads" in (result.stdout or "") + (result.stderr or "")
+
+
+MIN_SHARED_SITES = 20     # fewer shared aligned positions: no distance can be measured
+UNRELATED_P = 0.5         # median p-distance at which copies look unrelated
+
+
+def pairwise_overlap(rows: list[str], *, dna: bool = True):
+    """(shared, differing, residues): aligned positions shared and differing for
+    every pair (n × n arrays), and each row's number of residues."""
+    import numpy as np
+
+    arr = np.frombuffer("".join(r.upper() for r in rows).encode("ascii", "replace"),
+                        dtype=np.uint8).reshape(len(rows), -1)
+    if dna:
+        valid = np.isin(arr, np.frombuffer(b"ACGTU", dtype=np.uint8))
+    else:
+        valid = ~np.isin(arr, np.frombuffer(b"-.?X*", dtype=np.uint8))
+    n = len(rows)
+    shared = np.zeros((n, n), dtype=np.int64)
+    diff = np.zeros((n, n), dtype=np.int64)
+    for i in range(n):
+        both = valid[i] & valid
+        shared[i] = both.sum(axis=1)
+        diff[i] = (both & (arr != arr[i])).sum(axis=1)
+    return shared, diff, valid.sum(axis=1)
+
+
+def overlap_problems(names: list[str], rows: list[str], *, dna: bool = True,
+                     min_shared: int = MIN_SHARED_SITES) -> tuple[list[tuple[str, str, int]], float]:
+    """Pairs that share too few aligned positions to be compared, and the median
+    p-distance over the other pairs (nan when there are none).
+
+    "Too few" is fewer than ``min_shared``, or fewer than half of the shorter
+    sequence when that is less (so short repeats are not flagged)."""
+    import numpy as np
+
+    shared, diff, residues = pairwise_overlap(rows, dna=dna)
+    need = np.minimum(min_shared, np.maximum(1, np.minimum.outer(residues, residues) // 2))
+    iu = np.triu_indices(len(rows), k=1)
+    s, d = shared[iu], diff[iu]
+    too_few = [(names[i], names[j], int(shared[i, j]))
+               for i, j in zip(*iu) if shared[i, j] < need[i, j]]
+    ok = s >= need[iu]
+    median_p = float(np.median(d[ok] / s[ok])) if ok.any() else float("nan")
+    return too_few, median_p
+
+
 def summarize_tool_error(tool: str, returncode: int, output: str) -> str:
     """A readable one-paragraph reason for a failed external program."""
     text = output or ""
@@ -814,6 +907,12 @@ def summarize_tool_error(tool: str, returncode: int, output: str) -> str:
         )
     if "bad_alloc" in text or "Not enough memory" in text or "out of memory" in text.lower():
         return f"{tool} ran out of memory. Reduce the number of sequences or threads."
+    if "Unable to compute all distances" in text:
+        return (
+            f"{tool} could not measure the distance between some pairs of sequences: they "
+            "share no aligned positions or are too different. The sequences are probably "
+            "not all copies of one family."
+        )
     errors = [line.strip() for line in text.splitlines()
               if line.strip().startswith("ERROR") and not _STACK_LINE.match(line.strip())]
     if errors:
@@ -939,7 +1038,7 @@ def build_tree_run(
             warnings.append("Outgroup rooting was selected, but no outgroup was chosen.")
 
     stamp = stamp or run_stamp()
-    layout = plan_outputs(inputs)
+    layout = plan_outputs(inputs, run_tag(opts, dna=dna))
     created: list[Path] = []
     from repeatviewer.backends.job_cancel import JobCancelledError
 
@@ -971,10 +1070,153 @@ def _check_cancel(cancel) -> None:
         raise JobCancelledError("Job stopped by user")
 
 
-def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgroup,
-                warnings, opts, stamp, say, cancel):
+@dataclass
+class _Inference:
+    tree: object                    # Bio.Phylo tree, internal sequence IDs, supports attached
+    model: str
+    loglik: float | None
+    runs_same: int | None
+    support: str
+    best_prefix: Path | None = None   # IQ-TREE: best search
+    first_prefix: Path | None = None  # IQ-TREE: first search (model selection)
+
+
+def _infer(exe, opts, safe_aln, aln_pairs, dna, safe_outgroup, work, commands, say, cancel,
+           warnings, *, model_override: str = "", label: str = "") -> _Inference:
+    """Build one tree from ``safe_aln`` with the engine in ``opts``.
+
+    Used for the main tree and, with ``label`` and a fixed ``model_override``,
+    for the methylation-masked sensitivity tree.
+    """
     from repeatviewer.external_process import run_logged_process
 
+    wd = work / label.strip().replace(" ", "_") if label else work
+    wd.mkdir(parents=True, exist_ok=True)
+    loglik = None
+    model = ""
+    runs_same = None
+    support = ""
+    best_prefix = None
+    if opts.engine == TREE_ENGINE_IQTREE:
+        # Independent searches run as separate IQ-TREE processes (seed, seed+1, …)
+        # rather than one ``--runs N`` process: IQ-TREE 3 on macOS exhausts OpenMP
+        # threads when many searches share one process, and a crash in one search
+        # must not lose the others. ModelFinder runs once, in the first search;
+        # later searches reuse the selected model.
+        n_runs = max(1, opts.runs)
+        results: list[tuple[float, str, Path]] = []  # (logL, newick, prefix)
+        model = ""
+        failures: list[str] = []
+        for i in range(n_runs):
+            _check_cancel(cancel)
+            prefix = wd / f"run{i + 1}" / "iq"
+            prefix.parent.mkdir(parents=True)
+            if model_override:
+                run_model = model_override
+            else:
+                run_model = (opts.model or TREE_MODEL_FINDER) if i == 0 or not model else model
+            cmd = [exe, "-s", str(safe_aln), "-m", run_model, "--seed", str(opts.seed + i),
+                   "--prefix", str(prefix), "-redo"]
+            cmd += iqtree_thread_args(opts.threads)
+            if opts.ufboot:
+                cmd += ["-B", str(max(1000, opts.ufboot))]
+                if opts.bnni:
+                    cmd.append("-bnni")
+            if opts.alrt:
+                cmd += ["--alrt", str(opts.alrt)]
+            if opts.root_mode == TREE_ROOT_OUTGROUP and safe_outgroup:
+                cmd += ["-o", ",".join(safe_outgroup)]
+            _add_command(work, commands, " ".join(Path(c).name if k == 0 else c for k, c in enumerate(cmd))
+                            .replace(str(work) + "/", ""))
+            if n_runs > 1:
+                say(f"Building the {label or ''}tree — search {i + 1} of {n_runs}…".replace("  ", " "))
+            result = run_logged_process(cmd, tool="IQ-TREE", inputs=[safe_aln], cwd=work,
+                                        check=False, cancel=cancel)
+            _check_cancel(cancel)
+            treefile = prefix.with_suffix(".treefile")
+            report_file = prefix.with_suffix(".iqtree")
+            if result.returncode != 0 or not treefile.is_file() or not report_file.is_file():
+                failures.append(summarize_tool_error(
+                    "IQ-TREE", result.returncode, (result.stdout or "") + "\n" + (result.stderr or "")
+                ))
+                if i == 0:
+                    break  # the first search also selects the model; nothing to reuse
+                continue
+            report_text = report_file.read_text(encoding="utf-8", errors="replace")
+            if i == 0:
+                model = iqtree_model_from_report(report_text) or model_override or opts.model
+            lnl = iqtree_loglik_from_report(report_text)
+            results.append((lnl if lnl is not None else float("-inf"),
+                            treefile.read_text(encoding="utf-8"), prefix))
+        if not results:
+            raise TreeBuildError(failures[0] if failures else "IQ-TREE produced no tree.")
+        if failures:
+            warnings.append(f"{len(failures)} of {n_runs} IQ-TREE {label}searches failed and were "
+                            f"skipped: {failures[0].splitlines()[0]}")
+        loglik, tree_text, best_prefix = max(results, key=lambda r: r[0])
+        best = read_newick(tree_text)
+        runs_same = sum(1 for _l, nwk, _p in results if rf_distance(best, read_newick(nwk)) == 0)
+        parts = []
+        if opts.alrt:
+            parts.append(f"{opts.alrt} SH-aLRT replicates")
+        if opts.ufboot:
+            parts.append(f"{max(1000, opts.ufboot)} ultrafast bootstrap replicates (UFBoot2"
+                         + (", -bnni" if opts.bnni else "") + ")")
+        support = ("Branch support: " + " and ".join(parts) + " (shown as SH-aLRT/UFBoot)."
+                   if parts else "No branch support computed.")
+    elif opts.engine == TREE_ENGINE_FASTME:
+        phy = wd / "aln.phy"
+        _write_phylip(phy, aln_pairs)
+        main_out = wd / "fastme.nwk"
+        boot_out = wd / "fastme_boot.nwk"
+        cmd = [exe, f"--input_data={phy}", f"--output_tree={main_out}",
+               "--dna=T" if dna else "--protein=L", "--method=B", "--nni=B", "--spr",
+               f"--seed={opts.seed}"]
+        if fastme_supports_threads(exe):
+            cmd.append(f"--nb_threads={max(1, opts.threads)}")
+        if opts.distance_bootstrap:
+            cmd += [f"--bootstrap={opts.distance_bootstrap}", "-B", str(boot_out)]
+        _add_command(work, commands, " ".join(cmd).replace(str(work) + "/", ""))
+        result = run_logged_process(cmd, tool="FastME", inputs=[phy], cwd=work,
+                                    check=False, cancel=cancel)
+        _check_cancel(cancel)
+        if result.returncode != 0 or not main_out.is_file():
+            raise TreeBuildError(summarize_tool_error(
+                "FastME", result.returncode, (result.stdout or "") + "\n" + (result.stderr or "")))
+        tree_text = main_out.read_text(encoding="utf-8").strip().splitlines()[0]
+        model = "TN93" if dna else "LG"
+        support = (f"Branch support: {opts.distance_bootstrap} nonparametric bootstrap replicates."
+                   if opts.distance_bootstrap else "No branch support computed.")
+    else:  # FastTree
+        cmd = [exe, "-quiet", "-nopr", "-gamma", "-seed", str(opts.seed)]
+        cmd += ["-nt", "-gtr"] if dna else ["-lg"]
+        cmd.append(str(safe_aln))
+        _add_command(work, commands, " ".join(Path(c).name if i == 0 else c for i, c in enumerate(cmd))
+                        .replace(str(work) + "/", "") + " > tree.nwk")
+        result = run_logged_process(cmd, tool="FastTree", inputs=[safe_aln], cwd=work,
+                                    check=False, cancel=cancel, stdout_is_result=True)
+        _check_cancel(cancel)
+        tree_text = (result.stdout or "").strip()
+        if result.returncode != 0 or not tree_text:
+            raise TreeBuildError(summarize_tool_error("FastTree", result.returncode,
+                                                      result.stderr or ""))
+        model = "GTR+CAT+Gamma20" if dna else "LG+CAT+Gamma20"
+        support = "Branch support: FastTree SH-like local support values (0-1)."
+
+    tree = read_newick(tree_text)
+    if opts.engine == TREE_ENGINE_FASTME and opts.distance_bootstrap and boot_out.is_file():
+        reps = [read_newick(line) for line in boot_out.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        support_from_replicates(tree, reps)
+    for clade in tree.find_clades():
+        if clade.branch_length is not None and clade.branch_length < 0:
+            clade.branch_length = 0.0
+    return _Inference(tree, model, loglik, runs_same, support, best_prefix,
+                      wd / "run1" / "iq" if opts.engine == TREE_ENGINE_IQTREE else None)
+
+
+def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgroup,
+                warnings, opts, stamp, say, cancel):
     exe = engine_executable(opts.engine, system_path_only=opts.use_system_path)
     out = layout.path
     work = layout.details / ".work"
@@ -992,9 +1234,40 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
         _write_fasta(out(".excluded.fa"), [(r.name, r.seq.replace("-", "")) for r, _c in excluded])
         created.append(out(".excluded.fa"))
 
+    # --- monomer phase rotation (satellites) ----------------------------------
+    rotation_summary = ""
+    rotation_reference = ""
+    rotate = bool(opts.rotate_monomers)
+    if rotate and not dna:
+        warnings.append("Monomer rotation applies to DNA only; the protein input was not rotated.")
+        rotate = False
+    if rotate and opts.align_mode == TREE_ALIGN_NEVER:
+        warnings.append("Monomer rotation was skipped: it needs a new alignment, but "
+                        "'Use the input as an alignment' is selected.")
+        rotate = False
+    if rotate:
+        from repeatviewer.backends.monomer_phase import rotate_to_common_start
+
+        say("Rotating monomers to a common start…")
+        rot = rotate_to_common_start([(r.name, r.seq) for r in records])
+        rotated = dict(rot.sequences)
+        for r in records:
+            r.seq = rotated[r.name]
+        out(".rotation.tsv").write_text(rot.table_tsv(), encoding="utf-8")
+        created.append(out(".rotation.tsv"))
+        rotation_reference = rot.reference
+        rotation_summary = (f"{rot.n_rotated} of {len(records)} rotated, "
+                            f"{rot.n_reversed} reverse-complemented (reference {rot.reference})")
+        if rot.unmatched:
+            shown = ", ".join(rot.unmatched[:12]) + ("…" if len(rot.unmatched) > 12 else "")
+            warnings.append(
+                f"{len(rot.unmatched)} monomer(s) shared too few k-mers with the reference "
+                f"{rot.reference} to be rotated and were left as they are: {shown}"
+            )
+
     # --- alignment -----------------------------------------------------------
     already_aligned = is_aligned(records)
-    do_align = opts.align_mode == TREE_ALIGN_ALWAYS or (
+    do_align = opts.align_mode == TREE_ALIGN_ALWAYS or rotate or (
         opts.align_mode != TREE_ALIGN_NEVER and not already_aligned
     )
     if opts.align_mode == TREE_ALIGN_NEVER and not is_aligned(records):
@@ -1065,6 +1338,28 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
     _write_fasta(out(".aln.fa"), [(safe_to_name[n], s) for n, s in aln_pairs])
     created.append(out(".aln.fa"))
     stats = alignment_stats([s for _n, s in aln_pairs], dna=dna)
+    if len(aln_pairs) <= 2000:
+        too_few, median_p = overlap_problems([safe_to_name[n] for n, _s in aln_pairs],
+                                             [s for _n, s in aln_pairs], dna=dna)
+        if too_few:
+            shown = "; ".join(f"{a} and {b} ({k})" for a, b, k in too_few[:6])
+            more = f" and {len(too_few) - 6} more" if len(too_few) > 6 else ""
+            message = (
+                f"{len(too_few)} pair(s) of sequences share (almost) no aligned positions "
+                f"({shown}{more}; shared positions in brackets), so the distance between "
+                "them cannot be measured. The sequences are probably not all copies of one family (for "
+                "example consensus sequences of different satellite families); a tree needs "
+                "related copies."
+            )
+            if opts.engine == TREE_ENGINE_FASTME:
+                raise TreeBuildError(message + " FastME cannot build a tree from this alignment.")
+            warnings.append(message)
+        elif median_p == median_p and median_p >= UNRELATED_P:
+            warnings.append(
+                f"The sequences differ at {median_p:.0%} of their shared aligned positions "
+                "(median over all pairs), about what unrelated sequences give. Check that they "
+                "are copies of one family."
+            )
     if stats.informative_sites < 10:
         warnings.append(
             f"Only {stats.informative_sites} parsimony-informative sites: most branches "
@@ -1085,70 +1380,12 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
     runs_same = None
     support = ""
     say(f"Building the tree ({ENGINE_NAMES[opts.engine]})…")
+    inf = _infer(exe, opts, safe_aln, aln_pairs, dna, safe_outgroup, work, commands, say,
+                 cancel, warnings)
+    tree, model, loglik, runs_same, support = (inf.tree, inf.model, inf.loglik,
+                                               inf.runs_same, inf.support)
     if opts.engine == TREE_ENGINE_IQTREE:
-        # Independent searches run as separate IQ-TREE processes (seed, seed+1, …)
-        # rather than one ``--runs N`` process: IQ-TREE 3 on macOS exhausts OpenMP
-        # threads when many searches share one process, and a crash in one search
-        # must not lose the others. ModelFinder runs once, in the first search;
-        # later searches reuse the selected model.
-        n_runs = max(1, opts.runs)
-        results: list[tuple[float, str, Path]] = []  # (logL, newick, prefix)
-        model = ""
-        failures: list[str] = []
-        for i in range(n_runs):
-            _check_cancel(cancel)
-            prefix = work / f"run{i + 1}" / "iq"
-            prefix.parent.mkdir()
-            run_model = (opts.model or TREE_MODEL_FINDER) if i == 0 or not model else model
-            cmd = [exe, "-s", str(safe_aln), "-m", run_model, "--seed", str(opts.seed + i),
-                   "--prefix", str(prefix), "-redo"]
-            cmd += iqtree_thread_args(opts.threads)
-            if opts.ufboot:
-                cmd += ["-B", str(max(1000, opts.ufboot))]
-                if opts.bnni:
-                    cmd.append("-bnni")
-            if opts.alrt:
-                cmd += ["--alrt", str(opts.alrt)]
-            if opts.root_mode == TREE_ROOT_OUTGROUP and safe_outgroup:
-                cmd += ["-o", ",".join(safe_outgroup)]
-            _add_command(work, commands, " ".join(Path(c).name if k == 0 else c for k, c in enumerate(cmd))
-                            .replace(str(work) + "/", ""))
-            if n_runs > 1:
-                say(f"Building the tree — search {i + 1} of {n_runs}…")
-            result = run_logged_process(cmd, tool="IQ-TREE", inputs=[safe_aln], cwd=work,
-                                        check=False, cancel=cancel)
-            _check_cancel(cancel)
-            treefile = prefix.with_suffix(".treefile")
-            report_file = prefix.with_suffix(".iqtree")
-            if result.returncode != 0 or not treefile.is_file() or not report_file.is_file():
-                failures.append(summarize_tool_error(
-                    "IQ-TREE", result.returncode, (result.stdout or "") + "\n" + (result.stderr or "")
-                ))
-                if i == 0:
-                    break  # the first search also selects the model; nothing to reuse
-                continue
-            report_text = report_file.read_text(encoding="utf-8", errors="replace")
-            if i == 0:
-                model = iqtree_model_from_report(report_text) or opts.model
-            lnl = iqtree_loglik_from_report(report_text)
-            results.append((lnl if lnl is not None else float("-inf"),
-                            treefile.read_text(encoding="utf-8"), prefix))
-        if not results:
-            raise TreeBuildError(failures[0] if failures else "IQ-TREE produced no tree.")
-        if failures:
-            warnings.append(f"{len(failures)} of {n_runs} IQ-TREE searches failed and were "
-                            f"skipped: {failures[0].splitlines()[0]}")
-        loglik, tree_text, best_prefix = max(results, key=lambda r: r[0])
-        best = read_newick(tree_text)
-        runs_same = sum(1 for _l, nwk, _p in results if rf_distance(best, read_newick(nwk)) == 0)
-        parts = []
-        if opts.alrt:
-            parts.append(f"{opts.alrt} SH-aLRT replicates")
-        if opts.ufboot:
-            parts.append(f"{max(1000, opts.ufboot)} ultrafast bootstrap replicates (UFBoot2"
-                         + (", -bnni" if opts.bnni else "") + ")")
-        support = ("Branch support: " + " and ".join(parts) + " (shown as SH-aLRT/UFBoot)."
-                   if parts else "No branch support computed.")
+        best_prefix = inf.best_prefix
         # Keep the report and log of the best search, plus the model selection
         # (first search) when that was a different one.
         first_prefix = work / "run1" / "iq"
@@ -1165,52 +1402,6 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
                     dest = out(f"{tag}{ext}")
                     dest.write_text(text, encoding="utf-8")
                     created.append(dest)
-    elif opts.engine == TREE_ENGINE_FASTME:
-        phy = work / "aln.phy"
-        _write_phylip(phy, aln_pairs)
-        main_out = work / "fastme.nwk"
-        boot_out = work / "fastme_boot.nwk"
-        cmd = [exe, f"--input_data={phy}", f"--output_tree={main_out}",
-               "--dna=T" if dna else "--protein=L", "--method=B", "--nni=B", "--spr",
-               f"--seed={opts.seed}", f"--nb_threads={max(1, opts.threads)}"]
-        if opts.distance_bootstrap:
-            cmd += [f"--bootstrap={opts.distance_bootstrap}", "-B", str(boot_out)]
-        _add_command(work, commands, " ".join(cmd).replace(str(work) + "/", ""))
-        result = run_logged_process(cmd, tool="FastME", inputs=[phy], cwd=work,
-                                    check=False, cancel=cancel)
-        _check_cancel(cancel)
-        if result.returncode != 0 or not main_out.is_file():
-            raise TreeBuildError(summarize_tool_error(
-                "FastME", result.returncode, (result.stdout or "") + "\n" + (result.stderr or "")))
-        tree_text = main_out.read_text(encoding="utf-8").strip().splitlines()[0]
-        model = "TN93" if dna else "LG"
-        support = (f"Branch support: {opts.distance_bootstrap} nonparametric bootstrap replicates."
-                   if opts.distance_bootstrap else "No branch support computed.")
-    else:  # FastTree
-        cmd = [exe, "-quiet", "-nopr", "-gamma", "-seed", str(opts.seed)]
-        cmd += ["-nt", "-gtr"] if dna else ["-lg"]
-        cmd.append(str(safe_aln))
-        _add_command(work, commands, " ".join(Path(c).name if i == 0 else c for i, c in enumerate(cmd))
-                        .replace(str(work) + "/", "") + " > tree.nwk")
-        result = run_logged_process(cmd, tool="FastTree", inputs=[safe_aln], cwd=work,
-                                    check=False, cancel=cancel, stdout_is_result=True)
-        _check_cancel(cancel)
-        tree_text = (result.stdout or "").strip()
-        if result.returncode != 0 or not tree_text:
-            raise TreeBuildError(summarize_tool_error("FastTree", result.returncode,
-                                                      result.stderr or ""))
-        model = "GTR+CAT+Gamma20" if dna else "LG+CAT+Gamma20"
-        support = "Branch support: FastTree SH-like local support values (0-1)."
-
-    # --- post-processing -------------------------------------------------------
-    tree = read_newick(tree_text)
-    if opts.engine == TREE_ENGINE_FASTME and opts.distance_bootstrap and boot_out.is_file():
-        reps = [read_newick(line) for line in boot_out.read_text(encoding="utf-8").splitlines()
-                if line.strip()]
-        support_from_replicates(tree, reps)
-    for clade in tree.find_clades():
-        if clade.branch_length is not None and clade.branch_length < 0:
-            clade.branch_length = 0.0
     rename_leaves(tree, safe_to_name)
     if opts.root_mode == TREE_ROOT_OUTGROUP and len(outgroup) > 1:
         present = [t for t in tree.get_terminals() if t.name in set(outgroup)]
@@ -1224,6 +1415,58 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
     out(".treefile").write_text(tree_to_newick(tree) + "\n", encoding="utf-8")
     created.append(out(".treefile"))
 
+    # --- methylation-masked sensitivity tree ----------------------------------
+    masking_text = ""
+    masking_lost: list[list[str]] = []
+    if opts.methylation_mask and not dna:
+        warnings.append("The CG/CHG masking run applies to DNA only; it was skipped.")
+    elif opts.methylation_mask:
+        from repeatviewer.backends import methylation_mask as mm
+
+        _check_cancel(cancel)
+        rows = [s for _n, s in aln_pairs]
+        cols = mm.methylation_columns(rows, opts.methylation_mask)
+        masked_rows = mm.remove_columns(rows, cols)
+        masked_pairs = [(n, s) for (n, _s), s in zip(aln_pairs, masked_rows)]
+        mstats = alignment_stats(masked_rows, dna=True) if masked_rows[0] else None
+        if mstats is None or mstats.informative_sites < 10:
+            warnings.append(
+                f"After removing {len(cols)} {mm.MASK_LABELS[opts.methylation_mask]} columns, "
+                f"only {mstats.informative_sites if mstats else 0} parsimony-informative sites "
+                "remain; the masked tree was not built."
+            )
+        else:
+            mdir = work / "masked"
+            mdir.mkdir(exist_ok=True)
+            masked_aln = mdir / "aln.fa"
+            _write_fasta(masked_aln, masked_pairs)
+            say("Building the methylation-masked tree…")
+            fixed = model if opts.engine == TREE_ENGINE_IQTREE else ""
+            minf = _infer(exe, opts, masked_aln, masked_pairs, dna, safe_outgroup, work,
+                          commands, say, cancel, warnings, model_override=fixed,
+                          label="masked ")
+            mtree = minf.tree
+            rename_leaves(mtree, safe_to_name)
+            apply_rooting(mtree, opts.root_mode, outgroup)
+            mtree.ladderize()
+            out("_masked.treefile").write_text(tree_to_newick(mtree) + "\n", encoding="utf-8")
+            created.append(out("_masked.treefile"))
+            _write_fasta(out("_masked.aln.fa"),
+                         [(safe_to_name[n], s) for n, s in masked_pairs])
+            created.append(out("_masked.aln.fa"))
+            cmp = mm.compare_trees(tree, mtree, opts.engine)
+            masking_text = mm.comparison_sentence(cmp, len(cols), len(rows[0]),
+                                                  opts.methylation_mask)
+            if fixed:
+                masking_text += (f" The masked tree used the model selected for the full "
+                                 f"tree ({fixed}).")
+            masking_lost = cmp.lost_supported
+            if cmp.lost_supported:
+                warnings.append(
+                    f"{len(cmp.lost_supported)} well-supported grouping(s) of the full tree "
+                    "are not recovered without CG/CHG sites; see the sensitivity section."
+                )
+
     title = f"{output_base_name(inputs)} — {ENGINE_NAMES[opts.engine].split(' (')[0].lower()} tree"
     say("Drawing the tree…")
     images = render_tree(tree, layout.parent / layout.base, title="")
@@ -1236,7 +1479,8 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
         engine_version=engine_version, mafft_version=mafft_version, model=model,
         loglik=loglik, runs=opts.runs if opts.engine == TREE_ENGINE_IQTREE else 1,
         runs_same_topology=runs_same, support=support, rooting=rooting, seed=opts.seed,
-        warnings=warnings, commands=commands,
+        warnings=warnings, commands=commands, rotation=rotation_summary,
+        rotation_reference=rotation_reference, masking=masking_text, masked_lost=masking_lost,
     )
     methods = methods_paragraph(report, opts)
     out("_methods.txt").write_text(
