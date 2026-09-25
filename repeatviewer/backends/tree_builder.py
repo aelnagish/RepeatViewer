@@ -48,6 +48,7 @@ from repeatviewer.job_options import (
     TREE_MODEL_FINDER,
     TREE_ROOT_MIDPOINT,
     TREE_ROOT_OUTGROUP,
+    TREE_SEQ_RT,
     TreeOptions,
 )
 from repeatviewer.tool_output_paths import kept_input_name
@@ -549,7 +550,10 @@ class OutputLayout:
 
 def run_tag(opts: TreeOptions, *, dna: bool = True) -> str:
     """Name tag for runs that differ from a plain tree, so they stand apart:
-    ``_rot`` (monomers rotated), ``_cg`` / ``_cgchg`` (methylation check)."""
+    ``_rot`` (monomers rotated), ``_cg`` / ``_cgchg`` (methylation check),
+    ``_rt`` (RT domains; rotation and masking do not apply)."""
+    if opts.sequence_mode == TREE_SEQ_RT:
+        return "_rt"
     tag = ""
     if opts.rotate_monomers and dna and opts.align_mode != TREE_ALIGN_NEVER:
         tag += "_rot"
@@ -631,6 +635,8 @@ class TreeRunReport:
     rotation_reference: str = ""
     masking: str = ""               # sensitivity paragraph ("" = not run)
     masked_lost: list[list[str]] = field(default_factory=list)
+    rt_summary: str = ""            # RT-domain mode summary ("" = not used)
+    rt_methods: str = ""
 
 
 def reference_phrase(opts: TreeOptions) -> str:
@@ -655,6 +661,8 @@ def methods_paragraph(r: TreeRunReport, opts: TreeOptions) -> str:
     """A methods-section paragraph describing exactly what was run."""
     parts: list[str] = []
     seq_word = "nucleotide" if r.dna else "protein"
+    if r.rt_methods:
+        parts.append(r.rt_methods)
     if r.rotation:
         parts.append(
             "Before alignment, monomers were rotated to a common start and orientation "
@@ -735,11 +743,16 @@ CITATIONS = {
     "alrt": "Guindon S et al. (2010) New algorithms and methods to estimate maximum-likelihood phylogenies: PhyML 3.0. Syst Biol 59:307-321.",
     TREE_ENGINE_FASTME: "Lefort V, Desper R, Gascuel O (2015) FastME 2.0. Mol Biol Evol 32:2798-2800.",
     TREE_ENGINE_FASTTREE: "Price MN, Dehal PS, Arkin AP (2010) FastTree 2. PLoS ONE 5:e9490.",
+    "rexdb": "Neumann P, Novák P, Hoštáková N, Macas J (2019) Systematic survey of plant LTR-retrotransposons elucidates phylogenetic relationships of their polyprotein domains and provides a reference for element classification. Mobile DNA 10:1.",
+    "hmmer": "Eddy SR (2011) Accelerated profile HMM searches. PLoS Comput Biol 7:e1002195.",
+    "pyhmmer": "Larralde M, Zeller G (2023) PyHMMER: a Python library binding to HMMER for efficient sequence analysis. Bioinformatics 39:btad214.",
 }
 
 
 def citations_for(r: TreeRunReport, opts: TreeOptions) -> list[str]:
     out = []
+    if r.rt_summary:
+        out += [CITATIONS["rexdb"], CITATIONS["hmmer"], CITATIONS["pyhmmer"]]
     if r.aligned_by:
         out.append(CITATIONS["mafft"])
     if r.engine == TREE_ENGINE_IQTREE and r.engine_version.startswith("3"):
@@ -784,6 +797,8 @@ def report_html(r: TreeRunReport, opts: TreeOptions, svg_text: str, files: list[
              ("Seed", str(r.seed))]
     if r.rotation:
         rows.insert(3, ("Monomer rotation", r.rotation))
+    if r.rt_summary:
+        rows.insert(1, ("Sequences", r.rt_summary))
     table = "\n".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in rows)
     warn = "".join(f"<li>{e(w)}</li>" for w in r.warnings)
     excl = "".join(f"<li>{e(n)} ({c:.0%} of the {e(reference_phrase(opts))})</li>"
@@ -1016,7 +1031,22 @@ def build_tree_run(
         )
     dna = looks_like_dna(records)
     warnings: list[str] = []
-    records, excluded = coverage_filter(records, opts.min_coverage, opts.coverage_reference)
+    rt = None
+    if opts.sequence_mode == TREE_SEQ_RT:
+        if not dna:
+            raise TreeBuildError(
+                "'RT domain from DNA' is selected, but the selection looks like protein. "
+                "The RT domain is searched in the DNA; choose 'As they are' in the Alignment "
+                "tab for protein sequences."
+            )
+        records, rt = rt_domain_records(records, opts, say, cancel, warnings)
+        dna = False
+    if rt is None:
+        records, excluded = coverage_filter(records, opts.min_coverage, opts.coverage_reference)
+    else:
+        # RT types differ in domain length (Ty1 vs Ty3): fragments are judged
+        # against sequences of the same RT type only.
+        records, excluded = _coverage_filter_by_rt_type(records, rt, opts)
     if len(records) < MIN_TAXA:
         raise TreeBuildError(
             f"Only {len(records)} sequence(s) remain after excluding fragments shorter than "
@@ -1051,7 +1081,7 @@ def build_tree_run(
 
     try:
         return _run_in_dir(layout, created, inputs, records, n_input, excluded, dna,
-                           outgroup, warnings, opts, stamp, say, cancel)
+                           outgroup, warnings, opts, stamp, say, cancel, rt=rt)
     except JobCancelledError:
         _cleanup()
         raise
@@ -1215,8 +1245,132 @@ def _infer(exe, opts, safe_aln, aln_pairs, dna, safe_outgroup, work, commands, s
                       wd / "run1" / "iq" if opts.engine == TREE_ENGINE_IQTREE else None)
 
 
+def rt_domain_records(records: list[SeqRecordLite], opts: TreeOptions, say, cancel,
+                      warnings: list[str]):
+    """RT-domain mode: replace the DNA copies by their RT protein domains and add
+    REXdb reference RTs. Returns (protein records, RTResult)."""
+    from repeatviewer import app_preferences
+    from repeatviewer.backends import rt_domains as rd
+    from repeatviewer.backends.sequence_aligner import mafft_command
+
+    if not opts.rexdb_fasta:
+        raise TreeBuildError(
+            "'RT domain from DNA' needs REXdb. Choose the REXdb protein FASTA in the "
+            "Alignment tab (the .classification file must sit next to it)."
+        )
+    cmd = mafft_command(use_system_mafft=opts.use_system_mafft)
+    if cmd is None:
+        raise TreeBuildError("MAFFT was not found (bundled or on PATH).")
+    _check_cancel(cancel)
+    try:
+        res = rd.rt_domains_for(
+            [(r.name, r.seq.replace("-", "").replace(".", "")) for r in records],
+            opts.rexdb_fasta, mafft=cmd,
+            cache_dir=app_preferences.cache_dir() / "rexdb_profiles",
+            per_lineage=opts.rexdb_references, threads=opts.threads, say=say,
+        )
+    except rd.RexdbError as exc:
+        raise TreeBuildError(str(exc)) from exc
+    _check_cancel(cancel)
+    if len(res.hits) < MIN_TAXA:
+        raise TreeBuildError(
+            f"An RT domain was found in {len(res.hits)} of {len(records)} sequence(s); "
+            f"a tree needs at least {MIN_TAXA}. The copies may be too short or too "
+            "degraded, or not retrotransposons."
+        )
+    if res.missing:
+        shown = ", ".join(res.missing[:12]) + ("…" if len(res.missing) > 12 else "")
+        warnings.append(f"No RT domain was found in {len(res.missing)} sequence(s); "
+                        f"they are not in the tree: {shown}")
+    if opts.methylation_mask:
+        warnings.append("The CG/CHG masking run does not apply to RT domains; it was skipped.")
+    out = [SeqRecordLite(name=r.name, original=r.original, source=r.source,
+                         seq=res.hits[r.name].protein)
+           for r in records if r.name in res.hits]
+    used = {r.name for r in out}
+    for rid, lineage, protein in res.references:
+        base = newick_safe(rd.reference_name(rid, lineage))
+        name, n = base, 1
+        while name in used:
+            n += 1
+            name = f"{base}_{n}"
+        used.add(name)
+        out.append(SeqRecordLite(name=name, original=rid, source="REXdb",
+                                 seq=protein.upper()))
+    return out, res
+
+
+def _coverage_filter_by_rt_type(records: list[SeqRecordLite], rt, opts: TreeOptions):
+    def rt_type(r: SeqRecordLite) -> str:
+        if r.name in rt.hits:
+            return rt.hits[r.name].rt_type
+        return rt.rexdb.rt.get(r.original, ("", ""))[0] if rt.rexdb else ""
+
+    groups: dict[str, list[SeqRecordLite]] = {}
+    for r in records:
+        groups.setdefault(rt_type(r), []).append(r)
+    kept_names: set[str] = set()
+    excluded = []
+    for group in groups.values():
+        k, e = coverage_filter(group, opts.min_coverage, opts.coverage_reference)
+        kept_names |= {r.name for r in k}
+        excluded += e
+    return [r for r in records if r.name in kept_names], excluded
+
+
+def _rt_texts(rt, opts: TreeOptions, n_copies: int) -> tuple[str, str]:
+    """(report row, methods sentence) for RT-domain mode."""
+    from repeatviewer.backends.rt_domains import DEFAULT_EVALUE
+
+    db = rt.rexdb.name if rt.rexdb else "REXdb"
+    types = ", ".join(f"{t} {n}" for t, n in rt.by_type.most_common())
+    lineages = len({h.lineage for h in rt.hits.values() if h.lineage})
+    row = (f"RT domain from DNA ({db}): found in {len(rt.hits)} of {n_copies} copies "
+           f"({types}); {lineages} lineage(s); {len(rt.references)} REXdb reference RT(s) added")
+    refs = (f", together with {len(rt.references)} reference RTs from {db} (up to "
+            f"{opts.rexdb_references} per lineage of the RT types found)" if rt.references else "")
+    methods = (
+        "Reverse transcriptase (RT) domains were identified in six-frame translations of "
+        f"{n_copies} copies with profile HMMs built from the {db} RT sequences (Neumann et al. "
+        f"2019), searched with HMMER through pyhmmer (E-value ≤ {DEFAULT_EVALUE:g}; best domain per "
+        "copy). Each domain was assigned to the REXdb lineage whose profile HMM scored it "
+        f"highest. The RT protein sequences{refs} were used for the tree."
+    )
+    return row, methods
+
+
+def _write_rt_traits(tree_path: Path, rt, records: list[SeqRecordLite]) -> Path:
+    """Trait table so the viewer colours tips by lineage straight away."""
+    from repeatviewer.backends import tree_traits as tt
+
+    ref_lineage = {}
+    for r in records:
+        if r.source == "REXdb" and rt.rexdb is not None:
+            ref_lineage[r.name] = (rt.rexdb.lineage(r.original), rt.rexdb.superfamily(r.original),
+                                   rt.rexdb.rt.get(r.original, ("", ""))[0])
+    # "lineage" colours the copies and the references of the lineages the copies
+    # fall into (REXdb has ~40 lineages, more than the palette's 17 colours);
+    # "rexdb_lineage" names the lineage of every tip.
+    found = {h.lineage for h in rt.hits.values() if h.lineage}
+    rows: dict[str, dict[str, str]] = {}
+    for r in records:
+        if r.name in rt.hits:
+            h = rt.hits[r.name]
+            rows[r.name] = {"lineage": h.lineage, "rexdb_lineage": h.lineage,
+                            "superfamily": h.superfamily, "rt_type": h.rt_type,
+                            "kind": "copy", "header": r.original}
+        else:
+            lin, sf, rtt = ref_lineage.get(r.name, ("", "", ""))
+            rows[r.name] = {"lineage": lin if lin in found else "", "rexdb_lineage": lin,
+                            "superfamily": sf, "rt_type": rtt, "kind": "REXdb",
+                            "header": r.original}
+    table = tt.TraitTable(["lineage", "rexdb_lineage", "superfamily", "rt_type", "kind",
+                           "header"], rows)
+    return tt.write_trait_table(tt.traits_path(tree_path), table)
+
+
 def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgroup,
-                warnings, opts, stamp, say, cancel):
+                warnings, opts, stamp, say, cancel, rt=None):
     exe = engine_executable(opts.engine, system_path_only=opts.use_system_path)
     out = layout.path
     work = layout.details / ".work"
@@ -1233,11 +1387,18 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
     if excluded:
         _write_fasta(out(".excluded.fa"), [(r.name, r.seq.replace("-", "")) for r, _c in excluded])
         created.append(out(".excluded.fa"))
+    rt_summary = rt_methods = ""
+    if rt is not None:
+        out(".rt_domains.tsv").write_text(rt.table_tsv(), encoding="utf-8")
+        created.append(out(".rt_domains.tsv"))
+        _write_fasta(out(".rt_proteins.fa"), [(r.name, r.seq) for r in records])
+        created.append(out(".rt_proteins.fa"))
+        rt_summary, rt_methods = _rt_texts(rt, opts, len(rt.hits) + len(rt.missing))
 
     # --- monomer phase rotation (satellites) ----------------------------------
     rotation_summary = ""
     rotation_reference = ""
-    rotate = bool(opts.rotate_monomers)
+    rotate = bool(opts.rotate_monomers) and rt is None
     if rotate and not dna:
         warnings.append("Monomer rotation applies to DNA only; the protein input was not rotated.")
         rotate = False
@@ -1414,13 +1575,15 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
     tree.ladderize()
     out(".treefile").write_text(tree_to_newick(tree) + "\n", encoding="utf-8")
     created.append(out(".treefile"))
+    if rt is not None:
+        created.append(_write_rt_traits(out(".treefile"), rt, records))
 
     # --- methylation-masked sensitivity tree ----------------------------------
     masking_text = ""
     masking_lost: list[list[str]] = []
-    if opts.methylation_mask and not dna:
+    if opts.methylation_mask and not dna and rt is None:
         warnings.append("The CG/CHG masking run applies to DNA only; it was skipped.")
-    elif opts.methylation_mask:
+    elif opts.methylation_mask and dna:
         from repeatviewer.backends import methylation_mask as mm
 
         _check_cancel(cancel)
@@ -1481,6 +1644,7 @@ def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgro
         runs_same_topology=runs_same, support=support, rooting=rooting, seed=opts.seed,
         warnings=warnings, commands=commands, rotation=rotation_summary,
         rotation_reference=rotation_reference, masking=masking_text, masked_lost=masking_lost,
+        rt_summary=rt_summary, rt_methods=rt_methods,
     )
     methods = methods_paragraph(report, opts)
     out("_methods.txt").write_text(

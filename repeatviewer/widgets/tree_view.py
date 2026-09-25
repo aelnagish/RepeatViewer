@@ -1255,6 +1255,11 @@ class TreePanel(QWidget):
                     self._traits = tt.read_trait_table(path)
                 except (OSError, ValueError, UnicodeDecodeError):
                     self._traits = None
+            # RT-domain trees come with a lineage column: colour by it on first opening.
+            if (not self._state.color_by and self._traits is not None
+                    and "lineage" in self._traits.columns
+                    and not view_state_path(self._path).exists()):
+                self._state.color_by = "lineage"
         self._refresh_color_box()
 
     def _refresh_color_box(self) -> None:

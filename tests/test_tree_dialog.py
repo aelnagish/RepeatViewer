@@ -75,7 +75,8 @@ def test_professional_labels_and_question_mark_help(qapp, tmp_path):
     assert not any("recommended" in r.lower() and "IQ-TREE" in r for r in radios)
     assert not [l for l in dlg.findChildren(QLabel) if l.text() == "ⓘ"]
     helps = [b for b in dlg.findChildren(QToolButton) if b.text() == "?"]
-    assert len(helps) == 4   # MAFFT strategy, Method, Substitution model, Methylation check
+    # Sequences, REXdb, MAFFT strategy, Method, Substitution model, Methylation check
+    assert len(helps) == 6
     for b in helps:  # same round style as tool_dialogs._field_with_help
         assert b.size().width() == 22 and "border-radius: 10px" in b.styleSheet()
     tips = [b.toolTip() for b in helps]
@@ -156,3 +157,25 @@ def test_methylation_check_is_off_for_protein(qapp, tmp_path):
     dlg = TreeParamsDialog(files=[fa], initial=TreeOptions(methylation_mask="CG"))
     assert not dlg._mask.isEnabled()
     assert dlg.options().methylation_mask == ""
+
+
+def test_rt_domain_mode(qapp, tmp_path):
+    from repeatviewer.job_options import TREE_SEQ_RT
+
+    rex = tmp_path / "Viridiplantae_v4.0.fasta"
+    rex.write_text(">Ty1-RT__REXdb_ID1\nMKV\n")
+    (tmp_path / "Viridiplantae_v4.0.classification").write_text("REXdb_ID1\tClass_I\tAle\n")
+    opts = TreeOptions(threads=2, sequence_mode=TREE_SEQ_RT, rexdb_fasta=str(rex),
+                       rexdb_references=5, rotate_monomers=True)
+    dlg = _dialog(qapp, tmp_path, initial=opts)
+    assert dlg.options() == opts
+    assert not dlg._rotate.isEnabled() and not dlg._mask.isEnabled()
+    assert dlg._rexdb_refs.isEnabled()
+    assert "Found" in dlg._rexdb_status.text() and not dlg._frag_hint.isVisibleTo(dlg)
+    # a Files-panel click on something that is not REXdb leaves the field alone
+    other = tmp_path / "copies.fa"
+    other.write_text(">a\nACGT\n")
+    assert not dlg.apply_path_from_panel(other)
+    assert dlg.apply_path_from_panel(rex)
+    dlg._seq_mode.setCurrentIndex(0)
+    assert dlg._rotate.isEnabled() and not dlg._rexdb_refs.isEnabled()
