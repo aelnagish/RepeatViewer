@@ -103,6 +103,8 @@ COLLAPSE_HELP = (
 EDIT_HELP = (
     "<b>Right-click a branch</b> (or select it and use <b>Edit</b>) to reroot there, swap "
     "its branches, collapse or colour its clade, or show that clade only.<br>"
+    "<b>Double-click a tip</b> (or right-click it → Show in alignment) to see that sequence "
+    "in the tree's alignment, highlighted.<br>"
     "Undo: Cmd+Z / Ctrl+Z.<br>"
     "Colours and collapsed clades are remembered for this tree. Rerooting and swapping "
     "change the tree: the file is never overwritten, use <b>Save tree as…</b>."
@@ -600,12 +602,13 @@ def _fish_files(folder: Path) -> set[str] | None:
 
 
 class TreeCanvas(QGraphicsView):
-    """Zoom with the wheel or trackpad, drag to pan, double-click to fit.
+    """Zoom with the wheel or trackpad, drag to pan, double-click empty space to fit, a tip to see its sequence.
 
     Clicking a branch, tip or collapsed clade reports its display node index."""
 
     nodeClicked = Signal(int)                 # -1 = empty space
     nodeContextMenu = Signal(int, object)     # index (-1 = empty), global QPoint
+    nodeDoubleClicked = Signal(int)           # -1 = empty space
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -671,7 +674,8 @@ class TreeCanvas(QGraphicsView):
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        self.fit(max_scale=4.0)
+        # The panel decides: a tip opens its sequence, elsewhere the tree is fitted.
+        self.nodeDoubleClicked.emit(self.node_at(event.position().toPoint()))
         event.accept()
 
 
@@ -723,7 +727,7 @@ class TreePanel(QWidget):
         self._font_spin.setSuffix(" pt")
         self._font_spin.setFixedWidth(70)
         fit_btn = QPushButton("Fit", self)
-        fit_btn.setToolTip("Show the whole tree (or double-click the tree).")
+        fit_btn.setToolTip("Show the whole tree (or double-click an empty part of the tree).")
         fit_btn.clicked.connect(lambda: self._canvas.fit(max_scale=4.0))
         export_btn = QPushButton("Export", self)
         export_menu = QMenu(export_btn)
@@ -801,6 +805,8 @@ class TreePanel(QWidget):
         self._canvas = TreeCanvas(self)
         self._canvas.nodeClicked.connect(self._on_node_clicked)
         self._canvas.nodeContextMenu.connect(self._on_context_menu)
+        self._canvas.nodeDoubleClicked.connect(self._on_node_double_clicked)
+        self._aln_window = None
         self._status = QLabel(self)
         self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         undo_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Undo), self)
@@ -1031,6 +1037,68 @@ class TreePanel(QWidget):
         self._selected = None if key == self._selected else key
         self._redraw(refit=False)
 
+    def _tip_at(self, index: int) -> str | None:
+        """Name of the tip at a display index (not a collapsed clade), else None."""
+        d = self._display
+        if d is None or index < 0 or index >= len(d.keys) or index in d.info:
+            return None
+        node = d.model.nodes[index]
+        return node.name if node.is_tip else None
+
+    def _on_node_double_clicked(self, index: int) -> None:
+        tip = self._tip_at(index)
+        if tip is None:
+            self._canvas.fit(max_scale=4.0)
+            return
+        self._selected = self._key_for(index)
+        self._redraw(refit=False)
+        self.show_in_alignment(tip)
+
+    def _sequence_source(self):
+        from repeatviewer.backends import tree_links
+
+        return tree_links.sequences_for_tree(self._path) if self._path else None
+
+    def show_in_alignment(self, tip: str) -> bool:
+        """Open (or reuse) the alignment window and highlight ``tip``."""
+        from repeatviewer.backends import tree_links
+        from repeatviewer.widgets.alignment_view import AlignmentWindow
+
+        source = self._sequence_source()
+        if source is None:
+            QMessageBox.information(
+                self, "Show in alignment",
+                "No alignment or FASTA was found for this tree. RepeatViewer looks for "
+                "the tree run's .aln.fa, or a FASTA with the tree's name next to it.")
+            return False
+        win = self._aln_window
+        if win is None or win.path != source.path or not win.isVisible():
+            if win is not None:
+                win.close()
+            try:
+                aln = tree_links.read_alignment(source.path, aligned=source.aligned)
+            except OSError as exc:
+                QMessageBox.warning(self, "Show in alignment", f"Could not read {source.path.name}:\n{exc}")
+                return False
+            win = AlignmentWindow(source.path, aln, note=source.note, parent=self)
+            win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            win.destroyed.connect(lambda *_a: setattr(self, "_aln_window", None))
+            self._aln_window = win
+            win.show()
+            # scroll once the window has its size
+            QTimer.singleShot(0, lambda w=win, t=tip: self._highlight_in(w, t))
+        else:
+            win.raise_()
+            win.activateWindow()
+            self._highlight_in(win, tip)
+        return True
+
+    def _highlight_in(self, win, tip: str) -> None:
+        if self._aln_window is not win:
+            return
+        if not win.show_tip(tip):
+            self._update_status(f"{tip} is not in {win.path.name}")
+
     def select_clade(self, key: tuple[str, ...] | None) -> None:
         self._selected = tuple(sorted(key)) if key else None
         self._redraw(refit=False)
@@ -1063,6 +1131,8 @@ class TreePanel(QWidget):
             menu.addAction("Remove colour", lambda: self.set_clade_color(key, None))
         if node is not None and node.is_tip and idx not in d.info:
             menu.addSeparator()
+            act = menu.addAction("Show in alignment", lambda: self.show_in_alignment(node.name))
+            act.setEnabled(self._sequence_source() is not None)
             menu.addAction("Copy name", lambda: QApplication.clipboard().setText(node.name))
             header = (self._traits.rows.get(node.name, {}).get("header", "")
                       if self._traits else "")
