@@ -2973,6 +2973,7 @@ class MainWindow(QMainWindow):
         self._preview_tabs.setObjectName("PreviewTabs")
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
         self._preview_tabs.sequenceExtracted.connect(self._on_preview_sequence_extracted)
+        self._preview_tabs.fileWritten.connect(self._on_preview_file_written)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         preview_layout.addWidget(self._preview_tabs, stretch=1)
         self._preview_host.setMinimumHeight(120)
@@ -6198,6 +6199,10 @@ class MainWindow(QMainWindow):
 
     def _on_preview_sequence_extracted(self, path: object) -> None:
         # Show the new FASTA in Files, but keep the current file selected/previewed.
+        self._sync_sidecar_in_file_list(path, select=False)
+
+    def _on_preview_file_written(self, path: object) -> None:
+        # Exported tree figure etc.: show it in Files, keep the current preview.
         self._sync_sidecar_in_file_list(path, select=False)
 
     def _sync_sidecar_in_file_list(self, path: object, *, select: bool) -> None:
