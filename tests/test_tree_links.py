@@ -163,3 +163,39 @@ def test_save_menu_and_report_button(qapp, tmp_path):
     report.write_text("<html></html>")
     panel._update_status()
     assert panel.report_path() == report and panel._report_btn.isEnabled()
+
+
+def test_clade_sequences_original_and_aligned(tmp_path):
+    tree = _run(tmp_path)
+    (tmp_path / "sat.fa").write_text(">A copy\nACGTACGT\n>B copy\nACGTACGA\n>C copy\nACGTTCGTAA\n"
+                                     ">D copy\nGTACGTAA\n>E copy\nACGTACGTAA\n>F copy\nTTTTACGTAA\n")
+    got = tk.clade_sequences(tree, ["D", "E"], aligned=False)
+    assert got.records == [("D copy", "GTACGTAA"), ("E copy", "ACGTACGTAA")] and not got.missing
+    got = tk.clade_sequences(tree, ["D", "nope"], aligned=True)
+    assert got.records == [("D", "--GTACGTAA")] and got.missing == ["nope"]
+    # a tree from elsewhere: the alignment without gaps, and said so
+    other = tmp_path / "other.nwk"
+    other.write_text(IQTREE)
+    (tmp_path / "other.fa").write_text(ALN)
+    got = tk.clade_sequences(other, ["A"], aligned=False)
+    assert got.records == [("A", "ACGTACGT")] and "gaps removed" in got.note
+    assert tk.extract_default_path(tree, 2, aligned=False).name == "sat.fa_tree.treefile_2seqs.fa"
+    (tmp_path / "sat.fa_tree.treefile_2seqs.fa").write_text("")
+    assert tk.extract_default_path(tree, 2, aligned=False).name == "sat.fa_tree.treefile_2seqs_2.fa"
+    assert tk.extract_default_path(tree, 1, aligned=True).name == "sat.fa_tree.treefile_1seq_aligned.fa"
+
+
+def test_extract_from_the_clade_menu(qapp, tmp_path):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    tree = _run(tmp_path)
+    panel = TreePanel(tree)
+    menu = QMenu()
+    panel._add_clade_actions(menu, ("C", "D", "E"))
+    sub = next(a.menu() for a in menu.actions() if a.menu() is not None)
+    assert sub.title() == "Extract sequences (3)"
+    assert [a.text() for a in sub.actions()] == ["Original sequences…", "As aligned…"]
+    written = []
+    panel.fileWritten.connect(written.append)
+    out = panel.extract_sequences(("D", "E"), aligned=True, path=tmp_path / "de.fa")
+    assert out.read_text().startswith(">D\n--GTACGTAA\n>E\n") and written == [out]

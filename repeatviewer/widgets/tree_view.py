@@ -160,6 +160,8 @@ COLLAPSE_HELP = (
 EDIT_HELP = (
     "<b>Right-click a branch</b> (or select it and use <b>Edit</b>) to reroot there, swap "
     "its branches, collapse or colour its clade, or show that clade only.<br>"
+    "<b>Extract sequences</b> (same menu) saves the copies of that clade to a new FASTA "
+    "next to the tree: the original sequences from your input, or as aligned.<br>"
     "<b>Double-click a tip</b> (or right-click it → Show in alignment) to see that sequence "
     "in the tree's alignment, highlighted.<br>"
     "Undo: Cmd+Z / Ctrl+Z.<br>"
@@ -1615,6 +1617,45 @@ class TreePanel(QWidget):
             self._highlight_in(win, tip)
         return True
 
+    def extract_sequences(self, key, *, aligned: bool, path: Path | None = None) -> Path | None:
+        """Write the sequences of a clade (or one tip) to a new FASTA next to the tree."""
+        from repeatviewer.backends import tree_links
+
+        if not key or self._path is None:
+            return None
+        tips = list(key)
+        got = tree_links.clade_sequences(self._path, tips, aligned=aligned)
+        if not got.records:
+            QMessageBox.information(
+                self, "Extract sequences",
+                "No sequences were found for this selection"
+                + (f" ({got.note})." if got.note else ".")
+                + " RepeatViewer looks for the tree run's input FASTA and alignment.")
+            return None
+        if path is None:
+            default = tree_links.extract_default_path(self._path, len(got.records), aligned=aligned)
+            chosen, _ = QFileDialog.getSaveFileName(self, "Extract sequences", str(default),
+                                                    "FASTA (*.fa *.fasta)")
+            if not chosen:
+                return None
+            path = Path(chosen)
+        try:
+            path.write_text(tree_links.fasta_text(got.records), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Extract sequences", f"Could not write {path.name}:\n{exc}")
+            return None
+        message = f"saved {len(got.records)} sequence(s) to {path.name}"
+        if got.note:
+            message += f" ({got.note})"
+        if got.missing:
+            shown = ", ".join(got.missing[:5]) + ("…" if len(got.missing) > 5 else "")
+            QMessageBox.warning(self, "Extract sequences",
+                                f"{len(got.missing)} sequence(s) were not found and are not "
+                                f"in {path.name}: {shown}")
+        self._update_status(message)
+        self.fileWritten.emit(path)
+        return path
+
     def _highlight_in(self, win, tip: str) -> None:
         if self._aln_window is not win:
             return
@@ -1655,6 +1696,14 @@ class TreePanel(QWidget):
         act.setEnabled(node is not None)
         if key is not None and key in self._state.colors:
             menu.addAction("Remove colour", lambda: self.set_clade_color(key, None))
+        if key:
+            n = len(key)
+            sub = QMenu("Extract sequence" if n == 1 else f"Extract sequences ({n})", menu)
+            menu.addMenu(sub)
+            sub.addAction("Original sequences…" if n > 1 else "Original sequence…",
+                          lambda: self.extract_sequences(key, aligned=False))
+            sub.addAction("As aligned…", lambda: self.extract_sequences(key, aligned=True))
+            sub.setEnabled(self._path is not None)
         if node is not None and node.is_tip and idx not in d.info:
             menu.addSeparator()
             act = menu.addAction("Show in alignment", lambda: self.show_in_alignment(node.name))
