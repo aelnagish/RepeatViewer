@@ -1053,6 +1053,7 @@ class ExtractSequencesWorker(QObject):
         count_only: bool = False,
         single_file: bool = True,
         exclude: bool = False,
+        output_path: Path | None = None,
         cancel=None,
     ):
         super().__init__()
@@ -1062,6 +1063,9 @@ class ExtractSequencesWorker(QObject):
         self._count_only = count_only
         self._single_file = single_file
         self._exclude = exclude
+        self._output_path = (
+            Path(output_path).expanduser().resolve() if output_path is not None else None
+        )
         self._cancel = cancel
 
     def _emit_progress(self, done: int, total: int) -> None:
@@ -1096,6 +1100,7 @@ class ExtractSequencesWorker(QObject):
                     self._out_dir,
                     single_file=self._single_file,
                     exclude=self._exclude,
+                    output_path=self._output_path,
                     progress=self._emit_progress,
                     cancel=self._cancel,
                 )
@@ -2963,7 +2968,7 @@ class MainWindow(QMainWindow):
         preview_zoom_layout.setContentsMargins(0, 0, 0, 0)
         preview_zoom_layout.setSpacing(6)
         preview_zoom_layout.addWidget(self._preview_zoom_bar)
-        preview_zoom_layout.addWidget(self._annotation_zoom_bar)
+        # AnnotationZoomBar sits on PreviewHeaderBar next to Text/Annotation.
         preview_title_bar = BrowserDockTitleBar(
             self._dock_preview,
             "Preview",
@@ -3282,15 +3287,52 @@ class MainWindow(QMainWindow):
         from repeatviewer.backends.sequence_compose import (
             SequenceComposeError,
             extract_records,
+            proposed_extract_path,
+            proposed_single_record_path,
         )
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
 
+        selected = list(dialog.selected_ids())
+        if not selected:
+            return
+        single_file = dialog.single_file()
+        output_path: Path | None = None
         try:
+            if single_file:
+                proposed = proposed_extract_path(
+                    source, selected, source.parent, single_file=True
+                )
+                confirmed = confirm_existing_file_path(
+                    self,
+                    proposed,
+                    title="Extract Sequences from File",
+                    informative=(
+                        "Overwrite the existing file, or save under a different name?"
+                    ),
+                )
+                if confirmed is None:
+                    return
+                output_path = confirmed
+            elif len(selected) == 1:
+                proposed = proposed_single_record_path(source, selected[0], source.parent)
+                confirmed = confirm_existing_file_path(
+                    self,
+                    proposed,
+                    title="Extract Sequences from File",
+                    informative=(
+                        "Overwrite the existing file, or save under a different name?"
+                    ),
+                )
+                if confirmed is None:
+                    return
+                output_path = confirmed
+
             written = extract_records(
                 source,
-                dialog.selected_ids(),
+                set(selected),
                 source.parent,
-                single_file=dialog.single_file(),
-                combined_name=f"{source.name}_extracted",
+                single_file=single_file,
+                output_path=output_path,
             )
         except SequenceComposeError as exc:
             QMessageBox.warning(self, "Extract Sequences from File", str(exc))
@@ -3306,6 +3348,9 @@ class MainWindow(QMainWindow):
 
     def _run_id_list_extraction(self, source: Path, dialog) -> None:
         """ID-list path: one streaming pass in the background, with cancel."""
+        from repeatviewer.backends.sequence_compose import proposed_extract_path
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
+
         parsed = dialog.parsed_ids()
         if not parsed.ids:
             return
@@ -3330,12 +3375,30 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
 
+        output_path: Path | None = None
+        if single_file and not exclude:
+            proposed = proposed_extract_path(
+                source, list(parsed.ids), source.parent, single_file=True
+            )
+            confirmed = confirm_existing_file_path(
+                self,
+                proposed,
+                title="Extract Sequences from File",
+                informative=(
+                    "Overwrite the existing file, or save under a different name?"
+                ),
+            )
+            if confirmed is None:
+                return
+            output_path = confirmed
+
         self._start_extract_job(
             source,
             parsed.ids,
             count_only=False,
             single_file=single_file,
             exclude=exclude,
+            output_path=output_path,
         )
 
     @Slot(object)
@@ -3354,6 +3417,7 @@ class MainWindow(QMainWindow):
         count_only: bool,
         single_file: bool = True,
         exclude: bool = False,
+        output_path: Path | None = None,
     ) -> None:
         if not ids:
             return
@@ -3390,6 +3454,7 @@ class MainWindow(QMainWindow):
             count_only=count_only,
             single_file=single_file,
             exclude=exclude,
+            output_path=output_path,
             cancel=lambda: self._job_cancel.requested,
         )
         self._extract_worker.moveToThread(self._extract_thread)
@@ -8638,49 +8703,15 @@ class MainWindow(QMainWindow):
 
     def _confirm_plot_output_path(self, proposed: Path, *, title: str) -> Path | None:
         """If ``proposed`` already exists, ask to overwrite, rename, or cancel."""
-        proposed = proposed.expanduser().resolve()
-        if not proposed.exists():
-            return proposed
-        box = QMessageBox(self)
-        box.setWindowTitle(title)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setText(f"“{proposed.name}” already exists in this folder.")
-        box.setInformativeText(
-            "Overwrite the existing plot, or save under a different name?"
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
+
+        return confirm_existing_file_path(
+            self,
+            proposed,
+            title=title,
+            informative="Overwrite the existing plot, or save under a different name?",
+            force_html_suffix=True,
         )
-        overwrite_btn = box.addButton("Overwrite", QMessageBox.ButtonRole.DestructiveRole)
-        rename_btn = box.addButton("Rename…", QMessageBox.ButtonRole.AcceptRole)
-        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(rename_btn)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked == overwrite_btn:
-            return proposed
-        if clicked != rename_btn:
-            return None
-        new_name, ok = self._prompt_rename_text(
-            title=f"{title} — rename",
-            label="New file name:",
-            initial=proposed.name,
-        )
-        if not ok or not new_name.strip():
-            return None
-        name = new_name.strip()
-        if Path(name).name != name or "/" in name or "\\" in name:
-            QMessageBox.warning(
-                self,
-                title,
-                "Enter a file name only (no folder path).",
-            )
-            return self._confirm_plot_output_path(proposed, title=title)
-        path = (proposed.parent / name).expanduser().resolve()
-        if path.suffix.lower() not in {".html", ".htm"}:
-            path = path.with_suffix(".html")
-        if path == proposed:
-            return self._confirm_plot_output_path(proposed, title=title)
-        if path.exists():
-            return self._confirm_plot_output_path(path, title=title)
-        return path
 
     def _start_genome_map_build(
         self,
@@ -9451,15 +9482,11 @@ class MainWindow(QMainWindow):
         initial: str,
     ) -> tuple[str, bool]:
         """Wide rename prompt so long filenames fit without horizontal scrolling."""
-        dialog = QInputDialog(self)
-        dialog.setWindowTitle(title)
-        dialog.setLabelText(label)
-        dialog.setTextValue(initial)
-        dialog.setInputMode(QInputDialog.InputMode.TextInput)
-        dialog.resize(560, dialog.sizeHint().height())
-        dialog.setMinimumWidth(520)
-        ok = dialog.exec() == QDialog.DialogCode.Accepted
-        return dialog.textValue(), ok
+        from repeatviewer.widgets.file_conflict import prompt_rename_text
+
+        return prompt_rename_text(
+            self, title=title, label=label, initial=initial
+        )
 
     # -- cytogenetic images -------------------------------------------------
 
@@ -10393,6 +10420,32 @@ class MainWindow(QMainWindow):
             return candidate
         return _unique_duplicate_path(candidate)
 
+    def _resolve_transfer_destination(
+        self,
+        src: Path,
+        target_dir: Path,
+        *,
+        mode: Literal["copy", "cut"],
+    ) -> Path | None:
+        """Pick destination for a drag/paste; prompt if the name already exists."""
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
+
+        target_dir = target_dir.expanduser().resolve()
+        dest = (target_dir / src.name).expanduser().resolve()
+        if src.resolve() == dest.resolve():
+            return None
+        if not dest.exists():
+            return dest
+        action = "move" if mode == "cut" else "copy"
+        return confirm_existing_file_path(
+            self,
+            dest,
+            title="File already exists",
+            informative=(
+                f"Overwrite the existing file, or {action} under a different name?"
+            ),
+        )
+
     def _transfer_files(
         self,
         files: list[Path],
@@ -10412,11 +10465,13 @@ class MainWindow(QMainWindow):
             src = raw.expanduser().resolve()
             if not src.is_file():
                 continue
-            dest = self._unique_path_in_folder(src, target_dir)
-            if src.resolve() == dest.resolve():
+            dest = self._resolve_transfer_destination(src, target_dir, mode=mode)
+            if dest is None:
                 continue
             try:
                 if mode == "cut":
+                    if dest.exists():
+                        dest.unlink()
                     shutil.move(src, dest)
                     from repeatviewer.widgets.file_colors import replace_file_color_path
 

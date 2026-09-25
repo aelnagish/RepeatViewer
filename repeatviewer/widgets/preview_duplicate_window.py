@@ -52,7 +52,7 @@ class PreviewDuplicateWindow(QWidget):
         zoom_layout.setSpacing(6)
         zoom_layout.addStretch(1)
         zoom_layout.addWidget(self._zoom_bar)
-        zoom_layout.addWidget(self._annotation_zoom_bar)
+        # AnnotationZoomBar sits on PreviewHeaderBar next to Text/Annotation.
 
         self._header = PreviewHeaderBar(
             self._zoom_bar,

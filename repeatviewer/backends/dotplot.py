@@ -381,23 +381,39 @@ def compute_self_dotplot_for_fasta(
     word_size: int | None = None,
     include_reverse: bool = True,
     max_matches: int = DEFAULT_MAX_MATCHES,
+    sequence_id: str | None = None,
+    sequence: str | None = None,
 ) -> DotplotResult:
-    """Read a single-record FASTA and compute its self dotplot.
+    """Read a FASTA record and compute its self dotplot.
 
-    Raises DotplotError with a readable message rather than letting Biopython
-    exceptions reach the UI.
+    For a multi-record FASTA, pass ``sequence`` / ``sequence_id`` for the active
+    record (or the first record is used). Raises DotplotError with a readable
+    message rather than letting Biopython exceptions reach the UI.
     """
-    from repeatviewer.backends.sequence_features import load_single_sequence_fasta
+    from repeatviewer.backends.sequence_features import (
+        list_fasta_record_ids,
+        load_fasta_record,
+        load_single_sequence_fasta,
+    )
 
     try:
-        sequence_id, sequence = load_single_sequence_fasta(path)
+        if sequence is not None:
+            sid = str(sequence_id or "").strip() or "sequence"
+            seq = str(sequence)
+        else:
+            try:
+                sid, seq = load_single_sequence_fasta(path)
+            except ValueError:
+                ids = list_fasta_record_ids(path)
+                wanted = str(sequence_id or "").strip() or ids[0]
+                sid, seq = load_fasta_record(path, wanted)
     except (OSError, ValueError) as exc:
         raise DotplotError(str(exc)) from exc
 
-    resolved_word = word_size or suggest_word_size(len(sequence))
+    resolved_word = word_size or suggest_word_size(len(seq))
     return compute_self_dotplot(
-        sequence,
-        sequence_id=sequence_id,
+        seq,
+        sequence_id=sid,
         word_size=resolved_word,
         include_reverse=include_reverse,
         max_matches=max_matches,

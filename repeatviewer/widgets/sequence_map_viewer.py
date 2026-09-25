@@ -4433,6 +4433,7 @@ class SequenceMapPanel(QWidget):
     annotationJobProgress = Signal(str)
     annotationsSaved = Signal(object)  # Path to the written GFF3
     sequenceExtracted = Signal(object)  # Path to a newly written FASTA
+    activeSequenceChanged = Signal(str)  # sequence id after multi-seq switch
 
     def __init__(
         self,
@@ -4506,23 +4507,43 @@ class SequenceMapPanel(QWidget):
         self._seq_label = _annotation_row_label("Sequence:", self._seq_row_container)
         seq_row.addWidget(self._seq_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self._sequence_combo = QComboBox(self._seq_row_container)
-        self._sequence_combo.setEditable(True)
-        self._sequence_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self._sequence_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        self._sequence_combo.setEditable(False)
+        self._sequence_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
         )
-        self._sequence_combo.setMinimumContentsLength(24)
-        self._sequence_combo.setMinimumWidth(220)
+        self._sequence_combo.setMinimumWidth(180)
         self._sequence_combo.setToolTip(
-            "Choose which sequence from this FASTA to show on the map"
+            "Current sequence shown on the map. Use Search to jump by name."
         )
         self._sequence_combo.currentIndexChanged.connect(self._on_sequence_combo_changed)
         seq_row.addWidget(self._sequence_combo, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        self._seq_search_label = QLabel("Search:", self._seq_row_container)
+        self._seq_search_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        seq_row.addWidget(self._seq_search_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._sequence_search = QLineEdit(self._seq_row_container)
+        self._sequence_search.setPlaceholderText("Filter by sequence name…")
+        self._sequence_search.setClearButtonEnabled(True)
+        self._sequence_search.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._sequence_search.setMinimumWidth(140)
+        self._sequence_search.setToolTip(
+            "Type part of a sequence id, then press Enter or pick a suggestion."
+        )
+        self._sequence_search.returnPressed.connect(self._on_sequence_search_submitted)
+        seq_row.addWidget(self._sequence_search, 1, Qt.AlignmentFlag.AlignVCenter)
+
         self._seq_count_label = QLabel("", self._seq_row_container)
         self._seq_count_label.setStyleSheet("color: palette(mid);")
         seq_row.addWidget(self._seq_count_label, 0, Qt.AlignmentFlag.AlignVCenter)
         controls_layout.addWidget(self._seq_row_container)
         self._seq_row_container.hide()
+        self._sequence_search_completer: QCompleter | None = None
 
         self._add_row_container, add_row = _control_band(controls)
         self._add_feature_label = _annotation_row_label("Add feature:", self._add_row_container)
@@ -5137,9 +5158,11 @@ class SequenceMapPanel(QWidget):
         self._sequence_switch_updating = True
         try:
             self._sequence_combo.clear()
+            self._sequence_search.clear()
             if data is None or not data.record_ids:
                 self._seq_row_container.hide()
                 self._seq_count_label.clear()
+                self._sequence_search_completer = None
                 return
             for rid in data.record_ids:
                 n_feat = len(data.features_by_id.get(rid) or [])
@@ -5149,6 +5172,7 @@ class SequenceMapPanel(QWidget):
             if idx < 0:
                 idx = 0
             self._sequence_combo.setCurrentIndex(idx)
+            self._sequence_combo.setToolTip(data.sequence_id)
             total = len(data.record_ids)
             if total > 1:
                 self._seq_count_label.setText(f"{total:,} sequences")
@@ -5156,11 +5180,13 @@ class SequenceMapPanel(QWidget):
             else:
                 self._seq_count_label.clear()
                 self._seq_row_container.hide()
-            # Searchable list for large libraries.
-            completer = QCompleter(data.record_ids, self._sequence_combo)
+            completer = QCompleter(list(data.record_ids), self._sequence_search)
             completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
             completer.setFilterMode(Qt.MatchFlag.MatchContains)
-            self._sequence_combo.setCompleter(completer)
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            completer.activated.connect(self._on_sequence_search_activated)
+            self._sequence_search.setCompleter(completer)
+            self._sequence_search_completer = completer
         finally:
             self._sequence_switch_updating = False
 
@@ -5170,11 +5196,44 @@ class SequenceMapPanel(QWidget):
             return
         seq_id = self._sequence_combo.itemData(index)
         if not seq_id:
-            # Editable completer may leave text without itemData.
-            seq_id = self._sequence_combo.currentText().split("  (", 1)[0].strip()
-        if not seq_id:
             return
         self.ensure_active_sequence(str(seq_id))
+
+    @Slot(str)
+    def _on_sequence_search_activated(self, text: str) -> None:
+        self._apply_sequence_search(str(text))
+
+    @Slot()
+    def _on_sequence_search_submitted(self) -> None:
+        self._apply_sequence_search(self._sequence_search.text())
+
+    def _apply_sequence_search(self, query: str) -> None:
+        data = self._loaded_data
+        if data is None:
+            return
+        text = str(query or "").strip()
+        if not text:
+            return
+        # Exact id, or first contains match (case-insensitive).
+        lowered = text.lower()
+        target = ""
+        if text in data.record_ids:
+            target = text
+        else:
+            for rid in data.record_ids:
+                if rid.lower() == lowered:
+                    target = rid
+                    break
+            if not target:
+                for rid in data.record_ids:
+                    if lowered in rid.lower():
+                        target = rid
+                        break
+        if not target:
+            self.statusMessage.emit(f"No sequence matching “{text}”.")
+            return
+        if self.ensure_active_sequence(target):
+            self._sequence_search.clear()
 
     def ensure_active_sequence(self, seq_id: str) -> bool:
         """Switch the map to ``seq_id`` (saving in-memory edits for the previous id)."""
@@ -5219,6 +5278,8 @@ class SequenceMapPanel(QWidget):
         self._map.load(data, fit_after_load=True)
         self._feature_undo_stack.clear()
         self.refresh_sequence_summary()
+        self._sequence_combo.setToolTip(data.sequence_id)
+        self.activeSequenceChanged.emit(data.sequence_id)
         return True
 
     def _next_extraction_name(self, seq_id: str) -> str:

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QHBoxLayout,
+    QLineEdit,
     QMenu,
     QPushButton,
     QSizePolicy,
@@ -399,10 +400,18 @@ class PreviewZoomBar(QWidget):
 
 
 class AnnotationZoomBar(QWidget):
-    """Annotation title-bar Actions (default FASTA view); zoom lives on the map toolbar."""
+    """Controls beside Text/Annotation tabs.
+
+    Single-sequence Annotation: Actions menu (zoom lives on the map toolbar).
+    Multi-sequence overview: −/+/slider, Fit, Extract, and name filter.
+    """
 
     fit_mode_changed = Signal(str)
     reset_requested = Signal()
+    fit_requested = Signal()
+    extract_requested = Signal()
+    filter_text_changed = Signal(str)
+    filter_return_pressed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -423,6 +432,86 @@ class AnnotationZoomBar(QWidget):
         self._spin.hide()
         self._spin.valueChanged.connect(self._on_spin)
 
+        self._overview_host = QWidget(self)
+        self._overview_host.setObjectName("AnnotationOverviewControls")
+        ov = QHBoxLayout(self._overview_host)
+        ov.setContentsMargins(0, 0, 0, 0)
+        ov.setSpacing(6)
+
+        zoom_out = QToolButton(self._overview_host)
+        zoom_out.setText("−")
+        zoom_out.setToolTip("Zoom out (Shift+scroll)")
+        zoom_out.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        zoom_out.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        zoom_out.clicked.connect(lambda: self._nudge_zoom_slider(-8))
+        zoom_in = QToolButton(self._overview_host)
+        zoom_in.setText("+")
+        zoom_in.setToolTip("Zoom in (Shift+scroll)")
+        zoom_in.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        zoom_in.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        zoom_in.clicked.connect(lambda: self._nudge_zoom_slider(8))
+
+        self._zoom_slider = QSlider(Qt.Orientation.Horizontal, self._overview_host)
+        self._zoom_slider.setObjectName("annotationZoomSlider")
+        self._zoom_slider.setRange(0, 100)
+        self._zoom_slider.setValue(0)
+        self._zoom_slider.setFixedWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
+        self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
+        self._zoom_slider.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._zoom_slider.setToolTip(
+            "Left: fit longest sequence in window. Right: maximum zoom-in."
+        )
+        apply_annotation_zoom_slider_style(self._zoom_slider)
+
+        fit_btn = QPushButton("Fit", self._overview_host)
+        fit_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        fit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        fit_btn.setToolTip(
+            "Fit the longest sequence to the visible width · "
+            "Drag on tracks to zoom a region"
+        )
+        fit_btn.clicked.connect(self.fit_requested.emit)
+
+        extract_btn = QPushButton("Extract", self._overview_host)
+        extract_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        extract_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        extract_btn.setToolTip(
+            "Extract selected sequences (click / Shift / ⌘, or drag on names)"
+        )
+        extract_btn.clicked.connect(self.extract_requested.emit)
+
+        self._name_filter = QLineEdit(self._overview_host)
+        self._name_filter.setObjectName("FileFilter")
+        self._name_filter.setPlaceholderText("Filter by name…")
+        self._name_filter.setClearButtonEnabled(True)
+        self._name_filter.setFrame(False)
+        self._name_filter.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        self._name_filter.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._name_filter.setMaximumHeight(ZOOM_CONTROL_HEIGHT)
+        self._name_filter.setMinimumWidth(140)
+        self._name_filter.setMaximumWidth(280)
+        self._name_filter.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._name_filter.setToolTip(
+            "Type part of a sequence name to jump to it. "
+            "Press Enter for the next match."
+        )
+        self._name_filter.textChanged.connect(self.filter_text_changed.emit)
+        self._name_filter.returnPressed.connect(self.filter_return_pressed.emit)
+
+        for w in (
+            zoom_out,
+            zoom_in,
+            self._zoom_slider,
+            fit_btn,
+            extract_btn,
+            self._name_filter,
+        ):
+            ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._overview_host)
+
         self._actions_btn = _make_preview_actions_button(
             tooltip="Annotation actions",
         )
@@ -432,11 +521,31 @@ class AnnotationZoomBar(QWidget):
         layout.addWidget(self._actions_btn)
 
         self._block = False
+        self._overview_mode = False
+        self.set_overview_mode(False)
+
+    def set_overview_mode(self, enabled: bool) -> None:
+        """Show multi-seq overview controls, or the single-seq Actions menu."""
+        self._overview_mode = bool(enabled)
+        self._overview_host.setVisible(self._overview_mode)
+        self._actions_btn.setVisible(not self._overview_mode)
+
+    def is_overview_mode(self) -> bool:
+        return self._overview_mode
 
     @property
     def slider(self) -> QSpinBox:
         """Zoom percent control (name kept for sequence-map binding)."""
         return self._spin
+
+    @property
+    def zoom_slider(self) -> QSlider:
+        """Horizontal zoom slider used by the multi-sequence overview."""
+        return self._zoom_slider
+
+    @property
+    def name_filter(self) -> QLineEdit:
+        return self._name_filter
 
     def sync_display(self, value: int) -> None:
         """Update percent spin without emitting map zoom."""
@@ -447,7 +556,13 @@ class AnnotationZoomBar(QWidget):
         self._block = False
 
     def refresh_slider_style(self) -> None:
-        """Kept for theme-reload callers; spinbox uses the global stylesheet."""
+        """Re-apply accent colors after a theme change."""
+        apply_annotation_zoom_slider_style(self._zoom_slider)
+
+    def _nudge_zoom_slider(self, delta: int) -> None:
+        self._zoom_slider.setValue(
+            max(0, min(100, self._zoom_slider.value() + int(delta)))
+        )
 
     def _on_spin(self, _value: int) -> None:
         if self._block:
@@ -554,6 +669,10 @@ class PreviewWheelZoomFilter(QObject):
 
 FASTA_TAB_STRIP_HEIGHT = 22
 PREVIEW_HEADER_HEIGHT = 24
+# Tabs row stays FASTA_TAB_STRIP_HEIGHT; controls sit under the divider.
+PREVIEW_HEADER_WITH_CONTROLS_HEIGHT = (
+    FASTA_TAB_STRIP_HEIGHT + 1 + ZOOM_BAR_HEIGHT + 4
+)  # tabs + divider + padded controls
 
 
 class FastaTabStrip(QWidget):
@@ -604,9 +723,19 @@ class FastaTabStrip(QWidget):
         if 0 <= index < len(self._buttons):
             self._buttons[index].setVisible(bool(visible))
 
+    def set_tab_label(self, index: int, label: str) -> None:
+        if not (0 <= index < len(self._buttons)):
+            return
+        btn = self._buttons[index]
+        btn.setText(label)
+        selected_font = btn.font()
+        selected_font.setWeight(QFont.Weight.DemiBold)
+        text_width = QFontMetrics(selected_font).horizontalAdvance(label)
+        btn.setMinimumWidth(text_width + 24)
+
 
 class PreviewHeaderBar(QWidget):
-    """FASTA Text/Annotation switcher. Zoom controls live on the Preview dock title."""
+    """FASTA Text / Annotation (or Overview) tabs; controls sit below the divider."""
 
     fasta_tab_changed = Signal(int)
 
@@ -626,41 +755,64 @@ class PreviewHeaderBar(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        row = QHBoxLayout()
-        row.setContentsMargins(6, 0, 6, 0)
-        row.setSpacing(4)
+        # Tab row keeps the original compact height (never grows with controls).
+        tabs_host = QWidget(self)
+        tabs_host.setFixedHeight(FASTA_TAB_STRIP_HEIGHT)
+        tabs_row = QHBoxLayout(tabs_host)
+        tabs_row.setContentsMargins(6, 0, 6, 0)
+        tabs_row.setSpacing(4)
 
-        self._fasta_tabs = FastaTabStrip(self)
+        self._fasta_tabs = FastaTabStrip(tabs_host)
         self._fasta_tabs.hide()
         self._fasta_tabs.tab_changed.connect(self.fasta_tab_changed.emit)
-        row.addWidget(self._fasta_tabs)
-        row.addStretch(1)
-
-        # Zoom bars are mounted on the Preview dock title bar (same row as
-        # "Preview"); keep refs so set_header_zoom_mode() can show/hide them.
-        self._preview_zoom_bar = preview_zoom_bar
-        self._annotation_zoom_bar = annotation_zoom_bar
-
-        outer.addLayout(row)
+        tabs_row.addWidget(self._fasta_tabs)
+        tabs_row.addStretch(1)
+        outer.addWidget(tabs_host)
 
         divider = QFrame(self)
         divider.setObjectName("PreviewHeaderDivider")
         divider.setFrameShape(QFrame.Shape.HLine)
         divider.setFixedHeight(1)
         outer.addWidget(divider)
+
+        # −/+/Fit/Extract/filter sit under the line; same control styles as before.
+        self._preview_zoom_bar = preview_zoom_bar
+        self._annotation_zoom_bar = annotation_zoom_bar
+        self._controls_host = QWidget(self)
+        self._controls_host.setObjectName("PreviewHeaderControls")
+        self._controls_host.setFixedHeight(ZOOM_BAR_HEIGHT + 4)
+        controls_row = QHBoxLayout(self._controls_host)
+        controls_row.setContentsMargins(6, 2, 6, 2)
+        controls_row.setSpacing(4)
+        controls_row.addStretch(1)
+        if annotation_zoom_bar is not None:
+            controls_row.addWidget(annotation_zoom_bar, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._controls_host.hide()
+        outer.addWidget(self._controls_host)
+
         self.hide()
 
+    def _update_header_height(self) -> None:
+        if self._controls_host.isVisible():
+            self.setFixedHeight(PREVIEW_HEADER_WITH_CONTROLS_HEIGHT)
+        else:
+            self.setFixedHeight(PREVIEW_HEADER_HEIGHT)
+
     def _update_bar_visibility(self) -> None:
-        # Header only shows for Text/Annotation tabs; zoom lives on the title bar.
+        # Header only shows for Text/Annotation tabs; text zoom lives on the title bar.
         self.setVisible(not self._fasta_tabs.isHidden())
+        self._update_header_height()
 
     def set_header_zoom_mode(self, mode: str) -> None:
-        """Show preview zoom, annotation zoom, or hide both (on the dock title)."""
+        """Show preview zoom, annotation/overview controls, or hide both."""
         show_preview = mode == "preview"
         show_annotation = mode == "annotation"
         self._preview_zoom_bar.setVisible(show_preview)
         if self._annotation_zoom_bar is not None:
             self._annotation_zoom_bar.setVisible(show_annotation)
+        self._controls_host.setVisible(
+            show_annotation and self._annotation_zoom_bar is not None
+        )
         self._update_bar_visibility()
 
     def set_fasta_tabs_visible(self, visible: bool) -> None:
@@ -672,6 +824,9 @@ class PreviewHeaderBar(QWidget):
 
     def set_fasta_tab_visible(self, index: int, visible: bool) -> None:
         self._fasta_tabs.set_tab_visible(index, visible)
+
+    def set_fasta_tab_label(self, index: int, label: str) -> None:
+        self._fasta_tabs.set_tab_label(index, label)
 
     def current_fasta_tab(self) -> int:
         return self._fasta_tabs.current_index()

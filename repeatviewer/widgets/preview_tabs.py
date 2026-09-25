@@ -6,7 +6,7 @@ import gzip
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, QSizeF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QSize, QSizeF, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QPixmap, QShortcut, QTextCursor
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
@@ -87,6 +87,15 @@ def _is_single_fasta_file(path: Path) -> bool:
     # On a multi-sequence library this returns after the first few KB instead of
     # reading the entire file on the UI thread.
     return _count_fasta_sequences_fast(path, stop_at=2) == 1
+
+
+def _is_multi_fasta_file(path: Path) -> bool:
+    """True when the FASTA has two or more records (overview Annotation UI)."""
+    if not _is_fasta_file(path):
+        return False
+    if _is_fasta_too_large_for_preview(path):
+        return False
+    return _count_fasta_sequences_fast(path, stop_at=2) >= 2
 
 
 def _is_sequence_map_fasta(path: Path) -> bool:
@@ -581,7 +590,9 @@ class FilePreviewPage(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.path = path.expanduser().resolve()
         self._single_fasta_mode = False
+        self._multi_fasta_mode = False
         self._annotation_panel: SequenceMapPanel | None = None
+        self._annotation_overview = None  # MultiSequenceOverviewPanel, multi-FASTA only
         self._dotplot_panel = None  # built lazily on first view
         self._alignment_dotplot = None  # PAF/.1aln viewer, built on first use
         self._stack = QStackedWidget(self)
@@ -696,7 +707,7 @@ class FilePreviewPage(QWidget):
             shortcut.activated.connect(self._delete_annotation_features_if_active)
 
     def _delete_annotation_features_if_active(self) -> None:
-        if not self.is_annotation_preview_active():
+        if not self.is_annotation_preview_active() or self._multi_fasta_mode:
             return
         if self._annotation_panel is None:
             return
@@ -704,7 +715,11 @@ class FilePreviewPage(QWidget):
         self._annotation_panel._delete_feature(confirm_empty=False)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        if _is_delete_key(event.key()) and self.is_annotation_preview_active():
+        if (
+            _is_delete_key(event.key())
+            and self.is_annotation_preview_active()
+            and not self._multi_fasta_mode
+        ):
             if self._annotation_panel is not None:
                 self._annotation_panel._delete_feature(confirm_empty=False)
                 event.accept()
@@ -753,6 +768,12 @@ class FilePreviewPage(QWidget):
 
     def is_single_fasta_preview(self) -> bool:
         return self._single_fasta_mode
+
+    def is_multi_fasta_preview(self) -> bool:
+        return bool(self._single_fasta_mode and self._multi_fasta_mode)
+
+    def is_single_record_fasta_preview(self) -> bool:
+        return bool(self._single_fasta_mode and not self._multi_fasta_mode)
 
     def is_text_preview_active(self) -> bool:
         if self._single_fasta_mode:
@@ -854,6 +875,10 @@ class FilePreviewPage(QWidget):
 
     def _on_fasta_tab_changed(self, index: int) -> None:
         if not self._single_fasta_mode:
+            return
+        # Multi-FASTA: Dotplot (Self) is hidden — bounce to Annotation.
+        if self._multi_fasta_mode and index == 2:
+            self.set_fasta_tab_index(1)
             return
         self._refresh_sequence_info_bar()
         if index == 0:
@@ -995,6 +1020,8 @@ class FilePreviewPage(QWidget):
 
     def _set_single_fasta_mode(self, enabled: bool) -> None:
         self._single_fasta_mode = enabled
+        if not enabled:
+            self._multi_fasta_mode = False
         self._apply_view_mode()
         self._refresh_sequence_info_bar()
 
@@ -1005,7 +1032,10 @@ class FilePreviewPage(QWidget):
             and self.is_annotation_preview_active()
         ):
             self._sequence_info_bar.hide()
-            if self._annotation_panel is not None:
+            if (
+                not self._multi_fasta_mode
+                and self._annotation_panel is not None
+            ):
                 self._annotation_panel.refresh_sequence_summary()
             return
 
@@ -1036,11 +1066,53 @@ class FilePreviewPage(QWidget):
             )
         self._sequence_info_bar.show()
 
+    def _ensure_annotation_overview(self):
+        from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+        if self._annotation_overview is None:
+            self._annotation_overview = MultiSequenceOverviewPanel(self.path, self)
+            self._annotation_overview.annotationsSaved.connect(self.annotationsSaved.emit)
+            self._annotation_overview.sequenceExtracted.connect(self.sequenceExtracted.emit)
+            holder_layout = self._fasta_annotation_holder.layout()
+            if holder_layout is None:
+                holder_layout = QVBoxLayout(self._fasta_annotation_holder)
+                holder_layout.setContentsMargins(0, 0, 0, 0)
+                holder_layout.setSpacing(0)
+            holder_layout.addWidget(self._annotation_overview, stretch=1)
+        return self._annotation_overview
+
+    def _show_annotation_content(self, *, multi: bool) -> None:
+        """Show overview (multi) or sequence map (single) inside the Annotation tab."""
+        tab_host = self._preview_tab_host()
+        zoom_bar = (
+            tab_host._annotation_zoom_bar
+            if tab_host is not None
+            else None
+        )
+        if multi:
+            overview = self._ensure_annotation_overview()
+            overview.show()
+            if self._annotation_panel is not None:
+                self._annotation_panel.hide()
+            if zoom_bar is not None:
+                overview.bind_annotation_zoom_bar(zoom_bar)
+        else:
+            panel = self._ensure_annotation_panel()
+            panel.show()
+            if self._annotation_overview is not None:
+                self._annotation_overview.hide()
+            if zoom_bar is not None:
+                zoom_bar.set_overview_mode(False)
+                panel.bind_annotation_zoom_bar(zoom_bar)
+
     def _ensure_annotation_panel(self) -> SequenceMapPanel:
         if self._annotation_panel is None:
             self._annotation_panel = SequenceMapPanel(self.path, self, autoload=False)
             self._annotation_panel.annotationsSaved.connect(self.annotationsSaved.emit)
             self._annotation_panel.sequenceExtracted.connect(self.sequenceExtracted.emit)
+            self._annotation_panel.activeSequenceChanged.connect(
+                self._on_annotation_active_sequence_changed
+            )
             holder_layout = self._fasta_annotation_holder.layout()
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_annotation_holder)
@@ -1048,6 +1120,14 @@ class FilePreviewPage(QWidget):
                 holder_layout.setSpacing(0)
             holder_layout.addWidget(self._annotation_panel, stretch=1)
         return self._annotation_panel
+
+    @Slot(str)
+    def _on_annotation_active_sequence_changed(self, _seq_id: str) -> None:
+        if self._dotplot_panel is None:
+            return
+        self._sync_dotplot_active_sequence(self._dotplot_panel)
+        if self.is_dotplot_preview_active():
+            self._dotplot_panel.ensure_loaded()
 
     def _show_alignment_dotplot(self, path: Path) -> None:
         """Plot a PAF/.1aln alignment file instead of dumping it as text."""
@@ -1094,6 +1174,7 @@ class FilePreviewPage(QWidget):
     def _open_dotplot_tab(self) -> None:
         self._capture_text_selection_into_pending()
         panel = self._ensure_dotplot_panel()
+        self._sync_dotplot_active_sequence(panel)
         panel.ensure_loaded()
         # Carry the current Annotation selection across to the plot. A pending
         # selection that originated on the plot takes priority, so switching
@@ -1110,6 +1191,17 @@ class FilePreviewPage(QWidget):
                 current = None
             if current:
                 panel.show_selection(int(current[0]), int(current[1]))
+
+    def _sync_dotplot_active_sequence(self, panel=None) -> None:
+        """Point Dotplot (Self) at the Annotation tab's active FASTA record."""
+        if panel is None:
+            panel = self._dotplot_panel
+        if panel is None or self._annotation_panel is None:
+            return
+        data = getattr(self._annotation_panel, "_loaded_data", None)
+        if data is None or not getattr(data, "sequence", ""):
+            return
+        panel.set_active_sequence(data.sequence_id, data.sequence)
 
     def _open_text_tab(self) -> None:
         self._refresh_text_view()
@@ -1284,12 +1376,20 @@ class FilePreviewPage(QWidget):
 
     def _activate_fasta_tab(self, tab: DefaultFastaPreviewTab) -> None:
         if tab == DefaultFastaPreviewTab.DOTPLOT:
-            self.set_fasta_tab_index(2)
-            self._refresh_sequence_info_bar()
-            QTimer.singleShot(0, self._open_dotplot_tab)
-            return
+            if self._multi_fasta_mode:
+                # Multi-FASTA uses overview Annotation only (no Dotplot Self tab).
+                tab = DefaultFastaPreviewTab.ANNOTATION
+            else:
+                self.set_fasta_tab_index(2)
+                self._refresh_sequence_info_bar()
+                QTimer.singleShot(0, self._open_dotplot_tab)
+                return
         if tab == DefaultFastaPreviewTab.ANNOTATION:
-            self._ensure_annotation_panel()
+            if self._multi_fasta_mode:
+                self._show_annotation_content(multi=True)
+            else:
+                self._ensure_annotation_panel()
+                self._show_annotation_content(multi=False)
             self.set_fasta_tab_index(1)
             self._refresh_sequence_info_bar()
             QTimer.singleShot(0, self._open_annotation_tab)
@@ -1300,7 +1400,14 @@ class FilePreviewPage(QWidget):
 
     def _open_annotation_tab(self) -> None:
         self._capture_text_selection_into_pending()
+        if self._multi_fasta_mode:
+            self._show_annotation_content(multi=True)
+            if self._fasta_stack.currentIndex() != 1:
+                self.set_fasta_tab_index(1)
+            self._refresh_sequence_info_bar()
+            return
         panel = self._ensure_annotation_panel()
+        self._show_annotation_content(multi=False)
         tab_host = self._preview_tab_host()
         if tab_host is not None and tab_host._annotation_zoom_bar is not None:
             panel.bind_annotation_zoom_bar(tab_host._annotation_zoom_bar)
@@ -1347,6 +1454,22 @@ class FilePreviewPage(QWidget):
         widget needs to be visible for its zoom/scroll math to run immediately instead
         of falling back to its own visibility-polling retry loop.
         """
+        if self._multi_fasta_mode:
+            overview = self._ensure_annotation_overview()
+            self._show_annotation_content(multi=True)
+            if self._fasta_stack.currentIndex() != 1:
+                self.set_fasta_tab_index(1)
+            # Select matching row in the overview list.
+            from repeatviewer.backends.gff_features import _seqid_matches
+
+            wanted = str(seq_id or "").strip()
+            for row in range(overview._list.count()):
+                rid = overview._list.item(row).data(Qt.ItemDataRole.UserRole)
+                if rid == wanted or _seqid_matches(str(rid), wanted):
+                    overview._list.setCurrentRow(row)
+                    overview._list.scrollToItem(overview._list.item(row))
+                    break
+            return
         panel = self._ensure_annotation_panel()
         tab_host = self._preview_tab_host()
         if tab_host is not None and tab_host._annotation_zoom_bar is not None:
@@ -1367,9 +1490,11 @@ class FilePreviewPage(QWidget):
     def _load_single_fasta_preview(self, path: Path) -> None:
         if _is_fasta_too_large_for_preview(path):
             self._set_single_fasta_mode(False)
+            self._multi_fasta_mode = False
             self._show_text(_FASTA_TOO_LARGE_MESSAGE)
             return
         self._set_single_fasta_mode(True)
+        self._multi_fasta_mode = _is_multi_fasta_file(path)
         try:
             max_chars = _TEXT_PREVIEW_MAX_CHARS
             text, truncated = _read_text_preview(path, max_chars)
@@ -1386,11 +1511,17 @@ class FilePreviewPage(QWidget):
         self._pending_annotation_selection = None
         if self._dotplot_panel is not None:
             self._dotplot_panel.clear_selection()
-        if self._annotation_panel is not None:
-            self._annotation_panel.load_path(path)
+        self._show_annotation_content(multi=self._multi_fasta_mode)
+        if self._multi_fasta_mode:
+            self._ensure_annotation_overview().load_path(path)
+        else:
+            self._ensure_annotation_panel().load_path(path)
         if self._cyto_panel is not None:
             self._cyto_panel.set_path(path)
-        self._activate_fasta_tab(load_default_fasta_preview_tab())
+        default_tab = load_default_fasta_preview_tab()
+        if self._multi_fasta_mode and default_tab == DefaultFastaPreviewTab.DOTPLOT:
+            default_tab = DefaultFastaPreviewTab.ANNOTATION
+        self._activate_fasta_tab(default_tab)
         self._refresh_sequence_info_bar()
 
     def _load(self) -> None:
@@ -1575,7 +1706,10 @@ class FilePreviewPage(QWidget):
         self._text_truncated = False
         if self._single_fasta_mode:
             self._refresh_sequence_info_bar()
-            if self._annotation_panel is not None:
+            if self._multi_fasta_mode:
+                if self._annotation_overview is not None:
+                    self._annotation_overview.load_path(self.path)
+            elif self._annotation_panel is not None:
                 self._annotation_panel.load_path(self.path)
         return True
 
@@ -1835,8 +1969,18 @@ class PreviewTabWidget(QTabWidget):
         if isinstance(widget, FilePreviewPage) and widget.is_single_fasta_preview():
             # Cytogenetics tab only for sequences that have attached images.
             has_images = widget.has_cyto_images()
+            multi = widget.is_multi_fasta_preview()
             if hasattr(self._header_bar, "set_fasta_tab_visible"):
-                self._header_bar.set_fasta_tab_visible(3, has_images)
+                self._header_bar.set_fasta_tab_visible(2, not multi)  # Dotplot (Self)
+                self._header_bar.set_fasta_tab_visible(3, has_images and not multi)
+            if hasattr(self._header_bar, "set_fasta_tab_label"):
+                # Multi-seq shows length/feature overview; single-seq is the map.
+                self._header_bar.set_fasta_tab_label(
+                    1, "Overview" if multi else "Annotation"
+                )
+            if multi and widget.current_fasta_tab_index() == 2:
+                widget.set_fasta_tab_index(1)
+                return
             if not has_images and widget.current_fasta_tab_index() == 3:
                 widget.set_fasta_tab_index(1)  # last image removed: back to Annotation
                 return
@@ -2074,10 +2218,16 @@ class PreviewTabWidget(QTabWidget):
         zoom_kind = None
         if isinstance(widget, FilePreviewPage):
             is_annotation = widget.is_annotation_preview_active()
+            is_multi_overview = is_annotation and widget.is_multi_fasta_preview()
             is_dotplot = widget.is_dotplot_preview_active()
             is_cyto = widget.is_cyto_preview_active()
             zoom_kind = widget.preview_zoom_kind()
-            if is_annotation:
+            if is_annotation and not is_multi_overview:
+                is_text = False
+                is_pdf = False
+            elif is_multi_overview:
+                # Overview has no nucleotide zoom chrome.
+                is_annotation = False
                 is_text = False
                 is_pdf = False
             elif widget.is_single_fasta_preview():
@@ -2095,8 +2245,15 @@ class PreviewTabWidget(QTabWidget):
 
         if isinstance(self._header_bar, PreviewHeaderBar):
             if is_cyto:
-                # Cytogenetics has its own image controls; no text/annotation zoom.
+                # Cytogenetics: no text/annotation zoom chrome.
                 self._header_bar.set_header_zoom_mode("hidden")
+            elif (
+                isinstance(widget, FilePreviewPage)
+                and widget.is_annotation_preview_active()
+                and widget.is_multi_fasta_preview()
+            ):
+                # Multi-seq overview: −/+/Fit/Extract/filter on the header row.
+                self._header_bar.set_header_zoom_mode("annotation")
             elif is_annotation:
                 self._header_bar.set_header_zoom_mode("annotation")
             else:

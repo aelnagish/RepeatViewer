@@ -1244,10 +1244,13 @@ class DotplotPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("DotplotPanel")
         self._path = path.expanduser().resolve()
-        self._loaded_for: tuple[Path, int, bool] | None = None
+        self._loaded_for: tuple | None = None
         self._sequence_id = ""
         self._sequence_length = 0
         self._full_length = 0
+        # Optional override for multi-record FASTA (active Annotation sequence).
+        self._active_sequence_id = ""
+        self._active_sequence = ""
         # FastGA is opt-in for large files; the region window is the default.
         self._engine_choice = "region"
         # "fasta" computes a dotplot; "alignment" displays a PAF/.1aln file.
@@ -1545,6 +1548,8 @@ class DotplotPanel(QWidget):
         self._loaded_for = None
         self._mode = "fasta"
         self._alignments = None
+        self._active_sequence_id = ""
+        self._active_sequence = ""
         self._canvas.set_axes([], [])
         self._sequence_id = ""
         self._canvas.clear_plot()
@@ -1555,7 +1560,20 @@ class DotplotPanel(QWidget):
         self._set_status_text("")
         self._compute_btn.hide()
 
+    def set_active_sequence(self, sequence_id: str, sequence: str) -> None:
+        """Use this record for Dotplot (Self) on multi-sequence FASTA files."""
+        sid = str(sequence_id or "").strip()
+        seq = str(sequence or "")
+        if sid == self._active_sequence_id and seq == self._active_sequence:
+            return
+        self._active_sequence_id = sid
+        self._active_sequence = seq
+        self._full_length = len(seq)
+        self._loaded_for = None
+
     def _is_large(self) -> bool:
+        if self._active_sequence:
+            return len(self._active_sequence) > FASTGA_PREFERRED_ABOVE_BYTES
         try:
             return self._path.stat().st_size > FASTGA_PREFERRED_ABOVE_BYTES
         except OSError:
@@ -1710,9 +1728,11 @@ class DotplotPanel(QWidget):
             widget.setVisible(fastga)
 
     def _current_key(self):
+        active = self._active_sequence_id or ""
         if self._use_region():
             return (
                 self._path,
+                active,
                 "region",
                 int(self._region_start.value()),
                 int(self._region_size.value()),
@@ -1722,6 +1742,7 @@ class DotplotPanel(QWidget):
         if self._use_fastga():
             return (
                 self._path,
+                active,
                 "fastga",
                 round(float(self._identity.value()), 3),
                 int(self._min_len.value()),
@@ -1729,6 +1750,7 @@ class DotplotPanel(QWidget):
             )
         return (
             self._path,
+            active,
             "kmer",
             int(self._word.value()),
             self._reverse.isChecked(),
@@ -1823,11 +1845,14 @@ class DotplotPanel(QWidget):
     def _compute_kmer(self, key) -> None:
         self._set_status_text("Computing…")
         try:
-            result = compute_self_dotplot_for_fasta(
-                self._path,
-                word_size=int(self._word.value()),
-                include_reverse=self._reverse.isChecked(),
-            )
+            kwargs: dict = {
+                "word_size": int(self._word.value()),
+                "include_reverse": self._reverse.isChecked(),
+            }
+            if self._active_sequence:
+                kwargs["sequence"] = self._active_sequence
+                kwargs["sequence_id"] = self._active_sequence_id
+            result = compute_self_dotplot_for_fasta(self._path, **kwargs)
         except DotplotError as exc:
             message = str(exc)
             # The built-in engine refuses very large sequences. If FastGA is not
