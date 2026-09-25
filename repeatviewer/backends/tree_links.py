@@ -158,3 +158,60 @@ def first_residue(seq: str) -> int:
         if c not in "-.":
             return j
     return 0
+
+
+# --------------------------------------------------------------------------
+# Distance matrices (tree viewer → Export → Distance matrix…)
+# --------------------------------------------------------------------------
+
+
+def patristic_matrix(model) -> tuple[list[str], np.ndarray]:
+    """Tip names and the path length between every two tips of the tree."""
+    from repeatviewer.backends.tree_layout import depths
+
+    tips = model.tips()
+    depth = np.array(depths(model))
+    ancestors: dict[int, list[int]] = {}
+    for t in tips:
+        path, i = [], t
+        while i is not None:
+            path.append(i)
+            i = model.nodes[i].parent
+        ancestors[t] = path
+    n = len(tips)
+    out = np.zeros((n, n))
+    for a in range(n):
+        seen = set(ancestors[tips[a]])
+        for b in range(a + 1, n):
+            mrca = next(i for i in ancestors[tips[b]] if i in seen)
+            out[a, b] = out[b, a] = depth[tips[a]] + depth[tips[b]] - 2 * depth[mrca]
+    return [model.nodes[t].name for t in tips], out
+
+
+def p_distance_matrix(aln: Alignment) -> tuple[list[str], np.ndarray]:
+    """Share of differing residues over the columns both sequences have
+    (gaps skipped); NaN when two sequences share no column."""
+    width = aln.width
+    arr = np.full((len(aln.seqs), width), ord("-"), dtype=np.uint8)
+    for i, seq in enumerate(aln.seqs):
+        arr[i, : len(seq)] = np.frombuffer(seq.encode("ascii", "replace"), dtype=np.uint8)
+    gap = (arr == ord("-")) | (arr == ord(".")) | (arr == ord("N")) | (arr == ord("X"))
+    n = len(aln.seqs)
+    out = np.zeros((n, n))
+    for a in range(n):
+        both = ~gap[a] & ~gap[a + 1:]
+        diff = (arr[a] != arr[a + 1:]) & both
+        shared = both.sum(axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            d = np.where(shared > 0, diff.sum(axis=1) / shared, np.nan)
+        out[a, a + 1:] = d
+        out[a + 1:, a] = d
+    return list(aln.names), out
+
+
+def matrix_tsv(names: list[str], matrix: np.ndarray, digits: int = 5) -> str:
+    lines = ["\t" + "\t".join(names)]
+    for name, row in zip(names, matrix):
+        cells = ("NA" if not np.isfinite(v) else f"{v:.{digits}g}" for v in row)
+        lines.append(name + "\t" + "\t".join(cells))
+    return "\n".join(lines) + "\n"

@@ -403,3 +403,80 @@ def test_new_drawing_options_are_remembered(qapp, tree_file):
     again = TreePanel(tree_file)
     o = again.options()
     assert o.align_labels and o.branch_lengths == tl.BRANCHES_SQRT and o.spread == 200
+
+
+def test_flip_puts_names_left_of_the_tree(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions
+
+    panel = TreePanel(tree_file)
+    panel.set_options(TreeViewOptions(flip=True))
+    items = _label_items(panel, set("ABCDEF"))
+    assert all(i.pos().x() < 0 for i in items)          # tree grows to the left of the root
+
+
+def test_max_length_digits_and_line_weight(qapp, tmp_path):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions, shorten
+
+    assert shorten("Knob_reg_crosat13_2646-3101", 9) == "…2646-3101"
+    assert shorten("Knob_reg_crosat13_2646-3101", 4, keep_end=False) == "Knob…"
+    path = tmp_path / "long.treefile"
+    path.write_text("((Knob_reg_crosat13_2646-3101:0.123456,B:0.2):0.1,C:0.3);\n")
+    panel = TreePanel(path)
+    panel.set_options(TreeViewOptions(max_chars=9, branch_labels="length", branch_digits=2,
+                                      line_weight=3.0))
+    texts = _texts(panel)
+    assert "…2646-3101" in texts and "0.12" in texts
+    from PySide6.QtWidgets import QGraphicsPathItem
+    widths = {round(i.pen().widthF(), 2) for i in panel.scene().items()
+              if isinstance(i, QGraphicsPathItem) and i.data(0) is not None}
+    assert 3.0 in widths
+
+
+def test_tip_label_can_show_a_trait_column(qapp, located_tree):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(located_tree)
+    panel.build_traits(wait=True)
+    box = panel._tiplabel_box
+    idx = box.findData("col:chromosome")
+    assert idx > 0
+    box.setCurrentIndex(idx)
+    texts = _texts(panel)
+    assert "Chr1" in texts and "Chr1_100-256_+" not in texts
+    box.setCurrentIndex(box.findData("name+col:chromosome"))
+    assert "Chr1_100-256_+  Chr1" in _texts(panel)
+
+
+def test_collapse_by_distance_and_expand(qapp, tmp_path):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    path = tmp_path / "near.treefile"
+    path.write_text("(((A:0.01,B:0.02):0.3,(C:0.01,D:0.01):0.01):0.5,E:1.0);\n")
+    panel = TreePanel(path)
+    panel.set_collapse_distance(0.05)
+    assert len(panel.display().info) == 2
+    key = ("A", "B")
+    panel.toggle_collapse(key)                         # right-click → Expand clade
+    assert len(panel.display().info) == 1
+    panel.undo()
+    assert len(panel.display().info) == 2
+    panel.expand_all()
+    assert not panel.display().info and panel.state().collapse_distance == 0
+
+
+def test_copy_newick_and_options_panel(qapp, tree_file):
+    from PySide6.QtWidgets import QApplication
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    panel._copy_newick()
+    text = QApplication.clipboard().text()
+    assert text.startswith("(") and text.rstrip().endswith(";") and "A" in text
+    panel.show()
+    panel._options_btn.setChecked(False)
+    assert not panel._options_panel.isVisible()
+    panel._options_btn.setChecked(True)
+    assert panel._options_panel.isVisible()
+    titles = [b.text() for b in panel._options_panel.widget().findChildren(type(panel._options_btn))
+              if b.isCheckable() and b is not panel._options_btn]
+    assert titles[:3] == ["Layout", "Tip names", "Branch labels"]

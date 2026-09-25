@@ -258,6 +258,7 @@ class Layout:
     n_rows: int                            # rectangular: number of tip rows
     node_angle: dict[int, float] = field(default_factory=dict)  # circular / radial, degrees
     inner: float = 0.0                     # circular: empty radius left at the centre
+    mirrored: bool = False                 # drawn right to left (Flip)
 
 
 def _rectangular(model: TreeModel, depth: list[float]) -> Layout:
@@ -374,6 +375,45 @@ def compute_layout(model: TreeModel, kind: str = LAYOUT_RECTANGULAR,
         layout.extent = max(layout.extent, max(depth[i] + layout.inner + d
                                                for i, d in extra_depth.items()))
     return layout
+
+
+def orient(layout: Layout, rotate_deg: float = 0.0, mirror: bool = False) -> Layout:
+    """Turn a circular or radial layout by ``rotate_deg`` (counter-clockwise on
+    screen) and/or mirror any layout left-right (Flip). Returns a new Layout."""
+    rotate = rotate_deg % 360.0 if layout.kind != LAYOUT_RECTANGULAR else 0.0
+    if not rotate and not mirror:
+        return layout
+    c, s_ = math.cos(math.radians(rotate)), math.sin(math.radians(rotate))
+
+    def point(p: tuple[float, float]) -> tuple[float, float]:
+        x, y = p
+        if rotate:
+            x, y = x * c + y * s_, y * c - x * s_
+        return (-x, y) if mirror else (x, y)
+
+    def angle(a: float) -> float:
+        a = a + rotate
+        return 180.0 - a if mirror else a
+
+    lines = []
+    for x0, y0, x1, y1 in layout.lines:
+        (a, b), (d, e) = point((x0, y0)), point((x1, y1))
+        lines.append((a, b, d, e))
+    arcs = []
+    for arc in layout.arcs:
+        start = arc.start_deg + rotate
+        if mirror:
+            start = 180.0 - (start + arc.span_deg)
+        arcs.append(Arc(arc.radius, start, arc.span_deg))
+    return Layout(
+        layout.kind, [point(p) for p in layout.xy], lines, arcs,
+        {t: angle(a) for t, a in layout.tip_angle.items()} if layout.kind != LAYOUT_RECTANGULAR
+        else dict(layout.tip_angle),
+        {i: point(p) for i, p in layout.branch_mid.items()},
+        layout.extent, layout.n_rows,
+        {i: angle(a) for i, a in layout.node_angle.items()},
+        layout.inner, mirror != layout.mirrored,
+    )
 
 
 def label_rotation(angle_deg: float) -> tuple[float, bool]:

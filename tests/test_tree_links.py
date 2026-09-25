@@ -110,3 +110,34 @@ def test_double_click_empty_space_still_fits(qapp, tmp_path):
     panel = TreePanel(_run(tmp_path))
     panel._on_node_double_clicked(-1)
     assert panel._aln_window is None
+
+
+def test_distance_matrices():
+    from repeatviewer.backends import tree_layout as tl
+
+    m = tl.read_tree_text("((A:0.1,B:0.2):0.05,C:0.3);")
+    names, d = tk.patristic_matrix(m)
+    ia, ib, ic = names.index("A"), names.index("B"), names.index("C")
+    assert abs(d[ia, ib] - 0.3) < 1e-9 and abs(d[ia, ic] - 0.45) < 1e-9 and d[ia, ia] == 0
+    aln = tk.Alignment(["x", "y", "z"], ["ACGT", "ACGA", "--NN"], True)
+    names, p = tk.p_distance_matrix(aln)
+    assert abs(p[0, 1] - 0.25) < 1e-9
+    import math
+    assert math.isnan(p[0, 2])
+    tsv = tk.matrix_tsv(names, p)
+    assert tsv.splitlines()[0] == "\tx\ty\tz" and "NA" in tsv
+
+
+def test_distance_dialog_saves_next_to_tree(qapp, tmp_path):
+    from repeatviewer.backends import tree_layout as tl
+    from repeatviewer.views.tree_distances_dialog import SOURCE_ALIGNMENT, TreeDistancesDialog
+
+    tree = _run(tmp_path)
+    dlg = TreeDistancesDialog(tree, tl.read_tree_file(tree))
+    names, matrix = dlg.matrix()
+    assert sorted(names) == list("ABCDEF") and matrix.shape == (6, 6)
+    out = dlg.save_to(dlg.default_path())
+    assert out.name == "sat.fa_tree.treefile_distances_patristic.tsv" and out.is_file()
+    dlg._source_box.setCurrentIndex(dlg._source_box.findData(SOURCE_ALIGNMENT))
+    assert dlg.default_path().name.endswith("_pdistance.tsv")
+    assert dlg.matrix()[1].shape == (6, 6)
