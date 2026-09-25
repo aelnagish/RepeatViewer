@@ -89,12 +89,13 @@ METHOD_INFO = (
     "(more than ~1,000 sequences)."
 )
 MODEL_INFO = (
-    "<b>ModelFinder</b> — tests the models and selects the best by BIC (recommended).<br>"
-    "<b>GTR</b> — all six substitution types at their own rate.<br>"
-    "<b>TN (TN93)</b> — two transition rates (A↔G, C↔T), one transversion rate.<br>"
-    "<b>HKY</b> — one transition and one transversion rate, unequal base frequencies.<br>"
-    "<b>K2P (K80)</b> — as HKY, with equal base frequencies.<br>"
-    "<b>LG</b> — protein model.<br>"
+    "<b>ModelFinder</b>: tests the models and selects the best by BIC "
+    "(Bayesian information criterion).<br>"
+    "<b>GTR</b>: all six substitution types at their own rate.<br>"
+    "<b>TN (TN93)</b>: two transition rates (A↔G, C↔T), one transversion rate.<br>"
+    "<b>HKY</b>: one transition and one transversion rate, unequal base frequencies.<br>"
+    "<b>K2P (K80)</b>: as HKY, with equal base frequencies.<br>"
+    "<b>LG</b>: protein model.<br>"
     "<b>+F</b> empirical base frequencies · <b>+G4</b> rate variation among sites "
     "(4 gamma categories)."
 )
