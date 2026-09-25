@@ -156,9 +156,8 @@ def test_save_menu_and_report_button(qapp, tmp_path):
     tree = _run(tmp_path)
     panel = TreePanel(tree)
     texts = [a.text() for a in panel._save_btn.menu().actions() if a.text()]
-    assert texts == ["Figure as shown: SVG…", "Figure as shown: PDF…",
-                     "Figure as shown: PNG (300 dpi)…", "Tree as shown (.treefile)…",
-                     "Distance matrix (.tsv)…", "Copy Newick"]
+    assert texts == ["SVG", "PDF", "PNG", "Tree (.treefile)", "Distance matrix (.tsv)",
+                     "Copy Newick"]
     assert panel.report_path() is None and not panel._report_btn.isEnabled()
     report = tmp_path / "sat.fa_tree_details" / "sat.fa_tree_report.html"
     report.write_text("<html></html>")

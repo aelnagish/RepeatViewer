@@ -10,9 +10,9 @@ Opens ``.treefile`` (IQ-TREE), ``.nwk``, ``.newick``, ``.tre`` and ``.tree``.
   value; undo (Cmd+Z / Ctrl+Z).
 * Keep: colours, collapsed clades and view settings are remembered in a hidden
   file next to the tree (``.<tree name>.view.json``). Rerooting and swapping
-  change the tree itself, which is never overwritten: Save → "Tree as shown"
+  change the tree itself, which is never overwritten: Save → "Tree"
   writes a new file (``<tree name>_rerooted.treefile``, rule 1).
-* Save ▾: figure as shown (SVG, PDF, PNG), tree as shown, distance matrix,
+* Save ▾: figure as shown (SVG, PDF, PNG), tree (.treefile), distance matrix,
   copy Newick. Tree runs no longer write figures; they come from here.
 
 The geometry and the edits come from the pure, unit-tested modules
@@ -139,7 +139,7 @@ COLLAPSE_HELP = (
     "into their parent, so only well-supported groupings remain.<br>"
     "IQ-TREE: the UFBoot value is used (the second number, e.g. 97 in 92/97). "
     "FastTree values (0 to 1) are read as percentages.<br>"
-    "0 = off. The tree file is not changed; use <b>Save → Tree as shown</b> to keep the result.<br>"
+    "0 = off. The tree file is not changed; use <b>Save → Tree</b> to keep the result.<br>"
     "<b>Distance below</b>: clades whose tips all lie closer than this to the clade's own "
     "node (substitutions per site) are drawn as triangles, e.g. near-identical copies. "
     "Right-click a triangle to open it. Off = 0."
@@ -151,7 +151,7 @@ EDIT_HELP = (
     "in the tree's alignment, highlighted.<br>"
     "Undo: Cmd+Z / Ctrl+Z.<br>"
     "Colours and collapsed clades are remembered for this tree. Rerooting and swapping "
-    "change the tree: the file is never overwritten, use <b>Save → Tree as shown</b>."
+    "change the tree: the file is never overwritten, use <b>Save → Tree</b>."
 )
 
 
@@ -975,13 +975,14 @@ class TreePanel(QWidget):
         self._save_btn = QPushButton("Save", self)
         save_menu = QMenu(self._save_btn)
         for label, ext in EXPORT_FORMATS:
-            text = f"Figure as shown: {label}{' (300 dpi)' if ext == 'png' else ''}…"
-            save_menu.addAction(text, lambda checked=False, e=ext: self._export(e))
+            act = save_menu.addAction(label, lambda checked=False, e=ext: self._export(e))
+            act.setToolTip("The figure as shown" + (" (300 dpi)" if ext == "png" else "") + ".")
         save_menu.addSeparator()
-        save_menu.addAction("Tree as shown (.treefile)…", self._save_tree_as)
-        save_menu.addAction("Distance matrix (.tsv)…", self._open_distances)
+        save_menu.addAction("Tree (.treefile)", self._save_tree_as)
+        save_menu.addAction("Distance matrix (.tsv)", self._open_distances)
         save_menu.addSeparator()
         save_menu.addAction("Copy Newick", self._copy_newick)
+        save_menu.setToolTipsVisible(True)
         self._save_btn.setMenu(save_menu)
         self._save_btn.setToolTip("Save the figure, the tree or a distance matrix "
                                   "(next to the tree, with the tree's name).")
@@ -1466,7 +1467,7 @@ class TreePanel(QWidget):
         if self._state.subtree:
             parts.append(f"showing one clade ({len(self._state.subtree)} tips)")
         if self._state.edited:
-            parts.append(f"tree {self._state.edited}: Save → Tree as shown keeps it")
+            parts.append(f"tree {self._state.edited}: Save → Tree keeps it")
         if self._selected:
             parts.append(f"selected: {len(self._selected)} tips")
         if message:
@@ -1609,7 +1610,7 @@ class TreePanel(QWidget):
         menu.addSeparator()
         act = menu.addAction("Undo", self.undo)
         act.setEnabled(bool(self._undo))
-        menu.addAction("Save tree as shown…", self._save_tree_as)
+        menu.addAction("Save tree (.treefile)", self._save_tree_as)
 
     def _fill_edit_menu(self) -> None:
         menu = self._edit_menu
@@ -2046,7 +2047,7 @@ class TreePanel(QWidget):
             edited = f"{edited}_collapsed" if edited else "collapsed"
         default = saved_tree_default_path(self._path, edited)
         chosen, _ = QFileDialog.getSaveFileName(
-            self, "Save tree as shown", str(default), "Newick tree (*.treefile *.nwk *.tree)"
+            self, "Save tree", str(default), "Newick tree (*.treefile *.nwk *.tree)"
         )
         if not chosen:
             return
