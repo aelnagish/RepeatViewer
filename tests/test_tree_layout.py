@@ -115,3 +115,21 @@ def test_nice_scale_length(extent, expected):
 def test_branch_length_text():
     assert tl.branch_length_text(0.013912) == "0.01391"
     assert tl.branch_length_text(0.0) == "0"
+
+
+def test_branch_transforms_and_inner_space():
+    m = tl.read_tree_text("((A:0.1,B:0.2):0.05,(C:0.3,(D:0.1,E:0.1):0.2):0.1,F:4.0);")
+    eq = tl.transform_lengths(m, tl.BRANCHES_EQUAL)
+    d = tl.depths(eq)
+    assert len({round(d[t], 9) for t in eq.tips()}) == 1       # cladogram: tips aligned
+    sq = tl.transform_lengths(m, tl.BRANCHES_SQRT)
+    f = next(n for n in sq.nodes if n.name == "F")
+    assert abs(f.length - 2.0) < 1e-9
+    assert next(n for n in m.nodes if n.name == "F").length == 4.0   # original untouched
+    assert tl.transform_length(4.0, tl.BRANCHES_SQRT) == 2.0
+    plain = tl.compute_layout(m, tl.LAYOUT_CIRCULAR)
+    holed = tl.compute_layout(m, tl.LAYOUT_CIRCULAR, inner_fraction=0.25)
+    assert plain.inner == 0 and abs(holed.inner - 1.0) < 1e-9       # 25 % of depth 4.0
+    assert abs(holed.extent - plain.extent - 1.0) < 1e-9
+    root_r = (holed.xy[0][0] ** 2 + holed.xy[0][1] ** 2) ** 0.5
+    assert abs(root_r - 1.0) < 1e-9

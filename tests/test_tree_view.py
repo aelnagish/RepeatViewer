@@ -341,3 +341,65 @@ def test_trait_dialog_rules(qapp, located_tree, tmp_path):
     assert dlg.apply_path_from_panel(cov) and not dlg.apply_path_from_panel(fasta)   # rule 7
     assert dlg.settings()["methylation_file"].endswith("x.cov")
     assert dlg.settings()["array_gap"] == 10_000
+
+
+def _label_items(panel, names):
+    return [i for i in panel.scene().items()
+            if isinstance(i, QGraphicsSimpleTextItem) and i.text() in names]
+
+
+def test_align_names_puts_all_tips_on_one_line(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions
+
+    panel = TreePanel(tree_file)
+    panel.set_options(TreeViewOptions(align_labels=True))
+    xs = {round(i.pos().x(), 3) for i in _label_items(panel, set("ABCDEF"))}
+    assert len(xs) == 1
+    panel.set_options(TreeViewOptions(align_labels=False))
+    xs = {round(i.pos().x(), 3) for i in _label_items(panel, set("ABCDEF"))}
+    assert len(xs) > 1
+
+
+def test_hide_crowded_drops_overlapping_branch_labels(qapp, tmp_path):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions
+
+    # many tiny branches: their length labels would sit on top of each other
+    inner = ",".join(f"T{i}:0.0001" for i in range(40))
+    path = tmp_path / "crowd.treefile"
+    path.write_text(f"(({inner}):0.5,X:1.0);\n")
+    panel = TreePanel(path)
+    opts = dict(branch_labels="length", layout=tl.LAYOUT_RECTANGULAR)
+    panel.set_options(TreeViewOptions(**opts, hide_crowded=False))
+    before = len([i for i in panel.scene().items() if isinstance(i, QGraphicsSimpleTextItem)])
+    panel.set_options(TreeViewOptions(**opts, hide_crowded=True))
+    after = len([i for i in panel.scene().items() if isinstance(i, QGraphicsSimpleTextItem)])
+    assert after < before - 30
+    texts = _texts(panel)
+    assert "0.5" in texts and "1" in texts               # long branches keep their labels
+
+
+def test_branch_transform_hides_scale_bar_and_spread_grows_tree(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions
+
+    panel = TreePanel(tree_file)
+    panel.set_options(TreeViewOptions())
+    assert "0.05" in _texts(panel)
+    width = panel.scene().itemsBoundingRect().width()
+    panel.set_options(TreeViewOptions(branch_lengths=tl.BRANCHES_EQUAL))
+    assert "0.05" not in _texts(panel)
+    panel.set_options(TreeViewOptions(spread=300))
+    assert panel.scene().itemsBoundingRect().width() > width * 2
+    panel.set_options(TreeViewOptions(layout=tl.LAYOUT_RADIAL, align_labels=True))
+    assert not panel._align_check.isEnabled()
+
+
+def test_new_drawing_options_are_remembered(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel
+
+    panel = TreePanel(tree_file)
+    panel._align_check.setChecked(True)
+    panel._lengths_box.setCurrentIndex(panel._lengths_box.findData(tl.BRANCHES_SQRT))
+    panel._spread_spin.setValue(200)
+    again = TreePanel(tree_file)
+    o = again.options()
+    assert o.align_labels and o.branch_lengths == tl.BRANCHES_SQRT and o.spread == 200

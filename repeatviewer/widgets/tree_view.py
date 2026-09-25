@@ -81,17 +81,34 @@ _ZOOM_STEP = 1.12
 _TRACKPAD_ZOOM_BASE = 1.0022
 _MIN_TREE_PX = 260.0       # smallest drawing size (rectangular width / radius)
 _RECT_TREE_WIDTH_PX = 520.0
+SPREAD_MIN, SPREAD_MAX = 100, 500   # % (Spread)
 _MARGIN_PX = 24.0
 _HIT_WIDTH = 7.0           # clickable width around a branch, in pixels
 _SELECTED = QColor(0, 110, 230)
 ROLE_NODE = 0              # QGraphicsItem.data key: display node index
 
 SUPPORT_HELP = (
-    "<b>Support</b>: the label on each internal node.<br>"
+    "<b>Align names</b>: all tip names on one line (rectangular) or one circle (circular), "
+    "joined to their branches by dotted lines, so they never sit on top of each other. "
+    "Not for the radial layout.<br>"
+    "<b>Branch labels: Support</b>: the label on each internal node.<br>"
     "IQ-TREE shows <b>SH-aLRT/UFBoot</b>, e.g. 92/97. A branch is well supported "
     "at SH-aLRT 80 or more and UFBoot 95 or more.<br>"
     "FastME bootstrap: 70 or more. FastTree: local support from 0 to 1, close to 1 is strong.<br>"
-    "<b>Branch length</b>: substitutions per site."
+    "<b>Branch length</b>: substitutions per site.<br>"
+    "<b>Hide crowded</b>: a label that would overlap another is left out (labels on longer "
+    "branches are kept first), and lengths are not written on branches too short to "
+    "carry them. Hover over a branch end or zoom in to read more."
+)
+DRAW_HELP = (
+    "<b>Order</b>: sort each node's branches by clade size (ladderize).<br>"
+    "<b>Branches</b>: <b>Proportional</b> draws the lengths from the file. "
+    "<b>Equal</b> ignores lengths and shows the branching order only, with all tips "
+    "lined up (a cladogram). <b>Square root</b> keeps longer branches longer but shrinks "
+    "one very long branch, so it no longer squeezes the rest of the tree. "
+    "The scale bar is shown for Proportional only.<br>"
+    "<b>Spread</b>: makes the tree larger while the font stays the same; the circular "
+    "layout also opens a space in the centre. Use it when names or branches crowd."
 )
 COLLAPSE_HELP = (
     "<b>Collapse below support</b>: branches with support under this value are merged "
@@ -131,6 +148,10 @@ class TreeViewOptions:
     branch_labels: str = BRANCH_LABELS_SUPPORT
     font_pt: int = 10
     scale_bar: bool = True
+    align_labels: bool = False       # tip names on one line / circle, dotted lines to the tips
+    branch_lengths: str = tl.BRANCHES_PROPORTIONAL
+    spread: int = 100                # % : tree size relative to the font (circular: open centre)
+    hide_crowded: bool = True        # skip branch labels that would overlap others
 
 
 @dataclass
@@ -243,17 +264,48 @@ class _BranchItem(QGraphicsPathItem):
         return stroker.createStroke(self.path())
 
 
-def _pixel_scale(layout: tl.Layout, n_tips: int, row_h: float) -> tuple[float, float]:
+def spread_factor(opts: TreeViewOptions) -> float:
+    return max(SPREAD_MIN, min(SPREAD_MAX, int(opts.spread))) / 100.0
+
+
+def inner_fraction(opts: TreeViewOptions) -> float:
+    """Circular layout: empty centre (share of the tree depth) growing with Spread."""
+    return min(0.5, 0.15 * (spread_factor(opts) - 1.0))
+
+
+def _pixel_scale(layout: tl.Layout, n_tips: int, row_h: float,
+                 spread: float = 1.0) -> tuple[float, float]:
     """(sx, sy) from layout units to pixels."""
     extent = layout.extent if layout.extent > 0 else 1.0
     if layout.kind == tl.LAYOUT_RECTANGULAR:
-        return _RECT_TREE_WIDTH_PX / extent, row_h
+        return _RECT_TREE_WIDTH_PX * spread / extent, row_h
     if layout.kind == tl.LAYOUT_CIRCULAR:
         radius = max(_MIN_TREE_PX, n_tips * row_h / (2 * math.pi))
     else:
         radius = max(_MIN_TREE_PX, math.sqrt(n_tips) * row_h * 2.0)
-    s = radius / extent
+    s = radius * spread / extent
     return s, s
+
+
+class _LabelSpace:
+    """Rectangles already taken by labels; a coarse grid keeps lookups fast."""
+
+    def __init__(self, cell: float) -> None:
+        self._cell = max(4.0, cell)
+        self._grid: dict[tuple[int, int], list[QRectF]] = {}
+
+    def _cells(self, r: QRectF):
+        c = self._cell
+        for gx in range(int(math.floor(r.left() / c)), int(math.floor(r.right() / c)) + 1):
+            for gy in range(int(math.floor(r.top() / c)), int(math.floor(r.bottom() / c)) + 1):
+                yield gx, gy
+
+    def free(self, r: QRectF) -> bool:
+        return not any(o.intersects(r) for key in self._cells(r) for o in self._grid.get(key, ()))
+
+    def take(self, r: QRectF) -> None:
+        for key in self._cells(r):
+            self._grid.setdefault(key, []).append(r)
 
 
 def build_tree_scene(
@@ -272,7 +324,11 @@ def build_tree_scene(
     scene.clear()
     shown = display.model
     info = display.info
-    layout = tl.compute_layout(shown, opts.layout, {i: c.depth for i, c in info.items()})
+    mode = opts.branch_lengths if opts.branch_lengths in tl.BRANCH_TRANSFORMS else tl.BRANCHES_PROPORTIONAL
+    geom = tl.transform_lengths(shown, mode)     # drawn lengths; labels keep the file's
+    extra_depth = {i: tl.transform_length(c.depth, mode) for i, c in info.items()}
+    layout = tl.compute_layout(geom, opts.layout, extra_depth,
+                               inner_fraction=inner_fraction(opts))
     font = QFont()
     font.setPointSizeF(float(opts.font_pt))
     small = QFont(font)
@@ -280,8 +336,9 @@ def build_tree_scene(
     fm = QFontMetricsF(font)
     fm_small = QFontMetricsF(small)
     row_h = fm.height() * 1.3
-    sx, sy = _pixel_scale(layout, shown.n_tips, row_h)
+    sx, sy = _pixel_scale(layout, shown.n_tips, row_h, spread_factor(opts))
     radial = layout.kind != tl.LAYOUT_RECTANGULAR
+    align = opts.align_labels and layout.kind != tl.LAYOUT_RADIAL
 
     def px(point: tuple[float, float]) -> QPointF:
         return QPointF(point[0] * sx, point[1] * sy)
@@ -298,7 +355,7 @@ def build_tree_scene(
         return pen
 
     # --- branches: one item per node (its own branch + its connector) -------
-    depth = tl.depths(shown)
+    depth = [d + layout.inner for d in tl.depths(geom)]
     for node in shown.nodes:
         i = node.index
         path = QPainterPath()
@@ -308,7 +365,7 @@ def build_tree_scene(
                 r0 = depth[node.parent] * sx
                 path.moveTo(r0 * math.cos(a), -r0 * math.sin(a))
                 path.lineTo(px(layout.xy[i]))
-            if not node.is_tip and depth[i] > 0:
+            if not node.is_tip and depth[i] > 0 and node.children:
                 a0 = layout.node_angle[node.children[0]]
                 a1 = layout.node_angle[node.children[-1]]
                 if a1 > a0:
@@ -338,7 +395,7 @@ def build_tree_scene(
     # --- collapsed clades: triangles ------------------------------------------
     for i, ci in info.items():
         base = px(layout.xy[i])
-        length = ci.depth * sx
+        length = extra_depth[i] * sx
         half = row_h * 0.42
         if radial:
             a = math.radians(layout.node_angle.get(i, 0.0))
@@ -359,18 +416,43 @@ def build_tree_scene(
             item.setToolTip(f"Collapsed clade: {ci.n_tips} sequences\nRight-click to expand")
         scene.addItem(item)
 
+    # --- where each tip's dot and name start ----------------------------------------
+    # At the end of its branch (or collapsed triangle), or, with aligned names, on
+    # one line / circle for all tips, joined to the branch end by a dotted line.
+    def tip_dir(tip: int) -> tuple[float, float]:
+        if radial:
+            a = math.radians(layout.tip_angle[tip])
+            return math.cos(a), -math.sin(a)
+        return 1.0, 0.0
+
+    anchors: dict[int, QPointF] = {}
+    leader_pen = QPen(muted, 0.8, Qt.PenStyle.DotLine)
+    leader_pen.setCosmetic(not for_export)
+    for tip in shown.tips():
+        p = px(layout.xy[tip])
+        dx, dy = tip_dir(tip)
+        extra = extra_depth.get(tip, 0.0) * sx
+        end = QPointF(p.x() + dx * extra, p.y() + dy * extra)
+        if align:
+            if layout.kind == tl.LAYOUT_RECTANGULAR:
+                target = QPointF(layout.extent * sx, p.y())
+            else:
+                r = layout.extent * sx
+                target = QPointF(dx * r, dy * r)
+            if math.hypot(target.x() - end.x(), target.y() - end.y()) > 2.0:
+                leader = QPainterPath(end)
+                leader.lineTo(target)
+                scene.addPath(leader, leader_pen)
+            end = target
+        anchors[tip] = end
+
     # --- trait dots at the tips ---------------------------------------------------
     gap = fm.averageCharWidth() * 0.6
     dot = fm.height() * 0.62 if display.tip_colors else 0.0
     for tip, color in display.tip_colors.items():
-        p = px(layout.xy[tip])
-        extra = info[tip].depth * sx if tip in info else 0.0
-        if radial:
-            a = math.radians(layout.tip_angle[tip])
-            dx, dy = math.cos(a), -math.sin(a)
-        else:
-            dx, dy = 1.0, 0.0
-        reach = extra + gap + dot / 2.0
+        p = anchors[tip]
+        dx, dy = tip_dir(tip)
+        reach = gap + dot / 2.0
         cx, cy = p.x() + dx * reach, p.y() + dy * reach
         circle = scene.addEllipse(QRectF(cx - dot / 2.0, cy - dot / 2.0, dot, dot),
                                   QPen(QColor(color).darker(130), 0.6), QBrush(QColor(color)))
@@ -396,14 +478,13 @@ def build_tree_scene(
                 item.setToolTip(tip_text)
             w = item.boundingRect().width()
             h = item.boundingRect().height()
-            p = px(layout.xy[tip])
-            extra = info[tip].depth * sx if tip in info else 0.0
+            p = anchors[tip]
             if layout.kind == tl.LAYOUT_RECTANGULAR:
-                item.setPos(p.x() + extra + gap, p.y() - h / 2.0)
+                item.setPos(p.x() + gap, p.y() - h / 2.0)
             else:
                 angle = layout.tip_angle[tip]
                 rad = math.radians(angle)
-                reach = extra + gap
+                reach = gap
                 anchor = QPointF(p.x() + reach * math.cos(rad), p.y() - reach * math.sin(rad))
                 rotation, flipped = tl.label_rotation(angle)
                 if flipped:
@@ -418,6 +499,7 @@ def build_tree_scene(
     # --- branch labels ------------------------------------------------------------
     if opts.branch_labels != BRANCH_LABELS_NONE:
         label_brush = QBrush(muted)
+        candidates: list[tuple[float, QGraphicsSimpleTextItem]] = []
         for node in shown.nodes:
             if node.parent is None:
                 continue
@@ -441,6 +523,21 @@ def build_tree_scene(
             else:
                 p = px(layout.branch_mid[node.index])
                 item.setPos(p.x() - w / 2.0, p.y() - h)
+            branch_px = max(0.0, geom.nodes[node.index].length) * sx
+            if (opts.hide_crowded and opts.branch_labels == BRANCH_LABELS_LENGTH
+                    and branch_px < w * 0.5):
+                continue          # a length label wider than twice its branch says little
+            candidates.append((branch_px, item))
+        # Longest branches first; with "Hide crowded labels" a label that would
+        # overlap one already placed is left out.
+        candidates.sort(key=lambda c: -c[0])
+        space = _LabelSpace(fm_small.height() * 2.0)
+        for _length, item in candidates:
+            if opts.hide_crowded:
+                rect = item.boundingRect().translated(item.pos()).adjusted(-1, 0, 1, 0)
+                if not space.free(rect):
+                    continue
+                space.take(rect)
             scene.addItem(item)
 
     # --- legend for the trait colours ------------------------------------------------
@@ -448,8 +545,8 @@ def build_tree_scene(
         _draw_legend(scene, display.legend, font, small, ink, muted, for_export)
 
     # --- scale bar ------------------------------------------------------------------
-    if opts.scale_bar and shown.has_lengths:
-        value = tl.nice_scale_length(layout.extent)
+    if opts.scale_bar and shown.has_lengths and mode == tl.BRANCHES_PROPORTIONAL:
+        value = tl.nice_scale_length(layout.extent - layout.inner)
         if value > 0:
             bounds = scene.itemsBoundingRect()
             length_px = value * sx
@@ -722,6 +819,18 @@ class TreePanel(QWidget):
             self._branch_box.addItem(label, value)
         self._tips_check = QCheckBox("Tip names", self)
         self._scale_check = QCheckBox("Scale bar", self)
+        self._align_check = QCheckBox("Align names", self)
+        self._crowded_check = QCheckBox("Hide crowded", self)
+        self._lengths_box = NoWheelComboBox(self)
+        for label, value in (("Proportional", tl.BRANCHES_PROPORTIONAL),
+                             ("Equal", tl.BRANCHES_EQUAL),
+                             ("Square root", tl.BRANCHES_SQRT)):
+            self._lengths_box.addItem(label, value)
+        self._spread_spin = NoWheelSpinBox(self)
+        self._spread_spin.setRange(SPREAD_MIN, SPREAD_MAX)
+        self._spread_spin.setSingleStep(25)
+        self._spread_spin.setSuffix(" %")
+        self._spread_spin.setFixedWidth(80)
         self._font_spin = NoWheelSpinBox(self)
         self._font_spin.setRange(5, 36)
         self._font_spin.setSuffix(" pt")
@@ -759,20 +868,27 @@ class TreePanel(QWidget):
         row1.addWidget(QLabel("Order:", self))
         row1.addWidget(self._order_box)
         row1.addSpacing(8)
-        row1.addWidget(QLabel("Branch labels:", self))
-        row1.addWidget(self._branch_box)
-        row1.addWidget(make_help_button(self, "Branch labels", SUPPORT_HELP))
+        row1.addWidget(QLabel("Branches:", self))
+        row1.addWidget(self._lengths_box)
+        row1.addSpacing(8)
+        row1.addWidget(QLabel("Spread:", self))
+        row1.addWidget(self._spread_spin)
+        row1.addWidget(make_help_button(self, "Drawing the tree", DRAW_HELP))
         row1.addStretch(1)
         row2 = QHBoxLayout()
         row2.setSpacing(6)
         row2.addWidget(self._tips_check)
+        row2.addWidget(self._align_check)
         row2.addWidget(self._scale_check)
         row2.addSpacing(8)
         row2.addWidget(QLabel("Font:", self))
         row2.addWidget(self._font_spin)
+        row2.addSpacing(8)
+        row2.addWidget(QLabel("Branch labels:", self))
+        row2.addWidget(self._branch_box)
+        row2.addWidget(self._crowded_check)
+        row2.addWidget(make_help_button(self, "Labels", SUPPORT_HELP))
         row2.addStretch(1)
-        row2.addWidget(fit_btn)
-        row2.addWidget(export_btn)
         row3 = QHBoxLayout()
         row3.setSpacing(6)
         row3.addWidget(self._edit_btn)
@@ -783,6 +899,8 @@ class TreePanel(QWidget):
         row3.addWidget(self._collapse_spin)
         row3.addWidget(make_help_button(self, "Collapse below support", COLLAPSE_HELP))
         row3.addStretch(1)
+        row3.addWidget(fit_btn)
+        row3.addWidget(export_btn)
         row3.addWidget(save_btn)
 
         self._color_box = NoWheelComboBox(self)
@@ -824,11 +942,13 @@ class TreePanel(QWidget):
         layout.addWidget(self._status)
 
         self._apply_options_to_controls()
-        for box in (self._layout_box, self._order_box, self._branch_box):
+        for box in (self._layout_box, self._order_box, self._branch_box, self._lengths_box):
             box.currentIndexChanged.connect(self._on_controls_changed)
-        for check in (self._tips_check, self._scale_check):
+        for check in (self._tips_check, self._scale_check, self._align_check,
+                      self._crowded_check):
             check.toggled.connect(self._on_controls_changed)
         self._font_spin.valueChanged.connect(self._on_controls_changed)
+        self._spread_spin.valueChanged.connect(self._on_controls_changed)
         self._update_undo_button()
 
         if path is not None:
@@ -862,15 +982,28 @@ class TreePanel(QWidget):
         try:
             for box, value in ((self._layout_box, self._opts.layout),
                                (self._order_box, self._opts.order),
-                               (self._branch_box, self._opts.branch_labels)):
+                               (self._branch_box, self._opts.branch_labels),
+                               (self._lengths_box, self._opts.branch_lengths)):
                 idx = box.findData(value)
                 box.setCurrentIndex(max(0, idx))
             self._tips_check.setChecked(self._opts.tip_labels)
             self._scale_check.setChecked(self._opts.scale_bar)
+            self._align_check.setChecked(self._opts.align_labels)
+            self._crowded_check.setChecked(self._opts.hide_crowded)
             self._font_spin.setValue(self._opts.font_pt)
+            self._spread_spin.setValue(int(spread_factor(self._opts) * 100))
+            self._sync_enabled_controls()
             self._collapse_spin.setValue(self._state.collapse_below)
         finally:
             self._block = False
+
+    def _sync_enabled_controls(self) -> None:
+        radial = self._layout_box.currentData() == tl.LAYOUT_RADIAL
+        self._align_check.setEnabled(not radial and self._tips_check.isChecked())
+        self._align_check.setToolTip("Not for the radial layout." if radial else
+                                     "All names on one line or circle, dotted lines to the tips.")
+        self._crowded_check.setEnabled(self._branch_box.currentData() != BRANCH_LABELS_NONE)
+        self._scale_check.setEnabled(self._lengths_box.currentData() == tl.BRANCHES_PROPORTIONAL)
 
     def set_options(self, opts: TreeViewOptions) -> None:
         self._opts = replace(opts)
@@ -881,7 +1014,7 @@ class TreePanel(QWidget):
         if self._block:
             return
         global _last_options
-        old_layout = self._opts.layout
+        old = self._opts
         self._opts = TreeViewOptions(
             layout=str(self._layout_box.currentData()),
             order=str(self._order_box.currentData()),
@@ -889,9 +1022,17 @@ class TreePanel(QWidget):
             branch_labels=str(self._branch_box.currentData()),
             font_pt=self._font_spin.value(),
             scale_bar=self._scale_check.isChecked(),
+            align_labels=self._align_check.isChecked(),
+            branch_lengths=str(self._lengths_box.currentData()),
+            spread=self._spread_spin.value(),
+            hide_crowded=self._crowded_check.isChecked(),
         )
+        self._sync_enabled_controls()
         _last_options = replace(self._opts)
-        self._redraw(refit=self._opts.layout != old_layout)
+        refit = (self._opts.layout != old.layout or self._opts.spread != old.spread
+                 or self._opts.branch_lengths != old.branch_lengths
+                 or self._opts.align_labels != old.align_labels)
+        self._redraw(refit=refit)
         self._save_view_state()
 
     # ------------------------------------------------------------ loading
