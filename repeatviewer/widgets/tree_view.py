@@ -1,18 +1,29 @@
 """Tree tab of the Preview panel: an interactive view of a Newick tree.
 
 Opens ``.treefile`` (IQ-TREE), ``.nwk``, ``.newick``, ``.tre`` and ``.tree``.
-Rectangular, circular and radial layouts; tip names, support or branch-length
-labels, font size, scale bar, zoom and pan; export to SVG, PDF and PNG.
 
-The geometry comes from :mod:`repeatviewer.backends.tree_layout` (pure,
-unit-tested); this module only turns it into a ``QGraphicsScene``. Exported
-figures are always drawn in black on white, whatever the app theme.
+* View: rectangular, circular and radial layouts; tip names, support or
+  branch-length labels, font size, scale bar, zoom and pan.
+* Edit (right-click a branch, or the Edit menu for the selected branch):
+  reroot here, midpoint root, swap branches, collapse / expand a clade,
+  colour a clade, show one clade only; collapse all branches below a support
+  value; undo (Cmd+Z / Ctrl+Z).
+* Keep: colours, collapsed clades and view settings are remembered in a hidden
+  file next to the tree (``.<tree name>.view.json``). Rerooting and swapping
+  change the tree itself, which is never overwritten: "Save tree as…" writes a
+  new file (``<tree name>_rerooted.treefile``, rule 1).
+* Export: SVG, PDF and PNG of exactly what is shown, black on white.
+
+The geometry and the edits come from the pure, unit-tested modules
+:mod:`repeatviewer.backends.tree_layout` and :mod:`repeatviewer.backends.tree_edit`;
+this module only turns them into a ``QGraphicsScene``.
 """
 
 from __future__ import annotations
 
+import json
 import math
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, Signal
@@ -22,15 +33,22 @@ from PySide6.QtGui import (
     QFont,
     QFontMetricsF,
     QImage,
+    QKeySequence,
     QPageSize,
     QPainter,
     QPainterPath,
+    QPainterPathStroker,
     QPalette,
     QPen,
+    QPolygonF,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QCheckBox,
+    QColorDialog,
     QFileDialog,
+    QGraphicsPathItem,
+    QGraphicsPolygonItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsView,
@@ -43,6 +61,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from repeatviewer.backends import tree_edit as te
 from repeatviewer.backends import tree_layout as tl
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.help_button import make_help_button
@@ -59,6 +78,9 @@ _TRACKPAD_ZOOM_BASE = 1.0022
 _MIN_TREE_PX = 260.0       # smallest drawing size (rectangular width / radius)
 _RECT_TREE_WIDTH_PX = 520.0
 _MARGIN_PX = 24.0
+_HIT_WIDTH = 7.0           # clickable width around a branch, in pixels
+_SELECTED = QColor(0, 110, 230)
+ROLE_NODE = 0              # QGraphicsItem.data key: display node index
 
 SUPPORT_HELP = (
     "<b>Support</b>: the label on each internal node.<br>"
@@ -66,6 +88,20 @@ SUPPORT_HELP = (
     "at SH-aLRT 80 or more and UFBoot 95 or more.<br>"
     "FastME bootstrap: 70 or more. FastTree: local support from 0 to 1, close to 1 is strong.<br>"
     "<b>Branch length</b>: substitutions per site."
+)
+COLLAPSE_HELP = (
+    "<b>Collapse below support</b>: branches with support under this value are merged "
+    "into their parent, so only well-supported groupings remain.<br>"
+    "IQ-TREE: the UFBoot value is used (the second number, e.g. 97 in 92/97). "
+    "FastTree values (0 to 1) are read as percentages.<br>"
+    "0 = off. The tree file is not changed; use <b>Save tree as…</b> to keep the result."
+)
+EDIT_HELP = (
+    "<b>Right-click a branch</b> (or select it and use <b>Edit</b>) to reroot there, swap "
+    "its branches, collapse or colour its clade, or show that clade only.<br>"
+    "Undo: Cmd+Z / Ctrl+Z.<br>"
+    "Colours and collapsed clades are remembered for this tree. Rerooting and swapping "
+    "change the tree: the file is never overwritten, use <b>Save tree as…</b>."
 )
 
 
@@ -79,6 +115,32 @@ class TreeViewOptions:
     scale_bar: bool = True
 
 
+@dataclass
+class TreeViewState:
+    """What the user did to this tree view (clades by their tip names)."""
+
+    collapsed: set[tuple[str, ...]] = field(default_factory=set)
+    colors: dict[tuple[str, ...], str] = field(default_factory=dict)
+    subtree: tuple[str, ...] | None = None
+    collapse_below: int = 0          # support threshold, 0 = off
+    edited: str = ""                 # "", "rerooted" or "edited": the tree differs from the file
+
+    def copy(self) -> "TreeViewState":
+        return TreeViewState(set(self.collapsed), dict(self.colors), self.subtree,
+                             self.collapse_below, self.edited)
+
+
+@dataclass
+class Display:
+    """The tree as drawn: display model plus per-node clade keys and colours."""
+
+    model: tl.TreeModel
+    info: dict[int, te.CollapsedInfo]
+    keys: list[tuple[str, ...]]
+    colors: list[str | None]
+    n_contracted: int = 0
+
+
 # The last settings used, so the next tree opens the same way (this session).
 _last_options = TreeViewOptions()
 
@@ -88,9 +150,73 @@ def export_default_path(tree_path: Path, layout: str, ext: str) -> Path:
     return tree_path.parent / f"{tree_path.name}_{layout}.{ext}"
 
 
+def saved_tree_default_path(tree_path: Path, edited: str) -> Path:
+    """Rule 1: ``x.treefile_rerooted.treefile`` (never the file itself)."""
+    return tree_path.parent / f"{tree_path.name}_{edited or 'edited'}.treefile"
+
+
+def view_state_path(tree_path: Path) -> Path:
+    """Hidden settings file next to the tree (not listed in the file panel)."""
+    return tree_path.parent / f".{tree_path.name}.view.json"
+
+
+# --------------------------------------------------------------------------
+# Display pipeline (no drawing)
+# --------------------------------------------------------------------------
+
+
+def tree_structure(model: tl.TreeModel, state: TreeViewState) -> tuple[tl.TreeModel, int]:
+    """The tree after weak branches are collapsed and a clade is shown alone."""
+    n = 0
+    if state.collapse_below > 0:
+        model, n = te.collapse_weak(model, state.collapse_below)
+    if state.subtree:
+        idx = te.find_clade(model, state.subtree)
+        if idx is not None and not model.nodes[idx].is_tip:
+            model = te.subtree(model, idx)
+    return model, n
+
+
+def make_display(model: tl.TreeModel, opts: TreeViewOptions, state: TreeViewState) -> Display:
+    m, n_contracted = tree_structure(model, state)
+    collapsed = set()
+    for key in state.collapsed:
+        idx = te.find_clade(m, key)
+        if idx is not None and not m.nodes[idx].is_tip and idx != 0:
+            collapsed.add(idx)
+    d, info = te.display_model(m, collapsed)
+    d = tl.ordered(d, opts.order)
+    keys: list[tuple[str, ...]] = [()] * len(d.nodes)
+    for node in reversed(d.nodes):
+        i = node.index
+        if i in info:
+            keys[i] = info[i].key
+        elif node.is_tip:
+            keys[i] = (node.name,)
+        else:
+            acc: set[str] = set()
+            for c in node.children:
+                acc.update(keys[c])
+            keys[i] = tuple(sorted(acc))
+    colors: list[str | None] = [None] * len(d.nodes)
+    for node in d.nodes:
+        own = state.colors.get(keys[node.index])
+        colors[node.index] = own or (colors[node.parent] if node.parent is not None else None)
+    return Display(d, info, keys, colors, n_contracted)
+
+
 # --------------------------------------------------------------------------
 # Scene building
 # --------------------------------------------------------------------------
+
+
+class _BranchItem(QGraphicsPathItem):
+    """One node's branch (and its connector); easy to hit with the mouse."""
+
+    def shape(self) -> QPainterPath:  # noqa: D401 (Qt API)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(_HIT_WIDTH)
+        return stroker.createStroke(self.path())
 
 
 def _pixel_scale(layout: tl.Layout, n_tips: int, row_h: float) -> tuple[float, float]:
@@ -99,7 +225,6 @@ def _pixel_scale(layout: tl.Layout, n_tips: int, row_h: float) -> tuple[float, f
     if layout.kind == tl.LAYOUT_RECTANGULAR:
         return _RECT_TREE_WIDTH_PX / extent, row_h
     if layout.kind == tl.LAYOUT_CIRCULAR:
-        # Leave one row of height per tip around the circle so labels do not overlap.
         radius = max(_MIN_TREE_PX, n_tips * row_h / (2 * math.pi))
     else:
         radius = max(_MIN_TREE_PX, math.sqrt(n_tips) * row_h * 2.0)
@@ -109,17 +234,21 @@ def _pixel_scale(layout: tl.Layout, n_tips: int, row_h: float) -> tuple[float, f
 
 def build_tree_scene(
     scene: QGraphicsScene,
-    model: tl.TreeModel,
+    display: Display | tl.TreeModel,
     opts: TreeViewOptions,
     *,
     ink: QColor,
     muted: QColor,
     for_export: bool = False,
+    selected: tuple[str, ...] | None = None,
 ) -> None:
     """Fill ``scene`` with the tree drawn per ``opts``."""
+    if isinstance(display, tl.TreeModel):
+        display = make_display(display, opts, TreeViewState())
     scene.clear()
-    shown = tl.ordered(model, opts.order)
-    layout = tl.compute_layout(shown, opts.layout)
+    shown = display.model
+    info = display.info
+    layout = tl.compute_layout(shown, opts.layout, {i: c.depth for i, c in info.items()})
     font = QFont()
     font.setPointSizeF(float(opts.font_pt))
     small = QFont(font)
@@ -128,43 +257,107 @@ def build_tree_scene(
     fm_small = QFontMetricsF(small)
     row_h = fm.height() * 1.3
     sx, sy = _pixel_scale(layout, shown.n_tips, row_h)
+    radial = layout.kind != tl.LAYOUT_RECTANGULAR
 
     def px(point: tuple[float, float]) -> QPointF:
         return QPointF(point[0] * sx, point[1] * sy)
 
-    pen = QPen(ink, 1.2)
-    pen.setCosmetic(not for_export)
-    pen.setCapStyle(Qt.PenCapStyle.FlatCap)
-    path = QPainterPath()
-    for x0, y0, x1, y1 in layout.lines:
-        path.moveTo(x0 * sx, y0 * sy)
-        path.lineTo(x1 * sx, y1 * sy)
-    for arc in layout.arcs:
-        r = arc.radius * sx
-        rect = QRectF(-r, -r, 2 * r, 2 * r)
-        path.arcMoveTo(rect, arc.start_deg)
-        path.arcTo(rect, arc.start_deg, arc.span_deg)
-    scene.addPath(path, pen)
+    def color_for(i: int) -> QColor:
+        c = display.colors[i]
+        return QColor(c) if c else QColor(ink)
 
-    brush = QBrush(ink)
+    def pen_for(i: int, width: float = 1.2) -> QPen:
+        is_sel = selected is not None and display.keys[i] == selected and not for_export
+        pen = QPen(_SELECTED if is_sel else color_for(i), 2.6 if is_sel else width)
+        pen.setCosmetic(not for_export)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        return pen
+
+    # --- branches: one item per node (its own branch + its connector) -------
+    depth = tl.depths(shown)
+    for node in shown.nodes:
+        i = node.index
+        path = QPainterPath()
+        if opts.layout == tl.LAYOUT_CIRCULAR:
+            a = math.radians(layout.node_angle[i])
+            if node.parent is not None:
+                r0 = depth[node.parent] * sx
+                path.moveTo(r0 * math.cos(a), -r0 * math.sin(a))
+                path.lineTo(px(layout.xy[i]))
+            if not node.is_tip and depth[i] > 0:
+                a0 = layout.node_angle[node.children[0]]
+                a1 = layout.node_angle[node.children[-1]]
+                if a1 > a0:
+                    rr = depth[i] * sx
+                    rect = QRectF(-rr, -rr, 2 * rr, 2 * rr)
+                    path.arcMoveTo(rect, a0)
+                    path.arcTo(rect, a0, a1 - a0)
+        elif opts.layout == tl.LAYOUT_RECTANGULAR:
+            if node.parent is not None:
+                p1 = px(layout.xy[i])
+                path.moveTo(px(layout.xy[node.parent]).x(), p1.y())
+                path.lineTo(p1)
+            if not node.is_tip:
+                x = px(layout.xy[i]).x()
+                path.moveTo(x, layout.xy[node.children[0]][1] * sy)
+                path.lineTo(x, layout.xy[node.children[-1]][1] * sy)
+        elif node.parent is not None:
+            path.moveTo(px(layout.xy[node.parent]))
+            path.lineTo(px(layout.xy[i]))
+        if path.isEmpty():
+            continue
+        item = _BranchItem(path)
+        item.setPen(pen_for(i))
+        item.setData(ROLE_NODE, i)
+        scene.addItem(item)
+
+    # --- collapsed clades: triangles ------------------------------------------
+    for i, ci in info.items():
+        base = px(layout.xy[i])
+        length = ci.depth * sx
+        half = row_h * 0.42
+        if radial:
+            a = math.radians(layout.node_angle.get(i, 0.0))
+            dx, dy = math.cos(a), -math.sin(a)
+        else:
+            dx, dy = 1.0, 0.0
+        far = QPointF(base.x() + dx * length, base.y() + dy * length)
+        nx, ny = -dy, dx
+        tri = QPolygonF([base, QPointF(far.x() + nx * half, far.y() + ny * half),
+                         QPointF(far.x() - nx * half, far.y() - ny * half)])
+        item = QGraphicsPolygonItem(tri)
+        item.setPen(pen_for(i))
+        fill = QColor(color_for(i))
+        fill.setAlphaF(0.18)
+        item.setBrush(QBrush(fill))
+        item.setData(ROLE_NODE, i)
+        if not for_export:
+            item.setToolTip(f"Collapsed clade: {ci.n_tips} sequences\nRight-click to expand")
+        scene.addItem(item)
+
+    # --- tip labels -------------------------------------------------------------
     gap = fm.averageCharWidth() * 0.6
     if opts.tip_labels:
         for tip in shown.tips():
             node = shown.nodes[tip]
-            item = QGraphicsSimpleTextItem(node.name)
+            text = node.name
+            item = QGraphicsSimpleTextItem(text)
             item.setFont(font)
-            item.setBrush(brush)
+            item.setBrush(QBrush(color_for(tip)))
+            item.setData(ROLE_NODE, tip)
             if not for_export:
-                item.setToolTip(f"{node.name}\nBranch length: {tl.branch_length_text(node.length)}")
+                item.setToolTip(f"{text}\nBranch length: {tl.branch_length_text(node.length)}")
             w = item.boundingRect().width()
             h = item.boundingRect().height()
             p = px(layout.xy[tip])
+            extra = info[tip].depth * sx if tip in info else 0.0
             if layout.kind == tl.LAYOUT_RECTANGULAR:
-                item.setPos(p.x() + gap, p.y() - h / 2.0)
+                item.setPos(p.x() + extra + gap, p.y() - h / 2.0)
             else:
                 angle = layout.tip_angle[tip]
                 rad = math.radians(angle)
-                anchor = QPointF(p.x() + gap * math.cos(rad), p.y() - gap * math.sin(rad))
+                reach = extra + gap
+                anchor = QPointF(p.x() + reach * math.cos(rad), p.y() - reach * math.sin(rad))
                 rotation, flipped = tl.label_rotation(angle)
                 if flipped:
                     item.setTransformOriginPoint(w, h / 2.0)
@@ -175,6 +368,7 @@ def build_tree_scene(
                 item.setRotation(rotation)
             scene.addItem(item)
 
+    # --- branch labels ------------------------------------------------------------
     if opts.branch_labels != BRANCH_LABELS_NONE:
         label_brush = QBrush(muted)
         for node in shown.nodes:
@@ -202,6 +396,7 @@ def build_tree_scene(
                 item.setPos(p.x() - w / 2.0, p.y() - h)
             scene.addItem(item)
 
+    # --- scale bar ------------------------------------------------------------------
     if opts.scale_bar and shown.has_lengths:
         value = tl.nice_scale_length(layout.extent)
         if value > 0:
@@ -212,10 +407,12 @@ def build_tree_scene(
             bar = QPainterPath()
             bar.moveTo(x, y)
             bar.lineTo(x + length_px, y)
+            pen = QPen(ink, 1.2)
+            pen.setCosmetic(not for_export)
             scene.addPath(bar, pen)
             label = QGraphicsSimpleTextItem(tl.scale_text(value))
             label.setFont(small)
-            label.setBrush(brush)
+            label.setBrush(QBrush(ink))
             label.setPos(x + (length_px - label.boundingRect().width()) / 2.0, y + 2.0)
             scene.addItem(label)
 
@@ -228,7 +425,8 @@ def build_tree_scene(
 # --------------------------------------------------------------------------
 
 
-def export_tree(model: tl.TreeModel, opts: TreeViewOptions, out: Path, *, title: str = "") -> Path:
+def export_tree(model: tl.TreeModel | Display, opts: TreeViewOptions, out: Path, *,
+                title: str = "") -> Path:
     """Write the tree to ``out`` (.svg, .pdf or .png), black on white."""
     scene = QGraphicsScene()
     build_tree_scene(scene, model, opts, ink=QColor(0, 0, 0), muted=QColor(70, 70, 70),
@@ -250,8 +448,8 @@ def export_tree(model: tl.TreeModel, opts: TreeViewOptions, out: Path, *, title:
         finally:
             painter.end()
     elif ext == ".pdf":
-        from PySide6.QtGui import QPageLayout, QPdfWriter
         from PySide6.QtCore import QMarginsF
+        from PySide6.QtGui import QPageLayout, QPdfWriter
 
         writer = QPdfWriter(str(out))
         writer.setResolution(300)
@@ -293,7 +491,12 @@ def export_tree(model: tl.TreeModel, opts: TreeViewOptions, out: Path, *, title:
 
 
 class TreeCanvas(QGraphicsView):
-    """Zoom with the wheel or trackpad, drag to pan, double-click to fit."""
+    """Zoom with the wheel or trackpad, drag to pan, double-click to fit.
+
+    Clicking a branch, tip or collapsed clade reports its display node index."""
+
+    nodeClicked = Signal(int)                 # -1 = empty space
+    nodeContextMenu = Signal(int, object)     # index (-1 = empty), global QPoint
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -303,6 +506,14 @@ class TreeCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self._press = None
+
+    def node_at(self, view_pos) -> int:
+        for item in self.items(view_pos):
+            value = item.data(ROLE_NODE)
+            if value is not None:
+                return int(value)
+        return -1
 
     def zoom_by(self, factor: float) -> None:
         current = self.transform().m11()
@@ -334,6 +545,22 @@ class TreeCanvas(QGraphicsView):
         self.zoom_by(factor)
         event.accept()
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        self._press = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().mouseReleaseEvent(event)
+        pos = event.position().toPoint()
+        if (event.button() == Qt.MouseButton.LeftButton and self._press is not None
+                and (pos - self._press).manhattanLength() < 4):
+            self.nodeClicked.emit(self.node_at(pos))
+        self._press = None
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        self.nodeContextMenu.emit(self.node_at(event.pos()), event.globalPos())
+        event.accept()
+
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt API)
         self.fit(max_scale=4.0)
         event.accept()
@@ -342,15 +569,21 @@ class TreeCanvas(QGraphicsView):
 class TreePanel(QWidget):
     """Controls + canvas for one tree file."""
 
-    fileWritten = Signal(object)  # Path of an exported figure
+    fileWritten = Signal(object)  # Path of an exported figure or saved tree
 
     def __init__(self, path: Path | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("TreePanel")
         self._path: Path | None = None
+        self._file_model: tl.TreeModel | None = None
         self._model: tl.TreeModel | None = None
+        self._state = TreeViewState()
+        self._undo: list[tuple[tl.TreeModel, TreeViewState, TreeViewOptions]] = []
+        self._display: Display | None = None
+        self._selected: tuple[str, ...] | None = None
         self._opts = replace(_last_options)
         self._block = False
+        self._loaded_mtime: float | None = None
 
         self._layout_box = NoWheelComboBox(self)
         for label, value in (("Rectangular", tl.LAYOUT_RECTANGULAR),
@@ -378,10 +611,26 @@ class TreePanel(QWidget):
         fit_btn.setToolTip("Show the whole tree (or double-click the tree).")
         fit_btn.clicked.connect(lambda: self._canvas.fit(max_scale=4.0))
         export_btn = QPushButton("Export", self)
-        menu = QMenu(export_btn)
+        export_menu = QMenu(export_btn)
         for label, ext in EXPORT_FORMATS:
-            menu.addAction(f"{label}…", lambda checked=False, e=ext: self._export(e))
-        export_btn.setMenu(menu)
+            export_menu.addAction(f"{label}…", lambda checked=False, e=ext: self._export(e))
+        export_btn.setMenu(export_menu)
+
+        self._edit_btn = QPushButton("Edit", self)
+        self._edit_menu = QMenu(self._edit_btn)
+        self._edit_menu.aboutToShow.connect(self._fill_edit_menu)
+        self._edit_btn.setMenu(self._edit_menu)
+        self._undo_btn = QPushButton("Undo", self)
+        self._undo_btn.setToolTip("Undo the last edit (Cmd+Z / Ctrl+Z).")
+        self._undo_btn.clicked.connect(self.undo)
+        self._collapse_spin = NoWheelSpinBox(self)
+        self._collapse_spin.setRange(0, 100)
+        self._collapse_spin.setSpecialValueText("Off")
+        self._collapse_spin.setFixedWidth(70)
+        self._collapse_spin.editingFinished.connect(self._on_collapse_threshold)
+        save_btn = QPushButton("Save tree as…", self)
+        save_btn.setToolTip("Write the tree as shown (rerooted, collapsed…) to a new file.")
+        save_btn.clicked.connect(self._save_tree_as)
 
         row1 = QHBoxLayout()
         row1.setSpacing(6)
@@ -405,16 +654,33 @@ class TreePanel(QWidget):
         row2.addStretch(1)
         row2.addWidget(fit_btn)
         row2.addWidget(export_btn)
+        row3 = QHBoxLayout()
+        row3.setSpacing(6)
+        row3.addWidget(self._edit_btn)
+        row3.addWidget(make_help_button(self, "Editing the tree", EDIT_HELP))
+        row3.addWidget(self._undo_btn)
+        row3.addSpacing(8)
+        row3.addWidget(QLabel("Collapse below support:", self))
+        row3.addWidget(self._collapse_spin)
+        row3.addWidget(make_help_button(self, "Collapse below support", COLLAPSE_HELP))
+        row3.addStretch(1)
+        row3.addWidget(save_btn)
 
         self._canvas = TreeCanvas(self)
+        self._canvas.nodeClicked.connect(self._on_node_clicked)
+        self._canvas.nodeContextMenu.connect(self._on_context_menu)
         self._status = QLabel(self)
         self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        undo_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Undo), self)
+        undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        undo_shortcut.activated.connect(self.undo)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 4)
         layout.setSpacing(4)
         layout.addLayout(row1)
         layout.addLayout(row2)
+        layout.addLayout(row3)
         layout.addWidget(self._canvas, stretch=1)
         layout.addWidget(self._status)
 
@@ -424,6 +690,7 @@ class TreePanel(QWidget):
         for check in (self._tips_check, self._scale_check):
             check.toggled.connect(self._on_controls_changed)
         self._font_spin.valueChanged.connect(self._on_controls_changed)
+        self._update_undo_button()
 
         if path is not None:
             self.load_tree(path)
@@ -433,14 +700,23 @@ class TreePanel(QWidget):
     def options(self) -> TreeViewOptions:
         return replace(self._opts)
 
+    def state(self) -> TreeViewState:
+        return self._state.copy()
+
     def model(self) -> tl.TreeModel | None:
         return self._model
+
+    def display(self) -> Display | None:
+        return self._display
 
     def path(self) -> Path | None:
         return self._path
 
     def scene(self) -> QGraphicsScene:
         return self._canvas.scene()
+
+    def canvas(self) -> TreeCanvas:
+        return self._canvas
 
     def _apply_options_to_controls(self) -> None:
         self._block = True
@@ -453,6 +729,7 @@ class TreePanel(QWidget):
             self._tips_check.setChecked(self._opts.tip_labels)
             self._scale_check.setChecked(self._opts.scale_bar)
             self._font_spin.setValue(self._opts.font_pt)
+            self._collapse_spin.setValue(self._state.collapse_below)
         finally:
             self._block = False
 
@@ -476,25 +753,85 @@ class TreePanel(QWidget):
         )
         _last_options = replace(self._opts)
         self._redraw(refit=self._opts.layout != old_layout)
+        self._save_view_state()
 
     # ------------------------------------------------------------ loading
 
     def load_tree(self, path: Path) -> bool:
-        self._path = Path(path).expanduser().resolve()
+        new_path = Path(path).expanduser().resolve()
         try:
-            self._model = tl.read_tree_file(self._path)
+            mtime = new_path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if (self._model is not None and new_path == self._path and mtime is not None
+                and mtime == self._loaded_mtime):
+            # Same unchanged file opened again (e.g. the file list refreshed):
+            # keep unsaved edits and the undo history.
+            self._redraw(refit=False)
+            return True
+        self._path = new_path
+        self._loaded_mtime = mtime
+        self._undo.clear()
+        self._selected = None
+        self._state = TreeViewState()
+        try:
+            self._file_model = tl.read_tree_file(self._path)
         except (OSError, tl.TreeReadError) as exc:
-            self._model = None
+            self._file_model = self._model = self._display = None
             self._canvas.scene().clear()
             self._status.setText(f"Could not read {self._path.name}: {exc}")
+            self._update_undo_button()
             return False
+        self._model = self._file_model
+        self._load_view_state()
         if not self._model.has_support and self._opts.branch_labels == BRANCH_LABELS_SUPPORT:
-            self._block = True
-            self._branch_box.setCurrentIndex(self._branch_box.findData(BRANCH_LABELS_NONE))
-            self._block = False
             self._opts = replace(self._opts, branch_labels=BRANCH_LABELS_NONE)
+        self._apply_options_to_controls()
+        self._update_undo_button()
         self._redraw(refit=True)
         return True
+
+    def _load_view_state(self) -> None:
+        if self._path is None:
+            return
+        try:
+            data = json.loads(view_state_path(self._path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        opts = data.get("options") or {}
+        known = {k: v for k, v in opts.items() if k in TreeViewOptions.__dataclass_fields__}
+        try:
+            self._opts = replace(TreeViewOptions(), **known)
+        except TypeError:
+            pass
+        self._state.collapsed = {tuple(k) for k in data.get("collapsed", []) if k}
+        self._state.colors = {tuple(c["tips"]): str(c["color"])
+                              for c in data.get("colors", []) if c.get("tips") and c.get("color")}
+        sub = data.get("subtree")
+        self._state.subtree = tuple(sub) if sub else None
+        try:
+            self._state.collapse_below = max(0, min(100, int(data.get("collapse_below", 0))))
+        except (TypeError, ValueError):
+            self._state.collapse_below = 0
+
+    def _save_view_state(self) -> None:
+        """Remember colours, collapsed clades and view settings for this tree."""
+        if self._path is None or self._model is None:
+            return
+        data = {
+            "version": 1,
+            "options": asdict(self._opts),
+            "collapsed": [list(k) for k in sorted(self._state.collapsed)],
+            "colors": [{"tips": list(k), "color": c} for k, c in sorted(self._state.colors.items())],
+            "subtree": list(self._state.subtree) if self._state.subtree else None,
+            "collapse_below": self._state.collapse_below,
+        }
+        try:
+            view_state_path(self._path).write_text(json.dumps(data, indent=1), encoding="utf-8")
+        except OSError:
+            pass  # read-only folder: the view still works, it is just not remembered
+
+    # ------------------------------------------------------------ drawing
 
     def _palette_colors(self) -> tuple[QColor, QColor]:
         pal = self.palette()
@@ -508,16 +845,33 @@ class TreePanel(QWidget):
             return
         ink, muted = self._palette_colors()
         self._canvas.setBackgroundBrush(self.palette().color(QPalette.ColorRole.Base))
-        build_tree_scene(self._canvas.scene(), self._model, self._opts, ink=ink, muted=muted)
+        self._display = make_display(self._model, self._opts, self._state)
+        build_tree_scene(self._canvas.scene(), self._display, self._opts, ink=ink, muted=muted,
+                         selected=self._selected)
         if refit:
             self._canvas.fit(max_scale=1.0)
-        m = self._model
+        self._update_status()
+
+    def _update_status(self, message: str = "") -> None:
+        m, d = self._model, self._display
+        if m is None or d is None:
+            return
         parts = [f"{m.n_tips} tips", f"{m.n_internal} internal nodes"]
         if not m.has_lengths:
             parts.append("no branch lengths in the file")
         if m.has_support and self._opts.branch_labels == BRANCH_LABELS_SUPPORT:
             if any("/" in n.support for n in m.nodes):
                 parts.append("support: SH-aLRT/UFBoot")
+        if d.n_contracted:
+            parts.append(f"{d.n_contracted} weak branches collapsed")
+        if self._state.subtree:
+            parts.append(f"showing one clade ({len(self._state.subtree)} tips)")
+        if self._state.edited:
+            parts.append(f"tree {self._state.edited}: use Save tree as… to keep it")
+        if self._selected:
+            parts.append(f"selected: {len(self._selected)} tips")
+        if message:
+            parts.append(message)
         self._status.setText(" · ".join(parts))
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
@@ -525,10 +879,272 @@ class TreePanel(QWidget):
         if self._model is not None:
             self._canvas.fit(max_scale=1.0)
 
+    # ------------------------------------------------------------ selection and menus
+
+    def _key_for(self, index: int) -> tuple[str, ...] | None:
+        if self._display is None or index < 0 or index >= len(self._display.keys):
+            return None
+        return self._display.keys[index]
+
+    def _on_node_clicked(self, index: int) -> None:
+        key = self._key_for(index)
+        self._selected = None if key == self._selected else key
+        self._redraw(refit=False)
+
+    def select_clade(self, key: tuple[str, ...] | None) -> None:
+        self._selected = tuple(sorted(key)) if key else None
+        self._redraw(refit=False)
+
+    def _is_collapsed(self, key) -> bool:
+        return key in self._state.collapsed
+
+    def _add_clade_actions(self, menu: QMenu, key: tuple[str, ...] | None) -> None:
+        d = self._display
+        idx = d.keys.index(key) if (d is not None and key in d.keys) else -1
+        node = d.model.nodes[idx] if idx >= 0 else None
+        is_root = node is not None and node.parent is None
+        is_clade = node is not None and (not node.is_tip or idx in d.info)
+        is_internal = node is not None and not node.is_tip
+        label = "branch" if node is None or not node.is_tip or idx in d.info else f"“{node.name}”"
+        act = menu.addAction(f"Reroot on this {label}", lambda: self.reroot_at(key))
+        act.setEnabled(node is not None and not is_root and not self._state.subtree)
+        act = menu.addAction("Swap branches", lambda: self.swap_at(key))
+        act.setEnabled(is_internal)
+        if key is not None and self._is_collapsed(key):
+            menu.addAction("Expand clade", lambda: self.toggle_collapse(key))
+        else:
+            act = menu.addAction("Collapse clade", lambda: self.toggle_collapse(key))
+            act.setEnabled(is_internal and not is_root)
+        act = menu.addAction("Show only this clade", lambda: self.show_only(key))
+        act.setEnabled(is_clade and not is_root)
+        act = menu.addAction("Colour clade…", lambda: self._choose_color(key))
+        act.setEnabled(node is not None)
+        if key is not None and key in self._state.colors:
+            menu.addAction("Remove colour", lambda: self.set_clade_color(key, None))
+
+    def _add_tree_actions(self, menu: QMenu) -> None:
+        act = menu.addAction("Midpoint root", self.midpoint_root)
+        act.setEnabled(self._model is not None and not self._state.subtree)
+        act = menu.addAction("Back to full tree", self.full_tree)
+        act.setEnabled(bool(self._state.subtree))
+        act = menu.addAction("Expand all", self.expand_all)
+        act.setEnabled(bool(self._state.collapsed))
+        act = menu.addAction("Remove all colours", self.clear_colors)
+        act.setEnabled(bool(self._state.colors))
+        menu.addSeparator()
+        act = menu.addAction("Undo", self.undo)
+        act.setEnabled(bool(self._undo))
+        menu.addAction("Save tree as…", self._save_tree_as)
+
+    def _fill_edit_menu(self) -> None:
+        menu = self._edit_menu
+        menu.clear()
+        if self._selected:
+            title = menu.addAction(f"Selected clade ({len(self._selected)} tips)")
+            title.setEnabled(False)
+            self._add_clade_actions(menu, self._selected)
+        else:
+            hint = menu.addAction("Click a branch to select it")
+            hint.setEnabled(False)
+        menu.addSeparator()
+        self._add_tree_actions(menu)
+
+    def _on_context_menu(self, index: int, global_pos) -> None:
+        if self._model is None:
+            return
+        menu = QMenu(self)
+        key = self._key_for(index)
+        if key is not None:
+            self._selected = key
+            self._redraw(refit=False)
+            self._add_clade_actions(menu, key)
+            menu.addSeparator()
+        self._add_tree_actions(menu)
+        menu.exec(global_pos)
+
+    # ------------------------------------------------------------ edits
+
+    def _push_undo(self) -> None:
+        if self._model is not None:
+            self._undo.append((self._model, self._state.copy(), replace(self._opts)))
+            del self._undo[:-50]
+        self._update_undo_button()
+
+    def _update_undo_button(self) -> None:
+        self._undo_btn.setEnabled(bool(self._undo))
+
+    def _after_edit(self, message: str = "", *, refit: bool = False) -> None:
+        self._update_undo_button()
+        self._redraw(refit=refit)
+        if message:
+            self._update_status(message)
+        self._save_view_state()
+
+    def undo(self) -> None:
+        if not self._undo:
+            return
+        self._model, self._state, self._opts = self._undo.pop()
+        self._apply_options_to_controls()
+        self._after_edit("undone")
+
+    def _node_in_model(self, key) -> int | None:
+        if self._model is None or key is None:
+            return None
+        return te.find_clade(self._model, key)
+
+    def reroot_at(self, key) -> None:
+        idx = self._node_in_model(key)
+        if idx is None or idx == 0:
+            return
+        self._push_undo()
+        self._model = te.reroot(self._model, idx)
+        self._state.edited = "rerooted"
+        self._after_edit("rerooted", refit=True)
+
+    def midpoint_root(self) -> None:
+        if self._model is None:
+            return
+        self._push_undo()
+        self._model = te.midpoint_root(self._model)
+        self._state.edited = "rerooted"
+        self._after_edit("midpoint-rooted", refit=True)
+
+    def swap_at(self, key) -> None:
+        idx = self._node_in_model(key)
+        if idx is None or self._model.nodes[idx].is_tip:
+            return
+        self._push_undo()
+        self._model = te.swap_children(self._model, idx)
+        if self._opts.order != tl.ORDER_FILE:
+            # a sorted order would undo the swap right away
+            self._opts = replace(self._opts, order=tl.ORDER_FILE)
+            self._apply_options_to_controls()
+        self._state.edited = self._state.edited or "edited"
+        self._after_edit("branches swapped")
+
+    def toggle_collapse(self, key) -> None:
+        if key is None:
+            return
+        self._push_undo()
+        if key in self._state.collapsed:
+            self._state.collapsed.discard(key)
+            self._after_edit("expanded")
+        else:
+            self._state.collapsed.add(key)
+            self._after_edit("collapsed")
+
+    def expand_all(self) -> None:
+        if not self._state.collapsed:
+            return
+        self._push_undo()
+        self._state.collapsed.clear()
+        self._after_edit("all clades expanded")
+
+    def show_only(self, key) -> None:
+        if key is None:
+            return
+        self._push_undo()
+        self._state.subtree = key
+        self._selected = None
+        self._after_edit("showing one clade", refit=True)
+
+    def full_tree(self) -> None:
+        if not self._state.subtree:
+            return
+        self._push_undo()
+        self._state.subtree = None
+        self._after_edit("full tree", refit=True)
+
+    def set_clade_color(self, key, color: str | None) -> None:
+        if key is None:
+            return
+        self._push_undo()
+        if color:
+            self._state.colors[key] = QColor(color).name()
+        else:
+            self._state.colors.pop(key, None)
+        self._after_edit("colour set" if color else "colour removed")
+
+    def clear_colors(self) -> None:
+        if not self._state.colors:
+            return
+        self._push_undo()
+        self._state.colors.clear()
+        self._after_edit("colours removed")
+
+    def _choose_color(self, key) -> None:
+        start = QColor(self._state.colors.get(key, "#d62728"))
+        color = QColorDialog.getColor(start, self, "Colour clade")
+        if color.isValid():
+            self.set_clade_color(key, color.name())
+
+    def set_collapse_below(self, value: int) -> None:
+        value = max(0, min(100, int(value)))
+        if value == self._state.collapse_below:
+            return
+        self._push_undo()
+        self._state.collapse_below = value
+        self._block = True
+        self._collapse_spin.setValue(value)
+        self._block = False
+        self._after_edit()
+
+    def _on_collapse_threshold(self) -> None:
+        if not self._block:
+            self.set_collapse_below(self._collapse_spin.value())
+
+    # ------------------------------------------------------------ saving
+
+    def tree_to_save(self) -> tl.TreeModel | None:
+        """The tree as shown: rerooted / swapped, weak branches collapsed, one
+        clade if only one is shown, in the chosen order (collapsed triangles are
+        a drawing aid and keep all their tips)."""
+        if self._model is None:
+            return None
+        m, _n = tree_structure(self._model, self._state)
+        return tl.ordered(m, self._opts.order)
+
+    def save_tree(self, out: Path) -> Path:
+        tree = self.tree_to_save()
+        if tree is None:
+            raise ValueError("There is no tree to save.")
+        out.write_text(te.to_newick(tree) + "\n", encoding="utf-8")
+        return out
+
+    def _save_tree_as(self) -> None:
+        if self._model is None or self._path is None:
+            QMessageBox.information(self, "Save tree", "There is no tree to save.")
+            return
+        edited = self._state.edited
+        if self._state.subtree:
+            edited = f"{edited}_clade" if edited else "clade"
+        if self._state.collapse_below and not self._state.subtree:
+            edited = f"{edited}_collapsed" if edited else "collapsed"
+        default = saved_tree_default_path(self._path, edited)
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "Save tree as", str(default), "Newick tree (*.treefile *.nwk *.tree)"
+        )
+        if not chosen:
+            return
+        out = Path(chosen)
+        if out.resolve() == self._path:
+            QMessageBox.warning(self, "Save tree",
+                                "Choose a new file name: the original tree is never overwritten.")
+            return
+        if not tl.is_tree_file(out):
+            out = out.with_name(out.name + ".treefile")
+        try:
+            self.save_tree(out)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Save tree", f"Could not write {out.name}:\n{exc}")
+            return
+        self._update_status(f"saved {out.name}")
+        self.fileWritten.emit(out)
+
     # ------------------------------------------------------------ export
 
     def _export(self, ext: str) -> None:
-        if self._model is None or self._path is None:
+        if self._display is None or self._path is None:
             QMessageBox.information(self, "Export tree", "There is no tree to export.")
             return
         default = export_default_path(self._path, self._opts.layout, ext)
@@ -542,9 +1158,9 @@ class TreePanel(QWidget):
         if out.suffix.lower() != f".{ext}":
             out = out.with_name(out.name + f".{ext}")
         try:
-            export_tree(self._model, self._opts, out, title=self._path.name)
+            export_tree(self._display, self._opts, out, title=self._path.name)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Export tree", f"Could not write {out.name}:\n{exc}")
             return
-        self._status.setText(f"Saved {out.name}")
+        self._update_status(f"saved {out.name}")
         self.fileWritten.emit(out)

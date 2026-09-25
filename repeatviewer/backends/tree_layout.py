@@ -219,6 +219,7 @@ class Layout:
     branch_mid: dict[int, tuple[float, float]]  # middle of each node's own branch
     extent: float                          # max root-to-tip distance
     n_rows: int                            # rectangular: number of tip rows
+    node_angle: dict[int, float] = field(default_factory=dict)  # circular / radial, degrees
 
 
 def _rectangular(model: TreeModel, depth: list[float]) -> Layout:
@@ -276,7 +277,7 @@ def _circular(model: TreeModel, depth: list[float]) -> Layout:
             if depth[i] > 0 and a1 > a0:
                 arcs.append(Arc(depth[i], a0, a1 - a0))
     return Layout(LAYOUT_CIRCULAR, xy, lines, arcs, {t: angle[t] for t in tips}, mid,
-                  max(depth), n)
+                  max(depth), n, dict(enumerate(angle)))
 
 
 def _radial(model: TreeModel) -> Layout:
@@ -308,16 +309,24 @@ def _radial(model: TreeModel) -> Layout:
     tips = model.tips()
     extent = max(math.hypot(x, y) for x, y in xy)
     return Layout(LAYOUT_RADIAL, xy, lines, [], {t: direction[t] for t in tips}, mid,
-                  extent, len(tips))
+                  extent, len(tips), dict(enumerate(direction)))
 
 
-def compute_layout(model: TreeModel, kind: str = LAYOUT_RECTANGULAR) -> Layout:
+def compute_layout(model: TreeModel, kind: str = LAYOUT_RECTANGULAR,
+                   extra_depth: dict[int, float] | None = None) -> Layout:
+    """Coordinates for ``kind``. ``extra_depth`` reserves room beyond some tips
+    (collapsed clades drawn as triangles) so the drawing scale includes them."""
     if kind == LAYOUT_RADIAL:
-        return _radial(model)
+        layout = _radial(model)
+        if extra_depth:
+            layout.extent = max(layout.extent, max(
+                math.hypot(*layout.xy[i]) + d for i, d in extra_depth.items()))
+        return layout
     depth = depths(model)
-    if kind == LAYOUT_CIRCULAR:
-        return _circular(model, depth)
-    return _rectangular(model, depth)
+    layout = _circular(model, depth) if kind == LAYOUT_CIRCULAR else _rectangular(model, depth)
+    if extra_depth:
+        layout.extent = max(layout.extent, max(depth[i] + d for i, d in extra_depth.items()))
+    return layout
 
 
 def label_rotation(angle_deg: float) -> tuple[float, bool]:

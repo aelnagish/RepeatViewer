@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QGraphicsSimpleTextItem
 
+from repeatviewer.backends import tree_edit as te
 from repeatviewer.backends import tree_layout as tl
 
 IQTREE = "((A:0.1,B:0.2)92/97:0.05,(C:0.3,(D:0.1,E:0.1)100:0.2)88/99:0.1,F:0.4);\n"
@@ -90,3 +91,154 @@ def test_preview_panel_opens_trees_in_the_tree_view(qapp, tree_file):
     page = FilePreviewPage(tree_file)
     assert page.is_tree_preview_active()
     assert page._tree_panel.model().n_tips == 6
+
+
+# --------------------------------------------------------------------------
+# A2: editing in the viewer
+# --------------------------------------------------------------------------
+
+
+def _panel(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel, TreeViewOptions
+
+    panel = TreePanel(tree_file)
+    panel.set_options(TreeViewOptions())
+    return panel
+
+
+def _tip_order(panel):
+    d = panel.display().model
+    return [d.nodes[t].name for t in d.tips()]
+
+
+def _branch_items(panel):
+    from repeatviewer.widgets.tree_view import _BranchItem
+
+    return [i for i in panel.scene().items() if isinstance(i, _BranchItem)]
+
+
+def test_clicking_a_branch_selects_its_clade(qapp, tree_file):
+    panel = _panel(qapp, tree_file)
+    canvas = panel.canvas()
+    canvas.resize(800, 600)
+    item = next(i for i in panel.scene().items()
+                if isinstance(i, QGraphicsSimpleTextItem) and i.text() == "D")
+    view_pos = canvas.mapFromScene(item.sceneBoundingRect().center())
+    idx = canvas.node_at(view_pos)
+    assert panel.display().keys[idx] == ("D",)
+    panel._on_node_clicked(idx)
+    assert panel._selected == ("D",)
+    panel._on_node_clicked(idx)            # clicking again clears
+    assert panel._selected is None
+
+
+def test_reroot_midpoint_and_undo(qapp, tree_file):
+    panel = _panel(qapp, tree_file)
+    before = te.to_newick(panel.model())
+    panel.reroot_at(("F",))
+    root_kids = [panel.model().nodes[k].name for k in panel.model().root.children]
+    assert "F" in root_kids
+    assert panel.state().edited == "rerooted"
+    panel.midpoint_root()
+    panel.undo()
+    panel.undo()
+    assert te.to_newick(panel.model()) == before
+    assert not panel._undo
+
+
+def test_swap_collapse_expand(qapp, tree_file):
+    panel = _panel(qapp, tree_file)
+    order = _tip_order(panel)
+    panel.swap_at(("A", "B"))
+    assert _tip_order(panel)[:2] == ["B", "A"] and order[:2] == ["A", "B"]
+    panel.toggle_collapse(("C", "D", "E"))
+    d = panel.display()
+    assert d.model.n_tips == 4 and len(d.info) == 1
+    assert "C + 2 more" in _texts(panel)
+    panel.toggle_collapse(("C", "D", "E"))
+    assert panel.display().model.n_tips == 6
+
+
+def test_colour_and_show_only_this_clade(qapp, tree_file):
+    panel = _panel(qapp, tree_file)
+    panel.set_clade_color(("C", "D", "E"), "#d62728")
+    red = [i for i in _branch_items(panel) if i.pen().color().name() == "#d62728"]
+    assert len(red) >= 5                   # the clade's branches, not the rest
+    panel.show_only(("C", "D", "E"))
+    assert sorted(_tip_order(panel)) == ["C", "D", "E"]
+    panel.full_tree()
+    assert panel.display().model.n_tips == 6
+
+
+def test_collapse_below_support(qapp, tree_file):
+    panel = _panel(qapp, tree_file)
+    panel.set_collapse_below(98)           # 92/97 goes (UFBoot 97)
+    assert panel.display().n_contracted == 1
+    panel.set_collapse_below(0)
+    assert panel.display().n_contracted == 0
+
+
+def test_view_is_remembered_next_to_the_tree(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import TreePanel, view_state_path
+
+    panel = _panel(qapp, tree_file)
+    panel.set_clade_color(("A", "B"), "#1f77b4")
+    panel.toggle_collapse(("C", "D", "E"))
+    sidecar = view_state_path(tree_file)
+    assert sidecar.name == ".sat.fa_tree.treefile.view.json"   # hidden: not in the file list
+    again = TreePanel(tree_file)
+    assert again.state().colors == {("A", "B"): "#1f77b4"}
+    assert again.state().collapsed == {("C", "D", "E")}
+
+
+def test_save_tree_as_writes_a_new_file(qapp, tree_file):
+    from repeatviewer.widgets.tree_view import saved_tree_default_path
+
+    panel = _panel(qapp, tree_file)
+    original = tree_file.read_text()
+    panel.reroot_at(("F",))
+    out = saved_tree_default_path(tree_file, panel.state().edited)
+    assert out.name == "sat.fa_tree.treefile_rerooted.treefile"   # rule 1
+    panel.save_tree(out)
+    saved = tl.read_tree_text(out.read_text())
+    assert "F" in [saved.nodes[k].name for k in saved.root.children]
+    assert tree_file.read_text() == original                       # never overwritten
+
+
+def test_export_shows_collapsed_clade(qapp, tree_file, tmp_path):
+    from repeatviewer.widgets.tree_view import export_tree
+
+    panel = _panel(qapp, tree_file)
+    panel.toggle_collapse(("C", "D", "E"))
+    out = tmp_path / "x.svg"
+    export_tree(panel.display(), panel.options(), out)
+    svg = out.read_text()
+    assert "C + 2 more" in svg and ">D<" not in svg
+
+
+def test_context_menu_actions(qapp, tree_file):
+    from PySide6.QtWidgets import QMenu
+
+    panel = _panel(qapp, tree_file)
+    menu = QMenu()
+    panel._add_clade_actions(menu, ("C", "D", "E"))
+    enabled = {a.text(): a.isEnabled() for a in menu.actions() if a.text()}
+    assert enabled["Reroot on this branch"] and enabled["Swap branches"]
+    assert enabled["Collapse clade"] and enabled["Show only this clade"]
+    tip_menu = QMenu()
+    panel._add_clade_actions(tip_menu, ("F",))
+    tip = {a.text(): a.isEnabled() for a in tip_menu.actions() if a.text()}
+    assert tip["Reroot on this “F”"] and not tip["Swap branches"] and not tip["Collapse clade"]
+
+
+def test_reopening_the_same_unchanged_tree_keeps_unsaved_edits(qapp, tree_file):
+    import os
+
+    panel = _panel(qapp, tree_file)
+    panel.reroot_at(("F",))
+    panel.load_tree(tree_file)             # e.g. the file list refreshed
+    assert panel.state().edited == "rerooted" and panel._undo
+    st = tree_file.stat()
+    os.utime(tree_file, (st.st_atime, st.st_mtime + 5))   # the file changed on disk
+    panel.load_tree(tree_file)
+    assert panel.state().edited == "" and not panel._undo
