@@ -113,12 +113,12 @@ def test_support_choices_write_the_replicates(qapp, tmp_path):
 
 def test_root_and_outgroup(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path)
-    assert not dlg._outgroup_btn.isEnabled() and not _shown(dlg, dlg._outgroup_note)
+    assert not dlg._outgroup_btn.isEnabled()
     dlg._root_mode.setCurrentIndex(dlg._root_mode.findData(TREE_ROOT_OUTGROUP))
-    assert dlg._outgroup_btn.isEnabled() and "None chosen" in dlg._outgroup_note.text()
+    assert dlg._outgroup_btn.isEnabled() and dlg._outgroup_btn.text() == "Outgroup…"
     dlg._outgroup = ["m3"]
     dlg._sync()
-    assert "1 chosen: m3" in dlg._outgroup_note.text()
+    assert dlg._outgroup_btn.text() == "Outgroup (1)…" and dlg._outgroup_btn.toolTip() == "m3"
     assert dlg.options().outgroup == ["m3"] and dlg.options().root_mode == TREE_ROOT_OUTGROUP
     dlg._root_mode.setCurrentIndex(dlg._root_mode.findData(TREE_ROOT_MIDPOINT))
     assert dlg.options().root_mode == TREE_ROOT_MIDPOINT
@@ -144,7 +144,8 @@ def test_question_mark_help(qapp, tmp_path):
 
     dlg = _dialog(qapp, tmp_path)
     radios = [r.text() for r in dlg.findChildren(QRadioButton)]
-    assert "Maximum likelihood (IQ-TREE)" in radios and "Minimum evolution (FastME)" in radios
+    assert any(r.startswith("Maximum likelihood (IQ-TREE)") for r in radios)
+    assert any(r.startswith("Minimum evolution (FastME)") for r in radios)
     assert not [lab for lab in dlg.findChildren(QLabel) if lab.text() == "ⓘ"]
     helps = [b for b in dlg.findChildren(QToolButton) if b.text() == "?"]
     # Sequences, REXdb, Alignment, Monomers, Method, Branch support, Root,

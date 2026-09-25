@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -173,6 +173,24 @@ FASTME_SUPPORT = (
 )
 
 
+class _FitTabs(QTabWidget):
+    """Tabs as tall as the tab on show (not the tallest tab), as wide as the widest."""
+
+    def _fit(self, page_hint: QSize) -> QSize:
+        full = super().sizeHint()
+        biggest = QSize(0, 0)
+        for i in range(self.count()):
+            biggest = biggest.expandedTo(self.widget(i).sizeHint())
+        return QSize(full.width(), full.height() - biggest.height() + page_hint.height())
+
+    def sizeHint(self) -> QSize:
+        page = self.currentWidget()
+        return self._fit(page.sizeHint()) if page is not None else super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+
 def _row(parent: QWidget, *widgets: QWidget, stretch: bool = True) -> QWidget:
     row = QWidget(parent)
     lay = QHBoxLayout(row)
@@ -293,8 +311,6 @@ class TreeParamsDialog(QDialog):
             eb.addWidget(radio)
         if not any(b.isChecked() for b in self._engine_buttons.values()):
             self._engine_buttons[TREE_ENGINE_IQTREE].setChecked(True)
-        self._engine_status = _note("", self)
-        self._engine_status.setStyleSheet("color: #b00020;")
 
         self._support_iq = self._support_combo(
             IQ_SUPPORT, f"{opts.alrt},{opts.ufboot}",
@@ -315,8 +331,6 @@ class TreeParamsDialog(QDialog):
         self._set_combo(self._root_mode, opts.root_mode)
         self._outgroup_btn = QPushButton("Outgroup…", self)
         self._outgroup_btn.clicked.connect(self._choose_outgroup)
-        self._outgroup_note = _note("", self)
-        self._outgroup_note.setWordWrap(False)
 
         # --- more options ---------------------------------------------------------
         self._min_cov = QSpinBox(self)
@@ -358,8 +372,8 @@ class TreeParamsDialog(QDialog):
             w.setFixedWidth(_NUMBER_WIDTH)
         for w in (self._seq_mode, self._align_mode, self._model, self._mask):
             w.setFixedWidth(_FIELD_WIDTH)
-        self._root_mode.setFixedWidth(_FIELD_WIDTH - 106)
-        self._outgroup_btn.setFixedWidth(100)
+        self._root_mode.setFixedWidth(_FIELD_WIDTH - 136)
+        self._outgroup_btn.setFixedWidth(130)
 
         self._more_toggle = QToolButton(self)
         self._more_toggle.setText("More options")
@@ -398,10 +412,8 @@ class TreeParamsDialog(QDialog):
         mr.addWidget(method_help, 0, Qt.AlignmentFlag.AlignTop)
         mr.addStretch(1)
         f.addRow("Method:", method_row)
-        f.addRow("", self._engine_status)
         f.addRow("Branch support:", _row(self, self._support_stack, _help(self, "Branch support", SUPPORT_INFO)))
         f.addRow("Root:", _row(self, self._root_mode, self._outgroup_btn, _help(self, "Root", ROOT_INFO)))
-        f.addRow("", self._outgroup_note)
         f.addRow(self._more_toggle)
         self._more_rows = [
             _row(self, self._min_cov, self._cov_ref, _help(self, "Skip fragments", FRAG_INFO)),
@@ -455,9 +467,11 @@ class TreeParamsDialog(QDialog):
         ol.addWidget(exe_box)
         ol.addStretch(1)
 
-        self._tabs = QTabWidget(self)
+        self._tabs = _FitTabs(self)
         self._tabs.addTab(tree_tab, "Tree")
         self._tabs.addTab(options_tab, "Options")
+        # the window fits the tab on show, not the largest tab: no empty rows or columns
+        self._tabs.currentChanged.connect(lambda _i: (self._tabs.updateGeometry(), self.adjustSize()))
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
@@ -573,18 +587,16 @@ class TreeParamsDialog(QDialog):
             {TREE_ENGINE_IQTREE: 0, TREE_ENGINE_FASTME: 1}.get(engine, 2))
         outgroup = self._root_mode.currentData() == TREE_ROOT_OUTGROUP
         self._outgroup_btn.setEnabled(outgroup)
-        if outgroup:
-            if self._outgroup:
-                shown = ", ".join(self._outgroup[:3]) + ("…" if len(self._outgroup) > 3 else "")
-                self._outgroup_note.setText(f"{len(self._outgroup)} chosen: {shown}")
-            else:
-                self._outgroup_note.setText("None chosen yet: click Outgroup…")
-        self._set_row(self._outgroup_note, outgroup)
-        exe = tb.engine_executable(engine, system_path_only=self._use_system_path.isChecked())
-        if not exe:
-            self._engine_status.setText(
-                "Not found. " + tb.engine_install_hint(engine).replace("\n", " "))
-        self._set_row(self._engine_status, not exe)
+        n = len(self._outgroup)
+        self._outgroup_btn.setText(f"Outgroup ({n})…" if n else "Outgroup…")
+        self._outgroup_btn.setToolTip(", ".join(self._outgroup) if n else
+                                      "Choose the sequences that lie outside the rest.")
+        system = self._use_system_path.isChecked()
+        for value, radio in self._engine_buttons.items():
+            found = tb.engine_executable(value, system_path_only=system)
+            radio.setText(tb.ENGINE_LABELS[value] + ("" if found else " (not found)"))
+            radio.setToolTip(f"Found: {found}" if found else
+                             "Not found. " + tb.engine_install_hint(value).replace("\n", " "))
         more = self._more_toggle.isChecked()
         visible = {
             0: more, 2: more and iq, 3: more and not protein and not rt, 4: more and iq,
@@ -600,14 +612,17 @@ class TreeParamsDialog(QDialog):
         from repeatviewer.backends.sequence_aligner import mafft_command
 
         system = self._use_system_path.isChecked()
-        lines = []
+        lines, paths = [], []
         for engine, name in ((TREE_ENGINE_IQTREE, "IQ-TREE"), (TREE_ENGINE_FASTME, "FastME"),
                              (TREE_ENGINE_FASTTREE, "FastTree")):
             exe = tb.engine_executable(engine, system_path_only=system)
-            lines.append(f"{name}: {exe or 'not found'}")
+            lines.append(f"{name}: {'found' if exe else 'not found'}")
+            paths.append(f"{name}: {exe or 'not found'}")
         cmd = mafft_command(use_system_mafft=system)
-        lines.append(f"MAFFT: {cmd[0][0] if cmd else 'not found'}")
+        lines.append(f"MAFFT: {'found' if cmd else 'not found'}")
+        paths.append(f"MAFFT: {cmd[0][0] if cmd else 'not found'}")
         self._found.setText("\n".join(lines))
+        self._found.setToolTip("\n".join(paths))
 
     def _restore_defaults(self) -> None:
         d = TreeOptions()
