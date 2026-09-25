@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QTabWidget,
@@ -33,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends import tree_builder as tb
+from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.job_options import (
     TREE_COVERAGE_LONGEST,
     TREE_COVERAGE_MEDIAN,
@@ -73,55 +73,37 @@ def _form(parent: QWidget) -> QFormLayout:
 
 
 MAFFT_INFO = (
-    "<b>L-INS-i</b> — most accurate; copies share one alignable core but differ "
+    "<b>L-INS-i</b>: most accurate; copies share one alignable core but differ "
     "at the ends (e.g. truncated TE copies).<br>"
-    "<b>G-INS-i</b> — sequences alignable over their full length (e.g. monomers "
+    "<b>G-INS-i</b>: sequences alignable over their full length (e.g. monomers "
     "of one satellite family).<br>"
-    "<b>E-INS-i</b> — conserved blocks separated by long unalignable regions.<br>"
+    "<b>E-INS-i</b>: conserved blocks separated by long unalignable regions.<br>"
     "The INS-i methods suit up to ~200 sequences; above that use <b>FFT-NS-2</b>."
 )
 METHOD_INFO = (
-    "<b>Maximum likelihood (IQ-TREE)</b> — model-based inference with "
-    "SH-aLRT / UFBoot2 support; the standard for publication.<br>"
-    "<b>Minimum evolution (FastME)</b> — distance-based (TN93); fast, with a "
-    "conservative bootstrap. Useful as a cross-check.<br>"
-    "<b>Approximate maximum likelihood (FastTree)</b> — for very large sets "
+    "<b>Maximum likelihood (IQ-TREE)</b>: model-based inference with "
+    "SH-aLRT / UFBoot2 support.<br>"
+    "<b>Minimum evolution (FastME)</b>: distance-based (TN93); fast, with a "
+    "conservative bootstrap.<br>"
+    "<b>Approximate maximum likelihood (FastTree)</b>: for very large sets "
     "(more than ~1,000 sequences)."
 )
 MODEL_INFO = (
-    "<b>ModelFinder</b> — tests the models and selects the best by BIC (recommended).<br>"
-    "<b>GTR</b> — all six substitution types at their own rate.<br>"
-    "<b>TN (TN93)</b> — two transition rates (A↔G, C↔T), one transversion rate.<br>"
-    "<b>HKY</b> — one transition and one transversion rate, unequal base frequencies.<br>"
-    "<b>K2P (K80)</b> — as HKY, with equal base frequencies.<br>"
-    "<b>LG</b> — protein model.<br>"
+    "<b>ModelFinder</b>: tests the models and selects the best by BIC "
+    "(Bayesian information criterion).<br>"
+    "<b>GTR</b>: all six substitution types at their own rate.<br>"
+    "<b>TN (TN93)</b>: two transition rates (A↔G, C↔T), one transversion rate.<br>"
+    "<b>HKY</b>: one transition and one transversion rate, unequal base frequencies.<br>"
+    "<b>K2P (K80)</b>: as HKY, with equal base frequencies.<br>"
+    "<b>LG</b>: protein model.<br>"
     "<b>+F</b> empirical base frequencies · <b>+G4</b> rate variation among sites "
     "(4 gamma categories)."
 )
 
 
 def _help_button(parent: QWidget, title: str, html_text: str) -> QToolButton:
-    """Round "?" help button, same look and behaviour as the other tool dialogs
-    (tool_dialogs ``_field_with_help``): hover shows the text, click opens it."""
-    button = QToolButton(parent)
-    button.setText("?")
-    button.setToolTip(f"<div style='max-width:420px'>{html_text}</div>")
-    button.setAutoRaise(False)
-    button.setFixedSize(22, 22)
-    button.setStyleSheet(
-        "QToolButton {"
-        "  border: 1px solid palette(mid);"
-        "  border-radius: 10px;"
-        "  background: palette(base);"
-        "  font-weight: 600;"
-        "  padding: 0px;"
-        "}"
-        "QToolButton:hover { background: palette(alternate-base); }"
-    )
-    button.clicked.connect(
-        lambda checked=False: QMessageBox.information(parent, title, html_text)
-    )
-    return button
+    """Shared round "?" help button (``widgets.help_button``)."""
+    return make_help_button(parent, title, html_text)
 
 
 def _with_info(field: QWidget, info: QWidget, parent: QWidget, *, top: bool = False) -> QWidget:
