@@ -73,11 +73,11 @@ def _form(parent: QWidget) -> QFormLayout:
 
 
 MAFFT_INFO = (
-    "<b>L-INS-i</b> — most accurate; copies share one alignable core but differ "
+    "<b>L-INS-i</b>: most accurate; copies share one alignable core but differ "
     "at the ends (e.g. truncated TE copies).<br>"
-    "<b>G-INS-i</b> — sequences alignable over their full length (e.g. monomers "
+    "<b>G-INS-i</b>: sequences alignable over their full length (e.g. monomers "
     "of one satellite family).<br>"
-    "<b>E-INS-i</b> — conserved blocks separated by long unalignable regions.<br>"
+    "<b>E-INS-i</b>: conserved blocks separated by long unalignable regions.<br>"
     "The INS-i methods suit up to ~200 sequences; above that use <b>FFT-NS-2</b>."
 )
 METHOD_INFO = (
