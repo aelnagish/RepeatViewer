@@ -6950,6 +6950,8 @@ class MainWindow(QMainWindow):
             return
         if self._plugin_run_dialog is not None and self._plugin_run_dialog.isVisible():
             return
+        if self._tree_trait_dialog_open():
+            return  # a click fills the trait dialog; keep the tree in Preview
 
         path = self._preview_path_from_item(current)
         if path is None:
@@ -7448,6 +7450,24 @@ class MainWindow(QMainWindow):
             self._sync_define_database_dialog_from_files(panel_path)
             self._sync_add_annotation_dialog_from_files(panel_path)
             self._sync_add_blast_database_dialog_from_files(panel_path)
+            self._sync_tree_trait_dialog_from_files(panel_path)
+
+    def _open_tree_panels(self):
+        from repeatviewer.widgets.preview_tabs import FilePreviewPage
+
+        for index in range(self._preview_tabs.count()):
+            page = self._preview_tabs.widget(index)
+            if isinstance(page, FilePreviewPage) and page.tree_panel() is not None:
+                yield page.tree_panel()
+
+    def _tree_trait_dialog_open(self) -> bool:
+        return any(panel.trait_dialog_open() for panel in self._open_tree_panels())
+
+    def _sync_tree_trait_dialog_from_files(self, clicked_path: Path) -> None:
+        """Tree view → Trait table dialog: a clicked file fills its path field."""
+        for panel in self._open_tree_panels():
+            if panel.apply_path_from_panel(clicked_path):
+                return
 
     def _on_file_double_clicked(self, item: FileListRow) -> None:
         raw = item.data(ROLE_PATH)

@@ -26,9 +26,11 @@ import math
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QBrush,
+    QDesktopServices,
+    QLinearGradient,
     QColor,
     QFont,
     QFontMetricsF,
@@ -44,6 +46,7 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QFileDialog,
@@ -63,6 +66,7 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.backends import tree_edit as te
 from repeatviewer.backends import tree_layout as tl
+from repeatviewer.backends import tree_traits as tt
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
@@ -105,6 +109,18 @@ EDIT_HELP = (
 )
 
 
+TRAITS_HELP = (
+    "<b>Colour tips by</b> a column of the trait table next to the tree "
+    "(<i>tree name</i>_traits.tsv): chromosome, tandem array, methylation, or any column "
+    "you add yourself in a spreadsheet.<br>"
+    "Text columns get distinct colour-blind-safe colours; number columns a colour scale "
+    "(low = purple, high = yellow). A legend is drawn next to the tree and is part of "
+    "every export.<br>"
+    "<b>Trait table → Create or update</b> fills the table from the sequence headers "
+    "(and a methylation file, if given)."
+)
+
+
 @dataclass
 class TreeViewOptions:
     layout: str = tl.LAYOUT_RECTANGULAR
@@ -124,10 +140,13 @@ class TreeViewState:
     subtree: tuple[str, ...] | None = None
     collapse_below: int = 0          # support threshold, 0 = off
     edited: str = ""                 # "", "rerooted" or "edited": the tree differs from the file
+    color_by: str = ""               # trait-table column colouring the tips ("" = none)
+    trait_settings: dict = field(default_factory=dict)  # methylation_file, array_gap
 
     def copy(self) -> "TreeViewState":
         return TreeViewState(set(self.collapsed), dict(self.colors), self.subtree,
-                             self.collapse_below, self.edited)
+                             self.collapse_below, self.edited, self.color_by,
+                             dict(self.trait_settings))
 
 
 @dataclass
@@ -139,6 +158,9 @@ class Display:
     keys: list[tuple[str, ...]]
     colors: list[str | None]
     n_contracted: int = 0
+    tip_colors: dict[int, str] = field(default_factory=dict)   # trait colour per tip
+    tip_notes: dict[int, str] = field(default_factory=dict)    # trait values for tooltips
+    legend: tt.ColourScale | None = None
 
 
 # The last settings used, so the next tree opens the same way (this session).
@@ -335,8 +357,28 @@ def build_tree_scene(
             item.setToolTip(f"Collapsed clade: {ci.n_tips} sequences\nRight-click to expand")
         scene.addItem(item)
 
-    # --- tip labels -------------------------------------------------------------
+    # --- trait dots at the tips ---------------------------------------------------
     gap = fm.averageCharWidth() * 0.6
+    dot = fm.height() * 0.62 if display.tip_colors else 0.0
+    for tip, color in display.tip_colors.items():
+        p = px(layout.xy[tip])
+        extra = info[tip].depth * sx if tip in info else 0.0
+        if radial:
+            a = math.radians(layout.tip_angle[tip])
+            dx, dy = math.cos(a), -math.sin(a)
+        else:
+            dx, dy = 1.0, 0.0
+        reach = extra + gap + dot / 2.0
+        cx, cy = p.x() + dx * reach, p.y() + dy * reach
+        circle = scene.addEllipse(QRectF(cx - dot / 2.0, cy - dot / 2.0, dot, dot),
+                                  QPen(QColor(color).darker(130), 0.6), QBrush(QColor(color)))
+        circle.setData(ROLE_NODE, tip)
+        if not for_export and tip in display.tip_notes:
+            circle.setToolTip(display.tip_notes[tip])
+    if dot:
+        gap += dot + gap
+
+    # --- tip labels -------------------------------------------------------------
     if opts.tip_labels:
         for tip in shown.tips():
             node = shown.nodes[tip]
@@ -346,7 +388,10 @@ def build_tree_scene(
             item.setBrush(QBrush(color_for(tip)))
             item.setData(ROLE_NODE, tip)
             if not for_export:
-                item.setToolTip(f"{text}\nBranch length: {tl.branch_length_text(node.length)}")
+                tip_text = f"{text}\nBranch length: {tl.branch_length_text(node.length)}"
+                if tip in display.tip_notes:
+                    tip_text += "\n" + display.tip_notes[tip]
+                item.setToolTip(tip_text)
             w = item.boundingRect().width()
             h = item.boundingRect().height()
             p = px(layout.xy[tip])
@@ -396,6 +441,10 @@ def build_tree_scene(
                 item.setPos(p.x() - w / 2.0, p.y() - h)
             scene.addItem(item)
 
+    # --- legend for the trait colours ------------------------------------------------
+    if display.legend is not None:
+        _draw_legend(scene, display.legend, font, small, ink, muted, for_export)
+
     # --- scale bar ------------------------------------------------------------------
     if opts.scale_bar and shown.has_lengths:
         value = tl.nice_scale_length(layout.extent)
@@ -418,6 +467,53 @@ def build_tree_scene(
 
     rect = scene.itemsBoundingRect().adjusted(-_MARGIN_PX, -_MARGIN_PX, _MARGIN_PX, _MARGIN_PX)
     scene.setSceneRect(rect)
+
+
+def _draw_legend(scene: QGraphicsScene, scale: tt.ColourScale, font: QFont, small: QFont,
+                 ink: QColor, muted: QColor, for_export: bool) -> None:
+    """Legend to the right of the tree: categories, or a colour bar for numbers."""
+    bounds = scene.itemsBoundingRect()
+    fm = QFontMetricsF(font)
+    x = bounds.right() + fm.averageCharWidth() * 4
+    y = bounds.top()
+    title_font = QFont(font)
+    title_font.setBold(True)
+    title = QGraphicsSimpleTextItem(scale.column)
+    title.setFont(title_font)
+    title.setBrush(QBrush(ink))
+    title.setPos(x, y)
+    scene.addItem(title)
+    y += fm.height() * 1.4
+    size = fm.height() * 0.62
+    if scale.numeric:
+        bar_h, bar_w = fm.height() * 6, fm.height() * 0.9
+        grad = QLinearGradient(0, y + bar_h, 0, y)   # low at the bottom
+        for k in range(11):
+            grad.setColorAt(k / 10, QColor(tt.viridis(k / 10)))
+        scene.addRect(QRectF(x, y, bar_w, bar_h), QPen(QColor(ink), 0.6), QBrush(grad))
+        for value, yy in ((scale.high, y), (scale.low, y + bar_h)):
+            label = QGraphicsSimpleTextItem(f"{value:g}")
+            label.setFont(small)
+            label.setBrush(QBrush(ink))
+            label.setPos(x + bar_w + 6, yy - label.boundingRect().height() / 2)
+            scene.addItem(label)
+        y += bar_h + fm.height() * 0.6
+    else:
+        for value, color in scale.categories:
+            scene.addEllipse(QRectF(x, y + (fm.height() - size) / 2, size, size),
+                             QPen(QColor(color).darker(130), 0.6), QBrush(QColor(color)))
+            label = QGraphicsSimpleTextItem(value)
+            label.setFont(font)
+            label.setBrush(QBrush(ink))
+            label.setPos(x + size + 6, y)
+            scene.addItem(label)
+            y += fm.height() * 1.15
+    if scale.n_missing:
+        note = QGraphicsSimpleTextItem(f"no value: {scale.n_missing}")
+        note.setFont(small)
+        note.setBrush(QBrush(muted))
+        note.setPos(x, y + 2)
+        scene.addItem(note)
 
 
 # --------------------------------------------------------------------------
@@ -483,6 +579,19 @@ def export_tree(model: tl.TreeModel | Display, opts: TreeViewOptions, out: Path,
     else:
         raise ValueError(f"Unsupported export format: {ext}")
     return out
+
+
+def _fish_files(folder: Path) -> set[str] | None:
+    """FASTA files in ``folder`` that have FISH images attached (None: no images at all)."""
+    try:
+        from repeatviewer.backends.cyto_images import load_images
+
+        images = load_images(folder)
+    except Exception:  # noqa: BLE001 - optional information
+        return None
+    if not images:
+        return None
+    return {target.sequence for img in images for target in img.targets}
 
 
 # --------------------------------------------------------------------------
@@ -584,6 +693,12 @@ class TreePanel(QWidget):
         self._opts = replace(_last_options)
         self._block = False
         self._loaded_mtime: float | None = None
+        self._traits: tt.TraitTable | None = None
+        self._trait_dialog = None
+        self._trait_job = None
+        self._trait_timer = QTimer(self)
+        self._trait_timer.setInterval(200)
+        self._trait_timer.timeout.connect(self._poll_trait_job)
 
         self._layout_box = NoWheelComboBox(self)
         for label, value in (("Rectangular", tl.LAYOUT_RECTANGULAR),
@@ -666,6 +781,23 @@ class TreePanel(QWidget):
         row3.addStretch(1)
         row3.addWidget(save_btn)
 
+        self._color_box = NoWheelComboBox(self)
+        self._color_box.setMinimumWidth(160)
+        self._color_box.currentIndexChanged.connect(self._on_color_by_changed)
+        self._traits_btn = QPushButton("Trait table", self)
+        traits_menu = QMenu(self._traits_btn)
+        traits_menu.addAction("Create or update…", self._open_trait_dialog)
+        traits_menu.addAction("Reload", self._reload_traits)
+        self._open_traits_action = traits_menu.addAction("Open in spreadsheet app", self._open_traits_file)
+        self._traits_btn.setMenu(traits_menu)
+        row4 = QHBoxLayout()
+        row4.setSpacing(6)
+        row4.addWidget(QLabel("Colour tips by:", self))
+        row4.addWidget(self._color_box)
+        row4.addWidget(make_help_button(self, "Colour tips by", TRAITS_HELP))
+        row4.addWidget(self._traits_btn)
+        row4.addStretch(1)
+
         self._canvas = TreeCanvas(self)
         self._canvas.nodeClicked.connect(self._on_node_clicked)
         self._canvas.nodeContextMenu.connect(self._on_context_menu)
@@ -681,6 +813,7 @@ class TreePanel(QWidget):
         layout.addLayout(row1)
         layout.addLayout(row2)
         layout.addLayout(row3)
+        layout.addLayout(row4)
         layout.addWidget(self._canvas, stretch=1)
         layout.addWidget(self._status)
 
@@ -784,6 +917,7 @@ class TreePanel(QWidget):
             return False
         self._model = self._file_model
         self._load_view_state()
+        self._load_traits()
         if not self._model.has_support and self._opts.branch_labels == BRANCH_LABELS_SUPPORT:
             self._opts = replace(self._opts, branch_labels=BRANCH_LABELS_NONE)
         self._apply_options_to_controls()
@@ -813,6 +947,9 @@ class TreePanel(QWidget):
             self._state.collapse_below = max(0, min(100, int(data.get("collapse_below", 0))))
         except (TypeError, ValueError):
             self._state.collapse_below = 0
+        self._state.color_by = str(data.get("colour_by") or "")
+        ts = data.get("trait_settings")
+        self._state.trait_settings = dict(ts) if isinstance(ts, dict) else {}
 
     def _save_view_state(self) -> None:
         """Remember colours, collapsed clades and view settings for this tree."""
@@ -825,6 +962,8 @@ class TreePanel(QWidget):
             "colors": [{"tips": list(k), "color": c} for k, c in sorted(self._state.colors.items())],
             "subtree": list(self._state.subtree) if self._state.subtree else None,
             "collapse_below": self._state.collapse_below,
+            "colour_by": self._state.color_by,
+            "trait_settings": self._state.trait_settings,
         }
         try:
             view_state_path(self._path).write_text(json.dumps(data, indent=1), encoding="utf-8")
@@ -846,6 +985,7 @@ class TreePanel(QWidget):
         ink, muted = self._palette_colors()
         self._canvas.setBackgroundBrush(self.palette().color(QPalette.ColorRole.Base))
         self._display = make_display(self._model, self._opts, self._state)
+        self._apply_traits(self._display)
         build_tree_scene(self._canvas.scene(), self._display, self._opts, ink=ink, muted=muted,
                          selected=self._selected)
         if refit:
@@ -921,6 +1061,14 @@ class TreePanel(QWidget):
         act.setEnabled(node is not None)
         if key is not None and key in self._state.colors:
             menu.addAction("Remove colour", lambda: self.set_clade_color(key, None))
+        if node is not None and node.is_tip and idx not in d.info:
+            menu.addSeparator()
+            menu.addAction("Copy name", lambda: QApplication.clipboard().setText(node.name))
+            header = (self._traits.rows.get(node.name, {}).get("header", "")
+                      if self._traits else "")
+            if header and header != node.name:
+                menu.addAction("Copy original header",
+                               lambda: QApplication.clipboard().setText(header))
 
     def _add_tree_actions(self, menu: QMenu) -> None:
         act = menu.addAction("Midpoint root", self.midpoint_root)
@@ -1092,6 +1240,171 @@ class TreePanel(QWidget):
     def _on_collapse_threshold(self) -> None:
         if not self._block:
             self.set_collapse_below(self._collapse_spin.value())
+
+    # ------------------------------------------------------------ traits
+
+    def traits(self) -> tt.TraitTable | None:
+        return self._traits
+
+    def _load_traits(self) -> None:
+        self._traits = None
+        if self._path is not None:
+            path = tt.traits_path(self._path)
+            if path.is_file():
+                try:
+                    self._traits = tt.read_trait_table(path)
+                except (OSError, ValueError, UnicodeDecodeError):
+                    self._traits = None
+        self._refresh_color_box()
+
+    def _refresh_color_box(self) -> None:
+        self._block = True
+        try:
+            self._color_box.clear()
+            self._color_box.addItem("None", "")
+            for col in (self._traits.columns if self._traits else []):
+                if col not in ("header", "start", "end"):
+                    self._color_box.addItem(col, col)
+            idx = self._color_box.findData(self._state.color_by)
+            if idx < 0:
+                self._state.color_by = ""
+                idx = 0
+            self._color_box.setCurrentIndex(idx)
+            self._color_box.setEnabled(self._traits is not None)
+            self._open_traits_action.setEnabled(self._traits is not None)
+        finally:
+            self._block = False
+
+    def set_color_by(self, column: str) -> None:
+        idx = self._color_box.findData(column)
+        if idx >= 0:
+            self._color_box.setCurrentIndex(idx)
+
+    def _on_color_by_changed(self, *_args) -> None:
+        if self._block:
+            return
+        self._state.color_by = str(self._color_box.currentData() or "")
+        self._redraw(refit=False)
+        self._save_view_state()
+
+    def _apply_traits(self, display: Display) -> None:
+        if self._traits is None:
+            return
+        m = display.model
+        tips = [t for t in m.tips() if t not in display.info]
+        names = {t: m.nodes[t].name for t in tips}
+        cols = [c for c in self._traits.columns if c != "header"]
+        for t, name in names.items():
+            row = self._traits.rows.get(name)
+            if row:
+                values = [f"{c}: {row.get(c, '')}" for c in cols if row.get(c, "")]
+                if values:
+                    display.tip_notes[t] = "\n".join(values)
+        column = self._state.color_by
+        if column and column in self._traits.columns:
+            scale = tt.colour_scale(self._traits, column, list(names.values()))
+            display.tip_colors = {t: scale.colors[n] for t, n in names.items() if n in scale.colors}
+            display.legend = scale
+
+    def _reload_traits(self) -> None:
+        self._load_traits()
+        self._redraw(refit=False)
+        self._update_status("trait table reloaded" if self._traits else "no trait table yet")
+
+    def _open_traits_file(self) -> None:
+        if self._path is not None and tt.traits_path(self._path).is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(tt.traits_path(self._path))))
+
+    def _open_trait_dialog(self) -> None:
+        from repeatviewer.views.tree_traits_dialog import TraitTableDialog
+
+        if self._model is None or self._path is None:
+            return
+        if self._trait_dialog is not None and self._trait_dialog.isVisible():
+            self._trait_dialog.raise_()
+            return
+        dialog = TraitTableDialog(settings=self._state.trait_settings, tree_path=self._path,
+                                  parent=self)
+        dialog.setModal(False)
+        dialog.finished.connect(lambda code, d=dialog: self._on_trait_dialog_finished(d, code))
+        self._trait_dialog = dialog
+        dialog.show()
+
+    def trait_dialog_open(self) -> bool:
+        return self._trait_dialog is not None and self._trait_dialog.isVisible()
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        """A file clicked in the Files panel fills the open trait dialog."""
+        if self.trait_dialog_open():
+            if self._trait_dialog.apply_path_from_panel(path):
+                self._trait_dialog.raise_()
+                return True
+        return False
+
+    def _on_trait_dialog_finished(self, dialog, code: int) -> None:
+        self._trait_dialog = None
+        if code != dialog.DialogCode.Accepted:
+            return
+        self._state.trait_settings = dialog.settings()
+        self._save_view_state()
+        if dialog.should_run():
+            self.build_traits()
+
+    def build_traits(self, *, wait: bool = False) -> None:
+        """Create or update the trait table in the background."""
+        import concurrent.futures
+
+        if self._model is None or self._path is None or self._trait_job is not None:
+            return
+        tips = [self._model.nodes[t].name for t in self._model.tips()]
+        settings = dict(self._state.trait_settings)
+        meth = settings.get("methylation_file") or None
+        gap = int(settings.get("array_gap") or tt.DEFAULT_ARRAY_GAP)
+        tree_path = self._path
+        existing = self._traits
+        fish = _fish_files(tree_path.parent)
+
+        def work():
+            table = tt.build_trait_table(tree_path, tips, methylation_file=Path(meth) if meth else None,
+                                         array_gap=gap, fish_files=fish, existing=existing)
+            return tt.write_trait_table(tt.traits_path(tree_path), table), bool(meth)
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._trait_job = (pool, pool.submit(work))
+        self._update_status("building the trait table…")
+        if wait:
+            self._trait_job[1].result()
+            self._poll_trait_job()
+        else:
+            self._trait_timer.start()
+
+    def _poll_trait_job(self) -> None:
+        if self._trait_job is None:
+            self._trait_timer.stop()
+            return
+        pool, future = self._trait_job
+        if not future.done():
+            return
+        self._trait_timer.stop()
+        self._trait_job = None
+        pool.shutdown(wait=False)
+        try:
+            path, with_meth = future.result()
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            QMessageBox.warning(self, "Trait table", f"Could not build the trait table:\n{exc}")
+            self._update_status("trait table failed")
+            return
+        self._load_traits()
+        if not self._state.color_by and self._traits:
+            for col in (("methylation",) if with_meth else ()) + ("array", "chromosome", "source_file"):
+                if col in self._traits.columns:
+                    self._state.color_by = col
+                    break
+            self._refresh_color_box()
+        self._redraw(refit=False)
+        self._save_view_state()
+        self._update_status(f"saved {path.name}")
+        self.fileWritten.emit(path)
 
     # ------------------------------------------------------------ saving
 

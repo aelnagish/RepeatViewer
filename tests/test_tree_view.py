@@ -242,3 +242,102 @@ def test_reopening_the_same_unchanged_tree_keeps_unsaved_edits(qapp, tree_file):
     os.utime(tree_file, (st.st_atime, st.st_mtime + 5))   # the file changed on disk
     panel.load_tree(tree_file)
     assert panel.state().edited == "" and not panel._undo
+
+
+# --------------------------------------------------------------------------
+# A3: trait table colours
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def located_tree(tmp_path: Path) -> Path:
+    """A tree run with copies from two arrays on Chr1 and one on Chr2."""
+    tips = ["Chr1_100-256_+", "Chr1_260-416_-", "Chr1_420-576_+",
+            "Chr1_90000-90156_+", "Chr2_5000-5156_-", "Chr2_5160-5316_+"]
+    tree = tmp_path / "sat.fa_tree.treefile"
+    tree.write_text(f"((({tips[0]}:0.1,{tips[1]}:0.1)95/99:0.05,{tips[2]}:0.2)90/97:0.05,"
+                    f"({tips[3]}:0.2,({tips[4]}:0.1,{tips[5]}:0.1)99/100:0.1)80/96:0.05);\n")
+    details = tmp_path / "sat.fa_tree_details"
+    details.mkdir()
+    lines = ["tree_name\toriginal_header\tsource_file"]
+    for t in tips:
+        chrom, rest = t.split("_", 1)
+        span, strand = rest.rsplit("_", 1)
+        lines.append(f"{t}\t{chrom}:{span}({strand})\tsat.fa")
+    (details / "sat.fa_tree.names.tsv").write_text("\n".join(lines) + "\n")
+    return tree
+
+
+def test_trait_table_colours_tips_by_array(qapp, located_tree):
+    from repeatviewer.backends import tree_traits as tt
+
+    panel = _panel(qapp, located_tree)
+    assert not panel._color_box.isEnabled()           # no table yet
+    panel.build_traits(wait=True)
+    assert tt.traits_path(located_tree).is_file()
+    assert panel.state().color_by == "array"          # sensible default
+    colours = set(panel.display().tip_colors.values())
+    assert len(colours) == 3                          # two arrays on Chr1, one on Chr2
+    texts = _texts(panel)
+    assert "array" in texts and any(t.startswith("Chr2:") for t in texts)   # legend
+    notes = " ".join(panel.display().tip_notes.values())
+    assert "chromosome: Chr1" in notes
+
+
+def test_colour_by_methylation_gives_a_colour_bar(qapp, located_tree, tmp_path):
+    cov = tmp_path / "leaf_bismark.cov"
+    cov.write_text("Chr1\t150\t150\t100\t10\t0\nChr2\t5100\t5100\t0\t0\t10\n")
+    panel = _panel(qapp, located_tree)
+    panel._state.trait_settings = {"methylation_file": str(cov), "array_gap": 10_000}
+    panel.build_traits(wait=True)
+    assert panel.state().color_by == "methylation"
+    legend = panel.display().legend
+    assert legend.numeric and (legend.low, legend.high) == (0.0, 100.0)
+    assert legend.n_missing == 4                      # only two copies have sites
+    assert "no value: 4" in _texts(panel)
+
+
+def test_colour_choice_is_remembered_and_exported(qapp, located_tree, tmp_path):
+    from repeatviewer.widgets.tree_view import TreePanel, export_tree
+
+    panel = _panel(qapp, located_tree)
+    panel.build_traits(wait=True)
+    panel.set_color_by("chromosome")
+    again = TreePanel(located_tree)
+    assert again.state().color_by == "chromosome"
+    out = tmp_path / "t.svg"
+    export_tree(again.display(), again.options(), out)
+    svg = out.read_text()
+    assert ">chromosome<" in svg and ">Chr1<" in svg
+
+
+def test_user_columns_appear_after_reload(qapp, located_tree):
+    from repeatviewer.backends import tree_traits as tt
+
+    panel = _panel(qapp, located_tree)
+    panel.build_traits(wait=True)
+    table = tt.read_trait_table(tt.traits_path(located_tree))
+    table.columns.append("karyotype")
+    for i, row in enumerate(table.rows.values()):
+        row["karyotype"] = "B" if i % 2 else "A"
+    tt.write_trait_table(tt.traits_path(located_tree), table)
+    panel._reload_traits()
+    panel.set_color_by("karyotype")
+    assert set(panel.display().tip_colors.values()) == {tt.CATEGORICAL[0], tt.CATEGORICAL[1]}
+
+
+def test_trait_dialog_rules(qapp, located_tree, tmp_path):
+    from PySide6.QtWidgets import QPushButton
+
+    from repeatviewer.views.tree_traits_dialog import TraitTableDialog
+
+    dlg = TraitTableDialog(tree_path=located_tree)
+    names = [b.text() for b in dlg.findChildren(QPushButton) if b.text() in ("Cancel", "Save", "Run")]
+    assert names == ["Cancel", "Save", "Run"]                         # rule 2
+    cov = tmp_path / "x.cov"
+    cov.write_text("Chr1\t1\t1\t0\t0\t1\n")
+    fasta = tmp_path / "x.fa"
+    fasta.write_text(">a\nACGT\n")
+    assert dlg.apply_path_from_panel(cov) and not dlg.apply_path_from_panel(fasta)   # rule 7
+    assert dlg.settings()["methylation_file"].endswith("x.cov")
+    assert dlg.settings()["array_gap"] == 10_000
