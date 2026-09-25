@@ -1086,6 +1086,10 @@ class FilePreviewPage(QWidget):
         self._stack.setCurrentWidget(self._tree_panel)
         self._tree_panel.load_tree(path)
 
+    def tree_panel(self):
+        """The Tree view of this page, if it was ever shown (else None)."""
+        return getattr(self, "_tree_panel", None)
+
     def is_tree_preview_active(self) -> bool:
         panel = getattr(self, "_tree_panel", None)
         return (

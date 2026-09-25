@@ -282,8 +282,11 @@ def test_too_few_sequences(tmp_path, monkeypatch):
         tb.build_tree_run([fa], TreeOptions(use_system_path=True), stamp="t")
 
 
-@pytest.mark.skipif(not (shutil.which("iqtree2") and shutil.which("mafft")),
-                    reason="needs iqtree2 and mafft on PATH")
+_HAS_IQTREE = any(shutil.which(n) for n in ("iqtree3", "iqtree2", "iqtree"))
+
+
+@pytest.mark.skipif(not (_HAS_IQTREE and shutil.which("mafft")),
+                    reason="needs IQ-TREE and mafft on PATH")
 def test_build_tree_run_real_iqtree(tmp_path):
     import random
     rng = random.Random(1)
@@ -461,3 +464,187 @@ def test_outgroup_from_another_file_is_reported(tmp_path, monkeypatch):
     _details, _files, report = tb.build_tree_run([fa], opts, stamp="t")
     html = report.read_text()
     assert "not in this input: CroSat9" in html and "Unrooted" in html
+
+
+# --------------------------------------------------------------------------
+# Monomer rotation (B1) and methylation-masked sensitivity run (B2)
+# --------------------------------------------------------------------------
+
+
+def _cg_rich_alignment(groups=3, per_group=4, length=150, seed=3):
+    """Equal-length rows in clear groups: shared group changes give informative sites."""
+    import random
+    rng = random.Random(seed)
+    base = "".join(rng.choice("ACGT") for _ in range(length))
+
+    def change(seq, n):
+        s = list(seq)
+        for _ in range(n):
+            j = rng.randrange(length)
+            s[j] = rng.choice("ACGT".replace(s[j], ""))
+        return "".join(s)
+
+    rows = []
+    for _g in range(groups):
+        anc = change(base, 20)
+        rows += [change(anc, 3) for _ in range(per_group)]
+    return rows
+
+
+def test_masked_sensitivity_run_with_fake_fastme(tmp_path, monkeypatch):
+    fake = tmp_path / "bin" / "fastme"
+    fake.parent.mkdir()
+    fake.write_text(FAKE_FASTME)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:" + __import__("os").environ["PATH"])
+    fa = tmp_path / "aln.fa"
+    fa.write_text("".join(f">s{i}\n{s}\n" for i, s in enumerate(_cg_rich_alignment())))
+    opts = TreeOptions(engine=TREE_ENGINE_FASTME, use_system_path=True, threads=1,
+                       distance_bootstrap=4, methylation_mask="CG_CHG")
+    details, files, report = tb.build_tree_run([fa], opts, stamp="t")
+    assert details == tmp_path / "aln.fa_tree_cgchg_details"          # run tagged by what it did
+    assert (tmp_path / "aln.fa_tree_cgchg.treefile") in files
+    assert (tmp_path / "aln.fa_tree_cgchg_masked.treefile") in files  # next to the main tree
+    assert (details / "aln.fa_tree_cgchg_masked.aln.fa") in files
+    masked_len = len((details / "aln.fa_tree_cgchg_masked.aln.fa").read_text().splitlines()[1])
+    assert 0 < masked_len < 150
+    html = report.read_text()
+    assert "Methylation-masked sensitivity run" in html
+    assert "Robinson" in (details / "aln.fa_tree_cgchg_methods.txt").read_text()
+
+
+def test_rotation_is_skipped_for_input_used_as_alignment(tmp_path, monkeypatch):
+    fake = tmp_path / "bin" / "fastme"
+    fake.parent.mkdir()
+    fake.write_text(FAKE_FASTME)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:" + __import__("os").environ["PATH"])
+    fa = tmp_path / "aln.fa"
+    fa.write_text("".join(f">s{i}\n{s}\n" for i, s in enumerate(_cg_rich_alignment())))
+    opts = TreeOptions(engine=TREE_ENGINE_FASTME, use_system_path=True, threads=1,
+                       rotate_monomers=True, align_mode="never")
+    details, files, report = tb.build_tree_run([fa], opts, stamp="t")
+    assert "Monomer rotation was skipped" in report.read_text()
+    assert not (details / "aln.fa_tree.rotation.tsv").exists()
+
+
+def test_methods_paragraph_mentions_rotation_and_masking():
+    text = tb.methods_paragraph(
+        _report(rotation="3 of 4 rotated", rotation_reference="m2",
+                masking="As a sensitivity test, alignment columns were removed."),
+        TreeOptions(),
+    )
+    assert text.startswith("Before alignment, monomers were rotated to a common start")
+    assert "(m2)" in text
+    assert text.endswith("As a sensitivity test, alignment columns were removed.")
+
+
+@pytest.mark.skipif(not (_HAS_IQTREE and shutil.which("mafft")),
+                    reason="needs IQ-TREE and mafft on PATH")
+def test_rotation_recovers_subfamilies_real_run(tmp_path):
+    import random
+    from repeatviewer.backends.monomer_phase import reverse_complement, rotate
+
+    rng = random.Random(42)
+
+    def mut(s, n):
+        s = list(s)
+        for _ in range(n):
+            i = rng.randrange(len(s))
+            s[i] = rng.choice("ACGT".replace(s[i], ""))
+        return "".join(s)
+
+    base = "".join(rng.choice("ACGT") for _ in range(156))
+    rows = []
+    for fam in ("F1", "F2", "F3"):
+        anc = mut(base, 18)
+        for j in range(8):
+            s = rotate(mut(anc, 4), rng.randrange(156))
+            rows.append((f"{fam}_m{j}", reverse_complement(s) if j % 2 else s))
+    fa = tmp_path / "sat.fa"
+    fa.write_text("".join(f">{n}\n{s}\n" for n, s in rows))
+    opts = TreeOptions(use_system_path=True, use_system_mafft=True, threads=1, runs=1,
+                       mafft_strategy="ginsi", rotate_monomers=True)
+    tb.build_tree_run([fa], opts, stamp="t")
+    tree = tb.read_newick((tmp_path / "sat.fa_tree_rot.treefile").read_text())
+    taxa = frozenset(t.name for t in tree.get_terminals())
+    found = tb.splits(tree)
+    for fam in ("F1", "F2", "F3"):
+        side = frozenset(n for n in taxa if n.startswith(fam))
+        assert side in found or (taxa - side) in found
+
+
+def test_masked_run_is_skipped_when_too_little_remains(tmp_path, monkeypatch):
+    fake = tmp_path / "bin" / "fastme"
+    fake.parent.mkdir()
+    fake.write_text(FAKE_FASTME)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:" + __import__("os").environ["PATH"])
+    fa = tmp_path / "aln.fa"
+    fa.write_text(">a\nACGTACGTCG\n>b\nACGTACGTCA\n>c\nACGAACGTCG\n>d\nTCGAACGTCG\n>e\nTCGAACCTCG\n")
+    opts = TreeOptions(engine=TREE_ENGINE_FASTME, use_system_path=True, threads=1,
+                       distance_bootstrap=0, methylation_mask="CG_CHG")
+    details, files, report = tb.build_tree_run([fa], opts, stamp="t")
+    assert "the masked tree was not built" in report.read_text()
+    assert not list(tmp_path.glob("*_masked.treefile"))
+
+
+def test_run_tag_names_runs_by_what_they_did(tmp_path):
+    assert tb.run_tag(TreeOptions()) == ""
+    assert tb.run_tag(TreeOptions(rotate_monomers=True)) == "_rot"
+    assert tb.run_tag(TreeOptions(methylation_mask="CG")) == "_cg"
+    assert tb.run_tag(TreeOptions(rotate_monomers=True, methylation_mask="CG_CHG")) == "_rot_cgchg"
+    # nothing was rotated or masked: no tag
+    assert tb.run_tag(TreeOptions(rotate_monomers=True, align_mode="never")) == ""
+    assert tb.run_tag(TreeOptions(rotate_monomers=True, methylation_mask="CG"), dna=False) == ""
+    fa = tmp_path / "sat.fa"
+    fa.write_text(">a\nACGT\n")
+    plain, rot = tb.plan_outputs([fa]), tb.plan_outputs([fa], "_rot")
+    assert plain.base == "sat.fa_tree" and rot.base == "sat.fa_tree_rot"
+
+
+# --------------------------------------------------------------------------
+# Sequences that cannot be related (e.g. different satellite families)
+# --------------------------------------------------------------------------
+
+
+def test_overlap_problems_finds_pairs_without_shared_positions():
+    rows = ["ACGTACGTAC" + "-" * 10,
+            "ACGTACGTAA" + "-" * 10,
+            "-" * 10 + "TTGACCGTAG"]
+    too_few, median_p = tb.overlap_problems(["a", "b", "c"], rows, min_shared=5)
+    assert [(x, y) for x, y, _k in too_few] == [("a", "c"), ("b", "c")]
+    assert median_p == 0.1
+
+
+def test_unrelated_sequences_stop_fastme_with_a_clear_message(tmp_path, monkeypatch):
+    fake = tmp_path / "bin" / "fastme"
+    fake.parent.mkdir()
+    fake.write_text(FAKE_FASTME)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:" + __import__("os").environ["PATH"])
+    fa = tmp_path / "aln.fa"
+    half = "ACGTTGCAAC" * 3
+    other = "TTGGCCAATG" * 3
+    fa.write_text(f">a\n{half}{'-' * 30}\n>b\n{half[:-1]}A{'-' * 30}\n"
+                  f">c\n{'-' * 30}{other}\n>d\n{'-' * 30}{other[:-1]}C\n")
+    opts = TreeOptions(engine=TREE_ENGINE_FASTME, use_system_path=True, threads=4,
+                       min_coverage=0)
+    with pytest.raises(tb.TreeBuildError, match="not all copies of one family"):
+        tb.build_tree_run([fa], opts, stamp="t")
+
+
+def test_fastme_thread_option_only_when_supported(tmp_path):
+    with_threads = tmp_path / "fastme_mp"
+    with_threads.write_text("#!/bin/sh\necho '  -T, --nb_threads=num  Number of threads'\n")
+    without = tmp_path / "fastme_plain"
+    without.write_text("#!/bin/sh\necho 'usage: fastme -i file'\n")
+    for f in (with_threads, without):
+        f.chmod(0o755)
+    assert tb.fastme_supports_threads(str(with_threads)) is True
+    assert tb.fastme_supports_threads(str(without)) is False
+
+
+def test_readable_fastme_distance_error():
+    text = tb.summarize_tool_error("FastME", 1, ". Error: Unable to compute all distances\n")
+    assert "not all copies of one family" in text

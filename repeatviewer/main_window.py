@@ -3725,6 +3725,21 @@ class MainWindow(QMainWindow):
         menu.addAction(
             "Change Tree parameters", lambda: self._open_tree_dialog(require_selection=False)
         )
+        menu.addSeparator()
+        menu.addAction(
+            "Methylation-masked sensitivity run (CG and CHG)", self._run_tree_methylation_masked
+        )
+        menu.addAction("RT-domain tree (REXdb lineages)", self._run_tree_rt_domains)
+
+    def _run_tree_methylation_masked(self) -> None:
+        """Saved settings, plus a second tree without CG/CHG columns, compared in the report."""
+        from dataclasses import replace
+
+        from repeatviewer.backends.methylation_mask import MASK_CG_CHG
+
+        files = self._selected_files_for_tree()
+        if files:
+            self._start_tree_job(files, replace(self._tree_options, methylation_mask=MASK_CG_CHG))
 
     def _tree_candidate_files(self) -> list[Path]:
         """Selected FASTA files (several files are combined into one tree). No UI."""
@@ -3772,16 +3787,44 @@ class MainWindow(QMainWindow):
             files=files,
             parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+
+        def _accepted(d) -> None:
+            self._tree_options = d.options()
+            save_tree_options(self._tree_options)
+            if not d.should_run():
+                self._set_status_message("Tree settings saved", 4000)
+                return
+            # Non-modal: clicking REXdb in Files changes the selection, so the
+            # files chosen when the dialog opened are used.
+            run_files = files or [
+                p for p in self._selected_files_for_tree()
+                if str(p) != self._tree_options.rexdb_fasta
+            ]
+            if run_files:
+                self._start_tree_job(run_files, self._tree_options)
+
+        # Non-modal so a click in Files can fill the REXdb path (apply_path_from_panel).
+        self._present_te_viz_dialog(dialog, _accepted)
+
+    def _run_tree_rt_domains(self) -> None:
+        """Saved settings, with the sequences replaced by their RT domains (REXdb)."""
+        from repeatviewer.backends.rt_domains import looks_like_rexdb
+        from repeatviewer.job_options import TREE_SEQ_RT
+
+        rexdb = self._tree_options.rexdb_fasta
+        if not rexdb or not looks_like_rexdb(Path(rexdb)):
+            QMessageBox.information(
+                self,
+                "RT-domain tree",
+                "Choose REXdb first: Tree parameters → Alignment tab → REXdb.\n\n"
+                "Download Viridiplantae_v4.0.fasta and Viridiplantae_v4.0.classification "
+                "from github.com/repeatexplorer/rexdb into one folder.",
+            )
+            self._open_tree_dialog(require_selection=False)
             return
-        self._tree_options = dialog.options()
-        save_tree_options(self._tree_options)
-        if dialog.should_run():
-            files = self._selected_files_for_tree()
-            if files:
-                self._start_tree_job(files, self._tree_options)
-        else:
-            self._set_status_message("Tree settings saved", 4000)
+        files = self._selected_files_for_tree()
+        if files:
+            self._start_tree_job(files, replace(self._tree_options, sequence_mode=TREE_SEQ_RT))
 
     def _start_tree_job(self, files: list[Path], options) -> None:
         title = (f"Tree ({files[0].name})" if len(files) == 1
@@ -6936,6 +6979,8 @@ class MainWindow(QMainWindow):
             return
         if self._plugin_run_dialog is not None and self._plugin_run_dialog.isVisible():
             return
+        if self._tree_trait_dialog_open():
+            return  # a click fills the trait dialog; keep the tree in Preview
 
         path = self._preview_path_from_item(current)
         if path is None:
@@ -7434,6 +7479,24 @@ class MainWindow(QMainWindow):
             self._sync_define_database_dialog_from_files(panel_path)
             self._sync_add_annotation_dialog_from_files(panel_path)
             self._sync_add_blast_database_dialog_from_files(panel_path)
+            self._sync_tree_trait_dialog_from_files(panel_path)
+
+    def _open_tree_panels(self):
+        from repeatviewer.widgets.preview_tabs import FilePreviewPage
+
+        for index in range(self._preview_tabs.count()):
+            page = self._preview_tabs.widget(index)
+            if isinstance(page, FilePreviewPage) and page.tree_panel() is not None:
+                yield page.tree_panel()
+
+    def _tree_trait_dialog_open(self) -> bool:
+        return any(panel.trait_dialog_open() for panel in self._open_tree_panels())
+
+    def _sync_tree_trait_dialog_from_files(self, clicked_path: Path) -> None:
+        """Tree view → Trait table dialog: a clicked file fills its path field."""
+        for panel in self._open_tree_panels():
+            if panel.apply_path_from_panel(clicked_path):
+                return
 
     def _on_file_double_clicked(self, item: FileListRow) -> None:
         raw = item.data(ROLE_PATH)

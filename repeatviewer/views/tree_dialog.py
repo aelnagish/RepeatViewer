@@ -48,8 +48,11 @@ from repeatviewer.job_options import (
     TREE_ROOT_MIDPOINT,
     TREE_ROOT_NONE,
     TREE_ROOT_OUTGROUP,
+    TREE_SEQ_AS_IS,
+    TREE_SEQ_RT,
     TreeOptions,
 )
+from repeatviewer.widgets.path_browse import PathBrowseRow
 from repeatviewer.views.tool_dialogs import (
     QComboBox,
     QDoubleSpinBox,
@@ -88,6 +91,15 @@ METHOD_INFO = (
     "<b>Approximate maximum likelihood (FastTree)</b>: for very large sets "
     "(more than ~1,000 sequences)."
 )
+MASK_INFO = (
+    "<b>Methylation check</b>: builds a second tree without the alignment columns where any "
+    "sequence has a C or G in a CG (or CHG) context, and compares the two trees in the report.<br>"
+    "Methylated C mutates to T much more often than other bases change, so unrelated copies can "
+    "share the same C→T by chance. If the well-supported groups stay the same without these "
+    "sites, the tree does not depend on them.<br>"
+    "<b>CG</b>: CG sites only. <b>CG and CHG</b>: also CHG sites (plants).<br>"
+    "DNA only. Takes about twice as long."
+)
 MODEL_INFO = (
     "<b>ModelFinder</b>: tests the models and selects the best by BIC "
     "(Bayesian information criterion).<br>"
@@ -98,6 +110,28 @@ MODEL_INFO = (
     "<b>LG</b>: protein model.<br>"
     "<b>+F</b> empirical base frequencies · <b>+G4</b> rate variation among sites "
     "(4 gamma categories)."
+)
+
+
+SEQ_INFO = (
+    "<b>As they are</b>: the sequences are aligned as given (DNA or protein).<br>"
+    "<b>RT domain from DNA</b>: for LTR retrotransposons and LINEs. RepeatViewer finds the "
+    "reverse transcriptase (RT) domain in the six reading frames of every copy and builds "
+    "the tree from these protein pieces. The RT is the most conserved part of the element, "
+    "so copies of different lineages can be compared. Reference RTs from REXdb are added, "
+    "every copy gets its closest REXdb lineage, and the tips are coloured by lineage.<br>"
+    "Copies without an RT (solo LTRs, deleted copies) are left out and listed in the report."
+)
+
+REXDB_INFO = (
+    "REXdb: the reference database of plant retrotransposon protein domains "
+    "(Neumann et al. 2019, Mobile DNA). It is not shipped with RepeatViewer; download it "
+    "once from github.com/repeatexplorer/rexdb:<br>"
+    "<b>Viridiplantae_v4.0.fasta</b> and <b>Viridiplantae_v4.0.classification</b>, "
+    "saved in the same folder. Choose the .fasta here (or click it in Files).<br>"
+    "The first run builds search profiles from it (about 10 s); later runs reuse them.<br>"
+    "<b>References per lineage</b>: REXdb RTs added to the tree for each lineage of the "
+    "RT types found, so every copy sits next to named lineages. 0 = none."
 )
 
 
@@ -142,6 +176,29 @@ class TreeParamsDialog(QDialog):
         self._outgroup_saved = list(opts.outgroup)
 
         # --- Alignment tab ----------------------------------------------------
+        self._seq_mode = QComboBox(self)
+        self._seq_mode.addItem("As they are", TREE_SEQ_AS_IS)
+        self._seq_mode.addItem("RT domain from DNA (REXdb)", TREE_SEQ_RT)
+        self._set_combo(self._seq_mode, opts.sequence_mode)
+        self._seq_mode.setFixedWidth(_FIELD_WIDTH)
+        self._rexdb = PathBrowseRow(
+            self,
+            initial=opts.rexdb_fasta or None,
+            placeholder="REXdb protein FASTA: click it in Files, or Browse",
+            browse_title="Choose the REXdb protein FASTA",
+            file_filter="FASTA (*.fasta *.fa *.faa);;All files (*)",
+        )
+        self._rexdb.set_default_tooltip(
+            "Viridiplantae_v4.0.fasta, with Viridiplantae_v4.0.classification next to it.")
+        self._rexdb_refs = QSpinBox(self)
+        self._rexdb_refs.setRange(0, 50)
+        self._rexdb_refs.setValue(opts.rexdb_references)
+        self._rexdb_refs.setSuffix(" per lineage")
+        self._rexdb_refs.setFixedWidth(140)
+        self._rexdb_status = _note("", self)
+        self._rexdb_status.setWordWrap(False)
+        self._seq_mode.currentIndexChanged.connect(self._sync_enabled)
+        self._rexdb.path_changed.connect(self._sync_enabled)
         self._align_mode = QComboBox(self)
         for label, value in (
             ("Align if not already aligned", TREE_ALIGN_AUTO),
@@ -164,6 +221,13 @@ class TreeParamsDialog(QDialog):
         self._adjust_direction.setToolTip(
             "MAFFT --adjustdirectionaccurately. Keep on for TE and satellite copies taken "
             "from both strands; otherwise they look extremely divergent and misplace in the tree."
+        )
+        self._rotate = QCheckBox("Rotate satellite monomers to a common start", self)
+        self._rotate.setChecked(opts.rotate_monomers)
+        self._rotate.setToolTip(
+            "Monomers cut from an array start at arbitrary positions. This turns every "
+            "monomer to the start and strand of the median-length monomer before aligning. "
+            "Monomers too different to place are left as they are and listed in the report."
         )
         self._min_cov = QSpinBox(self)
         self._min_cov.setRange(0, 100)
@@ -208,9 +272,21 @@ class TreeParamsDialog(QDialog):
 
         align_tab = QWidget(self)
         af = _form(align_tab)
+        af.addRow("Sequences:", _with_info(self._seq_mode, _help_button(self, "Sequences", SEQ_INFO), self))
+        rex_row = QWidget(self)
+        rex_lay = QHBoxLayout(rex_row)
+        rex_lay.setContentsMargins(0, 0, 0, 0)
+        rex_lay.setSpacing(6)
+        rex_lay.addWidget(self._rexdb, 1)
+        rex_lay.addWidget(_help_button(self, "REXdb", REXDB_INFO))
+        af.addRow("REXdb:", rex_row)
+        af.addRow("References:", self._rexdb_refs)
+        af.addRow("", self._rexdb_status)
+        self._rexdb_rows = (self._rexdb, self._rexdb_refs)
         af.addRow("Alignment:", self._align_mode)
         af.addRow("MAFFT strategy:", _with_info(self._strategy, _help_button(self, "MAFFT strategy", MAFFT_INFO), self))
         af.addRow("", self._adjust_direction)
+        af.addRow("", self._rotate)
         cov_row = QWidget(self)
         cov_lay = QHBoxLayout(cov_row)
         cov_lay.setContentsMargins(0, 0, 0, 0)
@@ -287,6 +363,11 @@ class TreeParamsDialog(QDialog):
             w.setFixedWidth(_FIELD_WIDTH)
         for w in (self._runs, self._seed, self._threads):
             w.setFixedWidth(120)
+        self._mask = QComboBox(self)
+        for label, value in (("Off", ""), ("CG", "CG"), ("CG and CHG", "CG_CHG")):
+            self._mask.addItem(label, value)
+        self._set_combo(self._mask, opts.methylation_mask)
+        self._mask.setFixedWidth(_FIELD_WIDTH)
 
         tree_tab = QWidget(self)
         tf = _form(tree_tab)
@@ -296,6 +377,8 @@ class TreeParamsDialog(QDialog):
         tf.addRow("Independent searches:", self._runs)
         tf.addRow("Random seed:", self._seed)
         tf.addRow("Threads:", self._threads)
+        tf.addRow("Methylation check:",
+                  _with_info(self._mask, _help_button(self, "Methylation check", MASK_INFO), self))
 
         # --- Support and rooting tab -------------------------------------------
         self._alrt = QSpinBox(self)
@@ -482,6 +565,10 @@ class TreeParamsDialog(QDialog):
         if not self._files or s is None or s.error or not s.lengths:
             self._frag_hint.setVisible(False)
             return
+        if self._seq_mode.currentData() == TREE_SEQ_RT and self._seq_mode.isEnabled():
+            # lengths are judged on the RT domains, per RT type, during the run
+            self._frag_hint.setVisible(False)
+            return
         frag = tb.fragment_count(s.lengths, self._min_cov.value() / 100.0,
                                  str(self._cov_ref.currentData()))
         self._frag_hint.setText(
@@ -503,7 +590,28 @@ class TreeParamsDialog(QDialog):
         protein = bool(self._summary and not self._summary.error and not self._summary.dna)
         self._strategy.setEnabled(aligning)
         self._more_box.setEnabled(aligning)
-        self._adjust_direction.setEnabled(aligning and not protein)
+        rt = self._seq_mode.currentData() == TREE_SEQ_RT and not protein
+        self._seq_mode.setEnabled(not protein)
+        for w in self._rexdb_rows:
+            w.setEnabled(rt)
+        self._rexdb_status.setVisible(rt)
+        self._update_check()
+        if rt:
+            from repeatviewer.backends.rt_domains import looks_like_rexdb
+
+            path = self._rexdb.path()
+            if path is None:
+                msg, ok = "Choose REXdb to use this mode.", False
+            elif looks_like_rexdb(path):
+                msg, ok = "Found, with its .classification table.", True
+            else:
+                msg, ok = (f"{path.name}: not found, or {path.with_suffix('.classification').name} "
+                           "is not next to it."), False
+            self._rexdb_status.setText(msg)
+            self._rexdb_status.setStyleSheet("color: palette(mid);" if ok else "color: #b00020;")
+        self._adjust_direction.setEnabled(aligning and not protein and not rt)
+        self._rotate.setEnabled(aligning and not protein and not rt)
+        self._mask.setEnabled(not protein and not rt)
         if protein:
             self._adjust_direction.setToolTip("Only for DNA: the selected sequences are protein.")
         self._bnni.setEnabled(iq and self._ufboot.value() > 0)
@@ -519,9 +627,13 @@ class TreeParamsDialog(QDialog):
 
     def _restore_defaults(self) -> None:
         d = TreeOptions()
+        self._set_combo(self._seq_mode, d.sequence_mode)
+        self._rexdb_refs.setValue(d.rexdb_references)
         self._set_combo(self._align_mode, d.align_mode)
         self._set_combo(self._strategy, d.mafft_strategy)
         self._adjust_direction.setChecked(d.adjust_direction)
+        self._rotate.setChecked(d.rotate_monomers)
+        self._set_combo(self._mask, d.methylation_mask)
         self._min_cov.setValue(round(d.min_coverage * 100))
         self._set_combo(self._cov_ref, d.coverage_reference)
         self._gap_open.setValue(d.mafft_gap_open)
@@ -547,6 +659,16 @@ class TreeParamsDialog(QDialog):
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
+    def apply_path_from_panel(self, path: Path) -> bool:
+        """Files-panel click on a REXdb FASTA fills the REXdb field."""
+        from repeatviewer.backends.rt_domains import looks_like_rexdb
+
+        resolved = Path(path).expanduser()
+        if not looks_like_rexdb(resolved):
+            return False
+        self._rexdb.set_path(resolved)
+        return True
+
     def options(self) -> TreeOptions:
         model_idx = self._model.currentIndex()
         text = self._model.currentText().strip()
@@ -563,6 +685,12 @@ class TreeParamsDialog(QDialog):
             align_mode=str(self._align_mode.currentData()),
             mafft_strategy=str(self._strategy.currentData()),
             adjust_direction=self._adjust_direction.isChecked(),
+            rotate_monomers=self._rotate.isChecked(),
+            sequence_mode=(str(self._seq_mode.currentData())
+                           if self._seq_mode.isEnabled() else TREE_SEQ_AS_IS),
+            rexdb_fasta=str(self._rexdb.path() or ""),
+            rexdb_references=self._rexdb_refs.value(),
+            methylation_mask=str(self._mask.currentData() or "") if self._mask.isEnabled() else "",
             mafft_gap_open=self._gap_open.value(),
             mafft_offset=self._offset.value(),
             min_coverage=self._min_cov.value() / 100.0,
