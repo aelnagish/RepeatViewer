@@ -1110,7 +1110,7 @@ class TreePanel(QWidget):
         # --- options panel (right) ---------------------------------------------
         panel = QWidget(self)
         pl = QVBoxLayout(panel)
-        pl.setContentsMargins(4, 0, 6, 0)
+        pl.setContentsMargins(6, 6, 6, 6)
         pl.setSpacing(2)
         sec = _Section("Layout", panel, help_text=DRAW_HELP, key="layout")
         sec.add("Layout", self._layout_box)
@@ -1170,8 +1170,12 @@ class TreePanel(QWidget):
         # One surface: the panel shows the window's own background.
         panel.setAutoFillBackground(False)
         self._options_panel.viewport().setAutoFillBackground(False)
+        # Same colour as the Preview header bar (theme: palette(midlight)).
+        self._options_panel.setObjectName("TreeOptionsPanel")
         self._options_panel.setStyleSheet(
-            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+            "QScrollArea#TreeOptionsPanel { background: palette(midlight); border: none;"
+            " border-left: 1px solid palette(mid); }"
+            "QScrollArea#TreeOptionsPanel > QWidget > QWidget { background: transparent; }")
         # Smaller controls, as in dense macOS tool panels.
         small = QFont(panel.font())
         small.setPointSizeF(max(9.0, small.pointSizeF() - 1.0))
@@ -1201,16 +1205,31 @@ class TreePanel(QWidget):
         undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         undo_shortcut.activated.connect(self.undo)
 
+        # Button row: a full-width strip in the Preview header colour, line below.
+        toolbar = QWidget(self)
+        toolbar.setObjectName("TreeToolbar")
+        toolbar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        toolbar.setStyleSheet("QWidget#TreeToolbar { background: palette(midlight);"
+                              " border: none; border-bottom: 1px solid palette(mid); }")
+        top.setContentsMargins(8, 4, 8, 4)
+        toolbar.setLayout(top)
+        # Status line under the tree only, so the options panel reaches the bottom.
+        self._status.setContentsMargins(8, 2, 8, 2)
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(0)
+        left.addWidget(self._canvas, stretch=1)
+        left.addWidget(self._status)
         middle = QHBoxLayout()
-        middle.setSpacing(6)
-        middle.addWidget(self._canvas, stretch=1)
+        middle.setContentsMargins(0, 0, 0, 0)
+        middle.setSpacing(0)
+        middle.addLayout(left, stretch=1)
         middle.addWidget(self._options_panel)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 4)
-        layout.setSpacing(4)
-        layout.addLayout(top)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(toolbar)
         layout.addLayout(middle, stretch=1)
-        layout.addWidget(self._status)
 
         self._apply_options_to_controls()
         for box in (self._layout_box, self._order_box, self._branch_box, self._lengths_box,
