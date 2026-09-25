@@ -90,6 +90,7 @@ _TRACKPAD_ZOOM_BASE = 1.0022
 _MIN_TREE_PX = 260.0       # smallest drawing size (rectangular width / radius)
 _RECT_TREE_WIDTH_PX = 520.0
 SPREAD_MIN, SPREAD_MAX = 100, 500   # % (Spread)
+TOP_BUTTON_WIDTH = 86
 _MARGIN_PX = 24.0
 _HIT_WIDTH = 7.0           # clickable width around a branch, in pixels
 _SELECTED = QColor(0, 110, 230)
@@ -771,13 +772,9 @@ class _Section(QWidget):
     """Collapsible group for the options panel (heading ▸/▾ and an optional "?")."""
 
     def __init__(self, title: str, parent: QWidget, *, help_text: str = "",
-                 key: str = "", expanded: bool = True) -> None:
+                 key: str = "", expanded: bool = False) -> None:
         super().__init__(parent)
-        self._key = key
-        settings = QSettings()
-        if key:
-            expanded = str(settings.value(f"tree_view/section/{key}", expanded)).lower() in (
-                "1", "true")
+        self._key = key       # sections always start folded; opening one lasts for this view
         self.toggle = QToolButton(self)
         self.toggle.setText(title)
         self.toggle.setCheckable(True)
@@ -797,6 +794,7 @@ class _Section(QWidget):
         head.addStretch(1)
         if help_text:
             head.addWidget(make_help_button(parent, title, help_text))
+        self.labels: list[QLabel] = []
         self.body = QWidget(self)
         self.form = QFormLayout(self.body)
         self.form.setContentsMargins(14, 2, 0, 6)
@@ -813,11 +811,12 @@ class _Section(QWidget):
     def _on_toggled(self, on: bool, *, save: bool = True) -> None:
         self.toggle.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
         self.body.setVisible(on)
-        if save and self._key:
-            QSettings().setValue(f"tree_view/section/{self._key}", bool(on))
 
     def add(self, label: str, widget: QWidget) -> None:
-        self.form.addRow(label, widget)
+        text = QLabel(label, self.body)
+        text.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.labels.append(text)
+        self.form.addRow(text, widget)
 
 
 def _pair(parent: QWidget, *widgets: QWidget) -> QWidget:
@@ -1069,18 +1068,20 @@ class TreePanel(QWidget):
             combo.setMaximumWidth(170)
 
         # --- top row: actions only ---------------------------------------------
-        self._options_btn = QToolButton(self)
+        self._options_btn = QPushButton(self)
         self._options_btn.setCheckable(True)
         self._options_btn.setToolTip("Show or hide the options panel.")
+        # All actions on the right, one size: Fit, Edit (+ its "?"), Undo, Save, Options.
+        for btn in (fit_btn, self._edit_btn, self._undo_btn, self._save_btn, self._options_btn):
+            btn.setFixedWidth(TOP_BUTTON_WIDTH)
         top = QHBoxLayout()
         top.setSpacing(6)
+        top.addStretch(1)
+        top.addWidget(fit_btn)
         top.addWidget(self._edit_btn)
         top.addWidget(make_help_button(self, "Editing the tree", EDIT_HELP))
         top.addWidget(self._undo_btn)
-        top.addStretch(1)
-        top.addWidget(fit_btn)
         top.addWidget(self._save_btn)
-        top.addSpacing(6)
         top.addWidget(self._options_btn)
 
         # --- options panel (right) ---------------------------------------------
@@ -1119,7 +1120,7 @@ class TreePanel(QWidget):
         sec.add("By:", self._color_box)
         sec.add("", _pair(panel, self._traits_btn))
         pl.addWidget(sec)
-        sec = _Section("Scale bar", panel, help_text=SCALE_HELP, key="scale", expanded=False)
+        sec = _Section("Scale bar", panel, help_text=SCALE_HELP, key="scale")
         sec.add("", self._scale_check)
         sec.add("Length:", self._scale_len)
         sec.add("Font:", self._sfont_spin)
@@ -1127,11 +1128,16 @@ class TreePanel(QWidget):
         self._report_btn = QPushButton("Open run report", self)
         self._report_btn.setToolTip("The tree run's report (in its _details folder).")
         self._report_btn.clicked.connect(self._open_report)
-        sec = _Section("Statistics", panel, key="stats", expanded=False)
+        sec = _Section("Statistics", panel, key="stats")
         sec.form.addRow(self._stats_label)
         sec.form.addRow(_pair(panel, self._report_btn))
         pl.addWidget(sec)
         pl.addStretch(1)
+        # one label column for all sections, so every field starts at the same x
+        labels = [lab for sec in panel.findChildren(_Section) for lab in sec.labels]
+        width = max((lab.sizeHint().width() for lab in labels), default=0)
+        for lab in labels:
+            lab.setFixedWidth(width)
         self._options_panel = QScrollArea(self)
         self._options_panel.setWidget(panel)
         self._options_panel.setWidgetResizable(True)
@@ -1286,7 +1292,7 @@ class TreePanel(QWidget):
 
     def _show_options_panel(self, on: bool, *, save: bool = True) -> None:
         self._options_panel.setVisible(on)
-        self._options_btn.setText("Options ▸" if on else "Options ◂")
+        self._options_btn.setText("Options ▸" if on else "◂ Options")
         if save:
             QSettings().setValue("tree_view/options_panel", bool(on))
 

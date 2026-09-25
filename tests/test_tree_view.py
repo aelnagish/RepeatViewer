@@ -477,6 +477,9 @@ def test_copy_newick_and_options_panel(qapp, tree_file):
     assert not panel._options_panel.isVisible()
     panel._options_btn.setChecked(True)
     assert panel._options_panel.isVisible()
-    titles = [b.text() for b in panel._options_panel.widget().findChildren(type(panel._options_btn))
-              if b.isCheckable() and b is not panel._options_btn]
-    assert titles[:3] == ["Layout", "Tip names", "Branch labels"]
+    from PySide6.QtWidgets import QToolButton
+    toggles = [b for b in panel._options_panel.widget().findChildren(QToolButton) if b.isCheckable()]
+    assert [b.text() for b in toggles[:3]] == ["Layout", "Tip names", "Branch labels"]
+    assert not any(b.isChecked() for b in toggles)      # every section starts folded
+    toggles[0].setChecked(True)
+    assert panel._layout_box.isVisible()
