@@ -59,6 +59,7 @@ from repeatviewer.app_preferences import (
     load_cyto_experimenter,
     load_reopen_last_folder,
     load_restore_geometry,
+    load_show_splash,
     load_ui_thread_reserve,
     load_verbose_logging,
     log_file_path,
@@ -67,6 +68,7 @@ from repeatviewer.app_preferences import (
     save_cyto_experimenter,
     save_reopen_last_folder,
     save_restore_geometry,
+    save_show_splash,
     save_ui_thread_reserve,
     save_verbose_logging,
 )
@@ -531,6 +533,9 @@ class SettingsDialog(QDialog):
         self._restore_geometry = QCheckBox()
         self._restore_geometry.setChecked(load_restore_geometry())
         self._restore_geometry.setToolTip("Restore the window size and position from the last session.")
+        self._show_splash = QCheckBox()
+        self._show_splash.setChecked(load_show_splash())
+        self._show_splash.setToolTip("Show the RepeatViewer banner with a tip while the app loads.")
 
         # Cytogenetic images
         self._cyto_experimenter = QLineEdit(load_cyto_experimenter())
@@ -723,6 +728,7 @@ class SettingsDialog(QDialog):
         startup = _group("Startup", [
             ("Reopen last folder:", self._reopen_last),
             ("Restore window size:", self._restore_geometry),
+            ("Splash screen:", self._show_splash),
         ])
         cytogenetics = _group("Cytogenetic images", [
             ("Experimenter:", self._cyto_experimenter),
@@ -871,6 +877,7 @@ class SettingsDialog(QDialog):
         save_ui_thread_reserve(self._ui_thread_reserve.value())
         save_reopen_last_folder(self._reopen_last.isChecked())
         save_restore_geometry(self._restore_geometry.isChecked())
+        save_show_splash(self._show_splash.isChecked())
         save_cyto_experimenter(self._cyto_experimenter.text())
         save_verbose_logging(self._verbose_logging.isChecked())
         base_dir_text = self._blast_db_base_dir.text().strip()

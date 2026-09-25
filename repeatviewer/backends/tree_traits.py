@@ -54,8 +54,11 @@ def traits_path(tree_path: Path) -> Path:
 
 
 def names_table_path(tree_path: Path) -> Path | None:
-    """``names.tsv`` of the tree run that wrote ``tree_path``, if there is one."""
-    tree_path = Path(tree_path)
+    """``names.tsv`` of the tree run that wrote ``tree_path``, if there is one
+    (also for trees saved from the viewer, ``x.treefile_rerooted.treefile``)."""
+    from repeatviewer.backends.tree_links import run_tree
+
+    tree_path = run_tree(Path(tree_path))
     name = tree_path.name
     for suffix in ("_masked.treefile", ".treefile"):
         if name.endswith(suffix):

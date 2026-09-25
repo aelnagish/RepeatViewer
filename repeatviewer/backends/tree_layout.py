@@ -35,6 +35,12 @@ ORDER_INCREASING = "increasing"
 ORDER_DECREASING = "decreasing"
 ORDERS = (ORDER_FILE, ORDER_INCREASING, ORDER_DECREASING)
 
+# How branch lengths are drawn (Geneious: "Transform branches")
+BRANCHES_PROPORTIONAL = "proportional"   # as in the file
+BRANCHES_EQUAL = "equal"                 # cladogram: topology only, tips aligned
+BRANCHES_SQRT = "sqrt"                   # square root: one very long branch no longer squeezes the rest
+BRANCH_TRANSFORMS = (BRANCHES_PROPORTIONAL, BRANCHES_EQUAL, BRANCHES_SQRT)
+
 
 class TreeReadError(ValueError):
     """The file is not a readable Newick / NEXUS tree."""
@@ -197,6 +203,37 @@ def depths(model: TreeModel) -> list[float]:
     return out
 
 
+def transform_lengths(model: TreeModel, mode: str) -> TreeModel:
+    """Copy of ``model`` with branch lengths as drawn for ``mode``.
+
+    ``equal``: every node sits one step left of its tallest child, so all tips
+    line up (a cladogram); ``sqrt``: square root of each length. Labels keep
+    showing the file's lengths; only the drawing changes.
+    """
+    nodes = [Node(n.index, n.parent, list(n.children), n.name, n.length, n.support)
+             for n in model.nodes]
+    if mode == BRANCHES_SQRT:
+        for node in nodes[1:]:
+            node.length = math.sqrt(max(0.0, node.length))
+    elif mode == BRANCHES_EQUAL:
+        height = [0] * len(nodes)
+        for node in reversed(nodes):
+            if node.children:
+                height[node.index] = 1 + max(height[c] for c in node.children)
+        for node in nodes[1:]:
+            node.length = float(height[node.parent] - height[node.index])
+    return TreeModel(nodes=nodes, has_lengths=model.has_lengths, has_support=model.has_support)
+
+
+def transform_length(value: float, mode: str) -> float:
+    """One length (e.g. a collapsed clade's depth) as drawn for ``mode``."""
+    if mode == BRANCHES_SQRT:
+        return math.sqrt(max(0.0, value))
+    if mode == BRANCHES_EQUAL:
+        return 1.0
+    return value
+
+
 # --------------------------------------------------------------------------
 # Layouts
 # --------------------------------------------------------------------------
@@ -220,6 +257,7 @@ class Layout:
     extent: float                          # max root-to-tip distance
     n_rows: int                            # rectangular: number of tip rows
     node_angle: dict[int, float] = field(default_factory=dict)  # circular / radial, degrees
+    inner: float = 0.0                     # circular: empty radius left at the centre
 
 
 def _rectangular(model: TreeModel, depth: list[float]) -> Layout:
@@ -251,7 +289,7 @@ def _polar(r: float, deg: float) -> tuple[float, float]:
     return (r * math.cos(rad), -r * math.sin(rad))
 
 
-def _circular(model: TreeModel, depth: list[float]) -> Layout:
+def _circular(model: TreeModel, depth: list[float], inner: float = 0.0) -> Layout:
     tips = model.tips()
     n = len(tips)
     angle = [0.0] * len(model.nodes)
@@ -260,6 +298,8 @@ def _circular(model: TreeModel, depth: list[float]) -> Layout:
     for node in reversed(model.nodes):
         if not node.is_tip:
             angle[node.index] = (angle[node.children[0]] + angle[node.children[-1]]) / 2.0
+    # ``inner`` moves the root off the centre, so the branches near it open up.
+    depth = [d + inner for d in depth]
     xy = [_polar(depth[i], angle[i]) for i in range(len(model.nodes))]
     lines = []
     arcs = []
@@ -277,7 +317,7 @@ def _circular(model: TreeModel, depth: list[float]) -> Layout:
             if depth[i] > 0 and a1 > a0:
                 arcs.append(Arc(depth[i], a0, a1 - a0))
     return Layout(LAYOUT_CIRCULAR, xy, lines, arcs, {t: angle[t] for t in tips}, mid,
-                  max(depth), n, dict(enumerate(angle)))
+                  max(depth), n, dict(enumerate(angle)), inner)
 
 
 def _radial(model: TreeModel) -> Layout:
@@ -313,9 +353,11 @@ def _radial(model: TreeModel) -> Layout:
 
 
 def compute_layout(model: TreeModel, kind: str = LAYOUT_RECTANGULAR,
-                   extra_depth: dict[int, float] | None = None) -> Layout:
+                   extra_depth: dict[int, float] | None = None, *,
+                   inner_fraction: float = 0.0) -> Layout:
     """Coordinates for ``kind``. ``extra_depth`` reserves room beyond some tips
-    (collapsed clades drawn as triangles) so the drawing scale includes them."""
+    (collapsed clades drawn as triangles) so the drawing scale includes them.
+    ``inner_fraction`` (circular): empty centre as a share of the tree depth."""
     if kind == LAYOUT_RADIAL:
         layout = _radial(model)
         if extra_depth:
@@ -323,9 +365,14 @@ def compute_layout(model: TreeModel, kind: str = LAYOUT_RECTANGULAR,
                 math.hypot(*layout.xy[i]) + d for i, d in extra_depth.items()))
         return layout
     depth = depths(model)
-    layout = _circular(model, depth) if kind == LAYOUT_CIRCULAR else _rectangular(model, depth)
+    if kind == LAYOUT_CIRCULAR:
+        inner = max(0.0, inner_fraction) * (max(depth) or 1.0)
+        layout = _circular(model, depth, inner)
+    else:
+        layout = _rectangular(model, depth)
     if extra_depth:
-        layout.extent = max(layout.extent, max(depth[i] + d for i, d in extra_depth.items()))
+        layout.extent = max(layout.extent, max(depth[i] + layout.inner + d
+                                               for i, d in extra_depth.items()))
     return layout
 
 
