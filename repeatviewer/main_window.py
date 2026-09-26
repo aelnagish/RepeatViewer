@@ -513,9 +513,9 @@ _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 # it streams rather than parsing into memory, so size is not a reason to refuse.
 _EXTRACT_SOURCE_SUFFIXES = _FASTA_SUFFIXES | {".fna", ".ffn"}
 _GZIP_SUFFIXES = {".gz", ".bgz"}
-# Above this, the tick-box list is not built -- listing a read set record by
-# record is what makes the old dialog unusable on anything large.
-_EXTRACT_PICK_LIST_MAX_BYTES = 20_000_000
+# Tick-box list is fine for genomes (dozens of chroms); skip only for huge
+# read sets where building thousands of QListWidget items is unusable.
+_EXTRACT_PICK_LIST_MAX_RECORDS = 10_000
 # Confirm before scattering this many single-sequence files into a folder.
 _EXTRACT_MANY_FILES_WARNING = 200
 # sseqid in a RepeatViewer BLAST table: the genome sequence that was hit.
@@ -3194,6 +3194,37 @@ class MainWindow(QMainWindow):
             source_files=files,
         )
 
+    def _overview_extract_pick_records(
+        self, source: Path
+    ) -> list[tuple[str, str, int]] | None:
+        """Reuse Overview IDs/lengths when that FASTA is already open in Preview."""
+        tabs = self._preview_tabs
+        if tabs is None:
+            return None
+        wanted = source.expanduser().resolve()
+        for index in range(tabs.count()):
+            widget = tabs.widget(index)
+            overview = getattr(widget, "_annotation_overview", None)
+            if overview is None:
+                continue
+            path = getattr(overview, "_path", None)
+            if path is None:
+                continue
+            try:
+                if Path(path).expanduser().resolve() != wanted:
+                    continue
+            except OSError:
+                continue
+            record_ids = list(getattr(overview, "_record_ids", None) or [])
+            lengths = dict(getattr(overview, "_lengths", None) or {})
+            if not record_ids:
+                return None
+            return [
+                (rid, "", int(lengths.get(rid, 0)))
+                for rid in record_ids
+            ]
+        return None
+
     def _extract_sequences_from_list(
         self,
         source_path: object = None,
@@ -3203,14 +3234,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Pull chosen records out of a multi-FASTA, leaving the original alone.
 
-        Two ways to choose: tick boxes, or a list of sequence names. The tick
-        list is only built when the file is small enough to list cheaply --
-        a read set is handled through the ID tab, which never holds the FASTA
-        in memory.
-
-        ``source_path`` comes from the right-click menu; without it the current
-        selection is used. ``initial_ids`` pre-fills the ID tab (used by
-        "Extract subject sequences" on a BLAST hit table).
+        Two ways to choose: tick boxes, or a list of sequence names. The pick
+        list reuses Overview when that file is open, otherwise streams ids and
+        lengths (same scan Overview uses). Very large read sets fall back to
+        the ID tab.
         """
         from repeatviewer.backends.sequence_compose import (
             SequenceComposeError,
@@ -3241,23 +3268,27 @@ class MainWindow(QMainWindow):
 
         records: list[tuple[str, str, int]] | None = None
         records_note = ""
-        try:
-            size = source.stat().st_size
-        except OSError:
-            size = 0
-        if size > _EXTRACT_PICK_LIST_MAX_BYTES or source.suffix.lower() in {".gz", ".bgz"}:
-            records_note = (
-                f"{source.name} is too large to list sequence by sequence "
-                f"({size / 1_000_000:.0f} MB). Use the ID list tab."
-            )
-        else:
+        records = self._overview_extract_pick_records(source)
+        if records is None:
             try:
-                records = list_records(source)
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                try:
+                    records = list_records(source)
+                finally:
+                    QApplication.restoreOverrideCursor()
             except SequenceComposeError as exc:
                 if not initial_ids:
                     QMessageBox.warning(self, "Extract Sequences from File", str(exc))
                     return
+                records = None
                 records_note = str(exc)
+
+        if records is not None and len(records) > _EXTRACT_PICK_LIST_MAX_RECORDS:
+            records_note = (
+                f"{source.name} has {len(records):,} sequences — too many for the "
+                "pick list. Use the ID list tab."
+            )
+            records = None
 
         dialog = ExtractSequencesDialog(
             records=records,

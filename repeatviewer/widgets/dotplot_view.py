@@ -1251,8 +1251,10 @@ class DotplotPanel(QWidget):
         # Optional override for multi-record FASTA (active Annotation sequence).
         self._active_sequence_id = ""
         self._active_sequence = ""
-        # FastGA is opt-in for large files; the region window is the default.
-        self._engine_choice = "region"
+        # Large sequences (>~2 Mb) show a status note instead of the instant
+        # k-mer window. FastGA is available from the main toolbar, not this tab.
+        self._engine_choice = "fastga"
+        self._too_long_prompt_active = False
         # "fasta" computes a dotplot; "alignment" displays a PAF/.1aln file.
         self._mode = "fasta"
         self._alignments = None
@@ -1408,11 +1410,15 @@ class DotplotPanel(QWidget):
         self._cancel_btn.setAutoRaise(True)
         self._cancel_btn.hide()
 
-        # FastGA on a large genome takes minutes (measured ~13 min on a 648 Mb
-        # scaffold), so it is never started just because the tab was opened.
+        # FastGA on a large genome takes minutes, so it is never started just
+        # because the tab was opened — the user must click this button.
         self._compute_btn = QToolButton(self)
-        self._compute_btn.setText("Compute dotplot")
+        self._compute_btn.setText("Run FastGA")
         self._compute_btn.setAutoRaise(True)
+        self._compute_btn.setToolTip(
+            "Run FastGA to build a self-dotplot of this long sequence. "
+            "This can take several minutes on large chromosomes."
+        )
         self._compute_btn.hide()
 
         self._thread: QThread | None = None
@@ -1491,6 +1497,9 @@ class DotplotPanel(QWidget):
         bar.addWidget(self._cancel_btn)
         bar.addStretch(1)
 
+        self._controls_bar = QWidget(self)
+        self._controls_bar.setLayout(bar)
+
         self._title = QLabel("", self)
         self._title.setContentsMargins(_RULER_LEFT, 2, 6, 2)
         title_font = QFont(self.font())
@@ -1511,7 +1520,7 @@ class DotplotPanel(QWidget):
         title_row.addWidget(self._status, 0, Qt.AlignmentFlag.AlignVCenter)
         title_row.addStretch(1)
 
-        layout.addLayout(bar)
+        layout.addWidget(self._controls_bar)
         layout.addLayout(title_row)
         layout.addWidget(self._canvas, stretch=1)
 
@@ -1550,6 +1559,7 @@ class DotplotPanel(QWidget):
         self._alignments = None
         self._active_sequence_id = ""
         self._active_sequence = ""
+        self._too_long_prompt_active = False
         self._canvas.set_axes([], [])
         self._sequence_id = ""
         self._canvas.clear_plot()
@@ -1570,6 +1580,7 @@ class DotplotPanel(QWidget):
         self._active_sequence = seq
         self._full_length = len(seq)
         self._loaded_for = None
+        self._too_long_prompt_active = False
 
     def _is_large(self) -> bool:
         if self._active_sequence:
@@ -1665,16 +1676,13 @@ class DotplotPanel(QWidget):
         self._apply_result(("alignment", self._path, str(data)), result)
 
     def _use_fastga(self) -> bool:
-        """FastGA only when explicitly chosen; the region window is the default.
-
-        FastGA cannot report matches shorter than ~100 bp (its seeds are 40 bp),
-        so it is the wrong tool for looking inside a satellite array. Plotting a
-        window with the instant k-mer engine allows any word size.
-        """
-        return self._is_large() and self._engine_choice == "fastga" and fastga_available()
+        """Large sequences use FastGA (opt-in via Run FastGA), not the k-mer window."""
+        return self._is_large() and fastga_available()
 
     def _use_region(self) -> bool:
-        return self._is_large() and not self._use_fastga()
+        # Instant From/Window plotting is disabled for long sequences; users
+        # are directed to FastGA instead.
+        return False
 
     def _sync_engine_controls(self) -> None:
         if self._mode == "alignment":
@@ -1706,17 +1714,22 @@ class DotplotPanel(QWidget):
         self._pair_combo.setVisible(False)
         self._filter_len_label.setVisible(False)
         self._filter_len.setVisible(False)
-        fastga = self._use_fastga()
-        region = self._use_region()
+        # Status-only note for long sequences: hide Line width / zoom / Save PDF.
+        hide_bar = self._too_long_prompt_active
+        self._controls_bar.setVisible(not hide_bar)
+        if hide_bar:
+            self._compute_btn.hide()
+            self._title.hide()
+            return
         for widget in (self._word_label, self._word, self._reverse):
-            widget.setVisible(not fastga)
+            widget.setVisible(not self._is_large())
         for widget in (
             self._region_start_label,
             self._region_start,
             self._region_size_label,
             self._region_size,
         ):
-            widget.setVisible(region)
+            widget.setVisible(False)
         for widget in (
             self._identity_label,
             self._identity,
@@ -1725,20 +1738,10 @@ class DotplotPanel(QWidget):
             self._seed_freq_label,
             self._seed_freq,
         ):
-            widget.setVisible(fastga)
+            widget.setVisible(False)
 
     def _current_key(self):
         active = self._active_sequence_id or ""
-        if self._use_region():
-            return (
-                self._path,
-                active,
-                "region",
-                int(self._region_start.value()),
-                int(self._region_size.value()),
-                int(self._word.value()),
-                self._reverse.isChecked(),
-            )
         if self._use_fastga():
             return (
                 self._path,
@@ -1759,9 +1762,8 @@ class DotplotPanel(QWidget):
     def ensure_loaded(self) -> None:
         """Compute on first view only, never when a file is merely selected.
 
-        The small-sequence engine runs immediately (milliseconds). FastGA is
-        offered behind a button instead: on a large genome it runs for minutes,
-        which must never start merely because a tab was clicked.
+        Short sequences use the instant k-mer engine. Sequences longer than
+        ~2 Mb need FastGA: show a prompt (never auto-start a multi-minute run).
         """
         if self._mode == "alignment":
             return  # already loaded from file; nothing to compute
@@ -1769,27 +1771,46 @@ class DotplotPanel(QWidget):
         key = self._current_key()
         if self._loaded_for == key or self._thread is not None:
             return
-        if self._use_fastga():
-            self._offer_fastga(key)
-        elif self._use_region():
-            self._compute_region(key)
-        else:
-            self._compute_kmer(key)
+        if self._is_large():
+            if self._use_fastga():
+                self._offer_fastga(key)
+            else:
+                self._offer_too_long_no_fastga()
+            return
+        self._compute_kmer(key)
 
-    def _offer_fastga(self, key) -> None:
-        """Show what it will cost and wait for the user to ask for it."""
-        self._pending_key = key
+    def _too_long_status_message(self, *, fastga_available_now: bool) -> str:
+        del fastga_available_now  # same copy whether FastGA is installed
+        return (
+            "This sequence is too long for instant self-dotplot "
+            "(limit 2.0 Mbp of sequence length)."
+        )
+
+    def _offer_too_long_no_fastga(self) -> None:
+        """Large sequence but FastGA is not installed."""
+        self._pending_key = None
         self._canvas.clear_plot()
         self._clear_selection_chrome()
-        try:
-            mb = self._path.stat().st_size / 1024 / 1024
-        except OSError:
-            mb = 0
-        self._compute_btn.show()
-        self._set_status_text(
-            f"{mb:,.0f} MB — too large for the instant engine. "
-            "FastGA can plot it, but takes minutes on a genome this size."
-        )
+        self._compute_btn.hide()
+        # Remember so ensure_loaded does not re-fire the same prompt every paint.
+        self._loaded_for = ("too_long", self._path, self._active_sequence_id or "")
+        self._too_long_prompt_active = True
+        self._sync_engine_controls()
+        message = self._too_long_status_message(fastga_available_now=False)
+        self._set_status_text(message, tooltip="")
+        self.statusMessage.emit(message)
+
+    def _offer_fastga(self, key) -> None:
+        """Status-only note for long sequences (no in-tab Run FastGA UI)."""
+        self._pending_key = None
+        self._loaded_for = key  # prompt shown; do not re-fire on every ensure_loaded
+        self._too_long_prompt_active = True
+        self._canvas.clear_plot()
+        self._clear_selection_chrome()
+        self._compute_btn.hide()
+        self._sync_engine_controls()
+        message = self._too_long_status_message(fastga_available_now=True)
+        self._set_status_text(message, tooltip="")
 
     def _start_requested_compute(self) -> None:
         self._compute_btn.hide()
@@ -1807,10 +1828,8 @@ class DotplotPanel(QWidget):
             return
         if self._loaded_for is None:
             return
-        # Changing a FastGA setting must not silently relaunch a long run.
-        if self._use_fastga():
-            self._loaded_for = None
-            self._offer_fastga(self._current_key())
+        # Long-sequence note is informational only — do not relaunch FastGA from here.
+        if self._is_large():
             return
         self.ensure_loaded()
 
@@ -1946,6 +1965,8 @@ class DotplotPanel(QWidget):
         previous_length = self._sequence_length
         had_plot = self._loaded_for is not None
         self._loaded_for = key
+        self._too_long_prompt_active = False
+        self._sync_engine_controls()
         self._sequence_id = result.sequence_id
         self._sequence_length = result.sequence_length
         name = result.sequence_id or self._path.stem

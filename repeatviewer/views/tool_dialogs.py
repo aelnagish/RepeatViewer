@@ -1635,10 +1635,9 @@ class _CheckboxToggleListWidget(QListWidget):
 class ExtractSequencesDialog(QDialog):
     """Pick records out of a multi-FASTA, by hand or from a list of names.
 
-    Two ways in: tick boxes (fine for a handful of monomers) or an ID list
-    (the only workable option for thousands of reads). ``records`` may be
-    ``None`` when the source is too large to list cheaply -- the tick-box tab
-    is then replaced by a note.
+    Two ways in: tick boxes (fine for a genome or a handful of monomers) or an
+    ID list (for huge read sets). ``records`` may be ``None`` when there are too
+    many sequences for a tick list -- the pick tab then shows a note.
     """
 
     #: Emitted with the parsed id list when the user presses Check.

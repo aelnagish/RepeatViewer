@@ -64,6 +64,7 @@ from PySide6.QtWidgets import (
     QScrollBar,
     QSizePolicy,
     QSlider,
+    QStackedWidget,
     QStyle,
     QTextEdit,
     QVBoxLayout,
@@ -225,8 +226,19 @@ _FIT_MIN_PPB = 1e-6
 _MAX_PPB = 48.0
 _INTERACTIVE_SEQUENCE_LEN = 35_000
 _LARGE_SEQUENCE_LEN = 150_000
+# Hard Annotation display limit (sequence letters / bp — same idea as Dotplot's ~2 Mb).
 _HUGE_SEQUENCE_LEN = 2_000_000
+_MAX_ANNOTATION_DISPLAY_LEN = _HUGE_SEQUENCE_LEN
 _LAYOUT_SYNC_MS = 40
+
+
+def _annotation_too_long_message(length: int = 0) -> str:
+    """Status text when Annotation refuses to render a long sequence."""
+    del length  # kept for call-site compatibility
+    return (
+        "This sequence is too long for Annotation tab "
+        "(limit 2.0 Mbp of sequence length)."
+    )
 _BUCKET_DRAW_PPB = 1.0
 _WRAP_MIN_PPB = 4.0
 _WRAP_LINE_RULER = 12
@@ -909,10 +921,12 @@ class ViewportRulerWidget(QWidget):
             if x < _LEFT_MARGIN or x > vw - 4:
                 continue
             if bp != seq_len:
+                # Tick from top down toward the nucleotide track.
                 painter.drawLine(int(x), 1, int(x), _VIEWPORT_RULER_HEIGHT - 3)
             text = str(bp)
             if x - last_label_x < min_label_w and bp != start_bp:
                 continue
+            # Baseline flush to the bottom edge so the track sits under the numbers.
             painter.drawText(int(x + 2), _VIEWPORT_RULER_HEIGHT - 2, text)
             last_label_x = x
         painter.end()
@@ -3254,10 +3268,42 @@ class SequenceMapWidget(QWidget):
         main_layout.addWidget(self._header)
         main_layout.addWidget(self._sequence_block, stretch=1)
 
+        self._too_long_panel = QWidget(self)
+        self._too_long_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        too_long_layout = QVBoxLayout(self._too_long_panel)
+        too_long_layout.setContentsMargins(8, 4, 8, 4)
+        too_long_layout.setSpacing(0)
+        self._too_long_label = QLabel("", self._too_long_panel)
+        self._too_long_label.setWordWrap(True)
+        self._too_long_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self._too_long_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._too_long_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        too_long_layout.addWidget(self._too_long_label, 0, Qt.AlignmentFlag.AlignTop)
+        too_long_layout.addStretch(1)
+
+        self._map_stack = QStackedWidget(self)
+        self._map_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self._map_stack.addWidget(main_column)
+        self._map_stack.addWidget(self._too_long_panel)
+        self._too_long_active = False
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(main_column, stretch=1)
+        layout.addWidget(self._map_stack, stretch=1)
         if self._annotation_side_panel is not None:
             layout.addWidget(self._annotation_side_panel)
 
@@ -3498,7 +3544,7 @@ class SequenceMapWidget(QWidget):
         self._sync_overview_now()
 
     def select_by_position(self, start: int, end: int, *, _attempt: int = 0) -> None:
-        if self._data is None:
+        if self._data is None or self.is_too_long_for_display():
             return
         # Marks this as the most recent explicit positioning request so a still-pending
         # fit_window() from the initial Annotation-tab auto-load (see load()/
@@ -3544,9 +3590,40 @@ class SequenceMapWidget(QWidget):
     def data(self) -> SequenceMapData | None:
         return self._data
 
+    def is_too_long_for_display(self) -> bool:
+        """True when Annotation is showing the too-long placeholder instead of the map."""
+        return bool(getattr(self, "_too_long_active", False))
+
+    def _set_too_long_display(self, active: bool, *, length: int = 0) -> None:
+        """Swap between the map and the too-long message panel."""
+        self._too_long_active = bool(active)
+        if active:
+            message = _annotation_too_long_message(length)
+            self._too_long_label.setText(message)
+            self._map_stack.setCurrentWidget(self._too_long_panel)
+            if self._annotation_side_panel is not None:
+                self._annotation_side_panel.hide()
+            self.statusMessage.emit(message)
+        else:
+            self._map_stack.setCurrentIndex(0)
+            if self._annotation_side_panel is not None:
+                self._annotation_side_panel.show()
+
     def load(self, data: SequenceMapData, *, fit_after_load: bool = True) -> None:
         self._data = data
         self._dirty = False
+        seq_len = int(data.length)
+        if seq_len > _MAX_ANNOTATION_DISPLAY_LEN:
+            # Keep metadata for multi-seq switching / summary, but do not paint.
+            self._set_position_spin_limits(1)
+            self._canvas.set_sequence("", [], is_protein=data.is_protein)
+            self._canvas.clear_selection()
+            self._sync_position_spins(1, 1)
+            self._apply_sequence_stats_text("", None)
+            self._set_too_long_display(True, length=seq_len)
+            return
+
+        self._set_too_long_display(False)
         self._set_position_spin_limits(data.length)
         if self._font_size.value() != _DEFAULT_NUC_FONT_PT:
             self._font_size.blockSignals(True)
@@ -3560,13 +3637,7 @@ class SequenceMapWidget(QWidget):
         )
         self._canvas.clear_selection()
         self._sync_position_spins(1, 1)
-        seq_len = data.length
-        if seq_len > _HUGE_SEQUENCE_LEN:
-            self.statusMessage.emit(
-                f"Very long sequence ({seq_len:,} bp): zoom and pan are limited; "
-                "annotation tracks remain available."
-            )
-        elif seq_len > _INTERACTIVE_SEQUENCE_LEN:
+        if seq_len > _INTERACTIVE_SEQUENCE_LEN:
             self.statusMessage.emit(
                 f"Long sequence ({seq_len:,} bp): letter mode disabled for performance."
             )
@@ -3748,7 +3819,7 @@ class SequenceMapWidget(QWidget):
 
     def fit_window(self) -> None:
         """Zoom out so the entire sequence fits in the visible sequence width."""
-        if self._data is None or not self._data.sequence:
+        if self._data is None or not self._data.sequence or self.is_too_long_for_display():
             return
         viewport_w = self._scroll_viewport_width()
         panel_w = max(self.width(), self._sequence_block.width())
@@ -4897,7 +4968,8 @@ class SequenceMapPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._map, stretch=1)
-        layout.addWidget(_annotation_panel_separator(self))
+        self._controls_separator = _annotation_panel_separator(self)
+        layout.addWidget(self._controls_separator)
         layout.addWidget(controls)
         controls.installEventFilter(self)
 
@@ -5338,13 +5410,42 @@ class SequenceMapPanel(QWidget):
         except (OSError, ValueError) as exc:
             self._loaded_data = None
             self._populate_sequence_combo(None)
+            self._sync_too_long_controls()
             self.statusMessage.emit(str(exc))
             return
         self._loaded_data = data
         self._populate_sequence_combo(data)
         self._map.load(data, fit_after_load=fit_after_load)
         self._feature_undo_stack.clear()
-        self.refresh_sequence_summary()
+        self._sync_too_long_controls()
+        if not self._map.is_too_long_for_display():
+            self.refresh_sequence_summary()
+
+    def _sync_too_long_controls(self) -> None:
+        """Hide annotation chrome when the map is blocked for a too-long sequence."""
+        too_long = self._map.is_too_long_for_display()
+        for widget in (
+            self._add_row_container,
+            self._auto_row_container,
+            self._sim_row_container,
+            self._action_row_container,
+        ):
+            widget.setVisible(not too_long)
+        # Keep the sequence switcher for multi-FASTA so a shorter record can be picked.
+        multi = bool(
+            self._loaded_data is not None and len(self._loaded_data.record_ids) > 1
+        )
+        if too_long and not multi:
+            self._seq_row_container.hide()
+            self._controls_separator.hide()
+            self._controls_panel.hide()
+        else:
+            self._controls_separator.show()
+            self._controls_panel.show()
+            if multi:
+                self._seq_row_container.show()
+            elif not too_long:
+                self._seq_row_container.hide()
 
     def _populate_sequence_combo(self, data: SequenceMapData | None) -> None:
         self._sequence_switch_updating = True
@@ -5469,7 +5570,9 @@ class SequenceMapPanel(QWidget):
             self._sequence_switch_updating = False
         self._map.load(data, fit_after_load=True)
         self._feature_undo_stack.clear()
-        self.refresh_sequence_summary()
+        self._sync_too_long_controls()
+        if not self._map.is_too_long_for_display():
+            self.refresh_sequence_summary()
         self._sequence_combo.setToolTip(data.sequence_id)
         self.activeSequenceChanged.emit(data.sequence_id)
         return True
@@ -5588,6 +5691,10 @@ class SequenceMapPanel(QWidget):
         return self._map.selection_range()
 
     def refresh_sequence_summary(self) -> None:
+        if self._map.is_too_long_for_display():
+            self._map.set_sequence_summary_text("")
+            self._sequence_summary_cache_key = None
+            return
         if not load_show_sequence_summary():
             self._map.set_sequence_summary_text("")
             self._sequence_summary_cache_key = None
@@ -5712,6 +5819,7 @@ class SequenceMapPanel(QWidget):
         self._map.mark_clean()
         if self._loaded_data is not None:
             self._populate_sequence_combo(self._loaded_data)
+            self._sync_too_long_controls()
         if gff_path is not None:
             if show_message:
                 self.statusMessage.emit(f"Saved annotations: {gff_path}")
