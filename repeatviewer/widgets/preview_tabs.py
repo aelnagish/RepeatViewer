@@ -27,6 +27,7 @@ from repeatviewer.backends.bismark_cov import is_bismark_cov_file
 from repeatviewer.backends.sequence_features import (
     format_multi_sequence_fasta_summary_text,
     format_single_sequence_summary_text,
+    summarize_loaded_sequence,
     summarize_single_sequence_fasta,
 )
 from repeatviewer.browser_file_metadata import scan_fasta_headers
@@ -786,6 +787,9 @@ class FilePreviewPage(QWidget):
         """Show a different file in this page (reuse one preview tab)."""
         old_path = self.path
         self.path = path.expanduser().resolve()
+        self._cyto_images_cache_path = None
+        self._cyto_images_cache_count = None
+        self._sequence_info_bar_cache_key = None
         if (
             _preview_kind(old_path) in {"html"}
             and _preview_kind(self.path) not in {"html"}
@@ -819,10 +823,23 @@ class FilePreviewPage(QWidget):
     def has_cyto_images(self) -> bool:
         from repeatviewer.backends.cyto_images import image_count_for_sequence
 
+        # Cache per path — header sync used to re-scan the folder on every
+        # Text/Annotation/Dotplot click.
+        cache_path = getattr(self, "_cyto_images_cache_path", None)
+        cache_count = getattr(self, "_cyto_images_cache_count", None)
         try:
-            return image_count_for_sequence(self.path) > 0
+            resolved = self.path.expanduser().resolve()
+        except OSError:
+            resolved = self.path
+        if cache_path == resolved and isinstance(cache_count, int):
+            return cache_count > 0
+        try:
+            count = int(image_count_for_sequence(resolved))
         except Exception:  # noqa: BLE001
-            return False
+            count = 0
+        self._cyto_images_cache_path = resolved
+        self._cyto_images_cache_count = count
+        return count > 0
 
     def _ensure_cyto_panel(self):
         from repeatviewer.widgets.cyto_images_ui import CytogeneticsPanel
@@ -924,7 +941,7 @@ class FilePreviewPage(QWidget):
             tab_host = tab_host.parent()
         if isinstance(tab_host, PreviewTabWidget):
             tab_host._sync_zoom_bar_enabled()
-            tab_host._sync_header_from_current_page()
+            # _sync_zoom_bar_enabled already refreshes the FASTA tab strip.
 
     def _after_load(self) -> None:
         if self._single_fasta_mode:
@@ -1075,29 +1092,70 @@ class FilePreviewPage(QWidget):
         if not _is_fasta_file(path):
             self._sequence_info_bar.clear()
             self._sequence_info_bar.hide()
+            self._sequence_info_bar_cache_key = None
             return
 
         if _is_fasta_too_large_for_preview(path):
             self._sequence_info_bar.hide()
+            self._sequence_info_bar_cache_key = None
             return
 
-        sequence_count = _count_fasta_sequences_fast(path)
+        try:
+            resolved = path.expanduser().resolve()
+            mtime = resolved.stat().st_mtime_ns
+        except OSError:
+            resolved = path
+            mtime = None
+        show_summary = load_show_sequence_summary()
+        cache_key = (str(resolved), mtime, show_summary, self._multi_fasta_mode)
+        if (
+            cache_key == getattr(self, "_sequence_info_bar_cache_key", None)
+            and self._sequence_info_bar.isVisible()
+            and self._sequence_info_bar.text()
+        ):
+            return
+
+        # Prefer already-loaded Annotation data over re-reading the FASTA.
+        if (
+            not self._multi_fasta_mode
+            and self._annotation_panel is not None
+            and show_summary
+        ):
+            data = getattr(self._annotation_panel, "_loaded_data", None)
+            if data is not None and getattr(data, "fasta_path", None) == resolved:
+                summary = summarize_loaded_sequence(data.sequence_id, data.sequence)
+                self._sequence_info_bar.setText(
+                    format_single_sequence_summary_text(summary)
+                )
+                self._sequence_info_bar.show()
+                self._sequence_info_bar_cache_key = cache_key
+                return
+
+        # Only need single-vs-multi for the label when summary is off or multi.
+        sequence_count = _count_fasta_sequences_fast(
+            path, stop_at=None if self._multi_fasta_mode else 2
+        )
         if sequence_count <= 0:
             self._sequence_info_bar.hide()
+            self._sequence_info_bar_cache_key = None
             return
 
-        if sequence_count == 1 and load_show_sequence_summary():
+        if sequence_count == 1 and show_summary:
             try:
                 summary = summarize_single_sequence_fasta(path)
             except (OSError, ValueError):
                 self._sequence_info_bar.hide()
+                self._sequence_info_bar_cache_key = None
                 return
             self._sequence_info_bar.setText(format_single_sequence_summary_text(summary))
         else:
+            if self._multi_fasta_mode:
+                sequence_count = _count_fasta_sequences_fast(path)
             self._sequence_info_bar.setText(
                 format_multi_sequence_fasta_summary_text(sequence_count)
             )
         self._sequence_info_bar.show()
+        self._sequence_info_bar_cache_key = cache_key
 
     def _ensure_annotation_overview(self):
         from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
@@ -2023,6 +2081,10 @@ class PreviewTabWidget(QTabWidget):
             self._header_bar.set_fasta_tabs_visible(False)
 
     def _on_cyto_images_changed(self, _folder: str) -> None:
+        widget = self.currentWidget()
+        if isinstance(widget, FilePreviewPage):
+            widget._cyto_images_cache_path = None
+            widget._cyto_images_cache_count = None
         self._sync_header_from_current_page()
 
     def _sync_tab_bar_visible(self) -> None:

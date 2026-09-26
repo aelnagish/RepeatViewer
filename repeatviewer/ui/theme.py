@@ -516,6 +516,51 @@ def application_stylesheet(
         min-height: 0px;
         max-height: 18px;
     }}
+    QWidget#previewScaleCluster {{
+        background: transparent;
+    }}
+    QToolButton#previewScaleMenuButton {{
+        border: 1px solid palette(mid);
+        border-right: none;
+        border-top-left-radius: {radius_sm}px;
+        border-bottom-left-radius: {radius_sm}px;
+        border-top-right-radius: 0px;
+        border-bottom-right-radius: 0px;
+        background: palette(base);
+        padding: 0px;
+        font-size: 9pt;
+        min-width: 14px;
+        max-width: 14px;
+    }}
+    QToolButton#previewScaleMenuButton:hover {{
+        background: palette(alternate-base);
+    }}
+    QToolButton#previewScaleMenuButton:pressed {{
+        background: palette(mid);
+    }}
+    QWidget#previewScaleCluster QSpinBox#previewZoomSpin {{
+        border-top-left-radius: 0px;
+        border-bottom-left-radius: 0px;
+    }}
+    QFrame#previewScaleSliderPopup {{
+        border: 1px solid palette(mid);
+        border-radius: {radius_sm}px;
+        background: palette(base);
+    }}
+    QSlider#previewScaleSlider::groove:vertical {{
+        border: 1px solid palette(mid);
+        background: palette(mid);
+        width: 4px;
+        border-radius: 2px;
+    }}
+    QSlider#previewScaleSlider::handle:vertical {{
+        background: {accent};
+        border: 1px solid palette(text);
+        height: 12px;
+        width: 12px;
+        margin: 0 -4px;
+        border-radius: 6px;
+    }}
     QSlider::groove:horizontal {{
         border: 1px solid palette(mid);
         background: palette(base);

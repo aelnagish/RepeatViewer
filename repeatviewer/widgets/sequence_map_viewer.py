@@ -33,6 +33,7 @@ from PySide6.QtGui import (
     QImage,
     QPalette,
     QPen,
+    QPixmap,
     QPolygonF,
     QShortcut,
     QPageSize,
@@ -63,6 +64,7 @@ from PySide6.QtWidgets import (
     QScrollBar,
     QSizePolicy,
     QSlider,
+    QStyle,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -1859,16 +1861,60 @@ class SequenceMapCanvas(QWidget):
         self._select_end_bp: int | None = None
         self._drag_select = False
         self._mouse_grabbed = False
+        self._pending_selection_emit: tuple[int, int] | None = None
+        self._selection_emit_timer = QTimer(self)
+        self._selection_emit_timer.setSingleShot(True)
+        self._selection_emit_timer.setInterval(33)  # ~30 Hz spin/status updates
+        self._selection_emit_timer.timeout.connect(self._flush_pending_selection_emit)
+        self._seq_layer_cache: QPixmap | None = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._show_similarity_database_name = True
+
+    def _invalidate_seq_layer_cache(self) -> None:
+        self._seq_layer_cache = None
+
+    def _ensure_seq_layer_cache(self) -> None:
+        """Lazy sequence (+ wrap features) snapshot without selection chrome.
+
+        Rebuilt on zoom/scroll/sequence change — not on every mouse press — so
+        selection drag only blits the cache and redraws the highlight.
+        """
+        if (
+            self._seq_layer_cache is not None
+            and self._seq_layer_cache.size() == self.size()
+            and not self._seq_layer_cache.isNull()
+        ):
+            return
+        if self.width() < 2 or self.height() < 2 or not self._sequence:
+            self._seq_layer_cache = None
+            return
+        cache = QPixmap(self.size())
+        cache.fill(QColor("#fafafa"))
+        painter = QPainter(cache)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, False)
+        self._draw_sequence(painter, QRectF(cache.rect()))
+        if self.uses_wrap():
+            self._draw_features(painter)
+            track_bottom = self._feature_track_top() + self._feature_block_height()
+            painter.setPen(QColor("#bbbbbb"))
+            painter.drawLine(
+                _LEFT_MARGIN,
+                track_bottom + 2,
+                self._content_width() - _LEFT_MARGIN,
+                track_bottom + 2,
+            )
+        painter.end()
+        self._seq_layer_cache = cache
 
     def set_show_similarity_database_name(self, show: bool) -> None:
         show = bool(show)
         if show == self._show_similarity_database_name:
             return
         self._show_similarity_database_name = show
+        self._invalidate_seq_layer_cache()
         self.update()
 
     def _feature_track_label(self, feat: SequenceFeature, rect_width: float, min_width: float) -> str:
@@ -1891,8 +1937,13 @@ class SequenceMapCanvas(QWidget):
         self._release_drag_mouse()
         super().hideEvent(event)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        self._invalidate_seq_layer_cache()
+        super().resizeEvent(event)
+
     def set_font_point_size(self, point_size: int) -> None:
         self._font_point_size = max(_MIN_NUC_FONT_PT, min(_MAX_NUC_FONT_PT, int(point_size)))
+        self._invalidate_seq_layer_cache()
         self._update_geometry()
         self.update()
 
@@ -1915,12 +1966,14 @@ class SequenceMapCanvas(QWidget):
         self._features = list(features)
         self._is_protein = bool(is_protein)
         self._feature_rows, self._feature_row_count = _pack_feature_rows(self._features)
+        self._invalidate_seq_layer_cache()
         self._update_geometry()
         self.update()
 
     def set_pixels_per_bp(self, ppb: float) -> None:
         cap = _zoom_ppb_max_for(len(self._sequence))
         self._pixels_per_bp = max(_FIT_MIN_PPB, min(cap, float(ppb)))
+        self._invalidate_seq_layer_cache()
         self._update_geometry()
         self.update()
 
@@ -1933,6 +1986,7 @@ class SequenceMapCanvas(QWidget):
         if width == self._viewport_width:
             return
         self._viewport_width = width
+        self._invalidate_seq_layer_cache()
         self.update()
 
     def sync_viewport_from_widget(self) -> None:
@@ -1940,12 +1994,13 @@ class SequenceMapCanvas(QWidget):
         width = max(120, self.width())
         if width != self._viewport_width:
             self._viewport_width = width
+            self._invalidate_seq_layer_cache()
             self.update()
 
     def set_scroll_px(self, scroll_px: float) -> None:
         self._scroll_px = max(0.0, float(scroll_px))
+        self._invalidate_seq_layer_cache()
         self.update()
-
     def scroll_px(self) -> float:
         return self._scroll_px
 
@@ -1987,6 +2042,7 @@ class SequenceMapCanvas(QWidget):
 
     def set_color_bases(self, enabled: bool) -> None:
         self._color_bases = bool(enabled)
+        self._invalidate_seq_layer_cache()
         self.update()
 
     def color_bases(self) -> bool:
@@ -1994,6 +2050,8 @@ class SequenceMapCanvas(QWidget):
 
     def set_selected_features(self, indices: set[int] | frozenset[int] | None) -> None:
         self._selected_indices = set(indices or [])
+        if self.uses_wrap():
+            self._invalidate_seq_layer_cache()
         self.update()
 
     def set_selected_feature(self, index: int | None) -> None:
@@ -2362,13 +2420,15 @@ class SequenceMapCanvas(QWidget):
             )
             return
 
+        seq_left, seq_right = self._sequence_viewport_x_extent()
+
+        # Zoomed in (≈1 px/base or more): RLE by identical bases.
         if cell_w >= _BUCKET_DRAW_PPB:
             visible_start = max(0, int(math.floor((scroll + clip.left() - origin_x) / cell_w)))
             visible_end = min(
                 seq_len,
                 int(math.ceil((scroll + clip.right() - origin_x) / cell_w)),
             )
-            seq_left, seq_right = self._sequence_viewport_x_extent()
             i = visible_start
             while i < visible_end:
                 base = self._sequence[i]
@@ -2389,7 +2449,9 @@ class SequenceMapCanvas(QWidget):
                 )
             return
 
-        seq_left, seq_right = self._sequence_viewport_x_extent()
+        # Fit / overview (sub-pixel bases): one sample per pixel, coalesce runs.
+        # Always-RLE-by-base was the ~7 kb drag regression — DNA has ~1 base
+        # per run, so it issued thousands of fillRects vs ~viewport-width here.
         px_left = max(0, int(math.floor(clip.left())), int(math.floor(seq_left)))
         px_right = min(
             self.width(),
@@ -2399,13 +2461,29 @@ class SequenceMapCanvas(QWidget):
         if px_left >= px_right:
             return
         painter.setPen(Qt.PenStyle.NoPen)
-        for px in range(px_left, px_right):
+        content_span = seq_len * cell_w
+        px = px_left
+        while px < px_right:
             content_x0 = scroll + px - origin_x
-            if content_x0 < 0.0 or content_x0 >= seq_len * cell_w:
+            if content_x0 < 0.0 or content_x0 >= content_span:
+                px += 1
                 continue
             bp0 = min(seq_len - 1, int(content_x0 / cell_w))
             bg, _ = self._base_style(self._sequence[bp0])
-            painter.fillRect(QRectF(float(px), float(origin_y), 1.0, float(cell_h)), bg)
+            run_start = px
+            px += 1
+            while px < px_right:
+                content_x0 = scroll + px - origin_x
+                if content_x0 < 0.0 or content_x0 >= content_span:
+                    break
+                bp1 = min(seq_len - 1, int(content_x0 / cell_w))
+                if self._sequence[bp1] != self._sequence[bp0]:
+                    break
+                px += 1
+            painter.fillRect(
+                QRectF(float(run_start), float(origin_y), float(px - run_start), float(cell_h)),
+                bg,
+            )
 
     def _draw_sequence(self, painter: QPainter, clip: QRectF) -> None:
         if not self._sequence:
@@ -2497,21 +2575,34 @@ class SequenceMapCanvas(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#fafafa"))
         if not self._sequence:
+            painter.fillRect(event.rect(), QColor("#fafafa"))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No sequence")
             painter.end()
             return
 
-        seq_len = len(self._sequence)
-        ppb = self.effective_ppb()
-        clip = QRectF(event.rect())
-
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, False)
 
-        self._draw_sequence(painter, clip)
+        # Blit cached sequence layer; rebuild only after zoom/scroll/etc.
+        self._ensure_seq_layer_cache()
+        if self._seq_layer_cache is not None:
+            painter.drawPixmap(event.rect(), self._seq_layer_cache, event.rect())
+        else:
+            painter.fillRect(event.rect(), QColor("#fafafa"))
+            self._draw_sequence(painter, QRectF(event.rect()))
+            if self.uses_wrap():
+                self._draw_features(painter)
+                track_bottom = self._feature_track_top() + self._feature_block_height()
+                painter.setPen(QColor("#bbbbbb"))
+                painter.drawLine(
+                    _LEFT_MARGIN,
+                    track_bottom + 2,
+                    self._content_width() - _LEFT_MARGIN,
+                    track_bottom + 2,
+                )
 
+        clip = QRectF(event.rect())
         sel = self.selection_range()
         if sel:
             a, b = sel
@@ -2521,49 +2612,91 @@ class SequenceMapCanvas(QWidget):
                 for bp in range(a, b + 1):
                     x, y = self._index_to_xy(bp - 1)
                     rect = QRectF(x, y, cell_w_f, cell_h_f)
+                    if not clip.intersects(rect):
+                        continue
                     painter.fillRect(rect, _SELECTION_FILL)
                     painter.setPen(QPen(_SELECTION_BORDER, 1))
                     painter.drawRect(rect)
             else:
                 x1 = origin_x + (a - 1) * cell_w - self._scroll_px
                 x2 = origin_x + b * cell_w - self._scroll_px
-                # Extend equally above and below the DNA cells, keeping the
-                # sequence centered inside a larger, unmistakable highlight.
                 rect = QRectF(
                     x1,
                     float(origin_y - _SELECTION_HIGHLIGHT_MARGIN),
                     x2 - x1,
                     float(cell_h + 2 * _SELECTION_HIGHLIGHT_MARGIN),
                 )
-                painter.fillRect(rect, _SELECTION_FILL)
-                painter.setPen(QPen(_SELECTION_BORDER, 1))
-                painter.drawRect(rect)
+                if clip.intersects(rect):
+                    painter.fillRect(rect, _SELECTION_FILL)
+                    painter.setPen(QPen(_SELECTION_BORDER, 1))
+                    painter.drawRect(rect)
             painter.setPen(Qt.PenStyle.NoPen)
-
-        if self.uses_wrap():
-            self._draw_features(painter)
-            track_bottom = self._feature_track_top() + self._feature_block_height()
-            painter.setPen(QColor("#bbbbbb"))
-            painter.drawLine(
-                _LEFT_MARGIN,
-                track_bottom + 2,
-                self._content_width() - _LEFT_MARGIN,
-                track_bottom + 2,
-            )
         painter.end()
 
-    @staticmethod
-    def _nice_tick_step(seq_len: int, ppb: float, fm: QFontMetrics) -> int:
-        sample_w = max(
-            fm.horizontalAdvance("1"),
-            fm.horizontalAdvance(str(max(1, seq_len))),
-        )
-        target_px = max(sample_w + 8, 56.0)
-        raw = max(1, int(target_px / max(ppb, 0.01)))
-        for step in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 5000, 10000, 50000):
-            if step >= raw:
-                return min(step, seq_len)
-        return max(1, seq_len // 10)
+    def _selection_paint_rect(self, sel: tuple[int, int]) -> QRect:
+        """Pixel rect for a selection range (including highlight margin)."""
+        a, b = sel
+        origin_x, origin_y, cell_w, cell_h = self._nucleotide_cell_geometry()
+        pad = 3
+        if self.uses_wrap():
+            cell_w_f, cell_h_f, _ = self._cell_size()
+            x0, y0 = self._index_to_xy(a - 1)
+            x1, y1 = self._index_to_xy(b - 1)
+            left = min(x0, x1) - pad
+            top = min(y0, y1) - pad
+            right = max(x0 + cell_w_f, x1 + cell_w_f) + pad
+            bottom = max(y0 + cell_h_f, y1 + cell_h_f) + pad
+            return QRect(int(left), int(top), int(right - left), int(bottom - top)).intersected(
+                self.rect()
+            )
+        x1 = origin_x + (a - 1) * cell_w - self._scroll_px
+        x2 = origin_x + b * cell_w - self._scroll_px
+        top = int(origin_y - _SELECTION_HIGHLIGHT_MARGIN) - pad
+        height = int(cell_h + 2 * _SELECTION_HIGHLIGHT_MARGIN) + 2 * pad
+        return QRect(
+            int(min(x1, x2)) - pad,
+            top,
+            int(abs(x2 - x1)) + 2 * pad,
+            height,
+        ).intersected(self.rect())
+
+    def _selection_change_damage(
+        self, old: tuple[int, int] | None, new: tuple[int, int] | None
+    ) -> QRect:
+        """Repaint only edges that changed — not the full old∪new union.
+
+        Combined with the persistent sequence-layer cache, drag paints avoid
+        re-walking every base on each mouse move.
+        """
+        if old is None and new is None:
+            return QRect()
+        if old is None:
+            return self._selection_paint_rect(new)  # type: ignore[arg-type]
+        if new is None:
+            return self._selection_paint_rect(old)
+        oa, ob = old
+        na, nb = new
+        rect = QRect()
+        if oa != na:
+            rect = rect.united(self._selection_paint_rect((min(oa, na), max(oa, na))))
+        if ob != nb:
+            rect = rect.united(self._selection_paint_rect((min(ob, nb), max(ob, nb))))
+        if not rect.isNull():
+            return rect
+        # Identical range (e.g. press): refresh the thin caret/selection chrome.
+        return self._selection_paint_rect(new)
+
+    def _queue_selection_emit(self, start: int, end: int) -> None:
+        self._pending_selection_emit = (int(start), int(end))
+        if not self._selection_emit_timer.isActive():
+            self._selection_emit_timer.start()
+
+    def _flush_pending_selection_emit(self) -> None:
+        pending = self._pending_selection_emit
+        self._pending_selection_emit = None
+        if pending is None:
+            return
+        self.selectionChanged.emit(pending[0], pending[1])
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
@@ -2582,22 +2715,28 @@ class SequenceMapCanvas(QWidget):
                 return
         self._selected_indices.clear()
         bp = self._bp_at_pos(pos.x(), pos.y())
+        old_sel = self.selection_range()
         self._select_start_bp = bp
         self._select_end_bp = bp
         self._drag_select = True
         self.grabMouse()
         self._mouse_grabbed = True
         self.selectionChanged.emit(bp, bp)
-        self.update()
+        self.update(self._selection_change_damage(old_sel, (bp, bp)))
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._drag_select and self._select_start_bp is not None:
             bp = self._bp_at_pos(event.position().x(), event.position().y())
+            if bp == self._select_end_bp:
+                event.accept()
+                return
+            old_sel = self.selection_range()
             self._select_end_bp = bp
             a, b = sorted((self._select_start_bp, bp))
-            self.selectionChanged.emit(a, b)
-            self.update()
+            # Paint immediately; defer spin/status updates so drag stays smooth.
+            self._queue_selection_emit(a, b)
+            self.update(self._selection_change_damage(old_sel, (a, b)))
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -2606,9 +2745,24 @@ class SequenceMapCanvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_select = False
             self._release_drag_mouse()
+            self._selection_emit_timer.stop()
+            self._flush_pending_selection_emit()
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    @staticmethod
+    def _nice_tick_step(seq_len: int, ppb: float, fm: QFontMetrics) -> int:
+        sample_w = max(
+            fm.horizontalAdvance("1"),
+            fm.horizontalAdvance(str(max(1, seq_len))),
+        )
+        target_px = max(sample_w + 8, 56.0)
+        raw = max(1, int(target_px / max(ppb, 0.01)))
+        for step in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 5000, 10000, 50000):
+            if step >= raw:
+                return min(step, seq_len)
+        return max(1, seq_len // 10)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
         pos = QPointF(event.pos())
@@ -3152,9 +3306,12 @@ class SequenceMapWidget(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         QTimer.singleShot(0, self._sync_header_views)
+        # First open often fits before the panel has its real width; re-check.
+        QTimer.singleShot(0, self._ensure_fitted_to_viewport)
 
     def refresh_layout(self) -> None:
         self._sync_header_views()
+        self._ensure_fitted_to_viewport()
 
     def _sync_header_views(self) -> None:
         self._sync_sequence_block_layout()
@@ -3168,7 +3325,32 @@ class SequenceMapWidget(QWidget):
             width = widget.width()
             if width > 20:
                 return max(120, width - 2)
+        parent = self.parentWidget()
+        while parent is not None:
+            if parent.width() > 100:
+                return max(120, parent.width() - 48)
+            parent = parent.parentWidget()
         return 120
+
+    def _ensure_fitted_to_viewport(self) -> None:
+        """Re-fit when the sequence strip is much narrower than the panel."""
+        if self._data is None or not self._data.sequence:
+            return
+        if not self.isVisible():
+            return
+        viewport_w = self._scroll_viewport_width()
+        panel_w = max(self.width(), self._sequence_block.width())
+        if viewport_w <= 120 or (panel_w > 200 and viewport_w < panel_w * 0.45):
+            self._fit_retries += 1
+            if self._fit_retries < 40:
+                QTimer.singleShot(50, self._ensure_fitted_to_viewport)
+            return
+        content_w = self._canvas.content_pixel_width()
+        # Tiny first-open fit: content fills only a sliver of the panel.
+        if content_w > 0 and content_w < viewport_w * 0.55:
+            self.fit_window()
+            return
+        self._fit_retries = 0
 
     def _horizontal_scroll_px(self) -> float:
         return float(self._hbar.value())
@@ -3435,8 +3617,12 @@ class SequenceMapWidget(QWidget):
 
         if not isinstance(bar, AnnotationZoomBar):
             return
+        # Already bound — reconnecting would stack duplicate slots and make
+        # every later zoom/tab switch progressively slower.
+        if self._annotation_header_zoom_bar is bar and self._zoom_slider is bar.slider:
+            return
         old = self._annotation_header_zoom_bar
-        if old is not None and old is not bar:
+        if old is not None:
             try:
                 old.slider.valueChanged.disconnect(self._on_zoom_changed)
             except (RuntimeError, TypeError):
@@ -3565,9 +3751,11 @@ class SequenceMapWidget(QWidget):
         if self._data is None or not self._data.sequence:
             return
         viewport_w = self._scroll_viewport_width()
-        if viewport_w <= 20:
+        panel_w = max(self.width(), self._sequence_block.width())
+        # Treat premature layout widths as not ready (not only <= 20).
+        if viewport_w <= 120 or (panel_w > 240 and viewport_w < panel_w * 0.45):
             self._fit_retries += 1
-            if self._fit_retries < 30:
+            if self._fit_retries < 40:
                 QTimer.singleShot(50, self.fit_window)
             return
         self._fit_retries = 0
@@ -4729,7 +4917,10 @@ class SequenceMapPanel(QWidget):
         super().showEvent(event)
         QTimer.singleShot(0, self._sync_annotation_control_rows)
         QTimer.singleShot(0, self._refresh_annotation_button_styles)
-        QTimer.singleShot(0, self._refresh_similarity_database_rows)
+        # Rebuild DB chips only when empty — every Show used to recreate them
+        # and made Text ↔ Annotation ↔ Dotplot switches feel sluggish.
+        if not self._similarity_db_rows:
+            QTimer.singleShot(0, self._refresh_similarity_database_rows)
 
     def _refresh_annotation_button_styles(self) -> None:
         return
@@ -5009,6 +5200,7 @@ class SequenceMapPanel(QWidget):
             self.load_path(self._path, fit_after_load=True)
             QTimer.singleShot(50, self._map.refresh_layout)
         else:
+            # Already loaded — only re-sync scroll/viewport geometry (cheap).
             QTimer.singleShot(0, self._map.refresh_layout)
 
     # -- cytogenetic images ------------------------------------------------
@@ -5398,6 +5590,7 @@ class SequenceMapPanel(QWidget):
     def refresh_sequence_summary(self) -> None:
         if not load_show_sequence_summary():
             self._map.set_sequence_summary_text("")
+            self._sequence_summary_cache_key = None
             return
 
         # Prefer the sequence we already hold: re-reading the file here meant a
@@ -5405,17 +5598,30 @@ class SequenceMapPanel(QWidget):
         # peak memory.
         data = self._loaded_data
         if data is not None and data.fasta_path == self._path:
+            cache_key = (data.sequence_id, len(data.sequence), id(data.sequence))
+            if cache_key == getattr(self, "_sequence_summary_cache_key", None):
+                return
             self._map.set_sequence_summary(
                 summarize_loaded_sequence(data.sequence_id, data.sequence)
             )
+            self._sequence_summary_cache_key = cache_key
             return
 
+        try:
+            mtime = self._path.stat().st_mtime_ns
+        except OSError:
+            mtime = None
+        cache_key = (str(self._path), mtime)
+        if cache_key == getattr(self, "_sequence_summary_cache_key", None):
+            return
         try:
             summary = summarize_single_sequence_fasta(self._path)
         except (OSError, ValueError):
             self._map.set_sequence_summary_text("")
+            self._sequence_summary_cache_key = None
             return
         self._map.set_sequence_summary(summary)
+        self._sequence_summary_cache_key = cache_key
 
     def reload_annotations(self) -> None:
         """Reload features from the companion GFF3 on disk (Annotation tab open)."""
@@ -5777,6 +5983,52 @@ class SequenceMapPanel(QWidget):
     def _clear_annotation_job_status(self) -> None:
         self._annotation_job_status.clear()
 
+    def _show_wide_information(self, title: str, message: str) -> None:
+        """Multi-line summary dialog with text that fills the content width.
+
+        Native macOS QMessageBox ignores stylesheet width and leaves a large
+        empty gap beside short lines — use a plain QDialog instead.
+        """
+        dialog_w = 440
+        margin = 16
+        icon_w = 40
+        gap = 12
+        text_w = dialog_w - 2 * margin - icon_w - gap
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setModal(True)
+        dlg.setFixedWidth(dialog_w)
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(margin, margin, margin, 12)
+        root.setSpacing(14)
+
+        row = QHBoxLayout()
+        row.setSpacing(gap)
+        icon_label = QLabel(dlg)
+        icon = dlg.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
+        icon_label.setPixmap(icon.pixmap(icon_w, icon_w))
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        icon_label.setFixedWidth(icon_w)
+        row.addWidget(icon_label, 0)
+
+        text = QLabel(message, dlg)
+        text.setWordWrap(True)
+        text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        text.setFixedWidth(text_w)
+        text.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        row.addWidget(text, 0)
+        root.addLayout(row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, dlg)
+        buttons.accepted.connect(dlg.accept)
+        root.addWidget(buttons, 0, Qt.AlignmentFlag.AlignRight)
+
+        dlg.adjustSize()
+        dlg.exec()
+
     def _set_auto_run_button_running(self, running: bool) -> None:
         if running:
             self._auto_ann_run_btn.setText("Stop")
@@ -6095,7 +6347,7 @@ class SequenceMapPanel(QWidget):
             and needs_dialog
             and result.message.strip()
         ):
-            QMessageBox.information(self, "Similarity annotation", result.message)
+            self._show_wide_information("Similarity annotation", result.message)
 
     def _on_similarity_annotation_error(self, message: str) -> None:
         self._clear_annotation_job_status()
@@ -6211,7 +6463,7 @@ class SequenceMapPanel(QWidget):
             return
 
         if not result.features:
-            QMessageBox.information(self, "Auto annotation", result.message)
+            self._show_wide_information("Auto annotation", result.message)
             self._log_annotation_job(
                 "JOB FINISH",
                 "Auto annotation",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -10,6 +10,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QGuiApplication,
     QMouseEvent,
+    QNativeGestureEvent,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
@@ -206,6 +207,106 @@ def _make_preview_actions_button(*, tooltip: str) -> QToolButton:
     return btn
 
 
+class ScaleSliderPopup(QFrame):
+    """Vertical slider popup; range matches the linked spin (Shift+drag bounds)."""
+
+    def __init__(self, spin: QSpinBox, anchor: QWidget) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint,
+        )
+        self.setObjectName("previewScaleSliderPopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._spin = spin
+        self._block = False
+
+        self._slider = QSlider(Qt.Orientation.Vertical, self)
+        self._slider.setObjectName("previewScaleSlider")
+        self._slider.setRange(spin.minimum(), spin.maximum())
+        self._slider.setSingleStep(max(1, spin.singleStep()))
+        self._slider.setPageStep(max(1, spin.singleStep() * 5))
+        # Top of the bar = zoom in (maximum), same feel as dragging up.
+        self._slider.setInvertedAppearance(False)
+        self._slider.setMinimumHeight(140)
+        self._slider.setFixedWidth(28)
+        self._slider.setValue(spin.value())
+        self._slider.valueChanged.connect(self._on_slider)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 8, 6, 8)
+        layout.setSpacing(0)
+        layout.addWidget(self._slider, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        spin.valueChanged.connect(self._on_spin)
+        self._reposition(anchor)
+
+    def _reposition(self, anchor: QWidget) -> None:
+        self.adjustSize()
+        # Drop just below the scale cluster, left-aligned with the arrow.
+        origin = anchor.mapToGlobal(QPoint(0, anchor.height() + 2))
+        self.move(origin)
+
+    def _on_slider(self, value: int) -> None:
+        if self._block:
+            return
+        self._block = True
+        try:
+            self._spin.setValue(int(value))
+        finally:
+            self._block = False
+
+    def _on_spin(self, value: int) -> None:
+        if self._block or not self.isVisible():
+            return
+        self._block = True
+        try:
+            self._slider.setRange(self._spin.minimum(), self._spin.maximum())
+            self._slider.setValue(int(value))
+        finally:
+            self._block = False
+
+
+class ScaleSpinCluster(QWidget):
+    """Scale spin with a left chevron that opens a vertical slider popup."""
+
+    def __init__(self, spin: NoWheelSpinBox, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("previewScaleCluster")
+        self.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._spin = spin
+        self._popup: ScaleSliderPopup | None = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._arrow = QToolButton(self)
+        self._arrow.setObjectName("previewScaleMenuButton")
+        self._arrow.setText("▾")
+        self._arrow.setAutoRaise(True)
+        self._arrow.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._arrow.setFixedSize(14, ZOOM_CONTROL_HEIGHT)
+        self._arrow.setToolTip("Show scale slider")
+        self._arrow.clicked.connect(self._toggle_slider)
+        layout.addWidget(self._arrow)
+
+        spin.setParent(self)
+        layout.addWidget(spin)
+
+    @property
+    def spin(self) -> NoWheelSpinBox:
+        return self._spin
+
+    def _toggle_slider(self) -> None:
+        if self._popup is not None and self._popup.isVisible():
+            self._popup.close()
+            self._popup = None
+            return
+        self._popup = ScaleSliderPopup(self._spin, self)
+        self._popup.show()
+        self._popup._slider.setFocus(Qt.FocusReason.PopupFocusReason)
+
+
 class PreviewZoomBar(QWidget):
     """Compact preview controls for the Preview title bar.
 
@@ -229,18 +330,20 @@ class PreviewZoomBar(QWidget):
         self._spin = _make_zoom_percent_spin(
             minimum=MIN_PREVIEW_ZOOM_PERCENT,
             maximum=MAX_PREVIEW_ZOOM_PERCENT,
-            tooltip="Preview zoom (Shift+scroll, or trackpad pinch)",
+            tooltip="Preview zoom (Shift+scroll, trackpad pinch, or scale slider)",
         )
         self._spin.valueChanged.connect(self._on_spin)
-        layout.addWidget(self._spin)
+        self._spin_cluster = ScaleSpinCluster(self._spin, self)
+        layout.addWidget(self._spin_cluster)
 
         self._font_spin = _make_font_size_spin(
             minimum=MIN_PREVIEW_FONT_SIZE,
             maximum=MAX_PREVIEW_FONT_SIZE,
-            tooltip="Preview font size (Shift+scroll, or trackpad pinch)",
+            tooltip="Preview font size (Shift+scroll, trackpad pinch, or scale slider)",
         )
         self._font_spin.valueChanged.connect(self._on_font_spin)
-        layout.addWidget(self._font_spin)
+        self._font_cluster = ScaleSpinCluster(self._font_spin, self)
+        layout.addWidget(self._font_cluster)
 
         self._actions_btn = _make_preview_actions_button(
             tooltip="Preview actions",
@@ -288,8 +391,8 @@ class PreviewZoomBar(QWidget):
         show_font = mode == "text"
         show_reset = mode in {"text", "media"}
         show_text_tools = mode == "text"
-        self._spin.setVisible(show_percent)
-        self._font_spin.setVisible(show_font)
+        self._spin_cluster.setVisible(show_percent)
+        self._font_cluster.setVisible(show_font)
         self._reset_scale_action.setVisible(show_reset)
         self._text_actions_sep.setVisible(show_text_tools)
         self._edit_text_action.setVisible(show_text_tools)
@@ -596,11 +699,14 @@ class PreviewWheelZoomFilter(QObject):
 
     # Pixels of vertical Shift+drag per one zoom step (percent or pt).
     _DRAG_PIXELS_PER_STEP = 28.0
+    # Trackpad pinch magnification accumulated per zoom step.
+    _PINCH_DELTA_PER_STEP = 0.04
     _INTERESTING = (
         QEvent.Type.Wheel,
         QEvent.Type.MouseButtonPress,
         QEvent.Type.MouseMove,
         QEvent.Type.MouseButtonRelease,
+        QEvent.Type.NativeGesture,
     )
 
     def __init__(self, tabs: QWidget, zoom_bar: PreviewZoomBar) -> None:
@@ -612,6 +718,7 @@ class PreviewWheelZoomFilter(QObject):
         self._enabled = True
         self._watched: set[int] = set()
         self._zoom_accum = 0
+        self._pinch_accum = 0.0
         self._drag_origin: QPointF | None = None
         self._drag_accum = 0.0
         tabs.destroyed.connect(self._disable)
@@ -767,6 +874,27 @@ class PreviewWheelZoomFilter(QObject):
             return False
         return self._zoom_modifiers_held(event)
 
+    def _can_pinch_zoom(self, page, obj: QWidget | None) -> bool:
+        """Pinch does not need Shift; still skip Annotation / HTML / foreign widgets."""
+        if not self._alive() or obj is None:
+            return False
+        try:
+            if not self._zoom_bar.isVisible() or not self._zoom_bar._size_control_active():
+                return False
+            if self._page_uses_own_zoom(page):
+                return False
+        except RuntimeError:
+            return False
+        try:
+            if self._is_descendant_of(obj, page._sequence_info_bar):
+                return False
+            html = getattr(page, "_html", None)
+            if isinstance(html, QWidget) and self._is_descendant_of(obj, html):
+                return False
+        except RuntimeError:
+            return False
+        return True
+
     def _apply_zoom_delta(self, delta: int) -> None:
         if delta == 0 or not self._alive():
             return
@@ -775,6 +903,18 @@ class PreviewWheelZoomFilter(QObject):
         steps = int(self._zoom_accum / threshold)
         if steps != 0:
             self._zoom_accum -= steps * threshold
+            try:
+                self._zoom_bar.step_zoom(steps)
+            except RuntimeError:
+                pass
+
+    def _apply_pinch_delta(self, magnification: float) -> None:
+        if magnification == 0.0 or not self._alive():
+            return
+        self._pinch_accum += float(magnification)
+        steps = int(self._pinch_accum / self._PINCH_DELTA_PER_STEP)
+        if steps != 0:
+            self._pinch_accum -= steps * self._PINCH_DELTA_PER_STEP
             try:
                 self._zoom_bar.step_zoom(steps)
             except RuntimeError:
@@ -796,6 +936,20 @@ class PreviewWheelZoomFilter(QObject):
     def _event_filter_impl(self, watched, event) -> bool:
         page = self._current_page()
         obj = watched if isinstance(watched, QWidget) else None
+
+        if event.type() == QEvent.Type.NativeGesture and isinstance(
+            event, QNativeGestureEvent
+        ):
+            if page is None or obj is None:
+                return False
+            if event.gestureType() != Qt.NativeGestureType.ZoomNativeGesture:
+                return False
+            if not self._can_pinch_zoom(page, obj):
+                return False
+            # value() is the magnification delta (positive = zoom in).
+            self._apply_pinch_delta(float(event.value()))
+            event.accept()
+            return True
 
         if isinstance(event, QMouseEvent):
             if page is None or obj is None:
