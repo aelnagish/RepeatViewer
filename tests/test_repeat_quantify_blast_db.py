@@ -223,7 +223,9 @@ def test_report_is_self_contained_and_lists_both_engines(tmp_path):
     ).read_text()
     assert "http://" not in html and "https://" not in html  # works offline
     assert "2 / 3" in html  # families found / library entries
-    assert "Kimura div." in html
+    assert ">Kimura</th>" in html
+    assert "Column definitions" in html
+    assert "each locus is assigned to one family" in html  # method explained
     assert "not found" in html  # SatB has no RepeatMasker row
     assert "&lt;dup&gt;" in html and "<dup>" not in html  # escaped
     assert "saved database g.fa" in html

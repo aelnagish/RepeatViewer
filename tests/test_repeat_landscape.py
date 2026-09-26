@@ -224,7 +224,7 @@ def test_summary_tsv_records_divergence_metric(tmp_path, engine, metric, expecte
 
 
 @pytest.mark.parametrize(
-    "metric, label", [("kimura", "Kimura div."), ("raw", "Divergence (raw)")]
+    "metric, label", [("kimura", "Kimura"), ("raw", "Raw div.")]
 )
 def test_summary_html_labels_divergence_metric(tmp_path, metric, label):
     result = QuantifyResult(

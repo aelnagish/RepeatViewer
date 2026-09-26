@@ -870,19 +870,48 @@ _ENGINE_VAR = {"blastn": "--e-blastn", "repeatmasker": "--e-rm"}
 # Report table columns: (header, tooltip). The TSV keeps every raw column.
 _COL_TIPS = {
     "family": "Library family; monomer (period) length below.",
-    "engine": "Quantification engine.",
-    "covered": "Target bp covered by the family (overlaps counted once), "
-               "and its share of the genome.",
-    "copies": "Estimated copies = covered bp ÷ monomer length. Shown as a "
-              "fraction when a family covers less than one full monomer.",
-    "arrays": "Hits merged into contiguous blocks (≈ distinct array loci).",
+    "method": "How the family was quantified (see Column definitions).",
+    "covered": "Genome bp covered by the family, overlaps counted once; "
+               "share of the genome below.",
+    "copies": "Estimated copies = covered bp ÷ monomer length. A fraction when "
+              "less than one full monomer is covered.",
+    "hits": "Raw alignment fragments reported by the method, before merging.",
+    "arrays": "Hits merged into contiguous blocks, roughly the number of array loci.",
+    "mean_array": "Average array length = covered bp ÷ array count.",
     "max_array": "Largest single contiguous array.",
-    "identity": "Length-weighted mean % identity to the consensus "
-                "(RepeatMasker: 100 − raw substitution %). High = young / conserved.",
-    "divergence": "Length-weighted mean divergence from the consensus. Kimura: "
-                  "CpG-adjusted Kimura 2-parameter % from the RepeatMasker .align "
-                  "file; raw: .out substitution %. High = old / diverged copies.",
-    "scaffolds": "Number of distinct target sequences hit.",
+    "identity": "Length-weighted mean % identity to the monomer "
+                "(RepeatMasker: 100 − raw substitution %). High = young, conserved copies.",
+    "divergence": "Length-weighted mean divergence from the monomer "
+                  "(RepeatMasker only). High = old copies.",
+    "scaffolds": "Number of distinct target sequences with at least one hit.",
+}
+
+# Column definitions shown under the table: (group, [(term, text), ...]).
+_GLOSSARY = [
+    ("Coverage", [
+        ("Covered", _COL_TIPS["covered"]),
+        ("Monomer", "Length of the library monomer (period), under the family name."),
+    ]),
+    ("Copies", [
+        ("Est. copies", _COL_TIPS["copies"]),
+        ("Hits", _COL_TIPS["hits"]),
+    ]),
+    ("Arrays", [
+        ("Count", _COL_TIPS["arrays"]),
+        ("Mean · Max", "Average (covered ÷ count) and largest single array length."),
+    ]),
+]
+_DIVERGENCE_DEFS = {
+    "kimura": ("Kimura", "CpG-adjusted Kimura 2-parameter divergence from the "
+               "RepeatMasker .align file (RepeatMasker only). High = old copies."),
+    "raw": ("Raw div.", "Raw substitution % from the RepeatMasker .out file, used "
+            "when no .align file exists (RepeatMasker only). High = old copies."),
+}
+_METHOD_DEFS = {
+    "blastn": "BLASTn: each monomer searched against the genome; overlapping "
+              "families are each counted.",
+    "repeatmasker": "RepeatMasker: library-based masking; each locus is assigned "
+                    "to one family.",
 }
 
 
@@ -992,10 +1021,23 @@ th.l,td.l{text-align:left}
 td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;
 font-variant-numeric:tabular-nums;vertical-align:top;white-space:nowrap}
 tr.first td{border-top:1px solid var(--line2)}
+tr.grp th{border:0;padding-bottom:3px;cursor:default}
+th.g{text-align:center;color:var(--ink);border-bottom:1px solid var(--line2)!important}
+tr.h2 th{border-bottom:1px solid var(--line2)}
+th.gap,td.gap{border-left:1px solid var(--line)}
+tr.grp th.gap{border-left:0}
 td .s{display:block;font-size:11px;font-weight:400;color:var(--ink2)}
 td.fam{font-weight:600;white-space:normal;word-break:break-word}
 .none{color:var(--ink3)}
-.foot{font-size:11.5px;color:var(--ink2);margin-top:10px;line-height:1.55}
+.foot{font-size:11.5px;color:var(--ink2);margin-top:10px;padding-top:8px;
+border-top:1px solid var(--line);line-height:1.55}
+.defs{margin-top:12px;border-top:1px solid var(--line);padding-top:9px}
+.defs summary{cursor:pointer;font-weight:600;font-size:12.5px}
+.defs dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 24px;margin:9px 0 0}
+.defs dt{font-weight:600;font-size:12.5px} .defs dd{margin:1px 0 0;color:var(--ink2);
+font-size:12px;line-height:1.45}
+.dg{grid-column:1/-1;font-size:11.5px;color:var(--ink3);border-bottom:1px solid var(--line);
+padding-bottom:2px;margin-top:4px}
 .tip{position:absolute;pointer-events:none;background:var(--tip);border:1px solid
 var(--line2);border-radius:8px;padding:6px 9px;font-size:12px;display:none;
 white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.12);z-index:5}
@@ -1066,9 +1108,7 @@ def write_summary_html(
         note = f"{_fmt_mb(result.total_covered_bp)} · {name}"
         if i > 0 and ordered[0].total_covered_bp:
             diff = (result.total_covered_bp / ordered[0].total_covered_bp - 1) * 100
-            ref = {"repeatmasker": "RM"}.get(
-                ordered[0].engine, _ENGINE_DISPLAY.get(ordered[0].engine, ordered[0].engine)
-            )
+            ref = _ENGINE_DISPLAY.get(ordered[0].engine, ordered[0].engine)
             note = f"{_fmt_mb(result.total_covered_bp)} · {diff:+.0f} % vs {ref}"
             note = note.replace("-", "−")
         tiles.append(
@@ -1094,7 +1134,7 @@ def write_summary_html(
             for f in r.families
             if f.family == longest[1] and abs(f.max_array_bp - longest[0]) <= 0.01 * longest[0]
         ]
-        engines_note = "both engines" if len(where) > 1 else (where[0] if where else "")
+        engines_note = "both methods" if len(where) > 1 else (where[0] if where else "")
         tiles.append(
             "<div class='tile'><span class='muted'>Longest array</span>"
             f"<span class='v'>{_fmt_len(longest[0])}</span>"
@@ -1165,21 +1205,38 @@ def write_summary_html(
 
         # ---- table --------------------------------------------------------
         rm = next((r for r in results if r.engine == "repeatmasker"), None)
-        div_header = {"kimura": "Kimura div.", "raw": "Divergence (raw)"}.get(
-            rm.divergence_metric if rm else "", "Divergence"
-        )
+        metric = rm.divergence_metric if rm else ""
+        div_header = {"kimura": "Kimura", "raw": "Raw div."}.get(metric, "Divergence")
+        # (key, header, css class, group); group None = no group header above.
         cols = [
-            ("family", "Family", "l"), ("engine", "Engine", "l"),
-            ("covered", "Covered", ""), ("copies", "Copies", ""),
-            ("arrays", "Arrays", ""), ("max_array", "Max array", ""),
-            ("identity", "Identity", ""),
+            ("family", "Family", "l", None), ("method", "Method", "l", None),
+            ("covered", "Covered", "", "Coverage"),
+            ("copies", "Est.", "gap", "Copies"), ("hits", "Hits", "", "Copies"),
+            ("arrays", "Count", "gap", "Arrays"), ("mean_array", "Mean", "", "Arrays"),
+            ("max_array", "Max", "", "Arrays"),
+            ("identity", "Identity", "gap", "Similarity"),
         ]
         if rm is not None:
-            cols.append(("divergence", div_header, ""))
-        cols.append(("scaffolds", "Scaffolds", ""))
-        thead = "".join(
-            f"<th class='{cls}' title='{esc(_COL_TIPS[key])}'>{esc(label)}</th>"
-            for key, label, cls in cols
+            cols.append(("divergence", div_header, "", "Similarity"))
+        cols.append(("scaffolds", "Scaf.", "", None))
+        groups: list[tuple[str | None, int]] = []
+        for _key, _label, _cls, group in cols:
+            if groups and groups[-1][0] == group and group is not None:
+                groups[-1] = (group, groups[-1][1] + 1)
+            else:
+                groups.append((group, 1))
+        group_row = "".join(
+            f"<th class='g{' gap' if i > 2 and g else ''}' colspan='{n}'>{esc(g)}</th>"
+            if g else "<th></th>" * n
+            for i, (g, n) in enumerate(groups)
+        )
+        thead = (
+            f"<tr class='grp'>{group_row}</tr><tr class='h2'>"
+            + "".join(
+                f"<th class='{cls}' title='{esc(_COL_TIPS[key])}'>{esc(label)}</th>"
+                for key, label, cls, _g in cols
+            )
+            + "</tr>"
         )
         trs = []
         for fam in found:
@@ -1193,7 +1250,7 @@ def write_summary_html(
                 name = _ENGINE_DISPLAY.get(engine, engine)
                 fam_cell = ""
                 if i == 0:
-                    sub = f"<span class='s'>{mono:,} bp monomer</span>" if mono else ""
+                    sub = f"<span class='s'>{mono:,} bp</span>" if mono else ""
                     fam_cell = f"{esc(fam)}{sub}"
                 swatch = (
                     f"<span class='sw' style='margin-left:0;"
@@ -1201,35 +1258,37 @@ def write_summary_html(
                 )
                 cls = "first" if i == 0 else ""
                 if f is None:
-                    span = len(cols) - 2
                     trs.append(
                         f"<tr class='{cls}'><td class='l fam'>{fam_cell}</td>"
                         f"<td class='l'>{swatch}</td>"
-                        f"<td class='l none' colspan='{span}'>not found</td></tr>"
+                        f"<td class='l none' colspan='{len(cols) - 2}'>not found</td></tr>"
                     )
                     continue
+                dash = "<span class='none'>—</span>"
                 cells = [
-                    f"{_fmt_len(f.covered_bp)}<span class='s'>{_fmt_pct(f.pct_of_target)}</span>",
-                    _format_copy_number(f.copy_number, thousands=True) if f.monomer_len
-                    else "<span class='none'>—</span>",
-                    f"{f.arrays:,}",
-                    _fmt_len(f.max_array_bp),
-                    f"{f.mean_identity:.1f} %",
+                    ("", f"{_fmt_len(f.covered_bp)}<span class='s'>{_fmt_pct(f.pct_of_target)}</span>"),
+                    ("gap", _format_copy_number(f.copy_number, thousands=True)
+                     if f.monomer_len else dash),
+                    ("", f"{f.hits:,}"),
+                    ("gap", f"{f.arrays:,}"),
+                    ("", _fmt_len(f.mean_array_bp) if f.arrays else dash),
+                    ("", _fmt_len(f.max_array_bp)),
+                    ("gap", f"{f.mean_identity:.1f} %"),
                 ]
                 if rm is not None:
                     cells.append(
-                        f"{f.mean_divergence:.1f} %" if engine == "repeatmasker"
-                        else "<span class='none'>—</span>"
+                        ("", f"{f.mean_divergence:.1f} %" if engine == "repeatmasker" else dash)
                     )
-                cells.append(f"{f.scaffolds:,}")
+                cells.append(("", f"{f.scaffolds:,}"))
                 trs.append(
                     f"<tr class='{cls}'><td class='l fam'>{fam_cell}</td>"
                     f"<td class='l'>{swatch}</td>"
-                    + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
+                    + "".join(f"<td class='{c}'>{v}</td>" for c, v in cells) + "</tr>"
                 )
         body = (
             "<section class='card'><div class='card-h'><b>Results by family</b></div>"
-            f"<table><thead><tr>{thead}</tr></thead><tbody>{''.join(trs)}</tbody></table>"
+            f"<table><thead>{thead}</thead><tbody>{''.join(trs)}</tbody></table>"
+            f"{_report_glossary(engines, metric)}"
             f"{_report_footer(engines, run_info, __version__)}</section>"
         )
 
@@ -1245,10 +1304,35 @@ def write_summary_html(
     return path
 
 
+def _report_glossary(engines: list[str], divergence_metric: str) -> str:
+    """Collapsible column definitions, grouped like the table header."""
+    groups = [(g, list(items)) for g, items in _GLOSSARY]
+    similarity = [("Identity", _COL_TIPS["identity"])]
+    if "repeatmasker" in engines:
+        similarity.append(
+            _DIVERGENCE_DEFS.get(divergence_metric, ("Divergence", _COL_TIPS["divergence"]))
+        )
+    groups.append(("Similarity", similarity))
+    methods = " ".join(_METHOD_DEFS[e] for e in engines if e in _METHOD_DEFS)
+    groups.append(("Other", [("Scaffolds", _COL_TIPS["scaffolds"]), ("Method", methods)]))
+    items = "".join(
+        f"<div class='dg'>{_html_escape(group)}</div>"
+        + "".join(
+            f"<div><dt>{_html_escape(term)}</dt><dd>{_html_escape(text)}</dd></div>"
+            for term, text in entries
+        )
+        for group, entries in groups
+    )
+    return (
+        "<details class='defs' open><summary>Column definitions</summary>"
+        f"<dl>{items}</dl></details>"
+    )
+
+
 def _report_footer(engines: list[str], run_info: dict | None, version: str) -> str:
     """One provenance line: engine parameters, database used, app version."""
     params = dict(run_info or {})
-    parts = ["Hover a column name for its definition."]
+    parts: list[str] = []
     if "blastn" in engines:
         bits = []
         if "blast_word_size" in params:
