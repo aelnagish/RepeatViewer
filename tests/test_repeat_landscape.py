@@ -158,8 +158,8 @@ def test_tsv_records_bin_end_and_metric(tmp_path):
 @pytest.mark.parametrize(
     "metric, label",
     [
-        ("kimura", "Kimura divergence, CpG-adjusted (%)"),
-        ("raw", "Divergence from consensus, raw (%)"),
+        ("kimura", "Divergence (%)"),
+        ("raw", "Divergence (%)"),
     ],
 )
 def test_html_centres_bars_and_labels_metric(tmp_path, metric, label):

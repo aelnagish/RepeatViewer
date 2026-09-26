@@ -1400,11 +1400,7 @@ def write_landscape_html(
         barmode="stack",
         bargap=0.1,
         title=title,
-        xaxis_title=(
-            "Kimura divergence, CpG-adjusted (%)"
-            if result.landscape_metric == "kimura"
-            else "Divergence from consensus, raw (%)"
-        ),
+        xaxis_title="Divergence (%)",
         yaxis_title="Covered bp",
         plot_bgcolor="white",
         paper_bgcolor="white",
