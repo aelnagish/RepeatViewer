@@ -4578,6 +4578,37 @@ class TeaAidParamsDialog(QDialog):
         options_layout.setSpacing(8)
         options_layout.addWidget(rc_box)
 
+        self._x_axis_label = QLineEdit(self)
+        self._x_axis_label.setText(
+            (opts.x_axis_label or "").strip() or DEFAULT_TEAID_X_AXIS_LABEL
+        )
+        self._x_axis_label.setPlaceholderText(DEFAULT_TEAID_X_AXIS_LABEL)
+        self._x_axis_label.setToolTip(
+            "Axis title for the consensus position in the TE-Aid plots."
+        )
+        axis_box = QGroupBox("Plot labels", self)
+        axis_form = QFormLayout(axis_box)
+        axis_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        axis_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        axis_form.addRow(
+            "Consensus axis label:",
+            field_with_help(
+                self._x_axis_label,
+                "Consensus axis label",
+                "Title of the consensus-position axis in the divergence, "
+                "coverage and self dot plots (default: "
+                f"\"{DEFAULT_TEAID_X_AXIS_LABEL}\"). Change it when the input "
+                "is not a TE, e.g. \"satDNA monomer (bp)\". "
+                "Leave empty to use the default.",
+                parent=self,
+            ),
+        )
+        options_layout.addWidget(axis_box)
+
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
         params_tab = QWidget(self)
@@ -4712,6 +4743,7 @@ class TeaAidParamsDialog(QDialog):
         self._update_hit_color_button(self._hit_color_mid_btn, self._hit_color_mid)
         self._line_transparency.setValue(DEFAULT_TEAID_HIT_LINE_TRANSPARENCY * 100.0)
         self._right_click_buttons[TEAID_RIGHT_CLICK_RUN].setChecked(True)
+        self._x_axis_label.setText(DEFAULT_TEAID_X_AXIS_LABEL)
 
     def options(self) -> TeaAidOptions:
         high_pct, mid_pct = clamp_teaid_hit_len_pct(
@@ -4728,7 +4760,8 @@ class TeaAidParamsDialog(QDialog):
                 default=DEFAULT_TEAID_EVALUE,
             ),
             self_blast_word_size=self._word_size.value(),
-            x_axis_label=DEFAULT_TEAID_X_AXIS_LABEL,
+            x_axis_label=self._x_axis_label.text().strip()
+            or DEFAULT_TEAID_X_AXIS_LABEL,
             hit_len_high_pct=high_pct,
             hit_len_mid_pct=mid_pct,
             hit_color_high=self._hit_color_high or DEFAULT_TEAID_HIT_COLOR_HIGH,
