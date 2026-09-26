@@ -1499,6 +1499,9 @@ class RepeatQuantifyOptions:
     blast_min_coverage: float = 0.0
     rm_div: int = 40
     rm_sensitivity: str = "sensitive"
+    # Save a genome's BLAST index as a named database (Add/Manage databases)
+    # so later runs and other tools reuse it. Not a quantify_library keyword.
+    blast_save_index: bool = True
 
     def params(self) -> dict:
         """Keyword arguments for ``quantify_library`` (everything but engine)."""
@@ -1547,13 +1550,32 @@ def load_repeat_quantify_options() -> RepeatQuantifyOptions:
             sensitivity if sensitivity in REPEAT_QUANTIFY_SENSITIVITIES
             else d.rm_sensitivity
         ),
+        blast_save_index=_setting_bool(
+            v.get("blast_save_index", d.blast_save_index), d.blast_save_index
+        ),
     )
+
+
+def _setting_bool(value, default: bool) -> bool:
+    """QSettings hands booleans back as "true"/"false" strings on some platforms."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return default
 
 
 def save_repeat_quantify_options(opts: RepeatQuantifyOptions) -> None:
     _save_settings_group(
         "repeat_quantify",
-        {"engine": opts.engine, **opts.params()},
+        {
+            "engine": opts.engine,
+            **opts.params(),
+            "blast_save_index": bool(opts.blast_save_index),
+        },
     )
 
 

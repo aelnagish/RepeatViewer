@@ -362,14 +362,16 @@ def quantify_library_blastn(
     word_size: int = 11,
     threads: int = 1,
     use_system_blast: bool = False,
+    db_prefix: str | os.PathLike | None = None,
     cancel=None,
 ) -> QuantifyResult:
     """Quantify ``library_fasta`` occurrences across ``target_fasta`` via blastn.
 
-    Builds a nucleotide DB from the target (cached between runs, see
-    ``_blast_db_cache_dir``), searches the library against it, then aggregates
-    per family. Returns a QuantifyResult and writes a summary TSV and an arrays
-    GFF into ``out_dir``.
+    Searches against ``db_prefix`` when given (a saved BLAST database built from
+    the target, see ``resolve_blast_database``); otherwise builds a nucleotide
+    DB from the target (cached between runs, see ``_blast_db_cache_dir``).
+    Aggregates hits per family. Returns a QuantifyResult and writes a summary
+    TSV and an arrays GFF into ``out_dir``.
     """
     library_fasta = Path(library_fasta).expanduser().resolve()
     target_fasta = Path(target_fasta).expanduser().resolve()
@@ -379,38 +381,46 @@ def quantify_library_blastn(
         if not path.is_file():
             raise FileNotFoundError(f"FASTA not found: {path}")
 
-    os_type = platform.system()
-    # The index lives in the app cache, not the results folder: it keeps the ~8
-    # index files out of the way (the reason this used to be a scratch dir) and
-    # lets repeat runs against the same genome skip makeblastdb entirely.
-    db_dir = _blast_db_cache_dir(target_fasta)
-    db_dir.mkdir(parents=True, exist_ok=True)
-    db_path = os.path.join(str(db_dir), blast_database_basename(str(target_fasta)))
-    reused = _blast_index_present(db_path)
-    logger.info(
-        "repeat quantify blastn: %s BLAST index for %s (%s)",
-        "reusing cached" if reused else "building",
-        target_fasta.name,
-        db_dir,
-    )
     tab_path = out_dir / f"{kept_input_name(target_fasta)}_vs_{kept_input_name(library_fasta)}.blastn.tsv"
-    db = check_database(
-        str(target_fasta),
-        str(db_dir),
-        os_type=os_type,
-        use_system_blast=use_system_blast,
-    )
-    if db in {"makeblastdb_not_found", "makeblastdb_got_error"}:
-        raise RuntimeError(
-            "Could not build a BLAST database for the target sequences "
-            f"({db}). Check that makeblastdb is available."
+    if db_prefix:
+        db = str(db_prefix)
+        if not _blast_index_present(db):
+            raise RuntimeError(
+                f"The saved BLAST database for {target_fasta.name} is missing its "
+                f"index files (expected at {db}). Rebuild it in Add/Manage databases."
+            )
+        logger.info(
+            "repeat quantify blastn: using saved BLAST database %s for %s",
+            db, target_fasta.name,
         )
+    else:
+        os_type = platform.system()
+        # The index lives in the app cache, not the results folder: it keeps the
+        # ~8 index files out of the way and lets repeat runs against the same
+        # genome skip makeblastdb.
+        db_dir = _blast_db_cache_dir(target_fasta)
+        db_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "repeat quantify blastn: temporary BLAST index for %s (%s)",
+            target_fasta.name, db_dir,
+        )
+        db = check_database(
+            str(target_fasta),
+            str(db_dir),
+            os_type=os_type,
+            use_system_blast=use_system_blast,
+        )
+        if db in {"makeblastdb_not_found", "makeblastdb_got_error"}:
+            raise RuntimeError(
+                "Could not build a BLAST database for the target sequences "
+                f"({db}). Check that makeblastdb is available."
+            )
 
     cmd = [
         _blastn_executable(use_system_blast),
         "-task", "blastn",
         "-query", str(library_fasta),
-        "-db", db_path,
+        "-db", db,
         "-evalue", str(e_value),
         "-word_size", str(int(word_size)),
         "-num_threads", str(max(1, int(threads))),
@@ -848,44 +858,61 @@ def _html_escape(text: str) -> str:
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
     )
 
 
-# Column display headers and their short definitions (shown as a side panel).
-_COLUMN_LABELS = {
-    "family": "family",
-    "monomer_len": "monomer_len",
-    "copy_number": "copy_number",
-    "hits": "hits",
-    "arrays": "arrays",
-    "covered_bp": "covered_bp",
-    "pct_of_target": "%target (%)",
-    "mean_array_bp": "mean_array_bp",
-    "max_array_bp": "max_array_bp",
-    "mean_identity": "mean_identity",
-    "mean_divergence": "mean_divergence",
-    "scaffolds": "scaffolds",
+_ENGINE_DISPLAY = {"blastn": "BLASTn", "repeatmasker": "RepeatMasker"}
+# Series colour per engine (fixed, never by rank); light and dark steps.
+_ENGINE_VAR = {"blastn": "--e-blastn", "repeatmasker": "--e-rm"}
+
+# Report table columns: (header, tooltip). The TSV keeps every raw column.
+_COL_TIPS = {
+    "family": "Library family; monomer (period) length below.",
+    "method": "How the family was quantified (see Column definitions).",
+    "covered": "Genome bp covered by the family, overlaps counted once; "
+               "share of the genome below.",
+    "copies": "Estimated copies = covered bp ÷ monomer length. A fraction when "
+              "less than one full monomer is covered.",
+    "hits": "Raw alignment fragments reported by the method, before merging.",
+    "arrays": "Hits merged into contiguous blocks, roughly the number of array loci.",
+    "mean_array": "Average array length = covered bp ÷ array count.",
+    "max_array": "Largest single contiguous array.",
+    "identity": "Length-weighted mean % identity to the monomer "
+                "(RepeatMasker: 100 − raw substitution %). High = young, conserved copies.",
+    "divergence": "Length-weighted mean divergence from the monomer "
+                  "(RepeatMasker only). High = old copies.",
+    "scaffolds": "Number of distinct target sequences with at least one hit.",
 }
-_COLUMN_DEFS = [
-    ("family", "Library family that was matched."),
-    ("monomer_len", "Length of the library monomer (period size), bp."),
-    ("copy_number", "Estimated copies = covered_bp ÷ monomer length. Shown as a "
-                    "fraction when a family covers less than one full monomer."),
-    ("hits", "Number of alignment fragments (raw hit count)."),
-    ("arrays", "Hits merged into contiguous blocks (≈ distinct array loci)."),
-    ("covered_bp", "Target bp covered by the family (overlaps counted once)."),
-    ("%target (%)", "covered_bp as a percentage of the target length."),
-    ("mean_array_bp", "Average tandem-array length = covered_bp ÷ arrays."),
-    ("max_array_bp", "Largest single contiguous array, bp."),
-    ("mean_identity", "Length-weighted mean % identity to the consensus "
-                      "(RepeatMasker: 100 − raw substitution %; "
-                      "high = young / conserved copies)."),
-    ("mean_divergence", "Length-weighted mean divergence from the consensus. "
-                        "Kimura: CpG-adjusted Kimura 2-parameter % from the "
-                        "RepeatMasker .align file. raw: .out substitution % "
-                        "(runs without a .align). High = old / diverged copies."),
-    ("scaffolds", "Number of distinct target sequences hit."),
+
+# Column definitions shown under the table: (group, [(term, text), ...]).
+_GLOSSARY = [
+    ("Coverage", [
+        ("Covered", _COL_TIPS["covered"]),
+        ("Monomer", "Length of the library monomer (period), under the family name."),
+    ]),
+    ("Copies", [
+        ("Est. copies", _COL_TIPS["copies"]),
+        ("Hits", _COL_TIPS["hits"]),
+    ]),
+    ("Arrays", [
+        ("Count", _COL_TIPS["arrays"]),
+        ("Mean · Max", "Average (covered ÷ count) and largest single array length."),
+    ]),
 ]
+_DIVERGENCE_DEFS = {
+    "kimura": ("Kimura", "CpG-adjusted Kimura 2-parameter divergence from the "
+               "RepeatMasker .align file (RepeatMasker only). High = old copies."),
+    "raw": ("Raw div.", "Raw substitution % from the RepeatMasker .out file, used "
+            "when no .align file exists (RepeatMasker only). High = old copies."),
+}
+_METHOD_DEFS = {
+    "blastn": "BLASTn: each monomer searched against the genome; overlapping "
+              "families are each counted.",
+    "repeatmasker": "RepeatMasker: library-based masking; each locus is assigned "
+                    "to one family.",
+}
 
 
 def _global_family_order(results: list[QuantifyResult]) -> list[str]:
@@ -897,104 +924,440 @@ def _global_family_order(results: list[QuantifyResult]) -> list[str]:
     return sorted(max_cov, key=lambda name: max_cov[name], reverse=True)
 
 
+def _fmt_len(bp: float) -> str:
+    """bp / kb / Mb with sensible precision (1,050,016 -> '1,050 kb')."""
+    bp = float(bp)
+    if bp < 1_000:
+        return f"{bp:,.0f} bp"
+    if bp < 100_000:
+        return f"{bp / 1_000:,.1f} kb"
+    if bp < 10_000_000:
+        return f"{bp / 1_000:,.0f} kb"
+    return f"{bp / 1_000_000:,.1f} Mb"
+
+
+def _fmt_mb(bp: float) -> str:
+    bp = float(bp)
+    return f"{bp / 1_000_000:,.2f} Mb" if bp >= 1_000_000 else _fmt_len(bp)
+
+
+def _fmt_pct(value: float) -> str:
+    if value <= 0:
+        return "0 %"
+    if value < 0.01:
+        return "<0.01 %"
+    return f"{value:.2f} %"
+
+
+def _nice_axis_max(value: float) -> tuple[float, float]:
+    """Axis end and tick step: 1 / 2 / 2.5 / 4 / 5 × 10^n, about four ticks."""
+    if value <= 0:
+        return 1.0, 0.25
+    raw = value / 4
+    magnitude = 10 ** math.floor(math.log10(raw))
+    step = next(m * magnitude for m in (1, 2, 2.5, 4, 5, 10) if m * magnitude >= raw)
+    return step * math.ceil(value / step), step
+
+
+def _library_family_count(library_fasta: Path | None) -> int:
+    if library_fasta is None:
+        return 0
+    try:
+        return len({rec.id for rec in SeqIO.parse(str(library_fasta), "fasta")})
+    except (OSError, ValueError):
+        return 0
+
+
+_ICON_WARN = (
+    "<svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' "
+    "stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>"
+    "<path d='M12 9v4'/><path d='M10.4 3.9 2.6 17.5A1.9 1.9 0 0 0 4.2 20.3h15.6a1.9 1.9 "
+    "0 0 0 1.6-2.8L13.6 3.9a1.9 1.9 0 0 0-3.2 0z'/><path d='M12 16.5h.01'/></svg>"
+)
+
+_REPORT_CSS = """
+:root{color-scheme:light;--bg:#ffffff;--surface:#f6f6f4;--ink:#141413;--ink2:#5e5d59;
+--ink3:#8a8984;--line:#e6e5e0;--line2:#cfcec8;--warn-bg:#fdf3dc;--warn-ink:#7a4d00;
+--e-blastn:#2a78d6;--e-rm:#eb6834;--tip:#ffffff}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#1a1a19;--surface:#262624;
+--ink:#f5f4ef;--ink2:#c3c2b7;--ink3:#8f8e87;--line:#33332f;--line2:#4a4a45;
+--warn-bg:#3a2d10;--warn-ink:#f2c46b;--e-blastn:#3987e5;--e-rm:#d95926;--tip:#2b2b29}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 -apple-system,
+BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif}
+.page{max-width:1080px;margin:0 auto;padding:22px 24px 28px;display:flex;
+flex-direction:column;gap:14px;position:relative}
+h1{font-size:21px;font-weight:600;margin:0}
+.sub,.muted{color:var(--ink2)} .small{font-size:11.5px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.tile{background:var(--surface);border-radius:8px;padding:11px 13px}
+.tile .v{display:block;font-size:22px;font-weight:600;margin:2px 0 1px;
+font-variant-numeric:tabular-nums}
+.warn{display:flex;gap:9px;align-items:flex-start;background:var(--warn-bg);
+color:var(--warn-ink);border-radius:8px;padding:9px 13px;font-size:12.5px}
+.warn svg{flex:none;margin-top:1px} .warn p{margin:0} .warn p+p{margin-top:4px}
+.card{border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.card-h{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
+margin-bottom:10px} .card-h b{font-weight:600}
+.key{font-size:12px;color:var(--ink2);white-space:nowrap}
+.sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin:0 6px 0 12px;
+vertical-align:-0.5px}
+.row{display:grid;grid-template-columns:minmax(80px,140px) minmax(0,1fr);
+align-items:center;padding:4px 0}
+.row>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:10px}
+.bars{border-left:1px solid var(--line2);position:relative}
+.bar{position:relative;z-index:1;height:12px;border-radius:0 3px 3px 0;margin:3px 0;
+min-width:2px;cursor:default}
+.axis{display:grid;grid-template-columns:minmax(80px,140px) minmax(0,1fr);
+font-size:11px;color:var(--ink3);margin-top:2px}
+.ticks{position:relative;height:14px} .ticks span{position:absolute;transform:translateX(-50%);
+white-space:nowrap} .ticks span:first-child{transform:none}
+.ticks span:last-child{transform:translateX(-100%)}
+.grid{position:absolute;z-index:0;top:-4px;bottom:-4px;width:1px;background:var(--line)}
+table{width:100%;border-collapse:collapse}
+th{font-weight:600;font-size:12px;color:var(--ink2);text-align:right;padding:7px 8px;
+border-bottom:1px solid var(--line2);cursor:help;white-space:nowrap}
+th.l,td.l{text-align:left}
+td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;
+font-variant-numeric:tabular-nums;vertical-align:top;white-space:nowrap}
+tr.first td{border-top:1px solid var(--line2)}
+tr.grp th{border:0;padding-bottom:3px;cursor:default}
+th.g{text-align:center;color:var(--ink);border-bottom:1px solid var(--line2)!important}
+tr.h2 th{border-bottom:1px solid var(--line2)}
+th.gap,td.gap{border-left:1px solid var(--line)}
+tr.grp th.gap{border-left:0}
+td .s{display:block;font-size:11px;font-weight:400;color:var(--ink2)}
+td.fam{font-weight:600;white-space:normal;word-break:break-word}
+.none{color:var(--ink3)}
+.foot{font-size:11.5px;color:var(--ink2);margin-top:10px;padding-top:8px;
+border-top:1px solid var(--line);line-height:1.55}
+.defs{margin-top:12px;border-top:1px solid var(--line);padding-top:9px}
+.defs summary{cursor:pointer;font-weight:600;font-size:12.5px}
+.defs dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 24px;margin:9px 0 0}
+.defs dt{font-weight:600;font-size:12.5px} .defs dd{margin:1px 0 0;color:var(--ink2);
+font-size:12px;line-height:1.45}
+.dg{grid-column:1/-1;font-size:11.5px;color:var(--ink3);border-bottom:1px solid var(--line);
+padding-bottom:2px;margin-top:4px}
+.tip{position:absolute;pointer-events:none;background:var(--tip);border:1px solid
+var(--line2);border-radius:8px;padding:6px 9px;font-size:12px;display:none;
+white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.12);z-index:5}
+.empty{padding:18px;text-align:center;color:var(--ink2)}
+@media print{.tip{display:none!important}.card{break-inside:avoid}}
+"""
+
+_REPORT_JS = """
+(function(){var tip=document.getElementById('tip'),page=document.querySelector('.page');
+document.querySelectorAll('.bar').forEach(function(b){
+b.addEventListener('mousemove',function(e){var r=page.getBoundingClientRect();
+tip.textContent=b.getAttribute('data-t');tip.style.display='block';
+var x=e.clientX-r.left+14,w=tip.offsetWidth;if(x+w>r.width)x=e.clientX-r.left-w-14;
+tip.style.left=x+'px';tip.style.top=(e.clientY-r.top+14)+'px';});
+b.addEventListener('mouseleave',function(){tip.style.display='none';});});})();
+"""
+
+
 def write_summary_html(
     results: list[QuantifyResult],
     path: Path,
     *,
     target_label: str = "",
     warnings: list[str] | None = None,
+    library_fasta: Path | None = None,
+    run_info: dict | None = None,
 ) -> Path:
-    """Render one or more QuantifyResults as a styled HTML summary page."""
+    """Render one or more QuantifyResults as a self-contained HTML report.
+
+    Summary tiles, a per-family coverage chart (one bar per engine) and one
+    table with a row per family and engine. No external resources: it is shown
+    offline in the app's HTML preview. ``run_info`` (engine parameters,
+    optional ``blast_db_prefix``) feeds the provenance footer.
+    """
+    from repeatviewer import __version__
+
     path = Path(path)
-    engine_display = {"blastn": "BLASTn", "repeatmasker": "RepeatMasker"}
+    esc = _html_escape
+    results = [r for r in results if r is not None]
+    engines = [r.engine for r in results]
+    by_engine = {r.engine: {f.family: f for f in r.families} for r in results}
     family_order = _global_family_order(results)
-    blocks: list[str] = []
-    for result in results:
-        pct = (
-            result.total_covered_bp / result.target_length * 100.0
-            if result.target_length else 0.0
-        )
-        header = (
-            "<div class='qhead'>"
-            f"<span class='qname'>Quantifier: "
-            f"{engine_display.get(result.engine, result.engine)}</span>"
-            f"<span class='qcov'>Covered: {result.total_covered_bp:,} bp "
-            f"({pct:.2f}%)</span></div>"
-        )
-        show_div = result.engine == "repeatmasker"
-        cols = ["family", "monomer_len", "copy_number", "hits", "arrays",
-                "covered_bp", "pct_of_target", "mean_array_bp", "max_array_bp",
-                "mean_identity"] + (["mean_divergence"] if show_div else []) + ["scaffolds"]
-        div_label = {"kimura": "mean_divergence (Kimura)",
-                     "raw": "mean_divergence (raw)"}.get(
-            result.divergence_metric, _COLUMN_LABELS["mean_divergence"])
-        thead = "".join(
-            f"<th>{div_label if c == 'mean_divergence' else _COLUMN_LABELS[c]}</th>"
-            for c in cols
-        )
-        by_name = {f.family: f for f in result.families}
-        body_rows = []
-        for fam_name in family_order:  # same order in every table
-            f = by_name.get(fam_name)
-            if f is None:
-                continue
-            cells = [
-                _html_escape(f.family), f"{f.monomer_len:,}",
-                _format_copy_number(f.copy_number, thousands=True),
-                f"{f.hits}", f"{f.arrays}", f"{f.covered_bp:,}",
-                f"{f.pct_of_target:.3f}", f"{f.mean_array_bp:,.0f}",
-                f"{f.max_array_bp:,}", f"{f.mean_identity:.1f}",
-            ]
-            if show_div:
-                cells.append(f"{f.mean_divergence:.1f}")
-            cells.append(f"{f.scaffolds}")
-            body_rows.append("<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
-        blocks.append(
-            f"{header}<table><thead><tr>{thead}</tr></thead>"
-            f"<tbody>{''.join(body_rows)}</tbody></table>"
-        )
-    definitions = "".join(
-        f"<dt>{_html_escape(k)}</dt><dd>{_html_escape(v)}</dd>"
-        for k, v in _COLUMN_DEFS
-    )
-    aside = f"<aside><h4>Column definitions</h4><dl>{definitions}</dl></aside>"
-    style = (
-        "body{font-family:Arial,sans-serif;margin:16px;color:#111;}"
-        ".wrap{display:flex;align-items:flex-start;gap:28px;}"
-        ".tables{flex:1;min-width:0;}"
-        ".genome{font-size:14px;margin:0 0 16px;color:#333;}"
-        ".qhead{margin:16px 0 4px;}"
-        ".qname{font-weight:bold;font-size:14px;}"
-        ".qcov{color:#555;margin-left:14px;}"
-        "table{border-collapse:collapse;margin:4px 0 20px;font-size:13px;}"
-        "th,td{border:1px solid #ccc;padding:4px 8px;text-align:right;}"
-        "th{background:#f2f2f2;} td:first-child,th:first-child{text-align:left;}"
-        "tr:nth-child(even){background:#fafafa;}h2{margin:0 0 6px;}"
-        "aside{width:300px;flex:none;font-size:12px;color:#333;"
-        "border-left:2px solid #eee;padding-left:16px;}"
-        "aside h4{margin:0 0 8px;} dt{font-weight:bold;margin-top:8px;}"
-        "dd{margin:2px 0 0;color:#555;}"
-        ".warn{background:#fff8e1;border:1px solid #f0c36d;border-radius:6px;"
-        "padding:8px 12px;margin:0 0 16px;font-size:13px;color:#5c4400;}"
-        ".warn ul{margin:6px 0 0;padding-left:20px;} .warn b{color:#7a5b00;}"
-    )
     glen = results[0].target_length if results else 0
-    genome_line = (
-        f"Genome: {_html_escape(target_label)}, {glen:,} bp"
-        if target_label else f"Genome: {glen:,} bp"
+    library_fasta = Path(library_fasta) if library_fasta else None
+    n_library = _library_family_count(library_fasta)
+
+    # ---- header -----------------------------------------------------------
+    meta = [esc(target_label) if target_label else "Genome"]
+    if glen:
+        meta.append(_fmt_mb(glen))
+    if library_fasta is not None:
+        meta.append(f"library {esc(library_fasta.name)}")
+    meta.append(datetime.now().strftime("%d %b %Y, %H:%M"))
+    header = (
+        "<header><h1>Repeat quantification</h1>"
+        f"<div class='sub'>{' · '.join(meta)}</div></header>"
     )
+
+    # ---- tiles ------------------------------------------------------------
+    def coverage(result: QuantifyResult) -> float:
+        return result.total_covered_bp / glen * 100.0 if glen else 0.0
+
+    tiles: list[str] = []
+    ordered = sorted(results, key=lambda r: 0 if r.engine == "repeatmasker" else 1)
+    for i, result in enumerate(ordered):
+        name = _ENGINE_DISPLAY.get(result.engine, result.engine)
+        label = "Repeat coverage" if i == 0 else f"{name} coverage"
+        note = f"{_fmt_mb(result.total_covered_bp)} · {name}"
+        if i > 0 and ordered[0].total_covered_bp:
+            diff = (result.total_covered_bp / ordered[0].total_covered_bp - 1) * 100
+            ref = _ENGINE_DISPLAY.get(ordered[0].engine, ordered[0].engine)
+            note = f"{_fmt_mb(result.total_covered_bp)} · {diff:+.0f} % vs {ref}"
+            note = note.replace("-", "−")
+        tiles.append(
+            f"<div class='tile'><span class='muted'>{label}</span>"
+            f"<span class='v'>{_fmt_pct(coverage(result))}</span>"
+            f"<span class='muted small'>{note}</span></div>"
+        )
+    found = [f for f in family_order if any(f in by_engine[e] for e in engines)]
+    total_fams = n_library or len(found)
+    names = ", ".join(found[:3]) + (f" +{len(found) - 3}" if len(found) > 3 else "")
+    tiles.append(
+        "<div class='tile'><span class='muted'>Families found</span>"
+        f"<span class='v'>{len(found)} / {total_fams}</span>"
+        f"<span class='muted small'>{esc(names) or 'none'}</span></div>"
+    )
+    longest = max(
+        ((f.max_array_bp, f.family) for r in results for f in r.families),
+        default=(0, ""),
+    )
+    if longest[0]:
+        where = [
+            _ENGINE_DISPLAY.get(r.engine, r.engine) for r in results
+            for f in r.families
+            if f.family == longest[1] and abs(f.max_array_bp - longest[0]) <= 0.01 * longest[0]
+        ]
+        engines_note = "both methods" if len(where) > 1 else (where[0] if where else "")
+        tiles.append(
+            "<div class='tile'><span class='muted'>Longest array</span>"
+            f"<span class='v'>{_fmt_len(longest[0])}</span>"
+            f"<span class='muted small'>{esc(longest[1])} · {engines_note}</span></div>"
+        )
+    tiles_html = f"<section class='tiles'>{''.join(tiles)}</section>"
+
+    # ---- warnings ---------------------------------------------------------
     banner = ""
     if warnings:
-        items = "".join(f"<li>{_html_escape(w)}</li>" for w in warnings)
-        banner = f"<div class='warn'><b>⚠ Library warning</b><ul>{items}</ul></div>"
+        items = "".join(f"<p>{esc(w)}</p>" for w in warnings)
+        banner = f"<div class='warn' role='note'>{_ICON_WARN}<div>{items}</div></div>"
+
+    if not found:
+        body = (
+            "<div class='card empty'>No library family was found in this genome "
+            "with the chosen parameters.</div>"
+        )
+        chart = ""
+    else:
+        # ---- chart --------------------------------------------------------
+        top = max(
+            (by_engine[e][f].covered_bp for e in engines for f in found if f in by_engine[e]),
+            default=0,
+        )
+        axis_max, step = _nice_axis_max(top)
+        n_ticks = int(round(axis_max / step))
+        grid = "".join(
+            f"<div class='grid' style='left:{k * step / axis_max * 100:.3f}%'></div>"
+            for k in range(1, n_ticks + 1)
+        )
+        rows = []
+        for fam in found:
+            bars = []
+            for engine in engines:
+                f = by_engine[engine].get(fam)
+                name = _ENGINE_DISPLAY.get(engine, engine)
+                if f is None:
+                    bars.append("<div class='bar' style='width:0'></div>")
+                    continue
+                share = f"{_fmt_pct(f.pct_of_target)} of genome"
+                bars.append(
+                    f"<div class='bar' style='width:{f.covered_bp / axis_max * 100:.3f}%;"
+                    f"background:var({_ENGINE_VAR.get(engine, '--ink3')})' "
+                    f"data-t='{esc(fam)} · {name}: {f.covered_bp:,} bp ({share})' "
+                    f"title='{esc(fam)} · {name}: {f.covered_bp:,} bp ({share})'></div>"
+                )
+            rows.append(
+                f"<div class='row'><span title='{esc(fam)}'>{esc(fam)}</span>"
+                f"<div class='bars'>{grid}{''.join(bars)}</div></div>"
+            )
+        ticks = "".join(
+            f"<span style='left:{k * step / axis_max * 100:.3f}%'>"
+            f"{_fmt_len(k * step) if k else '0'}</span>"
+            for k in range(0, n_ticks + 1)
+        )
+        key = "".join(
+            f"<span class='sw' style='background:var({_ENGINE_VAR.get(e, '--ink3')})'>"
+            f"</span>{_ENGINE_DISPLAY.get(e, e)}"
+            for e in engines
+        )
+        chart = (
+            "<section class='card'><div class='card-h'><b>Genome covered per family</b>"
+            f"<span class='key'>{key}</span></div>{''.join(rows)}"
+            f"<div class='axis'><span></span><div class='ticks'>{ticks}</div></div>"
+            "</section>"
+        )
+
+        # ---- table --------------------------------------------------------
+        rm = next((r for r in results if r.engine == "repeatmasker"), None)
+        metric = rm.divergence_metric if rm else ""
+        div_header = {"kimura": "Kimura", "raw": "Raw div."}.get(metric, "Divergence")
+        # (key, header, css class, group); group None = no group header above.
+        cols = [
+            ("family", "Family", "l", None), ("method", "Method", "l", None),
+            ("covered", "Covered", "", "Coverage"),
+            ("copies", "Est.", "gap", "Copies"), ("hits", "Hits", "", "Copies"),
+            ("arrays", "Count", "gap", "Arrays"), ("mean_array", "Mean", "", "Arrays"),
+            ("max_array", "Max", "", "Arrays"),
+            ("identity", "Identity", "gap", "Similarity"),
+        ]
+        if rm is not None:
+            cols.append(("divergence", div_header, "", "Similarity"))
+        cols.append(("scaffolds", "Scaf.", "", None))
+        groups: list[tuple[str | None, int]] = []
+        for _key, _label, _cls, group in cols:
+            if groups and groups[-1][0] == group and group is not None:
+                groups[-1] = (group, groups[-1][1] + 1)
+            else:
+                groups.append((group, 1))
+        group_row = "".join(
+            f"<th class='g{' gap' if i > 2 and g else ''}' colspan='{n}'>{esc(g)}</th>"
+            if g else "<th></th>" * n
+            for i, (g, n) in enumerate(groups)
+        )
+        thead = (
+            f"<tr class='grp'>{group_row}</tr><tr class='h2'>"
+            + "".join(
+                f"<th class='{cls}' title='{esc(_COL_TIPS[key])}'>{esc(label)}</th>"
+                for key, label, cls, _g in cols
+            )
+            + "</tr>"
+        )
+        trs = []
+        for fam in found:
+            mono = next(
+                (by_engine[e][fam].monomer_len for e in engines
+                 if fam in by_engine[e] and by_engine[e][fam].monomer_len),
+                0,
+            )
+            for i, engine in enumerate(engines):
+                f = by_engine[engine].get(fam)
+                name = _ENGINE_DISPLAY.get(engine, engine)
+                fam_cell = ""
+                if i == 0:
+                    sub = f"<span class='s'>{mono:,} bp</span>" if mono else ""
+                    fam_cell = f"{esc(fam)}{sub}"
+                swatch = (
+                    f"<span class='sw' style='margin-left:0;"
+                    f"background:var({_ENGINE_VAR.get(engine, '--ink3')})'></span>{name}"
+                )
+                cls = "first" if i == 0 else ""
+                if f is None:
+                    trs.append(
+                        f"<tr class='{cls}'><td class='l fam'>{fam_cell}</td>"
+                        f"<td class='l'>{swatch}</td>"
+                        f"<td class='l none' colspan='{len(cols) - 2}'>not found</td></tr>"
+                    )
+                    continue
+                dash = "<span class='none'>—</span>"
+                cells = [
+                    ("", f"{_fmt_len(f.covered_bp)}<span class='s'>{_fmt_pct(f.pct_of_target)}</span>"),
+                    ("gap", _format_copy_number(f.copy_number, thousands=True)
+                     if f.monomer_len else dash),
+                    ("", f"{f.hits:,}"),
+                    ("gap", f"{f.arrays:,}"),
+                    ("", _fmt_len(f.mean_array_bp) if f.arrays else dash),
+                    ("", _fmt_len(f.max_array_bp)),
+                    ("gap", f"{f.mean_identity:.1f} %"),
+                ]
+                if rm is not None:
+                    cells.append(
+                        ("", f"{f.mean_divergence:.1f} %" if engine == "repeatmasker" else dash)
+                    )
+                cells.append(("", f"{f.scaffolds:,}"))
+                trs.append(
+                    f"<tr class='{cls}'><td class='l fam'>{fam_cell}</td>"
+                    f"<td class='l'>{swatch}</td>"
+                    + "".join(f"<td class='{c}'>{v}</td>" for c, v in cells) + "</tr>"
+                )
+        body = (
+            "<section class='card'><div class='card-h'><b>Results by family</b></div>"
+            f"<table><thead>{thead}</thead><tbody>{''.join(trs)}</tbody></table>"
+            f"{_report_glossary(engines, metric)}"
+            f"{_report_footer(engines, run_info, __version__)}</section>"
+        )
+
     path.write_text(
-        f"<!doctype html><html><head><meta charset='utf-8'><style>{style}</style>"
-        f"</head><body><h2>Repeat quantification</h2>"
-        f"<p class='genome'>{genome_line}</p>{banner}"
-        f"<div class='wrap'><div class='tables'>{''.join(blocks)}</div>{aside}</div>"
-        f"</body></html>"
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>Repeat quantification — {esc(target_label)}</title>"
+        f"<style>{_REPORT_CSS}</style></head><body><div class='page'>"
+        f"{header}{tiles_html}{banner}{chart}{body}<div class='tip' id='tip'></div>"
+        f"</div><script>{_REPORT_JS}</script></body></html>",
+        encoding="utf-8",
     )
     return path
+
+
+def _report_glossary(engines: list[str], divergence_metric: str) -> str:
+    """Column definitions, grouped like the table header; collapsed by default."""
+    groups = [(g, list(items)) for g, items in _GLOSSARY]
+    similarity = [("Identity", _COL_TIPS["identity"])]
+    if "repeatmasker" in engines:
+        similarity.append(
+            _DIVERGENCE_DEFS.get(divergence_metric, ("Divergence", _COL_TIPS["divergence"]))
+        )
+    groups.append(("Similarity", similarity))
+    methods = " ".join(_METHOD_DEFS[e] for e in engines if e in _METHOD_DEFS)
+    groups.append(("Other", [("Scaffolds", _COL_TIPS["scaffolds"]), ("Method", methods)]))
+    items = "".join(
+        f"<div class='dg'>{_html_escape(group)}</div>"
+        + "".join(
+            f"<div><dt>{_html_escape(term)}</dt><dd>{_html_escape(text)}</dd></div>"
+            for term, text in entries
+        )
+        for group, entries in groups
+    )
+    return (
+        "<details class='defs'><summary>Column definitions</summary>"
+        f"<dl>{items}</dl></details>"
+    )
+
+
+def _report_footer(engines: list[str], run_info: dict | None, version: str) -> str:
+    """One provenance line: engine parameters, database used, app version."""
+    params = dict(run_info or {})
+    parts: list[str] = []
+    if "blastn" in engines:
+        bits = []
+        if "blast_word_size" in params:
+            bits.append(f"word size {params['blast_word_size']}")
+        if "blast_evalue" in params:
+            bits.append(f"E-value {float(params['blast_evalue']):g}")
+        if params.get("blast_min_identity"):
+            bits.append(f"identity ≥ {float(params['blast_min_identity']):g} %")
+        if params.get("blast_min_coverage"):
+            bits.append(f"coverage ≥ {float(params['blast_min_coverage']):g} %")
+        prefix = params.get("blast_db_prefix")
+        bits.append(
+            f"saved database {Path(str(prefix)).name}" if prefix else "temporary index"
+        )
+        parts.append("BLASTn: " + ", ".join(bits) + ".")
+    if "repeatmasker" in engines:
+        bits = []
+        if "rm_div" in params:
+            bits.append(f"-div {params['rm_div']}")
+        if "rm_sensitivity" in params:
+            bits.append(str(params["rm_sensitivity"]))
+        if bits:
+            parts.append("RepeatMasker: " + ", ".join(bits) + ".")
+    parts.append(f"RepeatViewer {version}. All columns are in the TSV next to this report.")
+    return f"<div class='foot'>{_html_escape(' '.join(parts))}</div>"
 
 
 def write_landscape_html(
@@ -1037,11 +1400,7 @@ def write_landscape_html(
         barmode="stack",
         bargap=0.1,
         title=title,
-        xaxis_title=(
-            "Kimura divergence, CpG-adjusted (%)"
-            if result.landscape_metric == "kimura"
-            else "Divergence from consensus, raw (%)"
-        ),
+        xaxis_title="Divergence (%)",
         yaxis_title="Covered bp",
         plot_bgcolor="white",
         paper_bgcolor="white",
@@ -1188,11 +1547,17 @@ def quantify_library(
     blast_evalue: float = 1e-5,
     blast_min_identity: float = 0.0,
     blast_min_coverage: float = 0.0,
+    blast_db_prefix: str | None = None,
     rm_div: int = 40,
     rm_sensitivity: str = "sensitive",
+    use_system_blast: bool = False,
     cancel=None,
 ) -> list[QuantifyResult]:
-    """Run the requested engine(s): ``blastn``, ``repeatmasker``, or ``both``."""
+    """Run the requested engine(s): ``blastn``, ``repeatmasker``, or ``both``.
+
+    ``blast_db_prefix`` = a saved BLAST database of ``target_fasta`` to search
+    instead of indexing the genome again.
+    """
     results: list[QuantifyResult] = []
     if engine in ("blastn", "both"):
         results.append(
@@ -1203,6 +1568,8 @@ def quantify_library(
                 min_coverage=blast_min_coverage,
                 word_size=blast_word_size,
                 threads=threads,
+                use_system_blast=use_system_blast,
+                db_prefix=blast_db_prefix,
                 cancel=cancel,
             )
         )
@@ -1217,3 +1584,53 @@ def quantify_library(
             )
         )
     return results
+
+
+def resolve_blast_database(
+    target_fasta: Path,
+    databases: list,
+    *,
+    save_index: bool,
+    base_dir: Path | None,
+    use_system_blast: bool = False,
+):
+    """Pick the BLAST database Repeat Quantify searches for ``target_fasta``.
+
+    Returns ``(db_prefix, created)``:
+
+    - a registered database built from this FASTA (index current) ->
+      ``(its prefix, None)``;
+    - otherwise, with ``save_index`` -> builds a new named database in
+      ``base_dir`` and returns ``(its prefix, the new BlastDatabase)`` for the
+      caller to register, so every tool can reuse it;
+    - otherwise ``(None, None)``: quantify_library_blastn uses a temporary index.
+    """
+    from repeatviewer.backends.database_prepare import (
+        build_named_blast_database,
+        saved_blast_database_for,
+        unique_blast_database_name,
+    )
+    from repeatviewer.project import BLAST_MOLECULE_NUCL, BlastDatabase
+
+    target_fasta = Path(target_fasta).expanduser().resolve()
+    saved = saved_blast_database_for(target_fasta, databases)
+    if saved is not None:
+        return Path(saved.db_prefix_path), None
+    if not save_index or base_dir is None:
+        return None, None
+    name = unique_blast_database_name(target_fasta.name, databases, base_dir)
+    prefix = build_named_blast_database(
+        target_fasta,
+        Path(base_dir),
+        name,
+        molecule_type=BLAST_MOLECULE_NUCL,
+        use_system_blast=use_system_blast,
+    )
+    created = BlastDatabase(
+        name=name,
+        source_fasta=target_fasta,
+        db_prefix_path=Path(prefix),
+        molecule_type=BLAST_MOLECULE_NUCL,
+        created_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    return Path(prefix), created
