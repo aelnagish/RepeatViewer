@@ -93,7 +93,7 @@ def _add_default_fasta_tab_menu(parent_menu: QMenu) -> QAction:
 
 ZOOM_BAR_HEIGHT = 18
 ZOOM_CONTROL_HEIGHT = 18
-ZOOM_SPIN_WIDTH = 68
+ZOOM_SPIN_WIDTH = 56
 # Kept for sequence_map_viewer imports (embedded map toolbar height).
 ZOOM_SLIDER_HEIGHT = 22
 ANNOTATION_ZOOM_SLIDER_WIDTH = 240
@@ -134,6 +134,48 @@ def apply_annotation_zoom_slider_style(slider: QSlider) -> None:
             border-radius: 5px;
         }}
         QSlider#annotationZoomSlider::handle:horizontal:hover {{
+            background: {accent};
+            border: 1px solid palette(highlight);
+        }}
+        """
+    )
+
+
+def apply_preview_scale_slider_style(slider: QSlider) -> None:
+    """Blue filled track + circular thumb (same look as the annotation zoom bar)."""
+    from repeatviewer.ui.theme_mode import load_accent_color
+
+    accent = load_accent_color()
+    slider.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    slider.setStyleSheet(
+        f"""
+        QSlider#previewScaleSlider::groove:vertical {{
+            border: 1px solid palette(mid);
+            background: palette(mid);
+            width: 4px;
+            border-radius: 2px;
+        }}
+        QSlider#previewScaleSlider::sub-page:vertical {{
+            background: {accent};
+            border: 1px solid {accent};
+            width: 4px;
+            border-radius: 2px;
+        }}
+        QSlider#previewScaleSlider::add-page:vertical {{
+            background: palette(mid);
+            border: 1px solid palette(mid);
+            width: 4px;
+            border-radius: 2px;
+        }}
+        QSlider#previewScaleSlider::handle:vertical {{
+            background: {accent};
+            border: 1px solid palette(text);
+            height: 10px;
+            width: 10px;
+            margin: 0 -4px;
+            border-radius: 5px;
+        }}
+        QSlider#previewScaleSlider::handle:vertical:hover {{
             background: {accent};
             border: 1px solid palette(highlight);
         }}
@@ -225,11 +267,13 @@ class ScaleSliderPopup(QFrame):
         self._slider.setRange(spin.minimum(), spin.maximum())
         self._slider.setSingleStep(max(1, spin.singleStep()))
         self._slider.setPageStep(max(1, spin.singleStep() * 5))
-        # Top of the bar = zoom in (maximum), same feel as dragging up.
-        self._slider.setInvertedAppearance(False)
+        # Top = smallest scale / font; bottom = largest.
+        self._slider.setInvertedAppearance(True)
+        self._slider.setInvertedControls(True)
         self._slider.setMinimumHeight(140)
         self._slider.setFixedWidth(28)
         self._slider.setValue(spin.value())
+        apply_preview_scale_slider_style(self._slider)
         self._slider.valueChanged.connect(self._on_slider)
 
         layout = QVBoxLayout(self)
@@ -267,7 +311,7 @@ class ScaleSliderPopup(QFrame):
 
 
 class ScaleSpinCluster(QWidget):
-    """Scale spin with a left chevron that opens a vertical slider popup."""
+    """Scale spin with a Color-style ▶/▼ arrow that opens a vertical slider."""
 
     def __init__(self, spin: NoWheelSpinBox, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -282,7 +326,8 @@ class ScaleSpinCluster(QWidget):
 
         self._arrow = QToolButton(self)
         self._arrow.setObjectName("previewScaleMenuButton")
-        self._arrow.setText("▾")
+        # Same filled triangles as the Color disclosure button (▶ / ▼).
+        self._arrow.setText("▶")
         self._arrow.setAutoRaise(True)
         self._arrow.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._arrow.setFixedSize(14, ZOOM_CONTROL_HEIGHT)
@@ -297,12 +342,37 @@ class ScaleSpinCluster(QWidget):
     def spin(self) -> NoWheelSpinBox:
         return self._spin
 
+    def _set_arrow_expanded(self, expanded: bool) -> None:
+        arrow = getattr(self, "_arrow", None)
+        if arrow is None:
+            return
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(self) or not isValid(arrow):
+                return
+        except ImportError:
+            pass
+        try:
+            arrow.setText("▼" if expanded else "▶")
+        except RuntimeError:
+            # Arrow already deleted during teardown (popup destroyed after parent).
+            return
+
+    def _on_popup_destroyed(self, *_args) -> None:
+        self._popup = None
+        self._set_arrow_expanded(False)
+
     def _toggle_slider(self) -> None:
         if self._popup is not None and self._popup.isVisible():
-            self._popup.close()
+            popup = self._popup
             self._popup = None
+            self._set_arrow_expanded(False)
+            popup.close()
             return
         self._popup = ScaleSliderPopup(self._spin, self)
+        self._popup.destroyed.connect(self._on_popup_destroyed)
+        self._set_arrow_expanded(True)
         self._popup.show()
         self._popup._slider.setFocus(Qt.FocusReason.PopupFocusReason)
 

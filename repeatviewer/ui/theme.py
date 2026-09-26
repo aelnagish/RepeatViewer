@@ -509,8 +509,8 @@ def application_stylesheet(
         height: 0px;
     }}
     QSpinBox#previewZoomSpin {{
-        min-width: 64px;
-        max-width: 80px;
+        min-width: 52px;
+        max-width: 64px;
         padding: 0px 2px 0px 0px;
         /* Override global QSpinBox min/max-height so the bottom border is not clipped. */
         min-height: 0px;
@@ -528,7 +528,7 @@ def application_stylesheet(
         border-bottom-right-radius: 0px;
         background: palette(base);
         padding: 0px;
-        font-size: 9pt;
+        font-size: 8pt;
         min-width: 14px;
         max-width: 14px;
     }}
@@ -553,13 +553,25 @@ def application_stylesheet(
         width: 4px;
         border-radius: 2px;
     }}
+    QSlider#previewScaleSlider::sub-page:vertical {{
+        background: {accent};
+        border: 1px solid {accent};
+        width: 4px;
+        border-radius: 2px;
+    }}
+    QSlider#previewScaleSlider::add-page:vertical {{
+        background: palette(mid);
+        border: 1px solid palette(mid);
+        width: 4px;
+        border-radius: 2px;
+    }}
     QSlider#previewScaleSlider::handle:vertical {{
         background: {accent};
         border: 1px solid palette(text);
-        height: 12px;
-        width: 12px;
+        height: 10px;
+        width: 10px;
         margin: 0 -4px;
-        border-radius: 6px;
+        border-radius: 5px;
     }}
     QSlider::groove:horizontal {{
         border: 1px solid palette(mid);
