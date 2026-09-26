@@ -1305,7 +1305,7 @@ def write_summary_html(
 
 
 def _report_glossary(engines: list[str], divergence_metric: str) -> str:
-    """Collapsible column definitions, grouped like the table header."""
+    """Column definitions, grouped like the table header; collapsed by default."""
     groups = [(g, list(items)) for g, items in _GLOSSARY]
     similarity = [("Identity", _COL_TIPS["identity"])]
     if "repeatmasker" in engines:
@@ -1324,7 +1324,7 @@ def _report_glossary(engines: list[str], divergence_metric: str) -> str:
         for group, entries in groups
     )
     return (
-        "<details class='defs' open><summary>Column definitions</summary>"
+        "<details class='defs'><summary>Column definitions</summary>"
         f"<dl>{items}</dl></details>"
     )
 
