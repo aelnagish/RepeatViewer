@@ -194,3 +194,54 @@ def test_quantify_library_passes_the_database_and_system_blast(tmp_path, monkeyp
     )
     assert got["db_prefix"] == "/dbs/g/g"
     assert got["use_system_blast"] is True
+
+
+# --- HTML report -------------------------------------------------------------
+
+def _fam(name, cov, **kw):
+    base = dict(hits=10, arrays=2, covered_bp=cov, pct_of_target=cov / 1e6 * 100,
+                mean_identity=90.0, scaffolds=1, monomer_len=100,
+                copy_number=cov / 100, mean_array_bp=cov / 2, max_array_bp=cov // 2)
+    base.update(kw)
+    return rq.FamilyQuant(family=name, **base)
+
+
+def test_report_is_self_contained_and_lists_both_engines(tmp_path):
+    lib = tmp_path / "lib.fa"
+    lib.write_text(">SatA\nACGT\n>SatB\nACGT\n>SatC\nACGT\n")
+    blast = rq.QuantifyResult(engine="blastn", target_length=1_000_000,
+                              families=[_fam("SatA", 5000), _fam("SatB", 800)])
+    rm = rq.QuantifyResult(engine="repeatmasker", target_length=1_000_000,
+                           families=[_fam("SatA", 6000, mean_divergence=12.5)],
+                           landscape_metric="kimura")
+    html = rq.write_summary_html(
+        [blast, rm], tmp_path / "r.html", target_label="g.fa",
+        warnings=["'SatA' appears 2× <dup>"], library_fasta=lib,
+        run_info={"blast_word_size": 11, "blast_evalue": 1e-4,
+                  "blast_db_prefix": "/dbs/g.fa/g.fa", "rm_div": 40,
+                  "rm_sensitivity": "sensitive"},
+    ).read_text()
+    assert "http://" not in html and "https://" not in html  # works offline
+    assert "2 / 3" in html  # families found / library entries
+    assert "Kimura div." in html
+    assert "not found" in html  # SatB has no RepeatMasker row
+    assert "&lt;dup&gt;" in html and "<dup>" not in html  # escaped
+    assert "saved database g.fa" in html
+    assert html.count("class='bar'") == 4  # 2 families × 2 engines
+
+
+def test_report_without_hits_says_so(tmp_path):
+    result = rq.QuantifyResult(engine="blastn", target_length=1000, families=[])
+    html = rq.write_summary_html([result], tmp_path / "r.html").read_text()
+    assert "No library family was found" in html
+
+
+@pytest.mark.parametrize("bp, text", [
+    (834, "834 bp"), (13_790, "13.8 kb"), (1_050_016, "1,050 kb"), (59_290_000, "59.3 Mb"),
+])
+def test_lengths_are_shown_in_readable_units(bp, text):
+    assert rq._fmt_len(bp) == text
+
+
+def test_axis_ends_on_a_round_number():
+    assert rq._nice_axis_max(1_548_495) == (1_600_000, 400_000)

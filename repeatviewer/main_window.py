@@ -1039,6 +1039,8 @@ class RepeatQuantifyWorker(QObject):
                     out_dir / f"{target.name}_repeat_quant.html",
                     target_label=target.name,
                     warnings=lib_warnings,
+                    library_fasta=self._library,
+                    run_info=params,
                 )
                 outputs.append(str(summary))
                 for result in results:
