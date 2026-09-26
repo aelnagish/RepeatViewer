@@ -410,7 +410,7 @@ def quantify_library_blastn(
         _blastn_executable(use_system_blast),
         "-task", "blastn",
         "-query", str(library_fasta),
-        "-db", db_path,
+        "-db", db,
         "-evalue", str(e_value),
         "-word_size", str(int(word_size)),
         "-num_threads", str(max(1, int(threads))),
