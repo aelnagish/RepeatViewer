@@ -10,6 +10,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QGuiApplication,
     QPainter,
     QPalette,
     QPen,
@@ -627,10 +628,14 @@ class _BarsCanvas(QWidget):
         super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
-        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+        mods = event.modifiers() | QGuiApplication.keyboardModifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
             delta = event.angleDelta().y()
             if delta == 0:
                 delta = event.angleDelta().x()
+            pixel = event.pixelDelta()
+            if delta == 0 and not pixel.isNull():
+                delta = int(pixel.y()) or int(pixel.x())
             if delta != 0:
                 factor = _ZOOM_STEP if delta > 0 else 1 / _ZOOM_STEP
                 self.zoom_by(factor, anchor_x=event.position().x())
@@ -969,31 +974,24 @@ class MultiSequenceOverviewPanel(QWidget):
             content_height=content_h,
         )
 
+    @staticmethod
+    def _safe_disconnect(signal, slot) -> None:
+        """Disconnect without raising when the slot/receiver is already gone."""
+        try:
+            signal.disconnect(slot)
+        except (RuntimeError, TypeError, SystemError):
+            pass
+
     def _unbind_header_zoom_bar(self) -> None:
         """Disconnect this panel from the shared header zoom bar (no-op if unbound)."""
         bar = self._header_zoom_bar
         if bar is None:
             return
-        try:
-            bar.zoom_slider.valueChanged.disconnect(self._on_zoom_slider_changed)
-        except (RuntimeError, TypeError):
-            pass
-        try:
-            bar.fit_requested.disconnect(self._fit_bars)
-        except (RuntimeError, TypeError):
-            pass
-        try:
-            bar.extract_requested.disconnect(self._extract_selected)
-        except (RuntimeError, TypeError):
-            pass
-        try:
-            bar.filter_text_changed.disconnect(self._on_name_filter_edited)
-        except (RuntimeError, TypeError):
-            pass
-        try:
-            bar.filter_return_pressed.disconnect(self._on_name_filter_next)
-        except (RuntimeError, TypeError):
-            pass
+        self._safe_disconnect(bar.zoom_slider.valueChanged, self._on_zoom_slider_changed)
+        self._safe_disconnect(bar.fit_requested, self._fit_bars)
+        self._safe_disconnect(bar.extract_requested, self._extract_selected)
+        self._safe_disconnect(bar.filter_text_changed, self._on_name_filter_edited)
+        self._safe_disconnect(bar.filter_return_pressed, self._on_name_filter_next)
         if getattr(bar, "_bound_overview", None) is self:
             bar._bound_overview = None
         self._header_zoom_bar = None
@@ -1009,9 +1007,14 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         if prev_owner is not None and prev_owner is not self:
             try:
-                prev_owner._unbind_header_zoom_bar()
-            except (RuntimeError, TypeError, AttributeError):
-                pass
+                from shiboken6 import isValid
+
+                if isValid(prev_owner):
+                    prev_owner._unbind_header_zoom_bar()
+                else:
+                    bar._bound_overview = None
+            except (RuntimeError, TypeError, AttributeError, SystemError):
+                bar._bound_overview = None
         if self._header_zoom_bar is not None:
             self._unbind_header_zoom_bar()
 
@@ -1019,19 +1022,16 @@ class MultiSequenceOverviewPanel(QWidget):
         prev_filter = self._name_filter.text()
 
         if self._zoom_slider is not bar.zoom_slider:
-            try:
-                self._zoom_slider.valueChanged.disconnect(self._on_zoom_slider_changed)
-            except (RuntimeError, TypeError):
-                pass
+            self._safe_disconnect(
+                self._zoom_slider.valueChanged, self._on_zoom_slider_changed
+            )
         if self._name_filter is not bar.name_filter:
-            try:
-                self._name_filter.textChanged.disconnect(self._on_name_filter_edited)
-            except (RuntimeError, TypeError):
-                pass
-            try:
-                self._name_filter.returnPressed.disconnect(self._on_name_filter_next)
-            except (RuntimeError, TypeError):
-                pass
+            self._safe_disconnect(
+                self._name_filter.textChanged, self._on_name_filter_edited
+            )
+            self._safe_disconnect(
+                self._name_filter.returnPressed, self._on_name_filter_next
+            )
 
         self._header_zoom_bar = bar
         bar._bound_overview = self
@@ -1297,9 +1297,24 @@ class MultiSequenceOverviewPanel(QWidget):
         bars_vp = self._bars_scroll.viewport()
         if obj not in (names_vp, bars_vp):
             return super().eventFilter(obj, event)
-        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            # Let the tracks canvas handle Shift+wheel zoom.
-            return False
+        mods = event.modifiers() | QGuiApplication.keyboardModifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            # Handle zoom here — wheel is delivered to the viewport, not the canvas.
+            delta = event.angleDelta().y()
+            if delta == 0:
+                delta = event.angleDelta().x()
+            pixel = event.pixelDelta()
+            if delta == 0 and not pixel.isNull():
+                delta = int(pixel.y()) or int(pixel.x())
+            if delta != 0:
+                factor = _ZOOM_STEP if delta > 0 else 1.0 / _ZOOM_STEP
+                # Map viewport x → content x (include horizontal scroll).
+                anchor_x = float(event.position().x()) + float(
+                    self._bars_scroll.horizontalScrollBar().value()
+                )
+                self._bars.zoom_by(factor, anchor_x=anchor_x)
+            event.accept()
+            return True
         delta = _wheel_delta_y(event)
         if delta:
             self._nudge_vertical_scroll(delta)

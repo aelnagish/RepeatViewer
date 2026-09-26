@@ -727,7 +727,7 @@ class SettingsDialog(QDialog):
             ("Preview zoom — PDF:", self._preview_zoom_spins[PreviewZoomKind.PDF]),
             ("Preview zoom — image:", self._preview_zoom_spins[PreviewZoomKind.IMAGE]),
             ("Default preview fit:", self._preview_fit),
-            ("Default FASTA preview tab:", self._fasta_default_tab),
+            ("Default preview tab:", self._fasta_default_tab),
         ])
         parallel_jobs_help = (
             "How many selected sequences can run at the same time.\n\n"

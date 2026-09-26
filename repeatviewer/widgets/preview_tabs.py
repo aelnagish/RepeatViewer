@@ -365,12 +365,13 @@ class ScaledImagePreview(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt API)
         super().showEvent(event)
-        if self._scale_pending:
-            QTimer.singleShot(0, lambda: self.refresh_scale(immediate=True))
+        # After PDF/HTML → image, scroll can be stale; keep zoom %, pin top-left.
+        self.refresh_scale(immediate=True, reset_scroll=True)
 
     def set_zoom_percent(self, percent: int) -> None:
+        # Keep zoom %; always pin to top-left so PDF → PNG cannot leave a blank view.
         self._zoom_percent = max(25, min(MAX_PREVIEW_ZOOM_PERCENT, int(percent)))
-        self.refresh_scale(immediate=True, reset_scroll=False)
+        self.refresh_scale(immediate=True, reset_scroll=True)
 
     def set_fit_mode(self, mode: PreviewFitMode | str) -> None:
         if isinstance(mode, str):
@@ -380,6 +381,11 @@ class ScaledImagePreview(QWidget):
                 mode = PreviewFitMode.FIT_WINDOW
         self._fit_mode = mode
         self.refresh_scale(immediate=True, reset_scroll=True)
+
+    def reset_scroll_to_top_left(self) -> None:
+        """Pin scrollbars to the top-left corner of the image."""
+        self._scroll.horizontalScrollBar().setValue(0)
+        self._scroll.verticalScrollBar().setValue(0)
 
     def refresh_scale(
         self,
@@ -428,6 +434,9 @@ class ScaledImagePreview(QWidget):
         if physical_w == self._last_physical_w:
             current = self._label.pixmap()
             if current is not None and not current.isNull():
+                if self._reset_scroll_on_refresh:
+                    self.reset_scroll_to_top_left()
+                    self._reset_scroll_on_refresh = False
                 return
         # Fast path while dragging/resizing large images; smooth once settled.
         transform = (
@@ -445,8 +454,7 @@ class ScaledImagePreview(QWidget):
         self._label.setPixmap(display)
         self._label.setFixedSize(display.size())
         if self._reset_scroll_on_refresh:
-            self._scroll.horizontalScrollBar().setValue(0)
-            self._scroll.verticalScrollBar().setValue(0)
+            self.reset_scroll_to_top_left()
             self._reset_scroll_on_refresh = False
 
 
@@ -462,6 +470,7 @@ class PdfPreviewWidget(QWidget):
         self._doc = QPdfDocument(self)
         self._render_generation = 0
         self._zoom_percent = load_preview_zoom_percent(PreviewZoomKind.PDF)
+        self._pending_scroll_frac: tuple[float, float] | None = None
 
         self._scroll = QScrollArea(self)
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -490,6 +499,16 @@ class PdfPreviewWidget(QWidget):
             self._doc.pageCountChanged.connect(self._schedule_render)
 
     def set_zoom_percent(self, percent: int) -> None:
+        hbar = self._scroll.horizontalScrollBar()
+        vbar = self._scroll.verticalScrollBar()
+        vw = max(1, self._scroll.viewport().width())
+        vh = max(1, self._scroll.viewport().height())
+        old_w = max(1, self._content.width())
+        old_h = max(1, self._content.height())
+        self._pending_scroll_frac = (
+            (hbar.value() + vw / 2.0) / old_w,
+            (vbar.value() + vh / 2.0) / old_h,
+        )
         self._zoom_percent = max(
             MIN_PREVIEW_ZOOM_PERCENT,
             min(MAX_PREVIEW_ZOOM_PERCENT, int(percent)),
@@ -564,6 +583,17 @@ class PdfPreviewWidget(QWidget):
             self._layout.addWidget(label)
 
         self._content.adjustSize()
+        if self._pending_scroll_frac is not None:
+            frac_x, frac_y = self._pending_scroll_frac
+            self._pending_scroll_frac = None
+            hbar = self._scroll.horizontalScrollBar()
+            vbar = self._scroll.verticalScrollBar()
+            vw = max(1, self._scroll.viewport().width())
+            vh = max(1, self._scroll.viewport().height())
+            new_w = max(1, self._content.width())
+            new_h = max(1, self._content.height())
+            hbar.setValue(int(frac_x * new_w - vw / 2.0))
+            vbar.setValue(int(frac_y * new_h - vh / 2.0))
 
     def load_file(self, path: Path) -> QPdfDocument.Error:
         self._clear_pages()
@@ -942,7 +972,10 @@ class FilePreviewPage(QWidget):
         if current is self._html:
             QTimer.singleShot(0, self._reload_html_if_needed)
         elif current is self._image:
-            QTimer.singleShot(0, self._image.refresh_scale)
+            QTimer.singleShot(
+                0,
+                lambda: self._image.refresh_scale(immediate=True, reset_scroll=True),
+            )
         elif current is self._pdf:
             QTimer.singleShot(0, self._pdf.refresh)
 
@@ -2252,17 +2285,24 @@ class PreviewTabWidget(QTabWidget):
                 and widget.is_annotation_preview_active()
                 and widget.is_multi_fasta_preview()
             ):
-                # Multi-seq overview: −/+/Fit/Extract/filter on the header row.
+                # Multi-seq overview: −/+/Fit/Extract/filter under the tab divider.
                 self._header_bar.set_header_zoom_mode("annotation")
             elif is_annotation:
-                self._header_bar.set_header_zoom_mode("annotation")
+                # Single-seq Annotation: Actions on the Preview title bar (like Dotplot).
+                self._header_bar.set_header_zoom_mode("preview")
             else:
                 self._header_bar.set_header_zoom_mode("preview")
         else:
             self._zoom_bar.setVisible(not is_annotation)
 
+        single_annotation = (
+            isinstance(widget, FilePreviewPage)
+            and widget.is_annotation_preview_active()
+            and not widget.is_multi_fasta_preview()
+        )
         if hasattr(self._zoom_bar, "set_chrome_mode"):
-            if is_dotplot:
+            if is_dotplot or single_annotation:
+                # Actions only on the dock title (default preview tab).
                 self._zoom_bar.set_chrome_mode("dotplot")
             elif is_text or (
                 isinstance(widget, FilePreviewPage) and widget._uses_text_preview()
@@ -2279,12 +2319,17 @@ class PreviewTabWidget(QTabWidget):
             and not is_annotation
             and not is_dotplot
             and not is_cyto
+            and not single_annotation
         ):
             previous = self._zoom_bar.current_zoom_kind()
             self._zoom_bar.set_zoom_kind(zoom_kind)
             kind_changed = previous != zoom_kind
 
-        show_preview_chrome = not is_annotation and not is_cyto
+        show_preview_chrome = not is_cyto and not (
+            isinstance(widget, FilePreviewPage)
+            and widget.is_annotation_preview_active()
+            and widget.is_multi_fasta_preview()
+        )
         for control in (
             self._zoom_bar._spin,
             getattr(self._zoom_bar, "_font_spin", None),
@@ -2292,8 +2337,14 @@ class PreviewTabWidget(QTabWidget):
         ):
             if control is not None:
                 control.setEnabled(show_preview_chrome)
-        if is_dotplot and hasattr(self._zoom_bar, "_actions_btn"):
+        if (is_dotplot or single_annotation) and hasattr(self._zoom_bar, "_actions_btn"):
             self._zoom_bar._actions_btn.setEnabled(True)
+        if hasattr(self._zoom_bar, "set_default_preview_tab_visible"):
+            # Only FASTA previews have Text / Annotation / Dotplot tabs.
+            show_default_tab = isinstance(widget, FilePreviewPage) and (
+                widget.is_single_fasta_preview()
+            )
+            self._zoom_bar.set_default_preview_tab_visible(show_default_tab)
         self._sync_text_tool_actions()
         self._sync_header_from_current_page()
         if isinstance(widget, FilePreviewPage):
@@ -2481,6 +2532,9 @@ class PreviewTabWidget(QTabWidget):
         if isinstance(widget, FilePreviewPage):
             key = str(widget.path)
             self._path_to_index.pop(key, None)
+            overview = getattr(widget, "_annotation_overview", None)
+            if overview is not None and hasattr(overview, "_unbind_header_zoom_bar"):
+                overview._unbind_header_zoom_bar()
             widget.teardown_html_preview()
         self.removeTab(index)
         if widget is not None:

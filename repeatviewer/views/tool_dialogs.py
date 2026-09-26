@@ -2783,8 +2783,17 @@ class BlastParamsDialog(QDialog):
 
         self._blastn_write_text = QCheckBox("Export BLAST text file (*.txt)")
         self._blastn_write_text.setChecked(opts.write_text)
+        self._blastn_write_text.setToolTip(
+            "Keep the hit table (*_b.txt) next to the query. "
+            "When unchecked, the table is removed after Blast "
+            "(density / genome-map runs still keep it when needed)."
+        )
         self._blastn_write_gff = QCheckBox("Export GFF file (*.gff)")
         self._blastn_write_gff.setChecked(opts.write_gff)
+        self._blastn_write_gff.setToolTip(
+            "Write a GFF next to the query (*_b.gff). "
+            "When unchecked, any previous *_b.gff for this query is removed."
+        )
 
         self._blastp_evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._blastp_evalue)
@@ -2822,8 +2831,14 @@ class BlastParamsDialog(QDialog):
         )
         self._blastp_write_text = QCheckBox("Export BLAST text file (*.txt)")
         self._blastp_write_text.setChecked(opts.blastp_write_text)
+        self._blastp_write_text.setToolTip(
+            "Keep the hit table (*_b.txt). When unchecked, it is removed after Blast."
+        )
         self._blastp_write_gff = QCheckBox("Export GFF file (*.gff)")
         self._blastp_write_gff.setChecked(opts.blastp_write_gff)
+        self._blastp_write_gff.setToolTip(
+            "Write *_b.gff next to the query. When unchecked, any previous one is removed."
+        )
 
         # --- blastx: nucleotide query translated against a protein database ---
         self._blastx_database = QComboBox()
@@ -2869,8 +2884,14 @@ class BlastParamsDialog(QDialog):
         )
         self._blastx_write_text = QCheckBox("Export BLAST text file (*.txt)")
         self._blastx_write_text.setChecked(opts.blastx_write_text)
+        self._blastx_write_text.setToolTip(
+            "Keep the hit table (*_b.txt). When unchecked, it is removed after Blast."
+        )
         self._blastx_write_gff = QCheckBox("Export GFF file (*.gff)")
         self._blastx_write_gff.setChecked(opts.blastx_write_gff)
+        self._blastx_write_gff.setToolTip(
+            "Write *_b.gff next to the query. When unchecked, any previous one is removed."
+        )
 
         self._max_msa = QSpinBox()
         self._max_msa.setRange(10, 5000)

@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QFont, QFontMetrics, QGuiApplication, QWheelEvent
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QMouseEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -50,9 +58,9 @@ _FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
 )
 
 
-def _add_default_fasta_tab_menu(parent_menu: QMenu) -> None:
+def _add_default_fasta_tab_menu(parent_menu: QMenu) -> QAction:
     """Add Settings-equivalent default FASTA sub-tab chooser to an Actions menu."""
-    submenu = parent_menu.addMenu("Default FASTA preview tab")
+    submenu = parent_menu.addMenu("Default preview tab")
     submenu.setToolTip(
         "Sub-tab shown when you single-click a single-sequence FASTA file."
     )
@@ -80,6 +88,7 @@ def _add_default_fasta_tab_menu(parent_menu: QMenu) -> None:
     submenu.aboutToShow.connect(_sync_checks)
     group.triggered.connect(_on_chosen)
     _sync_checks()
+    return submenu.menuAction()
 
 ZOOM_BAR_HEIGHT = 18
 ZOOM_CONTROL_HEIGHT = 18
@@ -251,7 +260,7 @@ class PreviewZoomBar(QWidget):
         self._actions_menu.addAction(self._edit_text_action)
         self._actions_menu.addAction(self._save_text_action)
         self._default_tab_sep = self._actions_menu.addSeparator()
-        _add_default_fasta_tab_menu(self._actions_menu)
+        self._default_tab_action = _add_default_fasta_tab_menu(self._actions_menu)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
 
@@ -265,13 +274,14 @@ class PreviewZoomBar(QWidget):
         self._block = False
         self.set_text_actions_enabled(can_edit=False, can_save=False)
         self.set_chrome_mode("text")
+        self.set_default_preview_tab_visible(False)
 
     def set_chrome_mode(self, mode: str) -> None:
         """Configure title-bar chrome for the active preview kind.
 
-        ``text`` — font-size (pt) spin + Reset / Edit text / Save text + default tab.
-        ``media`` — % spin + Reset scale + default tab (HTML / PDF / image).
-        ``dotplot`` — Actions only (default FASTA tab); no size controls.
+        ``text`` — font-size (pt) spin + Reset / Edit text / Save text.
+        ``media`` — % spin + Reset scale (HTML / PDF / image).
+        ``dotplot`` — Actions only; no size controls.
         """
         self._chrome_mode = mode
         show_percent = mode == "media"
@@ -284,7 +294,6 @@ class PreviewZoomBar(QWidget):
         self._text_actions_sep.setVisible(show_text_tools)
         self._edit_text_action.setVisible(show_text_tools)
         self._save_text_action.setVisible(show_text_tools)
-        self._default_tab_sep.setVisible(show_reset)
         if mode == "text":
             self._reset_scale_action.setText("Reset font size")
             self._reset_scale_action.setToolTip(
@@ -293,6 +302,12 @@ class PreviewZoomBar(QWidget):
         else:
             self._reset_scale_action.setText("Reset scale")
             self._reset_scale_action.setToolTip("Restore default preview zoom (100%)")
+
+    def set_default_preview_tab_visible(self, visible: bool) -> None:
+        """Show Default preview tab only for FASTA files (not plain text/PDF/PNG/HTML)."""
+        show = bool(visible)
+        self._default_tab_action.setVisible(show)
+        self._default_tab_sep.setVisible(show)
 
     def set_zoom_kind(self, kind: PreviewZoomKind | str) -> None:
         """Load the saved font size (text) or zoom % (media) for this kind."""
@@ -370,6 +385,8 @@ class PreviewZoomBar(QWidget):
             return
         save_preview_zoom_percent(value, self._zoom_kind)
         self.zoom_changed.emit(value)
+        # Do not clearFocus here — that stops keyboard ↑/↓ auto-repeat.
+        # Stepper mouse clicks clear focus in NoWheelSpinBox.
 
     def _on_font_spin(self, value: int) -> None:
         if self._block:
@@ -516,7 +533,7 @@ class AnnotationZoomBar(QWidget):
             tooltip="Annotation actions",
         )
         self._actions_menu = QMenu(self._actions_btn)
-        _add_default_fasta_tab_menu(self._actions_menu)
+        self._default_tab_action = _add_default_fasta_tab_menu(self._actions_menu)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
 
@@ -570,26 +587,114 @@ class AnnotationZoomBar(QWidget):
 
 
 class PreviewWheelZoomFilter(QObject):
-    """Shift+scroll (or trackpad pinch) zooms; plain two-finger scroll navigates."""
+    """Shift+scroll / pinch / Shift+drag zooms; plain two-finger scroll navigates.
+
+    Watches only an explicit whitelist of text/PDF/image widgets. Never installs
+    on QApplication or WebEngine — app-level filters segfault on macOS when an
+    HTML preview starts Chromium.
+    """
+
+    # Pixels of vertical Shift+drag per one zoom step (percent or pt).
+    _DRAG_PIXELS_PER_STEP = 28.0
+    _INTERESTING = (
+        QEvent.Type.Wheel,
+        QEvent.Type.MouseButtonPress,
+        QEvent.Type.MouseMove,
+        QEvent.Type.MouseButtonRelease,
+    )
 
     def __init__(self, tabs: QWidget, zoom_bar: PreviewZoomBar) -> None:
-        super().__init__(tabs)
-        self._tabs = tabs
+        # Parent the filter to the zoom bar so its lifetime matches the title-bar
+        # controls (not the tab widget, which can be destroyed first).
+        super().__init__(zoom_bar)
+        self._tabs: QWidget | None = tabs
         self._zoom_bar = zoom_bar
+        self._enabled = True
         self._watched: set[int] = set()
         self._zoom_accum = 0
+        self._drag_origin: QPointF | None = None
+        self._drag_accum = 0.0
+        tabs.destroyed.connect(self._disable)
+        zoom_bar.destroyed.connect(self._disable)
+        self._watch(zoom_bar)
 
     def register_page(self, page: QWidget) -> None:
-        self._watch_widget(page)
+        """Attach to safe preview surfaces for this page (never HTML/WebEngine)."""
+        if not self._alive() or not isinstance(page, QWidget):
+            return
+        # Explicit safe targets only — do not walk findChildren / ChildAdded.
+        targets: list[QWidget] = [page]
+        for attr in (
+            "_text",
+            "_fasta_text",
+            "_text_scroll",
+            "_fasta_text_scroll",
+            "_placeholder",
+        ):
+            widget = getattr(page, attr, None)
+            if isinstance(widget, QWidget):
+                targets.append(widget)
+                self._append_viewport(targets, widget)
+        # Image/PDF panels wrap a QScrollArea — watch that viewport/label so
+        # Shift+scroll/drag reaches us instead of panning the scroll area alone.
+        for panel_attr in ("_pdf", "_image"):
+            panel = getattr(page, panel_attr, None)
+            if not isinstance(panel, QWidget):
+                continue
+            targets.append(panel)
+            scroll = getattr(panel, "_scroll", None)
+            if isinstance(scroll, QWidget):
+                targets.append(scroll)
+                self._append_viewport(targets, scroll)
+            for nested_attr in ("_label", "_content"):
+                nested = getattr(panel, nested_attr, None)
+                if isinstance(nested, QWidget):
+                    targets.append(nested)
+        for widget in targets:
+            self._watch(widget)
 
-    def _watch_widget(self, widget: QWidget) -> None:
+    @staticmethod
+    def _append_viewport(targets: list[QWidget], widget: QWidget) -> None:
+        viewport = getattr(widget, "viewport", None)
+        if not callable(viewport):
+            return
+        try:
+            vp = viewport()
+        except RuntimeError:
+            return
+        if isinstance(vp, QWidget):
+            targets.append(vp)
+
+    def _disable(self, *_args) -> None:
+        if not self._enabled:
+            return
+        self._enabled = False
+        self._tabs = None
+
+    def _alive(self) -> bool:
+        if not self._enabled or self._tabs is None:
+            return False
+        try:
+            from shiboken6 import isValid
+
+            return bool(isValid(self) and isValid(self._tabs) and isValid(self._zoom_bar))
+        except Exception:
+            return False
+
+    def _watch(self, widget: QWidget) -> None:
+        if not self._alive() or not isinstance(widget, QWidget):
+            return
+        name = type(widget).__name__
+        if "WebEngine" in name or "RenderWidget" in name or "Html" in name:
+            return
         key = id(widget)
         if key in self._watched:
             return
         self._watched.add(key)
-        widget.installEventFilter(self)
-        for child in widget.findChildren(QWidget):
-            self._watch_widget(child)
+        try:
+            widget.installEventFilter(self)
+        except RuntimeError:
+            self._watched.discard(key)
 
     @staticmethod
     def _is_descendant_of(widget: QWidget, ancestor: QWidget | None) -> bool:
@@ -603,67 +708,158 @@ class PreviewWheelZoomFilter(QObject):
         return False
 
     def _current_page(self):
+        if not self._alive():
+            return None
         from repeatviewer.widgets.preview_tabs import FilePreviewPage, PreviewTabWidget
 
-        if not isinstance(self._tabs, PreviewTabWidget):
+        tabs = self._tabs
+        try:
+            if not isinstance(tabs, PreviewTabWidget):
+                return None
+            widget = tabs.currentWidget()
+        except RuntimeError:
+            self._disable()
             return None
-        widget = self._tabs.currentWidget()
         return widget if isinstance(widget, FilePreviewPage) else None
 
-    def _can_zoom(self, page, obj: QWidget, wheel: QWheelEvent) -> bool:
-        # Text / HTML / PDF / image all share the title-bar size control.
-        if not self._zoom_bar.isVisible() or not self._zoom_bar._size_control_active():
-            return False
-        if page.is_annotation_preview_active() or page.is_dotplot_preview_active():
-            return False
-        if isinstance(obj, QSpinBox) or self._is_descendant_of(obj, page._sequence_info_bar):
-            return False
-        # macOS often strips Shift from the wheel event after remapping a
-        # vertical trackpad drag to horizontal — also read the live keyboard.
-        mods = wheel.modifiers() | QGuiApplication.keyboardModifiers()
-        # Shift+scroll zooms. Trackpad pinch often arrives as Ctrl/Cmd+wheel.
+    def _zoom_modifiers_held(self, event) -> bool:
+        mods = event.modifiers() | QGuiApplication.keyboardModifiers()
         if mods & Qt.KeyboardModifier.ShiftModifier:
             return True
         if mods & (
             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
         ):
             return True
-        # Plain two-finger scroll → leave for navigation (up/down).
         return False
 
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
-        # Catch widgets created after the page was first registered (e.g. web view).
-        if event.type() == QEvent.Type.ChildAdded:
-            child = event.child() if hasattr(event, "child") else None
-            if isinstance(child, QWidget):
-                self._watch_widget(child)
+    def _page_uses_own_zoom(self, page) -> bool:
+        try:
+            if page.is_annotation_preview_active() or page.is_dotplot_preview_active():
+                return True
+            if page.is_html_preview_active():
+                return True
+        except RuntimeError:
+            return True
+        return False
+
+    def _can_zoom(self, page, obj: QWidget, event) -> bool:
+        if not self._alive():
             return False
-        if event.type() != QEvent.Type.Wheel:
+        try:
+            if not self._zoom_bar.isVisible() or not self._zoom_bar._size_control_active():
+                return False
+            if self._page_uses_own_zoom(page):
+                return False
+        except RuntimeError:
             return False
-        wheel = event
-        if not isinstance(wheel, QWheelEvent):
+        if isinstance(obj, QSpinBox) and not self._is_descendant_of(
+            obj, self._zoom_bar
+        ):
             return False
-        page = self._current_page()
-        if page is None:
-            self._zoom_accum = 0
+        try:
+            if self._is_descendant_of(obj, page._sequence_info_bar):
+                return False
+            # Never hijack events under the HTML/WebEngine stack entry.
+            html = getattr(page, "_html", None)
+            if isinstance(html, QWidget) and self._is_descendant_of(obj, html):
+                return False
+        except RuntimeError:
             return False
-        obj = watched if isinstance(watched, QWidget) else None
-        if obj is None or not self._can_zoom(page, obj, wheel):
-            self._zoom_accum = 0
-            return False
-        delta = wheel_zoom_delta_from_event(wheel)
-        if delta != 0:
-            # Accumulate so the same trackpad drag is slower than one-step-per-tick,
-            # but still reaches a step within a short Shift+drag gesture.
-            self._zoom_accum += delta
-            threshold = PREVIEW_WHEEL_DELTA_PER_STEP
-            steps = int(self._zoom_accum / threshold)
-            if steps != 0:
-                self._zoom_accum -= steps * threshold
+        return self._zoom_modifiers_held(event)
+
+    def _apply_zoom_delta(self, delta: int) -> None:
+        if delta == 0 or not self._alive():
+            return
+        self._zoom_accum += delta
+        threshold = PREVIEW_WHEEL_DELTA_PER_STEP
+        steps = int(self._zoom_accum / threshold)
+        if steps != 0:
+            self._zoom_accum -= steps * threshold
+            try:
                 self._zoom_bar.step_zoom(steps)
-        # Always consume while Shift/pinch-zooming so the view does not pan
-        # horizontally (macOS Shift+scroll remap) instead of zooming.
-        wheel.accept()
+            except RuntimeError:
+                pass
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        try:
+            if event.type() not in self._INTERESTING:
+                return False
+        except RuntimeError:
+            return False
+        if not self._alive():
+            return False
+        try:
+            return self._event_filter_impl(watched, event)
+        except RuntimeError:
+            return False
+
+    def _event_filter_impl(self, watched, event) -> bool:
+        page = self._current_page()
+        obj = watched if isinstance(watched, QWidget) else None
+
+        if isinstance(event, QMouseEvent):
+            if page is None or obj is None:
+                self._drag_origin = None
+                self._drag_accum = 0.0
+                return False
+            if self._page_uses_own_zoom(page):
+                return False
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if (
+                    event.button() == Qt.MouseButton.LeftButton
+                    and self._can_zoom(page, obj, event)
+                ):
+                    self._drag_origin = QPointF(event.globalPosition())
+                    self._drag_accum = 0.0
+                    # Consume press so QScrollArea does not start a pan/drag.
+                    event.accept()
+                    return True
+                self._drag_origin = None
+                self._drag_accum = 0.0
+                return False
+            if event.type() == QEvent.Type.MouseMove:
+                if (
+                    self._drag_origin is not None
+                    and event.buttons() & Qt.MouseButton.LeftButton
+                ):
+                    # Keep zooming for the active drag even if Shift flickers;
+                    # never let the scroll area pan during a zoom drag.
+                    pos = QPointF(event.globalPosition())
+                    dy = self._drag_origin.y() - pos.y()
+                    self._drag_accum += dy
+                    self._drag_origin = pos
+                    steps = int(self._drag_accum / self._DRAG_PIXELS_PER_STEP)
+                    if steps != 0:
+                        self._drag_accum -= steps * self._DRAG_PIXELS_PER_STEP
+                        self._zoom_bar.step_zoom(steps)
+                    event.accept()
+                    return True
+                return False
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                if self._drag_origin is not None:
+                    self._drag_origin = None
+                    self._drag_accum = 0.0
+                    event.accept()
+                    return True
+                self._drag_origin = None
+                self._drag_accum = 0.0
+                return False
+
+        if event.type() != QEvent.Type.Wheel or not isinstance(event, QWheelEvent):
+            return False
+        if page is None or obj is None:
+            self._zoom_accum = 0
+            return False
+        if self._page_uses_own_zoom(page):
+            self._zoom_accum = 0
+            return False
+        if not self._can_zoom(page, obj, event):
+            self._zoom_accum = 0
+            return False
+        delta = wheel_zoom_delta_from_event(event)
+        self._apply_zoom_delta(delta)
+        # Consume fully — on macOS Shift+wheel is also horizontal scroll.
+        event.accept()
         return True
 
 
