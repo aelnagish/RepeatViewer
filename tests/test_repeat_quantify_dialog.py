@@ -243,3 +243,54 @@ def test_library_and_genome_start_empty():
     d = _dialog(start_dir="/some/folder")
     assert d.library() is None
     assert d.targets() == []
+
+
+def test_save_index_box_is_on_by_default_and_synced_across_tabs():
+    d = _dialog()
+    assert d.save_blast_index() is True
+    d._blast_c["save"].setChecked(False)
+    assert d._blast_a["save"].isChecked() is False
+    assert d.options().blast_save_index is False
+    d._restore_defaults()
+    assert d.save_blast_index() is True
+
+
+def test_save_index_choice_round_trips_through_settings(settings):
+    save_repeat_quantify_options(RepeatQuantifyOptions(blast_save_index=False))
+    assert load_repeat_quantify_options().blast_save_index is False
+    settings["repeat_quantify"]["blast_save_index"] = "true"  # QSettings string
+    assert load_repeat_quantify_options().blast_save_index is True
+
+
+def test_status_says_which_genomes_reuse_a_saved_database(tmp_path):
+    from repeatviewer.project import BlastDatabase
+
+    saved = tmp_path / "saved.fa"
+    fresh = tmp_path / "fresh.fa"
+    for f in (saved, fresh):
+        f.write_text(">s\nACGT\n")
+    prefix = tmp_path / "dbs" / "saved" / "saved"
+    prefix.parent.mkdir(parents=True)
+    Path(f"{prefix}.nin").write_text("")
+    db = BlastDatabase(name="Saffron v3", source_fasta=saved, db_prefix_path=prefix)
+    d = _dialog(blast_databases=[db])
+    d._genome_input._rows[0].set_path(saved)
+    d._genome_input.add_row()
+    d._genome_input._rows[1].set_path(fresh)
+    lines = d.blast_database_status()
+    assert lines[0].startswith("saved.fa: uses saved BLAST database")
+    assert "Saffron v3" in lines[0]
+    assert "indexed once and added to Add/Manage databases" in lines[1]
+    d._blast_a["save"].setChecked(False)
+    assert "temporary index" in d.blast_database_status()[1]
+
+
+def test_status_is_hidden_for_repeatmasker_only(tmp_path):
+    genome = tmp_path / "g.fa"
+    genome.write_text(">s\nACGT\n")
+    d = _dialog()
+    d._tabs.setCurrentIndex(0)
+    d._genome_input._rows[0].set_path(genome)
+    assert d._db_status.text()
+    d._tabs.setCurrentIndex(1)  # RepeatMasker
+    assert d._db_status.text() == ""

@@ -362,14 +362,16 @@ def quantify_library_blastn(
     word_size: int = 11,
     threads: int = 1,
     use_system_blast: bool = False,
+    db_prefix: str | os.PathLike | None = None,
     cancel=None,
 ) -> QuantifyResult:
     """Quantify ``library_fasta`` occurrences across ``target_fasta`` via blastn.
 
-    Builds a nucleotide DB from the target (cached between runs, see
-    ``_blast_db_cache_dir``), searches the library against it, then aggregates
-    per family. Returns a QuantifyResult and writes a summary TSV and an arrays
-    GFF into ``out_dir``.
+    Searches against ``db_prefix`` when given (a saved BLAST database built from
+    the target, see ``resolve_blast_database``); otherwise builds a nucleotide
+    DB from the target (cached between runs, see ``_blast_db_cache_dir``).
+    Aggregates hits per family. Returns a QuantifyResult and writes a summary
+    TSV and an arrays GFF into ``out_dir``.
     """
     library_fasta = Path(library_fasta).expanduser().resolve()
     target_fasta = Path(target_fasta).expanduser().resolve()
@@ -379,32 +381,40 @@ def quantify_library_blastn(
         if not path.is_file():
             raise FileNotFoundError(f"FASTA not found: {path}")
 
-    os_type = platform.system()
-    # The index lives in the app cache, not the results folder: it keeps the ~8
-    # index files out of the way (the reason this used to be a scratch dir) and
-    # lets repeat runs against the same genome skip makeblastdb entirely.
-    db_dir = _blast_db_cache_dir(target_fasta)
-    db_dir.mkdir(parents=True, exist_ok=True)
-    db_path = os.path.join(str(db_dir), blast_database_basename(str(target_fasta)))
-    reused = _blast_index_present(db_path)
-    logger.info(
-        "repeat quantify blastn: %s BLAST index for %s (%s)",
-        "reusing cached" if reused else "building",
-        target_fasta.name,
-        db_dir,
-    )
     tab_path = out_dir / f"{kept_input_name(target_fasta)}_vs_{kept_input_name(library_fasta)}.blastn.tsv"
-    db = check_database(
-        str(target_fasta),
-        str(db_dir),
-        os_type=os_type,
-        use_system_blast=use_system_blast,
-    )
-    if db in {"makeblastdb_not_found", "makeblastdb_got_error"}:
-        raise RuntimeError(
-            "Could not build a BLAST database for the target sequences "
-            f"({db}). Check that makeblastdb is available."
+    if db_prefix:
+        db = str(db_prefix)
+        if not _blast_index_present(db):
+            raise RuntimeError(
+                f"The saved BLAST database for {target_fasta.name} is missing its "
+                f"index files (expected at {db}). Rebuild it in Add/Manage databases."
+            )
+        logger.info(
+            "repeat quantify blastn: using saved BLAST database %s for %s",
+            db, target_fasta.name,
         )
+    else:
+        os_type = platform.system()
+        # The index lives in the app cache, not the results folder: it keeps the
+        # ~8 index files out of the way and lets repeat runs against the same
+        # genome skip makeblastdb.
+        db_dir = _blast_db_cache_dir(target_fasta)
+        db_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "repeat quantify blastn: temporary BLAST index for %s (%s)",
+            target_fasta.name, db_dir,
+        )
+        db = check_database(
+            str(target_fasta),
+            str(db_dir),
+            os_type=os_type,
+            use_system_blast=use_system_blast,
+        )
+        if db in {"makeblastdb_not_found", "makeblastdb_got_error"}:
+            raise RuntimeError(
+                "Could not build a BLAST database for the target sequences "
+                f"({db}). Check that makeblastdb is available."
+            )
 
     cmd = [
         _blastn_executable(use_system_blast),
@@ -1188,11 +1198,17 @@ def quantify_library(
     blast_evalue: float = 1e-5,
     blast_min_identity: float = 0.0,
     blast_min_coverage: float = 0.0,
+    blast_db_prefix: str | None = None,
     rm_div: int = 40,
     rm_sensitivity: str = "sensitive",
+    use_system_blast: bool = False,
     cancel=None,
 ) -> list[QuantifyResult]:
-    """Run the requested engine(s): ``blastn``, ``repeatmasker``, or ``both``."""
+    """Run the requested engine(s): ``blastn``, ``repeatmasker``, or ``both``.
+
+    ``blast_db_prefix`` = a saved BLAST database of ``target_fasta`` to search
+    instead of indexing the genome again.
+    """
     results: list[QuantifyResult] = []
     if engine in ("blastn", "both"):
         results.append(
@@ -1203,6 +1219,8 @@ def quantify_library(
                 min_coverage=blast_min_coverage,
                 word_size=blast_word_size,
                 threads=threads,
+                use_system_blast=use_system_blast,
+                db_prefix=blast_db_prefix,
                 cancel=cancel,
             )
         )
@@ -1217,3 +1235,53 @@ def quantify_library(
             )
         )
     return results
+
+
+def resolve_blast_database(
+    target_fasta: Path,
+    databases: list,
+    *,
+    save_index: bool,
+    base_dir: Path | None,
+    use_system_blast: bool = False,
+):
+    """Pick the BLAST database Repeat Quantify searches for ``target_fasta``.
+
+    Returns ``(db_prefix, created)``:
+
+    - a registered database built from this FASTA (index current) ->
+      ``(its prefix, None)``;
+    - otherwise, with ``save_index`` -> builds a new named database in
+      ``base_dir`` and returns ``(its prefix, the new BlastDatabase)`` for the
+      caller to register, so every tool can reuse it;
+    - otherwise ``(None, None)``: quantify_library_blastn uses a temporary index.
+    """
+    from repeatviewer.backends.database_prepare import (
+        build_named_blast_database,
+        saved_blast_database_for,
+        unique_blast_database_name,
+    )
+    from repeatviewer.project import BLAST_MOLECULE_NUCL, BlastDatabase
+
+    target_fasta = Path(target_fasta).expanduser().resolve()
+    saved = saved_blast_database_for(target_fasta, databases)
+    if saved is not None:
+        return Path(saved.db_prefix_path), None
+    if not save_index or base_dir is None:
+        return None, None
+    name = unique_blast_database_name(target_fasta.name, databases, base_dir)
+    prefix = build_named_blast_database(
+        target_fasta,
+        Path(base_dir),
+        name,
+        molecule_type=BLAST_MOLECULE_NUCL,
+        use_system_blast=use_system_blast,
+    )
+    created = BlastDatabase(
+        name=name,
+        source_fasta=target_fasta,
+        db_prefix_path=Path(prefix),
+        molecule_type=BLAST_MOLECULE_NUCL,
+        created_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    return Path(prefix), created

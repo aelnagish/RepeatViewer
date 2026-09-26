@@ -937,11 +937,18 @@ class RepeatQuantifyWorker(QObject):
     progress = Signal(int, str)
     finished = Signal(object)
     failed = Signal(str)
+    # A new saved BLAST database (BlastDatabase) built for a genome; the main
+    # window registers it so Add/Manage databases and other tools reuse it.
+    database_created = Signal(object)
 
     def __init__(
         self, library: Path, targets: list[Path], *, engine: str, threads: int,
         params: dict | None = None, cancel=None,
         output_base: Path | None = None, stamp: str | None = None,
+        blast_databases: list | None = None,
+        save_blast_index: bool = False,
+        blast_db_base_dir: Path | None = None,
+        use_system_blast: bool = False,
     ) -> None:
         super().__init__()
         from repeatviewer.backends.repeat_quantify import run_stamp
@@ -952,6 +959,11 @@ class RepeatQuantifyWorker(QObject):
         self._threads = threads
         self._params = params or {}
         self._cancel = cancel
+        # Saved BLAST databases to reuse; new ones are added as they are built.
+        self._blast_databases = list(blast_databases or [])
+        self._save_blast_index = bool(save_blast_index)
+        self._blast_db_base_dir = Path(blast_db_base_dir) if blast_db_base_dir else None
+        self._use_system_blast = bool(use_system_blast)
         # None = a new folder next to each genome; otherwise new folders inside it.
         self._output_base = Path(output_base) if output_base else None
         # One stamp for the whole batch, taken when Run was clicked.
@@ -966,6 +978,7 @@ class RepeatQuantifyWorker(QObject):
             create_repeat_quant_output_dir,
             library_duplicate_warnings,
             quantify_library,
+            resolve_blast_database,
             write_landscape_html,
             write_run_parameters,
             write_summary_html,
@@ -997,12 +1010,17 @@ class RepeatQuantifyWorker(QObject):
                 out_dir = create_repeat_quant_output_dir(
                     target, self._stamp, self._output_base
                 )
+                params = dict(self._params)
+                if self._engine in ("blastn", "both"):
+                    db_prefix = self._blast_database_for(target, index, resolve_blast_database)
+                    if db_prefix is not None:
+                        params["blast_db_prefix"] = str(db_prefix)
                 run_info = dict(
                     library_fasta=self._library,
                     target_fasta=target,
                     engine=self._engine,
                     threads=self._threads,
-                    params=self._params,
+                    params=params,
                     started=datetime.now(),
                 )
                 write_run_parameters(out_dir, **run_info)
@@ -1012,8 +1030,9 @@ class RepeatQuantifyWorker(QObject):
                     out_dir,
                     engine=self._engine,
                     threads=self._threads,
+                    use_system_blast=self._use_system_blast,
                     cancel=self._cancel,
-                    **self._params,
+                    **params,
                 )
                 summary = write_summary_html(
                     results,
@@ -1043,6 +1062,29 @@ class RepeatQuantifyWorker(QObject):
             message = _format_cli_failure(exc)
             _record("failed", message)
             self.failed.emit(message)
+
+    def _blast_database_for(self, target: Path, index: int, resolve) -> Path | None:
+        """Saved BLAST database prefix for ``target``, building one if asked."""
+        from repeatviewer.backends.database_prepare import saved_blast_database_for
+
+        if (
+            self._save_blast_index
+            and saved_blast_database_for(target, self._blast_databases) is None
+        ):
+            self.progress.emit(index, f"Indexing {target.name} as a BLAST database…")
+        prefix, created = resolve(
+            target,
+            self._blast_databases,
+            save_index=self._save_blast_index,
+            base_dir=self._blast_db_base_dir,
+            use_system_blast=self._use_system_blast,
+        )
+        if created is not None:
+            self._blast_databases.append(created)
+            self.database_created.emit(created)
+        if self._cancel is not None:
+            self._cancel.check()  # Stop pressed while makeblastdb ran
+        return prefix
 
 
 class GenomeMapWorker(QObject):
@@ -4266,17 +4308,28 @@ class MainWindow(QMainWindow):
                         "BLASTn engine instead.",
                     )
                     return
+            from repeatviewer.app_preferences import load_blast_db_base_dir
+            from repeatviewer.database_settings import (
+                reload_blast_databases_into_project,
+            )
+
+            worker = RepeatQuantifyWorker(
+                Path(library),
+                targets,
+                engine=engine,
+                threads=self._project.batch_workers,
+                params=params,
+                cancel=self._job_cancel,
+                output_base=dialog.output_dir(),
+                stamp=dialog.run_stamp(),
+                blast_databases=reload_blast_databases_into_project(self._project),
+                save_blast_index=dialog.save_blast_index(),
+                blast_db_base_dir=load_blast_db_base_dir(),
+                use_system_blast=self._project.use_system_blast,
+            )
+            worker.database_created.connect(self._register_blast_database)
             self._start_background_job(
-                RepeatQuantifyWorker(
-                    Path(library),
-                    targets,
-                    engine=engine,
-                    threads=self._project.batch_workers,
-                    params=params,
-                    cancel=self._job_cancel,
-                    output_base=dialog.output_dir(),
-                    stamp=dialog.run_stamp(),
-                ),
+                worker,
                 job_title="Repeat quantify",
                 # 1 = the app's plain "Repeat quantify… <genome>" status line; a
                 # count > 1 would switch the status bar to the batch progress bar.
@@ -4286,14 +4339,33 @@ class MainWindow(QMainWindow):
                 on_failed=self._on_repeat_quantify_failed,
             )
 
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+
         dialog = RepeatQuantifyDialog(
             start_dir=start_dir,
             initial=load_repeat_quantify_options(),
+            blast_databases=reload_blast_databases_into_project(self._project),
             parent=self,
         )
         # Same non-modal presentation as the TE visualization dialogs, so the
         # Folders and Files panels stay clickable while it is open.
         self._present_te_viz_dialog(dialog, _on_accept)
+
+    @Slot(object)
+    def _register_blast_database(self, db) -> None:
+        """Save a BLAST database a tool built, so Add/Manage and every tool see it."""
+        from repeatviewer.database_settings import (
+            load_blast_databases_from_settings,
+            save_blast_databases_to_settings,
+        )
+
+        databases = load_blast_databases_from_settings()
+        prefix = str(Path(db.db_prefix_path))
+        if any(str(Path(d.db_prefix_path)) == prefix for d in databases):
+            return
+        databases.append(db)
+        save_blast_databases_to_settings(databases)
+        self._project.blast_databases = databases
 
     @Slot(object)
     def _on_repeat_quantify_finished(self, outputs) -> None:

@@ -6803,10 +6803,14 @@ class RepeatQuantifyDialog(QDialog):
         *,
         start_dir: str = "",
         initial: RepeatQuantifyOptions | None = None,
+        blast_databases: list | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Repeat quantify")
+        # Saved BLAST databases (Add/Manage databases), to show which genomes
+        # already have an index Repeat Quantify will reuse.
+        self._blast_databases = list(blast_databases or [])
         # Wide enough for the labels plus a readable path, Browse and Remove;
         # any wider only leaves empty space beside the fixed-width parameters.
         self.setMinimumWidth(680)
@@ -6844,6 +6848,15 @@ class RepeatQuantifyDialog(QDialog):
         inputs_form.setContentsMargins(0, 0, 0, 0)
         inputs_form.addRow("Library (monomers / satellites):", self._library_input)
         inputs_form.addRow("Genome (scaffolds / assembly):", self._genome_input)
+        self._db_status = QLabel(self)
+        self._db_status.setWordWrap(True)
+        self._db_status.setTextFormat(Qt.TextFormat.PlainText)
+        # A word-wrapped label asks for a narrow width; let it use the whole field.
+        self._db_status.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self._db_status.setVisible(False)
+        inputs_form.addRow("", self._db_status)
         inputs_form.addRow("Output folder:", self._make_output_controls())
 
         # Tabs are the engine choice; each tab holds that engine's parameters.
@@ -6869,6 +6882,10 @@ class RepeatQuantifyDialog(QDialog):
         )
         self._tabs.addTab(self._params_tab(both_rows), "Both")
         self._apply_options(opts)
+        self._genome_input.paths_changed.connect(self._update_db_status)
+        self._tabs.currentChanged.connect(self._update_db_status)
+        self._blast_a["save"].toggled.connect(self._update_db_status)
+        self._update_db_status()
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
@@ -6999,7 +7016,15 @@ class RepeatQuantifyDialog(QDialog):
         for w in (word, evalue, minid, mincov):
             w.setFixedWidth(self._FIELD_WIDTH)
             w.setAlignment(Qt.AlignmentFlag.AlignRight)
-        return {"word": word, "evalue": evalue, "minid": minid, "mincov": mincov}
+        save = QCheckBox("Save new indexes as BLAST databases", self)
+        save.setToolTip(
+            "Keep each genome's BLAST index in Add/Manage databases so later "
+            "runs and other tools reuse it."
+        )
+        return {
+            "word": word, "evalue": evalue, "minid": minid, "mincov": mincov,
+            "save": save,
+        }
 
     def _make_rm_controls(self) -> dict:
         div = QSpinBox(self)
@@ -7030,6 +7055,9 @@ class RepeatQuantifyDialog(QDialog):
             if isinstance(a, QComboBox):
                 a.currentIndexChanged.connect(b.setCurrentIndex)
                 b.currentIndexChanged.connect(a.setCurrentIndex)
+            elif isinstance(a, QCheckBox):
+                a.toggled.connect(b.setChecked)
+                b.toggled.connect(a.setChecked)
             else:
                 a.valueChanged.connect(b.setValue)
                 b.valueChanged.connect(a.setValue)
@@ -7041,6 +7069,21 @@ class RepeatQuantifyDialog(QDialog):
             ("-evalue:", c["evalue"]),
             ("-perc_identity:", c["minid"]),
             ("-qcov_hsp_perc:", c["mincov"]),
+            (
+                "BLAST index:",
+                field_with_help(
+                    c["save"],
+                    "BLAST index",
+                    "Repeat Quantify searches each genome's BLAST index. If the "
+                    "genome is already in Add/Manage databases (and the FASTA has "
+                    "not changed since), that index is reused and makeblastdb is "
+                    "skipped.\n\nWhen this box is ticked, a genome without a saved "
+                    "index is indexed once and added to Add/Manage databases, so "
+                    "the next run, and the BLAST, TE-Aid and Extend tools, reuse "
+                    "it. When unticked, the index is temporary and rebuilt when "
+                    "the system clears its temp folder.",
+                ),
+            ),
         ]
 
     @staticmethod
@@ -7072,6 +7115,7 @@ class RepeatQuantifyDialog(QDialog):
         self._blast_a["evalue"].setValue(float(opts.blast_evalue))
         self._blast_a["minid"].setValue(float(opts.blast_min_identity))
         self._blast_a["mincov"].setValue(float(opts.blast_min_coverage))
+        self._blast_a["save"].setChecked(bool(opts.blast_save_index))
         self._rm_b["div"].setValue(int(opts.rm_div))
         idx = self._rm_b["sens"].findData(opts.rm_sensitivity)
         self._rm_b["sens"].setCurrentIndex(max(0, idx))
@@ -7091,7 +7135,38 @@ class RepeatQuantifyDialog(QDialog):
             blast_min_coverage=float(self._blast_a["mincov"].value()),
             rm_div=int(self._rm_b["div"].value()),
             rm_sensitivity=str(self._rm_b["sens"].currentData()),
+            blast_save_index=self.save_blast_index(),
         )
+
+    def save_blast_index(self) -> bool:
+        """Save a genome's new BLAST index to Add/Manage databases."""
+        return bool(self._blast_a["save"].isChecked())
+
+    def blast_database_status(self) -> list[str]:
+        """One line per genome: whether its BLAST index is reused or built."""
+        from repeatviewer.backends.database_prepare import saved_blast_database_for
+
+        lines = []
+        for target in self.targets():
+            saved = saved_blast_database_for(target, self._blast_databases)
+            if saved is not None:
+                lines.append(f"{target.name}: uses saved BLAST database \u201c{saved.name}\u201d")
+            elif self.save_blast_index():
+                lines.append(
+                    f"{target.name}: no saved BLAST database yet \u2014 indexed once "
+                    "and added to Add/Manage databases"
+                )
+            else:
+                lines.append(
+                    f"{target.name}: no saved BLAST database \u2014 temporary index for this run"
+                )
+        return lines
+
+    def _update_db_status(self, *_args) -> None:
+        uses_blast = self.engine() in ("blastn", "both")
+        lines = self.blast_database_status() if uses_blast else []
+        self._db_status.setText("\n".join(lines))
+        self._db_status.setVisible(bool(lines))
 
     def should_run(self) -> bool:
         """True when the dialog was closed with Run (not Save or Cancel)."""
