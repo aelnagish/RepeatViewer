@@ -276,15 +276,20 @@ def _zoom_ppb_max() -> float:
 
 
 def _zoom_ppb_max_for(seq_len: int) -> float:
-    """Cap zoom-in for very long sequences to keep scrolling responsive."""
+    """Cap zoom-in for very long sequences to keep scrolling responsive.
+
+    Keep the cap high enough that letter mode (≈ font width px/base) is still
+    reachable: letters are painted only for the visible viewport, so deep zoom
+    on a multi-Mb sequence stays cheap.
+    """
     length = max(0, int(seq_len))
     if length <= _INTERACTIVE_SEQUENCE_LEN:
         return _MAX_PPB
     if length <= _LARGE_SEQUENCE_LEN:
         return 16.0
     if length <= _HUGE_SEQUENCE_LEN:
-        return 8.0
-    return 4.0
+        return 16.0
+    return 8.0
 
 
 def _annotation_row_label(text: str, parent: QWidget) -> QLabel:
@@ -2132,10 +2137,15 @@ class SequenceMapCanvas(QWidget):
         return cell_w, max(1, cell_h)
 
     def shows_letters(self) -> bool:
-        if len(self._sequence) > _INTERACTIVE_SEQUENCE_LEN:
+        """True when zoomed in enough to draw A/C/G/T (or AA) glyphs.
+
+        Letters are painted only for the visible viewport, so this is safe for
+        long sequences as well as short ones — no full-sequence letter pass.
+        """
+        if not self._sequence:
             return False
         font_w, _ = self._font_letter_cell_size()
-        return self._pixels_per_bp >= font_w
+        return self._pixels_per_bp >= float(font_w)
 
     def _letter_cell_size(self) -> tuple[int, int]:
         """Current nucleotide cell size when drawing letters."""
@@ -2562,15 +2572,18 @@ class SequenceMapCanvas(QWidget):
             seq_len,
             int(math.ceil((scroll + clip.right() - origin_x) / cell_w)),
         )
-        if show_letters:
-            for i in range(visible_start, visible_end):
-                cell = self._base_rect_at(i)
-                self._draw_base_cell(
-                    painter,
-                    self._sequence[i],
-                    cell,
-                    show_letters=True,
-                )
+        # Hard cap: never attempt a huge letter pass if clip/math goes wrong.
+        if visible_end - visible_start > 20_000:
+            self._draw_sequence_bar_viewport(painter, clip)
+            return
+        for i in range(visible_start, visible_end):
+            cell = self._base_rect_at(i)
+            self._draw_base_cell(
+                painter,
+                self._sequence[i],
+                cell,
+                show_letters=True,
+            )
 
     def _draw_features(self, painter: QPainter) -> None:
         if not self._features:
@@ -3684,7 +3697,8 @@ class SequenceMapWidget(QWidget):
         self._sync_position_spins(1, 1)
         if seq_len > _INTERACTIVE_SEQUENCE_LEN:
             self.statusMessage.emit(
-                f"Long sequence ({seq_len:,} bp): letter mode disabled for performance."
+                f"Long sequence ({seq_len:,} bp): zoom in to see nucleotide letters "
+                "(letters are drawn only for the visible region)."
             )
         if fit_after_load:
             self._schedule_fit_window()
