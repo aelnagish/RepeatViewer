@@ -1016,12 +1016,11 @@ class DotplotCanvas(QGraphicsView):
         self._apply_zoom(factor, view_pos)
 
     def render_to_pdf(self, path: Path, *, title: str = "", subtitle: str = "") -> None:
-        """Write the plot to a PDF with axes, labels and a legend.
+        """Write the current view to a PDF with axes, labels and a legend.
 
-        The on-screen rulers are child widgets in the view margins, so they are
-        not part of the scene and cannot simply be rendered. The axes here are
-        drawn directly, using the same tick spacing and coordinate offset as the
-        interactive rulers so the two agree.
+        Exports the zoomed/panned viewport (not the full sequence square). The
+        on-screen rulers are child widgets in the view margins, so axes are
+        redrawn here using the same tick logic as the interactive rulers.
         """
         from PySide6.QtGui import QPageSize, QPdfWriter
 
@@ -1039,11 +1038,23 @@ class DotplotCanvas(QGraphicsView):
             head = int(26 * unit)                # title block + top tick labels
             foot = int(10 * unit)                # legend
 
-            side = min(
-                page.width() - margin * 2 - gutter,
-                page.height() - margin * 2 - head - foot - gutter,
-            )
-            plot = QRectF(margin + gutter, margin + head, side, side)
+            length = max(self._length, 1)
+            offset = self._offset
+            plot_bounds = QRectF(0.0, 0.0, float(length), float(length))
+            source = self.visible_scene_rect().intersected(plot_bounds)
+            if source.width() < 1.0 or source.height() < 1.0:
+                source = QRectF(plot_bounds)
+
+            avail_w = page.width() - margin * 2 - gutter
+            avail_h = page.height() - margin * 2 - head - foot - gutter
+            aspect = source.width() / max(source.height(), 1e-9)
+            if avail_w / max(avail_h, 1) > aspect:
+                side_h = float(avail_h)
+                side_w = side_h * aspect
+            else:
+                side_w = float(avail_w)
+                side_h = side_w / aspect
+            plot = QRectF(margin + gutter, margin + head, side_w, side_h)
 
             # The app may be in a dark theme; a figure should not be. Paint the
             # page and the plot area white and draw everything in dark ink.
@@ -1062,31 +1073,43 @@ class DotplotCanvas(QGraphicsView):
                 painter.setPen(QPen(QColor(90, 90, 90)))
                 painter.drawText(int(margin), int(margin + 12 * unit), subtitle)
 
-            # --- the plot itself ---
+            # --- the plot itself (current viewport only) ---
             painter.fillRect(plot, QColor(255, 255, 255))
             painter.save()
             painter.setClipRect(plot)
-            self.scene().render(painter, plot, self.sceneRect())
+            self.scene().render(painter, plot, source)
             painter.restore()
 
-            # --- axes, matching the on-screen rulers ---
-            length = max(self._length, 1)
-            offset = self._offset
-            step = self.shared_tick_step() if self._length else _nice_tick_step(float(length))
+            # --- axes for the visible range ---
+            span = max(float(source.width()), float(source.height()), 1.0)
+            step = _nice_tick_step(span, target_ticks=10)
             tick_len = 3 * unit
             f = QFont(base_font); f.setPointSizeF(7)
             painter.setFont(f)
             painter.setPen(QPen(QColor(70, 70, 70)))
             metrics = painter.fontMetrics()
 
-            ticks = _axis_tick_positions(
-                lo=0.0, hi=float(length), length=length, step=step
+            x_ticks = _axis_tick_positions(
+                lo=float(source.left()),
+                hi=float(source.right()),
+                length=length,
+                step=step,
+            )
+            y_ticks = _axis_tick_positions(
+                lo=float(source.top()),
+                hi=float(source.bottom()),
+                length=length,
+                step=step,
             )
             x_positions = {
-                tick: plot.left() + (tick / length) * plot.width() for tick in ticks
+                tick: plot.left()
+                + ((tick - source.left()) / max(source.width(), 1e-9)) * plot.width()
+                for tick in x_ticks
             }
             y_positions = {
-                tick: plot.top() + (tick / length) * plot.height() for tick in ticks
+                tick: plot.top()
+                + ((tick - source.top()) / max(source.height(), 1e-9)) * plot.height()
+                for tick in y_ticks
             }
 
             def _export_x_extent(pos: float, label: str) -> tuple[float, float]:
@@ -1098,21 +1121,21 @@ class DotplotCanvas(QGraphicsView):
                 return pos - half, pos + half
 
             x_labeled = _non_overlapping_tick_labels(
-                ticks,
+                x_ticks,
                 length=length,
                 offset=offset,
                 positions=x_positions,
                 label_extent=_export_x_extent,
             )
             y_labeled = _non_overlapping_tick_labels(
-                ticks,
+                y_ticks,
                 length=length,
                 offset=offset,
                 positions=y_positions,
                 label_extent=_export_y_extent,
             )
 
-            for tick in ticks:
+            for tick in x_ticks:
                 label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
                 x = x_positions[tick]
                 painter.drawLine(int(x), int(plot.top() - tick_len), int(x), int(plot.top()))
@@ -1123,6 +1146,8 @@ class DotplotCanvas(QGraphicsView):
                         label,
                     )
 
+            for tick in y_ticks:
+                label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
                 y = y_positions[tick]
                 painter.drawLine(int(plot.left() - tick_len), int(y), int(plot.left()), int(y))
                 if tick in y_labeled:
@@ -1526,7 +1551,9 @@ class DotplotPanel(QWidget):
         self._pdf_btn = QPushButton("Save", self)
         self._pdf_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
         self._pdf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._pdf_btn.setToolTip("Save the current plot as a PDF")
+        self._pdf_btn.setToolTip(
+            "Save the current view as a PDF next to the sequence file"
+        )
 
         self._cancel_btn = QToolButton(self)
         self._cancel_btn.setText("Cancel")
@@ -2255,20 +2282,30 @@ class DotplotPanel(QWidget):
         self.viewInAnnotationRequested.emit(int(start), int(end))
 
     def _save_pdf(self) -> None:
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from PySide6.QtWidgets import QMessageBox
+
+        from repeatviewer.tool_output_paths import kept_input_name
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
 
         if self._sequence_length <= 0:
-            QMessageBox.information(self, "Save PDF", "There is no plot to save yet.")
+            QMessageBox.information(self, "Dotplot", "There is no plot to save yet.")
             return
-        default = self._path.parent / f"{self._path.stem}_dotplot.pdf"
-        chosen, _ = QFileDialog.getSaveFileName(
-            self, "Save dotplot as PDF", str(default), "PDF (*.pdf)"
+
+        proposed = (
+            self._path.parent / f"{kept_input_name(self._path)}_dotplot.pdf"
+        ).expanduser().resolve()
+        out = confirm_existing_file_path(
+            self,
+            proposed,
+            title="Dotplot",
+            informative=(
+                "Overwrite the existing plot, or save under a different name?"
+            ),
+            required_suffix=".pdf",
         )
-        if not chosen:
+        if out is None:
             return
-        out = Path(chosen)
-        if out.suffix.lower() != ".pdf":
-            out = out.with_suffix(".pdf")
+
         try:
             self._canvas.render_to_pdf(
                 out,
@@ -2278,9 +2315,34 @@ class DotplotPanel(QWidget):
                 subtitle=self._status_caption(),
             )
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Save PDF", f"Could not write {out.name}:\n{exc}")
+            QMessageBox.warning(
+                self, "Dotplot", f"Could not write {out.name}:\n{exc}"
+            )
             return
+
         self.statusMessage.emit(f"Saved {out.name}")
+        self._open_saved_file(out)
+
+    def _open_saved_file(self, path: Path) -> None:
+        """Refresh the folder list and open the PDF in the preview pane."""
+        window = self.window()
+        refresh = getattr(window, "_refresh_folders_after_job", None)
+        if callable(refresh):
+            try:
+                refresh([path], [self._path])
+            except Exception:
+                pass
+        opener = getattr(window, "_auto_open_outputs", None)
+        if callable(opener):
+            try:
+                opener([path])
+                return
+            except Exception:
+                pass
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def sequence_id(self) -> str:
         return self._sequence_id

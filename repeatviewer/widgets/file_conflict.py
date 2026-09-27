@@ -38,12 +38,14 @@ def confirm_existing_file_path(
     title: str,
     informative: str | None = None,
     force_html_suffix: bool = False,
+    required_suffix: str | None = None,
 ) -> Path | None:
     """If ``proposed`` already exists, ask to overwrite, rename, or cancel.
 
     Returns the path to use, or ``None`` if the user cancels.
     When ``force_html_suffix`` is True (MSA / genome plots), renamed paths
     without ``.html`` / ``.htm`` get ``.html`` appended.
+    ``required_suffix`` (e.g. ``\".pdf\"``) forces that extension after rename.
     """
     proposed = proposed.expanduser().resolve()
     if not proposed.exists():
@@ -89,10 +91,19 @@ def confirm_existing_file_path(
             title=title,
             informative=informative,
             force_html_suffix=force_html_suffix,
+            required_suffix=required_suffix,
         )
     path = (proposed.parent / name).expanduser().resolve()
     if force_html_suffix and path.suffix.lower() not in {".html", ".htm"}:
         path = path.with_suffix(".html")
+    elif required_suffix:
+        suffix = (
+            required_suffix
+            if required_suffix.startswith(".")
+            else f".{required_suffix}"
+        )
+        if path.suffix.lower() != suffix.lower():
+            path = path.with_suffix(suffix)
     if path == proposed:
         return confirm_existing_file_path(
             parent,
@@ -100,6 +111,7 @@ def confirm_existing_file_path(
             title=title,
             informative=informative,
             force_html_suffix=force_html_suffix,
+            required_suffix=required_suffix,
         )
     if path.exists():
         return confirm_existing_file_path(
@@ -108,5 +120,6 @@ def confirm_existing_file_path(
             title=title,
             informative=informative,
             force_html_suffix=force_html_suffix,
+            required_suffix=required_suffix,
         )
     return path
