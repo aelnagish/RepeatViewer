@@ -256,6 +256,18 @@ _DEFAULT_NUC_FONT_PT = 13
 _ZOOM_BTN_SIZE = 28
 _ZOOM_BTN_HEIGHT = 24
 _ANNOTATION_SIDE_PANEL_WIDTH = 108
+# Wide enough for "2,000,000" plus spin arrows without clipping.
+_POSITION_SPIN_WIDTH = 108
+
+
+def _configure_position_spin(spin: QSpinBox) -> None:
+    """Size Position spins so the Annotation max coordinate is fully visible."""
+    spin.setFixedWidth(_POSITION_SPIN_WIDTH)
+    spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+    spin.setGroupSeparatorShown(True)
+    spin.setToolTip(
+        f"1-based position (up to {_MAX_ANNOTATION_DISPLAY_LEN:,} bp on Annotation)"
+    )
 
 
 def _zoom_ppb_max() -> float:
@@ -888,7 +900,7 @@ class ViewportRulerWidget(QWidget):
     ) -> None:
         self._sequence = sequence.upper()
         self._scroll_px = max(0.0, float(scroll_px))
-        self._ppb = max(0.01, float(ppb))
+        self._ppb = max(_FIT_MIN_PPB, float(ppb))
         self._viewport_w = max(1, int(viewport_w))
         self.update()
 
@@ -914,9 +926,20 @@ class ViewportRulerWidget(QWidget):
         min_label_w = fm.horizontalAdvance("00000") + 4
         last_label_x = -1e9
 
-        for bp in range(start_bp, end_bp + 1):
-            if bp != 1 and bp != seq_len and bp % tick_step != 0:
-                continue
+        # Walk by tick_step (not every base) so multi-Mb fit views stay cheap.
+        tick_bps: list[int] = []
+        if start_bp == 1:
+            tick_bps.append(1)
+        first = ((start_bp + tick_step - 1) // tick_step) * tick_step
+        if first < 1:
+            first = tick_step
+        for bp in range(first, end_bp + 1, tick_step):
+            if bp != 1:
+                tick_bps.append(bp)
+        if end_bp >= seq_len and seq_len not in tick_bps:
+            tick_bps.append(seq_len)
+
+        for bp in tick_bps:
             x = _bp_view_x(bp, scroll, ppb)
             if x < _LEFT_MARGIN or x > vw - 4:
                 continue
@@ -924,7 +947,7 @@ class ViewportRulerWidget(QWidget):
                 # Tick from top down toward the nucleotide track.
                 painter.drawLine(int(x), 1, int(x), _VIEWPORT_RULER_HEIGHT - 3)
             text = str(bp)
-            if x - last_label_x < min_label_w and bp != start_bp:
+            if x - last_label_x < min_label_w and bp != 1 and bp != seq_len:
                 continue
             # Baseline flush to the bottom edge so the track sits under the numbers.
             painter.drawText(int(x + 2), _VIEWPORT_RULER_HEIGHT - 2, text)
@@ -1421,7 +1444,7 @@ class AnnotationTrackWidget(QWidget):
         self._features = list(features)
         self._feature_rows = list(feature_rows)
         self._scroll_px = max(0.0, float(scroll_px))
-        self._ppb = max(0.01, float(ppb))
+        self._ppb = max(_FIT_MIN_PPB, float(ppb))
         self._viewport_w = max(1, int(viewport_w))
         if (
             not self._marquee_active
@@ -2772,10 +2795,32 @@ class SequenceMapCanvas(QWidget):
             fm.horizontalAdvance(str(max(1, seq_len))),
         )
         target_px = max(sample_w + 8, 56.0)
-        raw = max(1, int(target_px / max(ppb, 0.01)))
-        for step in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 5000, 10000, 50000):
+        # Do not floor ppb here — fit views for multi-Mb sequences are << 0.01.
+        raw = max(1, int(target_px / max(float(ppb), _FIT_MIN_PPB)))
+        for step in (
+            1,
+            2,
+            5,
+            10,
+            20,
+            50,
+            100,
+            200,
+            500,
+            1000,
+            2000,
+            5000,
+            10_000,
+            20_000,
+            50_000,
+            100_000,
+            200_000,
+            500_000,
+            1_000_000,
+            2_000_000,
+        ):
             if step >= raw:
-                return min(step, seq_len)
+                return min(step, max(1, seq_len))
         return max(1, seq_len // 10)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
@@ -3008,13 +3053,13 @@ class SequenceMapWidget(QWidget):
         self._pos_start = QSpinBox(controls_parent)
         self._pos_start.setMinimum(1)
         self._pos_start.setMaximum(1)
-        self._pos_start.setFixedWidth(72)
         self._pos_start.setKeyboardTracking(False)
+        _configure_position_spin(self._pos_start)
         self._pos_end = QSpinBox(controls_parent)
         self._pos_end.setMinimum(1)
         self._pos_end.setMaximum(1)
-        self._pos_end.setFixedWidth(72)
         self._pos_end.setKeyboardTracking(False)
+        _configure_position_spin(self._pos_end)
         self._pos_start.valueChanged.connect(self._on_position_spin_changed)
         self._pos_end.valueChanged.connect(self._on_position_spin_changed)
         self._pos_start.editingFinished.connect(self._on_position_editing_finished)
@@ -3061,8 +3106,8 @@ class SequenceMapWidget(QWidget):
             for w in (self._pos_start, self._pos_end, self._font_size, select_btn):
                 w.setParent(toolbar)
             self._sequence_stats_label.setParent(toolbar)
-            self._pos_start.setFixedWidth(64)
-            self._pos_end.setFixedWidth(64)
+            _configure_position_spin(self._pos_start)
+            _configure_position_spin(self._pos_end)
             self._font_size.setFixedWidth(70)
             for spin in (self._pos_start, self._pos_end, self._font_size):
                 spin.setFixedHeight(18)

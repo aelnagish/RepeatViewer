@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -38,6 +39,7 @@ from repeatviewer.widgets.spin_boxes import (
     NoWheelDoubleSpinBox as QDoubleSpinBox,
     NoWheelSpinBox as QSpinBox,
 )
+from repeatviewer.widgets.preview_controls import ZOOM_CONTROL_HEIGHT
 
 from repeatviewer.backends.dotplot import (
     DEFAULT_WORD_SIZE,
@@ -1380,29 +1382,31 @@ class DotplotPanel(QWidget):
 
         self._zoom_out_btn = QToolButton(self)
         self._zoom_out_btn.setText("−")
-        self._zoom_out_btn.setAutoRaise(True)
+        self._zoom_out_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._zoom_out_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._zoom_out_btn.setToolTip("Zoom out (or scroll the wheel)")
 
         self._zoom_in_btn = QToolButton(self)
         self._zoom_in_btn.setText("+")
-        self._zoom_in_btn.setAutoRaise(True)
+        self._zoom_in_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._zoom_in_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._zoom_in_btn.setToolTip("Zoom in (or scroll the wheel)")
 
-        self._reset_btn = QToolButton(self)
-        self._reset_btn.setText("Reset zoom")
-        self._reset_btn.setAutoRaise(True)
+        self._reset_btn = QPushButton("Fit", self)
+        self._reset_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._reset_btn.setToolTip("Fit the whole plot in the view")
 
-        self._zoom_select_btn = QToolButton(self)
-        self._zoom_select_btn.setText("Zoom select")
-        self._zoom_select_btn.setAutoRaise(True)
+        self._zoom_select_btn = QPushButton("Select", self)
+        self._zoom_select_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._zoom_select_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._zoom_select_btn.setToolTip(
             "Zoom to the selected region (drag a rectangle on the plot first)"
         )
 
-        self._pdf_btn = QToolButton(self)
-        self._pdf_btn.setText("Save PDF")
-        self._pdf_btn.setAutoRaise(True)
+        self._pdf_btn = QPushButton("Save", self)
+        self._pdf_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._pdf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._pdf_btn.setToolTip("Save the current plot as a PDF")
 
         self._cancel_btn = QToolButton(self)
@@ -1440,9 +1444,9 @@ class DotplotPanel(QWidget):
         sel_layout.setSpacing(4)
         self._sel_x = QLabel("", self._sel_row)
         self._sel_x.setStyleSheet("color: palette(mid);")
-        self._view_x_btn = QToolButton(self._sel_row)
-        self._view_x_btn.setText("View select")
-        self._view_x_btn.setAutoRaise(True)
+        self._view_x_btn = QPushButton("View", self._sel_row)
+        self._view_x_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._view_x_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._view_x_btn.setToolTip(
             "Open Annotation and highlight the selected x (horizontal) range"
         )
@@ -1450,9 +1454,9 @@ class DotplotPanel(QWidget):
         self._sel_sep.setStyleSheet("color: palette(mid);")
         self._sel_y = QLabel("", self._sel_row)
         self._sel_y.setStyleSheet("color: palette(mid);")
-        self._view_y_btn = QToolButton(self._sel_row)
-        self._view_y_btn.setText("View select")
-        self._view_y_btn.setAutoRaise(True)
+        self._view_y_btn = QPushButton("View", self._sel_row)
+        self._view_y_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._view_y_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._view_y_btn.setToolTip(
             "Open Annotation and highlight the selected y (vertical) range"
         )
@@ -1491,7 +1495,7 @@ class DotplotPanel(QWidget):
         bar.addWidget(self._reset_btn)
         bar.addWidget(self._zoom_select_btn)
         bar.addWidget(self._pdf_btn)
-        # Selection readout stays after Save PDF (not in the title row).
+        # Selection readout stays after Save (not in the title row).
         bar.addWidget(self._sel_row)
         bar.addWidget(self._compute_btn)
         bar.addWidget(self._cancel_btn)
@@ -1714,7 +1718,7 @@ class DotplotPanel(QWidget):
         self._pair_combo.setVisible(False)
         self._filter_len_label.setVisible(False)
         self._filter_len.setVisible(False)
-        # Status-only note for long sequences: hide Line width / zoom / Save PDF.
+        # Status-only note for long sequences: hide Line width / zoom / Save.
         hide_bar = self._too_long_prompt_active
         self._controls_bar.setVisible(not hide_bar)
         if hide_bar:
