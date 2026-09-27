@@ -8,7 +8,7 @@ All segments are painted by a single QGraphicsItem rather than one item per
 segment. Tens of thousands of QGraphicsLineItems would each carry their own
 bounding-box bookkeeping and make panning stutter; one item painting a list of
 lines stays smooth. Segments shorter than a pixel at the current zoom are
-skipped (level of detail), which keeps a dense satellite plot usable zoomed out.
+drawn as points so a dense plot still shows where matches sit when zoomed out.
 
 Rulers are drawn hard against the edges of the plot itself, not the viewport,
 so they stay beside the data the way they do in Geneious.
@@ -158,9 +158,8 @@ _ZOOM_STEP = 1.12        # +/- button step
 _TRACKPAD_ZOOM_BASE = 1.0022
 
 _RULER_TOP = 18
-# Left margin: name strip + tick labels flush against the axis (same px/base as X).
-_RULER_LEFT = 48
-_Y_NAME_X = 9
+# Left margin: room for tick labels flush against the axis (same px/base as X).
+_RULER_LEFT = 44
 _Y_TICK_PAD = 3  # gap between label and tick mark
 _RULER_BG = QColor(250, 250, 250)
 _RULER_FG = QColor(110, 110, 110)
@@ -287,6 +286,9 @@ class _SegmentsItem(QGraphicsItem):
             _MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(line_width_step))
         )
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
+        # Cache the dense hit layer in device pixels so mouse-move overlays
+        # (crosshair) do not re-rasterize hundreds of thousands of segments.
+        self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
 
     def set_line_width_step(self, step: int) -> None:
         step = max(_MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(step)))
@@ -309,19 +311,22 @@ class _SegmentsItem(QGraphicsItem):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         # White plot face; viewport outside the square uses the ruler grey so
         # there is no framed "box" around the data.
-        painter.fillRect(self.boundingRect(), QColor(255, 255, 255))
+        exposed = option.exposedRect if option is not None else self.boundingRect()
+        painter.fillRect(exposed, QColor(255, 255, 255))
         scale = painter.transform().m11() or 1.0
+        # Scene length that maps to ~1 screen pixel. Shorter hits still get a
+        # point so Fit zoom is not an empty diagonal on long sequences.
         min_length = 0.0 if scale >= 1.0 else (1.0 / scale)
-        visible = option.exposedRect if option is not None else self.boundingRect()
+        visible = exposed
 
         painter.setPen(self._pen(_DIAGONAL_COLOR))
         painter.drawLine(QPointF(0, 0), QPointF(self._n, self._n))
 
         forward: list[tuple[float, float, float, float]] = []
         reverse: list[tuple[float, float, float, float]] = []
+        forward_pts: list[QPointF] = []
+        reverse_pts: list[QPointF] = []
         for seg in self._result.segments:
-            if seg.length < min_length:
-                continue
             x1, y1 = float(seg.x), float(seg.y)
             x2, y2 = float(seg.end_x), float(seg.end_y)
             if not visible.isNull():
@@ -340,6 +345,14 @@ class _SegmentsItem(QGraphicsItem):
                     )
                     if mirrored_off:
                         continue
+            if seg.length < min_length:
+                # Sub-pixel match: keep a 1-px mark so overview still shows hits.
+                if seg.strand == STRAND_REVERSE:
+                    reverse_pts.append(QPointF(x1, y1))
+                else:
+                    forward_pts.append(QPointF(x1, y1))
+                    forward_pts.append(QPointF(y1, x1))  # self-symmetry
+                continue
             if seg.strand == STRAND_REVERSE:
                 reverse.append((x1, y1, x2, y2))
             else:
@@ -349,10 +362,14 @@ class _SegmentsItem(QGraphicsItem):
         for x1, y1, x2, y2 in forward:
             painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
             painter.drawLine(QPointF(y1, x1), QPointF(y2, x2))  # self-symmetry
+        if forward_pts:
+            painter.drawPoints(forward_pts)
 
         painter.setPen(self._pen(_REVERSE_COLOR))
         for x1, y1, x2, y2 in reverse:
             painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+        if reverse_pts:
+            painter.drawPoints(reverse_pts)
 
 
 class _Ruler(QWidget):
@@ -496,24 +513,52 @@ class _Ruler(QWidget):
                     label,
                 )
 
-        # Sequence name down the y axis, packed against the tick labels.
-        if not self._horizontal and view.plot_title():
-            painter.setPen(QPen(_RULER_FG))
-            painter.save()
-            painter.translate(_Y_NAME_X, self.height() / 2.0)
-            painter.rotate(-90)
-            painter.drawText(
-                QRectF(-self.height() / 2.0, -8, self.height(), 16),
-                int(Qt.AlignmentFlag.AlignCenter),
-                view.plot_title(),
-            )
-            painter.restore()
-
         painter.setPen(QPen(_RULER_LINE))
         if self._horizontal:
             painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
         else:
             painter.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+
+
+class _PlotOverlay(QWidget):
+    """Draws crosshair / selection in viewport space without re-painting hits."""
+
+    def __init__(self, view: "DotplotCanvas") -> None:
+        super().__init__(view.viewport())
+        self._view = view
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        view = self._view
+        if view._item is None or not view._length:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        active = view._selection
+        if view._drag_start is not None and view._drag_now is not None:
+            active = QRectF(view._drag_start, view._drag_now).normalized()
+        if active is not None and active.width() >= 1 and active.height() >= 1:
+            tl = view.mapFromScene(active.topLeft())
+            br = view.mapFromScene(active.bottomRight())
+            rect = QRect(tl, br).normalized()
+            painter.fillRect(rect, _SELECT_FILL)
+            edge = QPen(_SELECT_EDGE)
+            edge.setCosmetic(True)
+            painter.setPen(edge)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+
+        if view._cursor_pos is not None:
+            cross = QPen(QColor(90, 140, 220, 150))
+            cross.setCosmetic(True)
+            painter.setPen(cross)
+            pt = view.mapFromScene(view._cursor_pos)
+            painter.drawLine(pt.x(), 0, pt.x(), self.height())
+            painter.drawLine(0, pt.y(), self.width(), pt.y())
+        painter.end()
 
 
 class DotplotCanvas(QGraphicsView):
@@ -575,12 +620,16 @@ class DotplotCanvas(QGraphicsView):
         corner_pal = self._ruler_corner.palette()
         corner_pal.setColor(QPalette.ColorRole.Window, _RULER_BG)
         self._ruler_corner.setPalette(corner_pal)
+        # Crosshair / selection overlay — mouse move must not re-paint all hits.
+        self._overlay = _PlotOverlay(self)
         # Repaint the rulers whenever the view scrolls, so ticks track the plot.
         self.horizontalScrollBar().valueChanged.connect(self._refresh_rulers)
         self.verticalScrollBar().valueChanged.connect(self._refresh_rulers)
+        self.horizontalScrollBar().valueChanged.connect(self._overlay.update)
+        self.verticalScrollBar().valueChanged.connect(self._overlay.update)
 
     def set_title(self, title: str) -> None:
-        """Sequence name, drawn rotated beside the y axis."""
+        """Sequence name for status / PDF (not drawn on the y-axis)."""
         self._title = title or ""
         self._refresh_rulers()
 
@@ -645,6 +694,9 @@ class DotplotCanvas(QGraphicsView):
         self._top_ruler.update()
         self._left_ruler.update()
 
+    def _refresh_overlay(self) -> None:
+        self._overlay.update()
+
     def _position_rulers(self) -> None:
         vp = self.viewport().geometry()
         # Only the top-left margin corner — plot stays white.
@@ -654,6 +706,10 @@ class DotplotCanvas(QGraphicsView):
         self._left_ruler.setGeometry(0, vp.y(), _RULER_LEFT, vp.height())
         self._top_ruler.raise_()
         self._left_ruler.raise_()
+        # Overlay covers the plot viewport only (child of viewport()).
+        self._overlay.setGeometry(self.viewport().rect())
+        self._overlay.raise_()
+        self._overlay.show()
 
     # ------------------------------------------------------------------
     # content
@@ -821,12 +877,12 @@ class DotplotCanvas(QGraphicsView):
         if hi <= lo:
             return
         self._selection = QRectF(lo, lo, hi - lo, hi - lo)
-        self.viewport().update()
+        self._refresh_overlay()
 
     def clear_selection(self) -> None:
         self._selection = None
         self._drag_start = self._drag_now = None
-        self.viewport().update()
+        self._refresh_overlay()
 
     def selection_sequence_coords(self) -> tuple[int, int, int, int] | None:
         """Return the current drag-box as 1-based inclusive (x1, x2, y1, y2), or None."""
@@ -847,25 +903,14 @@ class DotplotCanvas(QGraphicsView):
     # ------------------------------------------------------------------
 
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: N802
-        """Scene-space overlays only: selection and crosshair lines.
+        """Scene-space overlays for multi-sequence separators only.
 
-        Anything that belongs in the ruler margins is painted in paintEvent
-        instead, because the margins are outside this viewport.
+        Crosshair and selection live on ``_PlotOverlay`` so mouse moves do not
+        re-rasterize the hit layer.
         """
         super().drawForeground(painter, rect)
         if self._item is None or not self._length:
             return
-
-        active = self._selection
-        if self._drag_start is not None and self._drag_now is not None:
-            active = QRectF(self._drag_start, self._drag_now).normalized()
-        if active is not None:
-            painter.fillRect(active, _SELECT_FILL)
-            edge = QPen(_SELECT_EDGE)
-            edge.setCosmetic(True)
-            painter.setPen(edge)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(active)
 
         if self._axis_x or self._axis_y:
             sep = QPen(QColor(150, 150, 150))
@@ -879,15 +924,6 @@ class DotplotCanvas(QGraphicsView):
                 painter.drawLine(
                     QPointF(0, entry.offset), QPointF(self._length, entry.offset)
                 )
-
-        if self._cursor_pos is not None:
-            cross = QPen(QColor(90, 140, 220, 150))
-            cross.setCosmetic(True)
-            painter.setPen(cross)
-            cx = self._cursor_pos.x()
-            cy = self._cursor_pos.y()
-            painter.drawLine(QPointF(cx, 0), QPointF(cx, self._length))
-            painter.drawLine(QPointF(0, cy), QPointF(self._length, cy))
 
     def _zoom_allowed(self, target: float) -> bool:
         floor = (self._fit_scale or target) * _ZOOM_OUT_LIMIT
@@ -1089,16 +1125,6 @@ class DotplotCanvas(QGraphicsView):
                         label,
                     )
 
-            # sequence name down the y axis
-            if title:
-                painter.save()
-                painter.translate(margin + 4 * unit, plot.center().y())
-                painter.rotate(-90)
-                painter.drawText(
-                    int(-metrics.horizontalAdvance(title) / 2), 0, title
-                )
-                painter.restore()
-
             # --- legend ---
             legend_y = plot.bottom() + 8 * unit
             swatch = 6 * unit
@@ -1156,7 +1182,7 @@ class DotplotCanvas(QGraphicsView):
             self._selection = None
             self._drag_start = self.mapToScene(pos)
             self._drag_now = self._drag_start
-            self.viewport().update()
+            self._refresh_overlay()
             return
         super().mousePressEvent(event)
 
@@ -1170,7 +1196,7 @@ class DotplotCanvas(QGraphicsView):
             h.setValue(h.value() - delta.x())
             v.setValue(v.value() - delta.y())
             self._clamp_scroll_to_plot()
-            self.viewport().update()
+            self._refresh_overlay()
             self._refresh_rulers()
             return
         super().mouseMoveEvent(event)
@@ -1180,7 +1206,8 @@ class DotplotCanvas(QGraphicsView):
         self._cursor_pos = point
         if self._drag_start is not None:
             self._drag_now = point
-        self.viewport().update()
+        # Overlay only — do not viewport().update() (that re-paints all hits).
+        self._refresh_overlay()
         self._refresh_rulers()
         x, y = int(point.x()), int(point.y())
         if 0 <= x <= self._length and 0 <= y <= self._length:
@@ -1208,7 +1235,7 @@ class DotplotCanvas(QGraphicsView):
             # A plain click only clears the selection; it never navigates.
             self._drag_start = self._drag_now = None
             self._selection = None
-            self.viewport().update()
+            self._refresh_overlay()
             return
 
         if self._drag_start is not None and self._drag_now is not None:
@@ -1218,7 +1245,7 @@ class DotplotCanvas(QGraphicsView):
             rect = rect.intersected(bounds)
             if rect.width() >= 1 and rect.height() >= 1:
                 self._selection = rect
-                self.viewport().update()
+                self._refresh_overlay()
                 self.rectSelected.emit(
                     int(rect.left()) + 1 + self._offset,
                     int(rect.right()) + self._offset,
@@ -1229,7 +1256,7 @@ class DotplotCanvas(QGraphicsView):
     def leaveEvent(self, event) -> None:  # noqa: N802
         super().leaveEvent(event)
         self._cursor_pos = None
-        self.viewport().update()
+        self._refresh_overlay()
         self._refresh_rulers()
 
 
@@ -1856,10 +1883,10 @@ class DotplotPanel(QWidget):
                 full_length=self._full_length,
             )
         except DotplotError as exc:
-            self._fail(str(exc))
+            self._fail(str(exc), key=key)
             return
         except Exception as exc:  # noqa: BLE001
-            self._fail(f"Could not plot region: {exc}")
+            self._fail(f"Could not plot region: {exc}", key=key)
             return
         self._apply_result(key, result)
 
@@ -1882,10 +1909,10 @@ class DotplotPanel(QWidget):
             # installed, say so here -- that is exactly the case it solves.
             if not fastga_available() and "limited to" in message:
                 message += f"\n\n{install_hint()}"
-            self._fail(message)
+            self._fail(message, key=key)
             return
         except Exception as exc:  # noqa: BLE001
-            self._fail(f"Could not build dotplot: {exc}")
+            self._fail(f"Could not build dotplot: {exc}", key=key)
             return
         self._apply_result(key, result)
 
@@ -1958,9 +1985,22 @@ class DotplotPanel(QWidget):
                 return line
         return lines[0]
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str, *, key=None) -> None:
         self._canvas.clear_plot()
-        self._loaded_for = None
+        # Keep the attempted settings (not None). Clearing to None made
+        # _recompute ignore later word-size / reverse edits until the user
+        # switched sequences — the error stayed on screen while the spin
+        # already showed the new value.
+        if key is not None:
+            self._loaded_for = key
+        elif self._pending_key is not None:
+            self._loaded_for = self._pending_key
+        else:
+            self._loaded_for = (
+                "failed",
+                self._path,
+                self._active_sequence_id or "",
+            )
         self._clear_selection_chrome()
         self._set_status_text(self._condense_error(message), tooltip=message)
         self.statusMessage.emit(message)
@@ -2155,4 +2195,5 @@ class DotplotPanel(QWidget):
             self.rangeSelected.emit(x1, x2, y1, y2)
 
     def _on_position(self, x: int, y: int) -> None:
-        self.statusMessage.emit(f"x: {x:,}  y: {y:,}")
+        # Live coords are on the axis rulers; skip status-bar spam (was a lag source).
+        del x, y
