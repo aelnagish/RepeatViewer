@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -252,6 +252,8 @@ def _make_preview_actions_button(*, tooltip: str) -> QToolButton:
 class ScaleSliderPopup(QFrame):
     """Vertical slider popup; range matches the linked spin (Shift+drag bounds)."""
 
+    closed = Signal()
+
     def __init__(self, spin: QSpinBox, anchor: QWidget) -> None:
         super().__init__(
             None,
@@ -259,8 +261,11 @@ class ScaleSliderPopup(QFrame):
         )
         self.setObjectName("previewScaleSliderPopup")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Lifetime is owned by ScaleSpinCluster (deleteLater on close) — do not
+        # use WA_DeleteOnClose; that raced with Popup dismiss and crashed.
         self._spin = spin
         self._block = False
+        self._closed_emitted = False
 
         self._slider = QSlider(Qt.Orientation.Vertical, self)
         self._slider.setObjectName("previewScaleSlider")
@@ -283,6 +288,14 @@ class ScaleSliderPopup(QFrame):
 
         spin.valueChanged.connect(self._on_spin)
         self._reposition(anchor)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        # Defer: Popup dismiss runs inside Qt's click handling; syncing the arrow
+        # synchronously (or deleteLater here) can exit the process on macOS.
+        if not self._closed_emitted:
+            self._closed_emitted = True
+            QTimer.singleShot(0, self.closed.emit)
 
     def _reposition(self, anchor: QWidget) -> None:
         self.adjustSize()
@@ -319,6 +332,8 @@ class ScaleSpinCluster(QWidget):
         self.setFixedHeight(ZOOM_CONTROL_HEIGHT)
         self._spin = spin
         self._popup: ScaleSliderPopup | None = None
+        # Qt dismisses Popup on press; the same click must not reopen it.
+        self._suppress_reopen = False
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -332,6 +347,7 @@ class ScaleSpinCluster(QWidget):
         self._arrow.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._arrow.setFixedSize(14, ZOOM_CONTROL_HEIGHT)
         self._arrow.setToolTip("Show scale slider")
+        self._arrow.installEventFilter(self)
         self._arrow.clicked.connect(self._toggle_slider)
         layout.addWidget(self._arrow)
 
@@ -341,6 +357,17 @@ class ScaleSpinCluster(QWidget):
     @property
     def spin(self) -> NoWheelSpinBox:
         return self._spin
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if watched is self._arrow and event.type() == QEvent.Type.MouseButtonPress:
+            if (
+                isinstance(event, QMouseEvent)
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._suppress_reopen
+            ):
+                self._suppress_reopen = False
+                return True
+        return super().eventFilter(watched, event)
 
     def _set_arrow_expanded(self, expanded: bool) -> None:
         arrow = getattr(self, "_arrow", None)
@@ -355,26 +382,98 @@ class ScaleSpinCluster(QWidget):
             pass
         try:
             arrow.setText("▼" if expanded else "▶")
+            arrow.setToolTip(
+                "Hide scale slider" if expanded else "Show scale slider"
+            )
         except RuntimeError:
-            # Arrow already deleted during teardown (popup destroyed after parent).
             return
 
-    def _on_popup_destroyed(self, *_args) -> None:
+    def _clear_suppress_reopen(self) -> None:
+        self._suppress_reopen = False
+
+    def _popup_is_open(self) -> bool:
+        popup = self._popup
+        if popup is None:
+            return False
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(popup):
+                self._popup = None
+                return False
+        except ImportError:
+            pass
+        try:
+            return bool(popup.isVisible())
+        except RuntimeError:
+            self._popup = None
+            return False
+
+    def _close_popup(self) -> None:
+        popup = self._popup
         self._popup = None
         self._set_arrow_expanded(False)
+        if popup is None:
+            return
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(popup):
+                return
+        except ImportError:
+            pass
+        try:
+            popup.closed.disconnect(self._on_popup_closed)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            popup.hide()
+            popup.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _open_popup(self) -> None:
+        self._close_popup()
+        popup = ScaleSliderPopup(self._spin, self)
+        self._popup = popup
+        popup.closed.connect(self._on_popup_closed)
+        self._set_arrow_expanded(True)
+        popup.show()
+        popup._slider.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def _on_popup_closed(self, *_args) -> None:
+        # Popup already hidden by Qt (outside click / Escape) or about to be.
+        popup = self._popup
+        self._popup = None
+        self._set_arrow_expanded(False)
+        self._suppress_reopen = True
+        QTimer.singleShot(0, self._clear_suppress_reopen)
+        if popup is None:
+            return
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(popup):
+                return
+        except ImportError:
+            pass
+        try:
+            popup.deleteLater()
+        except RuntimeError:
+            pass
 
     def _toggle_slider(self) -> None:
-        if self._popup is not None and self._popup.isVisible():
-            popup = self._popup
-            self._popup = None
-            self._set_arrow_expanded(False)
-            popup.close()
+        if self._suppress_reopen:
+            self._suppress_reopen = False
             return
-        self._popup = ScaleSliderPopup(self._spin, self)
-        self._popup.destroyed.connect(self._on_popup_destroyed)
-        self._set_arrow_expanded(True)
-        self._popup.show()
-        self._popup._slider.setFocus(Qt.FocusReason.PopupFocusReason)
+        if self._popup_is_open():
+            self._close_popup()
+            return
+        self._open_popup()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._close_popup()
+        super().hideEvent(event)
 
 
 class PreviewZoomBar(QWidget):
