@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QTransform
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QThread, Signal, Slot
+from PySide6.QtGui import QColor, QFont, QNativeGestureEvent, QPainter, QPalette, QPen, QTransform
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -40,6 +40,10 @@ from repeatviewer.widgets.spin_boxes import (
     NoWheelSpinBox as QSpinBox,
 )
 from repeatviewer.widgets.preview_controls import ZOOM_CONTROL_HEIGHT
+from repeatviewer.widgets.preview_zoom import (
+    PREVIEW_WHEEL_DELTA_PER_STEP,
+    wheel_zoom_delta_from_event,
+)
 
 from repeatviewer.backends.dotplot import (
     DEFAULT_WORD_SIZE,
@@ -154,8 +158,10 @@ def _line_width_px(step: int) -> float:
 _ZOOM_OUT_LIMIT = 1.0    # never smaller than fit → no empty margins from zoom-out
 _MAX_PIXELS_PER_BASE = 40.0
 _ZOOM_STEP = 1.12        # +/- button step
-# Trackpad: factor = TRACKPAD_ZOOM_BASE ** pixel_delta_y (smooth continuous zoom).
-_TRACKPAD_ZOOM_BASE = 1.0022
+# Shift+drag zoom: pixels of vertical motion per one +/- step (matches PNG preview).
+_DRAG_ZOOM_PIXELS_PER_STEP = 28.0
+# Trackpad pinch magnification accumulated per zoom step (matches PNG preview).
+_PINCH_DELTA_PER_STEP = 0.04
 
 _RULER_TOP = 18
 # Left margin: room for tick labels flush against the axis (same px/base as X).
@@ -601,6 +607,11 @@ class DotplotCanvas(QGraphicsView):
         self._press_pos: QPoint | None = None
         self._panning = False
         self._pan_origin: QPoint | None = None
+        self._zoom_dragging = False
+        self._zoom_drag_origin: QPointF | None = None
+        self._zoom_drag_accum = 0.0
+        self._wheel_zoom_accum = 0
+        self._pinch_accum = 0.0
         self._drag_start: QPointF | None = None
         self._drag_now: QPointF | None = None
         self._cursor_pos: QPointF | None = None
@@ -627,6 +638,7 @@ class DotplotCanvas(QGraphicsView):
         self.verticalScrollBar().valueChanged.connect(self._refresh_rulers)
         self.horizontalScrollBar().valueChanged.connect(self._overlay.update)
         self.verticalScrollBar().valueChanged.connect(self._overlay.update)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
 
     def set_title(self, title: str) -> None:
         """Sequence name for status / PDF (not drawn on the y-axis)."""
@@ -1151,43 +1163,102 @@ class DotplotCanvas(QGraphicsView):
     def wheelEvent(self, event) -> None:  # noqa: N802
         if self._item is None:
             return
-        # Mac trackpads send smooth pixelDelta; mouse wheels use angleDelta notches.
+        # Shift+scroll zooms (same accumulation as PNG preview). Plain scroll pans.
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            delta = wheel_zoom_delta_from_event(event)
+            if delta == 0:
+                return
+            self._wheel_zoom_accum += delta
+            steps = int(self._wheel_zoom_accum / PREVIEW_WHEEL_DELTA_PER_STEP)
+            if steps != 0:
+                self._wheel_zoom_accum -= steps * PREVIEW_WHEEL_DELTA_PER_STEP
+                self._apply_zoom(_ZOOM_STEP ** steps, event.position().toPoint())
+            event.accept()
+            return
+
         pixel = event.pixelDelta()
         angle = event.angleDelta()
-        if not pixel.isNull() and (pixel.y() != 0 or pixel.x() != 0):
-            dy = float(pixel.y() if pixel.y() != 0 else pixel.x())
-            factor = _TRACKPAD_ZOOM_BASE ** dy
-        elif angle.y() != 0:
-            factor = _ZOOM_STEP ** (angle.y() / 120.0)
+        if not pixel.isNull() and (pixel.x() != 0 or pixel.y() != 0):
+            dx, dy = int(pixel.x()), int(pixel.y())
+        elif angle.x() != 0 or angle.y() != 0:
+            # ~30 px per classic 120-unit notch.
+            dx = int(angle.x() // 4)
+            dy = int(angle.y() // 4)
         else:
             return
-        self._apply_zoom(factor, event.position().toPoint())
+        h = self.horizontalScrollBar()
+        v = self.verticalScrollBar()
+        h.setValue(h.value() - dx)
+        v.setValue(v.value() - dy)
+        self._clamp_scroll_to_plot()
+        self._refresh_overlay()
+        self._refresh_rulers()
         event.accept()
+
+    def viewportEvent(self, event) -> bool:  # noqa: N802
+        # Two-finger pinch on the trackpad (same path as PNG preview).
+        if event.type() == QEvent.Type.NativeGesture and isinstance(
+            event, QNativeGestureEvent
+        ):
+            if (
+                event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+                and self._item is not None
+            ):
+                self._pinch_accum += float(event.value())
+                steps = int(self._pinch_accum / _PINCH_DELTA_PER_STEP)
+                if steps != 0:
+                    self._pinch_accum -= steps * _PINCH_DELTA_PER_STEP
+                    self._apply_zoom(_ZOOM_STEP ** steps, event.position().toPoint())
+                event.accept()
+                return True
+        return super().viewportEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         pos = event.position().toPoint()
         self._press_pos = pos
-        pan_requested = (
-            event.button() == Qt.MouseButton.MiddleButton
-            or bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        )
-        if self._item is not None and pan_requested:
+        if self._item is None:
+            super().mousePressEvent(event)
+            return
+
+        mods = event.modifiers()
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+        if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
             self._pan_origin = pos
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
-        if self._item is not None and event.button() == Qt.MouseButton.LeftButton:
-            # Starting a new drag drops the previous selection straight away,
-            # so only one is ever on screen.
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            if shift:
+                # Shift+drag zooms (PNG preview behaviour).
+                self._zoom_dragging = True
+                self._zoom_drag_origin = QPointF(event.globalPosition())
+                self._zoom_drag_accum = 0.0
+                self.setCursor(Qt.CursorShape.SizeVerCursor)
+                return
+            # Click-drag draws a selection rectangle.
             self._selection = None
             self._drag_start = self.mapToScene(pos)
             self._drag_now = self._drag_start
             self._refresh_overlay()
             return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         pos = event.position().toPoint()
+        if self._zoom_dragging and self._zoom_drag_origin is not None:
+            # Drag up → zoom in; drag down → zoom out (matches PNG preview).
+            global_pos = QPointF(event.globalPosition())
+            dy = self._zoom_drag_origin.y() - global_pos.y()
+            self._zoom_drag_accum += dy
+            self._zoom_drag_origin = global_pos
+            steps = int(self._zoom_drag_accum / _DRAG_ZOOM_PIXELS_PER_STEP)
+            if steps != 0:
+                self._zoom_drag_accum -= steps * _DRAG_ZOOM_PIXELS_PER_STEP
+                self._apply_zoom(_ZOOM_STEP ** steps, pos)
+            return
         if self._panning and self._pan_origin is not None:
             delta = pos - self._pan_origin
             self._pan_origin = pos
@@ -1217,11 +1288,26 @@ class DotplotCanvas(QGraphicsView):
             )
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._zoom_dragging:
+            self._zoom_dragging = False
+            self._zoom_drag_origin = None
+            self._zoom_drag_accum = 0.0
+            self.unsetCursor()
+            self._press_pos = None
+            return
         if self._panning:
+            press = self._press_pos
             self._panning = False
             self._pan_origin = None
             self.unsetCursor()
             self._press_pos = None
+            # Tiny motion → click clears the selection (no accidental clear on pan).
+            if press is not None:
+                moved = (event.position().toPoint() - press).manhattanLength()
+                if moved <= _CLICK_SLOP:
+                    self._selection = None
+                    self._drag_start = self._drag_now = None
+                    self._refresh_overlay()
             return
         super().mouseReleaseEvent(event)
         if self._item is None or self._press_pos is None:
@@ -1252,6 +1338,8 @@ class DotplotCanvas(QGraphicsView):
                     int(rect.top()) + 1 + self._offset,
                     int(rect.bottom()) + self._offset,
                 )
+            return
+        self._drag_start = self._drag_now = None
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         super().leaveEvent(event)
@@ -1411,13 +1499,17 @@ class DotplotPanel(QWidget):
         self._zoom_out_btn.setText("−")
         self._zoom_out_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
         self._zoom_out_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._zoom_out_btn.setToolTip("Zoom out (or scroll the wheel)")
+        self._zoom_out_btn.setToolTip(
+            "Zoom out (Shift+scroll, Shift+drag, or pinch)"
+        )
 
         self._zoom_in_btn = QToolButton(self)
         self._zoom_in_btn.setText("+")
         self._zoom_in_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
         self._zoom_in_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._zoom_in_btn.setToolTip("Zoom in (or scroll the wheel)")
+        self._zoom_in_btn.setToolTip(
+            "Zoom in (Shift+scroll, Shift+drag, or pinch)"
+        )
 
         self._reset_btn = QPushButton("Fit", self)
         self._reset_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
@@ -2142,14 +2234,18 @@ class DotplotPanel(QWidget):
     def _zoom_to_selection(self) -> None:
         if self._canvas.zoom_to_selection():
             return
-        self._set_status_text("Select a region on the plot first (drag a rectangle).")
+        self._set_status_text(
+            "Select a region on the plot first (drag a rectangle)."
+        )
 
     def _view_axis_in_annotation(self, axis: str) -> None:
         if self._mode == "alignment":
             return
         coords = self._selection_xy or self._canvas.selection_sequence_coords()
         if coords is None:
-            self._set_status_text("Select a region on the plot first (drag a rectangle).")
+            self._set_status_text(
+            "Select a region on the plot first (drag a rectangle)."
+        )
             return
         x1, x2, y1, y2 = coords
         if axis == "y":
