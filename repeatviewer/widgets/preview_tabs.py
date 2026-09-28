@@ -845,6 +845,12 @@ class FilePreviewPage(QWidget):
     def is_annotation_preview_active(self) -> bool:
         return self._single_fasta_mode and self._fasta_stack.currentIndex() == 1
 
+    def show_annotation_tab(self) -> None:
+        """Switch this FASTA preview to the Annotation (or Overview) sub-tab."""
+        if not self._single_fasta_mode:
+            return
+        self._activate_fasta_tab(DefaultFastaPreviewTab.ANNOTATION)
+
     def is_cyto_preview_active(self) -> bool:
         return self._single_fasta_mode and self._fasta_stack.currentIndex() == 3
 
@@ -2753,6 +2759,22 @@ class PreviewTabWidget(QTabWidget):
         for path in paths:
             self.open_file(path, replace=False)
         self._sync_tab_bar_visible()
+
+    def show_annotation_for_path(self, path: Path) -> None:
+        """Open ``path`` in preview (if needed) and switch to its Annotation tab."""
+        resolved = path.expanduser().resolve()
+        self.open_file(resolved, replace=False)
+        key = str(resolved)
+        index = self._path_to_index.get(key)
+        if index is None or not (0 <= index < self.count()):
+            return
+        widget = self.widget(index)
+        if not isinstance(widget, FilePreviewPage):
+            return
+        self.setCurrentIndex(index)
+        self.setCurrentWidget(widget)
+        widget.show()
+        widget.show_annotation_tab()
 
     def reload_paths(self, paths: list[Path]) -> None:
         """Reload open preview tabs whose paths match (e.g. after DPI change)."""

@@ -1,4 +1,4 @@
-"""Import external annotations as RepeatViewer ``.RV.gff3`` sidecars."""
+"""Import external annotations into the JSON sidecar (GFF export is separate)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,10 @@ import pytest
 from repeatviewer.backends.sequence_features import (
     features_gff_path,
     import_annotation_as_rv_gff3,
-    load_features_from_gff,
+    load_features_by_id_from_json,
+    load_sequence_map_data,
     resolve_features_gff_path,
+    sidecar_path,
 )
 
 
@@ -24,7 +26,7 @@ def test_features_gff_path_uses_rv_suffix(tmp_path: Path) -> None:
     assert features_gff_path(fasta).name == "demo.RV.gff3"
 
 
-def test_import_gff3_writes_rv_format(tmp_path: Path) -> None:
+def test_import_gff3_writes_json_not_gff(tmp_path: Path) -> None:
     fasta = _write_fasta(tmp_path / "demo.fa", "TE1", "A" * 200)
     src = tmp_path / "external.gff3"
     src.write_text(
@@ -36,35 +38,47 @@ def test_import_gff3_writes_rv_format(tmp_path: Path) -> None:
 
     out, count = import_annotation_as_rv_gff3(fasta, src, merge_existing=False)
     assert count == 2
-    assert out == features_gff_path(fasta)
+    assert out == sidecar_path(fasta)
     assert out.is_file()
-    text = out.read_text(encoding="utf-8")
-    assert text.startswith("##gff-version 3")
-    assert "\tRepeatViewer\t" in text
-    assert "type=LTR" in text
-    assert "color=" in text
+    assert not features_gff_path(fasta).exists()
 
-    feats = load_features_from_gff(out, expected_id="TE1")
+    feats = load_features_by_id_from_json(fasta, ["TE1"]).get("TE1") or []
     assert len(feats) == 2
     assert {f.name for f in feats} == {"LTR5", "LTR3"}
+    assert {f.source for f in feats} == {"external.gff3"}
 
 
-def test_import_bed_remaps_seqid_for_single_fasta(tmp_path: Path) -> None:
-    fasta = _write_fasta(tmp_path / "sat.fa", "BvSat", "ACGT" * 25)
-    bed = tmp_path / "marks.bed"
-    # Different chrom name than FASTA id — should still import for single-seq FASTA.
-    bed.write_text("chr1\t10\t40\tmonomer\t.\t+\n", encoding="utf-8")
+def test_import_rejects_mismatched_seqid_for_single_fasta(tmp_path: Path) -> None:
+    """Do not silently attach Elbe4 annotations onto an L1 (or other) FASTA."""
+    fasta = _write_fasta(tmp_path / "L1.fa", "L1_Belline1", "ACGT" * 25)
+    gff = tmp_path / "Elbe4.gff3"
+    gff.write_text(
+        "##gff-version 3\n"
+        "Elbe4_Beta_vulgaris\tRepeatViewer\tLTR\t1\t50\t.\t+\t.\tName=LTR5\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="matched any sequence id"):
+        import_annotation_as_rv_gff3(fasta, gff, merge_existing=False)
 
-    out, count = import_annotation_as_rv_gff3(fasta, bed, merge_existing=False)
+
+def test_import_matches_fasta_id_with_hash_and_slash(tmp_path: Path) -> None:
+    seq_id = "TE/Class_I#LINE"
+    fasta = _write_fasta(tmp_path / "te.fa", seq_id, "A" * 100)
+    src = tmp_path / "te.gff3"
+    src.write_text(
+        f"##gff-version 3\n"
+        f"{seq_id}\tx\tORF\t1\t30\t.\t+\t.\tName=orf1\n",
+        encoding="utf-8",
+    )
+    out, count = import_annotation_as_rv_gff3(fasta, src, merge_existing=False)
     assert count == 1
-    feats = load_features_from_gff(out, expected_id="BvSat")
+    feats = load_features_by_id_from_json(fasta, [seq_id]).get(seq_id) or []
     assert len(feats) == 1
-    assert feats[0].name == "monomer"
-    assert feats[0].start == 11  # BED 0-based → 1-based
-    assert feats[0].end == 40
+    assert feats[0].name == "orf1"
+    assert out == sidecar_path(fasta)
 
 
-def test_import_merges_with_existing_rv_gff3(tmp_path: Path) -> None:
+def test_import_merges_with_existing_json(tmp_path: Path) -> None:
     fasta = _write_fasta(tmp_path / "demo.fa", "TE1", "N" * 100)
     first = tmp_path / "a.gff3"
     first.write_text(
@@ -80,8 +94,10 @@ def test_import_merges_with_existing_rv_gff3(tmp_path: Path) -> None:
     )
     out, count = import_annotation_as_rv_gff3(fasta, second, merge_existing=True)
     assert count == 2
-    feats = load_features_from_gff(out, expected_id="TE1")
+    assert out == sidecar_path(fasta)
+    feats = load_features_by_id_from_json(fasta, ["TE1"]).get("TE1") or []
     assert {f.name for f in feats} == {"orf1", "ltr"}
+    assert not features_gff_path(fasta).exists()
 
 
 def test_resolve_still_finds_legacy_features_gff3(tmp_path: Path) -> None:
@@ -117,14 +133,8 @@ def test_import_multi_sequence_matches_by_seqid(tmp_path: Path) -> None:
     result = import_annotation_as_rv_gff3(fasta, src, merge_existing=False)
     assert result.feature_count == 2
     assert result.sequence_count == 2
-    text = result.gff_path.read_text(encoding="utf-8")
-    assert "##sequence-region TE1 1 100" in text
-    assert "##sequence-region TE2 1 80" in text
-    assert "OTHER" not in text.split("\n", 1)[-1] or "Name=orphan" not in text
-    assert "Name=a" in text and "Name=b" in text
-    assert "Name=orphan" not in text
-
-    from repeatviewer.backends.sequence_features import load_sequence_map_data
+    assert result.json_path == sidecar_path(fasta)
+    assert not features_gff_path(fasta).exists()
 
     data = load_sequence_map_data(fasta)
     assert data.is_multi_sequence

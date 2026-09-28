@@ -363,12 +363,24 @@ def list_feature_types_in_annotation(path: Path, *, max_lines: int = 200_000) ->
 
 
 def _seqid_matches(record_id: str, gff_seqid: str) -> bool:
-    if record_id == gff_seqid:
+    """True when FASTA id token matches GFF column 1.
+
+    Exact match on the first whitespace-delimited token. Also allows an
+    internal duplicate uniquifier (``name#2``) to match GFF ``name``.
+    """
+    import re
+
+    rid = str(record_id or "").strip().split()[0] if str(record_id or "").strip() else ""
+    gid = str(gff_seqid or "").strip().split()[0] if str(gff_seqid or "").strip() else ""
+    if not rid or not gid:
+        return False
+    if rid == gid:
         return True
-    if record_id.startswith(gff_seqid) or gff_seqid.startswith(record_id):
+    # Duplicate-header uniquifier: FASTA internal "name#2" ↔ GFF "name".
+    match = re.fullmatch(r"(.+)#([2-9]|[1-9]\d+)", rid)
+    if match and match.group(1) == gid:
         return True
-    base = record_id.split()[0]
-    return base == gff_seqid or gff_seqid.startswith(base) or base.startswith(gff_seqid)
+    return False
 
 
 def features_for_records(

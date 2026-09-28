@@ -6,9 +6,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -17,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
     QColorDialog,
@@ -280,28 +284,70 @@ class AnnotationElementColorsPanel(QWidget):
 
 
 class AnnotationElementColorsDialog(QDialog):
-    """Edit colors for manual/auto feature types and similarity databases."""
+    """Annotation display settings and element colors (Sequence Annotation Options style)."""
 
     def __init__(
         self,
         parent: QWidget | None = None,
         *,
         show_apply_to_sequence: bool = True,
+        font_point_size: int = 13,
+        split_tracks_by_source: bool = True,
+        min_font_pt: int = 6,
+        max_font_pt: int = 36,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Element colors")
-        self.resize(620, 720)
+        self.setWindowTitle("Annotation settings")
+        self.resize(620, 760)
 
         # Kept for compatibility with older call sites; this dialog no longer
         # exposes a per-sequence apply toggle and always applies to current sequence.
         _ = show_apply_to_sequence
 
-        root = QVBoxLayout(self)
+        display_box = QGroupBox("Display", self)
+        display_form = QFormLayout(display_box)
+        display_form.setContentsMargins(12, 12, 12, 12)
+        display_form.setSpacing(8)
+        self._font_size = QSpinBox(display_box)
+        self._font_size.setRange(min_font_pt, max_font_pt)
+        self._font_size.setValue(
+            max(min_font_pt, min(max_font_pt, int(font_point_size)))
+        )
+        self._font_size.setSuffix(" pt")
+        self._font_size.setFixedWidth(72)
+        self._font_size.setToolTip("Nucleotide letter size (independent of zoom scale)")
+        font_row = QHBoxLayout()
+        font_row.setContentsMargins(0, 0, 0, 0)
+        font_row.addWidget(self._font_size, 0)
+        font_row.addStretch(1)
+        display_form.addRow("Font:", font_row)
+        self._split_by_source = QCheckBox("Split tracks by source", display_box)
+        self._split_by_source.setChecked(bool(split_tracks_by_source))
+        self._split_by_source.setToolTip(
+            "When checked, features from different sources use separate visual "
+            "tracks even if they share the same track number."
+        )
+        display_form.addRow("", self._split_by_source)
+
+        color_box = QGroupBox("Element colors", self)
+        color_box_layout = QVBoxLayout(color_box)
+        color_box_layout.setContentsMargins(12, 12, 12, 12)
+        self._panel = AnnotationElementColorsPanel(color_box)
+        color_box_layout.addWidget(self._panel)
+
+        body = QWidget(self)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(12, 10, 12, 10)
+        body_layout.setSpacing(12)
+        body_layout.addWidget(display_box)
+        body_layout.addWidget(color_box)
+        body_layout.addStretch(1)
+
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
-        self._panel = AnnotationElementColorsPanel(scroll)
-        scroll.setWidget(self._panel)
-        root.addWidget(scroll, stretch=1)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(body)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -311,9 +357,25 @@ class AnnotationElementColorsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(
-            self._panel.restore_defaults
+            self._restore_defaults
         )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+        root.addWidget(scroll, stretch=1)
         root.addWidget(buttons)
+
+    def _restore_defaults(self) -> None:
+        self._panel.restore_defaults()
+        self._font_size.setValue(13)
+        self._split_by_source.setChecked(True)
+
+    def font_point_size(self) -> int:
+        return int(self._font_size.value())
+
+    def split_tracks_by_source(self) -> bool:
+        return bool(self._split_by_source.isChecked())
 
     def apply_to_current_sequence(self) -> bool:
         return True

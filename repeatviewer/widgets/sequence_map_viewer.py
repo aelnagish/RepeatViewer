@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QPointF,
     QRect,
     QRectF,
+    QSettings,
     QSize,
     Qt,
     QThread,
@@ -107,10 +108,12 @@ from repeatviewer.backends.sequence_features import (
     SequenceFeature,
     SequenceMapData,
     SingleSequenceSummary,
+    REPEATVIEWER_INTERNAL_SOURCE,
     features_gff_path,
     format_single_sequence_summary_parts,
     format_single_sequence_summary_text,
     load_sequence_map_data,
+    pack_feature_display_rows,
     remount_parent_ids,
     summarize_loaded_sequence,
     resolve_features_gff_path,
@@ -157,6 +160,22 @@ def _annotation_panel_separator(parent: QWidget | None = None) -> QFrame:
     line.setLineWidth(1)
     line.setFixedHeight(1)
     return line
+
+
+_SPLIT_TRACKS_BY_SOURCE_KEY = "annotation/split_tracks_by_source"
+
+
+def _load_split_tracks_by_source() -> bool:
+    value = QSettings().value(_SPLIT_TRACKS_BY_SOURCE_KEY, True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _save_split_tracks_by_source(enabled: bool) -> None:
+    QSettings().setValue(_SPLIT_TRACKS_BY_SOURCE_KEY, bool(enabled))
 
 
 def _configure_annotation_controls_panel(panel: QWidget) -> None:
@@ -732,21 +751,13 @@ def _pack_feature_row_group(features: list[SequenceFeature]) -> tuple[list[int],
     return row_for_index, max(0, len(row_ends))
 
 
-def _pack_feature_rows(features: list[SequenceFeature]) -> tuple[list[int], int]:
-    """Assign rows per track, then stack tracks vertically."""
-    if not features:
-        return [], 0
-    tracks = sorted({feat.track for feat in features})
-    row_for_index = [0] * len(features)
-    row_offset = 0
-    for track in tracks:
-        indices = [idx for idx, feat in enumerate(features) if feat.track == track]
-        group = [features[idx] for idx in indices]
-        group_rows, group_count = _pack_feature_row_group(group)
-        for local_idx, global_idx in enumerate(indices):
-            row_for_index[global_idx] = group_rows[local_idx] + row_offset
-        row_offset += group_count
-    return row_for_index, row_offset
+def _pack_feature_rows(
+    features: list[SequenceFeature],
+    *,
+    split_by_source: bool = True,
+) -> tuple[list[int], int]:
+    """Assign rows per (source, track) or track, then stack bands vertically."""
+    return pack_feature_display_rows(features, split_by_source=split_by_source)
 
 
 class OverviewWidget(QWidget):
@@ -1025,6 +1036,7 @@ def _feature_with_track(feat: SequenceFeature, track: int) -> SequenceFeature:
         strand=feat.strand,
         track=max(0, int(track)),
         parent=feat.parent,
+        source=feat.source,
     )
 
 
@@ -1038,6 +1050,7 @@ def _feature_with_color(feat: SequenceFeature, color: str) -> SequenceFeature:
         strand=feat.strand,
         track=feat.track,
         parent=feat.parent,
+        source=feat.source,
     )
 
 
@@ -1914,6 +1927,20 @@ class SequenceMapCanvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._show_similarity_database_name = True
+        self._split_tracks_by_source = True
+
+    def set_split_tracks_by_source(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._split_tracks_by_source:
+            return
+        self._split_tracks_by_source = enabled
+        self._feature_rows, self._feature_row_count = _pack_feature_rows(
+            self._features,
+            split_by_source=self._split_tracks_by_source,
+        )
+        self._invalidate_seq_layer_cache()
+        self._update_geometry()
+        self.update()
 
     def _invalidate_seq_layer_cache(self) -> None:
         self._seq_layer_cache = None
@@ -2008,7 +2035,10 @@ class SequenceMapCanvas(QWidget):
         self._sequence = sequence.upper()
         self._features = list(features)
         self._is_protein = bool(is_protein)
-        self._feature_rows, self._feature_row_count = _pack_feature_rows(self._features)
+        self._feature_rows, self._feature_row_count = _pack_feature_rows(
+            self._features,
+            split_by_source=self._split_tracks_by_source,
+        )
         self._invalidate_seq_layer_cache()
         self._update_geometry()
         self.update()
@@ -3037,6 +3067,7 @@ class SequenceMapWidget(QWidget):
         self._fit_retries = 0
         self._layout_intent_generation = 0
         self._show_similarity_database_name = True
+        self._split_tracks_by_source = _load_split_tracks_by_source()
         if embedded:
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         else:
@@ -3063,6 +3094,7 @@ class SequenceMapWidget(QWidget):
         self._font_size.setFixedWidth(72)
         self._font_size.setToolTip("Nucleotide letter size (independent of zoom scale)")
         self._font_size.valueChanged.connect(self._on_font_size_changed)
+        self._font_size.hide()
 
         self._pos_start = QSpinBox(controls_parent)
         self._pos_start.setMinimum(1)
@@ -3117,13 +3149,12 @@ class SequenceMapWidget(QWidget):
             apply_annotation_zoom_slider_style(self._zoom_slider)
             self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
 
-            for w in (self._pos_start, self._pos_end, self._font_size, select_btn):
+            for w in (self._pos_start, self._pos_end, select_btn):
                 w.setParent(toolbar)
             self._sequence_stats_label.setParent(toolbar)
             _configure_position_spin(self._pos_start)
             _configure_position_spin(self._pos_end)
-            self._font_size.setFixedWidth(70)
-            for spin in (self._pos_start, self._pos_end, self._font_size):
+            for spin in (self._pos_start, self._pos_end):
                 spin.setFixedHeight(18)
             select_btn.setFixedHeight(20)
             select_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -3136,8 +3167,6 @@ class SequenceMapWidget(QWidget):
             tb.addWidget(QLabel("to", toolbar), 0, Qt.AlignmentFlag.AlignVCenter)
             tb.addWidget(self._pos_end, 0, Qt.AlignmentFlag.AlignVCenter)
             tb.addWidget(select_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-            tb.addWidget(QLabel("Font:", toolbar), 0, Qt.AlignmentFlag.AlignVCenter)
-            tb.addWidget(self._font_size, 0, Qt.AlignmentFlag.AlignVCenter)
             tb.addStretch(1)
             self._sequence_stats_label.setAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -3197,7 +3226,6 @@ class SequenceMapWidget(QWidget):
 
             for w in (
                 self._sequence_stats_label,
-                self._font_size,
                 self._pos_start,
                 self._pos_end,
                 select_btn,
@@ -3218,11 +3246,6 @@ class SequenceMapWidget(QWidget):
             )
             controls_layout.addWidget(select_btn)
 
-            font_label = QLabel("Font", annotation_controls)
-            font_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            controls_layout.addWidget(font_label)
-            controls_layout.addWidget(self._font_size)
-
             self._sequence_stats_label.setAlignment(
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
             )
@@ -3232,6 +3255,7 @@ class SequenceMapWidget(QWidget):
             self._annotation_side_panel = annotation_controls
         self._canvas = SequenceMapCanvas(self)
         self._canvas.set_color_bases(True)
+        self._canvas.set_split_tracks_by_source(self._split_tracks_by_source)
         self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._canvas.selectionChanged.connect(self._on_selection_changed)
         self._canvas.featureClicked.connect(self._on_canvas_feature_clicked)
@@ -3507,7 +3531,10 @@ class SequenceMapWidget(QWidget):
             viewport_w=vw,
         )
 
-        feature_rows, _ = _pack_feature_rows(self._data.features)
+        feature_rows, _ = _pack_feature_rows(
+            self._data.features,
+            split_by_source=self._split_tracks_by_source,
+        )
         self._annot_track.set_view(
             features=self._data.features,
             feature_rows=feature_rows,
@@ -3918,7 +3945,13 @@ class SequenceMapWidget(QWidget):
         if sel is None or self._data is None:
             return False
         start, end = sel
-        feat = SequenceFeature(start=start, end=end, name=name, feature_type=feature_type)
+        feat = SequenceFeature(
+            start=start,
+            end=end,
+            name=name,
+            feature_type=feature_type,
+            source=REPEATVIEWER_INTERNAL_SOURCE,
+        )
         features = list(self._data.features)
         features.append(feat)
         self.set_features(features)
@@ -3946,6 +3979,8 @@ class SequenceMapWidget(QWidget):
     def clear_feature_selection(self) -> None:
         self._selected_feature_indices.clear()
         self._canvas.clear_feature_selection()
+        self._annot_track._selected_indices = set()
+        self._annot_track.update()
         self._sync_overview()
         self._sync_header_views()
 
@@ -3957,6 +3992,33 @@ class SequenceMapWidget(QWidget):
         self._canvas.set_show_similarity_database_name(show)
         self._annot_track.set_show_similarity_database_name(show)
         self.update()
+
+    def set_split_tracks_by_source(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._split_tracks_by_source:
+            return
+        self._split_tracks_by_source = enabled
+        self._canvas.set_split_tracks_by_source(enabled)
+        self._sync_overview()
+        self.update()
+
+    def split_tracks_by_source(self) -> bool:
+        return bool(self._split_tracks_by_source)
+
+    def reload_split_tracks_by_source_pref(self) -> None:
+        """Reload the QSettings preference and re-pack display rows."""
+        self.set_split_tracks_by_source(_load_split_tracks_by_source())
+
+    def font_point_size(self) -> int:
+        return int(self._font_size.value())
+
+    def set_font_point_size(self, point_size: int) -> None:
+        size = max(_MIN_NUC_FONT_PT, min(_MAX_NUC_FONT_PT, int(point_size)))
+        if self._font_size.value() != size:
+            self._font_size.blockSignals(True)
+            self._font_size.setValue(size)
+            self._font_size.blockSignals(False)
+        self._canvas.set_font_point_size(size)
 
     def _apply_sequence_stats_text(self, length_part: str, gc_part: str | None) -> None:
         length_part = length_part.strip()
@@ -4017,6 +4079,8 @@ class SequenceMapWidget(QWidget):
     def set_selected_features(self, indices: set[int] | frozenset[int] | None) -> None:
         self._selected_feature_indices = set(indices or [])
         self._canvas.set_selected_features(self._selected_feature_indices)
+        self._annot_track._selected_indices = set(self._selected_feature_indices)
+        self._annot_track.update()
         self._sync_overview()
 
     def _on_canvas_feature_clicked(self, index: int) -> None:
@@ -4057,14 +4121,17 @@ class SequenceMapWidget(QWidget):
             self.statusMessage.emit(f"Feature: {feat.name} ({feat.start}–{feat.end})")
 
     def _sync_feature_selection_from_annot_track(self) -> None:
+        """Prefer annot-track selection; keep existing map selection if track is empty."""
         annot_sel = self._annot_track.selected_indices()
-        if not annot_sel:
+        if annot_sel:
+            if annot_sel != self._selected_feature_indices:
+                self._selected_feature_indices = set(annot_sel)
+                self._canvas.set_selected_features(annot_sel)
+                self._sync_overview()
             return
-        if annot_sel == self._selected_feature_indices:
-            return
-        self._selected_feature_indices = set(annot_sel)
-        self._canvas.set_selected_features(annot_sel)
-        self._sync_overview()
+        # Annot track empty — keep canvas/map selection and mirror it onto the track.
+        if self._selected_feature_indices:
+            self._annot_track._selected_indices = set(self._selected_feature_indices)
 
     def _request_delete_features(self) -> None:
         self._sync_feature_selection_from_annot_track()
@@ -4277,6 +4344,7 @@ class AddFeatureDialog(QDialog):
             feature_type=str(self._type.currentData() or self._type.currentText()),
             color=self._color.color_hex(),
             strand=str(self._strand.currentData()),
+            source=REPEATVIEWER_INTERNAL_SOURCE,
         )
 
 
@@ -4296,6 +4364,12 @@ class ModifyFeatureDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Modify feature")
         self._track = max(0, int(getattr(feature, "track", 0) or 0))
+        raw_source = str(getattr(feature, "source", "") or "").strip()
+        # Empty / legacy Sequence Annotation → shared internal source.
+        if not raw_source or raw_source == "Sequence Annotation":
+            self._source = REPEATVIEWER_INTERNAL_SOURCE
+        else:
+            self._source = raw_source
 
         start_pos, end_pos = sorted((int(feature.start), int(feature.end)))
 
@@ -4401,6 +4475,7 @@ class ModifyFeatureDialog(QDialog):
             strand=str(self._strand.currentData()),
             parent=self._parent.text().strip(),
             track=self._track,
+            source=self._source,
         )
 
 
@@ -4999,11 +5074,12 @@ class SequenceMapPanel(QWidget):
             "History is cleared when you open another sequence."
         )
         restore_btn.clicked.connect(self._restore_features)
-        color_btn = QPushButton("Color", self._action_row_container)
-        color_btn.setToolTip(
-            "Set colors for feature types, similarity databases, and nucleotides (A/C/G/T)"
+        settings_btn = QPushButton("Setting", self._action_row_container)
+        settings_btn.setToolTip(
+            "Font size, split tracks by source, and colors for feature types, "
+            "similarity databases, and nucleotides (A/C/G/T)"
         )
-        color_btn.clicked.connect(self._open_element_colors_dialog)
+        settings_btn.clicked.connect(self._open_annotation_settings_dialog)
         export_btn = QPushButton("Export", self._action_row_container)
         export_btn.setToolTip(
             "Export the current annotation view as SVG / PNG / PDF"
@@ -5014,7 +5090,7 @@ class SequenceMapPanel(QWidget):
             "Save annotations to the JSON sidecar (export GFF3 / GTF / BED separately)"
         )
         save_btn.clicked.connect(lambda: self._save_annotations(silent=True))
-        for btn in (del_btn, restore_btn, color_btn, export_btn, save_btn):
+        for btn in (del_btn, restore_btn, settings_btn, export_btn, save_btn):
             action_row.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
         action_row.addStretch()
         self._annotation_job_status = QLabel("", self._action_row_container)
@@ -5265,10 +5341,20 @@ class SequenceMapPanel(QWidget):
     def refresh_similarity_databases(self) -> None:
         self._refresh_similarity_database_rows()
 
-    def _open_element_colors_dialog(self) -> None:
-        dialog = AnnotationElementColorsDialog(parent=self)
+    def _open_annotation_settings_dialog(self) -> None:
+        dialog = AnnotationElementColorsDialog(
+            parent=self,
+            font_point_size=self._map.font_point_size(),
+            split_tracks_by_source=self._map.split_tracks_by_source(),
+            min_font_pt=_MIN_NUC_FONT_PT,
+            max_font_pt=_MAX_NUC_FONT_PT,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._map.set_font_point_size(dialog.font_point_size())
+        split_on = dialog.split_tracks_by_source()
+        _save_split_tracks_by_source(split_on)
+        self._map.set_split_tracks_by_source(split_on)
         if dialog.apply_to_current_sequence():
             self._apply_element_colors_to_map(
                 dialog.old_feature_type_colors(),
@@ -5280,7 +5366,11 @@ class SequenceMapPanel(QWidget):
         self._map.refresh_nucleotide_colors()
         self._map.update()
         self._broadcast_shared_annotation_settings_changed()
-        self.statusMessage.emit("Element colors updated.")
+        self.statusMessage.emit("Annotation settings updated.")
+
+    def _open_element_colors_dialog(self) -> None:
+        # Back-compat alias for older call sites.
+        self._open_annotation_settings_dialog()
 
     def _apply_element_colors_to_map(
         self,
@@ -5317,6 +5407,7 @@ class SequenceMapPanel(QWidget):
                     strand=feat.strand,
                     track=feat.track,
                     parent=feat.parent,
+                    source=feat.source,
                 )
             )
         if changed:
@@ -5803,6 +5894,7 @@ class SequenceMapPanel(QWidget):
         self._map.set_show_similarity_database_name(
             self._similarity_ann_settings.show_database_name_on_track
         )
+        self._map.reload_split_tracks_by_source_pref()
         self._rebuild_add_feature_buttons()
         self.refresh_similarity_databases()
         self.refresh_nucleotide_colors()

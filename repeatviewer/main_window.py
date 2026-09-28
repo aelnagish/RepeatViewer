@@ -8907,8 +8907,8 @@ class MainWindow(QMainWindow):
 
     def _on_add_annotation_dialog_finished(self, result: int) -> None:
         from repeatviewer.backends.sequence_features import (
-            features_gff_path,
             import_annotation_as_rv_gff3,
+            sidecar_path,
         )
 
         dialog = self._add_annotation_dialog
@@ -8923,38 +8923,32 @@ class MainWindow(QMainWindow):
             annotation = dialog.result_path()
             if annotation is None:
                 return
-            dest = features_gff_path(fasta)
-            if dest.is_file() and dest.resolve() == annotation:
-                QMessageBox.information(
-                    self,
-                    "Add annotation",
-                    f"{dest.name} is already the RepeatViewer annotation for this FASTA.",
-                )
-                return
             try:
                 result = import_annotation_as_rv_gff3(fasta, annotation)
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, "Add annotation", str(exc))
                 return
 
-            gff_path = result.gff_path
+            json_path = result.json_path
             count = result.feature_count
             seqs = result.sequence_count
-            self._sync_sidecar_in_file_list(gff_path, select=False)
+            # JSON sidecars are hidden from the file list; open Annotation view.
             if self._preview_tabs is not None:
-                self._preview_tabs.reload_paths([fasta])
+                self._preview_tabs.show_annotation_for_path(fasta)
+                self._ensure_preview_visible()
+            sidecar_name = sidecar_path(fasta).name
             if seqs > 1:
                 status = (
-                    f"Added {count:,} feature(s) across {seqs:,} sequences → {gff_path.name}"
+                    f"Added {count:,} feature(s) across {seqs:,} sequences → {sidecar_name}"
                 )
             else:
-                status = f"Added {count:,} feature(s) → {gff_path.name}"
+                status = f"Added {count:,} feature(s) → {sidecar_name}"
             self._set_status_message(
                 status,
                 8000,
                 override_file_link=True,
             )
-            self._set_status_file_link(gff_path)
+            self._set_status_file_link(fasta)
         finally:
             dialog.deleteLater()
 
@@ -11216,7 +11210,6 @@ class MainWindow(QMainWindow):
     def _duplicate_selected_files(self, paths: list[Path]) -> None:
         if not paths:
             return
-        from repeatviewer.backends.sequence_features import features_gff_path
 
         created: list[Path] = []
         failed: list[str] = []
@@ -11232,12 +11225,7 @@ class MainWindow(QMainWindow):
                 failed.append(f"{src.name}: {exc}")
                 continue
             for comp in companion_annotation_paths_for_fasta(src):
-                if comp.suffix.lower() == ".json" or ".seqmap" in comp.name:
-                    comp_dest = sidecar_path(dest)
-                elif comp.name.endswith(".gff3"):
-                    comp_dest = features_gff_path(dest)
-                else:
-                    comp_dest = dest.parent / comp.name
+                comp_dest = sidecar_path(dest)
                 if comp_dest.exists():
                     continue
                 try:
@@ -11306,7 +11294,7 @@ class MainWindow(QMainWindow):
             return None
 
     def _expand_paths_for_delete(self, paths: list[Path]) -> list[Path]:
-        """Include paired annotation sidecars (e.g. seqmap JSON with RV.gff3)."""
+        """Include paired JSON annotation sidecars with a FASTA."""
         expanded: list[Path] = []
         seen: set[str] = set()
         for path in paths:
@@ -11772,15 +11760,8 @@ class MainWindow(QMainWindow):
                 created.append(dest)
                 sources.append(src)
                 for comp in companion_srcs:
-                    # Keep canonical companion names beside the new FASTA.
-                    if comp.suffix.lower() == ".json" or ".seqmap" in comp.name:
-                        comp_dest = sidecar_path(dest)
-                    elif comp.name.endswith(".gff3"):
-                        from repeatviewer.backends.sequence_features import features_gff_path
-
-                        comp_dest = features_gff_path(dest)
-                    else:
-                        comp_dest = target_dir / comp.name
+                    # Keep canonical JSON sidecar name beside the new FASTA.
+                    comp_dest = sidecar_path(dest)
                     try:
                         if mode == "cut":
                             if comp_dest.exists() and comp_dest != comp:

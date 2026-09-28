@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -32,8 +32,10 @@ from PySide6.QtWidgets import (
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
     fasta_record_lengths,
+    feature_display_pack_key,
     load_all_features_by_id,
     load_features_by_id_from_json,
+    ordered_feature_pack_keys,
     remount_parent_ids,
     resolve_features_gff_path,
     resolve_sidecar_path,
@@ -91,19 +93,47 @@ def _bar_color(widget: QWidget, *, selected: bool) -> QColor:
     return QColor("#9aa3ad") if _is_dark(widget) else QColor("#b0b6be")
 
 
+def _split_tracks_by_source_pref() -> bool:
+    value = QSettings().value("annotation/split_tracks_by_source", True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def _pack_feature_tracks(
     features: list[SequenceFeature],
+    *,
+    split_by_source: bool | None = None,
 ) -> list[list[SequenceFeature]]:
+    """Pack features into visual bands by (source, track) or track only.
+
+    Within each band, overlapping features stack into additional rows.
+    """
+    if not features:
+        return []
+    if split_by_source is None:
+        split_by_source = _split_tracks_by_source_pref()
     tracks: list[list[SequenceFeature]] = []
-    for feat in sorted(features, key=lambda f: (f.start, f.end, f.name)):
-        placed = False
-        for track in tracks:
-            if all(feat.start > other.end or feat.end < other.start for other in track):
-                track.append(feat)
-                placed = True
-                break
-        if not placed:
-            tracks.append([feat])
+    keys = ordered_feature_pack_keys(features, split_by_source=split_by_source)
+    for key in keys:
+        group = [
+            feat
+            for feat in sorted(features, key=lambda f: (f.start, f.end, f.name))
+            if feature_display_pack_key(feat, split_by_source=split_by_source) == key
+        ]
+        band_rows: list[list[SequenceFeature]] = []
+        for feat in group:
+            placed = False
+            for row in band_rows:
+                if all(feat.start > other.end or feat.end < other.start for other in row):
+                    row.append(feat)
+                    placed = True
+                    break
+            if not placed:
+                band_rows.append([feat])
+        tracks.extend(band_rows)
     return tracks
 
 

@@ -13,7 +13,10 @@ from Bio import SeqIO
 from repeatviewer.backends.auto_annotation_settings import AutoAnnotationSettings
 from repeatviewer.backends.job_cancel import JobCancellation
 from repeatviewer.backends.orf_detect import detect_orf_features
-from repeatviewer.backends.sequence_features import SequenceFeature
+from repeatviewer.backends.sequence_features import (
+    REPEATVIEWER_INTERNAL_SOURCE,
+    SequenceFeature,
+)
 from repeatviewer.backends.tandem_repeat_detect import detect_tandem_repeat_features
 from repeatviewer.backends.terminal_repeat_detect import auto_annotate_terminal_repeats
 
@@ -136,6 +139,8 @@ def _stamp_track(
                 color=feat.color,
                 strand=feat.strand,
                 track=track,
+                parent=feat.parent,
+                source=REPEATVIEWER_INTERNAL_SOURCE,
             )
         )
     return stamped

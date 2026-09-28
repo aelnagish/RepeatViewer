@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -30,11 +31,18 @@ from repeatviewer.backends.sequence_features import (
     suggest_unique_export_ids,
 )
 from repeatviewer.widgets.file_conflict import confirm_existing_file_path
+from repeatviewer.widgets.path_browse import PathBrowseRow
 
 _FORMAT_SUFFIX = {
     "gff3": ".gff3",
     "gtf": ".gtf",
     "bed": ".bed",
+}
+
+_FORMAT_FILTER = {
+    "gff3": "GFF3 (*.gff3 *.gff);;All files (*)",
+    "gtf": "GTF (*.gtf);;All files (*)",
+    "bed": "BED (*.bed);;All files (*)",
 }
 
 
@@ -121,24 +129,40 @@ class _DuplicateSeqidDialog(QDialog):
 
 
 class ExportAnnotationDialog(QDialog):
-    """Format + editable filename; conflict uses overwrite/rename prompt."""
+    """Type + File (Browse) layout matching Add annotation; conflict prompt on OK."""
 
     def __init__(self, fasta_path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._fasta = fasta_path.expanduser().resolve()
         self.setWindowTitle("Export annotation")
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(480)
+        self._start_dir = (
+            self._fasta.parent if self._fasta.parent.is_dir() else Path.home()
+        )
 
-        layout = QVBoxLayout(self)
+        self._type = QComboBox(self)
+        self._type.addItem("GFF3", "gff3")
+        self._type.addItem("GTF", "gtf")
+        self._type.addItem("BED", "bed")
+
+        self._file_row = PathBrowseRow(
+            self,
+            placeholder="Choose export path, or Browse",
+            browse_title="Export annotation file",
+            start_dir=str(self._start_dir),
+            mode="file",
+            browse_handler=self._browse,
+        )
+        self._file = self._file_row.line_edit()
+        self._file_row.set_default_tooltip(
+            "Enter an export path, or use Browse to choose the file."
+        )
+
         form = QFormLayout()
-        self._format = QComboBox(self)
-        self._format.addItem("GFF3", "gff3")
-        self._format.addItem("GTF", "gtf")
-        self._format.addItem("BED", "bed")
-        form.addRow("Format:", self._format)
-        self._filename = QLineEdit(self)
-        form.addRow("File name:", self._filename)
-        layout.addLayout(form)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setSpacing(8)
+        form.addRow("Type:", self._type)
+        form.addRow("File:", self._file_row)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -146,6 +170,11 @@ class ExportAnnotationDialog(QDialog):
         )
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+        layout.addLayout(form)
         layout.addWidget(buttons)
 
         self._record_ids: list[str] = []
@@ -155,7 +184,8 @@ class ExportAnnotationDialog(QDialog):
         self._syncing_name = False
         self._load()
         self._sync_filename_from_format()
-        self._format.currentIndexChanged.connect(self._on_format_changed)
+        self._type.currentIndexChanged.connect(self._on_format_changed)
+        self._file_row.set_file_filter(self._file_filter())
 
     def _load(self) -> None:
         data = load_sequence_map_data(self._fasta)
@@ -174,55 +204,83 @@ class ExportAnnotationDialog(QDialog):
         return self._fasta.parent / f"{self._fasta.stem}.RV.bed"
 
     def _current_fmt(self) -> str:
-        return str(self._format.currentData() or "gff3")
+        return str(self._type.currentData() or "gff3")
+
+    def _file_filter(self) -> str:
+        return _FORMAT_FILTER[self._current_fmt()]
 
     def _sync_filename_from_format(self) -> None:
         self._syncing_name = True
         try:
-            self._filename.setText(self._default_out(self._current_fmt()).name)
+            self._file.setText(str(self._default_out(self._current_fmt())))
         finally:
             self._syncing_name = False
 
     def _on_format_changed(self, _index: int = 0) -> None:
+        self._file_row.set_file_filter(self._file_filter())
         if self._syncing_name:
             return
-        current = self._filename.text().strip()
+        current = self._file.text().strip()
         suffix = _FORMAT_SUFFIX[self._current_fmt()]
         if current:
-            name = Path(current).with_suffix(suffix).name
+            path = Path(current).expanduser()
+            updated = path.with_suffix(suffix)
             self._syncing_name = True
             try:
-                self._filename.setText(name)
+                self._file.setText(str(updated))
             finally:
                 self._syncing_name = False
         else:
             self._sync_filename_from_format()
 
+    def _browse(self) -> None:
+        current = self._file.text().strip()
+        if current:
+            start = str(Path(current).expanduser())
+        else:
+            start = str(self._default_out(self._current_fmt()))
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export annotation file",
+            start,
+            self._file_filter(),
+        )
+        if not chosen:
+            return
+        path = Path(chosen)
+        suffix = _FORMAT_SUFFIX[self._current_fmt()]
+        if path.suffix.lower() != suffix:
+            path = path.with_suffix(suffix)
+        self._file.setText(str(path))
+        self._file_row.set_file_filter(self._file_filter())
+
     def _proposed_path(self) -> Path | None:
-        name = self._filename.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Export annotation", "Enter a file name.")
+        text = self._file.text().strip()
+        if not text:
+            QMessageBox.warning(self, "Export annotation", "Choose an export file.")
             return None
-        if Path(name).name != name or "/" in name or "\\" in name:
-            QMessageBox.warning(
-                self,
-                "Export annotation",
-                "Enter a file name only (no folder path).",
-            )
-            return None
+        path = Path(text).expanduser()
+        # Bare file name → write beside the FASTA (same as before).
+        if path.name == text and "/" not in text and "\\" not in text:
+            path = self._fasta.parent / path.name
+        path = path.resolve()
         fmt = self._current_fmt()
         suffix = _FORMAT_SUFFIX[fmt]
-        path = (self._fasta.parent / name).expanduser().resolve()
         if path.suffix.lower() != suffix:
             path = path.with_suffix(suffix)
         return path
 
     def _resolve_seqid_map(self) -> dict[str, str] | None:
-        originals = [rid.split("#", 1)[0] for rid in self._record_ids]
+        from repeatviewer.backends.sequence_features import strip_duplicate_uniquifier
+
+        originals = [
+            strip_duplicate_uniquifier(rid, sibling_ids=self._record_ids)
+            for rid in self._record_ids
+        ]
         dups = duplicate_original_sequence_ids(originals)
         if not dups:
             return None
-        suggestions = suggest_unique_export_ids(originals)
+        suggestions = suggest_unique_export_ids(self._record_ids)
         dialog = _DuplicateSeqidDialog(
             self._record_ids, suggestions, dups, parent=self
         )

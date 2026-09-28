@@ -31,7 +31,11 @@ from repeatviewer.backends.database_prepare import (
 from repeatviewer.backends.gui_functions import check_cmd_in_path, get_original_file_path
 from repeatviewer.backends.job_cancel import JobCancellation, JobCancelledError, check_cancelled
 from repeatviewer.backends.orf_detect import OrfDetectResult, detect_orf_features
-from repeatviewer.backends.sequence_features import SequenceFeature, load_sequence_map_data
+from repeatviewer.backends.sequence_features import (
+    REPEATVIEWER_INTERNAL_SOURCE,
+    SequenceFeature,
+    load_sequence_map_data,
+)
 from repeatviewer.project import (
     DATABASE_TYPE_CDD,
     DATABASE_TYPE_DNA,
@@ -1386,6 +1390,8 @@ def _stamp_features(
                 color=color,
                 strand=feat.strand,
                 track=track,
+                parent=feat.parent,
+                source=REPEATVIEWER_INTERNAL_SOURCE,
             )
         )
     return stamped
