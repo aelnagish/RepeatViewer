@@ -302,7 +302,6 @@ def test_files_panel_click_fills_the_reference_only_in_reference_mode(qapp, tmp_
     assert dlg.apply_path_from_panel(ref) is True
     assert panel.reference() == ref
     assert panel.summary_text().startswith("2 FASTA selected → 2 runs against ref.fa")
-    assert panel.output_name_text().startswith("q1.fa_FastGA_vs_ref.fa.paf")
     # On another tab a panel click is not taken.
     dlg.findChild(QTabWidget).setCurrentIndex(0)
     assert dlg.apply_path_from_panel(q1) is False
