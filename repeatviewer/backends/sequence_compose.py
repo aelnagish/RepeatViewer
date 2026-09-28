@@ -120,6 +120,48 @@ def safe_file_stem(name: str) -> str:
     return cleaned.strip("._") or "sequence"
 
 
+def extract_source_suffix(source: Path) -> str:
+    """FASTA suffix for extracted files (always ``.fa``, or ``.faa`` for protein)."""
+    name = source.name.lower()
+    if name.endswith(".faa") or name.endswith(".faa.gz") or name.endswith(".faa.bgz"):
+        return ".faa"
+    return ".fa"
+
+
+def proposed_extract_path(
+    source: Path,
+    record_ids: list[str],
+    out_dir: Path | None = None,
+    *,
+    single_file: bool = True,
+) -> Path:
+    """Proposed output path for an extract (may already exist).
+
+    - One sequence → ``{sanitize_name(id)}{source_suffix}`` (Separate Sequences rule).
+    - Several sequences into one file → ``{source.name}_extr.fa``.
+    """
+    from repeatviewer.backends.separate_fasta import sanitize_name
+
+    source = source.expanduser().resolve()
+    folder = (out_dir or source.parent).expanduser().resolve()
+    ids = [str(i) for i in record_ids if str(i).strip()]
+    if single_file and len(ids) == 1:
+        return folder / f"{sanitize_name(ids[0])}{extract_source_suffix(source)}"
+    if single_file:
+        return folder / f"{source.name}_extr.fa"
+    # One-file-per-sequence caller should use proposed_single_record_path.
+    return folder / f"{source.name}_extr.fa"
+
+
+def proposed_single_record_path(source: Path, record_id: str, out_dir: Path | None = None) -> Path:
+    """Path for one extracted sequence, using Separate Sequences sanitization."""
+    from repeatviewer.backends.separate_fasta import sanitize_name
+
+    source = source.expanduser().resolve()
+    folder = (out_dir or source.parent).expanduser().resolve()
+    return folder / f"{sanitize_name(str(record_id))}{extract_source_suffix(source)}"
+
+
 def write_new_sequence(
     folder: Path,
     *,
@@ -237,16 +279,26 @@ def extract_records(
     *,
     single_file: bool = False,
     combined_name: str = "",
+    output_path: Path | None = None,
+    output_paths_by_id: dict[str, Path] | None = None,
 ) -> list[Path]:
     """Pull chosen records out of a multi-FASTA.
 
     Unlike "Separate FASTA", which splits everything into its own directory,
     this takes only the records asked for and writes them beside the source --
     either one file each, or all of them into one new multi-FASTA.
+
+    When ``output_path`` is set (combined / single-record extract), that path is
+    written directly (caller handles overwrite/rename). When
+    ``output_paths_by_id`` is set for multi-file extract, those paths are used
+    (caller handles conflicts). Otherwise a unique path is chosen automatically.
     """
+    from repeatviewer.backends.separate_fasta import sanitize_name
+
     if not wanted:
         raise SequenceComposeError("Select at least one sequence to extract.")
 
+    path = path.expanduser().resolve()
     try:
         records = [
             r for r in SeqIO.parse(str(path), "fasta") if str(r.id) in wanted
@@ -256,14 +308,42 @@ def extract_records(
     if not records:
         raise SequenceComposeError("None of the selected sequences were found.")
 
+    out_dir = out_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+    suffix = extract_source_suffix(path)
+    path_map = {
+        str(k): Path(v).expanduser().resolve()
+        for k, v in (output_paths_by_id or {}).items()
+    }
 
     if single_file:
-        from repeatviewer.tool_output_paths import kept_input_name
-
-        stem = safe_file_stem(combined_name or f"{kept_input_name(path)}_extracted")
-        out_path = _unique_path(out_dir, stem)
+        if output_path is not None:
+            out_path = output_path.expanduser().resolve()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        elif len(records) == 1:
+            proposed = proposed_extract_path(
+                path, [str(records[0].id)], out_dir, single_file=True
+            )
+            out_path = (
+                proposed
+                if not proposed.exists()
+                else _unique_path(out_dir, sanitize_name(str(records[0].id)), suffix)
+            )
+        else:
+            if combined_name:
+                stem = safe_file_stem(combined_name)
+                out_path = _unique_path(out_dir, stem, ".fa")
+            else:
+                proposed = proposed_extract_path(
+                    path, [str(r.id) for r in records], out_dir, single_file=True
+                )
+                if proposed.exists():
+                    # ``name_extr.fa`` → stem ``name_extr`` when unique-ifying.
+                    stem = proposed.name[: -len(".fa")] if proposed.name.endswith(".fa") else proposed.stem
+                    out_path = _unique_path(out_dir, stem, ".fa")
+                else:
+                    out_path = proposed
         with out_path.open("w", encoding="utf-8") as handle:
             for record in records:
                 handle.write(f">{record.description or record.id}\n")
@@ -271,7 +351,20 @@ def extract_records(
         return [out_path]
 
     for record in records:
-        out_path = _unique_path(out_dir, safe_file_stem(str(record.id)))
+        rid = str(record.id)
+        if rid in path_map:
+            out_path = path_map[rid]
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        elif output_path is not None and len(records) == 1:
+            out_path = output_path.expanduser().resolve()
+        else:
+            stem = sanitize_name(rid)
+            proposed = out_dir / f"{stem}{suffix}"
+            out_path = (
+                proposed
+                if not proposed.exists()
+                else _unique_path(out_dir, stem, suffix)
+            )
         with out_path.open("w", encoding="utf-8") as handle:
             handle.write(f">{record.description or record.id}\n")
             handle.write(_wrap(str(record.seq)) + "\n")
@@ -498,6 +591,8 @@ def extract_records_by_ids(
     single_file: bool = True,
     exclude: bool = False,
     combined_name: str = "",
+    output_path: Path | None = None,
+    output_paths_by_id: dict[str, Path] | None = None,
     write_missing: bool = True,
     progress: Callable[[int, int], None] | None = None,
     cancel: Callable[[], bool] | None = None,
@@ -517,9 +612,23 @@ def extract_records_by_ids(
     wanted_set = set(wanted)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    from repeatviewer.tool_output_paths import kept_input_name
+    from repeatviewer.backends.separate_fasta import sanitize_name
 
-    stem = combined_name or f"{kept_input_name(source)}_extracted"
+    forced_path = output_path.expanduser().resolve() if output_path is not None else None
+    path_map = {
+        str(k): Path(v).expanduser().resolve()
+        for k, v in (output_paths_by_id or {}).items()
+    }
+    if combined_name:
+        stem = safe_file_stem(combined_name)
+        combined_suffix = ".fa"
+    elif single_file and len(wanted) == 1 and not exclude:
+        stem = sanitize_name(wanted[0])
+        combined_suffix = extract_source_suffix(source)
+    else:
+        # Multi-record combined file: ``{source.name}_extr.fa``.
+        stem = f"{source.name}_extr"
+        combined_suffix = ".fa"
 
     written: list[Path] = []
     seen: set[str] = set()
@@ -534,13 +643,25 @@ def extract_records_by_ids(
         nonlocal matched, combined_handle, combined_path
         if single_file:
             if combined_handle is None:
-                combined_path = _unique_path(out_dir, safe_file_stem(stem))
+                if forced_path is not None:
+                    combined_path = forced_path
+                    combined_path.parent.mkdir(parents=True, exist_ok=True)
+                else:
+                    combined_path = _unique_path(out_dir, stem, combined_suffix)
                 combined_handle = combined_path.open("w", encoding="utf-8")
             handle = combined_handle
             handle.write(f">{header}\n")
             handle.write(_wrap(sequence) + "\n")
         else:
-            rec_path = _unique_path(out_dir, safe_file_stem(_record_id(header)))
+            rec_id = _record_id(header)
+            if rec_id in path_map:
+                rec_path = path_map[rec_id]
+                rec_path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                rec_stem = sanitize_name(rec_id)
+                rec_path = _unique_path(
+                    out_dir, rec_stem, extract_source_suffix(source)
+                )
             with rec_path.open("w", encoding="utf-8") as record_handle:
                 record_handle.write(f">{header}\n")
                 record_handle.write(_wrap(sequence) + "\n")

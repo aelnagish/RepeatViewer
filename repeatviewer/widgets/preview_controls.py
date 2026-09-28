@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QFont, QFontMetrics, QGuiApplication, QWheelEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QMouseEvent,
+    QNativeGestureEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QHBoxLayout,
+    QLineEdit,
     QMenu,
     QPushButton,
     QSizePolicy,
@@ -49,9 +59,9 @@ _FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
 )
 
 
-def _add_default_fasta_tab_menu(parent_menu: QMenu) -> None:
+def _add_default_fasta_tab_menu(parent_menu: QMenu) -> QAction:
     """Add Settings-equivalent default FASTA sub-tab chooser to an Actions menu."""
-    submenu = parent_menu.addMenu("Default FASTA preview tab")
+    submenu = parent_menu.addMenu("Default preview tab")
     submenu.setToolTip(
         "Sub-tab shown when you single-click a single-sequence FASTA file."
     )
@@ -79,10 +89,11 @@ def _add_default_fasta_tab_menu(parent_menu: QMenu) -> None:
     submenu.aboutToShow.connect(_sync_checks)
     group.triggered.connect(_on_chosen)
     _sync_checks()
+    return submenu.menuAction()
 
 ZOOM_BAR_HEIGHT = 18
 ZOOM_CONTROL_HEIGHT = 18
-ZOOM_SPIN_WIDTH = 68
+ZOOM_SPIN_WIDTH = 56
 # Kept for sequence_map_viewer imports (embedded map toolbar height).
 ZOOM_SLIDER_HEIGHT = 22
 ANNOTATION_ZOOM_SLIDER_WIDTH = 240
@@ -123,6 +134,48 @@ def apply_annotation_zoom_slider_style(slider: QSlider) -> None:
             border-radius: 5px;
         }}
         QSlider#annotationZoomSlider::handle:horizontal:hover {{
+            background: {accent};
+            border: 1px solid palette(highlight);
+        }}
+        """
+    )
+
+
+def apply_preview_scale_slider_style(slider: QSlider) -> None:
+    """Blue filled track + circular thumb (same look as the annotation zoom bar)."""
+    from repeatviewer.ui.theme_mode import load_accent_color
+
+    accent = load_accent_color()
+    slider.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    slider.setStyleSheet(
+        f"""
+        QSlider#previewScaleSlider::groove:vertical {{
+            border: 1px solid palette(mid);
+            background: palette(mid);
+            width: 4px;
+            border-radius: 2px;
+        }}
+        QSlider#previewScaleSlider::sub-page:vertical {{
+            background: {accent};
+            border: 1px solid {accent};
+            width: 4px;
+            border-radius: 2px;
+        }}
+        QSlider#previewScaleSlider::add-page:vertical {{
+            background: palette(mid);
+            border: 1px solid palette(mid);
+            width: 4px;
+            border-radius: 2px;
+        }}
+        QSlider#previewScaleSlider::handle:vertical {{
+            background: {accent};
+            border: 1px solid palette(text);
+            height: 10px;
+            width: 10px;
+            margin: 0 -4px;
+            border-radius: 5px;
+        }}
+        QSlider#previewScaleSlider::handle:vertical:hover {{
             background: {accent};
             border: 1px solid palette(highlight);
         }}
@@ -196,6 +249,233 @@ def _make_preview_actions_button(*, tooltip: str) -> QToolButton:
     return btn
 
 
+class ScaleSliderPopup(QFrame):
+    """Vertical slider popup; range matches the linked spin (Shift+drag bounds)."""
+
+    closed = Signal()
+
+    def __init__(self, spin: QSpinBox, anchor: QWidget) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint,
+        )
+        self.setObjectName("previewScaleSliderPopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Lifetime is owned by ScaleSpinCluster (deleteLater on close) — do not
+        # use WA_DeleteOnClose; that raced with Popup dismiss and crashed.
+        self._spin = spin
+        self._block = False
+        self._closed_emitted = False
+
+        self._slider = QSlider(Qt.Orientation.Vertical, self)
+        self._slider.setObjectName("previewScaleSlider")
+        self._slider.setRange(spin.minimum(), spin.maximum())
+        self._slider.setSingleStep(max(1, spin.singleStep()))
+        self._slider.setPageStep(max(1, spin.singleStep() * 5))
+        # Top = smallest scale / font; bottom = largest.
+        self._slider.setInvertedAppearance(True)
+        self._slider.setInvertedControls(True)
+        self._slider.setMinimumHeight(140)
+        self._slider.setFixedWidth(28)
+        self._slider.setValue(spin.value())
+        apply_preview_scale_slider_style(self._slider)
+        self._slider.valueChanged.connect(self._on_slider)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 8, 6, 8)
+        layout.setSpacing(0)
+        layout.addWidget(self._slider, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        spin.valueChanged.connect(self._on_spin)
+        self._reposition(anchor)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        # Defer: Popup dismiss runs inside Qt's click handling; syncing the arrow
+        # synchronously (or deleteLater here) can exit the process on macOS.
+        if not self._closed_emitted:
+            self._closed_emitted = True
+            QTimer.singleShot(0, self.closed.emit)
+
+    def _reposition(self, anchor: QWidget) -> None:
+        self.adjustSize()
+        # Drop just below the scale cluster, left-aligned with the arrow.
+        origin = anchor.mapToGlobal(QPoint(0, anchor.height() + 2))
+        self.move(origin)
+
+    def _on_slider(self, value: int) -> None:
+        if self._block:
+            return
+        self._block = True
+        try:
+            self._spin.setValue(int(value))
+        finally:
+            self._block = False
+
+    def _on_spin(self, value: int) -> None:
+        if self._block or not self.isVisible():
+            return
+        self._block = True
+        try:
+            self._slider.setRange(self._spin.minimum(), self._spin.maximum())
+            self._slider.setValue(int(value))
+        finally:
+            self._block = False
+
+
+class ScaleSpinCluster(QWidget):
+    """Scale spin with a Color-style ▶/▼ arrow that opens a vertical slider."""
+
+    def __init__(self, spin: NoWheelSpinBox, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("previewScaleCluster")
+        self.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._spin = spin
+        self._popup: ScaleSliderPopup | None = None
+        # Qt dismisses Popup on press; the same click must not reopen it.
+        self._suppress_reopen = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._arrow = QToolButton(self)
+        self._arrow.setObjectName("previewScaleMenuButton")
+        # Same filled triangles as the Color disclosure button (▶ / ▼).
+        self._arrow.setText("▶")
+        self._arrow.setAutoRaise(True)
+        self._arrow.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._arrow.setFixedSize(14, ZOOM_CONTROL_HEIGHT)
+        self._arrow.setToolTip("Show scale slider")
+        self._arrow.installEventFilter(self)
+        self._arrow.clicked.connect(self._toggle_slider)
+        layout.addWidget(self._arrow)
+
+        spin.setParent(self)
+        layout.addWidget(spin)
+
+    @property
+    def spin(self) -> NoWheelSpinBox:
+        return self._spin
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if watched is self._arrow and event.type() == QEvent.Type.MouseButtonPress:
+            if (
+                isinstance(event, QMouseEvent)
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._suppress_reopen
+            ):
+                self._suppress_reopen = False
+                return True
+        return super().eventFilter(watched, event)
+
+    def _set_arrow_expanded(self, expanded: bool) -> None:
+        arrow = getattr(self, "_arrow", None)
+        if arrow is None:
+            return
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(self) or not isValid(arrow):
+                return
+        except ImportError:
+            pass
+        try:
+            arrow.setText("▼" if expanded else "▶")
+            arrow.setToolTip(
+                "Hide scale slider" if expanded else "Show scale slider"
+            )
+        except RuntimeError:
+            return
+
+    def _clear_suppress_reopen(self) -> None:
+        self._suppress_reopen = False
+
+    def _popup_is_open(self) -> bool:
+        popup = self._popup
+        if popup is None:
+            return False
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(popup):
+                self._popup = None
+                return False
+        except ImportError:
+            pass
+        try:
+            return bool(popup.isVisible())
+        except RuntimeError:
+            self._popup = None
+            return False
+
+    def _close_popup(self) -> None:
+        popup = self._popup
+        self._popup = None
+        self._set_arrow_expanded(False)
+        if popup is None:
+            return
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(popup):
+                return
+        except ImportError:
+            pass
+        try:
+            popup.closed.disconnect(self._on_popup_closed)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            popup.hide()
+            popup.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _open_popup(self) -> None:
+        self._close_popup()
+        popup = ScaleSliderPopup(self._spin, self)
+        self._popup = popup
+        popup.closed.connect(self._on_popup_closed)
+        self._set_arrow_expanded(True)
+        popup.show()
+        popup._slider.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def _on_popup_closed(self, *_args) -> None:
+        # Popup already hidden by Qt (outside click / Escape) or about to be.
+        popup = self._popup
+        self._popup = None
+        self._set_arrow_expanded(False)
+        self._suppress_reopen = True
+        QTimer.singleShot(0, self._clear_suppress_reopen)
+        if popup is None:
+            return
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(popup):
+                return
+        except ImportError:
+            pass
+        try:
+            popup.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _toggle_slider(self) -> None:
+        if self._suppress_reopen:
+            self._suppress_reopen = False
+            return
+        if self._popup_is_open():
+            self._close_popup()
+            return
+        self._open_popup()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._close_popup()
+        super().hideEvent(event)
+
+
 class PreviewZoomBar(QWidget):
     """Compact preview controls for the Preview title bar.
 
@@ -219,18 +499,20 @@ class PreviewZoomBar(QWidget):
         self._spin = _make_zoom_percent_spin(
             minimum=MIN_PREVIEW_ZOOM_PERCENT,
             maximum=MAX_PREVIEW_ZOOM_PERCENT,
-            tooltip="Preview zoom (Shift+scroll, or trackpad pinch)",
+            tooltip="Preview zoom (Shift+scroll, trackpad pinch, or scale slider)",
         )
         self._spin.valueChanged.connect(self._on_spin)
-        layout.addWidget(self._spin)
+        self._spin_cluster = ScaleSpinCluster(self._spin, self)
+        layout.addWidget(self._spin_cluster)
 
         self._font_spin = _make_font_size_spin(
             minimum=MIN_PREVIEW_FONT_SIZE,
             maximum=MAX_PREVIEW_FONT_SIZE,
-            tooltip="Preview font size (Shift+scroll, or trackpad pinch)",
+            tooltip="Preview font size (Shift+scroll, trackpad pinch, or scale slider)",
         )
         self._font_spin.valueChanged.connect(self._on_font_spin)
-        layout.addWidget(self._font_spin)
+        self._font_cluster = ScaleSpinCluster(self._font_spin, self)
+        layout.addWidget(self._font_cluster)
 
         self._actions_btn = _make_preview_actions_button(
             tooltip="Preview actions",
@@ -250,7 +532,7 @@ class PreviewZoomBar(QWidget):
         self._actions_menu.addAction(self._edit_text_action)
         self._actions_menu.addAction(self._save_text_action)
         self._default_tab_sep = self._actions_menu.addSeparator()
-        _add_default_fasta_tab_menu(self._actions_menu)
+        self._default_tab_action = _add_default_fasta_tab_menu(self._actions_menu)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
 
@@ -264,26 +546,26 @@ class PreviewZoomBar(QWidget):
         self._block = False
         self.set_text_actions_enabled(can_edit=False, can_save=False)
         self.set_chrome_mode("text")
+        self.set_default_preview_tab_visible(False)
 
     def set_chrome_mode(self, mode: str) -> None:
         """Configure title-bar chrome for the active preview kind.
 
-        ``text`` — font-size (pt) spin + Reset / Edit text / Save text + default tab.
-        ``media`` — % spin + Reset scale + default tab (HTML / PDF / image).
-        ``dotplot`` — Actions only (default FASTA tab); no size controls.
+        ``text`` — font-size (pt) spin + Reset / Edit text / Save text.
+        ``media`` — % spin + Reset scale (HTML / PDF / image).
+        ``dotplot`` — Actions only; no size controls.
         """
         self._chrome_mode = mode
         show_percent = mode == "media"
         show_font = mode == "text"
         show_reset = mode in {"text", "media"}
         show_text_tools = mode == "text"
-        self._spin.setVisible(show_percent)
-        self._font_spin.setVisible(show_font)
+        self._spin_cluster.setVisible(show_percent)
+        self._font_cluster.setVisible(show_font)
         self._reset_scale_action.setVisible(show_reset)
         self._text_actions_sep.setVisible(show_text_tools)
         self._edit_text_action.setVisible(show_text_tools)
         self._save_text_action.setVisible(show_text_tools)
-        self._default_tab_sep.setVisible(show_reset)
         if mode == "text":
             self._reset_scale_action.setText("Reset font size")
             self._reset_scale_action.setToolTip(
@@ -292,6 +574,12 @@ class PreviewZoomBar(QWidget):
         else:
             self._reset_scale_action.setText("Reset scale")
             self._reset_scale_action.setToolTip("Restore default preview zoom (100%)")
+
+    def set_default_preview_tab_visible(self, visible: bool) -> None:
+        """Show Default preview tab only for FASTA files (not plain text/PDF/PNG/HTML)."""
+        show = bool(visible)
+        self._default_tab_action.setVisible(show)
+        self._default_tab_sep.setVisible(show)
 
     def set_zoom_kind(self, kind: PreviewZoomKind | str) -> None:
         """Load the saved font size (text) or zoom % (media) for this kind."""
@@ -369,6 +657,8 @@ class PreviewZoomBar(QWidget):
             return
         save_preview_zoom_percent(value, self._zoom_kind)
         self.zoom_changed.emit(value)
+        # Do not clearFocus here — that stops keyboard ↑/↓ auto-repeat.
+        # Stepper mouse clicks clear focus in NoWheelSpinBox.
 
     def _on_font_spin(self, value: int) -> None:
         if self._block:
@@ -399,10 +689,18 @@ class PreviewZoomBar(QWidget):
 
 
 class AnnotationZoomBar(QWidget):
-    """Annotation title-bar Actions (default FASTA view); zoom lives on the map toolbar."""
+    """Controls beside Text/Annotation tabs.
+
+    Single-sequence Annotation: Actions menu (zoom lives on the map toolbar).
+    Multi-sequence overview: −/+/slider, Fit, Extract, and name filter.
+    """
 
     fit_mode_changed = Signal(str)
     reset_requested = Signal()
+    fit_requested = Signal()
+    extract_requested = Signal()
+    filter_text_changed = Signal(str)
+    filter_return_pressed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -423,20 +721,120 @@ class AnnotationZoomBar(QWidget):
         self._spin.hide()
         self._spin.valueChanged.connect(self._on_spin)
 
+        self._overview_host = QWidget(self)
+        self._overview_host.setObjectName("AnnotationOverviewControls")
+        ov = QHBoxLayout(self._overview_host)
+        ov.setContentsMargins(0, 0, 0, 0)
+        ov.setSpacing(6)
+
+        zoom_out = QToolButton(self._overview_host)
+        zoom_out.setText("−")
+        zoom_out.setToolTip("Zoom out (Shift+scroll)")
+        zoom_out.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        zoom_out.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        zoom_out.clicked.connect(lambda: self._nudge_zoom_slider(-8))
+        zoom_in = QToolButton(self._overview_host)
+        zoom_in.setText("+")
+        zoom_in.setToolTip("Zoom in (Shift+scroll)")
+        zoom_in.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        zoom_in.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        zoom_in.clicked.connect(lambda: self._nudge_zoom_slider(8))
+
+        self._zoom_slider = QSlider(Qt.Orientation.Horizontal, self._overview_host)
+        self._zoom_slider.setObjectName("annotationZoomSlider")
+        self._zoom_slider.setRange(0, 100)
+        self._zoom_slider.setValue(0)
+        self._zoom_slider.setFixedWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
+        self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
+        self._zoom_slider.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._zoom_slider.setToolTip(
+            "Left: fit longest sequence in window. Right: maximum zoom-in."
+        )
+        apply_annotation_zoom_slider_style(self._zoom_slider)
+
+        fit_btn = QPushButton("Fit", self._overview_host)
+        fit_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        fit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        fit_btn.setToolTip(
+            "Fit the longest sequence to the visible width · "
+            "Drag on tracks to zoom a region"
+        )
+        fit_btn.clicked.connect(self.fit_requested.emit)
+
+        extract_btn = QPushButton("Extract", self._overview_host)
+        extract_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        extract_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        extract_btn.setToolTip(
+            "Extract selected sequences (click / Shift / ⌘, or drag on names)"
+        )
+        extract_btn.clicked.connect(self.extract_requested.emit)
+
+        self._name_filter = QLineEdit(self._overview_host)
+        self._name_filter.setObjectName("FileFilter")
+        self._name_filter.setPlaceholderText("Filter by name…")
+        self._name_filter.setClearButtonEnabled(True)
+        self._name_filter.setFrame(False)
+        self._name_filter.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        self._name_filter.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._name_filter.setMaximumHeight(ZOOM_CONTROL_HEIGHT)
+        self._name_filter.setMinimumWidth(140)
+        self._name_filter.setMaximumWidth(280)
+        self._name_filter.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._name_filter.setToolTip(
+            "Type part of a sequence name to jump to it. "
+            "Press Enter for the next match."
+        )
+        self._name_filter.textChanged.connect(self.filter_text_changed.emit)
+        self._name_filter.returnPressed.connect(self.filter_return_pressed.emit)
+
+        for w in (
+            zoom_out,
+            zoom_in,
+            self._zoom_slider,
+            fit_btn,
+            extract_btn,
+            self._name_filter,
+        ):
+            ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._overview_host)
+
         self._actions_btn = _make_preview_actions_button(
             tooltip="Annotation actions",
         )
         self._actions_menu = QMenu(self._actions_btn)
-        _add_default_fasta_tab_menu(self._actions_menu)
+        self._default_tab_action = _add_default_fasta_tab_menu(self._actions_menu)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
 
         self._block = False
+        self._overview_mode = False
+        self.set_overview_mode(False)
+
+    def set_overview_mode(self, enabled: bool) -> None:
+        """Show multi-seq overview controls, or the single-seq Actions menu."""
+        self._overview_mode = bool(enabled)
+        self._overview_host.setVisible(self._overview_mode)
+        self._actions_btn.setVisible(not self._overview_mode)
+
+    def is_overview_mode(self) -> bool:
+        return self._overview_mode
 
     @property
     def slider(self) -> QSpinBox:
         """Zoom percent control (name kept for sequence-map binding)."""
         return self._spin
+
+    @property
+    def zoom_slider(self) -> QSlider:
+        """Horizontal zoom slider used by the multi-sequence overview."""
+        return self._zoom_slider
+
+    @property
+    def name_filter(self) -> QLineEdit:
+        return self._name_filter
 
     def sync_display(self, value: int) -> None:
         """Update percent spin without emitting map zoom."""
@@ -447,7 +845,13 @@ class AnnotationZoomBar(QWidget):
         self._block = False
 
     def refresh_slider_style(self) -> None:
-        """Kept for theme-reload callers; spinbox uses the global stylesheet."""
+        """Re-apply accent colors after a theme change."""
+        apply_annotation_zoom_slider_style(self._zoom_slider)
+
+    def _nudge_zoom_slider(self, delta: int) -> None:
+        self._zoom_slider.setValue(
+            max(0, min(100, self._zoom_slider.value() + int(delta)))
+        )
 
     def _on_spin(self, _value: int) -> None:
         if self._block:
@@ -455,26 +859,118 @@ class AnnotationZoomBar(QWidget):
 
 
 class PreviewWheelZoomFilter(QObject):
-    """Shift+scroll (or trackpad pinch) zooms; plain two-finger scroll navigates."""
+    """Shift+scroll / pinch / Shift+drag zooms; plain two-finger scroll navigates.
+
+    Watches only an explicit whitelist of text/PDF/image widgets. Never installs
+    on QApplication or WebEngine — app-level filters segfault on macOS when an
+    HTML preview starts Chromium.
+    """
+
+    # Pixels of vertical Shift+drag per one zoom step (percent or pt).
+    _DRAG_PIXELS_PER_STEP = 28.0
+    # Trackpad pinch magnification accumulated per zoom step.
+    _PINCH_DELTA_PER_STEP = 0.04
+    _INTERESTING = (
+        QEvent.Type.Wheel,
+        QEvent.Type.MouseButtonPress,
+        QEvent.Type.MouseMove,
+        QEvent.Type.MouseButtonRelease,
+        QEvent.Type.NativeGesture,
+    )
 
     def __init__(self, tabs: QWidget, zoom_bar: PreviewZoomBar) -> None:
-        super().__init__(tabs)
-        self._tabs = tabs
+        # Parent the filter to the zoom bar so its lifetime matches the title-bar
+        # controls (not the tab widget, which can be destroyed first).
+        super().__init__(zoom_bar)
+        self._tabs: QWidget | None = tabs
         self._zoom_bar = zoom_bar
+        self._enabled = True
         self._watched: set[int] = set()
         self._zoom_accum = 0
+        self._pinch_accum = 0.0
+        self._drag_origin: QPointF | None = None
+        self._drag_accum = 0.0
+        tabs.destroyed.connect(self._disable)
+        zoom_bar.destroyed.connect(self._disable)
+        self._watch(zoom_bar)
 
     def register_page(self, page: QWidget) -> None:
-        self._watch_widget(page)
+        """Attach to safe preview surfaces for this page (never HTML/WebEngine)."""
+        if not self._alive() or not isinstance(page, QWidget):
+            return
+        # Explicit safe targets only — do not walk findChildren / ChildAdded.
+        targets: list[QWidget] = [page]
+        for attr in (
+            "_text",
+            "_fasta_text",
+            "_text_scroll",
+            "_fasta_text_scroll",
+            "_placeholder",
+        ):
+            widget = getattr(page, attr, None)
+            if isinstance(widget, QWidget):
+                targets.append(widget)
+                self._append_viewport(targets, widget)
+        # Image/PDF panels wrap a QScrollArea — watch that viewport/label so
+        # Shift+scroll/drag reaches us instead of panning the scroll area alone.
+        for panel_attr in ("_pdf", "_image"):
+            panel = getattr(page, panel_attr, None)
+            if not isinstance(panel, QWidget):
+                continue
+            targets.append(panel)
+            scroll = getattr(panel, "_scroll", None)
+            if isinstance(scroll, QWidget):
+                targets.append(scroll)
+                self._append_viewport(targets, scroll)
+            for nested_attr in ("_label", "_content"):
+                nested = getattr(panel, nested_attr, None)
+                if isinstance(nested, QWidget):
+                    targets.append(nested)
+        for widget in targets:
+            self._watch(widget)
 
-    def _watch_widget(self, widget: QWidget) -> None:
+    @staticmethod
+    def _append_viewport(targets: list[QWidget], widget: QWidget) -> None:
+        viewport = getattr(widget, "viewport", None)
+        if not callable(viewport):
+            return
+        try:
+            vp = viewport()
+        except RuntimeError:
+            return
+        if isinstance(vp, QWidget):
+            targets.append(vp)
+
+    def _disable(self, *_args) -> None:
+        if not self._enabled:
+            return
+        self._enabled = False
+        self._tabs = None
+
+    def _alive(self) -> bool:
+        if not self._enabled or self._tabs is None:
+            return False
+        try:
+            from shiboken6 import isValid
+
+            return bool(isValid(self) and isValid(self._tabs) and isValid(self._zoom_bar))
+        except Exception:
+            return False
+
+    def _watch(self, widget: QWidget) -> None:
+        if not self._alive() or not isinstance(widget, QWidget):
+            return
+        name = type(widget).__name__
+        if "WebEngine" in name or "RenderWidget" in name or "Html" in name:
+            return
         key = id(widget)
         if key in self._watched:
             return
         self._watched.add(key)
-        widget.installEventFilter(self)
-        for child in widget.findChildren(QWidget):
-            self._watch_widget(child)
+        try:
+            widget.installEventFilter(self)
+        except RuntimeError:
+            self._watched.discard(key)
 
     @staticmethod
     def _is_descendant_of(widget: QWidget, ancestor: QWidget | None) -> bool:
@@ -488,72 +984,214 @@ class PreviewWheelZoomFilter(QObject):
         return False
 
     def _current_page(self):
+        if not self._alive():
+            return None
         from repeatviewer.widgets.preview_tabs import FilePreviewPage, PreviewTabWidget
 
-        if not isinstance(self._tabs, PreviewTabWidget):
+        tabs = self._tabs
+        try:
+            if not isinstance(tabs, PreviewTabWidget):
+                return None
+            widget = tabs.currentWidget()
+        except RuntimeError:
+            self._disable()
             return None
-        widget = self._tabs.currentWidget()
         return widget if isinstance(widget, FilePreviewPage) else None
 
-    def _can_zoom(self, page, obj: QWidget, wheel: QWheelEvent) -> bool:
-        # Text / HTML / PDF / image all share the title-bar size control.
-        if not self._zoom_bar.isVisible() or not self._zoom_bar._size_control_active():
-            return False
-        if page.is_annotation_preview_active() or page.is_dotplot_preview_active():
-            return False
-        if isinstance(obj, QSpinBox) or self._is_descendant_of(obj, page._sequence_info_bar):
-            return False
-        # macOS often strips Shift from the wheel event after remapping a
-        # vertical trackpad drag to horizontal — also read the live keyboard.
-        mods = wheel.modifiers() | QGuiApplication.keyboardModifiers()
-        # Shift+scroll zooms. Trackpad pinch often arrives as Ctrl/Cmd+wheel.
+    def _zoom_modifiers_held(self, event) -> bool:
+        mods = event.modifiers() | QGuiApplication.keyboardModifiers()
         if mods & Qt.KeyboardModifier.ShiftModifier:
             return True
         if mods & (
             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
         ):
             return True
-        # Plain two-finger scroll → leave for navigation (up/down).
         return False
 
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
-        # Catch widgets created after the page was first registered (e.g. web view).
-        if event.type() == QEvent.Type.ChildAdded:
-            child = event.child() if hasattr(event, "child") else None
-            if isinstance(child, QWidget):
-                self._watch_widget(child)
+    def _page_uses_own_zoom(self, page) -> bool:
+        try:
+            if page.is_annotation_preview_active() or page.is_dotplot_preview_active():
+                return True
+            if page.is_html_preview_active():
+                return True
+        except RuntimeError:
+            return True
+        return False
+
+    def _can_zoom(self, page, obj: QWidget, event) -> bool:
+        if not self._alive():
             return False
-        if event.type() != QEvent.Type.Wheel:
+        try:
+            if not self._zoom_bar.isVisible() or not self._zoom_bar._size_control_active():
+                return False
+            if self._page_uses_own_zoom(page):
+                return False
+        except RuntimeError:
             return False
-        wheel = event
-        if not isinstance(wheel, QWheelEvent):
+        if isinstance(obj, QSpinBox) and not self._is_descendant_of(
+            obj, self._zoom_bar
+        ):
             return False
-        page = self._current_page()
-        if page is None:
-            self._zoom_accum = 0
+        try:
+            if self._is_descendant_of(obj, page._sequence_info_bar):
+                return False
+            # Never hijack events under the HTML/WebEngine stack entry.
+            html = getattr(page, "_html", None)
+            if isinstance(html, QWidget) and self._is_descendant_of(obj, html):
+                return False
+        except RuntimeError:
             return False
-        obj = watched if isinstance(watched, QWidget) else None
-        if obj is None or not self._can_zoom(page, obj, wheel):
-            self._zoom_accum = 0
+        return self._zoom_modifiers_held(event)
+
+    def _can_pinch_zoom(self, page, obj: QWidget | None) -> bool:
+        """Pinch does not need Shift; still skip Annotation / HTML / foreign widgets."""
+        if not self._alive() or obj is None:
             return False
-        delta = wheel_zoom_delta_from_event(wheel)
-        if delta != 0:
-            # Accumulate so the same trackpad drag is slower than one-step-per-tick,
-            # but still reaches a step within a short Shift+drag gesture.
-            self._zoom_accum += delta
-            threshold = PREVIEW_WHEEL_DELTA_PER_STEP
-            steps = int(self._zoom_accum / threshold)
-            if steps != 0:
-                self._zoom_accum -= steps * threshold
+        try:
+            if not self._zoom_bar.isVisible() or not self._zoom_bar._size_control_active():
+                return False
+            if self._page_uses_own_zoom(page):
+                return False
+        except RuntimeError:
+            return False
+        try:
+            if self._is_descendant_of(obj, page._sequence_info_bar):
+                return False
+            html = getattr(page, "_html", None)
+            if isinstance(html, QWidget) and self._is_descendant_of(obj, html):
+                return False
+        except RuntimeError:
+            return False
+        return True
+
+    def _apply_zoom_delta(self, delta: int) -> None:
+        if delta == 0 or not self._alive():
+            return
+        self._zoom_accum += delta
+        threshold = PREVIEW_WHEEL_DELTA_PER_STEP
+        steps = int(self._zoom_accum / threshold)
+        if steps != 0:
+            self._zoom_accum -= steps * threshold
+            try:
                 self._zoom_bar.step_zoom(steps)
-        # Always consume while Shift/pinch-zooming so the view does not pan
-        # horizontally (macOS Shift+scroll remap) instead of zooming.
-        wheel.accept()
+            except RuntimeError:
+                pass
+
+    def _apply_pinch_delta(self, magnification: float) -> None:
+        if magnification == 0.0 or not self._alive():
+            return
+        self._pinch_accum += float(magnification)
+        steps = int(self._pinch_accum / self._PINCH_DELTA_PER_STEP)
+        if steps != 0:
+            self._pinch_accum -= steps * self._PINCH_DELTA_PER_STEP
+            try:
+                self._zoom_bar.step_zoom(steps)
+            except RuntimeError:
+                pass
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt API)
+        try:
+            if event.type() not in self._INTERESTING:
+                return False
+        except RuntimeError:
+            return False
+        if not self._alive():
+            return False
+        try:
+            return self._event_filter_impl(watched, event)
+        except RuntimeError:
+            return False
+
+    def _event_filter_impl(self, watched, event) -> bool:
+        page = self._current_page()
+        obj = watched if isinstance(watched, QWidget) else None
+
+        if event.type() == QEvent.Type.NativeGesture and isinstance(
+            event, QNativeGestureEvent
+        ):
+            if page is None or obj is None:
+                return False
+            if event.gestureType() != Qt.NativeGestureType.ZoomNativeGesture:
+                return False
+            if not self._can_pinch_zoom(page, obj):
+                return False
+            # value() is the magnification delta (positive = zoom in).
+            self._apply_pinch_delta(float(event.value()))
+            event.accept()
+            return True
+
+        if isinstance(event, QMouseEvent):
+            if page is None or obj is None:
+                self._drag_origin = None
+                self._drag_accum = 0.0
+                return False
+            if self._page_uses_own_zoom(page):
+                return False
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if (
+                    event.button() == Qt.MouseButton.LeftButton
+                    and self._can_zoom(page, obj, event)
+                ):
+                    self._drag_origin = QPointF(event.globalPosition())
+                    self._drag_accum = 0.0
+                    # Consume press so QScrollArea does not start a pan/drag.
+                    event.accept()
+                    return True
+                self._drag_origin = None
+                self._drag_accum = 0.0
+                return False
+            if event.type() == QEvent.Type.MouseMove:
+                if (
+                    self._drag_origin is not None
+                    and event.buttons() & Qt.MouseButton.LeftButton
+                ):
+                    # Keep zooming for the active drag even if Shift flickers;
+                    # never let the scroll area pan during a zoom drag.
+                    pos = QPointF(event.globalPosition())
+                    dy = self._drag_origin.y() - pos.y()
+                    self._drag_accum += dy
+                    self._drag_origin = pos
+                    steps = int(self._drag_accum / self._DRAG_PIXELS_PER_STEP)
+                    if steps != 0:
+                        self._drag_accum -= steps * self._DRAG_PIXELS_PER_STEP
+                        self._zoom_bar.step_zoom(steps)
+                    event.accept()
+                    return True
+                return False
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                if self._drag_origin is not None:
+                    self._drag_origin = None
+                    self._drag_accum = 0.0
+                    event.accept()
+                    return True
+                self._drag_origin = None
+                self._drag_accum = 0.0
+                return False
+
+        if event.type() != QEvent.Type.Wheel or not isinstance(event, QWheelEvent):
+            return False
+        if page is None or obj is None:
+            self._zoom_accum = 0
+            return False
+        if self._page_uses_own_zoom(page):
+            self._zoom_accum = 0
+            return False
+        if not self._can_zoom(page, obj, event):
+            self._zoom_accum = 0
+            return False
+        delta = wheel_zoom_delta_from_event(event)
+        self._apply_zoom_delta(delta)
+        # Consume fully — on macOS Shift+wheel is also horizontal scroll.
+        event.accept()
         return True
 
 
 FASTA_TAB_STRIP_HEIGHT = 22
 PREVIEW_HEADER_HEIGHT = 24
+# Tabs row stays FASTA_TAB_STRIP_HEIGHT; controls sit under the divider.
+PREVIEW_HEADER_WITH_CONTROLS_HEIGHT = (
+    FASTA_TAB_STRIP_HEIGHT + 1 + ZOOM_BAR_HEIGHT + 4
+)  # tabs + divider + padded controls
 
 
 class FastaTabStrip(QWidget):
@@ -604,9 +1242,19 @@ class FastaTabStrip(QWidget):
         if 0 <= index < len(self._buttons):
             self._buttons[index].setVisible(bool(visible))
 
+    def set_tab_label(self, index: int, label: str) -> None:
+        if not (0 <= index < len(self._buttons)):
+            return
+        btn = self._buttons[index]
+        btn.setText(label)
+        selected_font = btn.font()
+        selected_font.setWeight(QFont.Weight.DemiBold)
+        text_width = QFontMetrics(selected_font).horizontalAdvance(label)
+        btn.setMinimumWidth(text_width + 24)
+
 
 class PreviewHeaderBar(QWidget):
-    """FASTA Text/Annotation switcher. Zoom controls live on the Preview dock title."""
+    """FASTA Text / Annotation (or Overview) tabs; controls sit below the divider."""
 
     fasta_tab_changed = Signal(int)
 
@@ -626,41 +1274,64 @@ class PreviewHeaderBar(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        row = QHBoxLayout()
-        row.setContentsMargins(6, 0, 6, 0)
-        row.setSpacing(4)
+        # Tab row keeps the original compact height (never grows with controls).
+        tabs_host = QWidget(self)
+        tabs_host.setFixedHeight(FASTA_TAB_STRIP_HEIGHT)
+        tabs_row = QHBoxLayout(tabs_host)
+        tabs_row.setContentsMargins(6, 0, 6, 0)
+        tabs_row.setSpacing(4)
 
-        self._fasta_tabs = FastaTabStrip(self)
+        self._fasta_tabs = FastaTabStrip(tabs_host)
         self._fasta_tabs.hide()
         self._fasta_tabs.tab_changed.connect(self.fasta_tab_changed.emit)
-        row.addWidget(self._fasta_tabs)
-        row.addStretch(1)
-
-        # Zoom bars are mounted on the Preview dock title bar (same row as
-        # "Preview"); keep refs so set_header_zoom_mode() can show/hide them.
-        self._preview_zoom_bar = preview_zoom_bar
-        self._annotation_zoom_bar = annotation_zoom_bar
-
-        outer.addLayout(row)
+        tabs_row.addWidget(self._fasta_tabs)
+        tabs_row.addStretch(1)
+        outer.addWidget(tabs_host)
 
         divider = QFrame(self)
         divider.setObjectName("PreviewHeaderDivider")
         divider.setFrameShape(QFrame.Shape.HLine)
         divider.setFixedHeight(1)
         outer.addWidget(divider)
+
+        # −/+/Fit/Extract/filter sit under the line; same control styles as before.
+        self._preview_zoom_bar = preview_zoom_bar
+        self._annotation_zoom_bar = annotation_zoom_bar
+        self._controls_host = QWidget(self)
+        self._controls_host.setObjectName("PreviewHeaderControls")
+        self._controls_host.setFixedHeight(ZOOM_BAR_HEIGHT + 4)
+        controls_row = QHBoxLayout(self._controls_host)
+        controls_row.setContentsMargins(6, 2, 6, 2)
+        controls_row.setSpacing(4)
+        controls_row.addStretch(1)
+        if annotation_zoom_bar is not None:
+            controls_row.addWidget(annotation_zoom_bar, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._controls_host.hide()
+        outer.addWidget(self._controls_host)
+
         self.hide()
 
+    def _update_header_height(self) -> None:
+        if self._controls_host.isVisible():
+            self.setFixedHeight(PREVIEW_HEADER_WITH_CONTROLS_HEIGHT)
+        else:
+            self.setFixedHeight(PREVIEW_HEADER_HEIGHT)
+
     def _update_bar_visibility(self) -> None:
-        # Header only shows for Text/Annotation tabs; zoom lives on the title bar.
+        # Header only shows for Text/Annotation tabs; text zoom lives on the title bar.
         self.setVisible(not self._fasta_tabs.isHidden())
+        self._update_header_height()
 
     def set_header_zoom_mode(self, mode: str) -> None:
-        """Show preview zoom, annotation zoom, or hide both (on the dock title)."""
+        """Show preview zoom, annotation/overview controls, or hide both."""
         show_preview = mode == "preview"
         show_annotation = mode == "annotation"
         self._preview_zoom_bar.setVisible(show_preview)
         if self._annotation_zoom_bar is not None:
             self._annotation_zoom_bar.setVisible(show_annotation)
+        self._controls_host.setVisible(
+            show_annotation and self._annotation_zoom_bar is not None
+        )
         self._update_bar_visibility()
 
     def set_fasta_tabs_visible(self, visible: bool) -> None:
@@ -672,6 +1343,9 @@ class PreviewHeaderBar(QWidget):
 
     def set_fasta_tab_visible(self, index: int, visible: bool) -> None:
         self._fasta_tabs.set_tab_visible(index, visible)
+
+    def set_fasta_tab_label(self, index: int, label: str) -> None:
+        self._fasta_tabs.set_tab_label(index, label)
 
     def current_fasta_tab(self) -> int:
         return self._fasta_tabs.current_index()

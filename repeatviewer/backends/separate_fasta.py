@@ -36,17 +36,23 @@ def count_fasta_sequences(path: Path) -> int:
     return sum(1 for _ in SeqIO.parse(str(path), "fasta"))
 
 
+def default_separation_folder_name(input_file: Path) -> str:
+    """Default output folder name: ``{input_file.name}_sep`` (sanitized)."""
+    input_file = input_file.expanduser().resolve()
+    return f"{sanitize_name(input_file.name)}_sep"
+
+
 def separation_output_dir(input_file: Path) -> Path:
     """
-    Choose an output folder for a multi-FASTA split.
+    Choose an unused output folder for a multi-FASTA split.
 
     Naming rule:
-    - Always based on the full input file name, e.g. ``myfile.fa_sep``.
+    - Default base: ``myfile.fa_sep``.
     - If the folder already exists, append ``_2``, ``_3``, ... to avoid conflicts.
     """
     input_file = input_file.expanduser().resolve()
     parent = input_file.parent
-    base = f"{sanitize_name(input_file.name)}_sep"
+    base = default_separation_folder_name(input_file)
 
     candidate = parent / base
     if not candidate.exists():

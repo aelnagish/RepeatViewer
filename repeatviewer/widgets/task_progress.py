@@ -56,20 +56,30 @@ class TaskProgressPanel(QWidget):
 
     def start(self, job_title: str, total: int) -> None:
         self._job_title = job_title
-        self._total = max(1, total)
-        show_bar = self._total > 1
-        self._bar.setVisible(show_bar)
-        if show_bar:
-            self._bar.setMaximum(self._total)
+        self._total = max(0, int(total))
+        self._bar.setVisible(True)
+        if self._total <= 0:
+            # Indeterminate busy bar (opening a large file, unknown steps).
+            self._bar.setRange(0, 0)
+            self._bar.setFormat("")
+        else:
+            self._bar.setRange(0, self._total)
             self._bar.setValue(0)
-            self._bar.setFormat(f"0 / {self._total}")
+            if self._total > 1:
+                self._bar.setFormat(f"0 / {self._total}")
+            else:
+                self._bar.setFormat("")
         self._set_running_label("")
         self.show()
 
     def update(self, completed: int, current_file: str = "") -> None:
+        if self._total <= 0:
+            # Busy mode — keep the bar spinning; only refresh the label.
+            self._set_running_label(current_file)
+            return
         completed = max(0, min(completed, self._total))
+        self._bar.setValue(completed)
         if self._total > 1:
-            self._bar.setValue(completed)
             remaining = self._total - completed
             self._bar.setFormat(f"{completed} done, {remaining} left")
         self._set_running_label(current_file)

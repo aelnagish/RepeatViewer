@@ -16,7 +16,7 @@ from typing import Callable, Iterable
 import plotly.io as pio
 from Bio import SeqIO
 
-from repeatviewer.backends.blast_gff import write_blast_gff
+from repeatviewer.backends.blast_gff import blast_gff_output_path, write_blast_gff
 from repeatviewer.tool_output_paths import write_genome_reference_link
 from repeatviewer.backends.flexidot_gff import (
     persistent_flexidot_color_config_path,
@@ -118,9 +118,9 @@ def cleanup_teaid_side_files(
     """
     Remove intermediate TE-Aid files for one input only.
 
-    Keeps the input FASTA and this run's HTML report. Safe when several TE-Aid
-    jobs run in parallel in the same folder (does not delete other sequences'
-    HTML reports or their source files).
+    Keeps the input FASTA, this run's HTML report, and Blast-tool sidecars
+    (``*_b.txt``, ``*_b.gff``, ``*_b.txt.fa``, etc.). Safe when several TE-Aid
+    jobs run in parallel in the same folder.
     """
     output_dir = output_dir.expanduser().resolve()
     input_file = input_file.expanduser().resolve()
@@ -146,10 +146,9 @@ def cleanup_teaid_side_files(
             continue
         if not (entry.is_file() or entry.is_symlink()):
             continue
+        # Consensus intermediates from this TE-Aid run only — never wipe Blast
+        # outputs that share the query name prefix ({input}_b.txt / .gff / .txt.fa).
         if name.startswith(consensus_prefix):
-            to_remove.append(resolved)
-            continue
-        if name.startswith(input_name) and name != input_name:
             to_remove.append(resolved)
 
     for path in sorted(to_remove, key=lambda p: len(p.parts), reverse=True):
@@ -684,6 +683,8 @@ def run_on_sequence(
             if p_write_gff:
                 gff_path = write_blast_gff(blast_txt_path, protein_coordinates=True)
                 created.append(str(gff_path.resolve()))
+            else:
+                blast_gff_output_path(blast_txt_path).unlink(missing_ok=True)
             if p_write_text:
                 created.append(str(blast_txt_path))
             else:
@@ -705,7 +706,7 @@ def run_on_sequence(
             str(blast_bed_filtered),
             blast_fa,
         )
-        # Expose both Blast outputs so the UI highlights all newly generated files.
+        # Expose selected Blast exports so the UI can highlight them in green.
         if blast_txt:
             blast_txt_path = Path(str(blast_txt)).resolve()
             if blast_opts.write_gff:
@@ -714,11 +715,14 @@ def run_on_sequence(
                     minimum_bit_score=blast_opts.minimum_bit_score,
                 )
                 created.append(str(gff_path.resolve()))
-            # Always keep the hit table on disk: TE density / divergence look it up
-            # by ``*_b.txt`` next to the query. Only skip UI highlighting when the
-            # user turned off "Export BLAST text file".
+            else:
+                blast_gff_output_path(blast_txt_path).unlink(missing_ok=True)
+            # Density / genome-map jobs force write_text=True when they need
+            # the hit table; honor the Export checkbox for ordinary Blast.
             if blast_opts.write_text:
                 created.append(str(blast_txt_path))
+            else:
+                blast_txt_path.unlink(missing_ok=True)
         # Remove temporary BED intermediates.
         for tmp in (Path(str(blast_bed)), Path(str(blast_bed_filtered))):
             try:
@@ -1209,8 +1213,10 @@ def run_batch(
         label = f" ({genome_label})" if genome_label else ""
         with progress_lock:
             completed_count += 1
+            # Report completed count (not count-1) so a finished 1-file BLAST
+            # advances the bar to 1 before the reserved "open results" step.
             progress_cb(
-                completed_count - 1,
+                completed_count,
                 f"{display_name}: {seq_path.name}{label}",
             )
         if error:
@@ -1222,8 +1228,14 @@ def run_batch(
     if workers == 1:
         for seq_path, genome_label, genome_path in work_items:
             check_cancelled(cancel)
-            path, label, outs, error = _run_single(seq_path, genome_label, genome_path)
-            _record_finished(path, label, outs, error)
+            label = f" ({genome_label})" if genome_label else ""
+            # Show which file is running (multi-file); count stays at completed so far.
+            progress_cb(
+                completed_count,
+                f"{display_name}: {seq_path.name}{label}",
+            )
+            path, glabel, outs, error = _run_single(seq_path, genome_label, genome_path)
+            _record_finished(path, glabel, outs, error)
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [

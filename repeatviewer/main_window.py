@@ -314,7 +314,9 @@ from repeatviewer.backends.gff_features import (
 )
 from repeatviewer.backends.sequence_features import (
     companion_annotation_files_for_delete,
+    companion_annotation_paths_for_fasta,
     is_sequence_map_hidden_file,
+    sidecar_path,
 )
 from repeatviewer.plugins import get_registry, load_plugins
 from repeatviewer.plugins.custom_command import (
@@ -419,15 +421,14 @@ from repeatviewer.views.tool_dialogs import (
 from repeatviewer.views.plugin_manage_dialog import InstalledPluginManageDialog
 from repeatviewer.backends.separate_fasta import (
     count_fasta_sequences,
+    default_separation_folder_name,
     sanitize_name,
     separate_sequences,
-    separation_output_dir,
 )
 from repeatviewer.views.genome_dialog import GenomeDialog, is_genome_fasta
 from repeatviewer.views.create_folder_dialog import (
     DEFAULT_FOLDER_NAME,
     CreateFolderDialog,
-    common_prefix_name,
 )
 from repeatviewer.views.define_database_dialog import DefineDatabaseDialog, resolve_panel_database_path
 from repeatviewer.views.settings_dialog import (
@@ -523,9 +524,9 @@ _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 # it streams rather than parsing into memory, so size is not a reason to refuse.
 _EXTRACT_SOURCE_SUFFIXES = _FASTA_SUFFIXES | {".fna", ".ffn"}
 _GZIP_SUFFIXES = {".gz", ".bgz"}
-# Above this, the tick-box list is not built -- listing a read set record by
-# record is what makes the old dialog unusable on anything large.
-_EXTRACT_PICK_LIST_MAX_BYTES = 20_000_000
+# Tick-box list is fine for genomes (dozens of chroms); skip only for huge
+# read sets where building thousands of QListWidget items is unusable.
+_EXTRACT_PICK_LIST_MAX_RECORDS = 10_000
 # Confirm before scattering this many single-sequence files into a folder.
 _EXTRACT_MANY_FILES_WARNING = 200
 # sseqid in a RepeatViewer BLAST table: the genome sequence that was hit.
@@ -560,7 +561,7 @@ _TOOLBAR_TOOLTIPS = {
     "msa_clean": "Trim or clean MSA using default parameters",
     "flexidot": "Dotplot comparison of selected sequences using default parameters",
     "consensus": "Click: set consensus parameters and run. Right-click: run with saved settings.",
-    "te_annotation": "Run sequence annotation on selected single-sequence FASTA files",
+    "te_annotation": "Run sequence annotation on selected FASTA files (single- or multi-sequence)",
 }
 
 _JOB_DISPLAY_TITLES = {
@@ -1106,6 +1107,8 @@ class ExtractSequencesWorker(QObject):
         count_only: bool = False,
         single_file: bool = True,
         exclude: bool = False,
+        output_path: Path | None = None,
+        output_paths_by_id: dict[str, Path] | None = None,
         cancel=None,
     ):
         super().__init__()
@@ -1115,6 +1118,13 @@ class ExtractSequencesWorker(QObject):
         self._count_only = count_only
         self._single_file = single_file
         self._exclude = exclude
+        self._output_path = (
+            Path(output_path).expanduser().resolve() if output_path is not None else None
+        )
+        self._output_paths_by_id = {
+            str(k): Path(v).expanduser().resolve()
+            for k, v in (output_paths_by_id or {}).items()
+        }
         self._cancel = cancel
 
     def _emit_progress(self, done: int, total: int) -> None:
@@ -1149,6 +1159,8 @@ class ExtractSequencesWorker(QObject):
                     self._out_dir,
                     single_file=self._single_file,
                     exclude=self._exclude,
+                    output_path=self._output_path,
+                    output_paths_by_id=self._output_paths_by_id or None,
                     progress=self._emit_progress,
                     cancel=self._cancel,
                 )
@@ -1906,6 +1918,9 @@ class _PendingTeVizBuild:
 
 _METADATA_UI_CHUNK = 24
 _METADATA_STAT_CHUNK = 48
+# Above this, avoid sync metadata/stat and O(n) preview/is_file scans on the GUI thread.
+_LARGE_FILE_LIST = 400
+_LARGE_JOB_OUTPUT_BATCH = 200
 
 
 class _MetadataEnrichWorker(QObject):
@@ -2031,6 +2046,9 @@ class MainWindow(QMainWindow):
         self._metadata_ui_timer.setSingleShot(True)
         self._metadata_ui_timer.timeout.connect(self._drain_metadata_ui_queue)
         self._job_running = False
+        self._preview_open_progress = False
+        self._job_finished_callback = None
+        self._job_failed_callback = None
         self._last_job_source_files: list[Path] = []
         self._job_toolbar_actions: list[QAction | QToolButton] = []
         self._cached_folder_files: list[Path] = []
@@ -2045,6 +2063,8 @@ class MainWindow(QMainWindow):
         self._genome_dialog: GenomeDialog | None = None
         self._define_database_dialog: DefineDatabaseDialog | None = None
         self._add_annotation_dialog = None
+        self._create_folder_dialog: CreateFolderDialog | None = None
+        self._create_folder_copy_files: list[Path] = []
         self._blast_params_dialog = None
         self._add_blast_database_dialog = None
         self._command_plugin_dialog: CommandPluginDesignerDialog | None = None
@@ -2170,6 +2190,7 @@ class MainWindow(QMainWindow):
         )
         self._file_list.add_blast_database_requested.connect(self._add_fasta_as_blast_database)
         self._file_list.add_annotation_requested.connect(self._add_annotation_for_fasta)
+        self._file_list.export_annotation_requested.connect(self._export_annotation_for_fasta)
         self._file_list.attach_cyto_image_requested.connect(self._attach_cyto_images)
         self._file_list.cyto_images_requested.connect(self._open_cyto_images)
         from repeatviewer.widgets.cyto_images_ui import cyto_notifier
@@ -2411,17 +2432,21 @@ class MainWindow(QMainWindow):
 
         was_sorting = self._file_list.isSortingEnabled()
         self._file_list.setSortingEnabled(False)
-        for path in visible_paths:
-            row_item = self._file_list.add_file_row(
-                path,
-                fill_metadata_columns=False,
-            )
-            key = str(path.expanduser().resolve())
-            if key in self._highlight_output_keys:
-                self._style_new_output_item(row_item)
-            elif key in self._highlight_source_keys:
-                self._style_source_file_item(row_item)
-        self._file_list.setSortingEnabled(was_sorting)
+        self._file_list.setUpdatesEnabled(False)
+        try:
+            for path in visible_paths:
+                row_item = self._file_list.add_file_row(
+                    path,
+                    fill_metadata_columns=False,
+                )
+                key = str(path.expanduser().resolve())
+                if key in self._highlight_output_keys:
+                    self._style_new_output_item(row_item)
+                elif key in self._highlight_source_keys:
+                    self._style_source_file_item(row_item)
+        finally:
+            self._file_list.setUpdatesEnabled(True)
+            self._file_list.setSortingEnabled(was_sorting)
         self._file_list.apply_default_sort()
 
     def _restore_window_layout(self) -> None:
@@ -2656,24 +2681,147 @@ class MainWindow(QMainWindow):
 
     def _show_job_progress(self, job_title: str, total_steps: int) -> None:
         self._job_running = True
+        self._preview_open_progress = False
+        self._job_progress_epoch = getattr(self, "_job_progress_epoch", 0) + 1
         self._active_job_log_title = job_title
+        # Worker steps only; +1 reserved so the bar fills after results open.
+        self._job_work_steps = max(1, int(total_steps))
         operation_logger.info(
             "JOB START name=%s total_steps=%s",
             self._job_display_title(job_title),
-            total_steps,
+            self._job_work_steps,
         )
         self.statusBar().clearMessage()
         if self._task_progress is not None:
-            self._task_progress.start(self._running_job_title(job_title), total_steps)
+            self._task_progress.start(
+                self._running_job_title(job_title),
+                self._job_work_steps + 1,
+            )
         if self._stop_btn is not None:
             self._stop_btn.setEnabled(True)
 
     def _hide_job_progress(self) -> None:
         self._job_running = False
+        self._preview_open_progress = False
         if self._task_progress is not None:
             self._task_progress.reset()
         if self._stop_btn is not None and self._genome_map_thread is None and self._benchmark_thread is None:
             self._stop_btn.setEnabled(False)
+
+    def _finish_background_job(self) -> None:
+        """Worker thread done — keep progress visible until results are opened."""
+        self._set_job_actions_enabled(True)
+        if self._stop_btn is not None:
+            self._stop_btn.setEnabled(False)
+        self._job_open_epoch = getattr(self, "_job_progress_epoch", 0)
+        if self._task_progress is not None and self._job_running:
+            work = getattr(self, "_job_work_steps", 1)
+            self._task_progress.update(work, "Opening results…")
+
+    def _after_job_ui_ready(self) -> None:
+        """Fill the progress bar only after refresh/preview has painted."""
+        # A follow-on job (e.g. genome map after BLAST) may have taken the bar.
+        if getattr(self, "_job_open_epoch", None) != getattr(
+            self, "_job_progress_epoch", None
+        ):
+            return
+        if self._task_progress is not None and self._job_running:
+            total = max(1, int(self._task_progress._total))
+            self._task_progress.update(total, "Done")
+        self._hide_job_progress()
+        # Large folders skipped sync metadata during the finish refresh.
+        from repeatviewer.widgets.file_list_columns import metadata_columns_visible
+
+        if (
+            metadata_columns_visible()
+            and self._file_list is not None
+            and self._file_list.rowCount() > _LARGE_FILE_LIST
+            and not self._any_background_job_running()
+        ):
+            QTimer.singleShot(0, self._fill_visible_file_metadata)
+
+    def _schedule_after_job_ui_ready(self) -> None:
+        """Defer fill/hide so preview paint is not interrupted by processEvents."""
+        QTimer.singleShot(0, self._after_job_ui_ready)
+
+    @Slot(dict)
+    @Slot(list)
+    @Slot(object)
+    def _on_background_job_finished(self, result: object = None) -> None:
+        """GUI-thread slot: never connect bare lambdas to worker.finished."""
+        title = getattr(self, "_active_job_log_title", "job")
+        self._log_job_finished(title, result)
+        self._finish_background_job()
+        callback = self._job_finished_callback
+        self._job_finished_callback = None
+        try:
+            if callback is not None:
+                callback(result)
+        finally:
+            self._schedule_after_job_ui_ready()
+
+    @Slot(str)
+    def _on_background_job_failed(self, error: str) -> None:
+        """GUI-thread slot: never connect bare lambdas to worker.failed."""
+        title = getattr(self, "_active_job_log_title", "job")
+        self._log_job_failed(title, error)
+        callback = self._job_failed_callback
+        self._job_failed_callback = None
+        try:
+            if callback is not None:
+                callback(error)
+        finally:
+            self._set_job_actions_enabled(True)
+            if self._stop_btn is not None:
+                self._stop_btn.setEnabled(False)
+            self._hide_job_progress()
+
+    def begin_preview_open_progress(self, filename: str, *, total: int = 0) -> bool:
+        """Show status-bar progress while opening a large preview file.
+
+        Does not mark a cancellable job (Stop stays disabled). Skipped when a
+        real background job already owns the progress panel.
+
+        Returns True when the bar is actually shown.
+        """
+        if self._job_running or self._task_progress is None:
+            return False
+        from repeatviewer.widgets.task_progress import truncate_filename
+
+        self._preview_open_progress = True
+        self.statusBar().clearMessage()
+        short = truncate_filename(str(filename or ""), 28)
+        title = f"Opening {short}…" if short else "Opening…"
+        self._task_progress.start(title, int(total))
+        # Preview open is sync on the GUI thread — pump paint so the bar is
+        # visible during the read (safe here; not used on the job-finish path).
+        from PySide6.QtCore import QEventLoop
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
+        return True
+
+    def update_preview_open_progress(self, completed: int, detail: str = "") -> None:
+        if not self._preview_open_progress or self._task_progress is None:
+            return
+        self._task_progress.update(int(completed), detail)
+        from PySide6.QtCore import QEventLoop
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
+
+    def end_preview_open_progress(self) -> None:
+        if not self._preview_open_progress:
+            return
+        self._preview_open_progress = False
+        if self._job_running:
+            return
+        if self._task_progress is not None:
+            self._task_progress.reset()
 
     def _set_status_file_link(self, path: Path | None) -> None:
         """Replace the left status text with a clickable filename (Finder link)."""
@@ -3020,7 +3168,7 @@ class MainWindow(QMainWindow):
         preview_zoom_layout.setContentsMargins(0, 0, 0, 0)
         preview_zoom_layout.setSpacing(6)
         preview_zoom_layout.addWidget(self._preview_zoom_bar)
-        preview_zoom_layout.addWidget(self._annotation_zoom_bar)
+        # AnnotationZoomBar sits on PreviewHeaderBar next to Text/Annotation.
         preview_title_bar = BrowserDockTitleBar(
             self._dock_preview,
             "Preview",
@@ -3219,33 +3367,105 @@ class MainWindow(QMainWindow):
             )
             return
         default_name = default_group_name(files)
-        dialog = QInputDialog(self)
-        dialog.setWindowTitle("Combine Sequences to One File")
-        dialog.setLabelText(
-            f"Combine {len(files)} sequences to one file.\n\nName for the new file:"
+        from repeatviewer.views.tool_dialogs import NameWithAnnotationDialog
+
+        dialog = NameWithAnnotationDialog(
+            title="Combine Sequences to One File",
+            intro=f"Combine {len(files)} sequences to one file.",
+            name_label="Name for the new file:",
+            default_name=default_name,
+            annotation_label="Copy annotations for combined sequences",
+            parent=self,
         )
-        dialog.setTextValue(default_name)
-        dialog.setInputMode(QInputDialog.InputMode.TextInput)
-        # QInputDialog otherwise shrinks; pin a width that fits long default stems.
-        name_px = dialog.fontMetrics().horizontalAdvance(default_name) + 48
-        dialog.resize(max(640, name_px + 120), dialog.sizeHint().height())
-        dialog.setMinimumWidth(max(640, name_px + 120))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        name = dialog.textValue()
-        if not name.strip():
+        name = dialog.name_text()
+        if not name:
             return
+        include_ann = dialog.include_annotations()
         out_path = files[0].parent / f"{safe_file_stem(name)}.fasta"
         try:
             written, count = group_sequences(files, out_path)
         except SequenceComposeError as exc:
             QMessageBox.warning(self, "Combine Sequences to One File", str(exc))
             return
+        if include_ann:
+            try:
+                self._combine_annotation_json(files, written)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Combine annotations",
+                    f"Sequences were combined, but annotations failed:\n{exc}",
+                )
         self._refresh_after_compose(
             [written],
             f"Combined {count} sequences into {written.name}",
             source_files=files,
         )
+
+    def _combine_annotation_json(self, sources: list[Path], dest_fasta: Path) -> None:
+        """Merge JSON annotations from source FASTAs into ``dest_fasta`` sidecar."""
+        from repeatviewer.backends.sequence_features import (
+            fasta_record_lengths,
+            load_features_by_id_from_json,
+            save_annotations_multi,
+        )
+
+        dest_lengths = fasta_record_lengths(dest_fasta)
+        dest_ids = list(dest_lengths.keys())
+        merged: dict[str, list] = {rid: [] for rid in dest_ids}
+        # Walk sources in order; assign features to dest records in the same order.
+        dest_index = 0
+        for src in sources:
+            src_lengths = fasta_record_lengths(src)
+            src_ids = list(src_lengths.keys())
+            src_feats = load_features_by_id_from_json(src, src_ids)
+            for sid in src_ids:
+                if dest_index >= len(dest_ids):
+                    break
+                feats = src_feats.get(sid) or []
+                if feats:
+                    merged[dest_ids[dest_index]].extend(feats)
+                dest_index += 1
+        if any(merged.values()):
+            save_annotations_multi(
+                dest_fasta,
+                features_by_id=merged,
+                lengths_by_id=dest_lengths,
+                record_ids=dest_ids,
+            )
+
+    def _overview_extract_pick_records(
+        self, source: Path
+    ) -> list[tuple[str, str, int]] | None:
+        """Reuse Overview IDs/lengths when that FASTA is already open in Preview."""
+        tabs = self._preview_tabs
+        if tabs is None:
+            return None
+        wanted = source.expanduser().resolve()
+        for index in range(tabs.count()):
+            widget = tabs.widget(index)
+            overview = getattr(widget, "_annotation_overview", None)
+            if overview is None:
+                continue
+            path = getattr(overview, "_path", None)
+            if path is None:
+                continue
+            try:
+                if Path(path).expanduser().resolve() != wanted:
+                    continue
+            except OSError:
+                continue
+            record_ids = list(getattr(overview, "_record_ids", None) or [])
+            lengths = dict(getattr(overview, "_lengths", None) or {})
+            if not record_ids:
+                return None
+            return [
+                (rid, "", int(lengths.get(rid, 0)))
+                for rid in record_ids
+            ]
+        return None
 
     def _extract_sequences_from_list(
         self,
@@ -3256,14 +3476,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Pull chosen records out of a multi-FASTA, leaving the original alone.
 
-        Two ways to choose: tick boxes, or a list of sequence names. The tick
-        list is only built when the file is small enough to list cheaply --
-        a read set is handled through the ID tab, which never holds the FASTA
-        in memory.
-
-        ``source_path`` comes from the right-click menu; without it the current
-        selection is used. ``initial_ids`` pre-fills the ID tab (used by
-        "Extract subject sequences" on a BLAST hit table).
+        Two ways to choose: tick boxes, or a list of sequence names. The pick
+        list reuses Overview when that file is open, otherwise streams ids and
+        lengths (same scan Overview uses). Very large read sets fall back to
+        the ID tab.
         """
         from repeatviewer.backends.sequence_compose import (
             SequenceComposeError,
@@ -3294,23 +3510,27 @@ class MainWindow(QMainWindow):
 
         records: list[tuple[str, str, int]] | None = None
         records_note = ""
-        try:
-            size = source.stat().st_size
-        except OSError:
-            size = 0
-        if size > _EXTRACT_PICK_LIST_MAX_BYTES or source.suffix.lower() in {".gz", ".bgz"}:
-            records_note = (
-                f"{source.name} is too large to list sequence by sequence "
-                f"({size / 1_000_000:.0f} MB). Use the ID list tab."
-            )
-        else:
+        records = self._overview_extract_pick_records(source)
+        if records is None:
             try:
-                records = list_records(source)
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                try:
+                    records = list_records(source)
+                finally:
+                    QApplication.restoreOverrideCursor()
             except SequenceComposeError as exc:
                 if not initial_ids:
                     QMessageBox.warning(self, "Extract Sequences from File", str(exc))
                     return
+                records = None
                 records_note = str(exc)
+
+        if records is not None and len(records) > _EXTRACT_PICK_LIST_MAX_RECORDS:
+            records_note = (
+                f"{source.name} has {len(records):,} sequences — too many for the "
+                "pick list. Use the ID list tab."
+            )
+            records = None
 
         dialog = ExtractSequencesDialog(
             records=records,
@@ -3340,15 +3560,60 @@ class MainWindow(QMainWindow):
         from repeatviewer.backends.sequence_compose import (
             SequenceComposeError,
             extract_records,
+            extract_source_suffix,
+            proposed_extract_path,
         )
+        from repeatviewer.backends.separate_fasta import sanitize_name
+        from repeatviewer.views.tool_dialogs import ModifyExtractFileNamesDialog
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
 
+        selected = list(dialog.selected_ids())
+        if not selected:
+            return
+        single_file = dialog.single_file()
+        include_annotations = bool(dialog.include_annotations())
+        output_path: Path | None = None
+        output_paths_by_id: dict[str, Path] | None = None
         try:
+            if single_file:
+                proposed = proposed_extract_path(
+                    source, selected, source.parent, single_file=True
+                )
+                custom_name = dialog.output_file_name()
+                if custom_name:
+                    if Path(custom_name).name != custom_name or "/" in custom_name or "\\" in custom_name:
+                        QMessageBox.warning(
+                            self,
+                            "Extract Sequences from File",
+                            "Enter a file name only (no folder path).",
+                        )
+                        return
+                    proposed = source.parent / custom_name
+                confirmed = confirm_existing_file_path(
+                    self,
+                    proposed,
+                    title="Extract Sequences from File",
+                    informative=(
+                        "Overwrite the existing file, or save under a different name?"
+                    ),
+                )
+                if confirmed is None:
+                    return
+                output_path = confirmed
+            else:
+                output_paths_by_id = self._resolve_multi_extract_output_paths(
+                    source, selected
+                )
+                if output_paths_by_id is None:
+                    return
+
             written = extract_records(
                 source,
-                dialog.selected_ids(),
+                set(selected),
                 source.parent,
-                single_file=dialog.single_file(),
-                combined_name=f"{source.name}_extracted",
+                single_file=single_file,
+                output_path=output_path,
+                output_paths_by_id=output_paths_by_id,
             )
         except SequenceComposeError as exc:
             QMessageBox.warning(self, "Extract Sequences from File", str(exc))
@@ -3356,19 +3621,174 @@ class MainWindow(QMainWindow):
         names = ", ".join(p.name for p in written[:4])
         if len(written) > 4:
             names += ", …"
+        if include_annotations:
+            try:
+                self._extract_annotation_json(source, written, selected)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Extract annotations",
+                    f"Sequences were extracted, but annotations failed:\n{exc}",
+                )
         self._refresh_after_compose(
             written,
             f"Extracted {len(written)} file(s): {names}",
             source_files=[source],
         )
 
+    def _resolve_multi_extract_output_paths(
+        self, source: Path, record_ids: list[str]
+    ) -> dict[str, Path] | None:
+        """Sanitized sequence-name paths; prompt to edit when names collide/exist."""
+        from repeatviewer.backends.sequence_compose import extract_source_suffix
+        from repeatviewer.backends.separate_fasta import sanitize_name
+        from repeatviewer.views.tool_dialogs import ModifyExtractFileNamesDialog
+
+        suffix = extract_source_suffix(source)
+        out_dir = source.parent
+        proposed_names: list[str] = []
+        used_stems: set[str] = set()
+        for rid in record_ids:
+            stem = sanitize_name(rid)
+            base = stem
+            n = 2
+            while stem.lower() in used_stems:
+                stem = f"{base}_{n}"
+                n += 1
+            used_stems.add(stem.lower())
+            proposed_names.append(f"{stem}{suffix}")
+
+        name_counts: dict[str, int] = {}
+        for name in proposed_names:
+            key = name.lower()
+            name_counts[key] = name_counts.get(key, 0) + 1
+        conflicting = {
+            name
+            for name in proposed_names
+            if name_counts[name.lower()] > 1 or (out_dir / name).exists()
+        }
+        name_map = {
+            rid: name for rid, name in zip(record_ids, proposed_names, strict=True)
+        }
+        if conflicting:
+            while True:
+                rename = ModifyExtractFileNamesDialog(
+                    record_ids=record_ids,
+                    proposed_names=[name_map[rid] for rid in record_ids],
+                    conflicting=conflicting,
+                    parent=self,
+                )
+                if rename.exec() != QDialog.DialogCode.Accepted:
+                    return None
+                try:
+                    name_map = rename.name_map()
+                except ValueError as exc:
+                    QMessageBox.warning(
+                        self, "Extract Sequences from File", str(exc)
+                    )
+                    continue
+                still = {n for n in name_map.values() if (out_dir / n).exists()}
+                if not still:
+                    break
+                conflicting = still
+                QMessageBox.warning(
+                    self,
+                    "Extract Sequences from File",
+                    "Some file names still exist:\n"
+                    + "\n".join(sorted(still)[:8])
+                    + ("\n…" if len(still) > 8 else "")
+                    + "\n\nPlease choose different names.",
+                )
+        return {rid: out_dir / name_map[rid] for rid in record_ids}
+
+    def _extract_annotation_json(
+        self,
+        source: Path,
+        written: list[Path],
+        selected_ids: list[str],
+    ) -> None:
+        from repeatviewer.backends.sequence_features import (
+            fasta_record_lengths,
+            load_features_by_id_from_json,
+            resolve_sidecar_path,
+            save_annotations_multi,
+        )
+
+        if resolve_sidecar_path(source) is None:
+            return
+        src_lengths = fasta_record_lengths(source)
+        src_ids = list(src_lengths.keys())
+        src_feats = load_features_by_id_from_json(source, src_ids)
+        if not any(src_feats.values()):
+            return
+        wanted = {str(x).strip() for x in selected_ids}
+        # Map original / uniquified ids.
+        selected_feats: dict[str, list] = {}
+        for sid in src_ids:
+            original = sid.split("#", 1)[0]
+            if sid in wanted or original in wanted:
+                feats = src_feats.get(sid) or []
+                if feats:
+                    selected_feats[sid] = feats
+        if not selected_feats:
+            return
+        fasta_outs = [
+            p for p in written if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        if len(fasta_outs) == 1 and len(selected_feats) >= 1:
+            out = fasta_outs[0]
+            out_lengths = fasta_record_lengths(out)
+            out_ids = list(out_lengths.keys())
+            merged = {rid: [] for rid in out_ids}
+            # Assign by order of selected_feats keys following src order.
+            ordered = [sid for sid in src_ids if sid in selected_feats]
+            for idx, sid in enumerate(ordered):
+                if idx >= len(out_ids):
+                    break
+                merged[out_ids[idx]] = list(selected_feats[sid])
+            save_annotations_multi(
+                out,
+                features_by_id=merged,
+                lengths_by_id=out_lengths,
+                record_ids=out_ids,
+            )
+            return
+        for out in fasta_outs:
+            try:
+                out_lengths = fasta_record_lengths(out)
+                out_ids = list(out_lengths.keys())
+            except Exception:  # noqa: BLE001
+                continue
+            if len(out_ids) != 1:
+                continue
+            oid = out_ids[0]
+            original = oid.split("#", 1)[0]
+            feats = selected_feats.get(oid) or selected_feats.get(original) or []
+            if not feats:
+                # try match by stem soft
+                for sid, f in selected_feats.items():
+                    if sid.split("#", 1)[0] == original:
+                        feats = f
+                        break
+            if feats:
+                save_annotations_multi(
+                    out,
+                    features_by_id={oid: feats},
+                    lengths_by_id=out_lengths,
+                    record_ids=out_ids,
+                )
+
     def _run_id_list_extraction(self, source: Path, dialog) -> None:
         """ID-list path: one streaming pass in the background, with cancel."""
+        from repeatviewer.backends.sequence_compose import proposed_extract_path
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
+
         parsed = dialog.parsed_ids()
         if not parsed.ids:
             return
         single_file = dialog.single_file()
         exclude = dialog.exclude()
+        self._extract_include_annotations = bool(dialog.include_annotations())
 
         if not single_file and (exclude or len(parsed.ids) > _EXTRACT_MANY_FILES_WARNING):
             expected = (
@@ -3388,13 +3808,50 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
 
+        output_path: Path | None = None
+        output_paths_by_id: dict[str, Path] | None = None
+        if single_file and not exclude:
+            proposed = proposed_extract_path(
+                source, list(parsed.ids), source.parent, single_file=True
+            )
+            custom_name = dialog.output_file_name()
+            if custom_name:
+                if Path(custom_name).name != custom_name or "/" in custom_name or "\\" in custom_name:
+                    QMessageBox.warning(
+                        self,
+                        "Extract Sequences from File",
+                        "Enter a file name only (no folder path).",
+                    )
+                    return
+                proposed = source.parent / custom_name
+            confirmed = confirm_existing_file_path(
+                self,
+                proposed,
+                title="Extract Sequences from File",
+                informative=(
+                    "Overwrite the existing file, or save under a different name?"
+                ),
+            )
+            if confirmed is None:
+                return
+            output_path = confirmed
+        elif not single_file and not exclude:
+            output_paths_by_id = self._resolve_multi_extract_output_paths(
+                source, list(parsed.ids)
+            )
+            if output_paths_by_id is None:
+                return
+
         self._start_extract_job(
             source,
             parsed.ids,
             count_only=False,
             single_file=single_file,
             exclude=exclude,
+            output_path=output_path,
+            output_paths_by_id=output_paths_by_id,
         )
+        self._extract_selected_ids = list(parsed.ids)
 
     @Slot(object)
     def _check_extract_ids(self, ids: object) -> None:
@@ -3412,6 +3869,8 @@ class MainWindow(QMainWindow):
         count_only: bool,
         single_file: bool = True,
         exclude: bool = False,
+        output_path: Path | None = None,
+        output_paths_by_id: dict[str, Path] | None = None,
     ) -> None:
         if not ids:
             return
@@ -3434,9 +3893,14 @@ class MainWindow(QMainWindow):
         self._set_status_message(f"{title} in {source.name}…", 0)
         if not count_only:
             self._job_running = True
+            self._job_progress_epoch = getattr(self, "_job_progress_epoch", 0) + 1
+            self._job_work_steps = 100
             self._set_job_actions_enabled(False)
             if self._task_progress is not None:
-                self._task_progress.start(self._running_job_title("Extract sequences"), 100)
+                # +1 reserved until extracted sequences are opened in preview.
+                self._task_progress.start(
+                    self._running_job_title("Extract sequences"), 101
+                )
             if self._stop_btn is not None:
                 self._stop_btn.setEnabled(True)
 
@@ -3448,13 +3912,16 @@ class MainWindow(QMainWindow):
             count_only=count_only,
             single_file=single_file,
             exclude=exclude,
+            output_path=output_path,
+            output_paths_by_id=output_paths_by_id,
             cancel=lambda: self._job_cancel.requested,
         )
         self._extract_worker.moveToThread(self._extract_thread)
         self._extract_thread.started.connect(self._extract_worker.run)
-        self._extract_worker.progress.connect(self._on_extract_progress)
-        self._extract_worker.finished.connect(self._on_extract_finished)
-        self._extract_worker.failed.connect(self._on_extract_failed)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._extract_worker.progress.connect(self._on_extract_progress, queued)
+        self._extract_worker.finished.connect(self._on_extract_finished, queued)
+        self._extract_worker.failed.connect(self._on_extract_failed, queued)
         self._extract_worker.finished.connect(self._extract_thread.quit)
         self._extract_worker.failed.connect(self._extract_thread.quit)
         self._extract_thread.finished.connect(self._cleanup_extract_worker)
@@ -3467,7 +3934,9 @@ class MainWindow(QMainWindow):
                 self._extract_dialog.set_check_progress(f"Checking… {text}")
             return
         if self._task_progress is not None:
-            self._task_progress.update(percent, text)
+            work = getattr(self, "_job_work_steps", 100)
+            capped = min(max(0, int(percent)), work)
+            self._task_progress.update(capped, text)
 
     @Slot(object)
     def _on_extract_finished(self, summary: object) -> None:
@@ -3476,6 +3945,9 @@ class MainWindow(QMainWindow):
         if getattr(summary, "cancelled", False):
             if self._extract_count_only and self._extract_dialog is not None:
                 self._extract_dialog.set_check_result("Check stopped.", ok=False)
+            if not self._extract_count_only:
+                self._hide_job_progress()
+                self._set_job_actions_enabled(True)
             self._set_status_message("Extract sequences stopped", 6000)
             return
 
@@ -3493,6 +3965,45 @@ class MainWindow(QMainWindow):
             self._set_status_message(f"{found:,} of {total:,} IDs found", 8000)
             return
 
+        self._finish_background_job()
+        detail = ""
+        try:
+            if not summary.written:
+                self._set_status_message("No sequences extracted", 6000)
+                return
+
+            message = f"Wrote {summary.matched:,} sequence(s)"
+            if len(summary.written) > 1:
+                message += f" to {len(summary.written):,} file(s)"
+            message += "."
+            if summary.missing:
+                message += f" {len(summary.missing):,} ID(s) not found."
+            outputs = list(summary.written)
+            if summary.missing_path is not None:
+                outputs.append(summary.missing_path)
+            sources = [self._extract_source] if getattr(self, "_extract_source", None) else []
+            self._refresh_after_compose(outputs, message, source_files=sources)
+            if (
+                getattr(self, "_extract_include_annotations", False)
+                and self._extract_source is not None
+                and summary.written
+            ):
+                try:
+                    self._extract_annotation_json(
+                        self._extract_source,
+                        list(summary.written),
+                        list(getattr(self, "_extract_selected_ids", None) or []),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+            detail = message
+            if summary.missing_path is not None:
+                detail += f"\n\nThe missing names are listed in:\n{summary.missing_path.name}"
+        finally:
+            self._extract_include_annotations = False
+            self._schedule_after_job_ui_ready()
+
         if not summary.written:
             QMessageBox.warning(
                 self,
@@ -3501,28 +4012,14 @@ class MainWindow(QMainWindow):
                 f"{name}.\n\nSequence names are matched up to the first space, "
                 "the same text BLAST reports.",
             )
-            self._set_status_message("No sequences extracted", 6000)
-            return
-
-        message = f"Wrote {summary.matched:,} sequence(s)"
-        if len(summary.written) > 1:
-            message += f" to {len(summary.written):,} file(s)"
-        message += "."
-        if summary.missing:
-            message += f" {len(summary.missing):,} ID(s) not found."
-        outputs = list(summary.written)
-        if summary.missing_path is not None:
-            outputs.append(summary.missing_path)
-        sources = [self._extract_source] if getattr(self, "_extract_source", None) else []
-        self._refresh_after_compose(outputs, message, source_files=sources)
-
-        detail = message
-        if summary.missing_path is not None:
-            detail += f"\n\nThe missing names are listed in:\n{summary.missing_path.name}"
-        QMessageBox.information(self, "Extract Sequences from File", detail)
+        elif detail:
+            QMessageBox.information(self, "Extract Sequences from File", detail)
 
     @Slot(str)
     def _on_extract_failed(self, message: str) -> None:
+        if not self._extract_count_only:
+            self._hide_job_progress()
+            self._set_job_actions_enabled(True)
         if message == CANCELLED_MESSAGE:
             self._set_status_message("Extract sequences stopped", 6000)
             return
@@ -3537,8 +4034,6 @@ class MainWindow(QMainWindow):
             self._job_cancel.reset()
         if not self._extract_count_only:
             self._job_running = self._worker_thread is not None
-            if self._task_progress is not None:
-                self._task_progress.reset()
             if self._worker_thread is None:
                 self._set_job_actions_enabled(True)
             if self._stop_btn is not None and not self._job_running:
@@ -6425,6 +6920,7 @@ class MainWindow(QMainWindow):
         new_outputs: list[Path] | None = None,
         source_files: list[Path] | None = None,
         record_history: bool = True,
+        open_preview: bool = True,
     ) -> None:
         folder = folder.expanduser().resolve()
         self._ensure_folder_visible_in_tree(folder)
@@ -6441,11 +6937,13 @@ class MainWindow(QMainWindow):
             new_outputs=new_outputs,
             source_files=source_files,
             record_history=record_history,
+            open_preview=open_preview,
         )
 
     def _on_folder_selected(self, folder: Path) -> None:
         self._sync_define_database_dialog_from_folder(folder)
         self._sync_te_viz_dialog_from_folder(folder)
+        self._sync_create_folder_dialog_from_folder(folder)
         self._populate_file_list(folder, record_history=True)
         self._update_directory_watchers()
         self._persist_workspace()
@@ -6671,22 +7169,26 @@ class MainWindow(QMainWindow):
 
         visible = sort_file_paths(visible, self._current_file_sort_mode())
 
-        fill_metadata = metadata_columns_visible()
-        # Fast path: name/size/type from stat only — no FASTA reads on the UI thread.
+        want_metadata = metadata_columns_visible()
+        # Large folders: skip sync stat/metadata on the GUI thread; fill later.
+        fill_metadata = want_metadata and len(visible) <= _LARGE_FILE_LIST
+        defer_metadata = want_metadata and not fill_metadata
         was_sorting = self._file_list.isSortingEnabled()
         self._file_list.setSortingEnabled(False)
         self._file_list.setUpdatesEnabled(False)
         try:
+            need_style = bool(self._highlight_output_keys or self._highlight_source_keys)
             for file_path in visible:
                 row_item = self._file_list.add_file_row(
                     file_path,
                     fill_metadata_columns=fill_metadata,
                 )
-                key = str(file_path.resolve())
-                if key in self._highlight_output_keys:
-                    self._style_new_output_item(row_item)
-                elif key in self._highlight_source_keys:
-                    self._style_source_file_item(row_item)
+                if need_style:
+                    key = str(file_path.expanduser().resolve())
+                    if key in self._highlight_output_keys:
+                        self._style_new_output_item(row_item)
+                    elif key in self._highlight_source_keys:
+                        self._style_source_file_item(row_item)
         finally:
             self._file_list.setUpdatesEnabled(True)
             self._file_list.setSortingEnabled(was_sorting)
@@ -6705,8 +7207,10 @@ class MainWindow(QMainWindow):
         )
         if fill_metadata and not self._any_background_job_running():
             self._start_metadata_enrichment(visible)
+        elif defer_metadata and not self._any_background_job_running():
+            QTimer.singleShot(0, self._fill_visible_file_metadata)
 
-    def _stop_metadata_enrichment(self) -> None:
+    def _stop_metadata_enrichment(self, *, wait_ms: int = 1000) -> None:
         self._pending_metadata_ui.clear()
         self._metadata_stat_queue.clear()
         self._metadata_ui_timer.stop()
@@ -6718,7 +7222,9 @@ class MainWindow(QMainWindow):
             worker.cancel()
         if thread is not None:
             thread.quit()
-            thread.wait(1000)
+            # Job start must not block the GUI for up to 1s waiting on enrichment.
+            if wait_ms > 0:
+                thread.wait(wait_ms)
 
     def _start_metadata_enrichment(self, paths: list[Path]) -> None:
         from repeatviewer.browser_file_metadata import is_fasta_path
@@ -6788,7 +7294,9 @@ class MainWindow(QMainWindow):
             self._refresh_metadata_row_highlights(chunk)
         if self._metadata_stat_queue or self._pending_metadata_ui:
             self._metadata_ui_timer.start(0)
-        else:
+        elif self._highlight_output_keys or self._highlight_source_keys:
+            # Chunks already re-tint touched rows; only restyle when highlights
+            # exist, and prefer the keyed path for large folders.
             self._refresh_file_list_highlights()
 
     def _refresh_metadata_row_highlights(
@@ -6856,8 +7364,101 @@ class MainWindow(QMainWindow):
                 same_folder = prev_folder.expanduser().resolve() == target_folder
             except OSError:
                 same_folder = False
+
+        highlight_request = bool(new_outputs or source_files)
+        large_folder = (
+            same_folder
+            and self._cached_folder_files is not None
+            and len(self._cached_folder_files) > _LARGE_FILE_LIST
+        )
+        # Large folder + few known new outputs: skip full scandir/rebuild.
+        # Membership is by basename in the current folder (unique on disk).
+        few_new_outputs = len(new_outputs or []) <= _LARGE_JOB_OUTPUT_BATCH
+        if (
+            large_folder
+            and highlight_request
+            and few_new_outputs
+            and self._file_list.rowCount() > 0
+        ):
+            self._current_folder = target_folder
+            self._folder_tree.set_active_folder(target_folder)
+            prev_highlight_keys = (
+                self._highlight_output_keys | self._highlight_source_keys
+            )
+            if prev_highlight_keys:
+                self._file_list.reapply_file_colors_for_keys(prev_highlight_keys)
+            if new_outputs or source_files:
+                self._highlight_output_keys = set()
+                self._highlight_source_keys = set()
+            highlight_paths: list[Path] = []
+
+            def _track_fast(path: Path, *, as_output: bool) -> None:
+                resolved = path.expanduser().resolve()
+                if resolved.parent != self._current_folder:
+                    return
+                key = str(resolved)
+                if as_output:
+                    self._highlight_output_keys.add(key)
+                    self._highlight_source_keys.discard(key)
+                elif key not in self._highlight_output_keys:
+                    self._highlight_source_keys.add(key)
+                highlight_paths.append(resolved)
+
+            if new_outputs:
+                for path in new_outputs:
+                    _track_fast(path, as_output=True)
+            if source_files:
+                for path in source_files:
+                    _track_fast(path, as_output=False)
+
+            existing_names = {p.name for p in self._cached_folder_files}
+            added_paths: list[Path] = []
+            for path in new_outputs or []:
+                resolved = path.expanduser().resolve()
+                if resolved.parent != self._current_folder:
+                    continue
+                if resolved.name in existing_names:
+                    continue
+                if not resolved.is_file() and not resolved.is_dir():
+                    continue
+                # Same absolute form as scandir (folder is already resolved).
+                cached = self._current_folder / resolved.name
+                self._cached_folder_files.append(cached)
+                existing_names.add(cached.name)
+                added_paths.append(cached)
+
+            self._file_list.blockSignals(True)
+            if added_paths:
+                self._incremental_add_files_to_list(added_paths)
+            else:
+                # Outputs already in the list (rerun) — tint only those rows.
+                self._apply_job_highlights_to_keys(
+                    self._highlight_output_keys | self._highlight_source_keys
+                )
+            if highlight_paths:
+                self._select_and_scroll_outputs(highlight_paths, open_preview=False)
+                n_out = len(self._highlight_output_keys)
+                n_src = len(self._highlight_source_keys)
+                names = ", ".join(
+                    Path(k).name for k in list(self._highlight_output_keys)[:3]
+                )
+                msg = f"Highlighted {n_out} new output(s) and {n_src} input(s)"
+                if names:
+                    msg += f" (e.g. {names})"
+                self._set_status_message(msg, 12000, override_file_link=True)
+            self._file_list.blockSignals(False)
+            if highlight_paths and open_preview:
+                self._open_best_preview_path(highlight_paths)
+            if hasattr(self, "_folder_nav"):
+                self._folder_nav.set_folder(
+                    self._current_folder,
+                    record_history=record_history,
+                )
+            self._sync_folder_tree_label_for_folder(self._current_folder)
+            return
+
         prev_cached_keys = (
-            {str(path.expanduser().resolve()) for path in self._cached_folder_files}
+            {str(path) for path in self._cached_folder_files}
             if same_folder
             else set()
         )
@@ -6886,7 +7487,7 @@ class MainWindow(QMainWindow):
         elif not same_folder:
             self._highlight_output_keys = set()
             self._highlight_source_keys = set()
-        highlight_paths: list[Path] = []
+        highlight_paths = []
 
         def _track(path: Path, *, as_output: bool) -> None:
             resolved = path.expanduser().resolve()
@@ -6909,13 +7510,46 @@ class MainWindow(QMainWindow):
             for path in source_files:
                 _track(path, as_output=False)
 
-        # Apply green (outputs) / light blue (inputs) before any selection.
-        if self._highlight_output_keys or self._highlight_source_keys:
-            self._refresh_file_list_highlights()
+        # Apply green/blue tints while adding/rebuilding rows — skip a full-list
+        # restyle of the *old* table first (that was O(n) resolve work for nothing).
 
-        new_cache_keys = {str(path.expanduser().resolve()) for path in self._cached_folder_files}
+        # Use unresolved absolute scandir paths for membership (no N× resolve).
+        new_cache_keys = {str(path) for path in self._cached_folder_files}
         added_keys = new_cache_keys - prev_cached_keys
         removed_keys = prev_cached_keys - new_cache_keys
+
+        # Same folder, highlights only, no membership change: do not rebuild.
+        if (
+            same_folder
+            and highlight_paths
+            and not added_keys
+            and not removed_keys
+        ):
+            self._file_list.blockSignals(True)
+            self._apply_job_highlights_to_keys(
+                self._highlight_output_keys | self._highlight_source_keys
+            )
+            self._select_and_scroll_outputs(highlight_paths, open_preview=False)
+            n_out = len(self._highlight_output_keys)
+            n_src = len(self._highlight_source_keys)
+            names = ", ".join(
+                Path(k).name for k in list(self._highlight_output_keys)[:3]
+            )
+            msg = f"Highlighted {n_out} new output(s) and {n_src} input(s)"
+            if names:
+                msg += f" (e.g. {names})"
+            self._set_status_message(msg, 12000, override_file_link=True)
+            self._file_list.blockSignals(False)
+            if open_preview:
+                self._open_best_preview_path(highlight_paths)
+            if hasattr(self, "_folder_nav"):
+                self._folder_nav.set_folder(
+                    self._current_folder,
+                    record_history=record_history,
+                )
+            self._sync_folder_tree_label_for_folder(self._current_folder)
+            return
+
         if (
             same_folder
             and highlight_paths
@@ -6925,7 +7559,7 @@ class MainWindow(QMainWindow):
             added_paths = [
                 path
                 for path in self._cached_folder_files
-                if str(path.expanduser().resolve()) in added_keys
+                if str(path) in added_keys
             ]
             self._file_list.blockSignals(True)
             self._incremental_add_files_to_list(added_paths)
@@ -6950,6 +7584,7 @@ class MainWindow(QMainWindow):
             self._sync_folder_tree_label_for_folder(self._current_folder)
             return
 
+        # Full rebuild: restyle of the previous list is pointless; rows are recreated.
         preserve_ui = same_folder
         prev_key: str | None = None
         prev_scroll: int | None = None
@@ -7000,7 +7635,7 @@ class MainWindow(QMainWindow):
                 for index in range(self._file_list.count()):
                     item = self._file_list.item(index)
                     raw = item.data(ROLE_PATH)
-                    if raw and str(Path(str(raw)).expanduser().resolve()) == prev_key:
+                    if raw and str(raw) == prev_key:
                         match = item
                         break
                 if match is not None:
@@ -7022,24 +7657,57 @@ class MainWindow(QMainWindow):
 
     def _clear_job_file_highlights(self) -> None:
         """Drop previous job green/blue tints (called when a new job starts)."""
+        prev_keys = self._highlight_output_keys | self._highlight_source_keys
         self._highlight_output_keys = set()
         self._highlight_source_keys = set()
-        self._refresh_file_list_highlights()
+        if not prev_keys:
+            return
+        # Only clear previously tinted rows — never restyle all 1700 files.
+        self._file_list.reapply_file_colors_for_keys(prev_keys)
 
-    def _refresh_file_list_highlights(self) -> None:
-        """Re-apply new-output / source tint after metadata or sort updates."""
-        for index in range(self._file_list.count()):
-            item = self._file_list.item(index)
-            raw = item.data(ROLE_PATH)
-            if not raw:
+    def _apply_job_highlights_to_keys(self, keys: set[str]) -> None:
+        """Tint only the given path keys (one path-index build)."""
+        if not keys or self._file_list is None:
+            return
+        row_index = self._file_list._path_row_index()
+        for key in keys:
+            row = row_index.get(key)
+            if row is None:
                 continue
-            key = str(Path(str(raw)).expanduser().resolve())
+            item = self._file_list.item(row)
+            if item is None:
+                continue
             if key in self._highlight_output_keys:
                 self._style_new_output_item(item)
             elif key in self._highlight_source_keys:
                 self._style_source_file_item(item)
+
+    def _refresh_file_list_highlights(self) -> None:
+        """Re-apply new-output / source tint after metadata or sort updates."""
+        n_rows = self._file_list.count()
+        out_keys = self._highlight_output_keys
+        src_keys = self._highlight_source_keys
+        if not out_keys and not src_keys:
+            # Nothing to tint. Callers that need a full clear should use
+            # ``_clear_job_file_highlights`` (keyed) instead of walking all rows.
+            return
+        # Large folders: only touch highlighted rows (O(highlights), not O(folder)).
+        if n_rows > _LARGE_FILE_LIST and len(out_keys) + len(src_keys) <= _LARGE_JOB_OUTPUT_BATCH:
+            self._apply_job_highlights_to_keys(out_keys | src_keys)
+            return
+        for index in range(n_rows):
+            item = self._file_list.item(index)
+            raw = item.data(ROLE_PATH)
+            if not raw:
+                continue
+            # ROLE_PATH is stored resolved; avoid another resolve() per row.
+            key = str(raw)
+            if key in out_keys:
+                self._style_new_output_item(item)
+            elif key in src_keys:
+                self._style_source_file_item(item)
             else:
-                self._file_list.reapply_file_color_for_path(Path(str(raw)))
+                self._file_list.reapply_file_color_at_row(index)
 
     def _palette_is_dark(self) -> bool:
         from PySide6.QtGui import QPalette
@@ -7097,23 +7765,50 @@ class MainWindow(QMainWindow):
         # Do not select every input/output — that would paint them all deep blue.
         self._file_list.clearSelection()
         self._file_list.setCurrentItem(None)
-        self._refresh_file_list_highlights()
-        for index in range(self._file_list.count()):
-            item = self._file_list.item(index)
-            raw = item.data(ROLE_PATH)
-            if raw and str(Path(str(raw)).resolve()) in path_set:
-                if first_item is None:
-                    first_item = item
-                candidate = Path(str(raw)).resolve()
-                key = str(candidate)
-                # Prefer new outputs over inputs when preview ranks match (both FASTA).
-                rank = (
-                    preview_path_priority(candidate),
-                    0 if key in self._highlight_output_keys else 1,
-                )
-                if preferred_key is None or rank < preferred_key:
-                    preferred_key = rank
+        # Tint only job keys — never restyle the whole large folder here.
+        self._apply_job_highlights_to_keys(
+            self._highlight_output_keys | self._highlight_source_keys
+        )
+        large_list = self._file_list.count() > _LARGE_FILE_LIST
+        large_batch = len(path_set) > _LARGE_JOB_OUTPUT_BATCH
+
+        def _consider(item: FileListRow, key: str) -> None:
+            nonlocal first_item, preferred_item, preferred_key
+            if first_item is None:
+                first_item = item
+            if large_batch:
+                if preferred_item is None and key in self._highlight_output_keys:
                     preferred_item = item
+                return
+            candidate = Path(key)
+            rank = (
+                preview_path_priority(candidate),
+                0 if key in self._highlight_output_keys else 1,
+            )
+            if preferred_key is None or rank < preferred_key:
+                preferred_key = rank
+                preferred_item = item
+
+        if large_list and not large_batch:
+            # Direct lookup for a few paths instead of scanning every row.
+            row_index = self._file_list._path_row_index()
+            for key in path_set:
+                row = row_index.get(key)
+                if row is None:
+                    continue
+                item = self._file_list.item(row)
+                if item is not None:
+                    _consider(item, key)
+        else:
+            for index in range(self._file_list.count()):
+                item = self._file_list.item(index)
+                raw = item.data(ROLE_PATH)
+                if not raw:
+                    continue
+                key = str(raw)
+                if key in path_set:
+                    _consider(item, key)
+
         focus_item = preferred_item or first_item
         if focus_item is not None:
             self._file_list.scrollToItem(
@@ -7125,9 +7820,19 @@ class MainWindow(QMainWindow):
             if path is not None and is_previewable_file(path):
                 self._open_file_in_preview(path)
                 self._reveal_file_list_item(focus_item)
-                self._refresh_file_list_highlights()
+                self._apply_job_highlights_to_keys(
+                    self._highlight_output_keys | self._highlight_source_keys
+                )
 
     def _open_best_preview_path(self, paths: list[Path]) -> None:
+        if not paths:
+            return
+        # Large batches: pick without N× is_file() syscalls.
+        if len(paths) > _LARGE_JOB_OUTPUT_BATCH:
+            target = self._pick_preview_output(list(paths))
+            if target is not None and is_previewable_file(target):
+                self._open_file_in_preview(target)
+            return
         candidates = [
             p.expanduser().resolve()
             for p in paths
@@ -7148,16 +7853,20 @@ class MainWindow(QMainWindow):
         """Select one file in the list (used after creating a genome map HTML)."""
         resolved = path.expanduser().resolve()
         key = str(resolved)
-        for index in range(self._file_list.count()):
-            item = self._file_list.item(index)
-            raw = item.data(ROLE_PATH)
-            if raw and str(Path(str(raw)).resolve()) == key:
-                self._reveal_file_list_item(
-                    item,
-                    scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
-                )
-                self._refresh_file_list_highlights()
-                return
+        row = self._file_list._path_row_index().get(key)
+        if row is None:
+            return
+        item = self._file_list.item(row)
+        if item is None:
+            return
+        self._reveal_file_list_item(
+            item,
+            scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
+        )
+        # Re-assert green/blue on job rows only (selection paints deep blue).
+        self._apply_job_highlights_to_keys(
+            self._highlight_output_keys | self._highlight_source_keys
+        )
 
     def _selected_files(self) -> list[Path]:
         files = []
@@ -8146,6 +8855,25 @@ class MainWindow(QMainWindow):
         self._file_list.clear_suppress_selection_preview()
         QTimer.singleShot(0, lambda p=path: self._run_add_annotation_for_fasta(p))
 
+    def _export_annotation_for_fasta(self, path: Path) -> None:
+        self._file_list.clear_suppress_selection_preview()
+        QTimer.singleShot(0, lambda p=path: self._run_export_annotation_for_fasta(p))
+
+    def _run_export_annotation_for_fasta(self, path: Path) -> None:
+        from repeatviewer.views.export_annotation_dialog import ExportAnnotationDialog
+
+        fasta = path.expanduser().resolve()
+        if not fasta.is_file():
+            QMessageBox.warning(self, "Export annotation", f"FASTA not found:\n{fasta}")
+            return
+        dialog = ExportAnnotationDialog(fasta, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        written = dialog.written_path()
+        if written is not None:
+            self._sync_sidecar_in_file_list(written, select=False)
+            self._set_status_message(f"Exported annotation: {written.name}", 8000)
+
     def _sync_add_annotation_dialog_from_files(self, clicked_path: Path | None = None) -> None:
         dialog = self._add_annotation_dialog
         if dialog is None or not dialog.isVisible() or clicked_path is None:
@@ -8582,15 +9310,10 @@ class MainWindow(QMainWindow):
         self._benchmark_worker = worker
         self._benchmark_worker.moveToThread(self._benchmark_thread)
         self._benchmark_thread.started.connect(self._benchmark_worker.run)
-        self._benchmark_worker.progress.connect(self._on_job_progress)
-        self._benchmark_worker.finished.connect(
-            lambda result, title=job_title: self._log_job_finished(title, result)
-        )
-        self._benchmark_worker.failed.connect(
-            lambda error, title=job_title: self._log_job_failed(title, error)
-        )
-        self._benchmark_worker.finished.connect(self._on_te_benchmark_finished)
-        self._benchmark_worker.failed.connect(self._on_te_benchmark_failed)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._benchmark_worker.progress.connect(self._on_job_progress, queued)
+        self._benchmark_worker.finished.connect(self._on_te_benchmark_finished, queued)
+        self._benchmark_worker.failed.connect(self._on_te_benchmark_failed, queued)
         self._benchmark_worker.finished.connect(self._benchmark_thread.quit)
         self._benchmark_worker.failed.connect(self._benchmark_thread.quit)
         self._benchmark_thread.finished.connect(self._cleanup_benchmark_worker)
@@ -8599,25 +9322,35 @@ class MainWindow(QMainWindow):
 
     @Slot(list)
     def _on_te_benchmark_finished(self, created_paths: list[Path]) -> None:
-        self._hide_job_progress()
-        self._set_job_actions_enabled(True)
-        paths = [Path(p).expanduser().resolve() for p in created_paths if Path(p).is_file()]
-        sources = self._last_benchmark_source_files
-        self._refresh_folders_after_job(paths, sources)
-        self._auto_open_outputs(paths)
-        title = self._job_display_title("te_confusion_benchmark")
-        if paths and any(p.name.endswith("_library_benchmark.html") for p in paths):
-            title = self._job_display_title("te_library_benchmark")
-        summary = f"{title} finished"
-        if paths:
-            names = ", ".join(p.name for p in paths[:4])
-            if len(paths) > 4:
-                names += ", …"
-            summary += f" — created: {names}"
-        self._set_status_message(summary, 12000, override_file_link=True)
+        self._log_job_finished(
+            getattr(self, "_active_job_log_title", "benchmark"), created_paths
+        )
+        self._finish_background_job()
+        try:
+            paths = [
+                Path(p).expanduser().resolve()
+                for p in created_paths
+                if Path(p).is_file()
+            ]
+            sources = self._last_benchmark_source_files
+            self._refresh_folders_after_job(paths, sources)
+            self._auto_open_outputs(paths)
+            title = self._job_display_title("te_confusion_benchmark")
+            if paths and any(p.name.endswith("_library_benchmark.html") for p in paths):
+                title = self._job_display_title("te_library_benchmark")
+            summary = f"{title} finished"
+            if paths:
+                names = ", ".join(p.name for p in paths[:4])
+                if len(paths) > 4:
+                    names += ", …"
+                summary += f" — created: {names}"
+            self._set_status_message(summary, 12000, override_file_link=True)
+        finally:
+            self._schedule_after_job_ui_ready()
 
     @Slot(str)
     def _on_te_benchmark_failed(self, error: str) -> None:
+        self._log_job_failed(getattr(self, "_active_job_log_title", "benchmark"), error)
         self._hide_job_progress()
         self._set_job_actions_enabled(True)
         if error == CANCELLED_MESSAGE:
@@ -9125,49 +9858,15 @@ class MainWindow(QMainWindow):
 
     def _confirm_plot_output_path(self, proposed: Path, *, title: str) -> Path | None:
         """If ``proposed`` already exists, ask to overwrite, rename, or cancel."""
-        proposed = proposed.expanduser().resolve()
-        if not proposed.exists():
-            return proposed
-        box = QMessageBox(self)
-        box.setWindowTitle(title)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setText(f"“{proposed.name}” already exists in this folder.")
-        box.setInformativeText(
-            "Overwrite the existing plot, or save under a different name?"
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
+
+        return confirm_existing_file_path(
+            self,
+            proposed,
+            title=title,
+            informative="Overwrite the existing plot, or save under a different name?",
+            force_html_suffix=True,
         )
-        overwrite_btn = box.addButton("Overwrite", QMessageBox.ButtonRole.DestructiveRole)
-        rename_btn = box.addButton("Rename…", QMessageBox.ButtonRole.AcceptRole)
-        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(rename_btn)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked == overwrite_btn:
-            return proposed
-        if clicked != rename_btn:
-            return None
-        new_name, ok = self._prompt_rename_text(
-            title=f"{title} — rename",
-            label="New file name:",
-            initial=proposed.name,
-        )
-        if not ok or not new_name.strip():
-            return None
-        name = new_name.strip()
-        if Path(name).name != name or "/" in name or "\\" in name:
-            QMessageBox.warning(
-                self,
-                title,
-                "Enter a file name only (no folder path).",
-            )
-            return self._confirm_plot_output_path(proposed, title=title)
-        path = (proposed.parent / name).expanduser().resolve()
-        if path.suffix.lower() not in {".html", ".htm"}:
-            path = path.with_suffix(".html")
-        if path == proposed:
-            return self._confirm_plot_output_path(proposed, title=title)
-        if path.exists():
-            return self._confirm_plot_output_path(path, title=title)
-        return path
 
     def _start_genome_map_build(
         self,
@@ -9213,8 +9912,11 @@ class MainWindow(QMainWindow):
         worker_note = f" ({workers} workers)" if workers > 1 else ""
         self._clear_job_file_highlights()
         self._set_status_message(f"Building TE genome map{worker_note}…", 0)
+        self._job_progress_epoch = getattr(self, "_job_progress_epoch", 0) + 1
+        self._job_work_steps = 6
         if self._task_progress is not None:
-            self._task_progress.start(self._running_job_title("TE genome map"), 6)
+            # +1 reserved until the HTML preview actually opens.
+            self._task_progress.start(self._running_job_title("TE genome map"), 7)
         if self._stop_btn is not None:
             self._stop_btn.setEnabled(True)
         self._genome_map_thread = QThread(self)
@@ -9248,9 +9950,10 @@ class MainWindow(QMainWindow):
         )
         self._genome_map_worker.moveToThread(self._genome_map_thread)
         self._genome_map_thread.started.connect(self._genome_map_worker.run)
-        self._genome_map_worker.progress.connect(self._on_genome_map_progress)
-        self._genome_map_worker.finished.connect(self._on_genome_map_finished)
-        self._genome_map_worker.failed.connect(self._on_genome_map_failed)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._genome_map_worker.progress.connect(self._on_genome_map_progress, queued)
+        self._genome_map_worker.finished.connect(self._on_genome_map_finished, queued)
+        self._genome_map_worker.failed.connect(self._on_genome_map_failed, queued)
         self._genome_map_worker.finished.connect(self._genome_map_thread.quit)
         self._genome_map_worker.failed.connect(self._genome_map_thread.quit)
         self._genome_map_thread.finished.connect(self._cleanup_genome_map_worker)
@@ -9259,39 +9962,53 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_genome_map_finished(self, html_path: object) -> None:
         blast_txt = self._genome_map_blast_txt
-        if self._task_progress is not None:
-            self._task_progress.update(6, Path(str(blast_txt)).name if blast_txt else "")
-        if html_path is None or not Path(html_path).is_file():
-            QMessageBox.warning(self, "TE genome map", "Could not build the genome map.")
-            self._set_status_message("TE genome map failed", 6000, override_file_link=True)
-            return
-        path = Path(html_path).resolve()
-        if blast_txt is not None:
-            self._highlight_genome_map_outputs(path, blast_txt)
-        if self._current_folder and path.parent.resolve() == self._current_folder.resolve():
-            self._select_path_in_file_list(path)
-        self._open_genome_map_in_preview(path)
-        n_inputs = len(self._genome_map_te_paths)
-        detail = (
-            "all TE samples share one y-axis scale"
-            if n_inputs > 1
-            else "chromosome tracks, Mbp on X axis"
-        )
-        self._set_status_message(
-            f"Genome map opened: {path.name} ({detail})",
-            12000,
-            override_file_link=True,
-        )
+        self._finish_background_job()
+        opened = False
+        try:
+            if html_path is None or not Path(html_path).is_file():
+                self._set_status_message(
+                    "TE genome map failed", 6000, override_file_link=True
+                )
+                return
+            path = Path(html_path).resolve()
+            if blast_txt is not None:
+                self._highlight_genome_map_outputs(path, blast_txt)
+            if (
+                self._current_folder
+                and path.parent.resolve() == self._current_folder.resolve()
+            ):
+                self._select_path_in_file_list(path)
+            self._open_genome_map_in_preview(path)
+            opened = True
+            n_inputs = len(self._genome_map_te_paths)
+            detail = (
+                "all TE samples share one y-axis scale"
+                if n_inputs > 1
+                else "chromosome tracks, Mbp on X axis"
+            )
+            self._set_status_message(
+                f"Genome map opened: {path.name} ({detail})",
+                12000,
+                override_file_link=True,
+            )
+        finally:
+            self._schedule_after_job_ui_ready()
+
+        if not opened:
+            QMessageBox.warning(
+                self, "TE genome map", "Could not build the genome map."
+            )
 
     @Slot(int, str)
     def _on_genome_map_progress(self, value: int, label: str) -> None:
         if self._task_progress is not None:
-            self._task_progress.update(value, label)
+            work = getattr(self, "_job_work_steps", 6)
+            self._task_progress.update(min(max(0, int(value)), work), label)
 
     @Slot(str)
     def _on_genome_map_failed(self, error: str) -> None:
-        if self._task_progress is not None:
-            self._task_progress.reset()
+        self._hide_job_progress()
+        self._set_job_actions_enabled(True)
         if error == CANCELLED_MESSAGE:
             self._set_status_message("Stopped TE genome map", 6000, override_file_link=True)
             return
@@ -9307,8 +10024,6 @@ class MainWindow(QMainWindow):
         if cancelled:
             self._job_cancel.reset()
         self._job_running = self._worker_thread is not None
-        if self._task_progress is not None:
-            self._task_progress.reset()
         thread = self._genome_map_thread
         if thread is not None and thread.isRunning():
             thread.quit()
@@ -9672,15 +10387,15 @@ class MainWindow(QMainWindow):
             panel.reload_shared_annotation_settings()
 
     def _te_annotation_fasta_selection(self) -> list[Path] | None:
-        """Validate selected single-sequence FASTAs for TE annotation, or None."""
-        from repeatviewer.backends.te_annotation_batch import is_single_sequence_fasta
+        """Validate selected FASTAs for Sequence Annotation, or None."""
+        from repeatviewer.backends.te_annotation_batch import is_annotatable_fasta
 
         selected = self._selected_files()
         if not selected:
             QMessageBox.information(
                 self,
                 "No sequence selected",
-                "Select one or more single-sequence FASTA files in the Files panel.",
+                "Select one or more FASTA files in the Files panel.",
             )
             return None
         seq_files = [p for p in selected if p.suffix.lower() in _FASTA_SUFFIXES]
@@ -9691,8 +10406,8 @@ class MainWindow(QMainWindow):
                 "Selected files do not include FASTA sequence files.",
             )
             return None
-        single = [p for p in seq_files if is_single_sequence_fasta(p)]
-        skipped = [p for p in seq_files if p not in single]
+        valid = [p for p in seq_files if is_annotatable_fasta(p)]
+        skipped = [p for p in seq_files if p not in valid]
         if skipped:
             skipped_names = "\n".join(p.name for p in skipped[:12])
             if len(skipped) > 12:
@@ -9700,36 +10415,52 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Skipped files",
-                f"{len(skipped)} file(s) skipped — only single-sequence FASTA files "
-                f"are supported:\n\n{skipped_names}",
+                f"{len(skipped)} file(s) skipped — could not read as FASTA:\n\n"
+                f"{skipped_names}",
             )
-        if not single:
+        if not valid:
             QMessageBox.warning(
                 self,
                 "No valid files",
-                "Select at least one single-sequence FASTA file for Sequence Annotation.",
+                "Select at least one readable FASTA file for Sequence Annotation.",
             )
             return None
-        return single
+        return valid
 
     def _confirm_te_annotation_overwrite(self, fastas: list[Path]) -> bool:
-        """Ask before overwriting existing ``*.RV.gff3`` companions. True = continue."""
-        from repeatviewer.backends.te_annotation_batch import existing_annotation_gff_paths
+        """Ask before adding onto existing annotation JSON / GFF companions."""
+        from repeatviewer.backends.te_annotation_batch import (
+            existing_annotation_gff_paths,
+            existing_annotation_json_paths,
+        )
 
-        existing = existing_annotation_gff_paths(fastas)
-        if not existing:
+        existing = [
+            *existing_annotation_json_paths(fastas),
+            *existing_annotation_gff_paths(fastas),
+        ]
+        # De-dupe by path string while keeping order.
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for path in existing:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+        if not unique:
             return True
-        listing = "\n".join(f"  • {path.name}" for path in existing[:20])
-        if len(existing) > 20:
-            listing += f"\n  … and {len(existing) - 20} more"
+        listing = "\n".join(f"  • {path.name}" for path in unique[:20])
+        if len(unique) > 20:
+            listing += f"\n  … and {len(unique) - 20} more"
         answer = QMessageBox.question(
             self,
-            "Overwrite annotations?",
+            "Add to existing annotations?",
             "Annotation file(s) already exist for the selected sequence(s):\n\n"
             f"{listing}\n\n"
-            "Running Sequence Annotation will overwrite them. Continue?",
+            "New detections will be added to the existing JSON annotations "
+            "(previous features are kept). Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         return answer == QMessageBox.StandardButton.Yes
 
@@ -9938,15 +10669,11 @@ class MainWindow(QMainWindow):
         initial: str,
     ) -> tuple[str, bool]:
         """Wide rename prompt so long filenames fit without horizontal scrolling."""
-        dialog = QInputDialog(self)
-        dialog.setWindowTitle(title)
-        dialog.setLabelText(label)
-        dialog.setTextValue(initial)
-        dialog.setInputMode(QInputDialog.InputMode.TextInput)
-        dialog.resize(560, dialog.sizeHint().height())
-        dialog.setMinimumWidth(520)
-        ok = dialog.exec() == QDialog.DialogCode.Accepted
-        return dialog.textValue(), ok
+        from repeatviewer.widgets.file_conflict import prompt_rename_text
+
+        return prompt_rename_text(
+            self, title=title, label=label, initial=initial
+        )
 
     # -- cytogenetic images -------------------------------------------------
 
@@ -10377,33 +11104,35 @@ class MainWindow(QMainWindow):
             )
             return
 
-        output_dir = separation_output_dir(path)
-        mapping_note = (
-            f"Sequence_name_mapping_{sanitize_name(path.name)}.txt will be written next to the input file."
-        )
+        from repeatviewer.views.tool_dialogs import NameWithAnnotationDialog
+
+        default_folder = default_separation_folder_name(path)
         if subfolder_per_sequence:
             title = "Separate into subfolders"
-            layout_note = (
-                f"Each sequence will be written to its own subfolder under:\n{output_dir}\n"
-                f"(e.g. {output_dir.name}/sequence_name/sequence_name{path.suffix.lower() or '.fa'})\n\n"
+            intro = (
+                f"Separate {seq_count} sequence to {seq_count} single folders "
+                "inside a new folder."
             )
-            done_title = "Separate into subfolders completed"
         else:
             title = "Separate FASTA sequences"
-            layout_note = f"into separate files under:\n{output_dir}\n\n"
-            done_title = "Separate FASTA completed"
-        answer = QMessageBox.question(
-            self,
-            title,
-            f"Split {seq_count} sequences from\n{path.name}\n\n"
-            f"{layout_note}"
-            f"Special characters in headers will be sanitized. {mapping_note}\n\n"
-            "Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            intro = f"Separated to {seq_count} single sequences to a new folder."
+
+        dialog = NameWithAnnotationDialog(
+            title=title,
+            intro=intro,
+            name_label="New folder name:",
+            default_name=default_folder,
+            annotation_label="Copy annotations for separated sequences",
+            parent=self,
+            name_is_folder=True,
+            parent_dir=path.parent,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        output_dir = dialog.resolved_folder()
+        if output_dir is None:
+            return
+        include_ann = dialog.include_annotations()
 
         try:
             created, written = separate_sequences(
@@ -10414,6 +11143,16 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Separate FASTA failed", str(exc))
             return
+
+        if include_ann:
+            try:
+                self._separate_annotation_json(path, created)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Separate annotations",
+                    f"Sequences were separated, but annotations failed:\n{exc}",
+                )
 
         # New folder creation also triggers the FS watcher; suppress it briefly so
         # a rebuild cannot steal selection to the next sibling folder.
@@ -10426,19 +11165,59 @@ class MainWindow(QMainWindow):
         )
         if subfolder_per_sequence:
             status = f"Created {written} subfolder(s) in {output_dir.name}/"
-            done_msg = f"Wrote {written} sequence(s), each in its own subfolder under:\n{output_dir}"
         else:
             status = f"Created {written} single-sequence file(s) in {output_dir.name}/"
-            done_msg = f"Wrote {written} file(s) to:\n{output_dir}"
         self._set_status_message(status, 10000)
-        QMessageBox.information(self, done_title, done_msg)
 
     def _separate_fasta_to_subfolders_file(self, path: Path) -> None:
         self._separate_fasta_file(path, subfolder_per_sequence=True)
 
+    def _separate_annotation_json(self, source: Path, created: list[Path]) -> None:
+        """Write per-output JSON when separating a multi-FASTA with annotations."""
+        from repeatviewer.backends.sequence_features import (
+            fasta_record_lengths,
+            load_features_by_id_from_json,
+            resolve_sidecar_path,
+            save_annotations_multi,
+        )
+
+        if resolve_sidecar_path(source) is None:
+            return
+        src_lengths = fasta_record_lengths(source)
+        src_ids = list(src_lengths.keys())
+        src_feats = load_features_by_id_from_json(source, src_ids)
+        if not any(src_feats.values()):
+            return
+        # Match outputs to source records by order (separate_sequences preserves order).
+        fasta_outs = [
+            p for p in created if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        for index, out in enumerate(fasta_outs):
+            if index >= len(src_ids):
+                break
+            sid = src_ids[index]
+            feats = src_feats.get(sid) or []
+            if not feats:
+                continue
+            try:
+                out_lengths = fasta_record_lengths(out)
+                out_ids = list(out_lengths.keys())
+            except Exception:  # noqa: BLE001
+                continue
+            if not out_ids:
+                continue
+            save_annotations_multi(
+                out,
+                features_by_id={out_ids[0]: feats},
+                lengths_by_id=out_lengths,
+                record_ids=out_ids,
+            )
+
     def _duplicate_selected_files(self, paths: list[Path]) -> None:
         if not paths:
             return
+        from repeatviewer.backends.sequence_features import features_gff_path
+
         created: list[Path] = []
         failed: list[str] = []
         for path in paths:
@@ -10451,6 +11230,21 @@ class MainWindow(QMainWindow):
                 created.append(dest)
             except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
+                continue
+            for comp in companion_annotation_paths_for_fasta(src):
+                if comp.suffix.lower() == ".json" or ".seqmap" in comp.name:
+                    comp_dest = sidecar_path(dest)
+                elif comp.name.endswith(".gff3"):
+                    comp_dest = features_gff_path(dest)
+                else:
+                    comp_dest = dest.parent / comp.name
+                if comp_dest.exists():
+                    continue
+                try:
+                    shutil.copy2(comp, comp_dest)
+                    created.append(comp_dest)
+                except OSError as exc:
+                    failed.append(f"{comp.name}: {exc}")
 
         if self._current_folder:
             current = self._current_folder.resolve()
@@ -10780,27 +11574,61 @@ class MainWindow(QMainWindow):
         *,
         files: list[Path] | None = None,
     ) -> None:
-        """Create a folder, optionally moving the selected files into it."""
+        """Create a folder, optionally copying the selected files into it."""
         if not isinstance(parent, Path):
             parent = None
-        move_files = [p for p in (files or []) if isinstance(p, Path) and p.is_file()]
-        destinations = self._folder_destination_candidates(parent)
-        if not destinations:
-            QMessageBox.warning(
-                self,
-                "No folder available",
-                "Add a folder to the Folders panel first (File → Add Folder).",
-            )
+        copy_files = [p for p in (files or []) if isinstance(p, Path) and p.is_file()]
+
+        if copy_files:
+            initial_destination = copy_files[0].expanduser().resolve().parent
+            default_name = f"{copy_files[0].name}_new_folder"
+        else:
+            destinations = self._folder_destination_candidates(parent)
+            if not destinations:
+                QMessageBox.warning(
+                    self,
+                    "No folder available",
+                    "Add a folder to the Folders panel first (File → Add Folder).",
+                )
+                return
+            initial_destination = destinations[0]
+            default_name = DEFAULT_FOLDER_NAME
+
+        if self._create_folder_dialog is not None and self._create_folder_dialog.isVisible():
+            existing = self._create_folder_dialog
+            existing.raise_()
+            existing.activateWindow()
+            if copy_files:
+                existing.set_destination(initial_destination)
             return
 
-        default_name = common_prefix_name(move_files) if move_files else ""
         dialog = CreateFolderDialog(
             self,
-            destinations=destinations,
-            default_name=default_name or DEFAULT_FOLDER_NAME,
-            move_count=len(move_files),
+            initial_destination=initial_destination,
+            default_name=default_name,
+            copy_count=len(copy_files),
         )
-        if not exec_modal_dialog(dialog):
+        self._create_folder_dialog = dialog
+        self._create_folder_copy_files = list(copy_files)
+        dialog.finished.connect(self._on_create_folder_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _sync_create_folder_dialog_from_folder(self, folder: Path) -> None:
+        dialog = self._create_folder_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        dialog.apply_folder_from_panel(folder)
+
+    def _on_create_folder_dialog_finished(self, result: int) -> None:
+        dialog = self._create_folder_dialog
+        copy_files = list(self._create_folder_copy_files)
+        self._create_folder_dialog = None
+        self._create_folder_copy_files = []
+        if dialog is None:
+            return
+        if result != int(QDialog.DialogCode.Accepted):
             return
         new_dir = dialog.target_path()
         if new_dir is None:
@@ -10812,21 +11640,22 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Create folder failed", str(exc))
             return
 
-        if move_files:
-            self._transfer_files(move_files, new_dir, mode="cut")
+        if copy_files:
+            # Copy (not move); FASTA companions are included by _transfer_files.
+            self._transfer_files(copy_files, new_dir, mode="copy")
 
         self._reveal_new_folder(new_dir)
-        if move_files:
-            noun = "file" if len(move_files) == 1 else "files"
+        if copy_files:
+            noun = "file" if len(copy_files) == 1 else "files"
             self._set_status_message(
-                f"Created {new_dir.name} with {len(move_files)} {noun}",
+                f"Created {new_dir.name} with {len(copy_files)} {noun} copied",
                 7000,
             )
         else:
             self._set_status_message(f"Created folder {new_dir.name}", 5000)
 
     def _create_folder_with_files(self, files: list[Path]) -> None:
-        """Files-panel entry point: create a folder and move the selection into it."""
+        """Files-panel entry point: create a folder and copy the selection into it."""
         self._create_folder(self._current_folder, files=list(files))
 
     def _reveal_new_folder(self, new_dir: Path) -> None:
@@ -10880,6 +11709,32 @@ class MainWindow(QMainWindow):
             return candidate
         return _unique_duplicate_path(candidate)
 
+    def _resolve_transfer_destination(
+        self,
+        src: Path,
+        target_dir: Path,
+        *,
+        mode: Literal["copy", "cut"],
+    ) -> Path | None:
+        """Pick destination for a drag/paste; prompt if the name already exists."""
+        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
+
+        target_dir = target_dir.expanduser().resolve()
+        dest = (target_dir / src.name).expanduser().resolve()
+        if src.resolve() == dest.resolve():
+            return None
+        if not dest.exists():
+            return dest
+        action = "move" if mode == "cut" else "copy"
+        return confirm_existing_file_path(
+            self,
+            dest,
+            title="File already exists",
+            informative=(
+                f"Overwrite the existing file, or {action} under a different name?"
+            ),
+        )
+
     def _transfer_files(
         self,
         files: list[Path],
@@ -10899,11 +11754,15 @@ class MainWindow(QMainWindow):
             src = raw.expanduser().resolve()
             if not src.is_file():
                 continue
-            dest = self._unique_path_in_folder(src, target_dir)
-            if src.resolve() == dest.resolve():
+            # Move/copy annotation companions with the FASTA.
+            companion_srcs = companion_annotation_paths_for_fasta(src)
+            dest = self._resolve_transfer_destination(src, target_dir, mode=mode)
+            if dest is None:
                 continue
             try:
                 if mode == "cut":
+                    if dest.exists():
+                        dest.unlink()
                     shutil.move(src, dest)
                     from repeatviewer.widgets.file_colors import replace_file_color_path
 
@@ -10912,6 +11771,26 @@ class MainWindow(QMainWindow):
                     shutil.copy2(src, dest)
                 created.append(dest)
                 sources.append(src)
+                for comp in companion_srcs:
+                    # Keep canonical companion names beside the new FASTA.
+                    if comp.suffix.lower() == ".json" or ".seqmap" in comp.name:
+                        comp_dest = sidecar_path(dest)
+                    elif comp.name.endswith(".gff3"):
+                        from repeatviewer.backends.sequence_features import features_gff_path
+
+                        comp_dest = features_gff_path(dest)
+                    else:
+                        comp_dest = target_dir / comp.name
+                    try:
+                        if mode == "cut":
+                            if comp_dest.exists() and comp_dest != comp:
+                                comp_dest.unlink()
+                            shutil.move(comp, comp_dest)
+                        else:
+                            shutil.copy2(comp, comp_dest)
+                        created.append(comp_dest)
+                    except OSError as exc:
+                        failed.append(f"{comp.name}: {exc}")
             except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
 
@@ -11811,8 +12690,11 @@ class MainWindow(QMainWindow):
 
         self._last_job_source_files = list(prepared_sources)
         self._clear_job_file_highlights()
-        self._stop_metadata_enrichment()
+        # Cancel enrichment without blocking the GUI (was wait(1000)).
+        self._stop_metadata_enrichment(wait_ms=0)
         self._job_cancel.reset()
+        self._job_finished_callback = on_finished
+        self._job_failed_callback = on_failed
         self._show_job_progress(job_title, total_steps)
         self._set_job_actions_enabled(False)
 
@@ -11822,16 +12704,10 @@ class MainWindow(QMainWindow):
         self._worker_thread.started.connect(self._worker.run)
         queued = Qt.ConnectionType.QueuedConnection
         self._worker.progress.connect(self._on_job_progress, queued)
-        self._worker.finished.connect(
-            lambda result, title=job_title: self._log_job_finished(title, result)
-        )
-        self._worker.failed.connect(
-            lambda error, title=job_title: self._log_job_failed(title, error)
-        )
-        self._worker.finished.connect(self._finish_background_job, queued)
-        self._worker.failed.connect(self._finish_background_job, queued)
-        self._worker.finished.connect(on_finished, queued)
-        self._worker.failed.connect(on_failed, queued)
+        # Bound MainWindow slots only — bare lambdas/closures have no receiver
+        # QObject and can run on the worker thread (QBasicTimer / segfault).
+        self._worker.finished.connect(self._on_background_job_finished, queued)
+        self._worker.failed.connect(self._on_background_job_failed, queued)
         self._worker.finished.connect(self._worker_thread.quit)
         self._worker.failed.connect(self._worker_thread.quit)
         self._worker_thread.finished.connect(self._cleanup_worker)
@@ -11847,7 +12723,14 @@ class MainWindow(QMainWindow):
             label,
         )
         if self._task_progress is not None:
-            self._task_progress.update(value, self._parse_progress_filename(label))
+            # Never fill the last slot here — reserved until results are shown.
+            work = getattr(self, "_job_work_steps", self._task_progress._total)
+            capped = min(max(0, int(value)), max(0, int(work)))
+            # One-file jobs: keep the status as "Running BLAST…" without a name.
+            detail = ""
+            if int(work) > 1:
+                detail = self._parse_progress_filename(label)
+            self._task_progress.update(capped, detail)
 
     def _log_job_finished(self, job_title: str, result) -> None:
         if isinstance(result, (list, tuple)):
@@ -11867,11 +12750,6 @@ class MainWindow(QMainWindow):
             error,
         )
 
-    @Slot()
-    def _finish_background_job(self) -> None:
-        self._hide_job_progress()
-        self._set_job_actions_enabled(True)
-
     def _set_job_actions_enabled(self, enabled: bool) -> None:
         for control in self._job_toolbar_actions:
             control.setEnabled(enabled)
@@ -11883,7 +12761,11 @@ class MainWindow(QMainWindow):
         *,
         extra_folders: set[Path] | None = None,
     ) -> None:
-        """Refresh file list; show outputs in each input file's folder."""
+        """Refresh file list; show outputs in each input file's folder.
+
+        Never auto-opens preview here — callers use ``_auto_open_outputs`` (or
+        open a specific result) so large jobs do not open twice.
+        """
         self._watcher_refresh_suppressed_until = time.monotonic() + 3.0
         touched = {p.parent.resolve() for p in created_paths} | {
             p.parent.resolve() for p in source_paths
@@ -11900,11 +12782,18 @@ class MainWindow(QMainWindow):
                 ancestor = ancestor.parent
 
         current = self._current_folder.resolve() if self._current_folder else None
+        # Huge jobs: skip input tinting (every selected FASTA) — only mark outputs.
+        # Keeps the finish path closer to O(new files) instead of O(inputs+outputs).
+        highlight_sources = source_paths
+        if len(created_paths) > _LARGE_JOB_OUTPUT_BATCH:
+            highlight_sources = []
         if current is not None and current in touched:
+            # created/source paths are already resolve()'d by the finish handler.
             self._populate_file_list(
                 current,
-                new_outputs=[p for p in created_paths if p.parent.resolve() == current],
-                source_files=[p for p in source_paths if p.parent.resolve() == current],
+                new_outputs=[p for p in created_paths if p.parent == current],
+                source_files=[p for p in highlight_sources if p.parent == current],
+                open_preview=False,
             )
             return
 
@@ -11912,11 +12801,14 @@ class MainWindow(QMainWindow):
             target = created_paths[0].parent.resolve()
             self._navigate_to_folder(
                 target,
-                new_outputs=[p for p in created_paths if p.parent.resolve() == target],
-                source_files=[p for p in source_paths if p.parent.resolve() == target],
+                new_outputs=[p for p in created_paths if p.parent == target],
+                source_files=[p for p in highlight_sources if p.parent == target],
+                open_preview=False,
             )
-        elif source_paths and self._current_folder:
-            self._populate_file_list(self._current_folder)
+            return
+
+        if source_paths and self._current_folder:
+            self._populate_file_list(self._current_folder, open_preview=False)
 
     @Slot(dict)
     def _on_worker_finished(self, result: dict) -> None:
@@ -12123,7 +13015,36 @@ class MainWindow(QMainWindow):
         """Prefer HTML/PDF/images for preview after TE-Aid / Flexidot / genome map."""
         if not created_paths:
             return None
-        files = [p.resolve() for p in created_paths if p.is_file()]
+
+        def _as_path(raw: Path) -> Path:
+            try:
+                return raw.expanduser().resolve()
+            except OSError:
+                return raw.expanduser()
+
+        # Large BLAST-style batches: avoid N× is_file() — trust worker paths.
+        # Prefer a visual output if present; otherwise the last previewable file.
+        if len(created_paths) > _LARGE_JOB_OUTPUT_BATCH:
+            preferred_suffixes = {
+                ".html",
+                ".htm",
+                ".pdf",
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".svg",
+            }
+            for raw in reversed(created_paths):
+                path = _as_path(raw)
+                if path.suffix.lower() in preferred_suffixes:
+                    return path
+            for raw in reversed(created_paths):
+                path = _as_path(raw)
+                if is_previewable_file(path):
+                    return path
+            return _as_path(created_paths[-1])
+
+        files = [p for p in (_as_path(p) for p in created_paths) if p.is_file()]
         if not files:
             return None
         for path in files:
@@ -12168,17 +13089,21 @@ class MainWindow(QMainWindow):
         target = self._pick_preview_output(created_paths)
         if target is None:
             return
-        # Select first so the deep-blue opened row is correct even if preview fails.
-        self._file_list.clearSelection()
-        self._file_list.setCurrentItem(None)
-        self._refresh_file_list_highlights()
-        self._select_path_in_file_list(target)
-        self._refresh_file_list_highlights()
-        if is_previewable_file(target):
-            self._open_preview_tab(target, replace=True)
-            # Re-assert selection after preview (some preview loads reshuffle focus).
+        # Suppress selection→preview while we select, so we open exactly once.
+        was_suppress = self._file_list.suppress_selection_preview()
+        self._file_list.set_suppress_selection_preview(True)
+        try:
+            self._file_list.clearSelection()
+            self._file_list.setCurrentItem(None)
+            # Do not full-restyle the folder — select path re-tints job keys only.
             self._select_path_in_file_list(target)
-            self._refresh_file_list_highlights()
+            if is_previewable_file(target):
+                self._open_preview_tab(target, replace=True)
+                self._select_path_in_file_list(target)
+        finally:
+            if not was_suppress:
+                # Keep suppress through deferred currentItemChanged timers.
+                QTimer.singleShot(0, self._file_list.clear_suppress_selection_preview)
 
     def _update_status(self) -> None:
         if self._job_running:

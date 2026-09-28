@@ -92,7 +92,7 @@ def test_extract_writes_one_combined_file_in_fasta_order(tmp_path: Path) -> None
 
     assert len(summary.written) == 1
     out = summary.written[0]
-    assert out.name == "reads_extracted.fasta"
+    assert out.name == "reads.fasta_extr.fa"
     # File order, not ID-list order.
     assert _headers(out) == ["read_1 length=4", "read_3 some description"]
     assert summary.matched == 2
@@ -172,7 +172,7 @@ def test_extract_cancelled_leaves_no_partial_output(tmp_path: Path) -> None:
     )
     assert summary.cancelled is True
     assert summary.written == []
-    assert not (tmp_path / "many_extracted.fasta").exists()
+    assert not (tmp_path / "many.fasta_extr.fa").exists()
 
 
 # --- the Check button ------------------------------------------------------

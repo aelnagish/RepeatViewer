@@ -33,6 +33,7 @@ from PySide6.QtGui import (
     QImage,
     QPalette,
     QPen,
+    QPixmap,
     QPolygonF,
     QShortcut,
     QPageSize,
@@ -63,6 +64,8 @@ from PySide6.QtWidgets import (
     QScrollBar,
     QSizePolicy,
     QSlider,
+    QStackedWidget,
+    QStyle,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -223,8 +226,20 @@ _FIT_MIN_PPB = 1e-6
 _MAX_PPB = 48.0
 _INTERACTIVE_SEQUENCE_LEN = 35_000
 _LARGE_SEQUENCE_LEN = 150_000
-_HUGE_SEQUENCE_LEN = 2_000_000
+# Hard Annotation display limit (sequence length). Viewport-only letters keep
+# long sequences usable; this is a safety gate, not a render window size.
+_HUGE_SEQUENCE_LEN = 100_000_000
+_MAX_ANNOTATION_DISPLAY_LEN = _HUGE_SEQUENCE_LEN
 _LAYOUT_SYNC_MS = 40
+
+
+def _annotation_too_long_message(length: int = 0) -> str:
+    """Status text when Annotation refuses to render a long sequence."""
+    del length  # kept for call-site compatibility
+    return (
+        "This sequence is too long for Annotation tab "
+        "(limit 100 Mbp of sequence length)."
+    )
 _BUCKET_DRAW_PPB = 1.0
 _WRAP_MIN_PPB = 4.0
 _WRAP_LINE_RULER = 12
@@ -242,6 +257,18 @@ _DEFAULT_NUC_FONT_PT = 13
 _ZOOM_BTN_SIZE = 28
 _ZOOM_BTN_HEIGHT = 24
 _ANNOTATION_SIDE_PANEL_WIDTH = 108
+# Wide enough for "2,000,000" plus spin arrows without clipping.
+_POSITION_SPIN_WIDTH = 108
+
+
+def _configure_position_spin(spin: QSpinBox) -> None:
+    """Size Position spins so the Annotation max coordinate is fully visible."""
+    spin.setFixedWidth(_POSITION_SPIN_WIDTH)
+    spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+    spin.setGroupSeparatorShown(True)
+    spin.setToolTip(
+        f"1-based position (up to {_MAX_ANNOTATION_DISPLAY_LEN:,} bp on Annotation)"
+    )
 
 
 def _zoom_ppb_max() -> float:
@@ -250,15 +277,20 @@ def _zoom_ppb_max() -> float:
 
 
 def _zoom_ppb_max_for(seq_len: int) -> float:
-    """Cap zoom-in for very long sequences to keep scrolling responsive."""
+    """Cap zoom-in for very long sequences to keep scrolling responsive.
+
+    Keep the cap high enough that letter mode (≈ font width px/base) is still
+    reachable: letters are painted only for the visible viewport, so deep zoom
+    on a multi-Mb sequence stays cheap.
+    """
     length = max(0, int(seq_len))
     if length <= _INTERACTIVE_SEQUENCE_LEN:
         return _MAX_PPB
     if length <= _LARGE_SEQUENCE_LEN:
         return 16.0
     if length <= _HUGE_SEQUENCE_LEN:
-        return 8.0
-    return 4.0
+        return 16.0
+    return 8.0
 
 
 def _annotation_row_label(text: str, parent: QWidget) -> QLabel:
@@ -874,7 +906,7 @@ class ViewportRulerWidget(QWidget):
     ) -> None:
         self._sequence = sequence.upper()
         self._scroll_px = max(0.0, float(scroll_px))
-        self._ppb = max(0.01, float(ppb))
+        self._ppb = max(_FIT_MIN_PPB, float(ppb))
         self._viewport_w = max(1, int(viewport_w))
         self.update()
 
@@ -900,17 +932,30 @@ class ViewportRulerWidget(QWidget):
         min_label_w = fm.horizontalAdvance("00000") + 4
         last_label_x = -1e9
 
-        for bp in range(start_bp, end_bp + 1):
-            if bp != 1 and bp != seq_len and bp % tick_step != 0:
-                continue
+        # Walk by tick_step (not every base) so multi-Mb fit views stay cheap.
+        tick_bps: list[int] = []
+        if start_bp == 1:
+            tick_bps.append(1)
+        first = ((start_bp + tick_step - 1) // tick_step) * tick_step
+        if first < 1:
+            first = tick_step
+        for bp in range(first, end_bp + 1, tick_step):
+            if bp != 1:
+                tick_bps.append(bp)
+        if end_bp >= seq_len and seq_len not in tick_bps:
+            tick_bps.append(seq_len)
+
+        for bp in tick_bps:
             x = _bp_view_x(bp, scroll, ppb)
             if x < _LEFT_MARGIN or x > vw - 4:
                 continue
             if bp != seq_len:
+                # Tick from top down toward the nucleotide track.
                 painter.drawLine(int(x), 1, int(x), _VIEWPORT_RULER_HEIGHT - 3)
             text = str(bp)
-            if x - last_label_x < min_label_w and bp != start_bp:
+            if x - last_label_x < min_label_w and bp != 1 and bp != seq_len:
                 continue
+            # Baseline flush to the bottom edge so the track sits under the numbers.
             painter.drawText(int(x + 2), _VIEWPORT_RULER_HEIGHT - 2, text)
             last_label_x = x
         painter.end()
@@ -1405,7 +1450,7 @@ class AnnotationTrackWidget(QWidget):
         self._features = list(features)
         self._feature_rows = list(feature_rows)
         self._scroll_px = max(0.0, float(scroll_px))
-        self._ppb = max(0.01, float(ppb))
+        self._ppb = max(_FIT_MIN_PPB, float(ppb))
         self._viewport_w = max(1, int(viewport_w))
         if (
             not self._marquee_active
@@ -1859,16 +1904,60 @@ class SequenceMapCanvas(QWidget):
         self._select_end_bp: int | None = None
         self._drag_select = False
         self._mouse_grabbed = False
+        self._pending_selection_emit: tuple[int, int] | None = None
+        self._selection_emit_timer = QTimer(self)
+        self._selection_emit_timer.setSingleShot(True)
+        self._selection_emit_timer.setInterval(33)  # ~30 Hz spin/status updates
+        self._selection_emit_timer.timeout.connect(self._flush_pending_selection_emit)
+        self._seq_layer_cache: QPixmap | None = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._show_similarity_database_name = True
+
+    def _invalidate_seq_layer_cache(self) -> None:
+        self._seq_layer_cache = None
+
+    def _ensure_seq_layer_cache(self) -> None:
+        """Lazy sequence (+ wrap features) snapshot without selection chrome.
+
+        Rebuilt on zoom/scroll/sequence change — not on every mouse press — so
+        selection drag only blits the cache and redraws the highlight.
+        """
+        if (
+            self._seq_layer_cache is not None
+            and self._seq_layer_cache.size() == self.size()
+            and not self._seq_layer_cache.isNull()
+        ):
+            return
+        if self.width() < 2 or self.height() < 2 or not self._sequence:
+            self._seq_layer_cache = None
+            return
+        cache = QPixmap(self.size())
+        cache.fill(QColor("#fafafa"))
+        painter = QPainter(cache)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, False)
+        self._draw_sequence(painter, QRectF(cache.rect()))
+        if self.uses_wrap():
+            self._draw_features(painter)
+            track_bottom = self._feature_track_top() + self._feature_block_height()
+            painter.setPen(QColor("#bbbbbb"))
+            painter.drawLine(
+                _LEFT_MARGIN,
+                track_bottom + 2,
+                self._content_width() - _LEFT_MARGIN,
+                track_bottom + 2,
+            )
+        painter.end()
+        self._seq_layer_cache = cache
 
     def set_show_similarity_database_name(self, show: bool) -> None:
         show = bool(show)
         if show == self._show_similarity_database_name:
             return
         self._show_similarity_database_name = show
+        self._invalidate_seq_layer_cache()
         self.update()
 
     def _feature_track_label(self, feat: SequenceFeature, rect_width: float, min_width: float) -> str:
@@ -1891,8 +1980,13 @@ class SequenceMapCanvas(QWidget):
         self._release_drag_mouse()
         super().hideEvent(event)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        self._invalidate_seq_layer_cache()
+        super().resizeEvent(event)
+
     def set_font_point_size(self, point_size: int) -> None:
         self._font_point_size = max(_MIN_NUC_FONT_PT, min(_MAX_NUC_FONT_PT, int(point_size)))
+        self._invalidate_seq_layer_cache()
         self._update_geometry()
         self.update()
 
@@ -1915,12 +2009,14 @@ class SequenceMapCanvas(QWidget):
         self._features = list(features)
         self._is_protein = bool(is_protein)
         self._feature_rows, self._feature_row_count = _pack_feature_rows(self._features)
+        self._invalidate_seq_layer_cache()
         self._update_geometry()
         self.update()
 
     def set_pixels_per_bp(self, ppb: float) -> None:
         cap = _zoom_ppb_max_for(len(self._sequence))
         self._pixels_per_bp = max(_FIT_MIN_PPB, min(cap, float(ppb)))
+        self._invalidate_seq_layer_cache()
         self._update_geometry()
         self.update()
 
@@ -1933,6 +2029,7 @@ class SequenceMapCanvas(QWidget):
         if width == self._viewport_width:
             return
         self._viewport_width = width
+        self._invalidate_seq_layer_cache()
         self.update()
 
     def sync_viewport_from_widget(self) -> None:
@@ -1940,12 +2037,13 @@ class SequenceMapCanvas(QWidget):
         width = max(120, self.width())
         if width != self._viewport_width:
             self._viewport_width = width
+            self._invalidate_seq_layer_cache()
             self.update()
 
     def set_scroll_px(self, scroll_px: float) -> None:
         self._scroll_px = max(0.0, float(scroll_px))
+        self._invalidate_seq_layer_cache()
         self.update()
-
     def scroll_px(self) -> float:
         return self._scroll_px
 
@@ -1987,6 +2085,7 @@ class SequenceMapCanvas(QWidget):
 
     def set_color_bases(self, enabled: bool) -> None:
         self._color_bases = bool(enabled)
+        self._invalidate_seq_layer_cache()
         self.update()
 
     def color_bases(self) -> bool:
@@ -1994,6 +2093,8 @@ class SequenceMapCanvas(QWidget):
 
     def set_selected_features(self, indices: set[int] | frozenset[int] | None) -> None:
         self._selected_indices = set(indices or [])
+        if self.uses_wrap():
+            self._invalidate_seq_layer_cache()
         self.update()
 
     def set_selected_feature(self, index: int | None) -> None:
@@ -2037,10 +2138,15 @@ class SequenceMapCanvas(QWidget):
         return cell_w, max(1, cell_h)
 
     def shows_letters(self) -> bool:
-        if len(self._sequence) > _INTERACTIVE_SEQUENCE_LEN:
+        """True when zoomed in enough to draw A/C/G/T (or AA) glyphs.
+
+        Letters are painted only for the visible viewport, so this is safe for
+        long sequences as well as short ones — no full-sequence letter pass.
+        """
+        if not self._sequence:
             return False
         font_w, _ = self._font_letter_cell_size()
-        return self._pixels_per_bp >= font_w
+        return self._pixels_per_bp >= float(font_w)
 
     def _letter_cell_size(self) -> tuple[int, int]:
         """Current nucleotide cell size when drawing letters."""
@@ -2362,13 +2468,15 @@ class SequenceMapCanvas(QWidget):
             )
             return
 
+        seq_left, seq_right = self._sequence_viewport_x_extent()
+
+        # Zoomed in (≈1 px/base or more): RLE by identical bases.
         if cell_w >= _BUCKET_DRAW_PPB:
             visible_start = max(0, int(math.floor((scroll + clip.left() - origin_x) / cell_w)))
             visible_end = min(
                 seq_len,
                 int(math.ceil((scroll + clip.right() - origin_x) / cell_w)),
             )
-            seq_left, seq_right = self._sequence_viewport_x_extent()
             i = visible_start
             while i < visible_end:
                 base = self._sequence[i]
@@ -2389,7 +2497,9 @@ class SequenceMapCanvas(QWidget):
                 )
             return
 
-        seq_left, seq_right = self._sequence_viewport_x_extent()
+        # Fit / overview (sub-pixel bases): one sample per pixel, coalesce runs.
+        # Always-RLE-by-base was the ~7 kb drag regression — DNA has ~1 base
+        # per run, so it issued thousands of fillRects vs ~viewport-width here.
         px_left = max(0, int(math.floor(clip.left())), int(math.floor(seq_left)))
         px_right = min(
             self.width(),
@@ -2399,13 +2509,29 @@ class SequenceMapCanvas(QWidget):
         if px_left >= px_right:
             return
         painter.setPen(Qt.PenStyle.NoPen)
-        for px in range(px_left, px_right):
+        content_span = seq_len * cell_w
+        px = px_left
+        while px < px_right:
             content_x0 = scroll + px - origin_x
-            if content_x0 < 0.0 or content_x0 >= seq_len * cell_w:
+            if content_x0 < 0.0 or content_x0 >= content_span:
+                px += 1
                 continue
             bp0 = min(seq_len - 1, int(content_x0 / cell_w))
             bg, _ = self._base_style(self._sequence[bp0])
-            painter.fillRect(QRectF(float(px), float(origin_y), 1.0, float(cell_h)), bg)
+            run_start = px
+            px += 1
+            while px < px_right:
+                content_x0 = scroll + px - origin_x
+                if content_x0 < 0.0 or content_x0 >= content_span:
+                    break
+                bp1 = min(seq_len - 1, int(content_x0 / cell_w))
+                if self._sequence[bp1] != self._sequence[bp0]:
+                    break
+                px += 1
+            painter.fillRect(
+                QRectF(float(run_start), float(origin_y), float(px - run_start), float(cell_h)),
+                bg,
+            )
 
     def _draw_sequence(self, painter: QPainter, clip: QRectF) -> None:
         if not self._sequence:
@@ -2447,15 +2573,18 @@ class SequenceMapCanvas(QWidget):
             seq_len,
             int(math.ceil((scroll + clip.right() - origin_x) / cell_w)),
         )
-        if show_letters:
-            for i in range(visible_start, visible_end):
-                cell = self._base_rect_at(i)
-                self._draw_base_cell(
-                    painter,
-                    self._sequence[i],
-                    cell,
-                    show_letters=True,
-                )
+        # Hard cap: never attempt a huge letter pass if clip/math goes wrong.
+        if visible_end - visible_start > 20_000:
+            self._draw_sequence_bar_viewport(painter, clip)
+            return
+        for i in range(visible_start, visible_end):
+            cell = self._base_rect_at(i)
+            self._draw_base_cell(
+                painter,
+                self._sequence[i],
+                cell,
+                show_letters=True,
+            )
 
     def _draw_features(self, painter: QPainter) -> None:
         if not self._features:
@@ -2497,21 +2626,34 @@ class SequenceMapCanvas(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#fafafa"))
         if not self._sequence:
+            painter.fillRect(event.rect(), QColor("#fafafa"))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No sequence")
             painter.end()
             return
 
-        seq_len = len(self._sequence)
-        ppb = self.effective_ppb()
-        clip = QRectF(event.rect())
-
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, False)
 
-        self._draw_sequence(painter, clip)
+        # Blit cached sequence layer; rebuild only after zoom/scroll/etc.
+        self._ensure_seq_layer_cache()
+        if self._seq_layer_cache is not None:
+            painter.drawPixmap(event.rect(), self._seq_layer_cache, event.rect())
+        else:
+            painter.fillRect(event.rect(), QColor("#fafafa"))
+            self._draw_sequence(painter, QRectF(event.rect()))
+            if self.uses_wrap():
+                self._draw_features(painter)
+                track_bottom = self._feature_track_top() + self._feature_block_height()
+                painter.setPen(QColor("#bbbbbb"))
+                painter.drawLine(
+                    _LEFT_MARGIN,
+                    track_bottom + 2,
+                    self._content_width() - _LEFT_MARGIN,
+                    track_bottom + 2,
+                )
 
+        clip = QRectF(event.rect())
         sel = self.selection_range()
         if sel:
             a, b = sel
@@ -2521,49 +2663,91 @@ class SequenceMapCanvas(QWidget):
                 for bp in range(a, b + 1):
                     x, y = self._index_to_xy(bp - 1)
                     rect = QRectF(x, y, cell_w_f, cell_h_f)
+                    if not clip.intersects(rect):
+                        continue
                     painter.fillRect(rect, _SELECTION_FILL)
                     painter.setPen(QPen(_SELECTION_BORDER, 1))
                     painter.drawRect(rect)
             else:
                 x1 = origin_x + (a - 1) * cell_w - self._scroll_px
                 x2 = origin_x + b * cell_w - self._scroll_px
-                # Extend equally above and below the DNA cells, keeping the
-                # sequence centered inside a larger, unmistakable highlight.
                 rect = QRectF(
                     x1,
                     float(origin_y - _SELECTION_HIGHLIGHT_MARGIN),
                     x2 - x1,
                     float(cell_h + 2 * _SELECTION_HIGHLIGHT_MARGIN),
                 )
-                painter.fillRect(rect, _SELECTION_FILL)
-                painter.setPen(QPen(_SELECTION_BORDER, 1))
-                painter.drawRect(rect)
+                if clip.intersects(rect):
+                    painter.fillRect(rect, _SELECTION_FILL)
+                    painter.setPen(QPen(_SELECTION_BORDER, 1))
+                    painter.drawRect(rect)
             painter.setPen(Qt.PenStyle.NoPen)
-
-        if self.uses_wrap():
-            self._draw_features(painter)
-            track_bottom = self._feature_track_top() + self._feature_block_height()
-            painter.setPen(QColor("#bbbbbb"))
-            painter.drawLine(
-                _LEFT_MARGIN,
-                track_bottom + 2,
-                self._content_width() - _LEFT_MARGIN,
-                track_bottom + 2,
-            )
         painter.end()
 
-    @staticmethod
-    def _nice_tick_step(seq_len: int, ppb: float, fm: QFontMetrics) -> int:
-        sample_w = max(
-            fm.horizontalAdvance("1"),
-            fm.horizontalAdvance(str(max(1, seq_len))),
-        )
-        target_px = max(sample_w + 8, 56.0)
-        raw = max(1, int(target_px / max(ppb, 0.01)))
-        for step in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 5000, 10000, 50000):
-            if step >= raw:
-                return min(step, seq_len)
-        return max(1, seq_len // 10)
+    def _selection_paint_rect(self, sel: tuple[int, int]) -> QRect:
+        """Pixel rect for a selection range (including highlight margin)."""
+        a, b = sel
+        origin_x, origin_y, cell_w, cell_h = self._nucleotide_cell_geometry()
+        pad = 3
+        if self.uses_wrap():
+            cell_w_f, cell_h_f, _ = self._cell_size()
+            x0, y0 = self._index_to_xy(a - 1)
+            x1, y1 = self._index_to_xy(b - 1)
+            left = min(x0, x1) - pad
+            top = min(y0, y1) - pad
+            right = max(x0 + cell_w_f, x1 + cell_w_f) + pad
+            bottom = max(y0 + cell_h_f, y1 + cell_h_f) + pad
+            return QRect(int(left), int(top), int(right - left), int(bottom - top)).intersected(
+                self.rect()
+            )
+        x1 = origin_x + (a - 1) * cell_w - self._scroll_px
+        x2 = origin_x + b * cell_w - self._scroll_px
+        top = int(origin_y - _SELECTION_HIGHLIGHT_MARGIN) - pad
+        height = int(cell_h + 2 * _SELECTION_HIGHLIGHT_MARGIN) + 2 * pad
+        return QRect(
+            int(min(x1, x2)) - pad,
+            top,
+            int(abs(x2 - x1)) + 2 * pad,
+            height,
+        ).intersected(self.rect())
+
+    def _selection_change_damage(
+        self, old: tuple[int, int] | None, new: tuple[int, int] | None
+    ) -> QRect:
+        """Repaint only edges that changed — not the full old∪new union.
+
+        Combined with the persistent sequence-layer cache, drag paints avoid
+        re-walking every base on each mouse move.
+        """
+        if old is None and new is None:
+            return QRect()
+        if old is None:
+            return self._selection_paint_rect(new)  # type: ignore[arg-type]
+        if new is None:
+            return self._selection_paint_rect(old)
+        oa, ob = old
+        na, nb = new
+        rect = QRect()
+        if oa != na:
+            rect = rect.united(self._selection_paint_rect((min(oa, na), max(oa, na))))
+        if ob != nb:
+            rect = rect.united(self._selection_paint_rect((min(ob, nb), max(ob, nb))))
+        if not rect.isNull():
+            return rect
+        # Identical range (e.g. press): refresh the thin caret/selection chrome.
+        return self._selection_paint_rect(new)
+
+    def _queue_selection_emit(self, start: int, end: int) -> None:
+        self._pending_selection_emit = (int(start), int(end))
+        if not self._selection_emit_timer.isActive():
+            self._selection_emit_timer.start()
+
+    def _flush_pending_selection_emit(self) -> None:
+        pending = self._pending_selection_emit
+        self._pending_selection_emit = None
+        if pending is None:
+            return
+        self.selectionChanged.emit(pending[0], pending[1])
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
@@ -2582,22 +2766,28 @@ class SequenceMapCanvas(QWidget):
                 return
         self._selected_indices.clear()
         bp = self._bp_at_pos(pos.x(), pos.y())
+        old_sel = self.selection_range()
         self._select_start_bp = bp
         self._select_end_bp = bp
         self._drag_select = True
         self.grabMouse()
         self._mouse_grabbed = True
         self.selectionChanged.emit(bp, bp)
-        self.update()
+        self.update(self._selection_change_damage(old_sel, (bp, bp)))
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._drag_select and self._select_start_bp is not None:
             bp = self._bp_at_pos(event.position().x(), event.position().y())
+            if bp == self._select_end_bp:
+                event.accept()
+                return
+            old_sel = self.selection_range()
             self._select_end_bp = bp
             a, b = sorted((self._select_start_bp, bp))
-            self.selectionChanged.emit(a, b)
-            self.update()
+            # Paint immediately; defer spin/status updates so drag stays smooth.
+            self._queue_selection_emit(a, b)
+            self.update(self._selection_change_damage(old_sel, (a, b)))
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -2606,9 +2796,46 @@ class SequenceMapCanvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_select = False
             self._release_drag_mouse()
+            self._selection_emit_timer.stop()
+            self._flush_pending_selection_emit()
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    @staticmethod
+    def _nice_tick_step(seq_len: int, ppb: float, fm: QFontMetrics) -> int:
+        sample_w = max(
+            fm.horizontalAdvance("1"),
+            fm.horizontalAdvance(str(max(1, seq_len))),
+        )
+        target_px = max(sample_w + 8, 56.0)
+        # Do not floor ppb here — fit views for multi-Mb sequences are << 0.01.
+        raw = max(1, int(target_px / max(float(ppb), _FIT_MIN_PPB)))
+        for step in (
+            1,
+            2,
+            5,
+            10,
+            20,
+            50,
+            100,
+            200,
+            500,
+            1000,
+            2000,
+            5000,
+            10_000,
+            20_000,
+            50_000,
+            100_000,
+            200_000,
+            500_000,
+            1_000_000,
+            2_000_000,
+        ):
+            if step >= raw:
+                return min(step, max(1, seq_len))
+        return max(1, seq_len // 10)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
         pos = QPointF(event.pos())
@@ -2840,13 +3067,13 @@ class SequenceMapWidget(QWidget):
         self._pos_start = QSpinBox(controls_parent)
         self._pos_start.setMinimum(1)
         self._pos_start.setMaximum(1)
-        self._pos_start.setFixedWidth(72)
         self._pos_start.setKeyboardTracking(False)
+        _configure_position_spin(self._pos_start)
         self._pos_end = QSpinBox(controls_parent)
         self._pos_end.setMinimum(1)
         self._pos_end.setMaximum(1)
-        self._pos_end.setFixedWidth(72)
         self._pos_end.setKeyboardTracking(False)
+        _configure_position_spin(self._pos_end)
         self._pos_start.valueChanged.connect(self._on_position_spin_changed)
         self._pos_end.valueChanged.connect(self._on_position_spin_changed)
         self._pos_start.editingFinished.connect(self._on_position_editing_finished)
@@ -2893,8 +3120,8 @@ class SequenceMapWidget(QWidget):
             for w in (self._pos_start, self._pos_end, self._font_size, select_btn):
                 w.setParent(toolbar)
             self._sequence_stats_label.setParent(toolbar)
-            self._pos_start.setFixedWidth(64)
-            self._pos_end.setFixedWidth(64)
+            _configure_position_spin(self._pos_start)
+            _configure_position_spin(self._pos_end)
             self._font_size.setFixedWidth(70)
             for spin in (self._pos_start, self._pos_end, self._font_size):
                 spin.setFixedHeight(18)
@@ -3100,10 +3327,42 @@ class SequenceMapWidget(QWidget):
         main_layout.addWidget(self._header)
         main_layout.addWidget(self._sequence_block, stretch=1)
 
+        self._too_long_panel = QWidget(self)
+        self._too_long_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        too_long_layout = QVBoxLayout(self._too_long_panel)
+        too_long_layout.setContentsMargins(8, 4, 8, 4)
+        too_long_layout.setSpacing(0)
+        self._too_long_label = QLabel("", self._too_long_panel)
+        self._too_long_label.setWordWrap(True)
+        self._too_long_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self._too_long_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._too_long_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        too_long_layout.addWidget(self._too_long_label, 0, Qt.AlignmentFlag.AlignTop)
+        too_long_layout.addStretch(1)
+
+        self._map_stack = QStackedWidget(self)
+        self._map_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self._map_stack.addWidget(main_column)
+        self._map_stack.addWidget(self._too_long_panel)
+        self._too_long_active = False
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(main_column, stretch=1)
+        layout.addWidget(self._map_stack, stretch=1)
         if self._annotation_side_panel is not None:
             layout.addWidget(self._annotation_side_panel)
 
@@ -3152,9 +3411,12 @@ class SequenceMapWidget(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         QTimer.singleShot(0, self._sync_header_views)
+        # First open often fits before the panel has its real width; re-check.
+        QTimer.singleShot(0, self._ensure_fitted_to_viewport)
 
     def refresh_layout(self) -> None:
         self._sync_header_views()
+        self._ensure_fitted_to_viewport()
 
     def _sync_header_views(self) -> None:
         self._sync_sequence_block_layout()
@@ -3168,7 +3430,32 @@ class SequenceMapWidget(QWidget):
             width = widget.width()
             if width > 20:
                 return max(120, width - 2)
+        parent = self.parentWidget()
+        while parent is not None:
+            if parent.width() > 100:
+                return max(120, parent.width() - 48)
+            parent = parent.parentWidget()
         return 120
+
+    def _ensure_fitted_to_viewport(self) -> None:
+        """Re-fit when the sequence strip is much narrower than the panel."""
+        if self._data is None or not self._data.sequence:
+            return
+        if not self.isVisible():
+            return
+        viewport_w = self._scroll_viewport_width()
+        panel_w = max(self.width(), self._sequence_block.width())
+        if viewport_w <= 120 or (panel_w > 200 and viewport_w < panel_w * 0.45):
+            self._fit_retries += 1
+            if self._fit_retries < 40:
+                QTimer.singleShot(50, self._ensure_fitted_to_viewport)
+            return
+        content_w = self._canvas.content_pixel_width()
+        # Tiny first-open fit: content fills only a sliver of the panel.
+        if content_w > 0 and content_w < viewport_w * 0.55:
+            self.fit_window()
+            return
+        self._fit_retries = 0
 
     def _horizontal_scroll_px(self) -> float:
         return float(self._hbar.value())
@@ -3316,7 +3603,7 @@ class SequenceMapWidget(QWidget):
         self._sync_overview_now()
 
     def select_by_position(self, start: int, end: int, *, _attempt: int = 0) -> None:
-        if self._data is None:
+        if self._data is None or self.is_too_long_for_display():
             return
         # Marks this as the most recent explicit positioning request so a still-pending
         # fit_window() from the initial Annotation-tab auto-load (see load()/
@@ -3362,9 +3649,40 @@ class SequenceMapWidget(QWidget):
     def data(self) -> SequenceMapData | None:
         return self._data
 
+    def is_too_long_for_display(self) -> bool:
+        """True when Annotation is showing the too-long placeholder instead of the map."""
+        return bool(getattr(self, "_too_long_active", False))
+
+    def _set_too_long_display(self, active: bool, *, length: int = 0) -> None:
+        """Swap between the map and the too-long message panel."""
+        self._too_long_active = bool(active)
+        if active:
+            message = _annotation_too_long_message(length)
+            self._too_long_label.setText(message)
+            self._map_stack.setCurrentWidget(self._too_long_panel)
+            if self._annotation_side_panel is not None:
+                self._annotation_side_panel.hide()
+            self.statusMessage.emit(message)
+        else:
+            self._map_stack.setCurrentIndex(0)
+            if self._annotation_side_panel is not None:
+                self._annotation_side_panel.show()
+
     def load(self, data: SequenceMapData, *, fit_after_load: bool = True) -> None:
         self._data = data
         self._dirty = False
+        seq_len = int(data.length)
+        if seq_len > _MAX_ANNOTATION_DISPLAY_LEN:
+            # Keep metadata for multi-seq switching / summary, but do not paint.
+            self._set_position_spin_limits(1)
+            self._canvas.set_sequence("", [], is_protein=data.is_protein)
+            self._canvas.clear_selection()
+            self._sync_position_spins(1, 1)
+            self._apply_sequence_stats_text("", None)
+            self._set_too_long_display(True, length=seq_len)
+            return
+
+        self._set_too_long_display(False)
         self._set_position_spin_limits(data.length)
         if self._font_size.value() != _DEFAULT_NUC_FONT_PT:
             self._font_size.blockSignals(True)
@@ -3378,15 +3696,10 @@ class SequenceMapWidget(QWidget):
         )
         self._canvas.clear_selection()
         self._sync_position_spins(1, 1)
-        seq_len = data.length
-        if seq_len > _HUGE_SEQUENCE_LEN:
+        if seq_len > _INTERACTIVE_SEQUENCE_LEN:
             self.statusMessage.emit(
-                f"Very long sequence ({seq_len:,} bp): zoom and pan are limited; "
-                "annotation tracks remain available."
-            )
-        elif seq_len > _INTERACTIVE_SEQUENCE_LEN:
-            self.statusMessage.emit(
-                f"Long sequence ({seq_len:,} bp): letter mode disabled for performance."
+                f"Long sequence ({seq_len:,} bp): zoom in to see nucleotide letters "
+                "(letters are drawn only for the visible region)."
             )
         if fit_after_load:
             self._schedule_fit_window()
@@ -3435,8 +3748,12 @@ class SequenceMapWidget(QWidget):
 
         if not isinstance(bar, AnnotationZoomBar):
             return
+        # Already bound — reconnecting would stack duplicate slots and make
+        # every later zoom/tab switch progressively slower.
+        if self._annotation_header_zoom_bar is bar and self._zoom_slider is bar.slider:
+            return
         old = self._annotation_header_zoom_bar
-        if old is not None and old is not bar:
+        if old is not None:
             try:
                 old.slider.valueChanged.disconnect(self._on_zoom_changed)
             except (RuntimeError, TypeError):
@@ -3562,12 +3879,14 @@ class SequenceMapWidget(QWidget):
 
     def fit_window(self) -> None:
         """Zoom out so the entire sequence fits in the visible sequence width."""
-        if self._data is None or not self._data.sequence:
+        if self._data is None or not self._data.sequence or self.is_too_long_for_display():
             return
         viewport_w = self._scroll_viewport_width()
-        if viewport_w <= 20:
+        panel_w = max(self.width(), self._sequence_block.width())
+        # Treat premature layout widths as not ready (not only <= 20).
+        if viewport_w <= 120 or (panel_w > 240 and viewport_w < panel_w * 0.45):
             self._fit_retries += 1
-            if self._fit_retries < 30:
+            if self._fit_retries < 40:
                 QTimer.singleShot(50, self.fit_window)
             return
         self._fit_retries = 0
@@ -4433,6 +4752,7 @@ class SequenceMapPanel(QWidget):
     annotationJobProgress = Signal(str)
     annotationsSaved = Signal(object)  # Path to the written GFF3
     sequenceExtracted = Signal(object)  # Path to a newly written FASTA
+    activeSequenceChanged = Signal(str)  # sequence id after multi-seq switch
 
     def __init__(
         self,
@@ -4506,23 +4826,43 @@ class SequenceMapPanel(QWidget):
         self._seq_label = _annotation_row_label("Sequence:", self._seq_row_container)
         seq_row.addWidget(self._seq_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self._sequence_combo = QComboBox(self._seq_row_container)
-        self._sequence_combo.setEditable(True)
-        self._sequence_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self._sequence_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        self._sequence_combo.setEditable(False)
+        self._sequence_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
         )
-        self._sequence_combo.setMinimumContentsLength(24)
-        self._sequence_combo.setMinimumWidth(220)
+        self._sequence_combo.setMinimumWidth(180)
         self._sequence_combo.setToolTip(
-            "Choose which sequence from this FASTA to show on the map"
+            "Current sequence shown on the map. Use Search to jump by name."
         )
         self._sequence_combo.currentIndexChanged.connect(self._on_sequence_combo_changed)
         seq_row.addWidget(self._sequence_combo, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        self._seq_search_label = QLabel("Search:", self._seq_row_container)
+        self._seq_search_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        seq_row.addWidget(self._seq_search_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._sequence_search = QLineEdit(self._seq_row_container)
+        self._sequence_search.setPlaceholderText("Filter by sequence name…")
+        self._sequence_search.setClearButtonEnabled(True)
+        self._sequence_search.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._sequence_search.setMinimumWidth(140)
+        self._sequence_search.setToolTip(
+            "Type part of a sequence id, then press Enter or pick a suggestion."
+        )
+        self._sequence_search.returnPressed.connect(self._on_sequence_search_submitted)
+        seq_row.addWidget(self._sequence_search, 1, Qt.AlignmentFlag.AlignVCenter)
+
         self._seq_count_label = QLabel("", self._seq_row_container)
         self._seq_count_label.setStyleSheet("color: palette(mid);")
         seq_row.addWidget(self._seq_count_label, 0, Qt.AlignmentFlag.AlignVCenter)
         controls_layout.addWidget(self._seq_row_container)
         self._seq_row_container.hide()
+        self._sequence_search_completer: QCompleter | None = None
 
         self._add_row_container, add_row = _control_band(controls)
         self._add_feature_label = _annotation_row_label("Add feature:", self._add_row_container)
@@ -4670,7 +5010,9 @@ class SequenceMapPanel(QWidget):
         )
         export_btn.clicked.connect(self._export_annotation_view)
         save_btn = QPushButton("Save", self._action_row_container)
-        save_btn.setToolTip("Write annotation changes to the JSON sidecar and GFF3 file")
+        save_btn.setToolTip(
+            "Save annotations to the JSON sidecar (export GFF3 / GTF / BED separately)"
+        )
         save_btn.clicked.connect(lambda: self._save_annotations(silent=True))
         for btn in (del_btn, restore_btn, color_btn, export_btn, save_btn):
             action_row.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -4688,7 +5030,8 @@ class SequenceMapPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._map, stretch=1)
-        layout.addWidget(_annotation_panel_separator(self))
+        self._controls_separator = _annotation_panel_separator(self)
+        layout.addWidget(self._controls_separator)
         layout.addWidget(controls)
         controls.installEventFilter(self)
 
@@ -4708,7 +5051,10 @@ class SequenceMapPanel(QWidget):
         super().showEvent(event)
         QTimer.singleShot(0, self._sync_annotation_control_rows)
         QTimer.singleShot(0, self._refresh_annotation_button_styles)
-        QTimer.singleShot(0, self._refresh_similarity_database_rows)
+        # Rebuild DB chips only when empty — every Show used to recreate them
+        # and made Text ↔ Annotation ↔ Dotplot switches feel sluggish.
+        if not self._similarity_db_rows:
+            QTimer.singleShot(0, self._refresh_similarity_database_rows)
 
     def _refresh_annotation_button_styles(self) -> None:
         return
@@ -4988,6 +5334,7 @@ class SequenceMapPanel(QWidget):
             self.load_path(self._path, fit_after_load=True)
             QTimer.singleShot(50, self._map.refresh_layout)
         else:
+            # Already loaded — only re-sync scroll/viewport geometry (cheap).
             QTimer.singleShot(0, self._map.refresh_layout)
 
     # -- cytogenetic images ------------------------------------------------
@@ -5125,21 +5472,52 @@ class SequenceMapPanel(QWidget):
         except (OSError, ValueError) as exc:
             self._loaded_data = None
             self._populate_sequence_combo(None)
+            self._sync_too_long_controls()
             self.statusMessage.emit(str(exc))
             return
         self._loaded_data = data
         self._populate_sequence_combo(data)
         self._map.load(data, fit_after_load=fit_after_load)
         self._feature_undo_stack.clear()
-        self.refresh_sequence_summary()
+        self._sync_too_long_controls()
+        if not self._map.is_too_long_for_display():
+            self.refresh_sequence_summary()
+
+    def _sync_too_long_controls(self) -> None:
+        """Hide annotation chrome when the map is blocked for a too-long sequence."""
+        too_long = self._map.is_too_long_for_display()
+        for widget in (
+            self._add_row_container,
+            self._auto_row_container,
+            self._sim_row_container,
+            self._action_row_container,
+        ):
+            widget.setVisible(not too_long)
+        # Keep the sequence switcher for multi-FASTA so a shorter record can be picked.
+        multi = bool(
+            self._loaded_data is not None and len(self._loaded_data.record_ids) > 1
+        )
+        if too_long and not multi:
+            self._seq_row_container.hide()
+            self._controls_separator.hide()
+            self._controls_panel.hide()
+        else:
+            self._controls_separator.show()
+            self._controls_panel.show()
+            if multi:
+                self._seq_row_container.show()
+            elif not too_long:
+                self._seq_row_container.hide()
 
     def _populate_sequence_combo(self, data: SequenceMapData | None) -> None:
         self._sequence_switch_updating = True
         try:
             self._sequence_combo.clear()
+            self._sequence_search.clear()
             if data is None or not data.record_ids:
                 self._seq_row_container.hide()
                 self._seq_count_label.clear()
+                self._sequence_search_completer = None
                 return
             for rid in data.record_ids:
                 n_feat = len(data.features_by_id.get(rid) or [])
@@ -5149,6 +5527,7 @@ class SequenceMapPanel(QWidget):
             if idx < 0:
                 idx = 0
             self._sequence_combo.setCurrentIndex(idx)
+            self._sequence_combo.setToolTip(data.sequence_id)
             total = len(data.record_ids)
             if total > 1:
                 self._seq_count_label.setText(f"{total:,} sequences")
@@ -5156,11 +5535,13 @@ class SequenceMapPanel(QWidget):
             else:
                 self._seq_count_label.clear()
                 self._seq_row_container.hide()
-            # Searchable list for large libraries.
-            completer = QCompleter(data.record_ids, self._sequence_combo)
+            completer = QCompleter(list(data.record_ids), self._sequence_search)
             completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
             completer.setFilterMode(Qt.MatchFlag.MatchContains)
-            self._sequence_combo.setCompleter(completer)
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            completer.activated.connect(self._on_sequence_search_activated)
+            self._sequence_search.setCompleter(completer)
+            self._sequence_search_completer = completer
         finally:
             self._sequence_switch_updating = False
 
@@ -5170,11 +5551,44 @@ class SequenceMapPanel(QWidget):
             return
         seq_id = self._sequence_combo.itemData(index)
         if not seq_id:
-            # Editable completer may leave text without itemData.
-            seq_id = self._sequence_combo.currentText().split("  (", 1)[0].strip()
-        if not seq_id:
             return
         self.ensure_active_sequence(str(seq_id))
+
+    @Slot(str)
+    def _on_sequence_search_activated(self, text: str) -> None:
+        self._apply_sequence_search(str(text))
+
+    @Slot()
+    def _on_sequence_search_submitted(self) -> None:
+        self._apply_sequence_search(self._sequence_search.text())
+
+    def _apply_sequence_search(self, query: str) -> None:
+        data = self._loaded_data
+        if data is None:
+            return
+        text = str(query or "").strip()
+        if not text:
+            return
+        # Exact id, or first contains match (case-insensitive).
+        lowered = text.lower()
+        target = ""
+        if text in data.record_ids:
+            target = text
+        else:
+            for rid in data.record_ids:
+                if rid.lower() == lowered:
+                    target = rid
+                    break
+            if not target:
+                for rid in data.record_ids:
+                    if lowered in rid.lower():
+                        target = rid
+                        break
+        if not target:
+            self.statusMessage.emit(f"No sequence matching “{text}”.")
+            return
+        if self.ensure_active_sequence(target):
+            self._sequence_search.clear()
 
     def ensure_active_sequence(self, seq_id: str) -> bool:
         """Switch the map to ``seq_id`` (saving in-memory edits for the previous id)."""
@@ -5218,7 +5632,11 @@ class SequenceMapPanel(QWidget):
             self._sequence_switch_updating = False
         self._map.load(data, fit_after_load=True)
         self._feature_undo_stack.clear()
-        self.refresh_sequence_summary()
+        self._sync_too_long_controls()
+        if not self._map.is_too_long_for_display():
+            self.refresh_sequence_summary()
+        self._sequence_combo.setToolTip(data.sequence_id)
+        self.activeSequenceChanged.emit(data.sequence_id)
         return True
 
     def _next_extraction_name(self, seq_id: str) -> str:
@@ -5335,8 +5753,13 @@ class SequenceMapPanel(QWidget):
         return self._map.selection_range()
 
     def refresh_sequence_summary(self) -> None:
+        if self._map.is_too_long_for_display():
+            self._map.set_sequence_summary_text("")
+            self._sequence_summary_cache_key = None
+            return
         if not load_show_sequence_summary():
             self._map.set_sequence_summary_text("")
+            self._sequence_summary_cache_key = None
             return
 
         # Prefer the sequence we already hold: re-reading the file here meant a
@@ -5344,17 +5767,30 @@ class SequenceMapPanel(QWidget):
         # peak memory.
         data = self._loaded_data
         if data is not None and data.fasta_path == self._path:
+            cache_key = (data.sequence_id, len(data.sequence), id(data.sequence))
+            if cache_key == getattr(self, "_sequence_summary_cache_key", None):
+                return
             self._map.set_sequence_summary(
                 summarize_loaded_sequence(data.sequence_id, data.sequence)
             )
+            self._sequence_summary_cache_key = cache_key
             return
 
+        try:
+            mtime = self._path.stat().st_mtime_ns
+        except OSError:
+            mtime = None
+        cache_key = (str(self._path), mtime)
+        if cache_key == getattr(self, "_sequence_summary_cache_key", None):
+            return
         try:
             summary = summarize_single_sequence_fasta(self._path)
         except (OSError, ValueError):
             self._map.set_sequence_summary_text("")
+            self._sequence_summary_cache_key = None
             return
         self._map.set_sequence_summary(summary)
+        self._sequence_summary_cache_key = cache_key
 
     def reload_annotations(self) -> None:
         """Reload features from the companion GFF3 on disk (Annotation tab open)."""
@@ -5390,7 +5826,10 @@ class SequenceMapPanel(QWidget):
             return True
         if not self._map.features():
             return False
-        return resolve_features_gff_path(self._path) is None
+        # Pending if there are features but no JSON sidecar yet.
+        from repeatviewer.backends.sequence_features import resolve_sidecar_path
+
+        return resolve_sidecar_path(self._path) is None
 
     def _save_annotations(self, *, silent: bool = False) -> bool:
         if self._map.data() is None:
@@ -5402,13 +5841,14 @@ class SequenceMapPanel(QWidget):
         if not self._persist_annotations(show_message=not silent):
             return False
         if not silent:
-            gff_path = features_gff_path(self._path)
-            if gff_path.is_file():
-                QMessageBox.information(
-                    self,
-                    "Saved",
-                    f"Annotations saved to:\n{gff_path}",
-                )
+            from repeatviewer.backends.sequence_features import sidecar_path
+
+            QMessageBox.information(
+                self,
+                "Saved",
+                f"Annotations saved to:\n{sidecar_path(self._path).name}\n\n"
+                "Use Export annotation… (file list right-click) to write GFF3 / GTF / BED.",
+            )
         return True
 
     def _persist_annotations(self, *, show_message: bool = True) -> bool:
@@ -5427,13 +5867,14 @@ class SequenceMapPanel(QWidget):
             ):
                 lengths = dict(data.lengths_by_id)
                 lengths[data.sequence_id] = data.length
-                _json_path, gff_path = save_annotations_multi(
+                json_path, _gff_path = save_annotations_multi(
                     self._path,
                     features_by_id=data.features_by_id,
                     lengths_by_id=lengths,
+                    record_ids=list(data.record_ids),
                 )
             else:
-                _json_path, gff_path = save_annotations(
+                json_path, _gff_path = save_annotations(
                     self._path,
                     sequence_id=data.sequence_id,
                     sequence_length=data.length,
@@ -5445,12 +5886,10 @@ class SequenceMapPanel(QWidget):
         self._map.mark_clean()
         if self._loaded_data is not None:
             self._populate_sequence_combo(self._loaded_data)
-        if gff_path is not None:
-            if show_message:
-                self.statusMessage.emit(f"Saved annotations: {gff_path}")
-            self.annotationsSaved.emit(gff_path)
-        elif show_message:
-            self.statusMessage.emit("Saved annotations (JSON sidecar).")
+            self._sync_too_long_controls()
+        if show_message:
+            self.statusMessage.emit(f"Saved annotations: {json_path.name}")
+        self.annotationsSaved.emit(json_path)
         return True
 
     def _add_feature_of_type(self, feature_type: str, *, feature_label: str | None = None) -> None:
@@ -5715,6 +6154,52 @@ class SequenceMapPanel(QWidget):
 
     def _clear_annotation_job_status(self) -> None:
         self._annotation_job_status.clear()
+
+    def _show_wide_information(self, title: str, message: str) -> None:
+        """Multi-line summary dialog with text that fills the content width.
+
+        Native macOS QMessageBox ignores stylesheet width and leaves a large
+        empty gap beside short lines — use a plain QDialog instead.
+        """
+        dialog_w = 440
+        margin = 16
+        icon_w = 40
+        gap = 12
+        text_w = dialog_w - 2 * margin - icon_w - gap
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setModal(True)
+        dlg.setFixedWidth(dialog_w)
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(margin, margin, margin, 12)
+        root.setSpacing(14)
+
+        row = QHBoxLayout()
+        row.setSpacing(gap)
+        icon_label = QLabel(dlg)
+        icon = dlg.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
+        icon_label.setPixmap(icon.pixmap(icon_w, icon_w))
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        icon_label.setFixedWidth(icon_w)
+        row.addWidget(icon_label, 0)
+
+        text = QLabel(message, dlg)
+        text.setWordWrap(True)
+        text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        text.setFixedWidth(text_w)
+        text.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        row.addWidget(text, 0)
+        root.addLayout(row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, dlg)
+        buttons.accepted.connect(dlg.accept)
+        root.addWidget(buttons, 0, Qt.AlignmentFlag.AlignRight)
+
+        dlg.adjustSize()
+        dlg.exec()
 
     def _set_auto_run_button_running(self, running: bool) -> None:
         if running:
@@ -6034,7 +6519,7 @@ class SequenceMapPanel(QWidget):
             and needs_dialog
             and result.message.strip()
         ):
-            QMessageBox.information(self, "Similarity annotation", result.message)
+            self._show_wide_information("Similarity annotation", result.message)
 
     def _on_similarity_annotation_error(self, message: str) -> None:
         self._clear_annotation_job_status()
@@ -6150,7 +6635,7 @@ class SequenceMapPanel(QWidget):
             return
 
         if not result.features:
-            QMessageBox.information(self, "Auto annotation", result.message)
+            self._show_wide_information("Auto annotation", result.message)
             self._log_annotation_job(
                 "JOB FINISH",
                 "Auto annotation",
