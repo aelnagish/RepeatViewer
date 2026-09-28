@@ -455,7 +455,7 @@ def fastga_mode_summary(
         )
     if mode == FASTGA_MODE_PAIRS:
         if n < 2:
-            return "All pairs needs two or more selected FASTA files."
+            return "Against each other needs two or more selected FASTA files."
         pairs = n * (n - 1) // 2
         return (
             f"{n} FASTA selected → {pairs} pair{'s' if pairs != 1 else ''}, "
@@ -1016,7 +1016,7 @@ def run_fastga_batch(
         chunks: list[str] = []
         for index, (source1, source2) in enumerate(jobs):
             _step(first_step + index)
-            _log(f"—— {label(index, source1, source2)} ——")
+            _log(label(index, source1, source2))
             with tempfile.NamedTemporaryFile(
                 prefix=".repeatviewer_fastga_part_",
                 suffix=output_suffix_for_format(combine_fmt),
@@ -1041,7 +1041,7 @@ def run_fastga_batch(
 
     if mode == FASTGA_MODE_PAIRS:
         if len(files) < 2:
-            raise FastgaError("All pairs needs two or more FASTA files.")
+            raise FastgaError("Against each other needs two or more FASTA files.")
         pairs = list(itertools.combinations(files, 2))
         first = files[0]
         combine_fmt = FORMAT_PAF if fmt == FORMAT_ALN else fmt
@@ -1093,8 +1093,8 @@ def run_fastga_batch(
             for index, query in enumerate(queries):
                 _step(2 + index)
                 if len(queries) > 1:
-                    _log(f"—— Run {index + 1}/{len(queries)}: "
-                         f"{query.name} vs {reference.name} ——")
+                    _log(f"Run {index + 1}/{len(queries)}: "
+                         f"{query.name} vs {reference.name}")
                 # Query indexes are temporary: "Keep genome index" is about the
                 # reference, which is the one reused.
                 created.append(_run(query, ref_source,
@@ -1109,7 +1109,7 @@ def run_fastga_batch(
         _step(index)
         out_path = source.parent / f"{source.name}_FastGA{suffix}"
         if len(files) > 1:
-            _log(f"—— Job {index}/{len(files)}: {out_path.name} ——")
+            _log(f"Job {index}/{len(files)}: {out_path.name}")
         created.append(_run(source, None, out_path, fmt,
                             keep_index=options.keep_index))
     return created

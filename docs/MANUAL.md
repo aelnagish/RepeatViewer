@@ -705,7 +705,7 @@ it was found. On Windows it runs in WSL.
 | Mode | Runs | Output (next to the input) |
 |------|------|----------------------------|
 | Each file against itself | one run per selected FASTA | `<file>_FastGA.paf` |
-| All pairs among selected files | every unique pair | `<first>_multi_FastGA.paf` |
+| Selected files against each other | every pair (A, B, C → A–B, A–C, B–C) | `<first>_multi_FastGA.paf` |
 | Selected files against a reference | one run per selected FASTA | `<file>_FastGA_vs_<reference>.paf`, or with **Write all into one file** `<first>_multi_FastGA_vs_<reference>.paf` |
 
 Against a reference: select the files to compare, open the window, then click
