@@ -1366,6 +1366,14 @@ class FilePreviewPage(QWidget):
             panel = self._dotplot_panel
         if panel is None or self._annotation_panel is None:
             return
+        try:
+            ann_path = self._annotation_panel.fasta_path().expanduser().resolve()
+            page_path = self.path.expanduser().resolve()
+        except OSError:
+            return
+        if ann_path != page_path:
+            # Annotation still holds another file — do not override Dotplot.
+            return
         data = getattr(self._annotation_panel, "_loaded_data", None)
         if data is None or not getattr(data, "sequence", ""):
             return
@@ -1762,7 +1770,17 @@ class FilePreviewPage(QWidget):
             # Selections belong to one sequence; never carry them to the next file.
             self._pending_annotation_selection = None
             if self._dotplot_panel is not None:
-                self._dotplot_panel.clear_selection()
+                # Must reset path/state — clear_selection alone leaves the
+                # previous file's "too long" prompt and any active sequence.
+                self._dotplot_panel.set_path(path)
+            if self._annotation_panel is not None:
+                # Drop stale loaded sequence so Dotplot sync cannot reinject
+                # the previous (e.g. 50 Mbp) record into a small new file.
+                self._annotation_panel._loaded_data = None
+                try:
+                    self._annotation_panel._path = path.expanduser().resolve()
+                except OSError:
+                    self._annotation_panel._path = path
             if show_progress:
                 self._update_open_progress(2, "Preparing tabs…")
             self._show_annotation_content(multi=self._multi_fasta_mode)
