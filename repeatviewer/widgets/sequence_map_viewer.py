@@ -226,8 +226,9 @@ _FIT_MIN_PPB = 1e-6
 _MAX_PPB = 48.0
 _INTERACTIVE_SEQUENCE_LEN = 35_000
 _LARGE_SEQUENCE_LEN = 150_000
-# Hard Annotation display limit (sequence letters / bp — same idea as Dotplot's ~2 Mb).
-_HUGE_SEQUENCE_LEN = 2_000_000
+# Hard Annotation display limit (sequence length). Viewport-only letters keep
+# long sequences usable; this is a safety gate, not a render window size.
+_HUGE_SEQUENCE_LEN = 100_000_000
 _MAX_ANNOTATION_DISPLAY_LEN = _HUGE_SEQUENCE_LEN
 _LAYOUT_SYNC_MS = 40
 
@@ -237,7 +238,7 @@ def _annotation_too_long_message(length: int = 0) -> str:
     del length  # kept for call-site compatibility
     return (
         "This sequence is too long for Annotation tab "
-        "(limit 2.0 Mbp of sequence length)."
+        "(limit 100 Mbp of sequence length)."
     )
 _BUCKET_DRAW_PPB = 1.0
 _WRAP_MIN_PPB = 4.0
