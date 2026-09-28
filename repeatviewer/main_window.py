@@ -331,8 +331,12 @@ from repeatviewer.plugins.custom_command import (
 )
 from repeatviewer.backends.sequence_viewer import open_fasta
 from repeatviewer.job_options import (
+    ALIGNER_FASTGA,
     ALIGNER_MAFFT,
     ALIGNER_MUSCLE,
+    ALIGNERS,
+    FASTGA_MODE_PAIRS,
+    FASTGA_MODE_REFERENCE,
     ALIGN_MODE_COMBINED,
     BLAST_PROGRAM_BLASTN,
     BLAST_PROGRAM_BLASTP,
@@ -742,9 +746,10 @@ class AlignWorker(QObject):
 class FastGaWorker(QObject):
     """Run FastGA alignment(s) off the UI thread.
 
-    Default: self-compare each selected FASTA. Pairwise mode with two files
-    compares them against each other. Indexing a large genome takes minutes,
-    so progress is reported and cancellation is polled throughout.
+    Modes (FastGaOptions.mode): each file against itself, all pairs into one
+    file, or each file against a reference (indexed once). The loop lives in
+    ``backends.fastga_dotplot.run_fastga_batch``. Indexing a large genome takes
+    minutes, so progress is reported and cancellation is polled throughout.
     """
 
     progress = Signal(int, str)
@@ -768,20 +773,16 @@ class FastGaWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        from itertools import combinations
-        import tempfile
-        from pathlib import Path as _Path
-
-        from repeatviewer.backends.fastga_dotplot import (
-            FORMAT_ALN,
-            FORMAT_PAF,
-            output_suffix_for_format,
-            run_fastga_alignment,
-        )
+        from repeatviewer.backends.fastga_dotplot import run_fastga_batch
 
         try:
+            step = [1]
+
+            def _on_step(n: int) -> None:
+                step[0] = max(1, int(n))
+
             def _progress(message: str) -> None:
-                self.progress.emit(max(1, getattr(self, "_step", 1)), message)
+                self.progress.emit(step[0], message)
 
             def _log(message: str) -> None:
                 self.log_line.emit(str(message))
@@ -789,104 +790,15 @@ class FastGaWorker(QObject):
             def _cancelled() -> bool:
                 return bool(self._cancel is not None and self._cancel.requested)
 
-            temp_raw = str(getattr(self._options, "temp_dir", "") or "").strip()
-            temp_dir = _Path(temp_raw).expanduser() if temp_raw else None
-            if temp_dir is not None:
-                temp_dir.mkdir(parents=True, exist_ok=True)
-
-            pairwise = bool(getattr(self._options, "pairwise", False))
-            fmt = self._options.output_format
-            suffix = output_suffix_for_format(fmt)
-            created: list[str] = []
-
-            if pairwise and len(self._seq_files) >= 2:
-                # All unique unordered pairs → one combined alignment file.
-                # Binary .1aln cannot be concatenated; stream PAF instead.
-                pair_jobs = list(combinations(self._seq_files, 2))
-                combine_fmt = FORMAT_PAF if fmt == FORMAT_ALN else fmt
-                combine_suffix = output_suffix_for_format(combine_fmt)
-                first = self._seq_files[0]
-                out_path = first.parent / f"{first.name}_multi_FastGA{combine_suffix}"
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                chunks: list[str] = []
-                for index, (source1, source2) in enumerate(pair_jobs, start=1):
-                    self._step = index
-                    label = f"{source1.name} vs {source2.name}"
-                    _log(f"—— Pair {index}/{len(pair_jobs)}: {label} ——")
-                    with tempfile.NamedTemporaryFile(
-                        prefix=".repeatviewer_fastga_pair_",
-                        suffix=combine_suffix,
-                        dir=str(first.parent),
-                        delete=False,
-                    ) as tmp:
-                        tmp_path = _Path(tmp.name)
-                    try:
-                        written = run_fastga_alignment(
-                            source1,
-                            source2,
-                            tmp_path,
-                            fmt=combine_fmt,
-                            threads=self._options.threads,
-                            min_identity=self._options.min_identity,
-                            min_length=self._options.min_length,
-                            seed_freq=getattr(self._options, "seed_freq", 200),
-                            chain_coverage=getattr(
-                                self._options, "chain_coverage", 85
-                            ),
-                            chain_gap=getattr(self._options, "chain_gap", 1000),
-                            symmetric=self._options.symmetric,
-                            keep_index=self._options.keep_index,
-                            no_soft_mask=getattr(
-                                self._options, "no_soft_mask", False
-                            ),
-                            temp_dir=temp_dir,
-                            progress=_progress,
-                            on_log=_log,
-                            is_cancelled=_cancelled,
-                        )
-                        text = written.read_text(encoding="utf-8")
-                        if text and not text.endswith("\n"):
-                            text += "\n"
-                        if text:
-                            chunks.append(text)
-                    finally:
-                        try:
-                            tmp_path.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                out_path.write_text("".join(chunks), encoding="utf-8")
-                created.append(str(out_path))
-            else:
-                # Default: self-compare each selected FASTA one by one.
-                jobs = [(path, None) for path in self._seq_files]
-                for index, (source1, source2) in enumerate(jobs, start=1):
-                    self._step = index
-                    base = f"{source1.name}_FastGA"
-                    out_path = source1.parent / f"{base}{suffix}"
-                    if len(jobs) > 1:
-                        _log(f"—— Job {index}/{len(jobs)}: {base} ——")
-                    written = run_fastga_alignment(
-                        source1,
-                        source2,
-                        out_path,
-                        fmt=fmt,
-                        threads=self._options.threads,
-                        min_identity=self._options.min_identity,
-                        min_length=self._options.min_length,
-                        seed_freq=getattr(self._options, "seed_freq", 200),
-                        chain_coverage=getattr(self._options, "chain_coverage", 85),
-                        chain_gap=getattr(self._options, "chain_gap", 1000),
-                        symmetric=self._options.symmetric,
-                        keep_index=self._options.keep_index,
-                        no_soft_mask=getattr(self._options, "no_soft_mask", False),
-                        temp_dir=temp_dir,
-                        progress=_progress,
-                        on_log=_log,
-                        is_cancelled=_cancelled,
-                    )
-                    created.append(str(written))
-
-            self.finished.emit(created)
+            created = run_fastga_batch(
+                self._seq_files,
+                self._options,
+                progress=_progress,
+                on_log=_log,
+                is_cancelled=_cancelled,
+                on_step=_on_step,
+            )
+            self.finished.emit([str(p) for p in created])
         except Exception as exc:  # noqa: BLE001 - surface to the UI
             self.failed.emit(_format_cli_failure(exc))
 
@@ -3249,6 +3161,7 @@ class MainWindow(QMainWindow):
         del skip_default
         menu.addAction("MAFFT", self._run_mafft_default)
         menu.addAction("MUSCLE", self._run_muscle_default)
+        menu.addAction("FastGA", self._run_fastga_default)
         menu.addAction(
             "Align all selected files in one MSA",
             self._align_selected_combined,
@@ -3746,7 +3659,7 @@ class MainWindow(QMainWindow):
             if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
         ]
 
-    def _selected_files_for_fastga(self, options=None) -> list[Path]:
+    def _selected_files_for_fastga(self, options=None, files=None) -> list[Path]:
         from repeatviewer.backends.fastga_dotplot import fastga_available, install_hint
 
         if not fastga_available():
@@ -3757,30 +3670,61 @@ class MainWindow(QMainWindow):
             )
             return []
         opts = options if options is not None else self._fastga_options
-        pairwise = bool(getattr(opts, "pairwise", False))
-        files = self._fastga_candidate_files()
+        mode = getattr(opts, "mode", "self")
+        files = list(files) if files else self._fastga_candidate_files()
+        if mode == FASTGA_MODE_REFERENCE:
+            from repeatviewer.backends.fastga_dotplot import reference_queries
+
+            reference = Path(opts.reference_fasta) if opts.reference_fasta else None
+            if reference is None or not reference.is_file():
+                QMessageBox.information(
+                    self,
+                    "FastGA",
+                    "Choose the reference first: Tools → Align → Change alignment "
+                    "parameters → FastGA tab, then click the reference in Files."
+                    if reference is None
+                    else f"The reference was not found:\n{reference}",
+                )
+                return []
+            if not reference_queries(files, reference):
+                QMessageBox.information(
+                    self,
+                    "FastGA",
+                    f"Select the FASTA files to compare with {reference.name} "
+                    "(the reference itself is skipped).",
+                )
+                return []
+            return files
         if not files:
             QMessageBox.information(
                 self,
                 "FastGA",
-                "Select one or more FASTA files for self-comparison (one by one), "
-                "or enable Do each pair comparison and select two or more FASTA files.",
+                "Select one or more FASTA files: each is compared against itself. "
+                "For other modes see Tools → Align → Change alignment parameters "
+                "→ FastGA tab.",
             )
             return []
-        if pairwise and len(files) < 2:
+        if mode == FASTGA_MODE_PAIRS and len(files) < 2:
             QMessageBox.information(
                 self,
                 "FastGA",
-                "Do each pair comparison needs at least two FASTA files.\n"
-                "Select more files, or turn the option off for self-comparison.",
+                "All pairs needs two or more selected FASTA files.\n"
+                "Select more files, or choose another mode in the FastGA tab.",
             )
             return []
         return files
 
     def _run_fastga_default(self) -> None:
-        files = self._selected_files_for_fastga(self._fastga_options)
+        opts = self._fastga_options
+        if getattr(opts, "mode", "self") == FASTGA_MODE_REFERENCE and not (
+            opts.reference_fasta and Path(opts.reference_fasta).is_file()
+        ):
+            # Nothing to run against yet: show the tab where it is chosen.
+            self._open_align_dialog(initial_tab=ALIGNER_FASTGA)
+            return
+        files = self._selected_files_for_fastga(opts)
         if files:
-            self._start_fastga_job(files, self._fastga_options)
+            self._start_fastga_job(files, opts)
 
     def _quick_fastga_right_click(self) -> None:
         """Right-click FastGA: run or reopen dialog per Options tab."""
@@ -3790,25 +3734,8 @@ class MainWindow(QMainWindow):
         self._run_fastga_default()
 
     def _open_fastga_dialog(self) -> None:
-        """Click FastGA → parameters dialog (same Cancel / Save / Run pattern as BLAST)."""
-        from repeatviewer.views.tool_dialogs import FastGaParamsDialog
-
-        candidates = self._fastga_candidate_files()
-        dialog = FastGaParamsDialog(
-            initial=self._fastga_options,
-            file_count=len(candidates),
-            parent=self,
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._fastga_options = dialog.options()
-        save_fastga_options(self._fastga_options)
-        if dialog.should_run():
-            files = self._selected_files_for_fastga(self._fastga_options)
-            if files:
-                self._start_fastga_job(files, self._fastga_options)
-        else:
-            self._set_status_message("FastGA settings saved", 4000)
+        """FastGA button / Tools → FastGA: the Align window on its FastGA tab."""
+        self._open_align_dialog(initial_tab=ALIGNER_FASTGA)
 
     # ------------------------------------------------------------------ Tree
 
@@ -4410,17 +4337,32 @@ class MainWindow(QMainWindow):
         self._rename_paths_with_spaces(targets, kind="genome")
 
     def _start_fastga_job(self, files: list[Path], options) -> None:
-        pairwise = bool(getattr(options, "pairwise", False))
-        if pairwise and len(files) >= 2:
+        from repeatviewer.backends.fastga_dotplot import (
+            fastga_step_count,
+            reference_queries,
+        )
+
+        mode = getattr(options, "mode", "self")
+        total_steps = fastga_step_count(files, options)
+        source_files = list(files)
+        if mode == FASTGA_MODE_PAIRS and len(files) >= 2:
             pair_count = len(files) * (len(files) - 1) // 2
             title = f"FastGA ({pair_count} pair(s) → multi)"
-            total_steps = max(1, pair_count)
+        elif mode == FASTGA_MODE_REFERENCE:
+            reference = Path(options.reference_fasta)
+            queries = reference_queries(files, reference)
+            files = queries
+            # Queries and reference are both inputs (blue highlight, rule 4).
+            source_files = [*queries, reference]
+            title = (
+                f"FastGA ({queries[0].name} vs {reference.name})"
+                if len(queries) == 1
+                else f"FastGA ({len(queries)} files vs {reference.name})"
+            )
         elif len(files) == 1:
             title = f"FastGA ({files[0].name} self)"
-            total_steps = 1
         else:
             title = f"FastGA ({len(files)} self-comparisons)"
-            total_steps = len(files)
         show_log = bool(getattr(options, "show_process_window", False))
         worker = FastGaWorker(
             files,
@@ -4439,7 +4381,7 @@ class MainWindow(QMainWindow):
             worker,
             job_title=title,
             total_steps=total_steps,
-            source_files=files,
+            source_files=source_files,
             on_finished=self._on_fastga_finished,
             on_failed=self._on_fastga_failed,
         )
@@ -5419,7 +5361,7 @@ class MainWindow(QMainWindow):
                 "Align",
                 self._open_align_dialog,
                 tooltip=(
-                    "Click: set parameters and run (MAFFT or MUSCLE by tab).\n"
+                    "Click: set parameters and run (MAFFT, MUSCLE or FastGA by tab).\n"
                     "Right-click: run the aligner chosen in the Options tab."
                 ),
                 right_click_slot=self._quick_align_right_click,
@@ -5430,7 +5372,7 @@ class MainWindow(QMainWindow):
                 "FastGA",
                 self._open_fastga_dialog,
                 tooltip=(
-                    "Click: set parameters and run.\n"
+                    "Click: the Align window on its FastGA tab.\n"
                     "Right-click: action chosen in the Options tab."
                 ),
                 right_click_slot=self._quick_fastga_right_click,
@@ -7889,38 +7831,59 @@ class MainWindow(QMainWindow):
         )
         return ALIGN_MODE_COMBINED if combined else "one_by_one"
 
-    def _open_align_dialog(self) -> None:
-        """Align parameters: Cancel / Save / Run (toolbar and menu use the same dialog)."""
+    def _open_align_dialog(self, *, initial_tab: str | None = None) -> None:
+        """Align parameters: Cancel / Save / Run (toolbar and menu use the same dialog).
+
+        Non-modal, so a click in the Files panel can fill the FastGA reference.
+        FastGA compares the FASTA files selected when the window opened (the
+        reference click changes the selection); MAFFT / MUSCLE use the
+        selection at Run, as before.
+        """
+        fastga_files = self._fastga_candidate_files()
         dialog = AlignParamsDialog(
             initial=self._align_options,
             use_system_mafft=self._project.use_system_mafft,
             use_system_muscle=self._project.use_system_muscle,
+            fastga_initial=self._fastga_options,
+            fastga_files=fastga_files,
+            initial_tab=initial_tab,
             parent=self,
         )
-        run_after = False
-        aligner = ALIGNER_MAFFT
-        try:
-            if not dialog.exec():
-                return  # Cancel: nothing changes.
-            self._align_options = dialog.options()
+        dialog.finished.connect(
+            lambda _code: QTimer.singleShot(0, self._repair_browser_chrome)
+        )
+
+        def _accepted(d) -> None:
+            self._align_options = d.options()
             save_align_options(self._align_options)
-            self._project.use_system_mafft = dialog.use_system_mafft()
-            self._project.use_system_muscle = dialog.use_system_muscle()
+            self._fastga_options = d.fastga_options()
+            save_fastga_options(self._fastga_options)
+            self._project.use_system_mafft = d.use_system_mafft()
+            self._project.use_system_muscle = d.use_system_muscle()
             self._persist_workspace()
-            run_after = dialog.should_run()
-            aligner = dialog.selected_aligner()
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
-        if run_after:
+            if not d.should_run():
+                self._set_status_message("Alignment settings saved", 4000)
+                return
+            aligner = d.selected_aligner()
+            if aligner == ALIGNER_FASTGA:
+                files = self._selected_files_for_fastga(
+                    self._fastga_options, files=fastga_files or None
+                )
+                if files:
+                    self._start_fastga_job(files, self._fastga_options)
+                return
             self._align_sequences(
                 engine=aligner, mode=self._mode_for_aligner(aligner)
             )
-        else:
-            self._set_status_message("Alignment settings saved", 4000)
+
+        self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_align_right_click(self) -> None:
         """Right-click Align: run the aligner chosen in the Options tab."""
         aligner = self._align_options.right_click_aligner
+        if aligner == ALIGNER_FASTGA:
+            self._run_fastga_default()
+            return
         self._align_sequences(engine=aligner, mode=self._mode_for_aligner(aligner))
 
     def _modify_align_parameters(self) -> None:
@@ -11655,7 +11618,11 @@ class MainWindow(QMainWindow):
             "align_options": self._align_options,
             "use_system_mafft": self._project.use_system_mafft,
             "use_system_muscle": self._project.use_system_muscle,
-            "align_engine": getattr(self._align_options, "right_click_aligner", None)
+            "align_engine": (
+                self._align_options.right_click_aligner
+                if self._align_options.right_click_aligner in ALIGNERS
+                else self._align_options.combined_aligner
+            )
             or ALIGNER_MAFFT,
         }
 

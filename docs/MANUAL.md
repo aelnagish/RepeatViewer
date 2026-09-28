@@ -458,10 +458,14 @@ large to work with.
 
 ### Align
 
-**Toolbar: Align · Tools → Align**
+**Toolbar: Align · Tools → Align** (MAFFT, MUSCLE, FastGA, Align all
+selected files in one MSA, Change alignment parameters)
 
 Builds a multiple sequence alignment with **MAFFT** or **MUSCLE**, both
-bundled. The **Options** tab selects the default engine.
+bundled, or a whole-genome alignment with **FastGA** (see [FastGA](#fastga)).
+The window has the tabs MAFFT, MUSCLE, FastGA and Options; **Run** runs the
+tab you are on. The **Options** tab sets what right-clicking the Align button
+runs (MAFFT, MUSCLE or FastGA) and what right-clicking the FastGA button does.
 
 MAFFT parameters:
 
@@ -688,18 +692,43 @@ currently use.
 
 ### FastGA
 
-**Toolbar: FastGA · Tools → FastGA**
+**Toolbar: FastGA · Tools → Align → FastGA · Tools → FastGA**
 
-Fast genome-scale alignment, for comparing large sequences where BLAST is too
-slow. Requires FastGA on `PATH`.
+Whole-genome alignment for large sequences, where BLAST is too slow. FastGA
+lives in the **Align** window, on its own **FastGA** tab; the FastGA button and
+**Tools → FastGA → Change FastGA parameters** open that tab. Requires FastGA
+from conda (`conda install -c bioconda fastga`); the Options tab shows where
+it was found. On Windows it runs in WSL.
+
+**Mode**
+
+| Mode | Runs | Output (next to the input) |
+|------|------|----------------------------|
+| Each file against itself | one run per selected FASTA | `<file>_FastGA.paf` |
+| All pairs among selected files | every unique pair | `<first>_multi_FastGA.paf` |
+| Selected files against a reference | one run per selected FASTA | `<file>_FastGA_vs_<reference>.paf`, or with **Write all into one file** `<first>_multi_FastGA_vs_<reference>.paf` |
+
+Against a reference: select the files to compare, open the window, then click
+the reference in the Files panel (or Browse). The files compared are the ones
+selected when the window opened; the reference is skipped if it is among them.
+The reference is indexed once (GIXmake) and reused for every run. With **Keep
+genome index** the index is kept in a hidden `.repeatviewer_fastga` folder
+next to the reference and reused while the reference is unchanged; an index
+takes about 14 GB per gigabase. The grey line under the reference says what
+Run will do ("3 FASTA selected → 3 runs against genome.fa").
 
 | Parameter | Meaning |
 |-----------|---------|
-| Output format | Alignment output type |
-| Min identity | Identity floor |
-| Min alignment length | Length floor |
-| Repeat cutoff (`-f`) | Repeat masking threshold |
-| Threads | Parallelism |
+| Output format | PAF (`-paf`, `-pafx`, `-pafm`, `-pafs`, `-pafS`), PSL, or binary `.1aln`. PAF and `.1aln` open in the dotplot view |
+| `-T` threads | Parallelism |
+| `-i` min identity | Identity floor |
+| `-l` min length | Shortest alignment reported (≥ 100) |
+| `-f` seed cutoff | Seeds more frequent than this are dropped as repetitive; RepeatViewer uses 200 (FastGA: 10) so repeats stay visible |
+| `-c` / `-s` | Chain coverage / chain gap |
+| Symmetric seeding (`-S`) | Result independent of argument order; for repeat structure |
+| Use soft mask | Seed only in uppercase bases. Sent as `-M` (FastGA 1.5+) or by leaving out `-N` (older FastGA), whichever the installed version takes |
+| Keep genome index (`-k`) | Keep `.1gdb` / `.gix` for later runs |
+| Temp dir (`-P`) | Folder for FastGA's large temporary files; empty = hidden folder next to the input |
 
 ### Tree
 

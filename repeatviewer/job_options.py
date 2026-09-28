@@ -205,6 +205,10 @@ MAFFT_SEQUENCE_TYPES = (
 ALIGNER_MAFFT = "mafft"
 ALIGNER_MUSCLE = "muscle"
 ALIGNERS = (ALIGNER_MAFFT, ALIGNER_MUSCLE)
+# FastGA sits in the Align window and can be the Align button's right-click
+# action, but it is not an MSA aligner: never a combined / workflow aligner.
+ALIGNER_FASTGA = "fastga"
+RIGHT_CLICK_ALIGNERS = (ALIGNER_MAFFT, ALIGNER_MUSCLE, ALIGNER_FASTGA)
 MUSCLE_MODE_ALIGN = "align"
 MUSCLE_MODE_SUPER5 = "super5"
 MUSCLE_MODES = (MUSCLE_MODE_ALIGN, MUSCLE_MODE_SUPER5)
@@ -263,18 +267,26 @@ DEFAULT_FASTGA_CHAIN_COVERAGE = 85
 DEFAULT_FASTGA_CHAIN_GAP = 1000
 DEFAULT_FASTGA_SYMMETRIC = True
 DEFAULT_FASTGA_KEEP_INDEX = True
-DEFAULT_FASTGA_NO_SOFT_MASK = False
+DEFAULT_FASTGA_SOFT_MASK = False
 DEFAULT_FASTGA_SHOW_PROCESS_WINDOW = False
-DEFAULT_FASTGA_PAIRWISE = False
+
+# What FastGA compares (FastGA tab → Mode).
+FASTGA_MODE_SELF = "self"            # each selected file against itself
+FASTGA_MODE_PAIRS = "pairs"          # every pair among the selected → one file
+FASTGA_MODE_REFERENCE = "reference"  # each selected file against one reference
+FASTGA_MODES = (FASTGA_MODE_SELF, FASTGA_MODE_PAIRS, FASTGA_MODE_REFERENCE)
 
 
 @dataclass
 class FastGaOptions:
     """FastGA whole-genome alignment.
 
-    By default each selected FASTA is self-compared one by one. Pairwise mode
-    ("Do each pair comparison") compares every unique pair among the selected
-    files and writes one combined alignment file.
+    ``mode``: self (default) compares each selected FASTA with itself; pairs
+    compares every unique pair and writes one combined file; reference runs
+    each selected FASTA against ``reference_fasta`` (one file per query, or
+    one combined file with ``reference_combined``).
+    ``soft_mask``: seed only in uppercase bases; sent as -M or -N depending on
+    the installed FastGA version.
     """
 
     output_format: str = FASTGA_FORMAT_PAF
@@ -286,8 +298,10 @@ class FastGaOptions:
     chain_gap: int = DEFAULT_FASTGA_CHAIN_GAP
     symmetric: bool = DEFAULT_FASTGA_SYMMETRIC
     keep_index: bool = DEFAULT_FASTGA_KEEP_INDEX
-    no_soft_mask: bool = DEFAULT_FASTGA_NO_SOFT_MASK
-    pairwise: bool = DEFAULT_FASTGA_PAIRWISE
+    soft_mask: bool = DEFAULT_FASTGA_SOFT_MASK
+    mode: str = FASTGA_MODE_SELF
+    reference_fasta: str = ""
+    reference_combined: bool = False
     temp_dir: str = ""
     right_click_action: str = FASTGA_RIGHT_CLICK_RUN
     show_process_window: bool = DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
@@ -301,6 +315,10 @@ def load_fastga_options() -> FastGaOptions:
     right_click_action = str(v.get("right_click_action", FASTGA_RIGHT_CLICK_RUN))
     if right_click_action not in FASTGA_RIGHT_CLICK_ACTIONS:
         right_click_action = FASTGA_RIGHT_CLICK_RUN
+    mode = str(v.get("mode", "") or "")
+    if mode not in FASTGA_MODES:
+        # Settings from before the Mode choice: "Do each pair comparison".
+        mode = FASTGA_MODE_PAIRS if _to_bool(v.get("pairwise"), False) else FASTGA_MODE_SELF
     return FastGaOptions(
         output_format=fmt,
         threads=max(1, int(v.get("threads", _default_tool_threads()))),
@@ -316,8 +334,10 @@ def load_fastga_options() -> FastGaOptions:
         chain_gap=max(1, int(v.get("chain_gap", DEFAULT_FASTGA_CHAIN_GAP))),
         symmetric=_to_bool(v.get("symmetric"), DEFAULT_FASTGA_SYMMETRIC),
         keep_index=_to_bool(v.get("keep_index"), DEFAULT_FASTGA_KEEP_INDEX),
-        no_soft_mask=_to_bool(v.get("no_soft_mask"), DEFAULT_FASTGA_NO_SOFT_MASK),
-        pairwise=_to_bool(v.get("pairwise"), DEFAULT_FASTGA_PAIRWISE),
+        soft_mask=_to_bool(v.get("soft_mask"), DEFAULT_FASTGA_SOFT_MASK),
+        mode=mode,
+        reference_fasta=str(v.get("reference_fasta", "") or ""),
+        reference_combined=_to_bool(v.get("reference_combined"), False),
         temp_dir=str(v.get("temp_dir", "") or ""),
         right_click_action=right_click_action,
         show_process_window=_to_bool(
@@ -339,8 +359,12 @@ def save_fastga_options(opts: FastGaOptions) -> None:
             "chain_gap": opts.chain_gap,
             "symmetric": opts.symmetric,
             "keep_index": opts.keep_index,
-            "no_soft_mask": opts.no_soft_mask,
-            "pairwise": opts.pairwise,
+            "soft_mask": opts.soft_mask,
+            "mode": opts.mode,
+            # Kept so an older RepeatViewer reading these settings still works.
+            "pairwise": opts.mode == FASTGA_MODE_PAIRS,
+            "reference_fasta": opts.reference_fasta,
+            "reference_combined": opts.reference_combined,
             "temp_dir": opts.temp_dir,
             "right_click_action": opts.right_click_action,
             "show_process_window": opts.show_process_window,
@@ -1103,7 +1127,7 @@ def load_align_options() -> AlignOptions:
     if muscle_mode not in MUSCLE_MODES:
         muscle_mode = MUSCLE_MODE_ALIGN
     right_click_aligner = str(v.get("right_click_aligner", ALIGNER_MAFFT))
-    if right_click_aligner not in ALIGNERS:
+    if right_click_aligner not in RIGHT_CLICK_ALIGNERS:
         right_click_aligner = ALIGNER_MAFFT
 
     def _flag(key: str) -> bool:

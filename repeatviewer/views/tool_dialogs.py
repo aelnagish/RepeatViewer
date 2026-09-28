@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -207,6 +208,10 @@ from repeatviewer.job_options import (
     EXTEND_RIGHT_CLICK_DIALOG,
     FASTGA_RIGHT_CLICK_RUN,
     FASTGA_RIGHT_CLICK_DIALOG,
+    FASTGA_MODE_SELF,
+    FASTGA_MODE_PAIRS,
+    FASTGA_MODE_REFERENCE,
+    ALIGNER_FASTGA,
     DEFAULT_FLEXIDOT_LCS_SHADING,
     DEFAULT_FLEXIDOT_OUTPUT_FORMAT,
     DEFAULT_FLEXIDOT_WORDSIZE,
@@ -1049,6 +1054,16 @@ class WrapperManageDialog(QDialog):
 PluginManageDialog = WrapperManageDialog
 
 
+def fastga_executable_text() -> str:
+    """Options tab line: where FastGA was found (it always comes from PATH/conda)."""
+    from repeatviewer.backends.fastga_dotplot import fastga_executable, install_hint
+
+    exe = fastga_executable()
+    if exe:
+        return f"FastGA: {exe}  ✓ found"
+    return "FastGA: not found. " + install_hint().splitlines()[0]
+
+
 class AlignParamsDialog(QDialog):
     def __init__(
         self,
@@ -1056,14 +1071,24 @@ class AlignParamsDialog(QDialog):
         initial: AlignOptions | None = None,
         use_system_mafft: bool = False,
         use_system_muscle: bool = False,
+        fastga_initial=None,
+        fastga_files: list[Path] | None = None,
+        initial_tab: str | None = None,
         title: str = "Alignment parameters",
         for_run: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
+        from repeatviewer.job_options import FastGaOptions
+
         self.setWindowTitle(title)
         self._for_run = for_run
         opts = initial or AlignOptions()
+        self._initial_align = opts
+        fastga_opts = fastga_initial or FastGaOptions()
+        self._fastga_panel = FastGaPanel(
+            initial=fastga_opts, files=fastga_files, parent=self
+        )
 
         self._strategy = QComboBox(self)
         for label, value in (
@@ -1229,35 +1254,89 @@ class AlignParamsDialog(QDialog):
         )
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
-        for label, value in (("MAFFT", ALIGNER_MAFFT), ("MUSCLE", ALIGNER_MUSCLE)):
+        rc_row = QHBoxLayout()
+        rc_row.setSpacing(18)
+        for label, value in (
+            ("MAFFT", ALIGNER_MAFFT),
+            ("MUSCLE", ALIGNER_MUSCLE),
+            ("FastGA", ALIGNER_FASTGA),
+        ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_aligner == value)
             self._right_click_group.addButton(radio)
             self._right_click_buttons[value] = radio
-            rc_box_layout.addWidget(radio)
+            rc_row.addWidget(radio)
+        rc_row.addStretch(1)
+        rc_box_layout.addLayout(rc_row)
         if not any(b.isChecked() for b in self._right_click_buttons.values()):
             self._right_click_buttons[ALIGNER_MAFFT].setChecked(True)
+        # The FastGA toolbar button (and Tools → FastGA) keeps its own action.
+        rc_box_layout.addWidget(QLabel("Right-clicking the FastGA button:", self))
+        self._fastga_rc_group = QButtonGroup(self)
+        self._fastga_rc_buttons: dict[str, QRadioButton] = {}
+        fastga_rc_row = QHBoxLayout()
+        fastga_rc_row.setSpacing(18)
+        for label, value in (
+            ("Run FastGA with saved parameters", FASTGA_RIGHT_CLICK_RUN),
+            ("Open this window", FASTGA_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(fastga_opts.right_click_action == value)
+            self._fastga_rc_group.addButton(radio)
+            self._fastga_rc_buttons[value] = radio
+            fastga_rc_row.addWidget(radio)
+        fastga_rc_row.addStretch(1)
+        rc_box_layout.addLayout(fastga_rc_row)
+        if not any(b.isChecked() for b in self._fastga_rc_buttons.values()):
+            self._fastga_rc_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
         options_layout.addWidget(rc_box)
 
         exe_box = QGroupBox("Executables", self)
         exe_box_layout = QVBoxLayout(exe_box)
         exe_box_layout.addWidget(self._use_system_mafft)
         exe_box_layout.addWidget(self._use_system_muscle)
+        self._fastga_exe_label = QLabel(fastga_executable_text(), self)
+        self._fastga_exe_label.setWordWrap(True)
+        self._fastga_exe_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        exe_box_layout.addWidget(self._fastga_exe_label)
         options_layout.addWidget(exe_box)
 
         process_box, self._show_process_window = make_process_output_box(
             self,
-            tool_name="Align",
-            checked=bool(getattr(opts, "show_process_window", False)),
+            tool_name="the aligner",
+            checked=bool(
+                getattr(opts, "show_process_window", False)
+                or getattr(fastga_opts, "show_process_window", False)
+            ),
         )
         options_layout.addWidget(process_box)
         options_layout.addStretch(1)
 
         self._aligner_tabs = QTabWidget(self)
+        self._mafft_tab = mafft_tab
+        self._muscle_tab = muscle_tab
+        self._options_tab = options_tab
+        fastga_scroll = QScrollArea(self)
+        fastga_scroll.setWidgetResizable(True)
+        fastga_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        fastga_scroll.setWidget(self._fastga_panel)
+        fastga_scroll.setMinimumSize(660, 460)
+        self._fastga_tab = fastga_scroll
         self._aligner_tabs.addTab(mafft_tab, "MAFFT")
         self._aligner_tabs.addTab(muscle_tab, "MUSCLE")
+        self._aligner_tabs.addTab(fastga_scroll, "FastGA")
         self._aligner_tabs.addTab(options_tab, "Options")
-        self._options_tab_index = self._aligner_tabs.count() - 1
+        self._options_tab_index = self._aligner_tabs.indexOf(options_tab)
+        tab_for = {
+            ALIGNER_MAFFT: mafft_tab,
+            ALIGNER_MUSCLE: muscle_tab,
+            ALIGNER_FASTGA: fastga_scroll,
+            "options": options_tab,
+        }
+        if initial_tab in tab_for:
+            self._aligner_tabs.setCurrentWidget(tab_for[initial_tab])
 
         self._close_action = "cancel"
         restore = QPushButton("Restore Defaults", self)
@@ -1281,13 +1360,34 @@ class AlignParamsDialog(QDialog):
         return dialog_should_run(self)
 
     def selected_aligner(self) -> str:
-        """The aligner of the active tab (MAFFT/MUSCLE); falls back to right-click."""
-        index = self._aligner_tabs.currentIndex()
-        if index == 0:
+        """The aligner of the active tab; on the Options tab, the right-click one."""
+        current = self._aligner_tabs.currentWidget()
+        if current is self._mafft_tab:
             return ALIGNER_MAFFT
-        if index == 1:
+        if current is self._muscle_tab:
             return ALIGNER_MUSCLE
+        if current is self._fastga_tab:
+            return ALIGNER_FASTGA
         return self.right_click_aligner()
+
+    def fastga_panel(self) -> "FastGaPanel":
+        return self._fastga_panel
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        """Files-panel click: fills the FastGA reference while that tab is shown."""
+        if self._aligner_tabs.currentWidget() is not self._fastga_tab:
+            return False
+        return self._fastga_panel.apply_path_from_panel(path)
+
+    def fastga_options(self):
+        right_click = next(
+            (v for v, b in self._fastga_rc_buttons.items() if b.isChecked()),
+            FASTGA_RIGHT_CLICK_RUN,
+        )
+        return self._fastga_panel.options(
+            right_click_action=right_click,
+            show_process_window=self._show_process_window.isChecked(),
+        )
 
     def right_click_aligner(self) -> str:
         for value, radio in self._right_click_buttons.items():
@@ -1350,8 +1450,16 @@ class AlignParamsDialog(QDialog):
         spinbox.setEnabled(False)
 
     def options(self) -> AlignOptions:
+        right_click = self.right_click_aligner()
+        # FastGA is no MSA aligner: the combined / workflow aligner stays
+        # MAFFT or MUSCLE even when FastGA is the right-click choice.
+        combined = (
+            right_click
+            if right_click in (ALIGNER_MAFFT, ALIGNER_MUSCLE)
+            else self._initial_align.combined_aligner
+        )
         return AlignOptions(
-            combined_aligner=self.right_click_aligner(),
+            combined_aligner=combined,
             num_threads=max(1, int(self._threads.value())),
             strategy=str(self._strategy.currentData()),
             sequence_type=str(self._sequence_type.currentData()),
@@ -1410,6 +1518,8 @@ class AlignParamsDialog(QDialog):
         # Default: bundled MAFFT / MUSCLE binaries, not system PATH.
         self._use_system_mafft.setChecked(False)
         self._use_system_muscle.setChecked(False)
+        self._fastga_rc_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
+        self._fastga_panel.restore_defaults()
         self._sync_controls()
 
 
@@ -2033,269 +2143,390 @@ class ExtractSequencesDialog(QDialog):
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
 
 
-class FastGaParamsDialog(QDialog):
-    """FastGA whole-genome alignment parameters (BLAST-style form)."""
+_FASTGA_MODE_HELP = (
+    "What FastGA compares.\n\n"
+    "Each file against itself: every selected FASTA is aligned with itself "
+    "(self matches skipped) — shows its repeats. Output: <file>_FastGA.paf.\n\n"
+    "All pairs: every unique pair among the selected files; all alignments go "
+    "into one file, <first selected>_multi_FastGA.paf.\n\n"
+    "Selected files against a reference: each selected FASTA is aligned with "
+    "the reference, one run per file. The reference is indexed once and reused "
+    "for every run. Output: <file>_FastGA_vs_<reference>.paf next to each "
+    "file, or one <first selected>_multi_FastGA_vs_<reference>.paf with "
+    "\"Write all into one file\"."
+)
+_FASTGA_REFERENCE_HELP = (
+    "The genome every selected file is aligned to (PAF target columns).\n\n"
+    "Click it in the Files panel while this window is open, or use Browse. "
+    "If the reference is also selected in the Files panel it is skipped, so it "
+    "is never compared with itself.\n\n"
+    "The files to compare are the ones selected when this window was opened."
+)
+_FASTGA_COMBINED_HELP = (
+    "Write the alignments of all selected files into one PAF file named "
+    "<first selected>_multi_FastGA_vs_<reference>.paf, instead of one file "
+    "per query.\n\n"
+    "A .1aln file cannot be joined, so this always writes PAF text."
+)
+_FASTGA_FORMAT_HELP = (
+    "PAF and PSL are text, streamed by FastGA (-paf, -pafx, -pafm, -pafs, "
+    "-pafS, -psl). -pafx/-pafm add a CIGAR string, -pafs/-pafS a CS string.\n\n"
+    "-1 writes a binary .1aln (ONEcode) file.\n\n"
+    "PAF and .1aln results open in the dotplot view; PSL does not preview."
+)
+_FASTGA_THREADS_HELP = "FastGA -T: number of threads."
+_FASTGA_IDENTITY_HELP = (
+    "FastGA -i: minimum alignment identity (0.70 = 70 %). Alignments below "
+    "this are not reported."
+)
+_FASTGA_LENGTH_HELP = (
+    "FastGA -l: shortest alignment to report, in bp. Cannot go below 100 — "
+    "FastGA rejects limits shorter than its seed length.\n\n"
+    "Raise it on satellite arrays, where short matches can swamp the output."
+)
+_FASTGA_SEED_HELP = (
+    "FastGA -f: seeds that occur more often than this are treated as "
+    "repetitive and dropped before alignment.\n\n"
+    "FastGA's own default is 10, which removes satellite arrays entirely. "
+    "RepeatViewer defaults to 200 so repeats stay visible; higher is slower."
+)
+_FASTGA_CHAIN_COV_HELP = (
+    "FastGA -c: a seed chain must cover at least this many bases in both "
+    "genomes to become an alignment. FastGA default: 85."
+)
+_FASTGA_CHAIN_GAP_HELP = (
+    "FastGA -s: largest spacing between consecutive seeds in one chain. "
+    "FastGA default: 1000."
+)
+_FASTGA_SYMMETRIC_HELP = (
+    "FastGA -S: seed from both genomes, so the result no longer depends on "
+    "which one comes first. Finds more repeat copies in the second genome; "
+    "slower. FastGA advises it for repeat structure, not for synteny."
+)
+_FASTGA_SOFT_MASK_HELP = (
+    "Seed only in UPPERCASE bases: lowercase (soft-masked) regions, e.g. from "
+    "RepeatMasker, cannot start an alignment, although an alignment may run "
+    "into them.\n\n"
+    "Off (default): repeats are aligned like any other sequence — usually what "
+    "you want in a repeat-focused analysis.\n\n"
+    "A file that is lowercase throughout counts as unmasked. RepeatViewer sends "
+    "-M (FastGA 1.5 and later) or leaves out -N (older FastGA), depending on "
+    "the installed version. With soft masking on, the reference is indexed on "
+    "every run instead of once."
+)
+_FASTGA_KEEP_INDEX_HELP = (
+    "FastGA -k: keep the genome index (.1gdb / .gix) so later runs skip "
+    "building it. An index takes about 14 GB per gigabase of genome.\n\n"
+    "Self and All pairs: kept next to each FASTA.\n"
+    "Against a reference: only the reference index is kept, in a hidden "
+    ".repeatviewer_fastga folder next to it, and reused while the reference "
+    "is unchanged. Query indexes are always removed."
+)
+_FASTGA_TEMP_HELP = (
+    "FastGA -P: folder for FastGA's temporary files, which can be large.\n\n"
+    "Empty (default): a hidden folder next to the input, removed afterwards. "
+    "On macOS the system temporary folder of a desktop app is small and often "
+    "fails with \"Cannot write overlap gather file\"."
+)
 
-    def __init__(
-        self,
-        *,
-        initial=None,
-        file_count: int = 1,
-        title: str = "FastGA parameters",
-        parent=None,
-    ) -> None:
+
+class FastGaPanel(QWidget):
+    """The FastGA tab of the Alignment window.
+
+    Holds the FastGA-only settings (mode, reference, output, alignment
+    parameters, index and temp files). Right-click action and the process
+    window live in the Options tab of the owning dialog.
+    """
+
+    changed = Signal()
+
+    def __init__(self, *, initial=None, files=None, parent=None) -> None:
         super().__init__(parent)
         from repeatviewer.backends.fastga_dotplot import FORMAT_LABELS
         from repeatviewer.job_options import FastGaOptions
 
-        self.setWindowTitle(title)
         opts = initial or FastGaOptions()
+        self._initial = opts
+        self._files = [Path(p) for p in (files or [])]
 
+        # --- Mode ---------------------------------------------------------
+        self._mode_group = QButtonGroup(self)
+        self._mode_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Each file against itself", FASTGA_MODE_SELF),
+            ("All pairs among selected files → one file", FASTGA_MODE_PAIRS),
+            ("Selected files against a reference", FASTGA_MODE_REFERENCE),
+        ):
+            radio = QRadioButton(label, self)
+            self._mode_group.addButton(radio)
+            self._mode_buttons[value] = radio
+        self._set_mode(opts.mode)
+
+        self._reference = PathBrowseRow(
+            self,
+            initial=opts.reference_fasta or None,
+            placeholder="Reference FASTA: click it in Files, or Browse",
+            browse_title="Choose the reference FASTA",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fa.gz *.fasta.gz *.fna.gz);;"
+                "All files (*)"
+            ),
+        )
+        self._reference.setFixedWidth(360)
+        self._combined = QCheckBox("Write all into one file", self)
+        self._combined.setChecked(bool(opts.reference_combined))
+
+        self._summary = QLabel(self)
+        self._summary.setWordWrap(True)
+        self._summary.setMinimumWidth(420)
+        self._summary.setStyleSheet("color: palette(mid);")
+
+        # --- Output -------------------------------------------------------
         self._format = QComboBox(self)
         for label, value in FORMAT_LABELS:
             self._format.addItem(label, value)
         idx = self._format.findData(opts.output_format)
-        if idx >= 0:
-            self._format.setCurrentIndex(idx)
-        self._format.setToolTip(
-            "Output format: PAF and PSL are text files streamed by FastGA "
-            "(-paf / -pafx / -pafm / -pafs / -pafS / -psl); -1 writes a binary "
-            ".1aln (ONEcode) file."
+        self._format.setCurrentIndex(idx if idx >= 0 else 0)
+        self._output_name = QLabel(self)
+        self._output_name.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self._output_name.setMinimumWidth(420)
 
+        # --- Alignment ----------------------------------------------------
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 128)
         self._threads.setValue(max(1, opts.threads))
-        self._threads.setToolTip("FastGA -T: number of threads to use.")
-
         self._identity = QDoubleSpinBox(self)
         self._identity.setRange(0.5, 1.0)
         self._identity.setSingleStep(0.05)
         self._identity.setDecimals(2)
         self._identity.setValue(opts.min_identity)
-        self._identity.setToolTip("FastGA -i: minimum alignment identity.")
-
         self._min_length = QSpinBox(self)
-        # Below ~100 FastGA fails: an alignment must contain a 40 bp seed and
-        # chains must cover at least 85 bases.
+        # Below 100 FastGA fails: a hit needs a 40 bp seed and 85 bp of chain.
         self._min_length.setRange(100, 1_000_000)
         self._min_length.setSingleStep(50)
         self._min_length.setValue(max(100, opts.min_length))
-        self._min_length.setToolTip(
-            "FastGA -l: shortest alignment to report, in bp. Cannot go below 100 "
-            "-- FastGA rejects limits shorter than its seed length.\n"
-            "Raise this on satellite arrays, where short matches can swamp "
-            "the output."
-        )
-
         self._seed_freq = QSpinBox(self)
         self._seed_freq.setRange(1, 100_000)
         self._seed_freq.setSingleStep(50)
         self._seed_freq.setValue(max(1, opts.seed_freq))
-        self._seed_freq.setToolTip(
-            "FastGA -f: adaptive seed count cutoff. Seeds occurring more often "
-            "than this are discarded as repetitive before alignment.\n"
-            "FastGA's own default is 10, which removes satellite arrays "
-            "entirely. Raise it to see repeat structure; higher values are slower."
-        )
-
         self._chain_coverage = QSpinBox(self)
         self._chain_coverage.setRange(1, 1_000_000)
         self._chain_coverage.setValue(max(1, opts.chain_coverage))
-        self._chain_coverage.setToolTip(
-            "FastGA -c: minimum seed chain coverage (bases) in both genomes. "
-            "FastGA default: 85."
-        )
-
         self._chain_gap = QSpinBox(self)
         self._chain_gap.setRange(1, 10_000_000)
         self._chain_gap.setSingleStep(100)
         self._chain_gap.setValue(max(1, opts.chain_gap))
-        self._chain_gap.setToolTip(
-            "FastGA -s: maximum spacing between consecutive seeds when starting "
-            "a new seed chain. FastGA default: 1000."
-        )
-
         self._symmetric = QCheckBox("Symmetric seeding (-S)", self)
         self._symmetric.setChecked(opts.symmetric)
-        self._symmetric.setToolTip(
-            "FastGA -S: seed adaptamers from both genomes so the result does "
-            "not depend on argument order. Useful for repeat structure; slower."
-        )
-
-        self._keep_index = QCheckBox("Keep genome index (-k)", self)
-        self._keep_index.setChecked(opts.keep_index)
-        self._keep_index.setToolTip(
-            "FastGA -k: keep generated .1gdb / .gix files beside the FASTA so "
-            "later runs skip the index build."
-        )
-
-        self._no_soft_mask = QCheckBox("Do not soft mask (-N)", self)
-        self._no_soft_mask.setChecked(opts.no_soft_mask)
-        self._no_soft_mask.setToolTip("FastGA -N: do not soft mask.")
-
-        self._pairwise = QCheckBox("Do each pair comparison", self)
-        self._pairwise.setChecked(bool(getattr(opts, "pairwise", False)))
-        self._pairwise.setToolTip(
-            "Off (default): each selected FASTA is compared against itself, "
-            "one file at a time.\n"
-            "On: compare every unique pair among the selected files and write "
-            "all alignments into one file named "
-            "<first_selected>_multi_FastGA.<ext>."
-        )
-
+        self._soft_mask = QCheckBox("Use soft mask (lowercase bases)", self)
+        self._soft_mask.setChecked(bool(opts.soft_mask))
         for field in (
-            self._format,
-            self._threads,
-            self._identity,
-            self._min_length,
-            self._seed_freq,
-            self._chain_coverage,
-            self._chain_gap,
+            self._format, self._threads, self._identity, self._min_length,
+            self._seed_freq, self._chain_coverage, self._chain_gap,
         ):
             field.setFixedWidth(280)
 
-        self._file_count = int(file_count)
-        self._mode = QLabel(self)
-        self._mode.setWordWrap(True)
-        self._mode.setStyleSheet("color: palette(mid);")
-        self._pairwise.toggled.connect(self._update_mode_text)
-        self._update_mode_text()
+        # --- Index & temp files -------------------------------------------
+        self._keep_index = QCheckBox("Keep genome index (-k)", self)
+        self._keep_index.setChecked(opts.keep_index)
+        self._temp_dir = PathBrowseRow(
+            self,
+            initial=opts.temp_dir or None,
+            placeholder="Empty: a hidden folder next to the input",
+            browse_title="Folder for FastGA temporary files",
+            mode="directory",
+        )
+        self._temp_dir.setFixedWidth(360)
 
-        params_tab = QWidget(self)
-        form = QFormLayout(params_tab)
+        self._platform_note = QLabel(
+            "Large genomes take minutes to hours; cancel from the progress bar."
+            + ("  Windows: FastGA runs in WSL." if sys.platform == "win32" else ""),
+            self,
+        )
+        self._platform_note.setWordWrap(True)
+        self._platform_note.setStyleSheet("color: palette(mid);")
+
+        # --- Layout -------------------------------------------------------
+        def _section(title: str) -> QLabel:
+            label = QLabel(f"<b>{title}</b>", self)
+            return label
+
+        form = QFormLayout(self)
         form.setContentsMargins(16, 14, 16, 14)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-        form.addRow(self._mode)
-        form.addRow("Output format:", self._format)
-        form.addRow("-T (threads):", self._threads)
-        form.addRow("-i (min identity):", self._identity)
-        form.addRow("-l (min length):", self._min_length)
-        form.addRow("-f (seed cutoff):", self._seed_freq)
-        form.addRow("-c (chain coverage):", self._chain_coverage)
-        form.addRow("-s (chain gap):", self._chain_gap)
-        form.addRow("", self._symmetric)
-        form.addRow("", self._keep_index)
-        form.addRow("", self._no_soft_mask)
-        form.addRow("", self._pairwise)
+        form.setVerticalSpacing(8)
 
-        self._right_click_group = QButtonGroup(self)
-        self._right_click_buttons: dict[str, QRadioButton] = {}
-        for label, value in (
-            ("Run FastGA with saved parameters", FASTGA_RIGHT_CLICK_RUN),
-            ("Open this dialog", FASTGA_RIGHT_CLICK_DIALOG),
-        ):
-            radio = QRadioButton(label, self)
-            radio.setChecked(opts.right_click_action == value)
-            self._right_click_group.addButton(radio)
-            self._right_click_buttons[value] = radio
-        if not any(b.isChecked() for b in self._right_click_buttons.values()):
-            self._right_click_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
-
-        rc_box = QGroupBox("Right-click action", self)
-        rc_box_layout = QVBoxLayout(rc_box)
-        rc_box_layout.setSpacing(6)
-        rc_box_layout.addWidget(
-            QLabel("Right-clicking the FastGA button does:", self)
-        )
-        for radio in self._right_click_buttons.values():
-            rc_box_layout.addWidget(radio)
-
-        process_box, self._show_process_window = make_process_output_box(
-            self,
-            tool_name="FastGA",
-            checked=bool(getattr(opts, "show_process_window", False)),
-        )
-
-        options_tab = QWidget(self)
-        options_layout = QVBoxLayout(options_tab)
-        options_layout.setContentsMargins(16, 14, 16, 14)
-        options_layout.setSpacing(14)
-        options_layout.addWidget(rc_box)
-        options_layout.addWidget(process_box)
-        options_layout.addStretch(1)
-
-        self._tabs = QTabWidget(self)
-        self._tabs.addTab(params_tab, "Parameters")
-        self._tabs.addTab(options_tab, "Options")
-
-        restore = QPushButton("Restore Defaults", self)
-        restore.clicked.connect(self._restore_defaults)
-        self._button_box = make_cancel_save_run_bar(
-            self,
-            left_widgets=[restore],
-        )
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 18, 22, 16)
-        layout.setSpacing(14)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._button_box)
-
-    def _update_mode_text(self) -> None:
-        pairwise = self._pairwise.isChecked()
-        n = self._file_count
-        if pairwise:
-            if n >= 2:
-                pair_count = n * (n - 1) // 2
-                text = (
-                    f"{n} files selected: every unique pair will be compared "
-                    f"({pair_count} pair(s)). Results are merged into one file "
-                    "named after the first selection with _multi_FastGA."
+        form.addRow(_section("Mode"))
+        mode_box = QWidget(self)
+        mode_layout = QVBoxLayout(mode_box)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(4)
+        for index, radio in enumerate(self._mode_buttons.values()):
+            if index == 0:
+                mode_layout.addWidget(
+                    field_with_help(radio, "FastGA mode", _FASTGA_MODE_HELP, stretch=True)
                 )
             else:
-                text = ""
-        elif n >= 1:
-            text = (
-                f"{n} file(s) selected: each will be compared against itself "
-                "one by one (self-comparison)."
-            )
-        else:
-            text = (
-                "Self-comparison (default): select one or more FASTA files. "
-                "Each is compared against itself, one by one. Enable "
-                "Do each pair comparison to compare every unique pair among "
-                "the selected files."
-            )
-        self._mode.setText(text)
+                mode_layout.addWidget(radio)
+        form.addRow("", mode_box)
+        form.addRow("Reference:", field_with_help(
+            self._reference, "Reference", _FASTGA_REFERENCE_HELP))
+        form.addRow("", field_with_help(
+            self._combined, "Write all into one file", _FASTGA_COMBINED_HELP))
+        form.addRow("", self._summary)
 
-    def _restore_defaults(self) -> None:
+        form.addRow(_section("Output"))
+        form.addRow("Output format:", field_with_help(
+            self._format, "Output format", _FASTGA_FORMAT_HELP))
+        form.addRow("Output name:", self._output_name)
+
+        form.addRow(_section("Alignment"))
+        form.addRow("-T (threads):", field_with_help(
+            self._threads, "Threads", _FASTGA_THREADS_HELP))
+        form.addRow("-i (min identity):", field_with_help(
+            self._identity, "Minimum identity", _FASTGA_IDENTITY_HELP))
+        form.addRow("-l (min length):", field_with_help(
+            self._min_length, "Minimum length", _FASTGA_LENGTH_HELP))
+        form.addRow("-f (seed cutoff):", field_with_help(
+            self._seed_freq, "Seed cutoff", _FASTGA_SEED_HELP))
+        form.addRow("-c (chain coverage):", field_with_help(
+            self._chain_coverage, "Chain coverage", _FASTGA_CHAIN_COV_HELP))
+        form.addRow("-s (chain gap):", field_with_help(
+            self._chain_gap, "Chain gap", _FASTGA_CHAIN_GAP_HELP))
+        form.addRow("", field_with_help(
+            self._symmetric, "Symmetric seeding", _FASTGA_SYMMETRIC_HELP))
+        form.addRow("", field_with_help(
+            self._soft_mask, "Soft mask", _FASTGA_SOFT_MASK_HELP))
+
+        form.addRow(_section("Index &amp; temp files"))
+        form.addRow("", field_with_help(
+            self._keep_index, "Keep genome index", _FASTGA_KEEP_INDEX_HELP))
+        form.addRow("Temp dir (-P):", field_with_help(
+            self._temp_dir, "Temporary files", _FASTGA_TEMP_HELP))
+        form.addRow("", self._platform_note)
+
+        for radio in self._mode_buttons.values():
+            radio.toggled.connect(self._sync)
+        self._reference.text_changed.connect(lambda _t: self._sync())
+        self._combined.toggled.connect(self._sync)
+        self._format.currentIndexChanged.connect(self._sync)
+        self._sync()
+
+    # ----------------------------------------------------------------- state
+
+    def _set_mode(self, mode: str) -> None:
+        radio = self._mode_buttons.get(mode) or self._mode_buttons[FASTGA_MODE_SELF]
+        radio.setChecked(True)
+
+    def mode(self) -> str:
+        for value, radio in self._mode_buttons.items():
+            if radio.isChecked():
+                return value
+        return FASTGA_MODE_SELF
+
+    def reference(self) -> Path | None:
+        return self._reference.path()
+
+    def files(self) -> list[Path]:
+        return list(self._files)
+
+    def summary_text(self) -> str:
+        return self._summary.text()
+
+    def output_name_text(self) -> str:
+        return self._output_name.text()
+
+    def _sync(self) -> None:
+        from repeatviewer.backends.fastga_dotplot import (
+            FORMAT_ALN,
+            fastga_mode_summary,
+            output_suffix_for_format,
+            reference_combined_output_path,
+            reference_output_path,
+            reference_queries,
+        )
+
+        mode = self.mode()
+        reference_mode = mode == FASTGA_MODE_REFERENCE
+        self._reference.setEnabled(reference_mode)
+        self._combined.setEnabled(reference_mode)
+        reference = self.reference() if reference_mode else None
+        combined = self._combined.isChecked()
+        self._summary.setText(
+            fastga_mode_summary(self._files, mode, reference, combined=combined)
+        )
+
+        fmt = str(self._format.currentData())
+        suffix = output_suffix_for_format(fmt)
+        first = self._files[0] if self._files else Path("<file>.fa")
+        if reference_mode:
+            ref = reference or Path("<reference>.fa")
+            queries = reference_queries(self._files, reference) or [first]
+            if combined and len(queries) > 1:
+                name = reference_combined_output_path(queries[0], ref).name
+                if fmt == FORMAT_ALN:
+                    name += "  (PAF: .1aln cannot be joined)"
+            else:
+                name = reference_output_path(queries[0], ref, fmt).name
+                if len(queries) > 1:
+                    name += f"  (+ {len(queries) - 1} more)"
+        elif mode == FASTGA_MODE_PAIRS:
+            name = f"{first.name}_multi_FastGA{'.paf' if fmt == FORMAT_ALN else suffix}"
+        else:
+            name = f"{first.name}_FastGA{suffix}"
+            if len(self._files) > 1:
+                name += f"  (+ {len(self._files) - 1} more)"
+        self._output_name.setText(name)
+        self.changed.emit()
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        """A FASTA clicked in Files becomes the reference (reference mode only)."""
+        if self.mode() != FASTGA_MODE_REFERENCE:
+            return False
+        candidate = Path(path).expanduser()
+        name = candidate.name.lower()
+        if name.endswith(".gz"):
+            name = name[:-3]
+        if not candidate.is_file() or Path(name).suffix not in {
+            ".fa", ".fasta", ".fna", ".fas",
+        }:
+            return False
+        self._reference.set_path(candidate)
+        return True
+
+    def restore_defaults(self) -> None:
         from repeatviewer.job_options import FastGaOptions
 
-        opts = FastGaOptions()
-        idx = self._format.findData(opts.output_format)
+        d = FastGaOptions()
+        self._set_mode(d.mode)
+        self._combined.setChecked(d.reference_combined)
+        idx = self._format.findData(d.output_format)
         if idx >= 0:
             self._format.setCurrentIndex(idx)
-        self._threads.setValue(max(1, opts.threads))
-        self._identity.setValue(opts.min_identity)
-        self._min_length.setValue(max(100, opts.min_length))
-        self._seed_freq.setValue(opts.seed_freq)
-        self._chain_coverage.setValue(opts.chain_coverage)
-        self._chain_gap.setValue(opts.chain_gap)
-        self._symmetric.setChecked(opts.symmetric)
-        self._keep_index.setChecked(opts.keep_index)
-        self._no_soft_mask.setChecked(opts.no_soft_mask)
-        self._pairwise.setChecked(opts.pairwise)
-        self._show_process_window.setChecked(opts.show_process_window)
-        self._right_click_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
-        self._update_mode_text()
+        self._threads.setValue(max(1, d.threads))
+        self._identity.setValue(d.min_identity)
+        self._min_length.setValue(max(100, d.min_length))
+        self._seed_freq.setValue(d.seed_freq)
+        self._chain_coverage.setValue(d.chain_coverage)
+        self._chain_gap.setValue(d.chain_gap)
+        self._symmetric.setChecked(d.symmetric)
+        self._soft_mask.setChecked(d.soft_mask)
+        self._keep_index.setChecked(d.keep_index)
+        self._temp_dir.clear()
+        # The reference is a choice of file, not a parameter: kept.
+        self._sync()
 
-    def should_run(self) -> bool:
-        return dialog_should_run(self)
+    def options(self, *, right_click_action: str, show_process_window: bool):
+        from dataclasses import replace
 
-    def options(self):
-        from repeatviewer.job_options import FastGaOptions
-
-        right_click_action = FASTGA_RIGHT_CLICK_RUN
-        for value, radio in self._right_click_buttons.items():
-            if radio.isChecked():
-                right_click_action = value
-                break
-
-        return FastGaOptions(
+        ref = self._reference.path()
+        temp = self._temp_dir.path()
+        return replace(
+            self._initial,
             output_format=str(self._format.currentData()),
             threads=int(self._threads.value()),
             min_identity=float(self._identity.value()),
@@ -2305,11 +2536,13 @@ class FastGaParamsDialog(QDialog):
             chain_gap=int(self._chain_gap.value()),
             symmetric=self._symmetric.isChecked(),
             keep_index=self._keep_index.isChecked(),
-            no_soft_mask=self._no_soft_mask.isChecked(),
-            pairwise=self._pairwise.isChecked(),
-            temp_dir="",
+            soft_mask=self._soft_mask.isChecked(),
+            mode=self.mode(),
+            reference_fasta=str(ref) if ref else "",
+            reference_combined=self._combined.isChecked(),
+            temp_dir=str(temp) if temp else "",
             right_click_action=right_click_action,
-            show_process_window=self._show_process_window.isChecked(),
+            show_process_window=bool(show_process_window),
         )
 
 
