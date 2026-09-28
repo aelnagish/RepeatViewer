@@ -52,8 +52,13 @@ _NAME_PAD = 8
 _SELECTED_BG_LIGHT = QColor(11, 92, 171, 36)
 _SELECTED_BG_DARK = QColor(80, 160, 255, 48)
 _DEFAULT_FEAT = QColor("#c0392b")
-_MIN_PPB = 0.002
+# Only guards division/painting against a zero scale.  The actual zoom-out
+# limit is calculated per data set so the longest sequence always fits.
+_ABS_MIN_PPB = 1e-12
 _MAX_PPB = 4.0
+_MAX_ZOOM_OVER_FIT = 32.0
+_QT_MAX_WIDGET_SIZE = 16_777_215
+_BAR_RIGHT_PAD = 8
 _ZOOM_STEP = 1.08
 _SCALE_HEIGHT = 28
 # Ignore tiny moves (click / accidental jitter); macOS-like drag threshold.
@@ -371,7 +376,9 @@ class _BarsCanvas(QWidget):
         self._rubber_active = False
         self._drag_origin = None
         if fit_bars_width and fit_bars_width > 40 and self._max_length > 0:
-            self._ppb = max(_MIN_PPB, (fit_bars_width - 16) / self._max_length)
+            self._ppb = self.fit_pixels_per_base(fit_bars_width)
+        fit_ppb, max_ppb = self.zoom_bounds()
+        self._ppb = max(fit_ppb, min(max_ppb, self._ppb))
         self._recompute_layout()
         self.update()
         self.zoomChanged.emit(self._ppb)
@@ -408,17 +415,45 @@ class _BarsCanvas(QWidget):
 
     def set_viewport_min_size(self, width: int, height: int) -> None:
         self._min_viewport = QSize(max(40, int(width)), max(40, int(height)))
+        fit_ppb, max_ppb = self.zoom_bounds()
+        self._ppb = max(fit_ppb, min(max_ppb, self._ppb))
         self._recompute_layout()
 
+    def fit_pixels_per_base(self, bars_width: int | None = None) -> float:
+        """Scale that fits the longest sequence inside the track viewport."""
+        width = max(
+            40,
+            int(self._min_viewport.width() if bars_width is None else bars_width),
+        )
+        usable_width = max(1, width - self._bar_pad - _BAR_RIGHT_PAD)
+        return max(_ABS_MIN_PPB, usable_width / max(1, self._max_length))
+
+    def zoom_bounds(self, bars_width: int | None = None) -> tuple[float, float]:
+        """Return data-dependent zoom limits that remain safe for QWidget."""
+        fit_ppb = self.fit_pixels_per_base(bars_width)
+        geometry_limit = max(
+            _ABS_MIN_PPB,
+            (
+                _QT_MAX_WIDGET_SIZE
+                - self._bar_pad
+                - _BAR_RIGHT_PAD
+            )
+            / max(1, self._max_length),
+        )
+        desired_max = max(_MAX_PPB, fit_ppb * _MAX_ZOOM_OVER_FIT)
+        return fit_ppb, max(fit_ppb, min(desired_max, geometry_limit))
+
     def set_pixels_per_base(self, ppb: float) -> None:
-        self._ppb = max(_MIN_PPB, min(_MAX_PPB, float(ppb)))
+        fit_ppb, max_ppb = self.zoom_bounds()
+        self._ppb = max(fit_ppb, min(max_ppb, float(ppb)))
         self._recompute_layout()
         self.update()
         self.zoomChanged.emit(self._ppb)
 
     def zoom_by(self, factor: float, *, anchor_x: float | None = None) -> None:
         old = self._ppb
-        new = max(_MIN_PPB, min(_MAX_PPB, old * factor))
+        fit_ppb, max_ppb = self.zoom_bounds()
+        new = max(fit_ppb, min(max_ppb, old * factor))
         if abs(new - old) < 1e-12:
             return
         if anchor_x is not None and old > 0:
@@ -439,9 +474,7 @@ class _BarsCanvas(QWidget):
             return
         self._pending_scroll_bp = None
         self._pending_anchor = None
-        self.set_pixels_per_base(
-            max(_MIN_PPB, (max(40, bars_width) - 16) / self._max_length)
-        )
+        self.set_pixels_per_base(self.fit_pixels_per_base(bars_width))
 
     def zoom_to_bp_range(
         self, start_bp: float, end_bp: float, bars_width: int
@@ -450,7 +483,8 @@ class _BarsCanvas(QWidget):
         width = max(40, int(bars_width))
         self._pending_scroll_bp = float(start_bp)
         self._pending_anchor = None
-        self.set_pixels_per_base(max(_MIN_PPB, (width - 16) / span))
+        usable_width = max(1, width - self._bar_pad - _BAR_RIGHT_PAD)
+        self.set_pixels_per_base(usable_width / span)
 
     def take_pending_scroll_bp(self) -> float | None:
         value = self._pending_scroll_bp
@@ -479,11 +513,19 @@ class _BarsCanvas(QWidget):
             self._row_tops.append(y)
             self._row_heights.append(h)
             y += h
-        content_w = int(self._bar_pad + self._max_length * self._ppb + 12)
+        content_w = math.ceil(
+            self._bar_pad + self._max_length * self._ppb + _BAR_RIGHT_PAD
+        )
         # Extra bottom pad so the last row clears the horizontal scrollbar edge.
         y = y + 4 if y else _MIN_ROW_HEIGHT
-        w = max(120, content_w, self._min_viewport.width())
-        h = max(_MIN_ROW_HEIGHT, y, self._min_viewport.height())
+        w = min(
+            _QT_MAX_WIDGET_SIZE,
+            max(120, content_w, self._min_viewport.width()),
+        )
+        h = min(
+            _QT_MAX_WIDGET_SIZE,
+            max(_MIN_ROW_HEIGHT, y, self._min_viewport.height()),
+        )
         self.setMinimumSize(w, h)
         self.resize(w, h)
         self.updateGeometry()
@@ -728,7 +770,7 @@ class _ScaleRuler(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def set_scale(self, *, ppb: float, max_length: int, bar_pad: int) -> None:
-        self._ppb = max(_MIN_PPB, float(ppb))
+        self._ppb = max(_ABS_MIN_PPB, float(ppb))
         self._max_length = max(1, int(max_length))
         self._bar_pad = int(bar_pad)
         self.update()
@@ -1061,7 +1103,7 @@ class MultiSequenceOverviewPanel(QWidget):
             self._lengths = {}
             self._features = {}
             self._bars.set_data([], {}, {})
-            self._scale.set_scale(ppb=_MIN_PPB, max_length=1, bar_pad=8)
+            self._scale.set_scale(ppb=_ABS_MIN_PPB, max_length=1, bar_pad=8)
             self.statusMessage.emit(str(exc))
             return
 
@@ -1130,15 +1172,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_zoom_slider_from_ppb()
 
     def _slider_ppb_bounds(self) -> tuple[float, float]:
-        max_len = max(1, self._bars.max_length())
-        fit_ppb = max(
-            _MIN_PPB,
-            (max(40, self._bars_viewport_width()) - 16) / max_len,
-        )
-        max_ppb = _MAX_PPB
-        if max_ppb < fit_ppb:
-            max_ppb = fit_ppb
-        return fit_ppb, max_ppb
+        return self._bars.zoom_bounds(self._bars_viewport_width())
 
     def _slider_value_to_ppb(self, value: int) -> float:
         fit_ppb, max_ppb = self._slider_ppb_bounds()

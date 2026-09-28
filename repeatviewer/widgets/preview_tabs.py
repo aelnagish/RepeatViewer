@@ -123,6 +123,7 @@ _TEXT_PREVIEW_SUFFIXES = _FASTA_SUFFIXES | {
     ".json",
     ".xml",
     ".out",
+    ".sizes",
 }
 _TEXT_PREVIEW_MAX_CHARS = 500_000
 _DEFAULT_TEXT_MAX_CHARS = 200_000
