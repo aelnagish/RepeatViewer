@@ -1858,6 +1858,9 @@ class _PendingTeVizBuild:
 
 _METADATA_UI_CHUNK = 24
 _METADATA_STAT_CHUNK = 48
+# Above this, avoid sync metadata/stat and O(n) preview/is_file scans on the GUI thread.
+_LARGE_FILE_LIST = 400
+_LARGE_JOB_OUTPUT_BATCH = 200
 
 
 class _MetadataEnrichWorker(QObject):
@@ -2364,17 +2367,21 @@ class MainWindow(QMainWindow):
 
         was_sorting = self._file_list.isSortingEnabled()
         self._file_list.setSortingEnabled(False)
-        for path in visible_paths:
-            row_item = self._file_list.add_file_row(
-                path,
-                fill_metadata_columns=False,
-            )
-            key = str(path.expanduser().resolve())
-            if key in self._highlight_output_keys:
-                self._style_new_output_item(row_item)
-            elif key in self._highlight_source_keys:
-                self._style_source_file_item(row_item)
-        self._file_list.setSortingEnabled(was_sorting)
+        self._file_list.setUpdatesEnabled(False)
+        try:
+            for path in visible_paths:
+                row_item = self._file_list.add_file_row(
+                    path,
+                    fill_metadata_columns=False,
+                )
+                key = str(path.expanduser().resolve())
+                if key in self._highlight_output_keys:
+                    self._style_new_output_item(row_item)
+                elif key in self._highlight_source_keys:
+                    self._style_source_file_item(row_item)
+        finally:
+            self._file_list.setUpdatesEnabled(True)
+            self._file_list.setSortingEnabled(was_sorting)
         self._file_list.apply_default_sort()
 
     def _restore_window_layout(self) -> None:
@@ -2657,6 +2664,16 @@ class MainWindow(QMainWindow):
             total = max(1, int(self._task_progress._total))
             self._task_progress.update(total, "Done")
         self._hide_job_progress()
+        # Large folders skipped sync metadata during the finish refresh.
+        from repeatviewer.widgets.file_list_columns import metadata_columns_visible
+
+        if (
+            metadata_columns_visible()
+            and self._file_list is not None
+            and self._file_list.rowCount() > _LARGE_FILE_LIST
+            and not self._any_background_job_running()
+        ):
+            QTimer.singleShot(0, self._fill_visible_file_metadata)
 
     def _schedule_after_job_ui_ready(self) -> None:
         """Defer fill/hide so preview paint is not interrupted by processEvents."""
@@ -6198,6 +6215,7 @@ class MainWindow(QMainWindow):
         new_outputs: list[Path] | None = None,
         source_files: list[Path] | None = None,
         record_history: bool = True,
+        open_preview: bool = True,
     ) -> None:
         folder = folder.expanduser().resolve()
         self._ensure_folder_visible_in_tree(folder)
@@ -6214,6 +6232,7 @@ class MainWindow(QMainWindow):
             new_outputs=new_outputs,
             source_files=source_files,
             record_history=record_history,
+            open_preview=open_preview,
         )
 
     def _on_folder_selected(self, folder: Path) -> None:
@@ -6440,22 +6459,26 @@ class MainWindow(QMainWindow):
 
         visible = sort_file_paths(visible, self._current_file_sort_mode())
 
-        fill_metadata = metadata_columns_visible()
-        # Fast path: name/size/type from stat only — no FASTA reads on the UI thread.
+        want_metadata = metadata_columns_visible()
+        # Large folders: skip sync stat/metadata on the GUI thread; fill later.
+        fill_metadata = want_metadata and len(visible) <= _LARGE_FILE_LIST
+        defer_metadata = want_metadata and not fill_metadata
         was_sorting = self._file_list.isSortingEnabled()
         self._file_list.setSortingEnabled(False)
         self._file_list.setUpdatesEnabled(False)
         try:
+            need_style = bool(self._highlight_output_keys or self._highlight_source_keys)
             for file_path in visible:
                 row_item = self._file_list.add_file_row(
                     file_path,
                     fill_metadata_columns=fill_metadata,
                 )
-                key = str(file_path.resolve())
-                if key in self._highlight_output_keys:
-                    self._style_new_output_item(row_item)
-                elif key in self._highlight_source_keys:
-                    self._style_source_file_item(row_item)
+                if need_style:
+                    key = str(file_path.expanduser().resolve())
+                    if key in self._highlight_output_keys:
+                        self._style_new_output_item(row_item)
+                    elif key in self._highlight_source_keys:
+                        self._style_source_file_item(row_item)
         finally:
             self._file_list.setUpdatesEnabled(True)
             self._file_list.setSortingEnabled(was_sorting)
@@ -6474,8 +6497,10 @@ class MainWindow(QMainWindow):
         )
         if fill_metadata and not self._any_background_job_running():
             self._start_metadata_enrichment(visible)
+        elif defer_metadata and not self._any_background_job_running():
+            QTimer.singleShot(0, self._fill_visible_file_metadata)
 
-    def _stop_metadata_enrichment(self) -> None:
+    def _stop_metadata_enrichment(self, *, wait_ms: int = 1000) -> None:
         self._pending_metadata_ui.clear()
         self._metadata_stat_queue.clear()
         self._metadata_ui_timer.stop()
@@ -6487,7 +6512,9 @@ class MainWindow(QMainWindow):
             worker.cancel()
         if thread is not None:
             thread.quit()
-            thread.wait(1000)
+            # Job start must not block the GUI for up to 1s waiting on enrichment.
+            if wait_ms > 0:
+                thread.wait(wait_ms)
 
     def _start_metadata_enrichment(self, paths: list[Path]) -> None:
         from repeatviewer.browser_file_metadata import is_fasta_path
@@ -6557,7 +6584,9 @@ class MainWindow(QMainWindow):
             self._refresh_metadata_row_highlights(chunk)
         if self._metadata_stat_queue or self._pending_metadata_ui:
             self._metadata_ui_timer.start(0)
-        else:
+        elif self._highlight_output_keys or self._highlight_source_keys:
+            # Chunks already re-tint touched rows; only restyle when highlights
+            # exist, and prefer the keyed path for large folders.
             self._refresh_file_list_highlights()
 
     def _refresh_metadata_row_highlights(
@@ -6625,8 +6654,101 @@ class MainWindow(QMainWindow):
                 same_folder = prev_folder.expanduser().resolve() == target_folder
             except OSError:
                 same_folder = False
+
+        highlight_request = bool(new_outputs or source_files)
+        large_folder = (
+            same_folder
+            and self._cached_folder_files is not None
+            and len(self._cached_folder_files) > _LARGE_FILE_LIST
+        )
+        # Large folder + few known new outputs: skip full scandir/rebuild.
+        # Membership is by basename in the current folder (unique on disk).
+        few_new_outputs = len(new_outputs or []) <= _LARGE_JOB_OUTPUT_BATCH
+        if (
+            large_folder
+            and highlight_request
+            and few_new_outputs
+            and self._file_list.rowCount() > 0
+        ):
+            self._current_folder = target_folder
+            self._folder_tree.set_active_folder(target_folder)
+            prev_highlight_keys = (
+                self._highlight_output_keys | self._highlight_source_keys
+            )
+            if prev_highlight_keys:
+                self._file_list.reapply_file_colors_for_keys(prev_highlight_keys)
+            if new_outputs or source_files:
+                self._highlight_output_keys = set()
+                self._highlight_source_keys = set()
+            highlight_paths: list[Path] = []
+
+            def _track_fast(path: Path, *, as_output: bool) -> None:
+                resolved = path.expanduser().resolve()
+                if resolved.parent != self._current_folder:
+                    return
+                key = str(resolved)
+                if as_output:
+                    self._highlight_output_keys.add(key)
+                    self._highlight_source_keys.discard(key)
+                elif key not in self._highlight_output_keys:
+                    self._highlight_source_keys.add(key)
+                highlight_paths.append(resolved)
+
+            if new_outputs:
+                for path in new_outputs:
+                    _track_fast(path, as_output=True)
+            if source_files:
+                for path in source_files:
+                    _track_fast(path, as_output=False)
+
+            existing_names = {p.name for p in self._cached_folder_files}
+            added_paths: list[Path] = []
+            for path in new_outputs or []:
+                resolved = path.expanduser().resolve()
+                if resolved.parent != self._current_folder:
+                    continue
+                if resolved.name in existing_names:
+                    continue
+                if not resolved.is_file() and not resolved.is_dir():
+                    continue
+                # Same absolute form as scandir (folder is already resolved).
+                cached = self._current_folder / resolved.name
+                self._cached_folder_files.append(cached)
+                existing_names.add(cached.name)
+                added_paths.append(cached)
+
+            self._file_list.blockSignals(True)
+            if added_paths:
+                self._incremental_add_files_to_list(added_paths)
+            else:
+                # Outputs already in the list (rerun) — tint only those rows.
+                self._apply_job_highlights_to_keys(
+                    self._highlight_output_keys | self._highlight_source_keys
+                )
+            if highlight_paths:
+                self._select_and_scroll_outputs(highlight_paths, open_preview=False)
+                n_out = len(self._highlight_output_keys)
+                n_src = len(self._highlight_source_keys)
+                names = ", ".join(
+                    Path(k).name for k in list(self._highlight_output_keys)[:3]
+                )
+                msg = f"Highlighted {n_out} new output(s) and {n_src} input(s)"
+                if names:
+                    msg += f" (e.g. {names})"
+                self._set_status_message(msg, 12000, override_file_link=True)
+            self._file_list.blockSignals(False)
+            if highlight_paths and open_preview:
+                self._open_best_preview_path(highlight_paths)
+            if hasattr(self, "_folder_nav"):
+                self._folder_nav.set_folder(
+                    self._current_folder,
+                    record_history=record_history,
+                )
+            self._sync_folder_tree_label_for_folder(self._current_folder)
+            return
+
         prev_cached_keys = (
-            {str(path.expanduser().resolve()) for path in self._cached_folder_files}
+            {str(path) for path in self._cached_folder_files}
             if same_folder
             else set()
         )
@@ -6655,7 +6777,7 @@ class MainWindow(QMainWindow):
         elif not same_folder:
             self._highlight_output_keys = set()
             self._highlight_source_keys = set()
-        highlight_paths: list[Path] = []
+        highlight_paths = []
 
         def _track(path: Path, *, as_output: bool) -> None:
             resolved = path.expanduser().resolve()
@@ -6678,13 +6800,46 @@ class MainWindow(QMainWindow):
             for path in source_files:
                 _track(path, as_output=False)
 
-        # Apply green (outputs) / light blue (inputs) before any selection.
-        if self._highlight_output_keys or self._highlight_source_keys:
-            self._refresh_file_list_highlights()
+        # Apply green/blue tints while adding/rebuilding rows — skip a full-list
+        # restyle of the *old* table first (that was O(n) resolve work for nothing).
 
-        new_cache_keys = {str(path.expanduser().resolve()) for path in self._cached_folder_files}
+        # Use unresolved absolute scandir paths for membership (no N× resolve).
+        new_cache_keys = {str(path) for path in self._cached_folder_files}
         added_keys = new_cache_keys - prev_cached_keys
         removed_keys = prev_cached_keys - new_cache_keys
+
+        # Same folder, highlights only, no membership change: do not rebuild.
+        if (
+            same_folder
+            and highlight_paths
+            and not added_keys
+            and not removed_keys
+        ):
+            self._file_list.blockSignals(True)
+            self._apply_job_highlights_to_keys(
+                self._highlight_output_keys | self._highlight_source_keys
+            )
+            self._select_and_scroll_outputs(highlight_paths, open_preview=False)
+            n_out = len(self._highlight_output_keys)
+            n_src = len(self._highlight_source_keys)
+            names = ", ".join(
+                Path(k).name for k in list(self._highlight_output_keys)[:3]
+            )
+            msg = f"Highlighted {n_out} new output(s) and {n_src} input(s)"
+            if names:
+                msg += f" (e.g. {names})"
+            self._set_status_message(msg, 12000, override_file_link=True)
+            self._file_list.blockSignals(False)
+            if open_preview:
+                self._open_best_preview_path(highlight_paths)
+            if hasattr(self, "_folder_nav"):
+                self._folder_nav.set_folder(
+                    self._current_folder,
+                    record_history=record_history,
+                )
+            self._sync_folder_tree_label_for_folder(self._current_folder)
+            return
+
         if (
             same_folder
             and highlight_paths
@@ -6694,7 +6849,7 @@ class MainWindow(QMainWindow):
             added_paths = [
                 path
                 for path in self._cached_folder_files
-                if str(path.expanduser().resolve()) in added_keys
+                if str(path) in added_keys
             ]
             self._file_list.blockSignals(True)
             self._incremental_add_files_to_list(added_paths)
@@ -6719,6 +6874,7 @@ class MainWindow(QMainWindow):
             self._sync_folder_tree_label_for_folder(self._current_folder)
             return
 
+        # Full rebuild: restyle of the previous list is pointless; rows are recreated.
         preserve_ui = same_folder
         prev_key: str | None = None
         prev_scroll: int | None = None
@@ -6769,7 +6925,7 @@ class MainWindow(QMainWindow):
                 for index in range(self._file_list.count()):
                     item = self._file_list.item(index)
                     raw = item.data(ROLE_PATH)
-                    if raw and str(Path(str(raw)).expanduser().resolve()) == prev_key:
+                    if raw and str(raw) == prev_key:
                         match = item
                         break
                 if match is not None:
@@ -6791,24 +6947,57 @@ class MainWindow(QMainWindow):
 
     def _clear_job_file_highlights(self) -> None:
         """Drop previous job green/blue tints (called when a new job starts)."""
+        prev_keys = self._highlight_output_keys | self._highlight_source_keys
         self._highlight_output_keys = set()
         self._highlight_source_keys = set()
-        self._refresh_file_list_highlights()
+        if not prev_keys:
+            return
+        # Only clear previously tinted rows — never restyle all 1700 files.
+        self._file_list.reapply_file_colors_for_keys(prev_keys)
 
-    def _refresh_file_list_highlights(self) -> None:
-        """Re-apply new-output / source tint after metadata or sort updates."""
-        for index in range(self._file_list.count()):
-            item = self._file_list.item(index)
-            raw = item.data(ROLE_PATH)
-            if not raw:
+    def _apply_job_highlights_to_keys(self, keys: set[str]) -> None:
+        """Tint only the given path keys (one path-index build)."""
+        if not keys or self._file_list is None:
+            return
+        row_index = self._file_list._path_row_index()
+        for key in keys:
+            row = row_index.get(key)
+            if row is None:
                 continue
-            key = str(Path(str(raw)).expanduser().resolve())
+            item = self._file_list.item(row)
+            if item is None:
+                continue
             if key in self._highlight_output_keys:
                 self._style_new_output_item(item)
             elif key in self._highlight_source_keys:
                 self._style_source_file_item(item)
+
+    def _refresh_file_list_highlights(self) -> None:
+        """Re-apply new-output / source tint after metadata or sort updates."""
+        n_rows = self._file_list.count()
+        out_keys = self._highlight_output_keys
+        src_keys = self._highlight_source_keys
+        if not out_keys and not src_keys:
+            # Nothing to tint. Callers that need a full clear should use
+            # ``_clear_job_file_highlights`` (keyed) instead of walking all rows.
+            return
+        # Large folders: only touch highlighted rows (O(highlights), not O(folder)).
+        if n_rows > _LARGE_FILE_LIST and len(out_keys) + len(src_keys) <= _LARGE_JOB_OUTPUT_BATCH:
+            self._apply_job_highlights_to_keys(out_keys | src_keys)
+            return
+        for index in range(n_rows):
+            item = self._file_list.item(index)
+            raw = item.data(ROLE_PATH)
+            if not raw:
+                continue
+            # ROLE_PATH is stored resolved; avoid another resolve() per row.
+            key = str(raw)
+            if key in out_keys:
+                self._style_new_output_item(item)
+            elif key in src_keys:
+                self._style_source_file_item(item)
             else:
-                self._file_list.reapply_file_color_for_path(Path(str(raw)))
+                self._file_list.reapply_file_color_at_row(index)
 
     def _palette_is_dark(self) -> bool:
         from PySide6.QtGui import QPalette
@@ -6866,23 +7055,50 @@ class MainWindow(QMainWindow):
         # Do not select every input/output — that would paint them all deep blue.
         self._file_list.clearSelection()
         self._file_list.setCurrentItem(None)
-        self._refresh_file_list_highlights()
-        for index in range(self._file_list.count()):
-            item = self._file_list.item(index)
-            raw = item.data(ROLE_PATH)
-            if raw and str(Path(str(raw)).resolve()) in path_set:
-                if first_item is None:
-                    first_item = item
-                candidate = Path(str(raw)).resolve()
-                key = str(candidate)
-                # Prefer new outputs over inputs when preview ranks match (both FASTA).
-                rank = (
-                    preview_path_priority(candidate),
-                    0 if key in self._highlight_output_keys else 1,
-                )
-                if preferred_key is None or rank < preferred_key:
-                    preferred_key = rank
+        # Tint only job keys — never restyle the whole large folder here.
+        self._apply_job_highlights_to_keys(
+            self._highlight_output_keys | self._highlight_source_keys
+        )
+        large_list = self._file_list.count() > _LARGE_FILE_LIST
+        large_batch = len(path_set) > _LARGE_JOB_OUTPUT_BATCH
+
+        def _consider(item: FileListRow, key: str) -> None:
+            nonlocal first_item, preferred_item, preferred_key
+            if first_item is None:
+                first_item = item
+            if large_batch:
+                if preferred_item is None and key in self._highlight_output_keys:
                     preferred_item = item
+                return
+            candidate = Path(key)
+            rank = (
+                preview_path_priority(candidate),
+                0 if key in self._highlight_output_keys else 1,
+            )
+            if preferred_key is None or rank < preferred_key:
+                preferred_key = rank
+                preferred_item = item
+
+        if large_list and not large_batch:
+            # Direct lookup for a few paths instead of scanning every row.
+            row_index = self._file_list._path_row_index()
+            for key in path_set:
+                row = row_index.get(key)
+                if row is None:
+                    continue
+                item = self._file_list.item(row)
+                if item is not None:
+                    _consider(item, key)
+        else:
+            for index in range(self._file_list.count()):
+                item = self._file_list.item(index)
+                raw = item.data(ROLE_PATH)
+                if not raw:
+                    continue
+                key = str(raw)
+                if key in path_set:
+                    _consider(item, key)
+
         focus_item = preferred_item or first_item
         if focus_item is not None:
             self._file_list.scrollToItem(
@@ -6894,9 +7110,19 @@ class MainWindow(QMainWindow):
             if path is not None and is_previewable_file(path):
                 self._open_file_in_preview(path)
                 self._reveal_file_list_item(focus_item)
-                self._refresh_file_list_highlights()
+                self._apply_job_highlights_to_keys(
+                    self._highlight_output_keys | self._highlight_source_keys
+                )
 
     def _open_best_preview_path(self, paths: list[Path]) -> None:
+        if not paths:
+            return
+        # Large batches: pick without N× is_file() syscalls.
+        if len(paths) > _LARGE_JOB_OUTPUT_BATCH:
+            target = self._pick_preview_output(list(paths))
+            if target is not None and is_previewable_file(target):
+                self._open_file_in_preview(target)
+            return
         candidates = [
             p.expanduser().resolve()
             for p in paths
@@ -6917,16 +7143,20 @@ class MainWindow(QMainWindow):
         """Select one file in the list (used after creating a genome map HTML)."""
         resolved = path.expanduser().resolve()
         key = str(resolved)
-        for index in range(self._file_list.count()):
-            item = self._file_list.item(index)
-            raw = item.data(ROLE_PATH)
-            if raw and str(Path(str(raw)).resolve()) == key:
-                self._reveal_file_list_item(
-                    item,
-                    scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
-                )
-                self._refresh_file_list_highlights()
-                return
+        row = self._file_list._path_row_index().get(key)
+        if row is None:
+            return
+        item = self._file_list.item(row)
+        if item is None:
+            return
+        self._reveal_file_list_item(
+            item,
+            scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
+        )
+        # Re-assert green/blue on job rows only (selection paints deep blue).
+        self._apply_job_highlights_to_keys(
+            self._highlight_output_keys | self._highlight_source_keys
+        )
 
     def _selected_files(self) -> list[Path]:
         files = []
@@ -11546,7 +11776,8 @@ class MainWindow(QMainWindow):
 
         self._last_job_source_files = list(prepared_sources)
         self._clear_job_file_highlights()
-        self._stop_metadata_enrichment()
+        # Cancel enrichment without blocking the GUI (was wait(1000)).
+        self._stop_metadata_enrichment(wait_ms=0)
         self._job_cancel.reset()
         self._job_finished_callback = on_finished
         self._job_failed_callback = on_failed
@@ -11581,7 +11812,11 @@ class MainWindow(QMainWindow):
             # Never fill the last slot here — reserved until results are shown.
             work = getattr(self, "_job_work_steps", self._task_progress._total)
             capped = min(max(0, int(value)), max(0, int(work)))
-            self._task_progress.update(capped, self._parse_progress_filename(label))
+            # One-file jobs: keep the status as "Running BLAST…" without a name.
+            detail = ""
+            if int(work) > 1:
+                detail = self._parse_progress_filename(label)
+            self._task_progress.update(capped, detail)
 
     def _log_job_finished(self, job_title: str, result) -> None:
         if isinstance(result, (list, tuple)):
@@ -11612,7 +11847,11 @@ class MainWindow(QMainWindow):
         *,
         extra_folders: set[Path] | None = None,
     ) -> None:
-        """Refresh file list; show outputs in each input file's folder."""
+        """Refresh file list; show outputs in each input file's folder.
+
+        Never auto-opens preview here — callers use ``_auto_open_outputs`` (or
+        open a specific result) so large jobs do not open twice.
+        """
         self._watcher_refresh_suppressed_until = time.monotonic() + 3.0
         touched = {p.parent.resolve() for p in created_paths} | {
             p.parent.resolve() for p in source_paths
@@ -11629,11 +11868,18 @@ class MainWindow(QMainWindow):
                 ancestor = ancestor.parent
 
         current = self._current_folder.resolve() if self._current_folder else None
+        # Huge jobs: skip input tinting (every selected FASTA) — only mark outputs.
+        # Keeps the finish path closer to O(new files) instead of O(inputs+outputs).
+        highlight_sources = source_paths
+        if len(created_paths) > _LARGE_JOB_OUTPUT_BATCH:
+            highlight_sources = []
         if current is not None and current in touched:
+            # created/source paths are already resolve()'d by the finish handler.
             self._populate_file_list(
                 current,
-                new_outputs=[p for p in created_paths if p.parent.resolve() == current],
-                source_files=[p for p in source_paths if p.parent.resolve() == current],
+                new_outputs=[p for p in created_paths if p.parent == current],
+                source_files=[p for p in highlight_sources if p.parent == current],
+                open_preview=False,
             )
             return
 
@@ -11641,11 +11887,14 @@ class MainWindow(QMainWindow):
             target = created_paths[0].parent.resolve()
             self._navigate_to_folder(
                 target,
-                new_outputs=[p for p in created_paths if p.parent.resolve() == target],
-                source_files=[p for p in source_paths if p.parent.resolve() == target],
+                new_outputs=[p for p in created_paths if p.parent == target],
+                source_files=[p for p in highlight_sources if p.parent == target],
+                open_preview=False,
             )
-        elif source_paths and self._current_folder:
-            self._populate_file_list(self._current_folder)
+            return
+
+        if source_paths and self._current_folder:
+            self._populate_file_list(self._current_folder, open_preview=False)
 
     @Slot(dict)
     def _on_worker_finished(self, result: dict) -> None:
@@ -11852,7 +12101,36 @@ class MainWindow(QMainWindow):
         """Prefer HTML/PDF/images for preview after TE-Aid / Flexidot / genome map."""
         if not created_paths:
             return None
-        files = [p.resolve() for p in created_paths if p.is_file()]
+
+        def _as_path(raw: Path) -> Path:
+            try:
+                return raw.expanduser().resolve()
+            except OSError:
+                return raw.expanduser()
+
+        # Large BLAST-style batches: avoid N× is_file() — trust worker paths.
+        # Prefer a visual output if present; otherwise the last previewable file.
+        if len(created_paths) > _LARGE_JOB_OUTPUT_BATCH:
+            preferred_suffixes = {
+                ".html",
+                ".htm",
+                ".pdf",
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".svg",
+            }
+            for raw in reversed(created_paths):
+                path = _as_path(raw)
+                if path.suffix.lower() in preferred_suffixes:
+                    return path
+            for raw in reversed(created_paths):
+                path = _as_path(raw)
+                if is_previewable_file(path):
+                    return path
+            return _as_path(created_paths[-1])
+
+        files = [p for p in (_as_path(p) for p in created_paths) if p.is_file()]
         if not files:
             return None
         for path in files:
@@ -11897,17 +12175,21 @@ class MainWindow(QMainWindow):
         target = self._pick_preview_output(created_paths)
         if target is None:
             return
-        # Select first so the deep-blue opened row is correct even if preview fails.
-        self._file_list.clearSelection()
-        self._file_list.setCurrentItem(None)
-        self._refresh_file_list_highlights()
-        self._select_path_in_file_list(target)
-        self._refresh_file_list_highlights()
-        if is_previewable_file(target):
-            self._open_preview_tab(target, replace=True)
-            # Re-assert selection after preview (some preview loads reshuffle focus).
+        # Suppress selection→preview while we select, so we open exactly once.
+        was_suppress = self._file_list.suppress_selection_preview()
+        self._file_list.set_suppress_selection_preview(True)
+        try:
+            self._file_list.clearSelection()
+            self._file_list.setCurrentItem(None)
+            # Do not full-restyle the folder — select path re-tints job keys only.
             self._select_path_in_file_list(target)
-            self._refresh_file_list_highlights()
+            if is_previewable_file(target):
+                self._open_preview_tab(target, replace=True)
+                self._select_path_in_file_list(target)
+        finally:
+            if not was_suppress:
+                # Keep suppress through deferred currentItemChanged timers.
+                QTimer.singleShot(0, self._file_list.clear_suppress_selection_preview)
 
     def _update_status(self) -> None:
         if self._job_running:

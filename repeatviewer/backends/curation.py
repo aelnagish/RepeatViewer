@@ -1213,8 +1213,10 @@ def run_batch(
         label = f" ({genome_label})" if genome_label else ""
         with progress_lock:
             completed_count += 1
+            # Report completed count (not count-1) so a finished 1-file BLAST
+            # advances the bar to 1 before the reserved "open results" step.
             progress_cb(
-                completed_count - 1,
+                completed_count,
                 f"{display_name}: {seq_path.name}{label}",
             )
         if error:
@@ -1226,8 +1228,14 @@ def run_batch(
     if workers == 1:
         for seq_path, genome_label, genome_path in work_items:
             check_cancelled(cancel)
-            path, label, outs, error = _run_single(seq_path, genome_label, genome_path)
-            _record_finished(path, label, outs, error)
+            label = f" ({genome_label})" if genome_label else ""
+            # Show which file is running (multi-file); count stays at completed so far.
+            progress_cb(
+                completed_count,
+                f"{display_name}: {seq_path.name}{label}",
+            )
+            path, glabel, outs, error = _run_single(seq_path, genome_label, genome_path)
+            _record_finished(path, glabel, outs, error)
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [

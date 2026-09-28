@@ -462,8 +462,11 @@ class FileListTableWidget(QTableWidget):
         fill_metadata_columns: bool | None = None,
     ) -> FileListRow:
         path = path.expanduser().resolve()
+        # Caller may already have sorting disabled for a bulk insert; avoid
+        # toggling it per row (expensive when adding hundreds of files).
         was_sorting = self.isSortingEnabled()
-        self.setSortingEnabled(False)
+        if was_sorting:
+            self.setSortingEnabled(False)
         row = self.rowCount()
         self.insertRow(row)
         if fill_metadata_columns is None:
@@ -505,21 +508,32 @@ class FileListTableWidget(QTableWidget):
         if fill_metadata_columns:
             self._apply_metadata_cells(row, path_text, meta)
         self._apply_cyto_cell(row, path)
-        self.setSortingEnabled(was_sorting)
+        if was_sorting:
+            self.setSortingEnabled(True)
         return FileListRow(self, row)
 
-    def _apply_file_color_cells(self, row: int, path: Path) -> None:
+    def _apply_file_color_cells(
+        self,
+        row: int,
+        path: Path,
+        *,
+        resolved: bool = False,
+    ) -> None:
         """Apply stored file color to Name, Color, and all metadata cells.
 
         Also clears job highlight backgrounds/bold so previous green/blue tints
         do not linger after a new tool run.
+
+        Pass ``resolved=True`` when ``path`` is already absolute/resolved
+        (e.g. ROLE_PATH) to avoid a redundant ``resolve()`` syscall.
         """
         from repeatviewer.widgets.file_colors import (
             color_label,
             get_file_color,
         )
 
-        path = path.expanduser().resolve()
+        if not resolved:
+            path = path.expanduser().resolve()
         path_text = str(path)
         color = get_file_color(path)
         brush = QBrush(QColor(color)) if color else QBrush()
@@ -556,13 +570,30 @@ class FileListTableWidget(QTableWidget):
             raw = self._path_for_row(row)
             if not raw:
                 continue
-            self._apply_file_color_cells(row, Path(raw))
+            # ROLE_PATH is already resolved — skip per-row resolve().
+            self._apply_file_color_cells(row, Path(raw), resolved=True)
+
+    def reapply_file_color_at_row(self, row: int) -> None:
+        """Clear job tint for one row without rebuilding the path index."""
+        raw = self._path_for_row(row)
+        if raw:
+            self._apply_file_color_cells(row, Path(raw), resolved=True)
 
     def reapply_file_color_for_path(self, path: Path) -> None:
         key = str(path.expanduser().resolve())
         row = self._path_row_index().get(key)
         if row is not None:
-            self._apply_file_color_cells(row, Path(key))
+            self._apply_file_color_cells(row, Path(key), resolved=True)
+
+    def reapply_file_colors_for_keys(self, keys: set[str]) -> None:
+        """Clear job tint for specific path keys (one index build)."""
+        if not keys:
+            return
+        row_index = self._path_row_index()
+        for key in keys:
+            row = row_index.get(key)
+            if row is not None:
+                self._apply_file_color_cells(row, Path(key), resolved=True)
 
     # -- cytogenetic images ------------------------------------------------
 
@@ -833,6 +864,9 @@ class FileListTableWidget(QTableWidget):
     def suppress_selection_preview(self) -> bool:
         """True while a right-click context menu is active (must not swap Preview)."""
         return self._suppress_selection_preview
+
+    def set_suppress_selection_preview(self, suppressed: bool) -> None:
+        self._suppress_selection_preview = bool(suppressed)
 
     def clear_suppress_selection_preview(self) -> None:
         self._suppress_selection_preview = False
