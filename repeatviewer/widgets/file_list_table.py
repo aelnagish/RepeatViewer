@@ -176,6 +176,7 @@ class FileListTableWidget(QTableWidget):
     blast_divergence_requested = Signal(Path)
     add_blast_database_requested = Signal(Path)
     add_annotation_requested = Signal(Path)
+    export_annotation_requested = Signal(Path)
     cyto_images_requested = Signal(Path)             # open the image(s) of a sequence
     attach_cyto_image_requested = Signal(Path, list)  # FASTA, image paths ([] = ask)
 
@@ -967,6 +968,15 @@ class FileListTableWidget(QTableWidget):
                             "Add annotation…",
                             lambda p=path: self.add_annotation_requested.emit(p),
                         )
+                        from repeatviewer.views.export_annotation_dialog import (
+                            fasta_has_exportable_annotations,
+                        )
+
+                        export_act = menu.addAction(
+                            "Export annotation…",
+                            lambda p=path: self.export_annotation_requested.emit(p),
+                        )
+                        export_act.setEnabled(fasta_has_exportable_annotations(path))
                         menu.addAction(
                             "Attach cytogenetic image…",
                             lambda p=path: self.attach_cyto_image_requested.emit(p, []),
@@ -993,10 +1003,11 @@ class FileListTableWidget(QTableWidget):
                                 f"Separate sequence into {seq_n} folders",
                                 lambda: self.separate_fasta_subfolders_requested.emit(path),
                             )
-                        menu.addAction(
+                        extract_act = menu.addAction(
                             "Extract Sequences from File",
                             lambda p=path: self.extract_sequences_requested.emit(p),
                         )
+                        extract_act.setEnabled(seq_n > 1)
                         blast_txt = find_blast_table_for_query(path)
                         if blast_txt is not None:
                             menu.addAction(

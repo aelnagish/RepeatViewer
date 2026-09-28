@@ -1629,6 +1629,179 @@ class NewSequenceDialog(QDialog):
         }
 
 
+class NameWithAnnotationDialog(QDialog):
+    """Name field plus annotation copy checkbox (combine / separate)."""
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        intro: str,
+        name_label: str,
+        default_name: str,
+        annotation_label: str,
+        parent=None,
+        name_is_folder: bool = False,
+        parent_dir: Path | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self._name_is_folder = name_is_folder
+        self._parent_dir = (
+            parent_dir.expanduser().resolve() if parent_dir is not None else None
+        )
+
+        intro_label = QLabel(intro, self)
+        intro_label.setWordWrap(True)
+
+        self._name = QLineEdit(default_name, self)
+        self._name.selectAll()
+        name_px = self.fontMetrics().horizontalAdvance(default_name) + 48
+        self.setMinimumWidth(max(520, min(name_px + 160, 900)))
+
+        self._include_annotations = QCheckBox(annotation_label, self)
+        self._include_annotations.setChecked(True)
+
+        form = QFormLayout()
+        form.addRow(name_label, self._name)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(10)
+        layout.addWidget(intro_label)
+        layout.addLayout(form)
+        layout.addWidget(self._include_annotations)
+        layout.addWidget(buttons)
+
+    def name_text(self) -> str:
+        return self._name.text().strip()
+
+    def include_annotations(self) -> bool:
+        return self._include_annotations.isChecked()
+
+    def resolved_folder(self) -> Path | None:
+        """Folder path when ``name_is_folder``; otherwise ``None``."""
+        if not self._name_is_folder or self._parent_dir is None:
+            return None
+        name = self.name_text()
+        if not name:
+            return None
+        return (self._parent_dir / name).expanduser().resolve()
+
+    def _accept(self) -> None:
+        name = self.name_text()
+        if not name:
+            QMessageBox.warning(self, self.windowTitle(), "Enter a name.")
+            return
+        if Path(name).name != name or "/" in name or "\\" in name:
+            QMessageBox.warning(
+                self,
+                self.windowTitle(),
+                "Enter a name only (no folder path).",
+            )
+            return
+        if self._name_is_folder and self._parent_dir is not None:
+            target = (self._parent_dir / name).expanduser().resolve()
+            if target.exists():
+                QMessageBox.warning(
+                    self,
+                    self.windowTitle(),
+                    f"“{name}” folder name already exist.\n\n"
+                    "Please choose a different folder name.",
+                )
+                self._name.selectAll()
+                self._name.setFocus()
+                return
+        self.accept()
+
+
+class ModifyExtractFileNamesDialog(QDialog):
+    """Edit per-sequence output file names when multi-extract paths conflict."""
+
+    def __init__(
+        self,
+        *,
+        record_ids: list[str],
+        proposed_names: list[str],
+        conflicting: set[str],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Modify extract file names")
+        self.setMinimumWidth(480)
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                "Some output file names already exist, or collide after special "
+                "characters are sanitized. Edit the file names below "
+                "(sequence names are used as file names)."
+            )
+        )
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        host = QWidget(scroll)
+        host_layout = QVBoxLayout(host)
+        self._edits: list[QLineEdit] = []
+        for rid, name in zip(record_ids, proposed_names, strict=True):
+            row = QHBoxLayout()
+            label = QLabel(rid, host)
+            label.setMinimumWidth(160)
+            label.setToolTip(rid)
+            row.addWidget(label)
+            edit = QLineEdit(name, host)
+            if name in conflicting:
+                edit.setStyleSheet("QLineEdit { background: #fff3cd; }")
+            self._edits.append(edit)
+            row.addWidget(edit, stretch=1)
+            wrap = QWidget(host)
+            wrap.setLayout(row)
+            host_layout.addWidget(wrap)
+        host_layout.addStretch()
+        scroll.setWidget(host)
+        scroll.setMaximumHeight(320)
+        layout.addWidget(scroll)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._record_ids = list(record_ids)
+
+    def name_map(self) -> dict[str, str]:
+        """Map record id → file name (with extension)."""
+        mapping: dict[str, str] = {}
+        used: set[str] = set()
+        for rid, edit in zip(self._record_ids, self._edits, strict=True):
+            name = edit.text().strip()
+            if not name:
+                raise ValueError("File names cannot be empty.")
+            if Path(name).name != name or "/" in name or "\\" in name:
+                raise ValueError("Enter a file name only (no folder path).")
+            key = name.lower()
+            if key in used:
+                raise ValueError(f"File name “{name}” is still duplicated.")
+            used.add(key)
+            mapping[rid] = name
+        return mapping
+
+    def _accept(self) -> None:
+        try:
+            self.name_map()
+        except ValueError as exc:
+            QMessageBox.warning(self, self.windowTitle(), str(exc))
+            return
+        self.accept()
+
+
 class _CheckboxToggleListWidget(QListWidget):
     """List where checkbox clicks toggle one row without range-select side effects.
 
@@ -1716,6 +1889,11 @@ class ExtractSequencesDialog(QDialog):
     #: Emitted with the parsed id list when the user presses Check.
     check_requested = Signal(object)
 
+    # Preferred open size. Must be reflected in sizeHint() because dialog
+    # polish / adjustSize otherwise shrinks back to content and ignores resize().
+    _DEFAULT_WIDTH = 870
+    _DEFAULT_HEIGHT = 560
+
     def __init__(
         self,
         *,
@@ -1728,8 +1906,12 @@ class ExtractSequencesDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Extract Sequences from File")
-        self.resize(600, 520)
+        self.setMinimumWidth(640)
+        self.setMinimumHeight(420)
+        self.resize(self._DEFAULT_WIDTH, self._DEFAULT_HEIGHT)
+        self.setSizeGripEnabled(True)
         self._source_name = source_name
+        self._did_center = False
 
         self._tabs = QTabWidget(self)
         self._tabs.addTab(self._build_pick_tab(records, records_note), "Pick from list")
@@ -1741,6 +1923,18 @@ class ExtractSequencesDialog(QDialog):
             "On: one multi-FASTA holding every extracted sequence.\n"
             "Off: one file per sequence, which with a long ID list means "
             "one file per matching record."
+        )
+        self._file_name = QLineEdit(self)
+        self._file_name.setPlaceholderText("Output file name")
+        self._file_name_form = QFormLayout()
+        self._file_name_form.addRow("File name:", self._file_name)
+        self._include_annotations = QCheckBox(
+            "Copy annotations for extracted sequences", self
+        )
+        self._include_annotations.setChecked(True)
+        self._include_annotations.setToolTip(
+            "When the source has a JSON annotation sidecar, write matching "
+            "annotations beside the extracted FASTA file(s)."
         )
 
         self._summary = QLabel(self)
@@ -1757,14 +1951,19 @@ class ExtractSequencesDialog(QDialog):
         layout.setSpacing(10)
         layout.addWidget(self._tabs, stretch=1)
         layout.addWidget(self._single_file)
+        layout.addLayout(self._file_name_form)
+        layout.addWidget(self._include_annotations)
         layout.addWidget(self._summary)
         layout.addWidget(self._buttons)
 
         self._tabs.currentChanged.connect(self._sync)
+        self._single_file.toggled.connect(self._on_single_file_toggled)
         # Opened with ids already in hand (from a hit table): start on that tab.
         if initial_ids.strip() or records is None:
             self._tabs.setCurrentIndex(1)
         self._sync()
+        self._refresh_default_file_name()
+        self._on_single_file_toggled(self._single_file.isChecked())
 
     # -- construction -------------------------------------------------------
 
@@ -1784,6 +1983,12 @@ class ExtractSequencesDialog(QDialog):
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._list.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._list.setUniformItemSizes(True)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self._list.setMinimumWidth(0)
+        self._list.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
         if records is None:
             note = QLabel(
@@ -1814,7 +2019,7 @@ class ExtractSequencesDialog(QDialog):
             item.setCheckState(Qt.CheckState.Unchecked)
 
         self._filter = QLineEdit(page)
-        self._filter.setPlaceholderText("Search sequences…")
+        self._filter.setPlaceholderText("Filter by name")
         self._filter.setClearButtonEnabled(True)
         self._filter.setToolTip(
             "Filter the list by sequence id or description. "
@@ -1830,24 +2035,13 @@ class ExtractSequencesDialog(QDialog):
         select_none.clicked.connect(self._select_none)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel(f"Sequences in {self._source_name}:", page))
-        top.addStretch(1)
+        top.setSpacing(8)
+        top.addWidget(self._filter, stretch=1)
         top.addWidget(select_all)
         top.addWidget(select_none)
 
-        hint = QLabel(
-            "Tick boxes to add or remove · Click a name to select · "
-            "Shift+click for a range · ⌘/Ctrl+click to add or remove · "
-            "drag to select several",
-            page,
-        )
-        hint.setStyleSheet("color: palette(mid);")
-        hint.setWordWrap(True)
-
         layout.addLayout(top)
-        layout.addWidget(self._filter)
         layout.addWidget(self._list, stretch=1)
-        layout.addWidget(hint)
         self._list.itemSelectionChanged.connect(self._on_pick_selection_changed)
         self._list.itemChanged.connect(self._on_pick_item_changed)
         return page
@@ -2099,8 +2293,73 @@ class ExtractSequencesDialog(QDialog):
     def use_id_list(self) -> bool:
         return self._tabs.currentIndex() == 1
 
+    def sizeHint(self) -> QSize:  # noqa: N802
+        hint = super().sizeHint()
+        return QSize(
+            max(hint.width(), self._DEFAULT_WIDTH),
+            max(hint.height(), self._DEFAULT_HEIGHT),
+        )
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._did_center:
+            return
+        self._did_center = True
+        # Keep the preferred width even if polish tried to shrink us, then
+        # center over the main window (figure-2 layout).
+        self.resize(self._DEFAULT_WIDTH, self._DEFAULT_HEIGHT)
+        parent = self.parentWidget()
+        if parent is not None:
+            geo = parent.frameGeometry()
+            x = geo.x() + max(0, (geo.width() - self.width()) // 2)
+            y = geo.y() + max(0, (geo.height() - self.height()) // 2)
+            self.move(x, y)
+
     def single_file(self) -> bool:
         return self._single_file.isChecked()
+
+    def include_annotations(self) -> bool:
+        return self._include_annotations.isChecked()
+
+    def output_file_name(self) -> str:
+        """User-chosen name when writing one file; empty when one-per-sequence."""
+        if not self.single_file():
+            return ""
+        return self._file_name.text().strip()
+
+    def _on_single_file_toggled(self, checked: bool) -> None:
+        # Show/hide every widget in the form row (label + field).
+        for i in range(self._file_name_form.rowCount()):
+            label_item = self._file_name_form.itemAt(i, QFormLayout.ItemRole.LabelRole)
+            field_item = self._file_name_form.itemAt(i, QFormLayout.ItemRole.FieldRole)
+            for item in (label_item, field_item):
+                if item is None:
+                    continue
+                widget = item.widget()
+                if widget is not None:
+                    widget.setVisible(checked)
+        if checked:
+            self._refresh_default_file_name()
+
+    def _refresh_default_file_name(self) -> None:
+        if not self.single_file():
+            return
+        from repeatviewer.backends.separate_fasta import sanitize_name
+        from repeatviewer.backends.sequence_compose import extract_source_suffix
+
+        if self.use_id_list():
+            ids = list(self.parsed_ids().ids)
+        else:
+            ids = list(self.selected_ids())
+        suffix = extract_source_suffix(Path(self._source_name))
+        if len(ids) == 1:
+            default = f"{sanitize_name(ids[0])}{suffix}"
+        else:
+            default = f"{self._source_name}_extr{suffix}"
+        current = self._file_name.text().strip()
+        if not current or current == getattr(self, "_auto_file_name", ""):
+            self._file_name.setText(default)
+            self._auto_file_name = default
 
     def _sync(self) -> None:
         if self.use_id_list():
@@ -2140,6 +2399,7 @@ class ExtractSequencesDialog(QDialog):
                 )
             enabled = bool(chosen)
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
+        self._refresh_default_file_name()
 
 
 _FASTGA_MODE_HELP = (

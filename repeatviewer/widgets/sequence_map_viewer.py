@@ -5010,7 +5010,9 @@ class SequenceMapPanel(QWidget):
         )
         export_btn.clicked.connect(self._export_annotation_view)
         save_btn = QPushButton("Save", self._action_row_container)
-        save_btn.setToolTip("Write annotation changes to the JSON sidecar and GFF3 file")
+        save_btn.setToolTip(
+            "Save annotations to the JSON sidecar (export GFF3 / GTF / BED separately)"
+        )
         save_btn.clicked.connect(lambda: self._save_annotations(silent=True))
         for btn in (del_btn, restore_btn, color_btn, export_btn, save_btn):
             action_row.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -5824,7 +5826,10 @@ class SequenceMapPanel(QWidget):
             return True
         if not self._map.features():
             return False
-        return resolve_features_gff_path(self._path) is None
+        # Pending if there are features but no JSON sidecar yet.
+        from repeatviewer.backends.sequence_features import resolve_sidecar_path
+
+        return resolve_sidecar_path(self._path) is None
 
     def _save_annotations(self, *, silent: bool = False) -> bool:
         if self._map.data() is None:
@@ -5836,13 +5841,14 @@ class SequenceMapPanel(QWidget):
         if not self._persist_annotations(show_message=not silent):
             return False
         if not silent:
-            gff_path = features_gff_path(self._path)
-            if gff_path.is_file():
-                QMessageBox.information(
-                    self,
-                    "Saved",
-                    f"Annotations saved to:\n{gff_path}",
-                )
+            from repeatviewer.backends.sequence_features import sidecar_path
+
+            QMessageBox.information(
+                self,
+                "Saved",
+                f"Annotations saved to:\n{sidecar_path(self._path).name}\n\n"
+                "Use Export annotation… (file list right-click) to write GFF3 / GTF / BED.",
+            )
         return True
 
     def _persist_annotations(self, *, show_message: bool = True) -> bool:
@@ -5861,13 +5867,14 @@ class SequenceMapPanel(QWidget):
             ):
                 lengths = dict(data.lengths_by_id)
                 lengths[data.sequence_id] = data.length
-                _json_path, gff_path = save_annotations_multi(
+                json_path, _gff_path = save_annotations_multi(
                     self._path,
                     features_by_id=data.features_by_id,
                     lengths_by_id=lengths,
+                    record_ids=list(data.record_ids),
                 )
             else:
-                _json_path, gff_path = save_annotations(
+                json_path, _gff_path = save_annotations(
                     self._path,
                     sequence_id=data.sequence_id,
                     sequence_length=data.length,
@@ -5880,12 +5887,9 @@ class SequenceMapPanel(QWidget):
         if self._loaded_data is not None:
             self._populate_sequence_combo(self._loaded_data)
             self._sync_too_long_controls()
-        if gff_path is not None:
-            if show_message:
-                self.statusMessage.emit(f"Saved annotations: {gff_path}")
-            self.annotationsSaved.emit(gff_path)
-        elif show_message:
-            self.statusMessage.emit("Saved annotations (JSON sidecar).")
+        if show_message:
+            self.statusMessage.emit(f"Saved annotations: {json_path.name}")
+        self.annotationsSaved.emit(json_path)
         return True
 
     def _add_feature_of_type(self, feature_type: str, *, feature_label: str | None = None) -> None:

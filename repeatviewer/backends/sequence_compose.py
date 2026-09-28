@@ -121,12 +121,11 @@ def safe_file_stem(name: str) -> str:
 
 
 def extract_source_suffix(source: Path) -> str:
-    """FASTA suffix for extracted files (matches Separate Sequences)."""
+    """FASTA suffix for extracted files (always ``.fa``, or ``.faa`` for protein)."""
     name = source.name.lower()
-    if name.endswith(".gz") or name.endswith(".bgz"):
-        inner = Path(source.stem)  # strip compression suffix
-        return inner.suffix.lower() or ".fa"
-    return source.suffix.lower() or ".fa"
+    if name.endswith(".faa") or name.endswith(".faa.gz") or name.endswith(".faa.bgz"):
+        return ".faa"
+    return ".fa"
 
 
 def proposed_extract_path(
@@ -281,6 +280,7 @@ def extract_records(
     single_file: bool = False,
     combined_name: str = "",
     output_path: Path | None = None,
+    output_paths_by_id: dict[str, Path] | None = None,
 ) -> list[Path]:
     """Pull chosen records out of a multi-FASTA.
 
@@ -289,8 +289,9 @@ def extract_records(
     either one file each, or all of them into one new multi-FASTA.
 
     When ``output_path`` is set (combined / single-record extract), that path is
-    written directly (caller handles overwrite/rename). Otherwise a unique path
-    is chosen automatically.
+    written directly (caller handles overwrite/rename). When
+    ``output_paths_by_id`` is set for multi-file extract, those paths are used
+    (caller handles conflicts). Otherwise a unique path is chosen automatically.
     """
     from repeatviewer.backends.separate_fasta import sanitize_name
 
@@ -311,6 +312,10 @@ def extract_records(
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     suffix = extract_source_suffix(path)
+    path_map = {
+        str(k): Path(v).expanduser().resolve()
+        for k, v in (output_paths_by_id or {}).items()
+    }
 
     if single_file:
         if output_path is not None:
@@ -346,10 +351,14 @@ def extract_records(
         return [out_path]
 
     for record in records:
-        stem = sanitize_name(str(record.id))
-        if output_path is not None and len(records) == 1:
+        rid = str(record.id)
+        if rid in path_map:
+            out_path = path_map[rid]
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        elif output_path is not None and len(records) == 1:
             out_path = output_path.expanduser().resolve()
         else:
+            stem = sanitize_name(rid)
             proposed = out_dir / f"{stem}{suffix}"
             out_path = (
                 proposed
@@ -583,6 +592,7 @@ def extract_records_by_ids(
     exclude: bool = False,
     combined_name: str = "",
     output_path: Path | None = None,
+    output_paths_by_id: dict[str, Path] | None = None,
     write_missing: bool = True,
     progress: Callable[[int, int], None] | None = None,
     cancel: Callable[[], bool] | None = None,
@@ -605,6 +615,10 @@ def extract_records_by_ids(
     from repeatviewer.backends.separate_fasta import sanitize_name
 
     forced_path = output_path.expanduser().resolve() if output_path is not None else None
+    path_map = {
+        str(k): Path(v).expanduser().resolve()
+        for k, v in (output_paths_by_id or {}).items()
+    }
     if combined_name:
         stem = safe_file_stem(combined_name)
         combined_suffix = ".fa"
@@ -640,8 +654,14 @@ def extract_records_by_ids(
             handle.write(_wrap(sequence) + "\n")
         else:
             rec_id = _record_id(header)
-            rec_stem = sanitize_name(rec_id)
-            rec_path = _unique_path(out_dir, rec_stem, extract_source_suffix(source))
+            if rec_id in path_map:
+                rec_path = path_map[rec_id]
+                rec_path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                rec_stem = sanitize_name(rec_id)
+                rec_path = _unique_path(
+                    out_dir, rec_stem, extract_source_suffix(source)
+                )
             with rec_path.open("w", encoding="utf-8") as record_handle:
                 record_handle.write(f">{header}\n")
                 record_handle.write(_wrap(sequence) + "\n")

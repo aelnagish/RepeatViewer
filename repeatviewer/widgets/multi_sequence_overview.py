@@ -33,8 +33,10 @@ from repeatviewer.backends.sequence_features import (
     SequenceFeature,
     fasta_record_lengths,
     load_all_features_by_id,
+    load_features_by_id_from_json,
     remount_parent_ids,
     resolve_features_gff_path,
+    resolve_sidecar_path,
     save_annotations_multi,
 )
 from repeatviewer.widgets.preview_controls import (
@@ -1108,12 +1110,27 @@ class MultiSequenceOverviewPanel(QWidget):
             return
 
         record_ids = list(lengths.keys())
+        # Prefer JSON sidecar (canonical store); fall back to companion GFF3.
+        json_by_id = load_features_by_id_from_json(self._path, record_ids)
         gff = resolve_features_gff_path(self._path)
-        features: dict[str, list[SequenceFeature]] = {rid: [] for rid in record_ids}
-        if gff is not None:
+        sidecar = resolve_sidecar_path(self._path)
+        if json_by_id and any(json_by_id.values()):
+            features = {rid: list(json_by_id.get(rid) or []) for rid in record_ids}
+            source_label = sidecar.name if sidecar is not None else "JSON"
+        elif gff is not None:
             features = load_all_features_by_id(
                 gff, record_ids, lengths_by_id=lengths
             )
+            if json_by_id:
+                for rid, json_feats in json_by_id.items():
+                    if not json_feats:
+                        continue
+                    current = features.get(rid) or []
+                    features[rid] = json_feats if not current else current
+            source_label = gff.name
+        else:
+            features = {rid: [] for rid in record_ids}
+            source_label = None
 
         self._record_ids = record_ids
         self._lengths = lengths
@@ -1136,14 +1153,18 @@ class MultiSequenceOverviewPanel(QWidget):
 
         annotated = sum(1 for rid in record_ids if features.get(rid))
         feat_total = sum(len(features.get(rid) or []) for rid in record_ids)
-        if gff is not None:
+        if source_label is not None and feat_total:
             self.statusMessage.emit(
                 f"{len(record_ids):,} sequences · {annotated:,} with annotations · "
-                f"{feat_total:,} features · {gff.name}"
+                f"{feat_total:,} features · {source_label}"
+            )
+        elif source_label is not None:
+            self.statusMessage.emit(
+                f"{len(record_ids):,} sequences · {source_label} (no features yet)"
             )
         else:
             self.statusMessage.emit(
-                f"{len(record_ids):,} sequences · no companion .RV.gff3 / annotation yet"
+                f"{len(record_ids):,} sequences · no annotation JSON / .RV.gff3 yet"
             )
 
     def _sync_viewport_fill(self) -> None:
@@ -1507,6 +1528,7 @@ class MultiSequenceOverviewPanel(QWidget):
                 self._path,
                 features_by_id=self._features,
                 lengths_by_id=self._lengths,
+                record_ids=list(self._record_ids),
             )
         except OSError as exc:
             QMessageBox.critical(self, "Save failed", str(exc))

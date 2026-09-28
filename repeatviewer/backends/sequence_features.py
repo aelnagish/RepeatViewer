@@ -297,38 +297,69 @@ def is_sequence_map_hidden_file(path: Path) -> bool:
 
 
 def companion_annotation_files_for_delete(path: Path) -> list[Path]:
-    """Return JSON sidecars that should be removed with an RV/features GFF3."""
+    """Return paired annotation files that should be removed with ``path``.
+
+    - Deleting ``*.RV.gff3`` / ``*.features.gff3`` also removes the JSON sidecar.
+    - Deleting a FASTA also removes its JSON and GFF3 companions.
+    """
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
         return []
     name = resolved.name
     folder = resolved.parent
+    companions: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(candidate: Path) -> None:
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            key = str(candidate)
+        if key in seen or key == str(resolved):
+            return
+        seen.add(key)
+        if candidate.is_file():
+            companions.append(candidate)
+
+    # FASTA deleted → take JSON + GFF companions.
+    suffix = resolved.suffix.lower()
+    if suffix in {".fa", ".fasta", ".fna", ".faa", ".fas"} or name.lower().endswith(
+        ".fa.gz"
+    ):
+        for candidate in (
+            sidecar_path(resolved),
+            legacy_stem_sidecar_path(resolved),
+            legacy_sidecar_path(resolved),
+            features_gff_path(resolved),
+            legacy_stem_features_gff_path(resolved),
+            legacy_features_gff_path(resolved),
+        ):
+            _add(candidate)
+        return companions
+
     stems: list[str] = []
     if name.endswith(".RV.gff3"):
         stems.append(name[: -len(".RV.gff3")])
     elif name.endswith(".features.gff3"):
         stem = name[: -len(".features.gff3")]
         stems.append(stem)
-        # Legacy ``demo.fa.features.gff3`` → also try ``demo.seqmap*``.
         if stem.endswith(".fa") or stem.endswith(".fasta") or stem.endswith(".fna"):
             stems.append(Path(stem).stem)
     else:
         return []
 
-    companions: list[Path] = []
-    seen: set[str] = set()
     for stem in stems:
         for candidate in (
             folder / f"{stem}.seqmap_RV.json",
             folder / f"{stem}.seqmap.json",
         ):
-            key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            if candidate.is_file() and candidate != resolved:
-                companions.append(candidate)
+            _add(candidate)
     return companions
+
+
+def companion_annotation_paths_for_fasta(fasta_path: Path) -> list[Path]:
+    """Existing JSON/GFF companions beside a FASTA (for move/copy/delete)."""
+    return companion_annotation_files_for_delete(fasta_path)
 
 
 def companion_annotation_renames_for_fasta(
@@ -397,7 +428,10 @@ def load_single_sequence_fasta(path: Path) -> tuple[str, str]:
 
 
 def list_fasta_record_ids(path: Path) -> list[str]:
-    """Return FASTA record ids in file order (sequences are not kept in memory)."""
+    """Return FASTA record ids in file order (sequences are not kept in memory).
+
+    Duplicate header ids are preserved (same name may appear more than once).
+    """
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
         raise FileNotFoundError(resolved)
@@ -411,19 +445,64 @@ def list_fasta_record_ids(path: Path) -> list[str]:
     return ids
 
 
+def uniquify_record_ids(record_ids: list[str]) -> list[str]:
+    """Make record ids unique for in-memory maps while preserving order.
+
+    First occurrence keeps the original name; later duplicates become
+    ``name#2``, ``name#3``, … so annotations for identical headers can coexist.
+    """
+    seen: dict[str, int] = {}
+    unique: list[str] = []
+    for rid in record_ids:
+        base = str(rid or "").strip() or "sequence"
+        count = seen.get(base, 0) + 1
+        seen[base] = count
+        unique.append(base if count == 1 else f"{base}#{count}")
+    return unique
+
+
+def duplicate_original_sequence_ids(record_ids: list[str]) -> list[str]:
+    """Original ids that appear more than once (stable unique list)."""
+    counts: dict[str, int] = {}
+    for rid in record_ids:
+        counts[rid] = counts.get(rid, 0) + 1
+    return [rid for rid, n in counts.items() if n > 1]
+
+
+def suggest_unique_export_ids(record_ids: list[str]) -> list[str]:
+    """Suggested seqids for export when FASTA headers collide (``name``, ``name_2``, …)."""
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for rid in record_ids:
+        base = str(rid or "").strip() or "sequence"
+        # Strip any internal #N uniquifier for suggestions based on original names.
+        original = base.split("#", 1)[0] if "#" in base else base
+        count = seen.get(original, 0) + 1
+        seen[original] = count
+        out.append(original if count == 1 else f"{original}_{count}")
+    return out
+
+
 def fasta_record_lengths(path: Path) -> dict[str, int]:
-    """Map each FASTA record id to its sequence length."""
+    """Map each unique FASTA record id to its sequence length.
+
+    Duplicate headers are uniquified (``name#2``, …) so later records are not
+    dropped when building annotation maps.
+    """
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
         raise FileNotFoundError(resolved)
-    lengths: dict[str, int] = {}
+    raw_ids: list[str] = []
+    raw_lens: list[int] = []
     for record in SeqIO.parse(str(resolved), "fasta"):
         rid = str(record.id).strip()
         if rid:
-            lengths[rid] = len(record.seq)
-    if not lengths:
+            raw_ids.append(rid)
+            raw_lens.append(len(record.seq))
+    if not raw_ids:
         raise ValueError(f"No sequences in {resolved.name}")
-    return lengths
+    unique = uniquify_record_ids(raw_ids)
+    return {uid: length for uid, length in zip(unique, raw_lens, strict=True)}
 
 
 def load_fasta_record(path: Path, seq_id: str) -> tuple[str, str]:
@@ -595,31 +674,36 @@ def load_sequence_map_data(
 ) -> SequenceMapData:
     """Load sequence-map data for a single- or multi-record FASTA.
 
-    Only the active sequence string is held in memory; annotations for all
-    record ids are loaded from the companion GFF when present.
+    Only the active sequence string is held in memory. Annotations prefer the
+    JSON sidecar (canonical store); a companion GFF3 is used when JSON is
+    absent (import / legacy).
     """
     resolved = path.expanduser().resolve()
     lengths = fasta_record_lengths(resolved)
     record_ids = list(lengths.keys())
 
-    gff_path = resolve_features_gff_path(resolved)
-    features_by_id = (
-        load_all_features_by_id(gff_path, record_ids, lengths_by_id=lengths)
-        if gff_path is not None
-        else {rid: [] for rid in record_ids}
-    )
-
-    # JSON color overlay (single-id legacy or multi-id payload).
     json_by_id = load_features_by_id_from_json(resolved, record_ids)
-    if json_by_id:
-        for rid, json_feats in json_by_id.items():
-            if not json_feats:
-                continue
-            current = features_by_id.get(rid) or []
-            if current:
-                features_by_id[rid] = _merge_feature_colors_from_json(current, json_feats)
-            else:
-                features_by_id[rid] = json_feats
+    gff_path = resolve_features_gff_path(resolved)
+    if json_by_id and any(json_by_id.values()):
+        features_by_id = {rid: list(json_by_id.get(rid) or []) for rid in record_ids}
+    elif gff_path is not None:
+        features_by_id = load_all_features_by_id(
+            gff_path, record_ids, lengths_by_id=lengths
+        )
+        # Optional color overlay from an empty-ish or partial JSON.
+        if json_by_id:
+            for rid, json_feats in json_by_id.items():
+                if not json_feats:
+                    continue
+                current = features_by_id.get(rid) or []
+                if current:
+                    features_by_id[rid] = _merge_feature_colors_from_json(
+                        current, json_feats
+                    )
+                else:
+                    features_by_id[rid] = json_feats
+    else:
+        features_by_id = {rid: [] for rid in record_ids}
 
     chosen = str(active_id or "").strip()
     if chosen and chosen in lengths:
@@ -629,7 +713,15 @@ def load_sequence_map_data(
             (rid for rid in record_ids if features_by_id.get(rid)),
             record_ids[0],
         )
-    seq_id, sequence = load_fasta_record(resolved, seq_id)
+    # load_fasta_record matches soft ids; strip #N uniquifier for lookup.
+    lookup_id = seq_id.split("#", 1)[0] if "#" in seq_id else seq_id
+    try:
+        loaded_id, sequence = load_fasta_record(resolved, lookup_id)
+    except ValueError:
+        # Ambiguous duplicates: load by index order via SeqIO.
+        loaded_id, sequence = _load_fasta_record_by_index(
+            resolved, record_ids.index(seq_id) if seq_id in record_ids else 0
+        )
     features = list(features_by_id.get(seq_id, []))
     return SequenceMapData(
         fasta_path=resolved,
@@ -643,11 +735,27 @@ def load_sequence_map_data(
     )
 
 
+def _load_fasta_record_by_index(path: Path, index: int) -> tuple[str, str]:
+    resolved = path.expanduser().resolve()
+    for i, record in enumerate(SeqIO.parse(str(resolved), "fasta")):
+        if i != index:
+            continue
+        seq = str(record.seq).upper()
+        if not seq:
+            raise ValueError(f"Empty sequence at index {index} in {resolved.name}")
+        return str(record.id), seq
+    raise ValueError(f"Sequence index {index} not found in {resolved.name}")
+
+
 def load_features_by_id_from_json(
     path: Path,
     record_ids: list[str],
 ) -> dict[str, list[SequenceFeature]]:
-    """Load JSON sidecar features keyed by sequence id (legacy or multi)."""
+    """Load JSON sidecar features keyed by sequence id (legacy or multi).
+
+    Format version 2 stores a list of ``{record_index, sequence_id, features}``
+    so two FASTA headers with the same name keep separate annotation sets.
+    """
     sidecar = resolve_sidecar_path(path)
     if sidecar is None:
         return {}
@@ -659,15 +767,45 @@ def load_features_by_id_from_json(
     result: dict[str, list[SequenceFeature]] = {rid: [] for rid in record_ids}
 
     sequences = payload.get("sequences")
-    if isinstance(sequences, dict):
-        for rid in record_ids:
-            block = sequences.get(rid)
+    # v2: ordered list with record_index (supports duplicate sequence names).
+    if isinstance(sequences, list):
+        for block in sequences:
             if not isinstance(block, dict):
                 continue
             raw = block.get("features")
             if not isinstance(raw, list):
                 continue
             feats: list[SequenceFeature] = []
+            for item in raw:
+                if isinstance(item, dict):
+                    try:
+                        feats.append(SequenceFeature.from_dict(item))
+                    except (TypeError, ValueError):
+                        continue
+            feats = sorted(feats, key=lambda f: (f.start, f.end))
+            try:
+                idx = int(block.get("record_index", -1))
+            except (TypeError, ValueError):
+                idx = -1
+            if 0 <= idx < len(record_ids):
+                result[record_ids[idx]] = feats
+                continue
+            sid = str(block.get("sequence_id", "") or "").strip()
+            if sid and sid in result:
+                result[sid] = feats
+        return result
+
+    if isinstance(sequences, dict):
+        for rid in record_ids:
+            # Match uniquified keys (name#2) to original name in legacy JSON.
+            original = rid.split("#", 1)[0] if "#" in rid else rid
+            block = sequences.get(rid) or sequences.get(original)
+            if not isinstance(block, dict):
+                continue
+            raw = block.get("features")
+            if not isinstance(raw, list):
+                continue
+            feats = []
             for item in raw:
                 if isinstance(item, dict):
                     try:
@@ -783,8 +921,14 @@ def load_features_from_gff(path: Path, *, expected_id: str) -> list[SequenceFeat
 def save_features(path: Path, *, sequence_id: str, features: list[SequenceFeature]) -> Path:
     sidecar = sidecar_path(path)
     payload = {
-        "sequence_id": sequence_id,
-        "features": [f.to_dict() for f in features],
+        "format_version": 2,
+        "sequences": [
+            {
+                "record_index": 0,
+                "sequence_id": sequence_id.split("#", 1)[0],
+                "features": [f.to_dict() for f in features],
+            }
+        ],
     }
     sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return sidecar
@@ -793,16 +937,34 @@ def save_features(path: Path, *, sequence_id: str, features: list[SequenceFeatur
 def save_features_multi(
     path: Path,
     features_by_id: dict[str, list[SequenceFeature]],
+    *,
+    record_ids: list[str] | None = None,
 ) -> Path:
-    """Write a multi-sequence JSON color/edit cache beside the FASTA."""
+    """Write multi-sequence JSON beside the FASTA (canonical annotation store).
+
+    Uses format_version 2: a list of blocks with ``record_index`` so two records
+    that share the same FASTA header name keep separate feature lists.
+    """
     sidecar = sidecar_path(path)
-    payload = {
-        "sequences": {
-            seq_id: {"features": [f.to_dict() for f in feats]}
-            for seq_id, feats in features_by_id.items()
-            if feats
-        }
-    }
+    ordered = list(record_ids) if record_ids else list(features_by_id.keys())
+    # Ensure every annotated id appears even if missing from record_ids.
+    for sid in features_by_id:
+        if sid not in ordered:
+            ordered.append(sid)
+    blocks = []
+    for index, seq_id in enumerate(ordered):
+        feats = features_by_id.get(seq_id) or []
+        if not feats:
+            continue
+        original = seq_id.split("#", 1)[0] if "#" in seq_id else seq_id
+        blocks.append(
+            {
+                "record_index": index,
+                "sequence_id": original,
+                "features": [f.to_dict() for f in feats],
+            }
+        )
+    payload = {"format_version": 2, "sequences": blocks}
     sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return sidecar
 
@@ -841,34 +1003,118 @@ def _gff_feature_line(sequence_id: str, feat: SequenceFeature, sequence_length: 
     return f"{sequence_id}\tRepeatViewer\t{safe_type}\t{start}\t{end}\t.\t{strand}\t.\t{attrs}"
 
 
-def export_features_gff_multi(
-    path: Path,
-    *,
+def _ordered_export_ids(
     features_by_id: dict[str, list[SequenceFeature]],
     lengths_by_id: dict[str, int],
-) -> Path:
-    """Write ``{stem}.RV.gff3`` with features for one or more sequence ids."""
-    resolved = path.expanduser().resolve()
-    out = features_gff_path(resolved)
-    lines = ["##gff-version 3"]
-    # Prefer a stable order: lengths_by_id insertion order, then any extras.
-    ordered_ids = [sid for sid in lengths_by_id if sid in features_by_id or sid in lengths_by_id]
+) -> list[str]:
+    ordered_ids = [
+        sid for sid in lengths_by_id if sid in features_by_id or sid in lengths_by_id
+    ]
     seen = set(ordered_ids)
     for sid in features_by_id:
         if sid not in seen:
             ordered_ids.append(sid)
             seen.add(sid)
+    return ordered_ids
+
+
+def export_features_gff_multi(
+    path: Path,
+    *,
+    features_by_id: dict[str, list[SequenceFeature]],
+    lengths_by_id: dict[str, int],
+    output_path: Path | None = None,
+    seqid_map: dict[str, str] | None = None,
+) -> Path:
+    """Write GFF3 (default ``{stem}.RV.gff3``) with features for one or more ids."""
+    resolved = path.expanduser().resolve()
+    out = Path(output_path).expanduser().resolve() if output_path else features_gff_path(resolved)
+    lines = ["##gff-version 3"]
+    ordered_ids = _ordered_export_ids(features_by_id, lengths_by_id)
+    rename = seqid_map or {}
     for seq_id in ordered_ids:
+        export_id = rename.get(seq_id, seq_id.split("#", 1)[0])
         length = max(1, int(lengths_by_id.get(seq_id, 1)))
-        lines.append(f"##sequence-region {seq_id} 1 {length}")
+        lines.append(f"##sequence-region {export_id} 1 {length}")
     for seq_id in ordered_ids:
         feats = features_by_id.get(seq_id) or []
         if not feats:
             continue
+        export_id = rename.get(seq_id, seq_id.split("#", 1)[0])
         length = max(1, int(lengths_by_id.get(seq_id, 10**9)))
         for feat in feats:
-            lines.append(_gff_feature_line(seq_id, feat, length))
+            lines.append(_gff_feature_line(export_id, feat, length))
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out
+
+
+def export_features_gtf_multi(
+    path: Path,
+    *,
+    features_by_id: dict[str, list[SequenceFeature]],
+    lengths_by_id: dict[str, int],
+    output_path: Path,
+    seqid_map: dict[str, str] | None = None,
+) -> Path:
+    """Write a simple GTF next to / at ``output_path``."""
+    out = Path(output_path).expanduser().resolve()
+    rename = seqid_map or {}
+    lines: list[str] = []
+    for seq_id in _ordered_export_ids(features_by_id, lengths_by_id):
+        feats = features_by_id.get(seq_id) or []
+        if not feats:
+            continue
+        export_id = rename.get(seq_id, seq_id.split("#", 1)[0])
+        length = max(1, int(lengths_by_id.get(seq_id, 10**9)))
+        for feat in feats:
+            start = max(1, min(feat.start, length))
+            end = max(1, min(feat.end, length))
+            if start > end:
+                start, end = end, start
+            strand = "-" if not feat.is_forward() else "+"
+            safe_name = feat.name.replace('"', "'")
+            safe_type = str(feat.feature_type).replace('"', "'")
+            attrs = (
+                f'gene_id "{safe_name}"; transcript_id "{safe_name}"; '
+                f'feature_type "{safe_type}";'
+            )
+            lines.append(
+                f"{export_id}\tRepeatViewer\t{safe_type}\t{start}\t{end}\t.\t{strand}\t.\t{attrs}"
+            )
+    out.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return out
+
+
+def export_features_bed_multi(
+    path: Path,
+    *,
+    features_by_id: dict[str, list[SequenceFeature]],
+    lengths_by_id: dict[str, int],
+    output_path: Path,
+    seqid_map: dict[str, str] | None = None,
+) -> Path:
+    """Write BED6 (0-based start) to ``output_path``."""
+    del path  # FASTA path reserved for callers / future relative naming
+    out = Path(output_path).expanduser().resolve()
+    rename = seqid_map or {}
+    lines: list[str] = []
+    for seq_id in _ordered_export_ids(features_by_id, lengths_by_id):
+        feats = features_by_id.get(seq_id) or []
+        if not feats:
+            continue
+        export_id = rename.get(seq_id, seq_id.split("#", 1)[0])
+        length = max(1, int(lengths_by_id.get(seq_id, 10**9)))
+        for feat in feats:
+            start = max(1, min(feat.start, length))
+            end = max(1, min(feat.end, length))
+            if start > end:
+                start, end = end, start
+            strand = "-" if not feat.is_forward() else "+"
+            # BED is 0-based, half-open.
+            lines.append(
+                f"{export_id}\t{start - 1}\t{end}\t{feat.name}\t0\t{strand}"
+            )
+    out.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
     return out
 
 
@@ -879,11 +1125,12 @@ def save_annotations(
     sequence_length: int,
     features: list[SequenceFeature],
 ) -> tuple[Path, Path | None]:
-    """Persist JSON sidecar and companion GFF3 when features are present."""
+    """Persist JSON sidecar only (GFF3 is export-on-demand)."""
     return save_annotations_multi(
         path,
         features_by_id={sequence_id: features},
         lengths_by_id={sequence_id: sequence_length},
+        record_ids=[sequence_id],
     )
 
 
@@ -892,39 +1139,29 @@ def save_annotations_multi(
     *,
     features_by_id: dict[str, list[SequenceFeature]],
     lengths_by_id: dict[str, int],
+    record_ids: list[str] | None = None,
 ) -> tuple[Path, Path | None]:
-    """Persist multi-sequence annotations (JSON cache + ``.RV.gff3``)."""
+    """Persist multi-sequence annotations to JSON only.
+
+    Returns ``(json_path, None)``. Write GFF3/GTF/BED via the export helpers
+    when the user explicitly requests them.
+    """
+    del lengths_by_id  # kept for call-site compatibility
+    ordered = list(record_ids) if record_ids else list(features_by_id.keys())
     non_empty = {sid: list(feats) for sid, feats in features_by_id.items() if feats}
-    if len(lengths_by_id) <= 1 and len(non_empty) <= 1:
-        # Keep legacy single-id JSON shape for one-record FASTA.
+    if len(ordered) <= 1 and len(non_empty) <= 1:
         if non_empty:
             sid, feats = next(iter(non_empty.items()))
-            json_path = save_features(path, sequence_id=sid, features=feats)
         else:
-            sid = next(iter(lengths_by_id), "")
-            json_path = save_features(path, sequence_id=sid, features=[])
+            sid = next(iter(ordered), "")
+            feats = []
+        json_path = save_features(path, sequence_id=sid, features=feats)
     else:
-        json_path = save_features_multi(path, non_empty)
-
-    gff_path = features_gff_path(path)
-    legacy_gff = legacy_features_gff_path(path)
-    if non_empty:
-        gff_path = export_features_gff_multi(
-            path,
-            features_by_id=non_empty,
-            lengths_by_id=lengths_by_id,
+        json_path = save_features_multi(
+            path, features_by_id, record_ids=ordered
         )
-        _cleanup_legacy_sidecars(path)
-    else:
-        for candidate in (
-            gff_path,
-            legacy_gff,
-            legacy_stem_features_gff_path(path),
-        ):
-            _remove_sidecar_if_exists(candidate)
-        gff_path = None
-        _cleanup_legacy_sidecars(path)
-    return json_path, gff_path
+    _cleanup_legacy_sidecars(path)
+    return json_path, None
 
 
 def _gff_rows_to_sequence_features(
@@ -1051,26 +1288,41 @@ def import_annotation_as_rv_gff3(
         )
 
     if merge_existing:
-        existing_path = resolve_features_gff_path(fasta)
-        if existing_path is not None:
-            existing_by_id = load_all_features_by_id(
-                existing_path,
-                record_ids,
-                lengths_by_id=lengths,
+        # Prefer JSON store; fall back to existing GFF3.
+        json_existing = load_features_by_id_from_json(fasta, record_ids)
+        if json_existing and any(json_existing.values()):
+            existing_by_id = json_existing
+        else:
+            existing_path = resolve_features_gff_path(fasta)
+            existing_by_id = (
+                load_all_features_by_id(
+                    existing_path,
+                    record_ids,
+                    lengths_by_id=lengths,
+                )
+                if existing_path is not None
+                else {}
             )
-            for rid in record_ids:
-                imported = features_by_id.get(rid) or []
-                existing = existing_by_id.get(rid) or []
-                if not existing:
-                    continue
-                seen = {_feature_color_key(f) for f in imported}
-                merged = list(imported)
-                for feat in existing:
-                    if _feature_color_key(feat) not in seen:
-                        merged.append(feat)
-                features_by_id[rid] = sorted(merged, key=lambda f: (f.start, f.end))
+        for rid in record_ids:
+            imported = features_by_id.get(rid) or []
+            existing = existing_by_id.get(rid) or []
+            if not existing:
+                continue
+            seen = {_feature_color_key(f) for f in imported}
+            merged = list(imported)
+            for feat in existing:
+                if _feature_color_key(feat) not in seen:
+                    merged.append(feat)
+            features_by_id[rid] = sorted(merged, key=lambda f: (f.start, f.end))
 
-    _json_path, gff_path = save_annotations_multi(
+    json_path, _ = save_annotations_multi(
+        fasta,
+        features_by_id=features_by_id,
+        lengths_by_id=lengths,
+        record_ids=record_ids,
+    )
+    # Import still writes `.RV.gff3` so external tools / legacy loaders see it.
+    gff_path = export_features_gff_multi(
         fasta,
         features_by_id=features_by_id,
         lengths_by_id=lengths,

@@ -314,7 +314,9 @@ from repeatviewer.backends.gff_features import (
 )
 from repeatviewer.backends.sequence_features import (
     companion_annotation_files_for_delete,
+    companion_annotation_paths_for_fasta,
     is_sequence_map_hidden_file,
+    sidecar_path,
 )
 from repeatviewer.plugins import get_registry, load_plugins
 from repeatviewer.plugins.custom_command import (
@@ -419,9 +421,9 @@ from repeatviewer.views.tool_dialogs import (
 from repeatviewer.views.plugin_manage_dialog import InstalledPluginManageDialog
 from repeatviewer.backends.separate_fasta import (
     count_fasta_sequences,
+    default_separation_folder_name,
     sanitize_name,
     separate_sequences,
-    separation_output_dir,
 )
 from repeatviewer.views.genome_dialog import GenomeDialog, is_genome_fasta
 from repeatviewer.views.create_folder_dialog import (
@@ -1107,6 +1109,7 @@ class ExtractSequencesWorker(QObject):
         single_file: bool = True,
         exclude: bool = False,
         output_path: Path | None = None,
+        output_paths_by_id: dict[str, Path] | None = None,
         cancel=None,
     ):
         super().__init__()
@@ -1119,6 +1122,10 @@ class ExtractSequencesWorker(QObject):
         self._output_path = (
             Path(output_path).expanduser().resolve() if output_path is not None else None
         )
+        self._output_paths_by_id = {
+            str(k): Path(v).expanduser().resolve()
+            for k, v in (output_paths_by_id or {}).items()
+        }
         self._cancel = cancel
 
     def _emit_progress(self, done: int, total: int) -> None:
@@ -1154,6 +1161,7 @@ class ExtractSequencesWorker(QObject):
                     single_file=self._single_file,
                     exclude=self._exclude,
                     output_path=self._output_path,
+                    output_paths_by_id=self._output_paths_by_id or None,
                     progress=self._emit_progress,
                     cancel=self._cancel,
                 )
@@ -2181,6 +2189,7 @@ class MainWindow(QMainWindow):
         )
         self._file_list.add_blast_database_requested.connect(self._add_fasta_as_blast_database)
         self._file_list.add_annotation_requested.connect(self._add_annotation_for_fasta)
+        self._file_list.export_annotation_requested.connect(self._export_annotation_for_fasta)
         self._file_list.attach_cyto_image_requested.connect(self._attach_cyto_images)
         self._file_list.cyto_images_requested.connect(self._open_cyto_images)
         from repeatviewer.widgets.cyto_images_ui import cyto_notifier
@@ -3357,33 +3366,74 @@ class MainWindow(QMainWindow):
             )
             return
         default_name = default_group_name(files)
-        dialog = QInputDialog(self)
-        dialog.setWindowTitle("Combine Sequences to One File")
-        dialog.setLabelText(
-            f"Combine {len(files)} sequences to one file.\n\nName for the new file:"
+        from repeatviewer.views.tool_dialogs import NameWithAnnotationDialog
+
+        dialog = NameWithAnnotationDialog(
+            title="Combine Sequences to One File",
+            intro=f"Combine {len(files)} sequences to one file.",
+            name_label="Name for the new file:",
+            default_name=default_name,
+            annotation_label="Copy annotations for combined sequences",
+            parent=self,
         )
-        dialog.setTextValue(default_name)
-        dialog.setInputMode(QInputDialog.InputMode.TextInput)
-        # QInputDialog otherwise shrinks; pin a width that fits long default stems.
-        name_px = dialog.fontMetrics().horizontalAdvance(default_name) + 48
-        dialog.resize(max(640, name_px + 120), dialog.sizeHint().height())
-        dialog.setMinimumWidth(max(640, name_px + 120))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        name = dialog.textValue()
-        if not name.strip():
+        name = dialog.name_text()
+        if not name:
             return
+        include_ann = dialog.include_annotations()
         out_path = files[0].parent / f"{safe_file_stem(name)}.fasta"
         try:
             written, count = group_sequences(files, out_path)
         except SequenceComposeError as exc:
             QMessageBox.warning(self, "Combine Sequences to One File", str(exc))
             return
+        if include_ann:
+            try:
+                self._combine_annotation_json(files, written)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Combine annotations",
+                    f"Sequences were combined, but annotations failed:\n{exc}",
+                )
         self._refresh_after_compose(
             [written],
             f"Combined {count} sequences into {written.name}",
             source_files=files,
         )
+
+    def _combine_annotation_json(self, sources: list[Path], dest_fasta: Path) -> None:
+        """Merge JSON annotations from source FASTAs into ``dest_fasta`` sidecar."""
+        from repeatviewer.backends.sequence_features import (
+            fasta_record_lengths,
+            load_features_by_id_from_json,
+            save_annotations_multi,
+        )
+
+        dest_lengths = fasta_record_lengths(dest_fasta)
+        dest_ids = list(dest_lengths.keys())
+        merged: dict[str, list] = {rid: [] for rid in dest_ids}
+        # Walk sources in order; assign features to dest records in the same order.
+        dest_index = 0
+        for src in sources:
+            src_lengths = fasta_record_lengths(src)
+            src_ids = list(src_lengths.keys())
+            src_feats = load_features_by_id_from_json(src, src_ids)
+            for sid in src_ids:
+                if dest_index >= len(dest_ids):
+                    break
+                feats = src_feats.get(sid) or []
+                if feats:
+                    merged[dest_ids[dest_index]].extend(feats)
+                dest_index += 1
+        if any(merged.values()):
+            save_annotations_multi(
+                dest_fasta,
+                features_by_id=merged,
+                lengths_by_id=dest_lengths,
+                record_ids=dest_ids,
+            )
 
     def _overview_extract_pick_records(
         self, source: Path
@@ -3509,21 +3559,35 @@ class MainWindow(QMainWindow):
         from repeatviewer.backends.sequence_compose import (
             SequenceComposeError,
             extract_records,
+            extract_source_suffix,
             proposed_extract_path,
-            proposed_single_record_path,
         )
+        from repeatviewer.backends.separate_fasta import sanitize_name
+        from repeatviewer.views.tool_dialogs import ModifyExtractFileNamesDialog
         from repeatviewer.widgets.file_conflict import confirm_existing_file_path
 
         selected = list(dialog.selected_ids())
         if not selected:
             return
         single_file = dialog.single_file()
+        include_annotations = bool(dialog.include_annotations())
         output_path: Path | None = None
+        output_paths_by_id: dict[str, Path] | None = None
         try:
             if single_file:
                 proposed = proposed_extract_path(
                     source, selected, source.parent, single_file=True
                 )
+                custom_name = dialog.output_file_name()
+                if custom_name:
+                    if Path(custom_name).name != custom_name or "/" in custom_name or "\\" in custom_name:
+                        QMessageBox.warning(
+                            self,
+                            "Extract Sequences from File",
+                            "Enter a file name only (no folder path).",
+                        )
+                        return
+                    proposed = source.parent / custom_name
                 confirmed = confirm_existing_file_path(
                     self,
                     proposed,
@@ -3535,19 +3599,12 @@ class MainWindow(QMainWindow):
                 if confirmed is None:
                     return
                 output_path = confirmed
-            elif len(selected) == 1:
-                proposed = proposed_single_record_path(source, selected[0], source.parent)
-                confirmed = confirm_existing_file_path(
-                    self,
-                    proposed,
-                    title="Extract Sequences from File",
-                    informative=(
-                        "Overwrite the existing file, or save under a different name?"
-                    ),
+            else:
+                output_paths_by_id = self._resolve_multi_extract_output_paths(
+                    source, selected
                 )
-                if confirmed is None:
+                if output_paths_by_id is None:
                     return
-                output_path = confirmed
 
             written = extract_records(
                 source,
@@ -3555,6 +3612,7 @@ class MainWindow(QMainWindow):
                 source.parent,
                 single_file=single_file,
                 output_path=output_path,
+                output_paths_by_id=output_paths_by_id,
             )
         except SequenceComposeError as exc:
             QMessageBox.warning(self, "Extract Sequences from File", str(exc))
@@ -3562,11 +3620,162 @@ class MainWindow(QMainWindow):
         names = ", ".join(p.name for p in written[:4])
         if len(written) > 4:
             names += ", …"
+        if include_annotations:
+            try:
+                self._extract_annotation_json(source, written, selected)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Extract annotations",
+                    f"Sequences were extracted, but annotations failed:\n{exc}",
+                )
         self._refresh_after_compose(
             written,
             f"Extracted {len(written)} file(s): {names}",
             source_files=[source],
         )
+
+    def _resolve_multi_extract_output_paths(
+        self, source: Path, record_ids: list[str]
+    ) -> dict[str, Path] | None:
+        """Sanitized sequence-name paths; prompt to edit when names collide/exist."""
+        from repeatviewer.backends.sequence_compose import extract_source_suffix
+        from repeatviewer.backends.separate_fasta import sanitize_name
+        from repeatviewer.views.tool_dialogs import ModifyExtractFileNamesDialog
+
+        suffix = extract_source_suffix(source)
+        out_dir = source.parent
+        proposed_names: list[str] = []
+        used_stems: set[str] = set()
+        for rid in record_ids:
+            stem = sanitize_name(rid)
+            base = stem
+            n = 2
+            while stem.lower() in used_stems:
+                stem = f"{base}_{n}"
+                n += 1
+            used_stems.add(stem.lower())
+            proposed_names.append(f"{stem}{suffix}")
+
+        name_counts: dict[str, int] = {}
+        for name in proposed_names:
+            key = name.lower()
+            name_counts[key] = name_counts.get(key, 0) + 1
+        conflicting = {
+            name
+            for name in proposed_names
+            if name_counts[name.lower()] > 1 or (out_dir / name).exists()
+        }
+        name_map = {
+            rid: name for rid, name in zip(record_ids, proposed_names, strict=True)
+        }
+        if conflicting:
+            while True:
+                rename = ModifyExtractFileNamesDialog(
+                    record_ids=record_ids,
+                    proposed_names=[name_map[rid] for rid in record_ids],
+                    conflicting=conflicting,
+                    parent=self,
+                )
+                if rename.exec() != QDialog.DialogCode.Accepted:
+                    return None
+                try:
+                    name_map = rename.name_map()
+                except ValueError as exc:
+                    QMessageBox.warning(
+                        self, "Extract Sequences from File", str(exc)
+                    )
+                    continue
+                still = {n for n in name_map.values() if (out_dir / n).exists()}
+                if not still:
+                    break
+                conflicting = still
+                QMessageBox.warning(
+                    self,
+                    "Extract Sequences from File",
+                    "Some file names still exist:\n"
+                    + "\n".join(sorted(still)[:8])
+                    + ("\n…" if len(still) > 8 else "")
+                    + "\n\nPlease choose different names.",
+                )
+        return {rid: out_dir / name_map[rid] for rid in record_ids}
+
+    def _extract_annotation_json(
+        self,
+        source: Path,
+        written: list[Path],
+        selected_ids: list[str],
+    ) -> None:
+        from repeatviewer.backends.sequence_features import (
+            fasta_record_lengths,
+            load_features_by_id_from_json,
+            resolve_sidecar_path,
+            save_annotations_multi,
+        )
+
+        if resolve_sidecar_path(source) is None:
+            return
+        src_lengths = fasta_record_lengths(source)
+        src_ids = list(src_lengths.keys())
+        src_feats = load_features_by_id_from_json(source, src_ids)
+        if not any(src_feats.values()):
+            return
+        wanted = {str(x).strip() for x in selected_ids}
+        # Map original / uniquified ids.
+        selected_feats: dict[str, list] = {}
+        for sid in src_ids:
+            original = sid.split("#", 1)[0]
+            if sid in wanted or original in wanted:
+                feats = src_feats.get(sid) or []
+                if feats:
+                    selected_feats[sid] = feats
+        if not selected_feats:
+            return
+        fasta_outs = [
+            p for p in written if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        if len(fasta_outs) == 1 and len(selected_feats) >= 1:
+            out = fasta_outs[0]
+            out_lengths = fasta_record_lengths(out)
+            out_ids = list(out_lengths.keys())
+            merged = {rid: [] for rid in out_ids}
+            # Assign by order of selected_feats keys following src order.
+            ordered = [sid for sid in src_ids if sid in selected_feats]
+            for idx, sid in enumerate(ordered):
+                if idx >= len(out_ids):
+                    break
+                merged[out_ids[idx]] = list(selected_feats[sid])
+            save_annotations_multi(
+                out,
+                features_by_id=merged,
+                lengths_by_id=out_lengths,
+                record_ids=out_ids,
+            )
+            return
+        for out in fasta_outs:
+            try:
+                out_lengths = fasta_record_lengths(out)
+                out_ids = list(out_lengths.keys())
+            except Exception:  # noqa: BLE001
+                continue
+            if len(out_ids) != 1:
+                continue
+            oid = out_ids[0]
+            original = oid.split("#", 1)[0]
+            feats = selected_feats.get(oid) or selected_feats.get(original) or []
+            if not feats:
+                # try match by stem soft
+                for sid, f in selected_feats.items():
+                    if sid.split("#", 1)[0] == original:
+                        feats = f
+                        break
+            if feats:
+                save_annotations_multi(
+                    out,
+                    features_by_id={oid: feats},
+                    lengths_by_id=out_lengths,
+                    record_ids=out_ids,
+                )
 
     def _run_id_list_extraction(self, source: Path, dialog) -> None:
         """ID-list path: one streaming pass in the background, with cancel."""
@@ -3578,6 +3787,7 @@ class MainWindow(QMainWindow):
             return
         single_file = dialog.single_file()
         exclude = dialog.exclude()
+        self._extract_include_annotations = bool(dialog.include_annotations())
 
         if not single_file and (exclude or len(parsed.ids) > _EXTRACT_MANY_FILES_WARNING):
             expected = (
@@ -3598,10 +3808,21 @@ class MainWindow(QMainWindow):
                 return
 
         output_path: Path | None = None
+        output_paths_by_id: dict[str, Path] | None = None
         if single_file and not exclude:
             proposed = proposed_extract_path(
                 source, list(parsed.ids), source.parent, single_file=True
             )
+            custom_name = dialog.output_file_name()
+            if custom_name:
+                if Path(custom_name).name != custom_name or "/" in custom_name or "\\" in custom_name:
+                    QMessageBox.warning(
+                        self,
+                        "Extract Sequences from File",
+                        "Enter a file name only (no folder path).",
+                    )
+                    return
+                proposed = source.parent / custom_name
             confirmed = confirm_existing_file_path(
                 self,
                 proposed,
@@ -3613,6 +3834,12 @@ class MainWindow(QMainWindow):
             if confirmed is None:
                 return
             output_path = confirmed
+        elif not single_file and not exclude:
+            output_paths_by_id = self._resolve_multi_extract_output_paths(
+                source, list(parsed.ids)
+            )
+            if output_paths_by_id is None:
+                return
 
         self._start_extract_job(
             source,
@@ -3621,7 +3848,9 @@ class MainWindow(QMainWindow):
             single_file=single_file,
             exclude=exclude,
             output_path=output_path,
+            output_paths_by_id=output_paths_by_id,
         )
+        self._extract_selected_ids = list(parsed.ids)
 
     @Slot(object)
     def _check_extract_ids(self, ids: object) -> None:
@@ -3640,6 +3869,7 @@ class MainWindow(QMainWindow):
         single_file: bool = True,
         exclude: bool = False,
         output_path: Path | None = None,
+        output_paths_by_id: dict[str, Path] | None = None,
     ) -> None:
         if not ids:
             return
@@ -3682,6 +3912,7 @@ class MainWindow(QMainWindow):
             single_file=single_file,
             exclude=exclude,
             output_path=output_path,
+            output_paths_by_id=output_paths_by_id,
             cancel=lambda: self._job_cancel.requested,
         )
         self._extract_worker.moveToThread(self._extract_thread)
@@ -3751,11 +3982,25 @@ class MainWindow(QMainWindow):
                 outputs.append(summary.missing_path)
             sources = [self._extract_source] if getattr(self, "_extract_source", None) else []
             self._refresh_after_compose(outputs, message, source_files=sources)
+            if (
+                getattr(self, "_extract_include_annotations", False)
+                and self._extract_source is not None
+                and summary.written
+            ):
+                try:
+                    self._extract_annotation_json(
+                        self._extract_source,
+                        list(summary.written),
+                        list(getattr(self, "_extract_selected_ids", None) or []),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
             detail = message
             if summary.missing_path is not None:
                 detail += f"\n\nThe missing names are listed in:\n{summary.missing_path.name}"
         finally:
+            self._extract_include_annotations = False
             self._schedule_after_job_ui_ready()
 
         if not summary.written:
@@ -8608,6 +8853,25 @@ class MainWindow(QMainWindow):
         self._file_list.clear_suppress_selection_preview()
         QTimer.singleShot(0, lambda p=path: self._run_add_annotation_for_fasta(p))
 
+    def _export_annotation_for_fasta(self, path: Path) -> None:
+        self._file_list.clear_suppress_selection_preview()
+        QTimer.singleShot(0, lambda p=path: self._run_export_annotation_for_fasta(p))
+
+    def _run_export_annotation_for_fasta(self, path: Path) -> None:
+        from repeatviewer.views.export_annotation_dialog import ExportAnnotationDialog
+
+        fasta = path.expanduser().resolve()
+        if not fasta.is_file():
+            QMessageBox.warning(self, "Export annotation", f"FASTA not found:\n{fasta}")
+            return
+        dialog = ExportAnnotationDialog(fasta, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        written = dialog.written_path()
+        if written is not None:
+            self._sync_sidecar_in_file_list(written, select=False)
+            self._set_status_message(f"Exported annotation: {written.name}", 8000)
+
     def _sync_add_annotation_dialog_from_files(self, clicked_path: Path | None = None) -> None:
         dialog = self._add_annotation_dialog
         if dialog is None or not dialog.isVisible() or clicked_path is None:
@@ -10822,33 +11086,32 @@ class MainWindow(QMainWindow):
             )
             return
 
-        output_dir = separation_output_dir(path)
-        mapping_note = (
-            f"Sequence_name_mapping_{sanitize_name(path.name)}.txt will be written next to the input file."
-        )
+        from repeatviewer.views.tool_dialogs import NameWithAnnotationDialog
+
+        default_folder = default_separation_folder_name(path)
         if subfolder_per_sequence:
             title = "Separate into subfolders"
-            layout_note = (
-                f"Each sequence will be written to its own subfolder under:\n{output_dir}\n"
-                f"(e.g. {output_dir.name}/sequence_name/sequence_name{path.suffix.lower() or '.fa'})\n\n"
-            )
-            done_title = "Separate into subfolders completed"
+            intro = f"Separated to {seq_count} sequence folders."
         else:
             title = "Separate FASTA sequences"
-            layout_note = f"into separate files under:\n{output_dir}\n\n"
-            done_title = "Separate FASTA completed"
-        answer = QMessageBox.question(
-            self,
-            title,
-            f"Split {seq_count} sequences from\n{path.name}\n\n"
-            f"{layout_note}"
-            f"Special characters in headers will be sanitized. {mapping_note}\n\n"
-            "Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            intro = f"Separated to {seq_count} single sequences to a new folder."
+
+        dialog = NameWithAnnotationDialog(
+            title=title,
+            intro=intro,
+            name_label="Folder name:",
+            default_name=default_folder,
+            annotation_label="Copy annotations for separated sequences",
+            parent=self,
+            name_is_folder=True,
+            parent_dir=path.parent,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        output_dir = dialog.resolved_folder()
+        if output_dir is None:
+            return
+        include_ann = dialog.include_annotations()
 
         try:
             created, written = separate_sequences(
@@ -10859,6 +11122,16 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Separate FASTA failed", str(exc))
             return
+
+        if include_ann:
+            try:
+                self._separate_annotation_json(path, created)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Separate annotations",
+                    f"Sequences were separated, but annotations failed:\n{exc}",
+                )
 
         # New folder creation also triggers the FS watcher; suppress it briefly so
         # a rebuild cannot steal selection to the next sibling folder.
@@ -10871,19 +11144,59 @@ class MainWindow(QMainWindow):
         )
         if subfolder_per_sequence:
             status = f"Created {written} subfolder(s) in {output_dir.name}/"
-            done_msg = f"Wrote {written} sequence(s), each in its own subfolder under:\n{output_dir}"
         else:
             status = f"Created {written} single-sequence file(s) in {output_dir.name}/"
-            done_msg = f"Wrote {written} file(s) to:\n{output_dir}"
         self._set_status_message(status, 10000)
-        QMessageBox.information(self, done_title, done_msg)
 
     def _separate_fasta_to_subfolders_file(self, path: Path) -> None:
         self._separate_fasta_file(path, subfolder_per_sequence=True)
 
+    def _separate_annotation_json(self, source: Path, created: list[Path]) -> None:
+        """Write per-output JSON when separating a multi-FASTA with annotations."""
+        from repeatviewer.backends.sequence_features import (
+            fasta_record_lengths,
+            load_features_by_id_from_json,
+            resolve_sidecar_path,
+            save_annotations_multi,
+        )
+
+        if resolve_sidecar_path(source) is None:
+            return
+        src_lengths = fasta_record_lengths(source)
+        src_ids = list(src_lengths.keys())
+        src_feats = load_features_by_id_from_json(source, src_ids)
+        if not any(src_feats.values()):
+            return
+        # Match outputs to source records by order (separate_sequences preserves order).
+        fasta_outs = [
+            p for p in created if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        for index, out in enumerate(fasta_outs):
+            if index >= len(src_ids):
+                break
+            sid = src_ids[index]
+            feats = src_feats.get(sid) or []
+            if not feats:
+                continue
+            try:
+                out_lengths = fasta_record_lengths(out)
+                out_ids = list(out_lengths.keys())
+            except Exception:  # noqa: BLE001
+                continue
+            if not out_ids:
+                continue
+            save_annotations_multi(
+                out,
+                features_by_id={out_ids[0]: feats},
+                lengths_by_id=out_lengths,
+                record_ids=out_ids,
+            )
+
     def _duplicate_selected_files(self, paths: list[Path]) -> None:
         if not paths:
             return
+        from repeatviewer.backends.sequence_features import features_gff_path
+
         created: list[Path] = []
         failed: list[str] = []
         for path in paths:
@@ -10896,6 +11209,21 @@ class MainWindow(QMainWindow):
                 created.append(dest)
             except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
+                continue
+            for comp in companion_annotation_paths_for_fasta(src):
+                if comp.suffix.lower() == ".json" or ".seqmap" in comp.name:
+                    comp_dest = sidecar_path(dest)
+                elif comp.name.endswith(".gff3"):
+                    comp_dest = features_gff_path(dest)
+                else:
+                    comp_dest = dest.parent / comp.name
+                if comp_dest.exists():
+                    continue
+                try:
+                    shutil.copy2(comp, comp_dest)
+                    created.append(comp_dest)
+                except OSError as exc:
+                    failed.append(f"{comp.name}: {exc}")
 
         if self._current_folder:
             current = self._current_folder.resolve()
@@ -11370,6 +11698,8 @@ class MainWindow(QMainWindow):
             src = raw.expanduser().resolve()
             if not src.is_file():
                 continue
+            # Move/copy annotation companions with the FASTA.
+            companion_srcs = companion_annotation_paths_for_fasta(src)
             dest = self._resolve_transfer_destination(src, target_dir, mode=mode)
             if dest is None:
                 continue
@@ -11385,6 +11715,26 @@ class MainWindow(QMainWindow):
                     shutil.copy2(src, dest)
                 created.append(dest)
                 sources.append(src)
+                for comp in companion_srcs:
+                    # Keep canonical companion names beside the new FASTA.
+                    if comp.suffix.lower() == ".json" or ".seqmap" in comp.name:
+                        comp_dest = sidecar_path(dest)
+                    elif comp.name.endswith(".gff3"):
+                        from repeatviewer.backends.sequence_features import features_gff_path
+
+                        comp_dest = features_gff_path(dest)
+                    else:
+                        comp_dest = target_dir / comp.name
+                    try:
+                        if mode == "cut":
+                            if comp_dest.exists() and comp_dest != comp:
+                                comp_dest.unlink()
+                            shutil.move(comp, comp_dest)
+                        else:
+                            shutil.copy2(comp, comp_dest)
+                        created.append(comp_dest)
+                    except OSError as exc:
+                        failed.append(f"{comp.name}: {exc}")
             except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
 
