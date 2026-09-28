@@ -167,8 +167,12 @@ _UNSUPPORTED_PREVIEW_SUFFIXES = {
 
 def _preview_kind(path: Path) -> str:
     suffix = path.suffix.lower()
+    if suffix == _CONTIG_PREVIEW_SUFFIX:
+        return "contig"
     if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
         return "dotplot"
+    if suffix in _TREE_PREVIEW_SUFFIXES:
+        return "tree"
     if suffix in _HTML_PREVIEW_SUFFIXES:
         return "html"
     if suffix in _FASTA_SUFFIXES or path.name.lower().endswith(".fa.gz"):
@@ -250,6 +254,10 @@ def _write_text_file(path: Path, text: str) -> None:
 
 # Alignment files shown as a dotplot rather than a table of numbers.
 _DOTPLOT_PREVIEW_SUFFIXES = frozenset({".paf", ".1aln"})
+# Newick trees (.treefile, .nwk, .newick, .tre, .tree) open in the Tree tab.
+from repeatviewer.backends.tree_layout import TREE_SUFFIXES as _TREE_PREVIEW_SUFFIXES  # noqa: E402
+# Map to Reference results (.rvmap) open in the contig view.
+_CONTIG_PREVIEW_SUFFIX = ".rvmap"
 
 
 def is_previewable_file(path: Path) -> bool:
@@ -257,7 +265,9 @@ def is_previewable_file(path: Path) -> bool:
     resolved = path.expanduser()
     suffix = resolved.suffix.lower()
     name = resolved.name.lower()
-    if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
+    if suffix in _DOTPLOT_PREVIEW_SUFFIXES or suffix in _TREE_PREVIEW_SUFFIXES:
+        return True
+    if suffix == _CONTIG_PREVIEW_SUFFIX:
         return True
     if is_bismark_cov_file(resolved):
         return True
@@ -278,7 +288,9 @@ def preview_path_priority(path: Path) -> int:
         if "divergence" in name or "genome_map" in name:
             return 0
         return 1
-    if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
+    if suffix in _DOTPLOT_PREVIEW_SUFFIXES or suffix in _TREE_PREVIEW_SUFFIXES:
+        return 2
+    if suffix == _CONTIG_PREVIEW_SUFFIX:
         return 2
     if suffix == ".pdf":
         return 3
@@ -625,6 +637,8 @@ class FilePreviewPage(QWidget):
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
     sequenceExtracted = Signal(object)  # Path to a FASTA extracted from a selection
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
+    fileWritten = Signal(object)  # Path of a file written from the preview (e.g. tree export)
+    openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
 
     def __init__(self, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -636,6 +650,7 @@ class FilePreviewPage(QWidget):
         self._annotation_overview = None  # MultiSequenceOverviewPanel, multi-FASTA only
         self._dotplot_panel = None  # built lazily on first view
         self._alignment_dotplot = None  # PAF/.1aln viewer, built on first use
+        self._tree_panel = None  # Newick tree viewer, built on first use
         self._stack = QStackedWidget(self)
         self._stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._placeholder = QLabel("Loading…")
@@ -906,7 +921,11 @@ class FilePreviewPage(QWidget):
         """
         from repeatviewer.widgets.preview_zoom import PreviewZoomKind
 
-        if self.is_annotation_preview_active() or self.is_dotplot_preview_active():
+        if (
+            self.is_annotation_preview_active()
+            or self.is_dotplot_preview_active()
+            or self.is_tree_preview_active()
+        ):
             return PreviewZoomKind.TEXT
         if not self._single_fasta_mode:
             current = self._stack.currentWidget()
@@ -1245,6 +1264,51 @@ class FilePreviewPage(QWidget):
             self._stack.addWidget(self._alignment_dotplot)
         self._stack.setCurrentWidget(self._alignment_dotplot)
         self._alignment_dotplot.load_alignment(path)
+
+    def _show_tree(self, path: Path) -> None:
+        """Draw a Newick tree in the Tree view instead of showing the text."""
+        from repeatviewer.widgets.tree_view import TreePanel
+
+        if self._tree_panel is None:
+            self._tree_panel = TreePanel(None, self)
+            self._tree_panel.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            self._tree_panel.fileWritten.connect(self.fileWritten.emit)
+            self._stack.addWidget(self._tree_panel)
+        self._stack.setCurrentWidget(self._tree_panel)
+        self._tree_panel.load_tree(path)
+
+    def _show_contig(self, path: Path) -> None:
+        """Draw a Map to Reference result (.rvmap) in the contig view."""
+        from repeatviewer.widgets.contig_view import ContigViewPanel
+
+        if getattr(self, "_contig_panel", None) is None:
+            self._contig_panel = ContigViewPanel(None, self)
+            self._contig_panel.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            self._contig_panel.openRequested.connect(self.openFileRequested.emit)
+            self._contig_panel.fileWritten.connect(self.fileWritten.emit)
+            self._stack.addWidget(self._contig_panel)
+        self._stack.setCurrentWidget(self._contig_panel)
+        self._contig_panel.load(path)
+
+    def contig_panel(self):
+        """The contig view of this page, if it was ever shown (else None)."""
+        return getattr(self, "_contig_panel", None)
+
+    def tree_panel(self):
+        """The Tree view of this page, if it was ever shown (else None)."""
+        return getattr(self, "_tree_panel", None)
+
+    def is_tree_preview_active(self) -> bool:
+        panel = getattr(self, "_tree_panel", None)
+        return (
+            not self._single_fasta_mode
+            and panel is not None
+            and self._stack.currentWidget() is panel
+        )
 
     def _ensure_dotplot_panel(self):
         """Create the dotplot panel on first use.
@@ -1741,6 +1805,12 @@ class FilePreviewPage(QWidget):
         if suffix in _DOTPLOT_PREVIEW_SUFFIXES:
             self._show_alignment_dotplot(path)
             return
+        if suffix in _TREE_PREVIEW_SUFFIXES:
+            self._show_tree(path)
+            return
+        if suffix == _CONTIG_PREVIEW_SUFFIX:
+            self._show_contig(path)
+            return
         if suffix == ".pdf":
             status = self._pdf.load_file(path)
             if status == QPdfDocument.Error.None_:
@@ -2001,6 +2071,8 @@ class PreviewTabWidget(QTabWidget):
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
     sequenceExtracted = Signal(object)  # Path to a FASTA extracted from a selection
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
+    fileWritten = Signal(object)  # Path of a file written from a preview (e.g. tree export)
+    openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
 
     def __init__(
         self,
@@ -2312,6 +2384,8 @@ class PreviewTabWidget(QTabWidget):
         page.annotationsSaved.connect(self.annotationsSaved.emit)
         page.sequenceExtracted.connect(self.sequenceExtracted.emit)
         page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
+        page.fileWritten.connect(self.fileWritten.emit)
+        page.openFileRequested.connect(self.openFileRequested.emit)
         self._wheel_zoom_filter.register_page(page)
 
     def show_annotation_region_for_sequence(self, seq_id: str, start: int, end: int) -> bool:
@@ -2438,7 +2512,9 @@ class PreviewTabWidget(QTabWidget):
         if isinstance(widget, FilePreviewPage):
             is_annotation = widget.is_annotation_preview_active()
             is_multi_overview = is_annotation and widget.is_multi_fasta_preview()
-            is_dotplot = widget.is_dotplot_preview_active()
+            is_dotplot = (
+                widget.is_dotplot_preview_active() or widget.is_tree_preview_active()
+            )
             is_cyto = widget.is_cyto_preview_active()
             zoom_kind = widget.preview_zoom_kind()
             if is_annotation and not is_multi_overview:

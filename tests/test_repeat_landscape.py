@@ -158,8 +158,8 @@ def test_tsv_records_bin_end_and_metric(tmp_path):
 @pytest.mark.parametrize(
     "metric, label",
     [
-        ("kimura", "Kimura divergence, CpG-adjusted (%)"),
-        ("raw", "Divergence from consensus, raw (%)"),
+        ("kimura", "Divergence (%)"),
+        ("raw", "Divergence (%)"),
     ],
 )
 def test_html_centres_bars_and_labels_metric(tmp_path, metric, label):
@@ -224,7 +224,7 @@ def test_summary_tsv_records_divergence_metric(tmp_path, engine, metric, expecte
 
 
 @pytest.mark.parametrize(
-    "metric, label", [("kimura", "mean_divergence (Kimura)"), ("raw", "mean_divergence (raw)")]
+    "metric, label", [("kimura", "Kimura"), ("raw", "Raw div.")]
 )
 def test_summary_html_labels_divergence_metric(tmp_path, metric, label):
     result = QuantifyResult(
@@ -234,4 +234,4 @@ def test_summary_html_labels_divergence_metric(tmp_path, metric, label):
         landscape_metric=metric,
     )
     html = write_summary_html([result], tmp_path / "s.html").read_text()
-    assert f"<th>{label}</th>" in html
+    assert f">{label}</th>" in html

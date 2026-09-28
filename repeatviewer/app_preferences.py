@@ -23,6 +23,7 @@ APP_SETTINGS_GROUP = "app"
 
 DEFAULT_REOPEN_LAST_FOLDER = True
 DEFAULT_RESTORE_GEOMETRY = True
+DEFAULT_SHOW_SPLASH = True
 DEFAULT_VERBOSE_LOGGING = False
 # 0 means "auto" (let thread_budget pick its default reserve).
 DEFAULT_UI_THREAD_RESERVE = 0
@@ -61,6 +62,14 @@ def load_restore_geometry() -> bool:
 
 def save_restore_geometry(enabled: bool) -> None:
     _set_value("restore_geometry", bool(enabled))
+
+
+def load_show_splash() -> bool:
+    return _get_bool("show_splash", DEFAULT_SHOW_SPLASH)
+
+
+def save_show_splash(enabled: bool) -> None:
+    _set_value("show_splash", bool(enabled))
 
 
 def load_cyto_experimenter() -> str:

@@ -205,6 +205,10 @@ MAFFT_SEQUENCE_TYPES = (
 ALIGNER_MAFFT = "mafft"
 ALIGNER_MUSCLE = "muscle"
 ALIGNERS = (ALIGNER_MAFFT, ALIGNER_MUSCLE)
+# FastGA sits in the Align window and can be the Align button's right-click
+# action, but it is not an MSA aligner: never a combined / workflow aligner.
+ALIGNER_FASTGA = "fastga"
+RIGHT_CLICK_ALIGNERS = (ALIGNER_MAFFT, ALIGNER_MUSCLE, ALIGNER_FASTGA)
 MUSCLE_MODE_ALIGN = "align"
 MUSCLE_MODE_SUPER5 = "super5"
 MUSCLE_MODES = (MUSCLE_MODE_ALIGN, MUSCLE_MODE_SUPER5)
@@ -263,18 +267,26 @@ DEFAULT_FASTGA_CHAIN_COVERAGE = 85
 DEFAULT_FASTGA_CHAIN_GAP = 1000
 DEFAULT_FASTGA_SYMMETRIC = True
 DEFAULT_FASTGA_KEEP_INDEX = True
-DEFAULT_FASTGA_NO_SOFT_MASK = False
+DEFAULT_FASTGA_SOFT_MASK = False
 DEFAULT_FASTGA_SHOW_PROCESS_WINDOW = False
-DEFAULT_FASTGA_PAIRWISE = False
+
+# What FastGA compares (FastGA tab → Mode).
+FASTGA_MODE_SELF = "self"            # each selected file against itself
+FASTGA_MODE_PAIRS = "pairs"          # every pair among the selected → one file
+FASTGA_MODE_REFERENCE = "reference"  # each selected file against one reference
+FASTGA_MODES = (FASTGA_MODE_SELF, FASTGA_MODE_PAIRS, FASTGA_MODE_REFERENCE)
 
 
 @dataclass
 class FastGaOptions:
     """FastGA whole-genome alignment.
 
-    By default each selected FASTA is self-compared one by one. Pairwise mode
-    ("Do each pair comparison") compares every unique pair among the selected
-    files and writes one combined alignment file.
+    ``mode``: self (default) compares each selected FASTA with itself; pairs
+    compares every unique pair and writes one combined file; reference runs
+    each selected FASTA against ``reference_fasta`` (one file per query, or
+    one combined file with ``reference_combined``).
+    ``soft_mask``: seed only in uppercase bases; sent as -M or -N depending on
+    the installed FastGA version.
     """
 
     output_format: str = FASTGA_FORMAT_PAF
@@ -286,8 +298,10 @@ class FastGaOptions:
     chain_gap: int = DEFAULT_FASTGA_CHAIN_GAP
     symmetric: bool = DEFAULT_FASTGA_SYMMETRIC
     keep_index: bool = DEFAULT_FASTGA_KEEP_INDEX
-    no_soft_mask: bool = DEFAULT_FASTGA_NO_SOFT_MASK
-    pairwise: bool = DEFAULT_FASTGA_PAIRWISE
+    soft_mask: bool = DEFAULT_FASTGA_SOFT_MASK
+    mode: str = FASTGA_MODE_SELF
+    reference_fasta: str = ""
+    reference_combined: bool = False
     temp_dir: str = ""
     right_click_action: str = FASTGA_RIGHT_CLICK_RUN
     show_process_window: bool = DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
@@ -301,6 +315,10 @@ def load_fastga_options() -> FastGaOptions:
     right_click_action = str(v.get("right_click_action", FASTGA_RIGHT_CLICK_RUN))
     if right_click_action not in FASTGA_RIGHT_CLICK_ACTIONS:
         right_click_action = FASTGA_RIGHT_CLICK_RUN
+    mode = str(v.get("mode", "") or "")
+    if mode not in FASTGA_MODES:
+        # Settings from before the Mode choice: "Do each pair comparison".
+        mode = FASTGA_MODE_PAIRS if _to_bool(v.get("pairwise"), False) else FASTGA_MODE_SELF
     return FastGaOptions(
         output_format=fmt,
         threads=max(1, int(v.get("threads", _default_tool_threads()))),
@@ -316,8 +334,10 @@ def load_fastga_options() -> FastGaOptions:
         chain_gap=max(1, int(v.get("chain_gap", DEFAULT_FASTGA_CHAIN_GAP))),
         symmetric=_to_bool(v.get("symmetric"), DEFAULT_FASTGA_SYMMETRIC),
         keep_index=_to_bool(v.get("keep_index"), DEFAULT_FASTGA_KEEP_INDEX),
-        no_soft_mask=_to_bool(v.get("no_soft_mask"), DEFAULT_FASTGA_NO_SOFT_MASK),
-        pairwise=_to_bool(v.get("pairwise"), DEFAULT_FASTGA_PAIRWISE),
+        soft_mask=_to_bool(v.get("soft_mask"), DEFAULT_FASTGA_SOFT_MASK),
+        mode=mode,
+        reference_fasta=str(v.get("reference_fasta", "") or ""),
+        reference_combined=_to_bool(v.get("reference_combined"), False),
         temp_dir=str(v.get("temp_dir", "") or ""),
         right_click_action=right_click_action,
         show_process_window=_to_bool(
@@ -339,8 +359,12 @@ def save_fastga_options(opts: FastGaOptions) -> None:
             "chain_gap": opts.chain_gap,
             "symmetric": opts.symmetric,
             "keep_index": opts.keep_index,
-            "no_soft_mask": opts.no_soft_mask,
-            "pairwise": opts.pairwise,
+            "soft_mask": opts.soft_mask,
+            "mode": opts.mode,
+            # Kept so an older RepeatViewer reading these settings still works.
+            "pairwise": opts.mode == FASTGA_MODE_PAIRS,
+            "reference_fasta": opts.reference_fasta,
+            "reference_combined": opts.reference_combined,
             "temp_dir": opts.temp_dir,
             "right_click_action": opts.right_click_action,
             "show_process_window": opts.show_process_window,
@@ -1103,7 +1127,7 @@ def load_align_options() -> AlignOptions:
     if muscle_mode not in MUSCLE_MODES:
         muscle_mode = MUSCLE_MODE_ALIGN
     right_click_aligner = str(v.get("right_click_aligner", ALIGNER_MAFFT))
-    if right_click_aligner not in ALIGNERS:
+    if right_click_aligner not in RIGHT_CLICK_ALIGNERS:
         right_click_aligner = ALIGNER_MAFFT
 
     def _flag(key: str) -> bool:
@@ -1499,6 +1523,9 @@ class RepeatQuantifyOptions:
     blast_min_coverage: float = 0.0
     rm_div: int = 40
     rm_sensitivity: str = "sensitive"
+    # Save a genome's BLAST index as a named database (Add/Manage databases)
+    # so later runs and other tools reuse it. Not a quantify_library keyword.
+    blast_save_index: bool = True
 
     def params(self) -> dict:
         """Keyword arguments for ``quantify_library`` (everything but engine)."""
@@ -1547,13 +1574,32 @@ def load_repeat_quantify_options() -> RepeatQuantifyOptions:
             sensitivity if sensitivity in REPEAT_QUANTIFY_SENSITIVITIES
             else d.rm_sensitivity
         ),
+        blast_save_index=_setting_bool(
+            v.get("blast_save_index", d.blast_save_index), d.blast_save_index
+        ),
     )
+
+
+def _setting_bool(value, default: bool) -> bool:
+    """QSettings hands booleans back as "true"/"false" strings on some platforms."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return default
 
 
 def save_repeat_quantify_options(opts: RepeatQuantifyOptions) -> None:
     _save_settings_group(
         "repeat_quantify",
-        {"engine": opts.engine, **opts.params()},
+        {
+            "engine": opts.engine,
+            **opts.params(),
+            "blast_save_index": bool(opts.blast_save_index),
+        },
     )
 
 
@@ -1785,3 +1831,312 @@ def save_msa_clean_options(opts: MsaCleanOptions) -> None:
     s.setValue("gap_row_gap_threshold", gr.gap_threshold)
     s.setValue("gap_row_window_size", gr.window_size)
     s.endGroup()
+
+
+# --------------------------------------------------------------------------
+# Tree (phylogenetic tree builder)
+# --------------------------------------------------------------------------
+
+TREE_ENGINE_IQTREE = "iqtree"
+TREE_ENGINE_FASTME = "fastme"
+TREE_ENGINE_FASTTREE = "fasttree"
+TREE_ENGINES = (TREE_ENGINE_IQTREE, TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE)
+
+TREE_ALIGN_AUTO = "auto"      # align unless the input is already an alignment
+TREE_ALIGN_ALWAYS = "always"
+TREE_ALIGN_NEVER = "never"    # input must already be aligned
+TREE_ALIGN_MODES = (TREE_ALIGN_AUTO, TREE_ALIGN_ALWAYS, TREE_ALIGN_NEVER)
+
+TREE_COVERAGE_MEDIAN = "median"    # length filter relative to the median length
+TREE_COVERAGE_LONGEST = "longest"  # ... or to the longest sequence
+TREE_COVERAGE_REFERENCES = (TREE_COVERAGE_MEDIAN, TREE_COVERAGE_LONGEST)
+
+TREE_ROOT_NONE = "none"
+TREE_ROOT_OUTGROUP = "outgroup"
+TREE_ROOT_MIDPOINT = "midpoint"
+TREE_ROOT_MODES = (TREE_ROOT_NONE, TREE_ROOT_OUTGROUP, TREE_ROOT_MIDPOINT)
+
+TREE_MODEL_FINDER = "MFP"      # IQ-TREE ModelFinder, best model by BIC
+
+TREE_RIGHT_CLICK_RUN = "run"
+TREE_RIGHT_CLICK_DIALOG = "dialog"
+TREE_RIGHT_CLICK_ACTIONS = (TREE_RIGHT_CLICK_RUN, TREE_RIGHT_CLICK_DIALOG)
+
+
+TREE_SEQ_AS_IS = "as_is"
+TREE_SEQ_RT = "rt_domain"
+TREE_SEQ_MODES = (TREE_SEQ_AS_IS, TREE_SEQ_RT)
+
+
+@dataclass
+class TreeOptions:
+    """Phylogenetic tree building (Tools → Tree).
+
+    Defaults follow current practice for a publishable tree: MAFFT L-INS-i with
+    strand adjustment, IQ-TREE with ModelFinder (BIC), several independent
+    searches, SH-aLRT + UFBoot2 (-bnni) branch support and a fixed seed.
+    """
+
+    # Alignment
+    align_mode: str = TREE_ALIGN_AUTO
+    mafft_strategy: str = "choose"     # L-INS-i up to 200 sequences, else FFT-NS-2
+    adjust_direction: bool = True
+    rotate_monomers: bool = False      # satellite monomers: common start before aligning
+    # Sequences: TREE_SEQ_AS_IS, or TREE_SEQ_RT = RT domain found in the DNA (REXdb)
+    sequence_mode: str = TREE_SEQ_AS_IS
+    rexdb_fasta: str = ""              # user's REXdb protein FASTA (.classification beside it)
+    rexdb_references: int = 3          # REXdb RTs added per lineage (0 = none)
+    mafft_gap_open: float = 1.53
+    mafft_offset: float = 0.0
+    min_coverage: float = 0.7          # fraction of the reference length; 0 = off
+    coverage_reference: str = TREE_COVERAGE_MEDIAN
+    # Tree
+    engine: str = TREE_ENGINE_IQTREE
+    model: str = TREE_MODEL_FINDER
+    runs: int = 5
+    seed: int = 12345
+    threads: int = field(default_factory=_default_tool_threads)
+    # Support and rooting
+    ufboot: int = 1000
+    alrt: int = 1000
+    bnni: bool = True
+    distance_bootstrap: int = 100      # FastME bootstrap replicates
+    root_mode: str = TREE_ROOT_NONE
+    outgroup: list[str] = field(default_factory=list)
+    # Options tab
+    right_click_action: str = TREE_RIGHT_CLICK_RUN
+    show_process_window: bool = False
+    use_system_mafft: bool = False
+    use_system_path: bool = False      # tree programs: system PATH only
+    # Methylation check: also build a tree without CG / CHG columns and compare.
+    # Set in the Tree tab (saved) or for one run by Tools → Tree → masked run.
+    methylation_mask: str = ""         # "", "CG" or "CG_CHG"
+
+
+def load_tree_options() -> TreeOptions:
+    v = _load_settings_group("tree")
+    d = TreeOptions()
+
+    def _pick(key: str, allowed: tuple[str, ...], default: str) -> str:
+        value = str(v.get(key, default))
+        return value if value in allowed else default
+
+    def _num(key: str, default, cast, lo, hi):
+        try:
+            return max(lo, min(hi, cast(v.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    outgroup = v.get("outgroup") or []
+    if isinstance(outgroup, str):
+        outgroup = [x for x in outgroup.split(",") if x]
+    return TreeOptions(
+        align_mode=_pick("align_mode", TREE_ALIGN_MODES, d.align_mode),
+        mafft_strategy=str(v.get("mafft_strategy", d.mafft_strategy)),
+        adjust_direction=_to_bool(v.get("adjust_direction"), d.adjust_direction),
+        rotate_monomers=_to_bool(v.get("rotate_monomers"), d.rotate_monomers),
+        methylation_mask=_pick("methylation_mask", ("", "CG", "CG_CHG"), d.methylation_mask),
+        sequence_mode=_pick("sequence_mode", TREE_SEQ_MODES, d.sequence_mode),
+        rexdb_fasta=str(v.get("rexdb_fasta", d.rexdb_fasta) or ""),
+        rexdb_references=_num("rexdb_references", d.rexdb_references, int, 0, 50),
+        mafft_gap_open=_num("mafft_gap_open", d.mafft_gap_open, float, 0.0, 20.0),
+        mafft_offset=_num("mafft_offset", d.mafft_offset, float, 0.0, 10.0),
+        min_coverage=_num("min_coverage", d.min_coverage, float, 0.0, 1.0),
+        coverage_reference=_pick("coverage_reference", TREE_COVERAGE_REFERENCES,
+                                 d.coverage_reference),
+        engine=_pick("engine", TREE_ENGINES, d.engine),
+        model=str(v.get("model", d.model) or d.model).strip(),
+        runs=_num("runs", d.runs, int, 1, 100),
+        seed=_num("seed", d.seed, int, 1, 2_000_000_000),
+        threads=_num("threads", _default_tool_threads(), int, 1, 256),
+        ufboot=_num("ufboot", d.ufboot, int, 0, 100_000),
+        alrt=_num("alrt", d.alrt, int, 0, 100_000),
+        bnni=_to_bool(v.get("bnni"), d.bnni),
+        distance_bootstrap=_num("distance_bootstrap", d.distance_bootstrap, int, 0, 10_000),
+        root_mode=_pick("root_mode", TREE_ROOT_MODES, d.root_mode),
+        outgroup=[str(x) for x in outgroup],
+        right_click_action=_pick(
+            "right_click_action", TREE_RIGHT_CLICK_ACTIONS, d.right_click_action
+        ),
+        show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
+        use_system_mafft=_to_bool(v.get("use_system_mafft"), d.use_system_mafft),
+        use_system_path=_to_bool(v.get("use_system_path"), d.use_system_path),
+    )
+
+
+def save_tree_options(opts: TreeOptions) -> None:
+    _save_settings_group(
+        "tree",
+        {
+            "align_mode": opts.align_mode,
+            "mafft_strategy": opts.mafft_strategy,
+            "adjust_direction": opts.adjust_direction,
+            "rotate_monomers": opts.rotate_monomers,
+            "methylation_mask": opts.methylation_mask,
+            "sequence_mode": opts.sequence_mode,
+            "rexdb_fasta": opts.rexdb_fasta,
+            "rexdb_references": opts.rexdb_references,
+            "mafft_gap_open": opts.mafft_gap_open,
+            "mafft_offset": opts.mafft_offset,
+            "min_coverage": opts.min_coverage,
+            "coverage_reference": opts.coverage_reference,
+            "engine": opts.engine,
+            "model": opts.model,
+            "runs": opts.runs,
+            "seed": opts.seed,
+            "threads": opts.threads,
+            "ufboot": opts.ufboot,
+            "alrt": opts.alrt,
+            "bnni": opts.bnni,
+            "distance_bootstrap": opts.distance_bootstrap,
+            "root_mode": opts.root_mode,
+            "outgroup": list(opts.outgroup),
+            "right_click_action": opts.right_click_action,
+            "show_process_window": opts.show_process_window,
+            "use_system_mafft": opts.use_system_mafft,
+            "use_system_path": opts.use_system_path,
+        },
+    )
+
+
+# --------------------------------------------------------------------------
+# Map to Reference (Tools → Map to Reference)
+# --------------------------------------------------------------------------
+
+MAP_ENGINE_AUTO = "auto"
+MAP_ENGINE_MAFFT = "mafft"
+MAP_ENGINE_MINIMAP2 = "minimap2"
+MAP_ENGINE_BOWTIE2 = "bowtie2"
+MAP_ENGINES = (MAP_ENGINE_AUTO, MAP_ENGINE_MAFFT, MAP_ENGINE_MINIMAP2, MAP_ENGINE_BOWTIE2)
+
+MAP_SENS_FAST = "fast"
+MAP_SENS_MEDIUM = "medium"
+MAP_SENS_HIGH = "high"
+MAP_SENSITIVITIES = (MAP_SENS_FAST, MAP_SENS_MEDIUM, MAP_SENS_HIGH)
+
+# A sequence that fits equally well in several places (common in satellite arrays).
+MAP_MULTI_BEST = "best"    # one place (the mapper's best; ties at random)
+MAP_MULTI_ALL = "all"      # every equally good place
+MAP_MULTI_NONE = "none"    # none: listed as ambiguous with the unused sequences
+MAP_MULTI_MODES = (MAP_MULTI_BEST, MAP_MULTI_ALL, MAP_MULTI_NONE)
+
+MAP_MINIMAP2_PRESET_AUTO = "auto"
+MAP_MINIMAP2_PRESETS = (MAP_MINIMAP2_PRESET_AUTO, "map-ont", "map-hifi", "map-pb",
+                        "asm5", "asm10", "asm20", "sr")
+
+# Consensus threshold, as a fraction of the sequences covering a position.
+# 0 = majority (the most common base); higher values give IUPAC codes.
+MAP_CONSENSUS_THRESHOLDS = (0.0, 0.5, 0.75, 0.95, 1.0)
+MAP_NO_COVERAGE_N = "N"
+MAP_NO_COVERAGE_REFERENCE = "reference"
+MAP_NO_COVERAGE_SKIP = "skip"
+MAP_NO_COVERAGE_MODES = (MAP_NO_COVERAGE_N, MAP_NO_COVERAGE_REFERENCE, MAP_NO_COVERAGE_SKIP)
+
+MAP_RIGHT_CLICK_RUN = "run"
+MAP_RIGHT_CLICK_DIALOG = "dialog"
+MAP_RIGHT_CLICK_ACTIONS = (MAP_RIGHT_CLICK_RUN, MAP_RIGHT_CLICK_DIALOG)
+
+
+@dataclass
+class MapOptions:
+    """Map sequences or reads to a reference (Tools → Map to Reference).
+
+    MAFFT (bundled) places a few sequences on a short reference, e.g. satellite
+    variants on an annotated monomer array; minimap2 maps long reads or
+    assemblies to a genome; Bowtie2 maps short reads. ``auto`` picks by input.
+    """
+
+    reference_fasta: str = ""
+    engine: str = MAP_ENGINE_AUTO
+    sensitivity: str = MAP_SENS_MEDIUM
+    multiple_hits: str = MAP_MULTI_BEST
+    minimap2_preset: str = MAP_MINIMAP2_PRESET_AUTO
+    # Advanced: a mapped sequence is kept only when it passes all of these.
+    min_identity: float = 0.70         # fraction of aligned columns that match
+    min_aligned_bp: int = 25
+    min_mapq: int = 0                  # minimap2 / Bowtie2 only
+    threads: int = field(default_factory=_default_tool_threads)
+    # Output
+    consensus_threshold: float = 0.0   # 0 = majority
+    no_coverage: str = MAP_NO_COVERAGE_N
+    min_variant_freq: float = 0.0      # variants table: 0 = every difference
+    save_consensus: bool = True
+    save_mapped: bool = True
+    save_unused: bool = True
+    save_variants: bool = True
+    lift_annotations: bool = True
+    max_display_reads: int = 2000
+    # Options tab
+    right_click_action: str = MAP_RIGHT_CLICK_RUN
+    show_process_window: bool = False
+    use_system_path: bool = False
+
+
+def load_map_options() -> MapOptions:
+    v = _load_settings_group("map_reference")
+    d = MapOptions()
+
+    def _pick(key: str, allowed: tuple, default):
+        value = v.get(key, default)
+        return value if value in allowed else default
+
+    def _num(key: str, default, cast, lo, hi):
+        try:
+            return max(lo, min(hi, cast(v.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    threshold = _num("consensus_threshold", d.consensus_threshold, float, 0.0, 1.0)
+    return MapOptions(
+        reference_fasta=str(v.get("reference_fasta", d.reference_fasta) or ""),
+        engine=_pick("engine", MAP_ENGINES, d.engine),
+        sensitivity=_pick("sensitivity", MAP_SENSITIVITIES, d.sensitivity),
+        multiple_hits=_pick("multiple_hits", MAP_MULTI_MODES, d.multiple_hits),
+        minimap2_preset=_pick("minimap2_preset", MAP_MINIMAP2_PRESETS, d.minimap2_preset),
+        min_identity=_num("min_identity", d.min_identity, float, 0.0, 1.0),
+        min_aligned_bp=_num("min_aligned_bp", d.min_aligned_bp, int, 1, 1_000_000),
+        min_mapq=_num("min_mapq", d.min_mapq, int, 0, 255),
+        threads=_num("threads", _default_tool_threads(), int, 1, 256),
+        consensus_threshold=threshold if threshold in MAP_CONSENSUS_THRESHOLDS else 0.0,
+        no_coverage=_pick("no_coverage", MAP_NO_COVERAGE_MODES, d.no_coverage),
+        min_variant_freq=_num("min_variant_freq", d.min_variant_freq, float, 0.0, 1.0),
+        save_consensus=_to_bool(v.get("save_consensus"), d.save_consensus),
+        save_mapped=_to_bool(v.get("save_mapped"), d.save_mapped),
+        save_unused=_to_bool(v.get("save_unused"), d.save_unused),
+        save_variants=_to_bool(v.get("save_variants"), d.save_variants),
+        lift_annotations=_to_bool(v.get("lift_annotations"), d.lift_annotations),
+        max_display_reads=_num("max_display_reads", d.max_display_reads, int, 50, 100_000),
+        right_click_action=_pick("right_click_action", MAP_RIGHT_CLICK_ACTIONS,
+                                 d.right_click_action),
+        show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
+        use_system_path=_to_bool(v.get("use_system_path"), d.use_system_path),
+    )
+
+
+def save_map_options(opts: MapOptions) -> None:
+    _save_settings_group(
+        "map_reference",
+        {
+            "reference_fasta": opts.reference_fasta,
+            "engine": opts.engine,
+            "sensitivity": opts.sensitivity,
+            "multiple_hits": opts.multiple_hits,
+            "minimap2_preset": opts.minimap2_preset,
+            "min_identity": opts.min_identity,
+            "min_aligned_bp": opts.min_aligned_bp,
+            "min_mapq": opts.min_mapq,
+            "threads": opts.threads,
+            "consensus_threshold": opts.consensus_threshold,
+            "no_coverage": opts.no_coverage,
+            "min_variant_freq": opts.min_variant_freq,
+            "save_consensus": opts.save_consensus,
+            "save_mapped": opts.save_mapped,
+            "save_unused": opts.save_unused,
+            "save_variants": opts.save_variants,
+            "lift_annotations": opts.lift_annotations,
+            "max_display_reads": opts.max_display_reads,
+            "right_click_action": opts.right_click_action,
+            "show_process_window": opts.show_process_window,
+            "use_system_path": opts.use_system_path,
+        },
+    )

@@ -91,3 +91,72 @@ def test_failed_or_cancelled_runs_are_recorded(qapp, fastas, monkeypatch, error,
     assert record["finished"]
     if status == "failed":
         assert "boom" in record["error"]
+
+
+def test_saved_blast_database_is_passed_on_and_recorded(qapp, fastas, monkeypatch):
+    lib, genome = fastas
+    seen = {}
+
+    def _fake(library, target, out_dir, **kwargs):
+        seen.update(kwargs)
+        return _fake_quantify(library, target, out_dir)
+
+    monkeypatch.setattr(rq, "quantify_library", _fake)
+    monkeypatch.setattr(rq, "write_summary_html", _fake_summary)
+    monkeypatch.setattr(
+        rq, "resolve_blast_database",
+        lambda target, dbs, **kw: (Path("/dbs/genome/genome"), None),
+    )
+    worker = mw.RepeatQuantifyWorker(
+        lib, [genome], engine="blastn", threads=1, stamp=STAMP,
+        use_system_blast=True,
+    )
+    created = []
+    worker.database_created.connect(created.append)
+    _run(worker)
+    assert seen["blast_db_prefix"] == "/dbs/genome/genome"
+    assert seen["use_system_blast"] is True
+    assert created == []
+    record = json.loads(
+        next(genome.parent.glob("*_repeat_quant_*/run_parameters.json")).read_text()
+    )
+    assert record["parameters"]["blast_db_prefix"] == "/dbs/genome/genome"
+
+
+def test_new_blast_database_is_announced_once(qapp, fastas, monkeypatch):
+    lib, genome = fastas
+    monkeypatch.setattr(rq, "quantify_library", _fake_quantify)
+    monkeypatch.setattr(rq, "write_summary_html", _fake_summary)
+    new_db = object()
+    calls = []
+
+    def _resolve(target, dbs, **kw):
+        calls.append(kw["save_index"])
+        return Path("/dbs/new/new"), new_db
+
+    monkeypatch.setattr(rq, "resolve_blast_database", _resolve)
+    worker = mw.RepeatQuantifyWorker(
+        lib, [genome], engine="both", threads=1, stamp=STAMP,
+        save_blast_index=True, blast_db_base_dir=Path("/dbs"),
+    )
+    created = []
+    worker.database_created.connect(created.append)
+    got = _run(worker)
+    assert "failed" not in got
+    assert calls == [True]
+    assert created == [new_db]
+
+
+def test_repeatmasker_only_runs_never_touch_blast_databases(qapp, fastas, monkeypatch):
+    lib, genome = fastas
+    monkeypatch.setattr(rq, "quantify_library", _fake_quantify)
+    monkeypatch.setattr(rq, "write_summary_html", _fake_summary)
+    monkeypatch.setattr(
+        rq, "resolve_blast_database",
+        lambda *a, **k: pytest.fail("no BLAST index for RepeatMasker"),
+    )
+    got = _run(mw.RepeatQuantifyWorker(
+        lib, [genome], engine="repeatmasker", threads=1, stamp=STAMP,
+        save_blast_index=True, blast_db_base_dir=Path("/dbs"),
+    ))
+    assert "failed" not in got

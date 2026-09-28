@@ -1,0 +1,21 @@
+# Tips shown on the RepeatViewer splash screen, one per line.
+# Lines starting with # are ignored. Keep each tip to one or two short sentences.
+Double-click a tip in a tree to see that sequence in the alignment, highlighted.
+Crowded tree? Tick "Align names" and set Branches to "Square root".
+"Spread" makes a tree larger while the font stays the same.
+Right-click a branch to reroot the tree there, collapse its clade or give it a colour.
+"Collapse below support" hides weakly supported branches; "Save tree as…" keeps the result.
+Undo tree edits with Cmd+Z (macOS) or Ctrl+Z.
+Colour tree tips by chromosome, array or methylation: Trait table → Create or update.
+Satellite monomers start at random positions: "Rotate satellite monomers to a common start" fixes that before the tree is built.
+"Methylation check" builds a second tree without CG/CHG sites and tells you which groupings depend on them.
+RT-domain tree: choose your REXdb in the Tree window and set Sequences to "RT domain from DNA".
+Select several FASTA files together to build one combined tree.
+In the alignment window, "Differences only" shows a dot wherever a base matches the consensus.
+Every tree run writes a methods paragraph with references, ready for your paper, in its details folder.
+Results never overwrite earlier runs: a new run adds _2, _3 to the name.
+Export trees as SVG, PDF or PNG (PNG at about 300 dpi).
+Right-click the Tree button to run with your saved settings.
+Every "?" button explains the option next to it.
+Click a file in the Files panel while a tool window is open to fill in its path.
+Turn this window off in Settings → Startup → Splash screen.

@@ -322,8 +322,18 @@ def build_blast_index(
 
 
 def _named_blast_index_marker(db_prefix: Path, *, protein: bool) -> Path:
+    """Index file that proves ``db_prefix`` was built.
+
+    ``.nin`` / ``.pin`` for a single-volume database. makeblastdb splits a
+    large genome into volumes (``prefix.00.nin`` ...) and writes an alias
+    file ``.nal`` / ``.pal`` instead, so fall back to that.
+    """
     suffix = ".pin" if protein else ".nin"
-    return Path(f"{db_prefix}{suffix}")
+    single = Path(f"{db_prefix}{suffix}")
+    if single.is_file():
+        return single
+    alias = Path(f"{db_prefix}{'.pal' if protein else '.nal'}")
+    return alias if alias.is_file() else single
 
 
 def named_blast_index_exists(db_prefix: Path, *, protein: bool) -> bool:
@@ -343,6 +353,53 @@ def _named_blast_index_is_current(db_prefix: Path, source_fasta: Path, *, protei
 def blast_database_is_ready(db: BlastDatabase) -> bool:
     """Whether a saved BLAST database's index files are still present on disk."""
     return named_blast_index_exists(db.db_prefix_path, protein=db.molecule_type == "prot")
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except OSError:
+        return False
+
+
+def saved_blast_database_for(
+    fasta: Path, databases: list[BlastDatabase]
+) -> BlastDatabase | None:
+    """The registered nucleotide database built from ``fasta``, if still usable.
+
+    Usable means its index files exist and are not older than the FASTA, so an
+    edited genome is not searched against a stale index.
+    """
+    fasta = Path(fasta).expanduser()
+    for db in databases:
+        if db.molecule_type == "prot":
+            continue
+        if not _same_file(db.source_fasta, fasta):
+            continue
+        if _named_blast_index_is_current(db.db_prefix_path, fasta, protein=False):
+            return db
+    return None
+
+
+def unique_blast_database_name(
+    base_name: str, databases: list[BlastDatabase], base_dir: Path
+) -> str:
+    """``base_name``, or ``base_name (2)``, ``(3)``... when the name or folder is taken.
+
+    A taken folder is never reused: it may hold an index of a different FASTA
+    with the same file name, which the mtime check alone cannot tell apart.
+    """
+    taken = {db.name.lower() for db in databases}
+    root = Path(base_dir).expanduser()
+    base_name = base_name.strip() or "database"
+    candidate, n = base_name, 1
+    while (
+        candidate.lower() in taken
+        or (root / (sanitize_name(candidate) or "database")).exists()
+    ):
+        n += 1
+        candidate = f"{base_name} ({n})"
+    return candidate
 
 
 def build_named_blast_database(

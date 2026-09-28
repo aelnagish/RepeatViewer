@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QTabWidget,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +34,7 @@ from PySide6.QtWidgets import (
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
 from repeatviewer.widgets.path_browse import PathBrowseRow
+from repeatviewer.widgets.help_button import field_with_help
 
 if TYPE_CHECKING:
     from repeatviewer.plugins.registry import PluginRegistry
@@ -59,6 +59,7 @@ from repeatviewer.app_preferences import (
     load_cyto_experimenter,
     load_reopen_last_folder,
     load_restore_geometry,
+    load_show_splash,
     load_ui_thread_reserve,
     load_verbose_logging,
     log_file_path,
@@ -67,6 +68,7 @@ from repeatviewer.app_preferences import (
     save_cyto_experimenter,
     save_reopen_last_folder,
     save_restore_geometry,
+    save_show_splash,
     save_ui_thread_reserve,
     save_verbose_logging,
 )
@@ -531,6 +533,9 @@ class SettingsDialog(QDialog):
         self._restore_geometry = QCheckBox()
         self._restore_geometry.setChecked(load_restore_geometry())
         self._restore_geometry.setToolTip("Restore the window size and position from the last session.")
+        self._show_splash = QCheckBox()
+        self._show_splash.setChecked(load_show_splash())
+        self._show_splash.setToolTip("Show the RepeatViewer banner with a tip while the app loads.")
 
         # Cytogenetic images
         self._cyto_experimenter = QLineEdit(load_cyto_experimenter())
@@ -647,44 +652,15 @@ class SettingsDialog(QDialog):
         ):
             widget.setFixedWidth(_FIELD_WIDTH)
 
-        def _help_button(title: str, help_text: str) -> QToolButton:
-            """Circular ? control matching MSA clean dialogs."""
-            button = QToolButton(self)
-            button.setText("?")
-            button.setToolTip(help_text)
-            button.setAutoRaise(False)
-            button.setFixedSize(22, 22)
-            button.setStyleSheet(
-                "QToolButton {"
-                "  border: 1px solid palette(mid);"
-                "  border-radius: 10px;"
-                "  background: palette(base);"
-                "  font-weight: 600;"
-                "  padding: 0px;"
-                "}"
-                "QToolButton:hover { background: palette(alternate-base); }"
-            )
-            button.clicked.connect(
-                lambda checked=False, t=title, text=help_text: QMessageBox.information(
-                    self, t, text
-                )
-            )
-            return button
-
         def _field_with_help(
             field: QWidget,
             *,
             help_title: str,
             help_text: str,
         ) -> QWidget:
-            wrap = QWidget(self)
-            row = QHBoxLayout(wrap)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
-            row.addWidget(field, 0)
-            row.addWidget(_help_button(help_title, help_text), 0)
-            row.addStretch(1)
-            return wrap
+            return field_with_help(
+                field, help_title, help_text, parent=self, stretch=True
+            )
 
         def _group(title: str, rows: list) -> QGroupBox:
             box = QGroupBox(title)
@@ -752,6 +728,7 @@ class SettingsDialog(QDialog):
         startup = _group("Startup", [
             ("Reopen last folder:", self._reopen_last),
             ("Restore window size:", self._restore_geometry),
+            ("Splash screen:", self._show_splash),
         ])
         cytogenetics = _group("Cytogenetic images", [
             ("Experimenter:", self._cyto_experimenter),
@@ -900,6 +877,7 @@ class SettingsDialog(QDialog):
         save_ui_thread_reserve(self._ui_thread_reserve.value())
         save_reopen_last_folder(self._reopen_last.isChecked())
         save_restore_geometry(self._restore_geometry.isChecked())
+        save_show_splash(self._show_splash.isChecked())
         save_cyto_experimenter(self._cyto_experimenter.text())
         save_verbose_logging(self._verbose_logging.isChecked())
         base_dir_text = self._blast_db_base_dir.text().strip()

@@ -331,8 +331,12 @@ from repeatviewer.plugins.custom_command import (
 )
 from repeatviewer.backends.sequence_viewer import open_fasta
 from repeatviewer.job_options import (
+    ALIGNER_FASTGA,
     ALIGNER_MAFFT,
     ALIGNER_MUSCLE,
+    ALIGNERS,
+    FASTGA_MODE_PAIRS,
+    FASTGA_MODE_REFERENCE,
     ALIGN_MODE_COMBINED,
     BLAST_PROGRAM_BLASTN,
     BLAST_PROGRAM_BLASTP,
@@ -344,6 +348,7 @@ from repeatviewer.job_options import (
     TEAID_RIGHT_CLICK_DIALOG,
     MSA_CLEAN_RIGHT_CLICK_DIALOG,
     TE_ANNOTATION_RIGHT_CLICK_DIALOG,
+    TREE_RIGHT_CLICK_DIALOG,
     load_align_options,
     load_blast_options,
     load_consensus_options,
@@ -360,6 +365,8 @@ from repeatviewer.job_options import (
     load_te_confusion_matrix_benchmark_options,
     load_te_library_benchmark_options,
     load_tsd_search_options,
+    load_tree_options,
+    load_map_options,
     msa_clean_method_description,
     save_align_options,
     save_blast_options,
@@ -377,6 +384,9 @@ from repeatviewer.job_options import (
     save_te_confusion_matrix_benchmark_options,
     save_te_library_benchmark_options,
     save_tsd_search_options,
+    save_tree_options,
+    save_map_options,
+    MAP_RIGHT_CLICK_DIALOG,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
     MsaPlotJobOptions,
@@ -540,6 +550,8 @@ _TOOLBAR_TOOLTIPS = {
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
     "fastga": "FastGA whole-genome alignment (self-comparison one-by-one by default; optional all-pairs)",
+    "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
+    "map_reference": "Map the selected sequences or reads to a reference (MAFFT / minimap2 / Bowtie2)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
@@ -734,9 +746,10 @@ class AlignWorker(QObject):
 class FastGaWorker(QObject):
     """Run FastGA alignment(s) off the UI thread.
 
-    Default: self-compare each selected FASTA. Pairwise mode with two files
-    compares them against each other. Indexing a large genome takes minutes,
-    so progress is reported and cancellation is polled throughout.
+    Modes (FastGaOptions.mode): each file against itself, all pairs into one
+    file, or each file against a reference (indexed once). The loop lives in
+    ``backends.fastga_dotplot.run_fastga_batch``. Indexing a large genome takes
+    minutes, so progress is reported and cancellation is polled throughout.
     """
 
     progress = Signal(int, str)
@@ -760,20 +773,16 @@ class FastGaWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        from itertools import combinations
-        import tempfile
-        from pathlib import Path as _Path
-
-        from repeatviewer.backends.fastga_dotplot import (
-            FORMAT_ALN,
-            FORMAT_PAF,
-            output_suffix_for_format,
-            run_fastga_alignment,
-        )
+        from repeatviewer.backends.fastga_dotplot import run_fastga_batch
 
         try:
+            step = [1]
+
+            def _on_step(n: int) -> None:
+                step[0] = max(1, int(n))
+
             def _progress(message: str) -> None:
-                self.progress.emit(max(1, getattr(self, "_step", 1)), message)
+                self.progress.emit(step[0], message)
 
             def _log(message: str) -> None:
                 self.log_line.emit(str(message))
@@ -781,104 +790,104 @@ class FastGaWorker(QObject):
             def _cancelled() -> bool:
                 return bool(self._cancel is not None and self._cancel.requested)
 
-            temp_raw = str(getattr(self._options, "temp_dir", "") or "").strip()
-            temp_dir = _Path(temp_raw).expanduser() if temp_raw else None
-            if temp_dir is not None:
-                temp_dir.mkdir(parents=True, exist_ok=True)
+            created = run_fastga_batch(
+                self._seq_files,
+                self._options,
+                progress=_progress,
+                on_log=_log,
+                is_cancelled=_cancelled,
+                on_step=_on_step,
+            )
+            self.finished.emit([str(p) for p in created])
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(_format_cli_failure(exc))
 
-            pairwise = bool(getattr(self._options, "pairwise", False))
-            fmt = self._options.output_format
-            suffix = output_suffix_for_format(fmt)
-            created: list[str] = []
 
-            if pairwise and len(self._seq_files) >= 2:
-                # All unique unordered pairs → one combined alignment file.
-                # Binary .1aln cannot be concatenated; stream PAF instead.
-                pair_jobs = list(combinations(self._seq_files, 2))
-                combine_fmt = FORMAT_PAF if fmt == FORMAT_ALN else fmt
-                combine_suffix = output_suffix_for_format(combine_fmt)
-                first = self._seq_files[0]
-                out_path = first.parent / f"{first.name}_multi_FastGA{combine_suffix}"
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                chunks: list[str] = []
-                for index, (source1, source2) in enumerate(pair_jobs, start=1):
-                    self._step = index
-                    label = f"{source1.name} vs {source2.name}"
-                    _log(f"—— Pair {index}/{len(pair_jobs)}: {label} ——")
-                    with tempfile.NamedTemporaryFile(
-                        prefix=".repeatviewer_fastga_pair_",
-                        suffix=combine_suffix,
-                        dir=str(first.parent),
-                        delete=False,
-                    ) as tmp:
-                        tmp_path = _Path(tmp.name)
-                    try:
-                        written = run_fastga_alignment(
-                            source1,
-                            source2,
-                            tmp_path,
-                            fmt=combine_fmt,
-                            threads=self._options.threads,
-                            min_identity=self._options.min_identity,
-                            min_length=self._options.min_length,
-                            seed_freq=getattr(self._options, "seed_freq", 200),
-                            chain_coverage=getattr(
-                                self._options, "chain_coverage", 85
-                            ),
-                            chain_gap=getattr(self._options, "chain_gap", 1000),
-                            symmetric=self._options.symmetric,
-                            keep_index=self._options.keep_index,
-                            no_soft_mask=getattr(
-                                self._options, "no_soft_mask", False
-                            ),
-                            temp_dir=temp_dir,
-                            progress=_progress,
-                            on_log=_log,
-                            is_cancelled=_cancelled,
-                        )
-                        text = written.read_text(encoding="utf-8")
-                        if text and not text.endswith("\n"):
-                            text += "\n"
-                        if text:
-                            chunks.append(text)
-                    finally:
-                        try:
-                            tmp_path.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                out_path.write_text("".join(chunks), encoding="utf-8")
-                created.append(str(out_path))
-            else:
-                # Default: self-compare each selected FASTA one by one.
-                jobs = [(path, None) for path in self._seq_files]
-                for index, (source1, source2) in enumerate(jobs, start=1):
-                    self._step = index
-                    base = f"{source1.name}_FastGA"
-                    out_path = source1.parent / f"{base}{suffix}"
-                    if len(jobs) > 1:
-                        _log(f"—— Job {index}/{len(jobs)}: {base} ——")
-                    written = run_fastga_alignment(
-                        source1,
-                        source2,
-                        out_path,
-                        fmt=fmt,
-                        threads=self._options.threads,
-                        min_identity=self._options.min_identity,
-                        min_length=self._options.min_length,
-                        seed_freq=getattr(self._options, "seed_freq", 200),
-                        chain_coverage=getattr(self._options, "chain_coverage", 85),
-                        chain_gap=getattr(self._options, "chain_gap", 1000),
-                        symmetric=self._options.symmetric,
-                        keep_index=self._options.keep_index,
-                        no_soft_mask=getattr(self._options, "no_soft_mask", False),
-                        temp_dir=temp_dir,
-                        progress=_progress,
-                        on_log=_log,
-                        is_cancelled=_cancelled,
-                    )
-                    created.append(str(written))
+class TreeWorker(QObject):
+    """Build a phylogenetic tree off the UI thread (Tools → Tree)."""
 
-            self.finished.emit(created)
+    progress = Signal(int, str)
+    log_line = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, seq_files: list[Path], options, *, cancel=None) -> None:
+        super().__init__()
+        self._seq_files = list(seq_files)
+        self._options = options
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from repeatviewer.backends.tree_builder import TreeBuildError, build_tree_run
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
+        steps = {"Aligning": 1, "Building": 2, "Drawing": 3}
+
+        def _progress(message: str) -> None:
+            step = next((v for k, v in steps.items() if message.startswith(k)), 1)
+            self.progress.emit(step, message)
+            self.log_line.emit(message)
+
+        try:
+            with process_log_sink(_log):
+                run_dir, files, report = build_tree_run(
+                    self._seq_files, self._options, progress=_progress, cancel=self._cancel
+                )
+            self.finished.emit({"details_dir": str(run_dir), "files": [str(f) for f in files],
+                                "report": str(report)})
+        except JobCancelledError:
+            self.failed.emit(CANCELLED_MESSAGE)
+        except TreeBuildError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(_format_cli_failure(exc))
+
+
+class MapReferenceWorker(QObject):
+    """Map sequences or reads to a reference off the UI thread (Tools → Map to Reference)."""
+
+    progress = Signal(int, str)
+    log_line = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, seq_files: list[Path], options, *, cancel=None) -> None:
+        super().__init__()
+        self._seq_files = list(seq_files)
+        self._options = options
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from repeatviewer.backends.map_reference import MapReferenceError, run_mapping
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
+        steps = {"Reading": 1, "Indexing": 1, "Placing": 2, "Mapping": 2, "Collecting": 3,
+                 "Consensus": 3, "Writing": 4}
+
+        def _progress(message: str) -> None:
+            step = next((v for k, v in steps.items() if message.startswith(k)), 1)
+            self.progress.emit(step, message)
+            self.log_line.emit(message)
+
+        try:
+            with process_log_sink(_log):
+                rvmap, files, report = run_mapping(
+                    self._seq_files, self._options, progress=_progress, cancel=self._cancel
+                )
+            self.finished.emit({"rvmap": str(rvmap), "files": [str(f) for f in files],
+                                "report": str(report)})
+        except JobCancelledError:
+            self.failed.emit(CANCELLED_MESSAGE)
+        except MapReferenceError as exc:
+            self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - surface to the UI
             self.failed.emit(_format_cli_failure(exc))
 
@@ -889,11 +898,18 @@ class RepeatQuantifyWorker(QObject):
     progress = Signal(int, str)
     finished = Signal(object)
     failed = Signal(str)
+    # A new saved BLAST database (BlastDatabase) built for a genome; the main
+    # window registers it so Add/Manage databases and other tools reuse it.
+    database_created = Signal(object)
 
     def __init__(
         self, library: Path, targets: list[Path], *, engine: str, threads: int,
         params: dict | None = None, cancel=None,
         output_base: Path | None = None, stamp: str | None = None,
+        blast_databases: list | None = None,
+        save_blast_index: bool = False,
+        blast_db_base_dir: Path | None = None,
+        use_system_blast: bool = False,
     ) -> None:
         super().__init__()
         from repeatviewer.backends.repeat_quantify import run_stamp
@@ -904,6 +920,11 @@ class RepeatQuantifyWorker(QObject):
         self._threads = threads
         self._params = params or {}
         self._cancel = cancel
+        # Saved BLAST databases to reuse; new ones are added as they are built.
+        self._blast_databases = list(blast_databases or [])
+        self._save_blast_index = bool(save_blast_index)
+        self._blast_db_base_dir = Path(blast_db_base_dir) if blast_db_base_dir else None
+        self._use_system_blast = bool(use_system_blast)
         # None = a new folder next to each genome; otherwise new folders inside it.
         self._output_base = Path(output_base) if output_base else None
         # One stamp for the whole batch, taken when Run was clicked.
@@ -918,6 +939,7 @@ class RepeatQuantifyWorker(QObject):
             create_repeat_quant_output_dir,
             library_duplicate_warnings,
             quantify_library,
+            resolve_blast_database,
             write_landscape_html,
             write_run_parameters,
             write_summary_html,
@@ -949,12 +971,17 @@ class RepeatQuantifyWorker(QObject):
                 out_dir = create_repeat_quant_output_dir(
                     target, self._stamp, self._output_base
                 )
+                params = dict(self._params)
+                if self._engine in ("blastn", "both"):
+                    db_prefix = self._blast_database_for(target, index, resolve_blast_database)
+                    if db_prefix is not None:
+                        params["blast_db_prefix"] = str(db_prefix)
                 run_info = dict(
                     library_fasta=self._library,
                     target_fasta=target,
                     engine=self._engine,
                     threads=self._threads,
-                    params=self._params,
+                    params=params,
                     started=datetime.now(),
                 )
                 write_run_parameters(out_dir, **run_info)
@@ -964,14 +991,17 @@ class RepeatQuantifyWorker(QObject):
                     out_dir,
                     engine=self._engine,
                     threads=self._threads,
+                    use_system_blast=self._use_system_blast,
                     cancel=self._cancel,
-                    **self._params,
+                    **params,
                 )
                 summary = write_summary_html(
                     results,
                     out_dir / f"{target.name}_repeat_quant.html",
                     target_label=target.name,
                     warnings=lib_warnings,
+                    library_fasta=self._library,
+                    run_info=params,
                 )
                 outputs.append(str(summary))
                 for result in results:
@@ -995,6 +1025,29 @@ class RepeatQuantifyWorker(QObject):
             message = _format_cli_failure(exc)
             _record("failed", message)
             self.failed.emit(message)
+
+    def _blast_database_for(self, target: Path, index: int, resolve) -> Path | None:
+        """Saved BLAST database prefix for ``target``, building one if asked."""
+        from repeatviewer.backends.database_prepare import saved_blast_database_for
+
+        if (
+            self._save_blast_index
+            and saved_blast_database_for(target, self._blast_databases) is None
+        ):
+            self.progress.emit(index, f"Indexing {target.name} as a BLAST database…")
+        prefix, created = resolve(
+            target,
+            self._blast_databases,
+            save_index=self._save_blast_index,
+            base_dir=self._blast_db_base_dir,
+            use_system_blast=self._use_system_blast,
+        )
+        if created is not None:
+            self._blast_databases.append(created)
+            self.database_created.emit(created)
+        if self._cancel is not None:
+            self._cancel.check()  # Stop pressed while makeblastdb ran
+        return prefix
 
 
 class GenomeMapWorker(QObject):
@@ -2010,6 +2063,8 @@ class MainWindow(QMainWindow):
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
         self._fastga_options = load_fastga_options()
+        self._tree_options = load_tree_options()
+        self._map_options = load_map_options()
         self._extend_options = load_extend_options()
         self._tsd_search_options = load_tsd_search_options()
         self._teaid_options = load_teaid_options()
@@ -3062,6 +3117,8 @@ class MainWindow(QMainWindow):
         self._preview_tabs.setObjectName("PreviewTabs")
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
         self._preview_tabs.sequenceExtracted.connect(self._on_preview_sequence_extracted)
+        self._preview_tabs.fileWritten.connect(self._on_preview_file_written)
+        self._preview_tabs.openFileRequested.connect(self._on_preview_open_requested)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         preview_layout.addWidget(self._preview_tabs, stretch=1)
         self._preview_host.setMinimumHeight(120)
@@ -3242,6 +3299,7 @@ class MainWindow(QMainWindow):
         del skip_default
         menu.addAction("MAFFT", self._run_mafft_default)
         menu.addAction("MUSCLE", self._run_muscle_default)
+        menu.addAction("FastGA", self._run_fastga_default)
         menu.addAction(
             "Align all selected files in one MSA",
             self._align_selected_combined,
@@ -3850,7 +3908,7 @@ class MainWindow(QMainWindow):
             if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
         ]
 
-    def _selected_files_for_fastga(self, options=None) -> list[Path]:
+    def _selected_files_for_fastga(self, options=None, files=None) -> list[Path]:
         from repeatviewer.backends.fastga_dotplot import fastga_available, install_hint
 
         if not fastga_available():
@@ -3861,30 +3919,61 @@ class MainWindow(QMainWindow):
             )
             return []
         opts = options if options is not None else self._fastga_options
-        pairwise = bool(getattr(opts, "pairwise", False))
-        files = self._fastga_candidate_files()
+        mode = getattr(opts, "mode", "self")
+        files = list(files) if files else self._fastga_candidate_files()
+        if mode == FASTGA_MODE_REFERENCE:
+            from repeatviewer.backends.fastga_dotplot import reference_queries
+
+            reference = Path(opts.reference_fasta) if opts.reference_fasta else None
+            if reference is None or not reference.is_file():
+                QMessageBox.information(
+                    self,
+                    "FastGA",
+                    "Choose the reference first: Tools → Align → Change alignment "
+                    "parameters → FastGA tab, then click the reference in Files."
+                    if reference is None
+                    else f"The reference was not found:\n{reference}",
+                )
+                return []
+            if not reference_queries(files, reference):
+                QMessageBox.information(
+                    self,
+                    "FastGA",
+                    f"Select the FASTA files to compare with {reference.name} "
+                    "(the reference itself is skipped).",
+                )
+                return []
+            return files
         if not files:
             QMessageBox.information(
                 self,
                 "FastGA",
-                "Select one or more FASTA files for self-comparison (one by one), "
-                "or enable Do each pair comparison and select two or more FASTA files.",
+                "Select one or more FASTA files: each is compared against itself. "
+                "For other modes see Tools → Align → Change alignment parameters "
+                "→ FastGA tab.",
             )
             return []
-        if pairwise and len(files) < 2:
+        if mode == FASTGA_MODE_PAIRS and len(files) < 2:
             QMessageBox.information(
                 self,
                 "FastGA",
-                "Do each pair comparison needs at least two FASTA files.\n"
-                "Select more files, or turn the option off for self-comparison.",
+                "All pairs needs two or more selected FASTA files.\n"
+                "Select more files, or choose another mode in the FastGA tab.",
             )
             return []
         return files
 
     def _run_fastga_default(self) -> None:
-        files = self._selected_files_for_fastga(self._fastga_options)
+        opts = self._fastga_options
+        if getattr(opts, "mode", "self") == FASTGA_MODE_REFERENCE and not (
+            opts.reference_fasta and Path(opts.reference_fasta).is_file()
+        ):
+            # Nothing to run against yet: show the tab where it is chosen.
+            self._open_align_dialog(initial_tab=ALIGNER_FASTGA)
+            return
+        files = self._selected_files_for_fastga(opts)
         if files:
-            self._start_fastga_job(files, self._fastga_options)
+            self._start_fastga_job(files, opts)
 
     def _quick_fastga_right_click(self) -> None:
         """Right-click FastGA: run or reopen dialog per Options tab."""
@@ -3894,25 +3983,307 @@ class MainWindow(QMainWindow):
         self._run_fastga_default()
 
     def _open_fastga_dialog(self) -> None:
-        """Click FastGA → parameters dialog (same Cancel / Save / Run pattern as BLAST)."""
-        from repeatviewer.views.tool_dialogs import FastGaParamsDialog
+        """FastGA button / Tools → FastGA: the Align window on its FastGA tab."""
+        self._open_align_dialog(initial_tab=ALIGNER_FASTGA)
 
-        candidates = self._fastga_candidate_files()
-        dialog = FastGaParamsDialog(
-            initial=self._fastga_options,
-            file_count=len(candidates),
+    # ------------------------------------------------------------------ Tree
+
+    def _populate_tree_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        if not skip_default:
+            menu.addAction("Tree with default parameters", self._run_tree_default)
+        menu.addSeparator()
+        # Settings can be changed without a selection (Run then asks for one).
+        menu.addAction(
+            "Change Tree parameters", lambda: self._open_tree_dialog(require_selection=False)
+        )
+        menu.addSeparator()
+        menu.addAction(
+            "Methylation-masked sensitivity run (CG and CHG)", self._run_tree_methylation_masked
+        )
+        menu.addAction("RT-domain tree (REXdb lineages)", self._run_tree_rt_domains)
+
+    def _run_tree_methylation_masked(self) -> None:
+        """Saved settings, plus a second tree without CG/CHG columns, compared in the report."""
+        from dataclasses import replace
+
+        from repeatviewer.backends.methylation_mask import MASK_CG_CHG
+
+        files = self._selected_files_for_tree()
+        if files:
+            self._start_tree_job(files, replace(self._tree_options, methylation_mask=MASK_CG_CHG))
+
+    def _tree_candidate_files(self) -> list[Path]:
+        """Selected FASTA files (several files are combined into one tree). No UI."""
+        return [
+            p for p in self._selected_files()
+            if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+
+    def _selected_files_for_tree(self) -> list[Path]:
+        files = self._tree_candidate_files()
+        if not files:
+            QMessageBox.information(
+                self,
+                "Tree",
+                "Select one or more FASTA files in the file panel first.\n"
+                "Several selected files are combined into one tree.",
+            )
+        return files
+
+    def _run_tree_default(self) -> None:
+        files = self._selected_files_for_tree()
+        if files:
+            self._start_tree_job(files, self._tree_options)
+
+    def _quick_tree_right_click(self) -> None:
+        """Right-click Tree: run with saved settings or reopen the dialog (Options tab)."""
+        if self._tree_options.right_click_action == TREE_RIGHT_CLICK_DIALOG:
+            self._open_tree_dialog()
+            return
+        self._run_tree_default()
+
+    def _open_tree_dialog(self, *, require_selection: bool = True) -> None:
+        """Click Tree → parameters dialog (Cancel / Save / Run).
+
+        Without a FASTA selection the toolbar click only shows a message; the
+        Tools → Tree → Change Tree parameters entry still opens the dialog."""
+        from repeatviewer.views.tree_dialog import TreeParamsDialog
+
+        files = self._tree_candidate_files()
+        if require_selection and not files:
+            self._selected_files_for_tree()  # shows the "select a FASTA file" message
+            return
+        dialog = TreeParamsDialog(
+            initial=self._tree_options,
+            files=files,
             parent=self,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+
+        def _accepted(d) -> None:
+            self._tree_options = d.options()
+            save_tree_options(self._tree_options)
+            if not d.should_run():
+                self._set_status_message("Tree settings saved", 4000)
+                return
+            # Non-modal: clicking REXdb in Files changes the selection, so the
+            # files chosen when the dialog opened are used.
+            run_files = files or [
+                p for p in self._selected_files_for_tree()
+                if str(p) != self._tree_options.rexdb_fasta
+            ]
+            if run_files:
+                self._start_tree_job(run_files, self._tree_options)
+
+        # Non-modal so a click in Files can fill the REXdb path (apply_path_from_panel).
+        self._present_te_viz_dialog(dialog, _accepted)
+
+    def _run_tree_rt_domains(self) -> None:
+        """Saved settings, with the sequences replaced by their RT domains (REXdb)."""
+        from repeatviewer.backends.rt_domains import looks_like_rexdb
+        from repeatviewer.job_options import TREE_SEQ_RT
+
+        rexdb = self._tree_options.rexdb_fasta
+        if not rexdb or not looks_like_rexdb(Path(rexdb)):
+            QMessageBox.information(
+                self,
+                "RT-domain tree",
+                "Choose REXdb first: Tree parameters → Alignment tab → REXdb.\n\n"
+                "Download Viridiplantae_v4.0.fasta and Viridiplantae_v4.0.classification "
+                "from github.com/repeatexplorer/rexdb into one folder.",
+            )
+            self._open_tree_dialog(require_selection=False)
             return
-        self._fastga_options = dialog.options()
-        save_fastga_options(self._fastga_options)
-        if dialog.should_run():
-            files = self._selected_files_for_fastga(self._fastga_options)
-            if files:
-                self._start_fastga_job(files, self._fastga_options)
+        files = self._selected_files_for_tree()
+        if files:
+            self._start_tree_job(files, replace(self._tree_options, sequence_mode=TREE_SEQ_RT))
+
+    def _start_tree_job(self, files: list[Path], options) -> None:
+        title = (f"Tree ({files[0].name})" if len(files) == 1
+                 else f"Tree ({len(files)} files combined)")
+        worker = TreeWorker(files, options, cancel=self._job_cancel)
+        self._attach_process_monitor(
+            worker,
+            title=title,
+            enabled=bool(options.show_process_window),
+            tool_key="tree",
+            mirror_progress=False,
+        )
+        self._start_background_job(
+            worker,
+            job_title=title,
+            total_steps=3,
+            source_files=files,
+            on_finished=self._on_tree_finished,
+            on_failed=self._on_tree_failed,
+        )
+
+    @Slot(object)
+    def _on_tree_finished(self, result) -> None:
+        report = Path(result["report"])
+        created = [Path(p) for p in result["files"] if Path(p).is_file()]
+        if self._current_folder:
+            # Only the tree sits next to the input (green) and opens in the tree
+            # viewer (deep blue); the report and supporting files are in the
+            # new <input>_tree_details folder.
+            self._refresh_subfolders_under(self._current_folder)
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created,
+                source_files=getattr(self, "_last_job_source_files", []),
+                open_preview=False,
+            )
+        tree = next((p for p in created if p.name.endswith(".treefile")
+                     and not p.name.endswith("_masked.treefile")), None)
+        opened = tree if tree is not None else (report if report.is_file() else None)
+        if opened is not None:
+            self._auto_open_outputs([opened])
+        self._set_status_message(
+            f"Tree completed — {opened.name if opened else report.name} "
+            f"(report in {report.parent.name})", 12000, override_file_link=True
+        )
+
+    @Slot(str)
+    def _on_tree_failed(self, error: str) -> None:
+        if error.strip() == CANCELLED_MESSAGE:
+            return
+        QMessageBox.warning(self, "Tree failed", error.strip() or "Unknown error.")
+
+    # ------------------------------------------------------------------ Map to Reference
+
+    _MAP_SUFFIXES = (".fa", ".fasta", ".fna", ".fas", ".fsa", ".fq", ".fastq")
+
+    def _populate_map_menu(self, menu: QMenu) -> None:
+        menu.addAction("Map with default parameters", self._run_map_default)
+        menu.addSeparator()
+        # Settings can be changed without a selection (Run then asks for one).
+        menu.addAction(
+            "Change Map to Reference parameters",
+            lambda: self._open_map_dialog(require_selection=False),
+        )
+
+    def _map_candidate_files(self) -> list[Path]:
+        """Selected FASTA / FASTQ files (gzipped too), without the reference. No UI."""
+        reference = str(self._map_options.reference_fasta or "")
+        out = []
+        for p in self._selected_files():
+            name = p.name.lower()
+            if name.endswith(".gz"):
+                name = name[:-3]
+            if p.is_file() and name.endswith(self._MAP_SUFFIXES) and str(p) != reference:
+                out.append(p)
+        return out
+
+    def _selected_files_for_map(self) -> list[Path]:
+        files = self._map_candidate_files()
+        if not files:
+            QMessageBox.information(
+                self,
+                "Map to Reference",
+                "Select the FASTA or FASTQ files to map in the file panel first.\n"
+                "The reference is chosen in the Map to Reference window.",
+            )
+        return files
+
+    def _run_map_default(self) -> None:
+        if not self._map_options.reference_fasta:
+            self._open_map_dialog()
+            return
+        files = self._selected_files_for_map()
+        if files:
+            self._start_map_job(files, self._map_options)
+
+    def _quick_map_right_click(self) -> None:
+        """Right-click: map with saved settings, or open the dialog (Options tab)."""
+        if self._map_options.right_click_action == MAP_RIGHT_CLICK_DIALOG:
+            self._open_map_dialog()
+            return
+        self._run_map_default()
+
+    def _open_map_dialog(self, *, require_selection: bool = True) -> None:
+        """Map to Reference → parameters dialog (Cancel / Save / Run), non-modal so a
+        click in Files fills the Reference field."""
+        from repeatviewer.views.map_reference_dialog import MapReferenceDialog
+
+        files = self._map_candidate_files()
+        if require_selection and not files:
+            self._selected_files_for_map()  # shows the "select files" message
+            return
+        dialog = MapReferenceDialog(initial=self._map_options, files=files, parent=self)
+
+        def _accepted(d) -> None:
+            self._map_options = d.options()
+            save_map_options(self._map_options)
+            if not d.should_run():
+                self._set_status_message("Map to Reference settings saved", 4000)
+                return
+            reference = self._map_options.reference_fasta
+            run_files = [p for p in (files or self._selected_files_for_map())
+                         if str(p) != reference]
+            if not reference:
+                QMessageBox.information(self, "Map to Reference",
+                                        "Choose a reference first (Mapping tab).")
+                return
+            if run_files:
+                self._start_map_job(run_files, self._map_options)
+
+        self._present_te_viz_dialog(dialog, _accepted)
+
+    def _start_map_job(self, files: list[Path], options) -> None:
+        ref = Path(options.reference_fasta).name if options.reference_fasta else "reference"
+        title = (f"Map {files[0].name} to {ref}" if len(files) == 1
+                 else f"Map {len(files)} files to {ref}")
+        worker = MapReferenceWorker(files, options, cancel=self._job_cancel)
+        self._attach_process_monitor(
+            worker,
+            title=title,
+            enabled=bool(options.show_process_window),
+            tool_key="map_reference",
+            mirror_progress=False,
+        )
+        self._start_background_job(
+            worker,
+            job_title=title,
+            total_steps=4,
+            source_files=files,
+            on_finished=self._on_map_finished,
+            on_failed=self._on_map_failed,
+        )
+
+    @Slot(object)
+    def _on_map_finished(self, result) -> None:
+        rvmap = Path(result["rvmap"])
+        created = [Path(p) for p in result["files"] if Path(p).is_file()]
+        if self._current_folder:
+            # The .rvmap sits next to the input (green) and opens in the contig view
+            # (deep blue); everything else is in <input>_map_details.
+            self._refresh_subfolders_under(self._current_folder)
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created,
+                source_files=getattr(self, "_last_job_source_files", []),
+                open_preview=False,
+            )
+        if rvmap.is_file():
+            self._auto_open_outputs([rvmap])
+        self._set_status_message(
+            f"Map to Reference completed — {rvmap.name} (report in {rvmap.stem}_details)",
+            12000, override_file_link=True,
+        )
+
+    @Slot(str)
+    def _on_map_failed(self, error: str) -> None:
+        if error.strip() == CANCELLED_MESSAGE:
+            return
+        QMessageBox.warning(self, "Map to Reference failed", error.strip() or "Unknown error.")
+
+    def _on_preview_open_requested(self, path: object) -> None:
+        """A result file asked for from a preview (contig view → Results menu)."""
+        if not isinstance(path, Path) or not path.is_file():
+            return
+        if path.suffix.lower() in _FASTA_SUFFIXES:
+            self._open_in_sequence_viewer(path)
         else:
-            self._set_status_message("FastGA settings saved", 4000)
+            self._open_preview_tab(path, replace=False)
 
     def _attach_process_monitor(
         self,
@@ -4215,17 +4586,32 @@ class MainWindow(QMainWindow):
         self._rename_paths_with_spaces(targets, kind="genome")
 
     def _start_fastga_job(self, files: list[Path], options) -> None:
-        pairwise = bool(getattr(options, "pairwise", False))
-        if pairwise and len(files) >= 2:
+        from repeatviewer.backends.fastga_dotplot import (
+            fastga_step_count,
+            reference_queries,
+        )
+
+        mode = getattr(options, "mode", "self")
+        total_steps = fastga_step_count(files, options)
+        source_files = list(files)
+        if mode == FASTGA_MODE_PAIRS and len(files) >= 2:
             pair_count = len(files) * (len(files) - 1) // 2
             title = f"FastGA ({pair_count} pair(s) → multi)"
-            total_steps = max(1, pair_count)
+        elif mode == FASTGA_MODE_REFERENCE:
+            reference = Path(options.reference_fasta)
+            queries = reference_queries(files, reference)
+            files = queries
+            # Queries and reference are both inputs (blue highlight, rule 4).
+            source_files = [*queries, reference]
+            title = (
+                f"FastGA ({queries[0].name} vs {reference.name})"
+                if len(queries) == 1
+                else f"FastGA ({len(queries)} files vs {reference.name})"
+            )
         elif len(files) == 1:
             title = f"FastGA ({files[0].name} self)"
-            total_steps = 1
         else:
             title = f"FastGA ({len(files)} self-comparisons)"
-            total_steps = len(files)
         show_log = bool(getattr(options, "show_process_window", False))
         worker = FastGaWorker(
             files,
@@ -4244,7 +4630,7 @@ class MainWindow(QMainWindow):
             worker,
             job_title=title,
             total_steps=total_steps,
-            source_files=files,
+            source_files=source_files,
             on_finished=self._on_fastga_finished,
             on_failed=self._on_fastga_failed,
         )
@@ -4303,17 +4689,28 @@ class MainWindow(QMainWindow):
                         "BLASTn engine instead.",
                     )
                     return
+            from repeatviewer.app_preferences import load_blast_db_base_dir
+            from repeatviewer.database_settings import (
+                reload_blast_databases_into_project,
+            )
+
+            worker = RepeatQuantifyWorker(
+                Path(library),
+                targets,
+                engine=engine,
+                threads=self._project.batch_workers,
+                params=params,
+                cancel=self._job_cancel,
+                output_base=dialog.output_dir(),
+                stamp=dialog.run_stamp(),
+                blast_databases=reload_blast_databases_into_project(self._project),
+                save_blast_index=dialog.save_blast_index(),
+                blast_db_base_dir=load_blast_db_base_dir(),
+                use_system_blast=self._project.use_system_blast,
+            )
+            worker.database_created.connect(self._register_blast_database)
             self._start_background_job(
-                RepeatQuantifyWorker(
-                    Path(library),
-                    targets,
-                    engine=engine,
-                    threads=self._project.batch_workers,
-                    params=params,
-                    cancel=self._job_cancel,
-                    output_base=dialog.output_dir(),
-                    stamp=dialog.run_stamp(),
-                ),
+                worker,
                 job_title="Repeat quantify",
                 # 1 = the app's plain "Repeat quantify… <genome>" status line; a
                 # count > 1 would switch the status bar to the batch progress bar.
@@ -4323,14 +4720,33 @@ class MainWindow(QMainWindow):
                 on_failed=self._on_repeat_quantify_failed,
             )
 
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+
         dialog = RepeatQuantifyDialog(
             start_dir=start_dir,
             initial=load_repeat_quantify_options(),
+            blast_databases=reload_blast_databases_into_project(self._project),
             parent=self,
         )
         # Same non-modal presentation as the TE visualization dialogs, so the
         # Folders and Files panels stay clickable while it is open.
         self._present_te_viz_dialog(dialog, _on_accept)
+
+    @Slot(object)
+    def _register_blast_database(self, db) -> None:
+        """Save a BLAST database a tool built, so Add/Manage and every tool see it."""
+        from repeatviewer.database_settings import (
+            load_blast_databases_from_settings,
+            save_blast_databases_to_settings,
+        )
+
+        databases = load_blast_databases_from_settings()
+        prefix = str(Path(db.db_prefix_path))
+        if any(str(Path(d.db_prefix_path)) == prefix for d in databases):
+            return
+        databases.append(db)
+        save_blast_databases_to_settings(databases)
+        self._project.blast_databases = databases
 
     @Slot(object)
     def _on_repeat_quantify_finished(self, outputs) -> None:
@@ -4518,6 +4934,8 @@ class MainWindow(QMainWindow):
         self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_fastga_menu(tools_menu.addMenu("Fast&GA"))
+        self._populate_tree_menu(tools_menu.addMenu("T&ree"))
+        self._populate_map_menu(tools_menu.addMenu("&Map to Reference"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
@@ -5192,7 +5610,7 @@ class MainWindow(QMainWindow):
                 "Align",
                 self._open_align_dialog,
                 tooltip=(
-                    "Click: set parameters and run (MAFFT or MUSCLE by tab).\n"
+                    "Click: set parameters and run (MAFFT, MUSCLE or FastGA by tab).\n"
                     "Right-click: run the aligner chosen in the Options tab."
                 ),
                 right_click_slot=self._quick_align_right_click,
@@ -5203,10 +5621,34 @@ class MainWindow(QMainWindow):
                 "FastGA",
                 self._open_fastga_dialog,
                 tooltip=(
-                    "Click: set parameters and run.\n"
+                    "Click: the Align window on its FastGA tab.\n"
                     "Right-click: action chosen in the Options tab."
                 ),
                 right_click_slot=self._quick_fastga_right_click,
+            )
+        elif tool_id == "tree":
+            self._add_toolbar_action_button(
+                bar,
+                "Tree",
+                lambda: self._open_tree_dialog(),
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: build with saved parameters)."
+                ),
+                right_click_slot=self._quick_tree_right_click,
+            )
+        elif tool_id == "map_reference":
+            self._add_toolbar_action_button(
+                bar,
+                "Map to Reference",
+                lambda: self._open_map_dialog(),
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: map with saved parameters)."
+                ),
+                right_click_slot=self._quick_map_right_click,
             )
         elif tool_id == "repeat_quantify":
             self._add_toolbar_text_action(
@@ -6275,6 +6717,10 @@ class MainWindow(QMainWindow):
         # Show the new FASTA in Files, but keep the current file selected/previewed.
         self._sync_sidecar_in_file_list(path, select=False)
 
+    def _on_preview_file_written(self, path: object) -> None:
+        # Exported tree figure etc.: show it in Files, keep the current preview.
+        self._sync_sidecar_in_file_list(path, select=False)
+
     def _sync_sidecar_in_file_list(self, path: object, *, select: bool) -> None:
         if not isinstance(path, Path) or not self._current_folder:
             return
@@ -7217,6 +7663,8 @@ class MainWindow(QMainWindow):
             return
         if self._plugin_run_dialog is not None and self._plugin_run_dialog.isVisible():
             return
+        if self._tree_trait_dialog_open():
+            return  # a click fills the trait dialog; keep the tree in Preview
 
         path = self._preview_path_from_item(current)
         if path is None:
@@ -7715,6 +8163,24 @@ class MainWindow(QMainWindow):
             self._sync_define_database_dialog_from_files(panel_path)
             self._sync_add_annotation_dialog_from_files(panel_path)
             self._sync_add_blast_database_dialog_from_files(panel_path)
+            self._sync_tree_trait_dialog_from_files(panel_path)
+
+    def _open_tree_panels(self):
+        from repeatviewer.widgets.preview_tabs import FilePreviewPage
+
+        for index in range(self._preview_tabs.count()):
+            page = self._preview_tabs.widget(index)
+            if isinstance(page, FilePreviewPage) and page.tree_panel() is not None:
+                yield page.tree_panel()
+
+    def _tree_trait_dialog_open(self) -> bool:
+        return any(panel.trait_dialog_open() for panel in self._open_tree_panels())
+
+    def _sync_tree_trait_dialog_from_files(self, clicked_path: Path) -> None:
+        """Tree view → Trait table dialog: a clicked file fills its path field."""
+        for panel in self._open_tree_panels():
+            if panel.apply_path_from_panel(clicked_path):
+                return
 
     def _on_file_double_clicked(self, item: FileListRow) -> None:
         raw = item.data(ROLE_PATH)
@@ -7827,38 +8293,59 @@ class MainWindow(QMainWindow):
         )
         return ALIGN_MODE_COMBINED if combined else "one_by_one"
 
-    def _open_align_dialog(self) -> None:
-        """Align parameters: Cancel / Save / Run (toolbar and menu use the same dialog)."""
+    def _open_align_dialog(self, *, initial_tab: str | None = None) -> None:
+        """Align parameters: Cancel / Save / Run (toolbar and menu use the same dialog).
+
+        Non-modal, so a click in the Files panel can fill the FastGA reference.
+        FastGA compares the FASTA files selected when the window opened (the
+        reference click changes the selection); MAFFT / MUSCLE use the
+        selection at Run, as before.
+        """
+        fastga_files = self._fastga_candidate_files()
         dialog = AlignParamsDialog(
             initial=self._align_options,
             use_system_mafft=self._project.use_system_mafft,
             use_system_muscle=self._project.use_system_muscle,
+            fastga_initial=self._fastga_options,
+            fastga_files=fastga_files,
+            initial_tab=initial_tab,
             parent=self,
         )
-        run_after = False
-        aligner = ALIGNER_MAFFT
-        try:
-            if not dialog.exec():
-                return  # Cancel: nothing changes.
-            self._align_options = dialog.options()
+        dialog.finished.connect(
+            lambda _code: QTimer.singleShot(0, self._repair_browser_chrome)
+        )
+
+        def _accepted(d) -> None:
+            self._align_options = d.options()
             save_align_options(self._align_options)
-            self._project.use_system_mafft = dialog.use_system_mafft()
-            self._project.use_system_muscle = dialog.use_system_muscle()
+            self._fastga_options = d.fastga_options()
+            save_fastga_options(self._fastga_options)
+            self._project.use_system_mafft = d.use_system_mafft()
+            self._project.use_system_muscle = d.use_system_muscle()
             self._persist_workspace()
-            run_after = dialog.should_run()
-            aligner = dialog.selected_aligner()
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
-        if run_after:
+            if not d.should_run():
+                self._set_status_message("Alignment settings saved", 4000)
+                return
+            aligner = d.selected_aligner()
+            if aligner == ALIGNER_FASTGA:
+                files = self._selected_files_for_fastga(
+                    self._fastga_options, files=fastga_files or None
+                )
+                if files:
+                    self._start_fastga_job(files, self._fastga_options)
+                return
             self._align_sequences(
                 engine=aligner, mode=self._mode_for_aligner(aligner)
             )
-        else:
-            self._set_status_message("Alignment settings saved", 4000)
+
+        self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_align_right_click(self) -> None:
         """Right-click Align: run the aligner chosen in the Options tab."""
         aligner = self._align_options.right_click_aligner
+        if aligner == ALIGNER_FASTGA:
+            self._run_fastga_default()
+            return
         self._align_sequences(engine=aligner, mode=self._mode_for_aligner(aligner))
 
     def _modify_align_parameters(self) -> None:
@@ -11604,7 +12091,11 @@ class MainWindow(QMainWindow):
             "align_options": self._align_options,
             "use_system_mafft": self._project.use_system_mafft,
             "use_system_muscle": self._project.use_system_muscle,
-            "align_engine": getattr(self._align_options, "right_click_aligner", None)
+            "align_engine": (
+                self._align_options.right_click_aligner
+                if self._align_options.right_click_aligner in ALIGNERS
+                else self._align_options.combined_aligner
+            )
             or ALIGNER_MAFFT,
         }
 

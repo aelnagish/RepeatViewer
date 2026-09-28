@@ -12,8 +12,8 @@ from repeatviewer.qt_runtime import apply_macos_app_name, configure_qt_runtime
 configure_qt_runtime()
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication, QPalette, QPixmap
-from PySide6.QtWidgets import QApplication, QSplashScreen
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QApplication
 
 from repeatviewer.widgets.app_icon import app_icon
 
@@ -99,19 +99,24 @@ def run_app(argv: list[str] | None = None) -> int:
         if not icon.isNull():
             app.setWindowIcon(icon)
 
-        splash_pix = QPixmap(480, 120)
-        splash_pix.fill(app.palette().color(QPalette.ColorRole.Window))
-        splash = QSplashScreen(splash_pix)
-        splash.showMessage(
-            f"Starting {APP_DISPLAY_NAME}…",
-            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
-            app.palette().color(QPalette.ColorRole.WindowText),
-        )
-        splash.show()
-        app.processEvents()
+        from repeatviewer.app_preferences import load_show_splash
 
+        splash = None
+        if load_show_splash():
+            from repeatviewer.widgets.splash import RepeatViewerSplash
+
+            splash = RepeatViewerSplash(__version__)
+            splash.show()
+            splash.set_status(f"Starting {APP_DISPLAY_NAME}…")
+        else:
+            app.processEvents()
+
+        if splash is not None:
+            splash.set_status("Loading tools…")
         from repeatviewer.main_window import MainWindow
 
+        if splash is not None:
+            splash.set_status("Opening the main window…")
         window = MainWindow()
         if not icon.isNull():
             window.setWindowIcon(icon)
@@ -120,7 +125,9 @@ def run_app(argv: list[str] | None = None) -> int:
         from repeatviewer.ui.window_geometry import fit_widget_to_available_screen
 
         fit_widget_to_available_screen(window)
-        splash.finish(window)
+        if splash is not None:
+            splash.set_status("Ready")
+            splash.finish_after_minimum(window)
 
         from repeatviewer.backends.webengine_probe import warmup_webengine_probe
 

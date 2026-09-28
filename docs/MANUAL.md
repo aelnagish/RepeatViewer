@@ -458,10 +458,14 @@ large to work with.
 
 ### Align
 
-**Toolbar: Align · Tools → Align**
+**Toolbar: Align · Tools → Align** (MAFFT, MUSCLE, FastGA, Align all
+selected files in one MSA, Change alignment parameters)
 
 Builds a multiple sequence alignment with **MAFFT** or **MUSCLE**, both
-bundled. The **Options** tab selects the default engine.
+bundled, or a whole-genome alignment with **FastGA** (see [FastGA](#fastga)).
+The window has the tabs MAFFT, MUSCLE, FastGA and Options; **Run** runs the
+tab you are on. The **Options** tab sets what right-clicking the Align button
+runs (MAFFT, MUSCLE or FastGA) and what right-clicking the FastGA button does.
 
 MAFFT parameters:
 
@@ -688,18 +692,200 @@ currently use.
 
 ### FastGA
 
-**Toolbar: FastGA · Tools → FastGA**
+**Toolbar: FastGA · Tools → Align → FastGA · Tools → FastGA**
 
-Fast genome-scale alignment, for comparing large sequences where BLAST is too
-slow. Requires FastGA on `PATH`.
+Whole-genome alignment for large sequences, where BLAST is too slow. FastGA
+lives in the **Align** window, on its own **FastGA** tab; the FastGA button and
+**Tools → FastGA → Change FastGA parameters** open that tab. Requires FastGA
+from conda (`conda install -c bioconda fastga`); the Options tab shows where
+it was found. On Windows it runs in WSL.
+
+**Mode**
+
+| Mode | Runs | Output (next to the input) |
+|------|------|----------------------------|
+| Each file against itself | one run per selected FASTA | `<file>_FastGA.paf` |
+| All pairs among selected files | every unique pair | `<first>_multi_FastGA.paf` |
+| Selected files against a reference | one run per selected FASTA | `<file>_FastGA_vs_<reference>.paf`, or with **Write all into one file** `<first>_multi_FastGA_vs_<reference>.paf` |
+
+Against a reference: select the files to compare, open the window, then click
+the reference in the Files panel (or Browse). The files compared are the ones
+selected when the window opened; the reference is skipped if it is among them.
+The reference is indexed once (GIXmake) and reused for every run. With **Keep
+genome index** the index is kept in a hidden `.repeatviewer_fastga` folder
+next to the reference and reused while the reference is unchanged; an index
+takes about 14 GB per gigabase. The grey line under the reference says what
+Run will do ("3 FASTA selected → 3 runs against genome.fa").
 
 | Parameter | Meaning |
 |-----------|---------|
-| Output format | Alignment output type |
-| Min identity | Identity floor |
-| Min alignment length | Length floor |
-| Repeat cutoff (`-f`) | Repeat masking threshold |
-| Threads | Parallelism |
+| Output format | PAF (`-paf`, `-pafx`, `-pafm`, `-pafs`, `-pafS`), PSL, or binary `.1aln`. PAF and `.1aln` open in the dotplot view |
+| `-T` threads | Parallelism |
+| `-i` min identity | Identity floor |
+| `-l` min length | Shortest alignment reported (≥ 100) |
+| `-f` seed cutoff | Seeds more frequent than this are dropped as repetitive; RepeatViewer uses 200 (FastGA: 10) so repeats stay visible |
+| `-c` / `-s` | Chain coverage / chain gap |
+| Symmetric seeding (`-S`) | Result independent of argument order; for repeat structure |
+| Use soft mask | Seed only in uppercase bases. Sent as `-M` (FastGA 1.5+) or by leaving out `-N` (older FastGA), whichever the installed version takes |
+| Keep genome index (`-k`) | Keep `.1gdb` / `.gix` for later runs |
+| Temp dir (`-P`) | Folder for FastGA's large temporary files; empty = hidden folder next to the input |
+
+### Tree
+
+**Toolbar: Tree (add it in File → Setting → Toolbar) · Tools → Tree**
+
+Builds a phylogenetic tree from the selected FASTA file(s). Several selected
+files are combined into one tree. RepeatViewer prepares the input, checks it
+and writes the report; established programs do the computing:
+
+- **MAFFT** (bundled) aligns unaligned input.
+- **IQ-TREE** (maximum likelihood), **FastME** (minimum evolution) or
+  **FastTree** (approximate maximum likelihood, for more than ~1,000
+  sequences) builds the tree.
+
+The tree programs are not bundled. Install them into the conda environment
+set in **File → Setting → External tools**:
+
+```bash
+conda install -c bioconda iqtree fastme fasttree
+```
+
+If the chosen program is missing, the run stops with this hint. It never
+falls back silently to a weaker method.
+
+Left-click opens the dialog; right-click builds with saved parameters (or
+opens the dialog, chosen in the Options tab). Without a FASTA selection the
+button only asks you to select one; **Tools → Tree → Change Tree parameters**
+opens the dialog anyway, to adjust settings in advance. **Tools → Tree → Tree
+with default parameters** runs with the saved settings, like TE-Aid. The round
+**?** buttons next to the MAFFT strategy, the method and the substitution model
+explain the choices; options that do not apply to the current choices are
+greyed out.
+
+| Tab | Setting | Default | Why |
+|-----|---------|---------|-----|
+| Alignment | Alignment | Align if not already aligned | Equal-length input is used as an alignment |
+| | MAFFT strategy | L-INS-i | Accurate up to ~200 sequences; FFT-NS-2 for larger sets |
+| | Adjust direction | On | TE/satellite copies from the other strand are reverse-complemented instead of looking extremely divergent |
+| | Minimum length | 70 % of the median length | Fragments (5'-truncated copies) are excluded, listed in the report and saved to `.excluded.fa`. The grey line below says how many. Use *of the longest sequence* when many sequences may be fragments, or all should be about the same length (monomers) |
+| | More options: `--op` / `--ep` | 1.53 / 0 | MAFFT defaults; change only with a reason |
+| Tree | Method | IQ-TREE | |
+| | Substitution model | ModelFinder, best by BIC | The chosen model goes into the report |
+| | Independent searches | 5 | Separate IQ-TREE searches (seeds seed, seed+1, …); the best is kept and the report says how many found the same topology. ModelFinder runs once, in the first search |
+| | Random seed | 12345 | Recorded, so the run can be repeated exactly |
+| | Threads | Preferences value | Maximum; IQ-TREE chooses the best number up to it (`-T AUTO`) |
+| Support and rooting | SH-aLRT / UFBoot2 | 1000 / 1000, `-bnni` | Shown as SH-aLRT/UFBoot; commonly trusted at ≥ 80 / ≥ 95 |
+| | Bootstrap (FastME) | 100 | Trusted at ≥ 70 |
+| | Root | None | Outgroup (tick one or more sequences) or midpoint |
+| Options | Right-click action, process window, MAFFT / tree programs from `PATH` | | |
+
+**Output** — like every tool, the results are written next to the input and
+keep its full name. When the run finishes, the input is highlighted light blue,
+the new files green, and the report opens (deep blue):
+
+| File | Content |
+|------|---------|
+| `<input>_tree_report.html` | Tree, run report, warnings, methods text, citations (opened automatically) |
+| `<input>_tree.treefile` | Newick with support values, for FigTree / iTOL / ggtree |
+| `<input>_tree.svg` / `.pdf` / `.png` | Tree figure |
+| `<input>_tree.aln.fa` | The alignment the tree was built from |
+
+Supporting files go into `<input>_tree_details/`: the IQ-TREE report and log
+(`.iqtree` / `.log`, plus `.modelfinder.*` when the best search was not the
+first), the methods paragraph with references (`_methods.txt`), program
+versions and exact command lines (`_commands.txt`), tree names ↔ original
+FASTA headers (`.names.tsv`) and the excluded fragments (`.excluded.fa`).
+A second run on the same input writes `<input>_tree_2…`; nothing is
+overwritten.
+
+Rooting keeps each support value on its branch (a common mistake when
+rerooting Newick trees). If several outgroup sequences do not form one clade,
+the report warns that the root position is uncertain.
+
+**If a run fails**, no half-finished results are left. The message gives the
+reason in plain words, and the full log (commands and program output) is saved
+next to the input as `<input>_tree_failed.log`, ready to send with a bug report.
+
+### Map to Reference
+
+**Toolbar: Map to Reference (add it in File → Setting → Toolbar) · Tools → Map to Reference**
+
+Places the selected sequences or reads on a reference and shows what differs,
+like Geneious' *Map to Reference*. Select the files to map in the Files panel
+(FASTA or FASTQ, gzipped too), open the dialog, and click the reference in the
+Files panel (or Browse). The grey line under the reference says what will be
+mapped to what.
+
+Three mappers; **Auto** picks one from the input:
+
+- **MAFFT add fragments** (bundled) — a few sequences (up to 500) on one short
+  reference (up to 50 kb), for example satellite variants on an annotated
+  monomer array. The most accurate placement; copies from the other strand are
+  turned round and shown as *(reversed)*.
+- **minimap2** — long reads (ONT, HiFi) or assembled contigs against a genome.
+- **Bowtie2** — many short reads (Illumina).
+
+minimap2 and Bowtie2 are not bundled. Install them into the conda environment
+set in **File → Setting → External tools**:
+
+```bash
+conda install -c conda-forge -c bioconda minimap2 bowtie2
+```
+
+A mapper you chose that is missing stops the run with this hint. If Auto's
+choice is missing, the other read mapper is used and the report says so.
+Bowtie2 builds its index once and keeps it next to the reference in the hidden
+folder `.repeatviewer_bowtie2`.
+
+| Tab | Setting | Default | Why |
+|-----|---------|---------|-----|
+| Mapping | Mapper | Auto | See above |
+| | Sensitivity | Medium | *High* finds older, more diverged repeat copies (smaller seeds) |
+| | Several places | Best place only | For sequences that fit equally well in several places of an array or family: one place, every place, or none (listed as ambiguous) |
+| | Annotations | On | Every reference feature is checked in every mapped sequence |
+| Advanced | Minimum identity / aligned length / mapping quality | 70 % / 25 bp / 0 | Placements below these are not used; the reason is listed |
+| | minimap2 preset | Auto | `sr` for short reads, `asm20` for long contigs, otherwise `map-ont` |
+| Output | Consensus | Majority | Or 50–100 % thresholds with IUPAC codes |
+| | No coverage | N | Or the reference base, or leave out |
+| | Variants from | Every difference | Minimum frequency for the variants table |
+| | Sequences drawn | 2,000 | Per reference sequence; coverage, consensus and variants use all |
+| Options | Right-click action, process window, programs from `PATH` | | |
+
+**The contig view.** The result, `<input>_map.rvmap`, is written next to the
+input and opens in the contig view: the reference annotations, the consensus
+(differences from the reference in red), the coverage and the reference, then
+every placed sequence with the bases that differ from the reference coloured.
+Deletions are drawn as a line, insertions as a purple mark. Ctrl/Cmd + wheel
+zooms, **Bases** zooms until the bases are written out, **Fit** (or a
+double-click) shows the whole reference. Four tables below:
+
+- **Sequences** — position, strand, identity, mismatches, deleted and inserted
+  bases of every placement.
+- **Features** — every reference feature in every placed sequence: *intact*,
+  *n diff* (changed), *partial* (only part covered) or *lost* (half or more
+  deleted). Hover a cell for its identity and its position on the sequence;
+  click it to jump there.
+- **Variants** — every difference with its count, depth and frequency, the
+  feature it falls in and its cytosine context (CG / CHG), where
+  methylation-driven C→T changes are expected.
+- **Not used** — the sequences that were not placed, with the reason.
+
+**Results** (top right) opens the report and the other files. Everything
+except the `.rvmap` is in `<input>_map_details/`:
+
+| File | Content |
+|------|---------|
+| `<input>_map_report.html` | Run report, coverage plots, feature and variant summaries, methods text, citations, commands |
+| `<input>_map_consensus.fa` | Consensus, with the reference annotations moved onto it (`.RV.gff3`) |
+| `<input>_map_mapped.fa` | The placed sequences, turned to the reference strand, with the lifted annotations |
+| `<input>_map_unused.fa` | The sequences not placed, with the reason in the header |
+| `<input>_map_variants.tsv` / `_features.tsv` / `_reads.tsv` | The three tables |
+| `<input>_map.aln.fa` / `.paf` / `.sam` | The mapper's own output |
+
+No pysam or samtools is needed: minimap2 and Bowtie2 output is read directly.
+A second run on the same input writes `<input>_map_2…`; nothing is
+overwritten. If a run fails, nothing half-finished is left and the full log is
+saved as `<input>_map_failed.log`.
 
 ### Open in AliView
 
