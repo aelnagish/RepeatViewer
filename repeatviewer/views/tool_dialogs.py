@@ -2144,89 +2144,90 @@ class ExtractSequencesDialog(QDialog):
 
 
 _FASTGA_MODE_HELP = (
-    "What FastGA compares.\n\n"
-    "Each file against itself: every selected FASTA is aligned with itself "
-    "(self matches skipped) — shows its repeats. Output: <file>_FastGA.paf.\n\n"
-    "All pairs: every unique pair among the selected files; all alignments go "
-    "into one file, <first selected>_multi_FastGA.paf.\n\n"
-    "Selected files against a reference: each selected FASTA is aligned with "
-    "the reference, one run per file. The reference is indexed once and reused "
-    "for every run. Output: <file>_FastGA_vs_<reference>.paf next to each "
-    "file, or one <first selected>_multi_FastGA_vs_<reference>.paf with "
-    "\"Write all into one file\"."
+    "<b>Each file against itself</b>: every selected FASTA is aligned with itself, "
+    "skipping the trivial self match, which shows its repeats. "
+    "Output: &lt;file&gt;_FastGA.paf.<br>"
+    "<b>Selected files against each other</b>: every selected file is compared with "
+    "every other one (A, B, C: A vs B, A vs C, B vs C). All results go into one file "
+    "named after the first selected file: &lt;first&gt;_multi_FastGA.paf.<br>"
+    "<b>Selected files against a reference</b>: each selected FASTA is aligned with the "
+    "reference, one run per file. The reference is indexed once and reused for every "
+    "run. Output: &lt;file&gt;_FastGA_vs_&lt;reference&gt;.paf next to each file, or "
+    "one &lt;first&gt;_multi_FastGA_vs_&lt;reference&gt;.paf with "
+    "<b>Write all into one file</b>."
 )
 _FASTGA_REFERENCE_HELP = (
-    "The genome every selected file is aligned to (PAF target columns).\n\n"
-    "Click it in the Files panel while this window is open, or use Browse. "
-    "If the reference is also selected in the Files panel it is skipped, so it "
-    "is never compared with itself.\n\n"
-    "The files to compare are the ones selected when this window was opened."
+    "The genome every selected file is aligned to (the target columns of the PAF).<br>"
+    "Click it in the Files panel while this window is open, or use Browse. If the "
+    "reference is also selected in the Files panel it is skipped, so it is never "
+    "compared with itself.<br>"
+    "The files compared are the ones selected when this window was opened."
 )
 _FASTGA_COMBINED_HELP = (
-    "Write the alignments of all selected files into one PAF file named "
-    "<first selected>_multi_FastGA_vs_<reference>.paf, instead of one file "
-    "per query.\n\n"
+    "Write the alignments of all selected files into one PAF file, "
+    "&lt;first&gt;_multi_FastGA_vs_&lt;reference&gt;.paf, instead of one file per "
+    "selected file.<br>"
     "A .1aln file cannot be joined, so this always writes PAF text."
 )
 _FASTGA_FORMAT_HELP = (
-    "PAF and PSL are text, streamed by FastGA (-paf, -pafx, -pafm, -pafs, "
-    "-pafS, -psl). -pafx/-pafm add a CIGAR string, -pafs/-pafS a CS string.\n\n"
-    "-1 writes a binary .1aln (ONEcode) file.\n\n"
-    "PAF and .1aln results open in the dotplot view; PSL does not preview."
+    "<b>PAF</b> and <b>PSL</b> are text files (-paf, -pafx, -pafm, -pafs, -pafS, -psl). "
+    "-pafx and -pafm add a CIGAR string, -pafs and -pafS a CS string.<br>"
+    "<b>-1</b> writes a binary .1aln (ONEcode) file.<br>"
+    "PAF and .1aln results open in the dotplot view; PSL files do not preview."
 )
-_FASTGA_THREADS_HELP = "FastGA -T: number of threads."
+_FASTGA_THREADS_HELP = "FastGA <b>-T</b>: number of threads."
 _FASTGA_IDENTITY_HELP = (
-    "FastGA -i: minimum alignment identity (0.70 = 70 %). Alignments below "
-    "this are not reported."
+    "FastGA <b>-i</b>: minimum alignment identity (0.70 = 70 %). Alignments below this "
+    "are not reported."
 )
 _FASTGA_LENGTH_HELP = (
-    "FastGA -l: shortest alignment to report, in bp. Cannot go below 100 — "
-    "FastGA rejects limits shorter than its seed length.\n\n"
-    "Raise it on satellite arrays, where short matches can swamp the output."
+    "FastGA <b>-l</b>: shortest alignment to report, in bp. It cannot go below 100, "
+    "because FastGA rejects limits shorter than its seed length.<br>"
+    "Raise it for satellite arrays, where short matches can swamp the output."
 )
 _FASTGA_SEED_HELP = (
-    "FastGA -f: seeds that occur more often than this are treated as "
-    "repetitive and dropped before alignment.\n\n"
-    "FastGA's own default is 10, which removes satellite arrays entirely. "
-    "RepeatViewer defaults to 200 so repeats stay visible; higher is slower."
+    "FastGA <b>-f</b>: seeds that occur more often than this are treated as repetitive "
+    "and dropped before alignment.<br>"
+    "FastGA's own default is 10, which removes satellite arrays entirely. RepeatViewer "
+    "uses 200 so repeats stay visible. Higher values are slower."
 )
 _FASTGA_CHAIN_COV_HELP = (
-    "FastGA -c: a seed chain must cover at least this many bases in both "
-    "genomes to become an alignment. FastGA default: 85."
+    "FastGA <b>-c</b>: a seed chain must cover at least this many bases in both genomes "
+    "to become an alignment. FastGA default: 85."
 )
 _FASTGA_CHAIN_GAP_HELP = (
-    "FastGA -s: largest spacing between consecutive seeds in one chain. "
+    "FastGA <b>-s</b>: largest spacing between two consecutive seeds in one chain. "
     "FastGA default: 1000."
 )
 _FASTGA_SYMMETRIC_HELP = (
-    "FastGA -S: seed from both genomes, so the result no longer depends on "
-    "which one comes first. Finds more repeat copies in the second genome; "
-    "slower. FastGA advises it for repeat structure, not for synteny."
+    "FastGA <b>-S</b>: take seeds from both genomes, so the result does not depend on "
+    "which one comes first. Finds more repeat copies in the second genome, but is "
+    "slower. FastGA recommends it for repeat structure, not for synteny."
 )
 _FASTGA_SOFT_MASK_HELP = (
-    "Seed only in UPPERCASE bases: lowercase (soft-masked) regions, e.g. from "
-    "RepeatMasker, cannot start an alignment, although an alignment may run "
-    "into them.\n\n"
-    "Off (default): repeats are aligned like any other sequence — usually what "
-    "you want in a repeat-focused analysis.\n\n"
-    "A file that is lowercase throughout counts as unmasked. RepeatViewer sends "
-    "-M (FastGA 1.5 and later) or leaves out -N (older FastGA), depending on "
-    "the installed version. With soft masking on, the reference is indexed on "
-    "every run instead of once."
+    "<b>On</b>: alignments can only start in UPPERCASE bases. Lowercase (soft-masked) "
+    "regions, e.g. from RepeatMasker, cannot start an alignment, although an alignment "
+    "may extend into them.<br>"
+    "<b>Off</b> (default): repeats are aligned like any other sequence, which is usually "
+    "what you want when studying repeats.<br>"
+    "A file that is lowercase throughout counts as unmasked. RepeatViewer sends -M "
+    "(FastGA 1.5 and later) or leaves out -N (older FastGA), depending on the installed "
+    "version. With soft masking on, the reference is indexed on every run instead of once."
 )
 _FASTGA_KEEP_INDEX_HELP = (
-    "FastGA -k: keep the genome index (.1gdb / .gix) so later runs skip "
-    "building it. An index takes about 14 GB per gigabase of genome.\n\n"
-    "Self and All pairs: kept next to each FASTA.\n"
-    "Against a reference: only the reference index is kept, in a hidden "
-    ".repeatviewer_fastga folder next to it, and reused while the reference "
-    "is unchanged. Query indexes are always removed."
+    "FastGA <b>-k</b>: keep the genome index (.1gdb / .gix) so later runs skip building "
+    "it. An index takes about 14 GB per gigabase of genome.<br>"
+    "<b>Against itself</b> and <b>against each other</b>: kept next to each FASTA.<br>"
+    "<b>Against a reference</b>: only the reference index is kept, in a hidden "
+    ".repeatviewer_fastga folder next to it, and reused while the reference is unchanged. "
+    "Indexes of the other files are always removed."
 )
 _FASTGA_TEMP_HELP = (
-    "FastGA -P: folder for FastGA's temporary files, which can be large.\n\n"
-    "Empty (default): a hidden folder next to the input, removed afterwards. "
-    "On macOS the system temporary folder of a desktop app is small and often "
-    "fails with \"Cannot write overlap gather file\"."
+    "FastGA <b>-P</b>: folder for FastGA's temporary files, which can be large.<br>"
+    "<b>Empty</b> (default): a hidden folder next to the input, removed afterwards.<br>"
+    "Choose a folder only if that disk is too small or slow. The macOS temporary folder "
+    "of a desktop app is small, and FastGA fails there with \"Cannot write overlap "
+    "gather file\"."
 )
 
 
@@ -2254,7 +2255,7 @@ class FastGaPanel(QWidget):
         self._mode_buttons: dict[str, QRadioButton] = {}
         for label, value in (
             ("Each file against itself", FASTGA_MODE_SELF),
-            ("All pairs among selected files → one file", FASTGA_MODE_PAIRS),
+            ("Selected files against each other", FASTGA_MODE_PAIRS),
             ("Selected files against a reference", FASTGA_MODE_REFERENCE),
         ):
             radio = QRadioButton(label, self)
@@ -2287,11 +2288,6 @@ class FastGaPanel(QWidget):
             self._format.addItem(label, value)
         idx = self._format.findData(opts.output_format)
         self._format.setCurrentIndex(idx if idx >= 0 else 0)
-        self._output_name = QLabel(self)
-        self._output_name.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self._output_name.setMinimumWidth(420)
 
         # --- Alignment ----------------------------------------------------
         self._threads = QSpinBox(self)
@@ -2382,7 +2378,6 @@ class FastGaPanel(QWidget):
         form.addRow(_section("Output"))
         form.addRow("Output format:", field_with_help(
             self._format, "Output format", _FASTGA_FORMAT_HELP))
-        form.addRow("Output name:", self._output_name)
 
         form.addRow(_section("Alignment"))
         form.addRow("-T (threads):", field_with_help(
@@ -2437,18 +2432,8 @@ class FastGaPanel(QWidget):
     def summary_text(self) -> str:
         return self._summary.text()
 
-    def output_name_text(self) -> str:
-        return self._output_name.text()
-
     def _sync(self) -> None:
-        from repeatviewer.backends.fastga_dotplot import (
-            FORMAT_ALN,
-            fastga_mode_summary,
-            output_suffix_for_format,
-            reference_combined_output_path,
-            reference_output_path,
-            reference_queries,
-        )
+        from repeatviewer.backends.fastga_dotplot import fastga_mode_summary
 
         mode = self.mode()
         reference_mode = mode == FASTGA_MODE_REFERENCE
@@ -2460,27 +2445,6 @@ class FastGaPanel(QWidget):
             fastga_mode_summary(self._files, mode, reference, combined=combined)
         )
 
-        fmt = str(self._format.currentData())
-        suffix = output_suffix_for_format(fmt)
-        first = self._files[0] if self._files else Path("<file>.fa")
-        if reference_mode:
-            ref = reference or Path("<reference>.fa")
-            queries = reference_queries(self._files, reference) or [first]
-            if combined and len(queries) > 1:
-                name = reference_combined_output_path(queries[0], ref).name
-                if fmt == FORMAT_ALN:
-                    name += "  (PAF: .1aln cannot be joined)"
-            else:
-                name = reference_output_path(queries[0], ref, fmt).name
-                if len(queries) > 1:
-                    name += f"  (+ {len(queries) - 1} more)"
-        elif mode == FASTGA_MODE_PAIRS:
-            name = f"{first.name}_multi_FastGA{'.paf' if fmt == FORMAT_ALN else suffix}"
-        else:
-            name = f"{first.name}_FastGA{suffix}"
-            if len(self._files) > 1:
-                name += f"  (+ {len(self._files) - 1} more)"
-        self._output_name.setText(name)
         self.changed.emit()
 
     def apply_path_from_panel(self, path: Path) -> bool:

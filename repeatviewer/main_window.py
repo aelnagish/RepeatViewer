@@ -549,7 +549,7 @@ _TOOLBAR_TOOLTIPS = {
     "translate": "Translate selected DNA FASTA to protein",
     "aliview": "Open selected FASTA in AliView",
     "align": "Align FASTA using default parameters",
-    "fastga": "FastGA whole-genome alignment (self-comparison one-by-one by default; optional all-pairs)",
+    "fastga": "FastGA whole-genome alignment (each file against itself, against each other, or against a reference)",
     "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
     "map_reference": "Map the selected sequences or reads to a reference (MAFFT / minimap2 / Bowtie2)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
@@ -3708,7 +3708,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "FastGA",
-                "All pairs needs two or more selected FASTA files.\n"
+                "Against each other needs two or more selected FASTA files.\n"
                 "Select more files, or choose another mode in the FastGA tab.",
             )
             return []
