@@ -171,7 +171,7 @@ class FileListTableWidget(QTableWidget):
     extract_sequences_requested = Signal(Path)      # pick records out of one file
     extract_hit_subjects_requested = Signal(Path)  # hit table -> subject sequences
     group_sequences_requested = Signal(list)        # combine several files
-    new_folder_with_files_requested = Signal(list)  # move selection into a new folder
+    new_folder_with_files_requested = Signal(list)  # copy selection into a new folder
     blast_genome_map_requested = Signal(Path)
     blast_divergence_requested = Signal(Path)
     add_blast_database_requested = Signal(Path)
@@ -955,17 +955,17 @@ class FileListTableWidget(QTableWidget):
                         lambda: self.open_in_preview_tab_requested.emit(paths),
                     )
                     menu.addAction(
-                        "Open in text editor",
+                        "Open in Text Editor",
                         lambda: self.open_in_text_editor_requested.emit(paths),
                     )
                     menu.addAction("Rename", lambda: self.rename_file_requested.emit(path))
                     if path.suffix.lower() in _FASTA_SUFFIXES:
                         menu.addAction(
-                            "Add as BLAST database…",
+                            "Add as BLAST Database…",
                             lambda p=path: self.add_blast_database_requested.emit(p),
                         )
                         menu.addAction(
-                            "Add annotation…",
+                            "Add Annotation…",
                             lambda p=path: self.add_annotation_requested.emit(p),
                         )
                         from repeatviewer.views.export_annotation_dialog import (
@@ -973,12 +973,12 @@ class FileListTableWidget(QTableWidget):
                         )
 
                         export_act = menu.addAction(
-                            "Export annotation…",
+                            "Export Annotation…",
                             lambda p=path: self.export_annotation_requested.emit(p),
                         )
                         export_act.setEnabled(fasta_has_exportable_annotations(path))
                         menu.addAction(
-                            "Attach cytogenetic image…",
+                            "Attach Cytogenetic Image…",
                             lambda p=path: self.attach_cyto_image_requested.emit(p, []),
                         )
                         try:
@@ -987,7 +987,7 @@ class FileListTableWidget(QTableWidget):
                             n_images = 0
                         if n_images:
                             menu.addAction(
-                                f"Show cytogenetic images ({n_images})",
+                                f"Show Cytogenetic Images ({n_images})",
                                 lambda p=path: self.cyto_images_requested.emit(p),
                             )
                         try:
@@ -996,11 +996,11 @@ class FileListTableWidget(QTableWidget):
                             seq_n = 0
                         if seq_n > 1:
                             menu.addAction(
-                                f"Separate sequence into {seq_n} files",
+                                f"Separate Sequence into {seq_n} Files",
                                 lambda: self.separate_fasta_requested.emit(path),
                             )
                             menu.addAction(
-                                f"Separate sequence into {seq_n} folders",
+                                f"Separate Sequence into {seq_n} Folders",
                                 lambda: self.separate_fasta_subfolders_requested.emit(path),
                             )
                         extract_act = menu.addAction(
@@ -1011,21 +1011,21 @@ class FileListTableWidget(QTableWidget):
                         blast_txt = find_blast_table_for_query(path)
                         if blast_txt is not None:
                             menu.addAction(
-                                "TE density plot",
+                                "TE Density Plot",
                                 lambda bt=blast_txt: self.blast_genome_map_requested.emit(bt),
                             )
                     if is_blast_table_file(path):
                         menu.addAction(
-                            "Extract subject sequences",
+                            "Extract Subject Sequences",
                             lambda bt=path: self.extract_hit_subjects_requested.emit(bt),
                         )
                     if is_te_hit_table_file(path):
                         menu.addAction(
-                            "TE density plot",
+                            "TE Density Plot",
                             lambda bt=path: self.blast_genome_map_requested.emit(bt),
                         )
                         menu.addAction(
-                            "TE divergence plot",
+                            "TE Divergence Plot",
                             lambda bt=path: self.blast_divergence_requested.emit(bt),
                         )
                 else:
@@ -1034,16 +1034,16 @@ class FileListTableWidget(QTableWidget):
                         lambda: self.open_in_preview_requested.emit([paths[0]]),
                     )
                     menu.addAction(
-                        f"Open {len(paths)} files in Preview",
+                        f"Open {len(paths)} Files in Preview",
                         lambda: self.open_in_preview_tab_requested.emit(paths),
                     )
                     menu.addAction(
-                        f"Open {len(paths)} files in text editor",
+                        f"Open {len(paths)} Files in Text Editor",
                         lambda: self.open_in_text_editor_requested.emit(paths),
                     )
                 menu.addSeparator()
                 if len(paths) == 1:
-                    new_folder_label = "New Folder with Selection"
+                    new_folder_label = "New Folder with Selected Items"
                 else:
                     new_folder_label = f"New Folder with {len(paths)} Selected Items"
                 menu.addAction(
@@ -1063,7 +1063,7 @@ class FileListTableWidget(QTableWidget):
                     )
                 else:
                     menu.addAction(
-                        f"Duplicate {len(paths)} files",
+                        f"Duplicate {len(paths)} Files",
                         lambda: self.duplicate_files_requested.emit(paths),
                     )
                 menu.addSeparator()
@@ -1072,7 +1072,7 @@ class FileListTableWidget(QTableWidget):
                     label = (
                         "Reveal in Finder"
                         if platform.system() == "Darwin"
-                        else "Show in file manager"
+                        else "Show in File Manager"
                     )
                     menu.addAction(label, lambda: self._reveal_paths(paths))
                 menu.addSeparator()
@@ -1082,7 +1082,7 @@ class FileListTableWidget(QTableWidget):
                     menu.addAction("Delete", lambda: self.delete_files_requested.emit(paths))
                 else:
                     menu.addAction(
-                        f"Delete {len(paths)} files",
+                        f"Delete {len(paths)} Files",
                         lambda: self.delete_files_requested.emit(paths),
                     )
             elif can_paste:
@@ -1104,9 +1104,9 @@ class FileListTableWidget(QTableWidget):
     def _add_file_color_menu(self, menu: QMenu, paths: list[Path]) -> None:
         from repeatviewer.widgets.file_colors import FILE_COLOR_PRESETS
 
-        color_menu = menu.addMenu("File color")
+        color_menu = menu.addMenu("File Color")
         color_menu.addAction(
-            "Choose color…",
+            "Choose Color…",
             lambda ps=list(paths): self._choose_files_color(ps),
         )
         for label, hex_color in FILE_COLOR_PRESETS:
@@ -1118,7 +1118,7 @@ class FileListTableWidget(QTableWidget):
             )
         color_menu.addSeparator()
         color_menu.addAction(
-            "Clear color",
+            "Clear Color",
             lambda ps=list(paths): self._clear_files_color(ps),
         )
 
@@ -1154,7 +1154,7 @@ class FileListTableWidget(QTableWidget):
             initial = QColor(FILE_COLOR_PRESETS[0][1])
 
         dialog = QColorDialog(initial, self.window())
-        dialog.setWindowTitle("File color")
+        dialog.setWindowTitle("File Color")
         dialog.setStyleSheet("")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return

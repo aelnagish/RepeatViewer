@@ -429,7 +429,6 @@ from repeatviewer.views.genome_dialog import GenomeDialog, is_genome_fasta
 from repeatviewer.views.create_folder_dialog import (
     DEFAULT_FOLDER_NAME,
     CreateFolderDialog,
-    common_prefix_name,
 )
 from repeatviewer.views.define_database_dialog import DefineDatabaseDialog, resolve_panel_database_path
 from repeatviewer.views.settings_dialog import (
@@ -562,7 +561,7 @@ _TOOLBAR_TOOLTIPS = {
     "msa_clean": "Trim or clean MSA using default parameters",
     "flexidot": "Dotplot comparison of selected sequences using default parameters",
     "consensus": "Click: set consensus parameters and run. Right-click: run with saved settings.",
-    "te_annotation": "Run sequence annotation on selected single-sequence FASTA files",
+    "te_annotation": "Run sequence annotation on selected FASTA files (single- or multi-sequence)",
 }
 
 _JOB_DISPLAY_TITLES = {
@@ -2064,6 +2063,8 @@ class MainWindow(QMainWindow):
         self._genome_dialog: GenomeDialog | None = None
         self._define_database_dialog: DefineDatabaseDialog | None = None
         self._add_annotation_dialog = None
+        self._create_folder_dialog: CreateFolderDialog | None = None
+        self._create_folder_copy_files: list[Path] = []
         self._blast_params_dialog = None
         self._add_blast_database_dialog = None
         self._command_plugin_dialog: CommandPluginDesignerDialog | None = None
@@ -6942,6 +6943,7 @@ class MainWindow(QMainWindow):
     def _on_folder_selected(self, folder: Path) -> None:
         self._sync_define_database_dialog_from_folder(folder)
         self._sync_te_viz_dialog_from_folder(folder)
+        self._sync_create_folder_dialog_from_folder(folder)
         self._populate_file_list(folder, record_history=True)
         self._update_directory_watchers()
         self._persist_workspace()
@@ -10385,15 +10387,15 @@ class MainWindow(QMainWindow):
             panel.reload_shared_annotation_settings()
 
     def _te_annotation_fasta_selection(self) -> list[Path] | None:
-        """Validate selected single-sequence FASTAs for TE annotation, or None."""
-        from repeatviewer.backends.te_annotation_batch import is_single_sequence_fasta
+        """Validate selected FASTAs for Sequence Annotation, or None."""
+        from repeatviewer.backends.te_annotation_batch import is_annotatable_fasta
 
         selected = self._selected_files()
         if not selected:
             QMessageBox.information(
                 self,
                 "No sequence selected",
-                "Select one or more single-sequence FASTA files in the Files panel.",
+                "Select one or more FASTA files in the Files panel.",
             )
             return None
         seq_files = [p for p in selected if p.suffix.lower() in _FASTA_SUFFIXES]
@@ -10404,8 +10406,8 @@ class MainWindow(QMainWindow):
                 "Selected files do not include FASTA sequence files.",
             )
             return None
-        single = [p for p in seq_files if is_single_sequence_fasta(p)]
-        skipped = [p for p in seq_files if p not in single]
+        valid = [p for p in seq_files if is_annotatable_fasta(p)]
+        skipped = [p for p in seq_files if p not in valid]
         if skipped:
             skipped_names = "\n".join(p.name for p in skipped[:12])
             if len(skipped) > 12:
@@ -10413,36 +10415,52 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Skipped files",
-                f"{len(skipped)} file(s) skipped — only single-sequence FASTA files "
-                f"are supported:\n\n{skipped_names}",
+                f"{len(skipped)} file(s) skipped — could not read as FASTA:\n\n"
+                f"{skipped_names}",
             )
-        if not single:
+        if not valid:
             QMessageBox.warning(
                 self,
                 "No valid files",
-                "Select at least one single-sequence FASTA file for Sequence Annotation.",
+                "Select at least one readable FASTA file for Sequence Annotation.",
             )
             return None
-        return single
+        return valid
 
     def _confirm_te_annotation_overwrite(self, fastas: list[Path]) -> bool:
-        """Ask before overwriting existing ``*.RV.gff3`` companions. True = continue."""
-        from repeatviewer.backends.te_annotation_batch import existing_annotation_gff_paths
+        """Ask before adding onto existing annotation JSON / GFF companions."""
+        from repeatviewer.backends.te_annotation_batch import (
+            existing_annotation_gff_paths,
+            existing_annotation_json_paths,
+        )
 
-        existing = existing_annotation_gff_paths(fastas)
-        if not existing:
+        existing = [
+            *existing_annotation_json_paths(fastas),
+            *existing_annotation_gff_paths(fastas),
+        ]
+        # De-dupe by path string while keeping order.
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for path in existing:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+        if not unique:
             return True
-        listing = "\n".join(f"  • {path.name}" for path in existing[:20])
-        if len(existing) > 20:
-            listing += f"\n  … and {len(existing) - 20} more"
+        listing = "\n".join(f"  • {path.name}" for path in unique[:20])
+        if len(unique) > 20:
+            listing += f"\n  … and {len(unique) - 20} more"
         answer = QMessageBox.question(
             self,
-            "Overwrite annotations?",
+            "Add to existing annotations?",
             "Annotation file(s) already exist for the selected sequence(s):\n\n"
             f"{listing}\n\n"
-            "Running Sequence Annotation will overwrite them. Continue?",
+            "New detections will be added to the existing JSON annotations "
+            "(previous features are kept). Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
         return answer == QMessageBox.StandardButton.Yes
 
@@ -11091,7 +11109,10 @@ class MainWindow(QMainWindow):
         default_folder = default_separation_folder_name(path)
         if subfolder_per_sequence:
             title = "Separate into subfolders"
-            intro = f"Separated to {seq_count} sequence folders."
+            intro = (
+                f"Separate {seq_count} sequence to {seq_count} single folders "
+                "inside a new folder."
+            )
         else:
             title = "Separate FASTA sequences"
             intro = f"Separated to {seq_count} single sequences to a new folder."
@@ -11099,7 +11120,7 @@ class MainWindow(QMainWindow):
         dialog = NameWithAnnotationDialog(
             title=title,
             intro=intro,
-            name_label="Folder name:",
+            name_label="New folder name:",
             default_name=default_folder,
             annotation_label="Copy annotations for separated sequences",
             parent=self,
@@ -11553,27 +11574,61 @@ class MainWindow(QMainWindow):
         *,
         files: list[Path] | None = None,
     ) -> None:
-        """Create a folder, optionally moving the selected files into it."""
+        """Create a folder, optionally copying the selected files into it."""
         if not isinstance(parent, Path):
             parent = None
-        move_files = [p for p in (files or []) if isinstance(p, Path) and p.is_file()]
-        destinations = self._folder_destination_candidates(parent)
-        if not destinations:
-            QMessageBox.warning(
-                self,
-                "No folder available",
-                "Add a folder to the Folders panel first (File → Add Folder).",
-            )
+        copy_files = [p for p in (files or []) if isinstance(p, Path) and p.is_file()]
+
+        if copy_files:
+            initial_destination = copy_files[0].expanduser().resolve().parent
+            default_name = f"{copy_files[0].name}_new_folder"
+        else:
+            destinations = self._folder_destination_candidates(parent)
+            if not destinations:
+                QMessageBox.warning(
+                    self,
+                    "No folder available",
+                    "Add a folder to the Folders panel first (File → Add Folder).",
+                )
+                return
+            initial_destination = destinations[0]
+            default_name = DEFAULT_FOLDER_NAME
+
+        if self._create_folder_dialog is not None and self._create_folder_dialog.isVisible():
+            existing = self._create_folder_dialog
+            existing.raise_()
+            existing.activateWindow()
+            if copy_files:
+                existing.set_destination(initial_destination)
             return
 
-        default_name = common_prefix_name(move_files) if move_files else ""
         dialog = CreateFolderDialog(
             self,
-            destinations=destinations,
-            default_name=default_name or DEFAULT_FOLDER_NAME,
-            move_count=len(move_files),
+            initial_destination=initial_destination,
+            default_name=default_name,
+            copy_count=len(copy_files),
         )
-        if not exec_modal_dialog(dialog):
+        self._create_folder_dialog = dialog
+        self._create_folder_copy_files = list(copy_files)
+        dialog.finished.connect(self._on_create_folder_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _sync_create_folder_dialog_from_folder(self, folder: Path) -> None:
+        dialog = self._create_folder_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        dialog.apply_folder_from_panel(folder)
+
+    def _on_create_folder_dialog_finished(self, result: int) -> None:
+        dialog = self._create_folder_dialog
+        copy_files = list(self._create_folder_copy_files)
+        self._create_folder_dialog = None
+        self._create_folder_copy_files = []
+        if dialog is None:
+            return
+        if result != int(QDialog.DialogCode.Accepted):
             return
         new_dir = dialog.target_path()
         if new_dir is None:
@@ -11585,21 +11640,22 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Create folder failed", str(exc))
             return
 
-        if move_files:
-            self._transfer_files(move_files, new_dir, mode="cut")
+        if copy_files:
+            # Copy (not move); FASTA companions are included by _transfer_files.
+            self._transfer_files(copy_files, new_dir, mode="copy")
 
         self._reveal_new_folder(new_dir)
-        if move_files:
-            noun = "file" if len(move_files) == 1 else "files"
+        if copy_files:
+            noun = "file" if len(copy_files) == 1 else "files"
             self._set_status_message(
-                f"Created {new_dir.name} with {len(move_files)} {noun}",
+                f"Created {new_dir.name} with {len(copy_files)} {noun} copied",
                 7000,
             )
         else:
             self._set_status_message(f"Created folder {new_dir.name}", 5000)
 
     def _create_folder_with_files(self, files: list[Path]) -> None:
-        """Files-panel entry point: create a folder and move the selection into it."""
+        """Files-panel entry point: create a folder and copy the selection into it."""
         self._create_folder(self._current_folder, files=list(files))
 
     def _reveal_new_folder(self, new_dir: Path) -> None:
