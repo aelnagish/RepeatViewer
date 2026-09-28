@@ -1973,3 +1973,146 @@ def save_tree_options(opts: TreeOptions) -> None:
             "use_system_path": opts.use_system_path,
         },
     )
+
+
+# --------------------------------------------------------------------------
+# Map to Reference (Tools → Map to Reference)
+# --------------------------------------------------------------------------
+
+MAP_ENGINE_AUTO = "auto"
+MAP_ENGINE_MAFFT = "mafft"
+MAP_ENGINE_MINIMAP2 = "minimap2"
+MAP_ENGINE_BOWTIE2 = "bowtie2"
+MAP_ENGINES = (MAP_ENGINE_AUTO, MAP_ENGINE_MAFFT, MAP_ENGINE_MINIMAP2, MAP_ENGINE_BOWTIE2)
+
+MAP_SENS_FAST = "fast"
+MAP_SENS_MEDIUM = "medium"
+MAP_SENS_HIGH = "high"
+MAP_SENSITIVITIES = (MAP_SENS_FAST, MAP_SENS_MEDIUM, MAP_SENS_HIGH)
+
+# A sequence that fits equally well in several places (common in satellite arrays).
+MAP_MULTI_BEST = "best"    # one place (the mapper's best; ties at random)
+MAP_MULTI_ALL = "all"      # every equally good place
+MAP_MULTI_NONE = "none"    # none: listed as ambiguous with the unused sequences
+MAP_MULTI_MODES = (MAP_MULTI_BEST, MAP_MULTI_ALL, MAP_MULTI_NONE)
+
+MAP_MINIMAP2_PRESET_AUTO = "auto"
+MAP_MINIMAP2_PRESETS = (MAP_MINIMAP2_PRESET_AUTO, "map-ont", "map-hifi", "map-pb",
+                        "asm5", "asm10", "asm20", "sr")
+
+# Consensus threshold, as a fraction of the sequences covering a position.
+# 0 = majority (the most common base); higher values give IUPAC codes.
+MAP_CONSENSUS_THRESHOLDS = (0.0, 0.5, 0.75, 0.95, 1.0)
+MAP_NO_COVERAGE_N = "N"
+MAP_NO_COVERAGE_REFERENCE = "reference"
+MAP_NO_COVERAGE_SKIP = "skip"
+MAP_NO_COVERAGE_MODES = (MAP_NO_COVERAGE_N, MAP_NO_COVERAGE_REFERENCE, MAP_NO_COVERAGE_SKIP)
+
+MAP_RIGHT_CLICK_RUN = "run"
+MAP_RIGHT_CLICK_DIALOG = "dialog"
+MAP_RIGHT_CLICK_ACTIONS = (MAP_RIGHT_CLICK_RUN, MAP_RIGHT_CLICK_DIALOG)
+
+
+@dataclass
+class MapOptions:
+    """Map sequences or reads to a reference (Tools → Map to Reference).
+
+    MAFFT (bundled) places a few sequences on a short reference, e.g. satellite
+    variants on an annotated monomer array; minimap2 maps long reads or
+    assemblies to a genome; Bowtie2 maps short reads. ``auto`` picks by input.
+    """
+
+    reference_fasta: str = ""
+    engine: str = MAP_ENGINE_AUTO
+    sensitivity: str = MAP_SENS_MEDIUM
+    multiple_hits: str = MAP_MULTI_BEST
+    minimap2_preset: str = MAP_MINIMAP2_PRESET_AUTO
+    # Advanced: a mapped sequence is kept only when it passes all of these.
+    min_identity: float = 0.70         # fraction of aligned columns that match
+    min_aligned_bp: int = 25
+    min_mapq: int = 0                  # minimap2 / Bowtie2 only
+    threads: int = field(default_factory=_default_tool_threads)
+    # Output
+    consensus_threshold: float = 0.0   # 0 = majority
+    no_coverage: str = MAP_NO_COVERAGE_N
+    min_variant_freq: float = 0.0      # variants table: 0 = every difference
+    save_consensus: bool = True
+    save_mapped: bool = True
+    save_unused: bool = True
+    save_variants: bool = True
+    lift_annotations: bool = True
+    max_display_reads: int = 2000
+    # Options tab
+    right_click_action: str = MAP_RIGHT_CLICK_RUN
+    show_process_window: bool = False
+    use_system_path: bool = False
+
+
+def load_map_options() -> MapOptions:
+    v = _load_settings_group("map_reference")
+    d = MapOptions()
+
+    def _pick(key: str, allowed: tuple, default):
+        value = v.get(key, default)
+        return value if value in allowed else default
+
+    def _num(key: str, default, cast, lo, hi):
+        try:
+            return max(lo, min(hi, cast(v.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    threshold = _num("consensus_threshold", d.consensus_threshold, float, 0.0, 1.0)
+    return MapOptions(
+        reference_fasta=str(v.get("reference_fasta", d.reference_fasta) or ""),
+        engine=_pick("engine", MAP_ENGINES, d.engine),
+        sensitivity=_pick("sensitivity", MAP_SENSITIVITIES, d.sensitivity),
+        multiple_hits=_pick("multiple_hits", MAP_MULTI_MODES, d.multiple_hits),
+        minimap2_preset=_pick("minimap2_preset", MAP_MINIMAP2_PRESETS, d.minimap2_preset),
+        min_identity=_num("min_identity", d.min_identity, float, 0.0, 1.0),
+        min_aligned_bp=_num("min_aligned_bp", d.min_aligned_bp, int, 1, 1_000_000),
+        min_mapq=_num("min_mapq", d.min_mapq, int, 0, 255),
+        threads=_num("threads", _default_tool_threads(), int, 1, 256),
+        consensus_threshold=threshold if threshold in MAP_CONSENSUS_THRESHOLDS else 0.0,
+        no_coverage=_pick("no_coverage", MAP_NO_COVERAGE_MODES, d.no_coverage),
+        min_variant_freq=_num("min_variant_freq", d.min_variant_freq, float, 0.0, 1.0),
+        save_consensus=_to_bool(v.get("save_consensus"), d.save_consensus),
+        save_mapped=_to_bool(v.get("save_mapped"), d.save_mapped),
+        save_unused=_to_bool(v.get("save_unused"), d.save_unused),
+        save_variants=_to_bool(v.get("save_variants"), d.save_variants),
+        lift_annotations=_to_bool(v.get("lift_annotations"), d.lift_annotations),
+        max_display_reads=_num("max_display_reads", d.max_display_reads, int, 50, 100_000),
+        right_click_action=_pick("right_click_action", MAP_RIGHT_CLICK_ACTIONS,
+                                 d.right_click_action),
+        show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
+        use_system_path=_to_bool(v.get("use_system_path"), d.use_system_path),
+    )
+
+
+def save_map_options(opts: MapOptions) -> None:
+    _save_settings_group(
+        "map_reference",
+        {
+            "reference_fasta": opts.reference_fasta,
+            "engine": opts.engine,
+            "sensitivity": opts.sensitivity,
+            "multiple_hits": opts.multiple_hits,
+            "minimap2_preset": opts.minimap2_preset,
+            "min_identity": opts.min_identity,
+            "min_aligned_bp": opts.min_aligned_bp,
+            "min_mapq": opts.min_mapq,
+            "threads": opts.threads,
+            "consensus_threshold": opts.consensus_threshold,
+            "no_coverage": opts.no_coverage,
+            "min_variant_freq": opts.min_variant_freq,
+            "save_consensus": opts.save_consensus,
+            "save_mapped": opts.save_mapped,
+            "save_unused": opts.save_unused,
+            "save_variants": opts.save_variants,
+            "lift_annotations": opts.lift_annotations,
+            "max_display_reads": opts.max_display_reads,
+            "right_click_action": opts.right_click_action,
+            "show_process_window": opts.show_process_window,
+            "use_system_path": opts.use_system_path,
+        },
+    )

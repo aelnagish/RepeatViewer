@@ -362,6 +362,7 @@ from repeatviewer.job_options import (
     load_te_library_benchmark_options,
     load_tsd_search_options,
     load_tree_options,
+    load_map_options,
     msa_clean_method_description,
     save_align_options,
     save_blast_options,
@@ -380,6 +381,8 @@ from repeatviewer.job_options import (
     save_te_library_benchmark_options,
     save_tsd_search_options,
     save_tree_options,
+    save_map_options,
+    MAP_RIGHT_CLICK_DIALOG,
     TeGenomeMapOptions,
     TeDivergencePlotOptions,
     MsaPlotJobOptions,
@@ -544,6 +547,7 @@ _TOOLBAR_TOOLTIPS = {
     "align": "Align FASTA using default parameters",
     "fastga": "FastGA whole-genome alignment (self-comparison one-by-one by default; optional all-pairs)",
     "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
+    "map_reference": "Map the selected sequences or reads to a reference (MAFFT / minimap2 / Bowtie2)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
@@ -926,6 +930,51 @@ class TreeWorker(QObject):
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
         except TreeBuildError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - surface to the UI
+            self.failed.emit(_format_cli_failure(exc))
+
+
+class MapReferenceWorker(QObject):
+    """Map sequences or reads to a reference off the UI thread (Tools → Map to Reference)."""
+
+    progress = Signal(int, str)
+    log_line = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, seq_files: list[Path], options, *, cancel=None) -> None:
+        super().__init__()
+        self._seq_files = list(seq_files)
+        self._options = options
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from repeatviewer.backends.map_reference import MapReferenceError, run_mapping
+        from repeatviewer.external_process import process_log_sink
+
+        def _log(message: str) -> None:
+            self.log_line.emit(str(message))
+
+        steps = {"Reading": 1, "Indexing": 1, "Placing": 2, "Mapping": 2, "Collecting": 3,
+                 "Consensus": 3, "Writing": 4}
+
+        def _progress(message: str) -> None:
+            step = next((v for k, v in steps.items() if message.startswith(k)), 1)
+            self.progress.emit(step, message)
+            self.log_line.emit(message)
+
+        try:
+            with process_log_sink(_log):
+                rvmap, files, report = run_mapping(
+                    self._seq_files, self._options, progress=_progress, cancel=self._cancel
+                )
+            self.finished.emit({"rvmap": str(rvmap), "files": [str(f) for f in files],
+                                "report": str(report)})
+        except JobCancelledError:
+            self.failed.emit(CANCELLED_MESSAGE)
+        except MapReferenceError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - surface to the UI
             self.failed.emit(_format_cli_failure(exc))
@@ -2092,6 +2141,7 @@ class MainWindow(QMainWindow):
         self._blast_options = load_blast_options()
         self._fastga_options = load_fastga_options()
         self._tree_options = load_tree_options()
+        self._map_options = load_map_options()
         self._extend_options = load_extend_options()
         self._tsd_search_options = load_tsd_search_options()
         self._teaid_options = load_teaid_options()
@@ -3018,6 +3068,7 @@ class MainWindow(QMainWindow):
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
         self._preview_tabs.sequenceExtracted.connect(self._on_preview_sequence_extracted)
         self._preview_tabs.fileWritten.connect(self._on_preview_file_written)
+        self._preview_tabs.openFileRequested.connect(self._on_preview_open_requested)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
         preview_layout.addWidget(self._preview_tabs, stretch=1)
         self._preview_host.setMinimumHeight(120)
@@ -3921,6 +3972,143 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.warning(self, "Tree failed", error.strip() or "Unknown error.")
 
+    # ------------------------------------------------------------------ Map to Reference
+
+    _MAP_SUFFIXES = (".fa", ".fasta", ".fna", ".fas", ".fsa", ".fq", ".fastq")
+
+    def _populate_map_menu(self, menu: QMenu) -> None:
+        menu.addAction("Map with default parameters", self._run_map_default)
+        menu.addSeparator()
+        # Settings can be changed without a selection (Run then asks for one).
+        menu.addAction(
+            "Change Map to Reference parameters",
+            lambda: self._open_map_dialog(require_selection=False),
+        )
+
+    def _map_candidate_files(self) -> list[Path]:
+        """Selected FASTA / FASTQ files (gzipped too), without the reference. No UI."""
+        reference = str(self._map_options.reference_fasta or "")
+        out = []
+        for p in self._selected_files():
+            name = p.name.lower()
+            if name.endswith(".gz"):
+                name = name[:-3]
+            if p.is_file() and name.endswith(self._MAP_SUFFIXES) and str(p) != reference:
+                out.append(p)
+        return out
+
+    def _selected_files_for_map(self) -> list[Path]:
+        files = self._map_candidate_files()
+        if not files:
+            QMessageBox.information(
+                self,
+                "Map to Reference",
+                "Select the FASTA or FASTQ files to map in the file panel first.\n"
+                "The reference is chosen in the Map to Reference window.",
+            )
+        return files
+
+    def _run_map_default(self) -> None:
+        if not self._map_options.reference_fasta:
+            self._open_map_dialog()
+            return
+        files = self._selected_files_for_map()
+        if files:
+            self._start_map_job(files, self._map_options)
+
+    def _quick_map_right_click(self) -> None:
+        """Right-click: map with saved settings, or open the dialog (Options tab)."""
+        if self._map_options.right_click_action == MAP_RIGHT_CLICK_DIALOG:
+            self._open_map_dialog()
+            return
+        self._run_map_default()
+
+    def _open_map_dialog(self, *, require_selection: bool = True) -> None:
+        """Map to Reference → parameters dialog (Cancel / Save / Run), non-modal so a
+        click in Files fills the Reference field."""
+        from repeatviewer.views.map_reference_dialog import MapReferenceDialog
+
+        files = self._map_candidate_files()
+        if require_selection and not files:
+            self._selected_files_for_map()  # shows the "select files" message
+            return
+        dialog = MapReferenceDialog(initial=self._map_options, files=files, parent=self)
+
+        def _accepted(d) -> None:
+            self._map_options = d.options()
+            save_map_options(self._map_options)
+            if not d.should_run():
+                self._set_status_message("Map to Reference settings saved", 4000)
+                return
+            reference = self._map_options.reference_fasta
+            run_files = [p for p in (files or self._selected_files_for_map())
+                         if str(p) != reference]
+            if not reference:
+                QMessageBox.information(self, "Map to Reference",
+                                        "Choose a reference first (Mapping tab).")
+                return
+            if run_files:
+                self._start_map_job(run_files, self._map_options)
+
+        self._present_te_viz_dialog(dialog, _accepted)
+
+    def _start_map_job(self, files: list[Path], options) -> None:
+        ref = Path(options.reference_fasta).name if options.reference_fasta else "reference"
+        title = (f"Map {files[0].name} to {ref}" if len(files) == 1
+                 else f"Map {len(files)} files to {ref}")
+        worker = MapReferenceWorker(files, options, cancel=self._job_cancel)
+        self._attach_process_monitor(
+            worker,
+            title=title,
+            enabled=bool(options.show_process_window),
+            tool_key="map_reference",
+            mirror_progress=False,
+        )
+        self._start_background_job(
+            worker,
+            job_title=title,
+            total_steps=4,
+            source_files=files,
+            on_finished=self._on_map_finished,
+            on_failed=self._on_map_failed,
+        )
+
+    @Slot(object)
+    def _on_map_finished(self, result) -> None:
+        rvmap = Path(result["rvmap"])
+        created = [Path(p) for p in result["files"] if Path(p).is_file()]
+        if self._current_folder:
+            # The .rvmap sits next to the input (green) and opens in the contig view
+            # (deep blue); everything else is in <input>_map_details.
+            self._refresh_subfolders_under(self._current_folder)
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=created,
+                source_files=getattr(self, "_last_job_source_files", []),
+                open_preview=False,
+            )
+        if rvmap.is_file():
+            self._auto_open_outputs([rvmap])
+        self._set_status_message(
+            f"Map to Reference completed — {rvmap.name} (report in {rvmap.stem}_details)",
+            12000, override_file_link=True,
+        )
+
+    @Slot(str)
+    def _on_map_failed(self, error: str) -> None:
+        if error.strip() == CANCELLED_MESSAGE:
+            return
+        QMessageBox.warning(self, "Map to Reference failed", error.strip() or "Unknown error.")
+
+    def _on_preview_open_requested(self, path: object) -> None:
+        """A result file asked for from a preview (contig view → Results menu)."""
+        if not isinstance(path, Path) or not path.is_file():
+            return
+        if path.suffix.lower() in _FASTA_SUFFIXES:
+            self._open_in_sequence_viewer(path)
+        else:
+            self._open_preview_tab(path, replace=False)
+
     def _attach_process_monitor(
         self,
         worker,
@@ -4556,6 +4744,7 @@ class MainWindow(QMainWindow):
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_fastga_menu(tools_menu.addMenu("Fast&GA"))
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
+        self._populate_map_menu(tools_menu.addMenu("&Map to Reference"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
@@ -5257,6 +5446,18 @@ class MainWindow(QMainWindow):
                     "(default: build with saved parameters)."
                 ),
                 right_click_slot=self._quick_tree_right_click,
+            )
+        elif tool_id == "map_reference":
+            self._add_toolbar_action_button(
+                bar,
+                "Map to Reference",
+                lambda: self._open_map_dialog(),
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: action chosen in the Options tab "
+                    "(default: map with saved parameters)."
+                ),
+                right_click_slot=self._quick_map_right_click,
             )
         elif tool_id == "repeat_quantify":
             self._add_toolbar_text_action(
