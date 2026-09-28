@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 _FASTA_PREVIEW_MAX_BYTES = 1024**3
+# Show status-bar progress when opening files at least this large.
+_PREVIEW_OPEN_PROGRESS_MIN_BYTES = 10 * 1024 * 1024
 _FASTA_TOO_LARGE_MESSAGE = "The file size is too big to show"
 
 
@@ -75,6 +77,13 @@ def _is_fasta_too_large_for_preview(path: Path) -> bool:
         return False
     try:
         return path.expanduser().resolve().stat().st_size > _FASTA_PREVIEW_MAX_BYTES
+    except OSError:
+        return False
+
+
+def _should_show_preview_open_progress(path: Path) -> bool:
+    try:
+        return path.expanduser().resolve().stat().st_size >= _PREVIEW_OPEN_PROGRESS_MIN_BYTES
     except OSError:
         return False
 
@@ -691,6 +700,9 @@ class FilePreviewPage(QWidget):
         # Annotation view. select_by_position() only retries for ~2 s while the
         # tab is hidden, so hold it here until Annotation is actually opened.
         self._pending_annotation_selection: tuple[int, int] | None = None
+        # Annotation/overview data is loaded lazily on first Annotation tab open
+        # so Text preview of large genomes does not wait on a full FASTA parse.
+        self._annotation_data_loaded_for: Path | None = None
         self._fasta_stack.addWidget(self._fasta_text_scroll)
         self._fasta_stack.addWidget(self._fasta_annotation_holder)
         self._fasta_stack.addWidget(self._fasta_dotplot_holder)
@@ -1496,6 +1508,10 @@ class FilePreviewPage(QWidget):
             self._show_annotation_content(multi=True)
             if self._fasta_stack.currentIndex() != 1:
                 self.set_fasta_tab_index(1)
+                return
+            self._ensure_annotation_data_loaded(
+                progress_detail="Loading annotations…"
+            )
             self._refresh_sequence_info_bar()
             return
         panel = self._ensure_annotation_panel()
@@ -1506,6 +1522,7 @@ class FilePreviewPage(QWidget):
         if self._fasta_stack.currentIndex() != 1:
             self.set_fasta_tab_index(1)
             return
+        self._ensure_annotation_data_loaded(progress_detail="Loading annotations…")
         self._refresh_sequence_info_bar()
         panel.open_annotation_tab()
         # Apply after open_annotation_tab()'s own deferred layout work has run,
@@ -1551,6 +1568,7 @@ class FilePreviewPage(QWidget):
             self._show_annotation_content(multi=True)
             if self._fasta_stack.currentIndex() != 1:
                 self.set_fasta_tab_index(1)
+            self._ensure_annotation_data_loaded(progress_detail="Loading annotations…")
             # Select matching row in the overview list.
             from repeatviewer.backends.gff_features import _seqid_matches
 
@@ -1568,6 +1586,7 @@ class FilePreviewPage(QWidget):
             panel.bind_annotation_zoom_bar(tab_host._annotation_zoom_bar)
         if self._fasta_stack.currentIndex() != 1:
             self.set_fasta_tab_index(1)
+        self._ensure_annotation_data_loaded(progress_detail="Loading annotations…")
         panel.ensure_active_sequence(seq_id)
         panel.jump_to_region(start, end)
 
@@ -1579,42 +1598,122 @@ class FilePreviewPage(QWidget):
         if self._annotation_panel is not None:
             self._annotation_panel.refresh_similarity_databases()
 
+    def _preview_progress_host(self):
+        window = self.window()
+        begin = getattr(window, "begin_preview_open_progress", None)
+        if not callable(begin):
+            return None
+        return window
+
+    def _begin_open_progress(self, path: Path, *, total: int = 0) -> bool:
+        host = self._preview_progress_host()
+        if host is None or not _should_show_preview_open_progress(path):
+            return False
+        host.begin_preview_open_progress(path.name, total=total)
+        return True
+
+    def _update_open_progress(self, completed: int, detail: str = "") -> None:
+        host = self._preview_progress_host()
+        if host is None:
+            return
+        update = getattr(host, "update_preview_open_progress", None)
+        if callable(update):
+            update(completed, detail)
+
+    def _end_open_progress(self) -> None:
+        host = self._preview_progress_host()
+        if host is None:
+            return
+        end = getattr(host, "end_preview_open_progress", None)
+        if callable(end):
+            end()
+
+    def _annotation_data_is_current(self) -> bool:
+        loaded_for = self._annotation_data_loaded_for
+        if loaded_for is None:
+            return False
+        try:
+            return loaded_for == self.path.expanduser().resolve()
+        except OSError:
+            return loaded_for == self.path
+
+    def _ensure_annotation_data_loaded(self, *, progress_detail: str = "") -> None:
+        """Load Annotation/overview data once per path (may take a while)."""
+        if self._annotation_data_is_current():
+            return
+        path = self.path
+        host = self._preview_progress_host()
+        started_here = False
+        if host is not None and not getattr(host, "_preview_open_progress", False):
+            if progress_detail or _should_show_preview_open_progress(path):
+                host.begin_preview_open_progress(path.name, total=0)
+                started_here = True
+                if progress_detail:
+                    self._update_open_progress(0, progress_detail)
+        try:
+            if self._multi_fasta_mode:
+                self._ensure_annotation_overview().load_path(path)
+            else:
+                self._ensure_annotation_panel().load_path(path)
+            try:
+                self._annotation_data_loaded_for = path.expanduser().resolve()
+            except OSError:
+                self._annotation_data_loaded_for = path
+        finally:
+            if started_here:
+                self._end_open_progress()
+
     def _load_single_fasta_preview(self, path: Path) -> None:
         if _is_fasta_too_large_for_preview(path):
             self._set_single_fasta_mode(False)
             self._multi_fasta_mode = False
             self._show_text(_FASTA_TOO_LARGE_MESSAGE)
             return
-        self._set_single_fasta_mode(True)
-        self._multi_fasta_mode = _is_multi_fasta_file(path)
+        show_progress = self._begin_open_progress(path, total=4)
         try:
-            max_chars = _TEXT_PREVIEW_MAX_CHARS
-            text, truncated = _read_text_preview(path, max_chars)
-        except OSError as exc:
-            text = f"Could not read file:\n{path}\n{exc}"
-            truncated = False
-        self._text_truncated = truncated
-        self._exit_text_edit_mode(clear_dirty=True)
-        self._fasta_text.setPlainText(text)
-        cursor = self._fasta_text.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.Start)
-        self._fasta_text.setTextCursor(cursor)
-        # Selections belong to one sequence; never carry them to the next file.
-        self._pending_annotation_selection = None
-        if self._dotplot_panel is not None:
-            self._dotplot_panel.clear_selection()
-        self._show_annotation_content(multi=self._multi_fasta_mode)
-        if self._multi_fasta_mode:
-            self._ensure_annotation_overview().load_path(path)
-        else:
-            self._ensure_annotation_panel().load_path(path)
-        if self._cyto_panel is not None:
-            self._cyto_panel.set_path(path)
-        default_tab = load_default_fasta_preview_tab()
-        if self._multi_fasta_mode and default_tab == DefaultFastaPreviewTab.DOTPLOT:
-            default_tab = DefaultFastaPreviewTab.ANNOTATION
-        self._activate_fasta_tab(default_tab)
-        self._refresh_sequence_info_bar()
+            self._set_single_fasta_mode(True)
+            self._multi_fasta_mode = _is_multi_fasta_file(path)
+            self._annotation_data_loaded_for = None
+            if show_progress:
+                self._update_open_progress(0, "Reading text…")
+            try:
+                max_chars = _TEXT_PREVIEW_MAX_CHARS
+                text, truncated = _read_text_preview(path, max_chars)
+            except OSError as exc:
+                text = f"Could not read file:\n{path}\n{exc}"
+                truncated = False
+            if show_progress:
+                self._update_open_progress(1, "Filling preview…")
+            self._text_truncated = truncated
+            self._exit_text_edit_mode(clear_dirty=True)
+            self._fasta_text.setPlainText(text)
+            cursor = self._fasta_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            self._fasta_text.setTextCursor(cursor)
+            # Selections belong to one sequence; never carry them to the next file.
+            self._pending_annotation_selection = None
+            if self._dotplot_panel is not None:
+                self._dotplot_panel.clear_selection()
+            if show_progress:
+                self._update_open_progress(2, "Preparing tabs…")
+            self._show_annotation_content(multi=self._multi_fasta_mode)
+            if self._cyto_panel is not None:
+                self._cyto_panel.set_path(path)
+            default_tab = load_default_fasta_preview_tab()
+            if self._multi_fasta_mode and default_tab == DefaultFastaPreviewTab.DOTPLOT:
+                default_tab = DefaultFastaPreviewTab.ANNOTATION
+            # Only pay for Annotation parse when that tab is the default open.
+            if default_tab == DefaultFastaPreviewTab.ANNOTATION:
+                if show_progress:
+                    self._update_open_progress(3, "Loading annotations…")
+                self._ensure_annotation_data_loaded()
+            self._activate_fasta_tab(default_tab)
+            if show_progress:
+                self._update_open_progress(3, "Summarizing…")
+            self._refresh_sequence_info_bar()
+        finally:
+            if show_progress:
+                self._end_open_progress()
 
     def _load(self) -> None:
         path = self.path
@@ -1654,16 +1753,27 @@ class FilePreviewPage(QWidget):
             self._stack.setCurrentWidget(self._image)
             return
         if _is_text_like_preview(path):
+            show_progress = self._begin_open_progress(path, total=2)
             try:
-                max_chars = (
-                    _TEXT_PREVIEW_MAX_CHARS
-                    if _is_text_like_preview(path)
-                    else _DEFAULT_TEXT_MAX_CHARS
-                )
-                text, truncated = _read_text_preview(path, max_chars)
-                self._show_text(text, truncated=truncated)
-            except OSError as exc:
-                self._show_text(f"Could not read file:\n{path}\n{exc}", truncated=False)
+                if show_progress:
+                    self._update_open_progress(0, "Reading text…")
+                try:
+                    max_chars = (
+                        _TEXT_PREVIEW_MAX_CHARS
+                        if _is_text_like_preview(path)
+                        else _DEFAULT_TEXT_MAX_CHARS
+                    )
+                    text, truncated = _read_text_preview(path, max_chars)
+                    if show_progress:
+                        self._update_open_progress(1, "Filling preview…")
+                    self._show_text(text, truncated=truncated)
+                except OSError as exc:
+                    self._show_text(
+                        f"Could not read file:\n{path}\n{exc}", truncated=False
+                    )
+            finally:
+                if show_progress:
+                    self._end_open_progress()
             return
         if _looks_like_binary_file(path):
             self._show_text(
@@ -1801,8 +1911,16 @@ class FilePreviewPage(QWidget):
             if self._multi_fasta_mode:
                 if self._annotation_overview is not None:
                     self._annotation_overview.load_path(self.path)
+                    try:
+                        self._annotation_data_loaded_for = self.path.expanduser().resolve()
+                    except OSError:
+                        self._annotation_data_loaded_for = self.path
             elif self._annotation_panel is not None:
                 self._annotation_panel.load_path(self.path)
+                try:
+                    self._annotation_data_loaded_for = self.path.expanduser().resolve()
+                except OSError:
+                    self._annotation_data_loaded_for = self.path
         return True
 
     def _exit_text_edit_mode(self, *, clear_dirty: bool = False) -> None:

@@ -1983,6 +1983,9 @@ class MainWindow(QMainWindow):
         self._metadata_ui_timer.setSingleShot(True)
         self._metadata_ui_timer.timeout.connect(self._drain_metadata_ui_queue)
         self._job_running = False
+        self._preview_open_progress = False
+        self._job_finished_callback = None
+        self._job_failed_callback = None
         self._last_job_source_files: list[Path] = []
         self._job_toolbar_actions: list[QAction | QToolButton] = []
         self._cached_folder_files: list[Path] = []
@@ -2606,24 +2609,120 @@ class MainWindow(QMainWindow):
 
     def _show_job_progress(self, job_title: str, total_steps: int) -> None:
         self._job_running = True
+        self._preview_open_progress = False
+        self._job_progress_epoch = getattr(self, "_job_progress_epoch", 0) + 1
         self._active_job_log_title = job_title
+        # Worker steps only; +1 reserved so the bar fills after results open.
+        self._job_work_steps = max(1, int(total_steps))
         operation_logger.info(
             "JOB START name=%s total_steps=%s",
             self._job_display_title(job_title),
-            total_steps,
+            self._job_work_steps,
         )
         self.statusBar().clearMessage()
         if self._task_progress is not None:
-            self._task_progress.start(self._running_job_title(job_title), total_steps)
+            self._task_progress.start(
+                self._running_job_title(job_title),
+                self._job_work_steps + 1,
+            )
         if self._stop_btn is not None:
             self._stop_btn.setEnabled(True)
 
     def _hide_job_progress(self) -> None:
         self._job_running = False
+        self._preview_open_progress = False
         if self._task_progress is not None:
             self._task_progress.reset()
         if self._stop_btn is not None and self._genome_map_thread is None and self._benchmark_thread is None:
             self._stop_btn.setEnabled(False)
+
+    def _finish_background_job(self) -> None:
+        """Worker thread done — keep progress visible until results are opened."""
+        self._set_job_actions_enabled(True)
+        if self._stop_btn is not None:
+            self._stop_btn.setEnabled(False)
+        self._job_open_epoch = getattr(self, "_job_progress_epoch", 0)
+        if self._task_progress is not None and self._job_running:
+            work = getattr(self, "_job_work_steps", 1)
+            self._task_progress.update(work, "Opening results…")
+
+    def _after_job_ui_ready(self) -> None:
+        """Fill the progress bar only after refresh/preview has painted."""
+        # A follow-on job (e.g. genome map after BLAST) may have taken the bar.
+        if getattr(self, "_job_open_epoch", None) != getattr(
+            self, "_job_progress_epoch", None
+        ):
+            return
+        if self._task_progress is not None and self._job_running:
+            total = max(1, int(self._task_progress._total))
+            self._task_progress.update(total, "Done")
+        self._hide_job_progress()
+
+    def _schedule_after_job_ui_ready(self) -> None:
+        """Defer fill/hide so preview paint is not interrupted by processEvents."""
+        QTimer.singleShot(0, self._after_job_ui_ready)
+
+    @Slot(dict)
+    @Slot(list)
+    @Slot(object)
+    def _on_background_job_finished(self, result: object = None) -> None:
+        """GUI-thread slot: never connect bare lambdas to worker.finished."""
+        title = getattr(self, "_active_job_log_title", "job")
+        self._log_job_finished(title, result)
+        self._finish_background_job()
+        callback = self._job_finished_callback
+        self._job_finished_callback = None
+        try:
+            if callback is not None:
+                callback(result)
+        finally:
+            self._schedule_after_job_ui_ready()
+
+    @Slot(str)
+    def _on_background_job_failed(self, error: str) -> None:
+        """GUI-thread slot: never connect bare lambdas to worker.failed."""
+        title = getattr(self, "_active_job_log_title", "job")
+        self._log_job_failed(title, error)
+        callback = self._job_failed_callback
+        self._job_failed_callback = None
+        try:
+            if callback is not None:
+                callback(error)
+        finally:
+            self._set_job_actions_enabled(True)
+            if self._stop_btn is not None:
+                self._stop_btn.setEnabled(False)
+            self._hide_job_progress()
+
+    def begin_preview_open_progress(self, filename: str, *, total: int = 0) -> None:
+        """Show status-bar progress while opening a large preview file.
+
+        Does not mark a cancellable job (Stop stays disabled). Skipped when a
+        real background job already owns the progress panel.
+        """
+        if self._job_running or self._task_progress is None:
+            return
+        from repeatviewer.widgets.task_progress import truncate_filename
+
+        self._preview_open_progress = True
+        self.statusBar().clearMessage()
+        short = truncate_filename(str(filename or ""), 28)
+        title = f"Opening {short}…" if short else "Opening…"
+        self._task_progress.start(title, int(total))
+
+    def update_preview_open_progress(self, completed: int, detail: str = "") -> None:
+        if not self._preview_open_progress or self._task_progress is None:
+            return
+        self._task_progress.update(int(completed), detail)
+
+    def end_preview_open_progress(self) -> None:
+        if not self._preview_open_progress:
+            return
+        self._preview_open_progress = False
+        if self._job_running:
+            return
+        if self._task_progress is not None:
+            self._task_progress.reset()
 
     def _set_status_file_link(self, path: Path | None) -> None:
         """Replace the left status text with a clickable filename (Finder link)."""
@@ -3471,9 +3570,14 @@ class MainWindow(QMainWindow):
         self._set_status_message(f"{title} in {source.name}…", 0)
         if not count_only:
             self._job_running = True
+            self._job_progress_epoch = getattr(self, "_job_progress_epoch", 0) + 1
+            self._job_work_steps = 100
             self._set_job_actions_enabled(False)
             if self._task_progress is not None:
-                self._task_progress.start(self._running_job_title("Extract sequences"), 100)
+                # +1 reserved until extracted sequences are opened in preview.
+                self._task_progress.start(
+                    self._running_job_title("Extract sequences"), 101
+                )
             if self._stop_btn is not None:
                 self._stop_btn.setEnabled(True)
 
@@ -3490,9 +3594,10 @@ class MainWindow(QMainWindow):
         )
         self._extract_worker.moveToThread(self._extract_thread)
         self._extract_thread.started.connect(self._extract_worker.run)
-        self._extract_worker.progress.connect(self._on_extract_progress)
-        self._extract_worker.finished.connect(self._on_extract_finished)
-        self._extract_worker.failed.connect(self._on_extract_failed)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._extract_worker.progress.connect(self._on_extract_progress, queued)
+        self._extract_worker.finished.connect(self._on_extract_finished, queued)
+        self._extract_worker.failed.connect(self._on_extract_failed, queued)
         self._extract_worker.finished.connect(self._extract_thread.quit)
         self._extract_worker.failed.connect(self._extract_thread.quit)
         self._extract_thread.finished.connect(self._cleanup_extract_worker)
@@ -3505,7 +3610,9 @@ class MainWindow(QMainWindow):
                 self._extract_dialog.set_check_progress(f"Checking… {text}")
             return
         if self._task_progress is not None:
-            self._task_progress.update(percent, text)
+            work = getattr(self, "_job_work_steps", 100)
+            capped = min(max(0, int(percent)), work)
+            self._task_progress.update(capped, text)
 
     @Slot(object)
     def _on_extract_finished(self, summary: object) -> None:
@@ -3514,6 +3621,9 @@ class MainWindow(QMainWindow):
         if getattr(summary, "cancelled", False):
             if self._extract_count_only and self._extract_dialog is not None:
                 self._extract_dialog.set_check_result("Check stopped.", ok=False)
+            if not self._extract_count_only:
+                self._hide_job_progress()
+                self._set_job_actions_enabled(True)
             self._set_status_message("Extract sequences stopped", 6000)
             return
 
@@ -3531,6 +3641,31 @@ class MainWindow(QMainWindow):
             self._set_status_message(f"{found:,} of {total:,} IDs found", 8000)
             return
 
+        self._finish_background_job()
+        detail = ""
+        try:
+            if not summary.written:
+                self._set_status_message("No sequences extracted", 6000)
+                return
+
+            message = f"Wrote {summary.matched:,} sequence(s)"
+            if len(summary.written) > 1:
+                message += f" to {len(summary.written):,} file(s)"
+            message += "."
+            if summary.missing:
+                message += f" {len(summary.missing):,} ID(s) not found."
+            outputs = list(summary.written)
+            if summary.missing_path is not None:
+                outputs.append(summary.missing_path)
+            sources = [self._extract_source] if getattr(self, "_extract_source", None) else []
+            self._refresh_after_compose(outputs, message, source_files=sources)
+
+            detail = message
+            if summary.missing_path is not None:
+                detail += f"\n\nThe missing names are listed in:\n{summary.missing_path.name}"
+        finally:
+            self._schedule_after_job_ui_ready()
+
         if not summary.written:
             QMessageBox.warning(
                 self,
@@ -3539,28 +3674,14 @@ class MainWindow(QMainWindow):
                 f"{name}.\n\nSequence names are matched up to the first space, "
                 "the same text BLAST reports.",
             )
-            self._set_status_message("No sequences extracted", 6000)
-            return
-
-        message = f"Wrote {summary.matched:,} sequence(s)"
-        if len(summary.written) > 1:
-            message += f" to {len(summary.written):,} file(s)"
-        message += "."
-        if summary.missing:
-            message += f" {len(summary.missing):,} ID(s) not found."
-        outputs = list(summary.written)
-        if summary.missing_path is not None:
-            outputs.append(summary.missing_path)
-        sources = [self._extract_source] if getattr(self, "_extract_source", None) else []
-        self._refresh_after_compose(outputs, message, source_files=sources)
-
-        detail = message
-        if summary.missing_path is not None:
-            detail += f"\n\nThe missing names are listed in:\n{summary.missing_path.name}"
-        QMessageBox.information(self, "Extract Sequences from File", detail)
+        elif detail:
+            QMessageBox.information(self, "Extract Sequences from File", detail)
 
     @Slot(str)
     def _on_extract_failed(self, message: str) -> None:
+        if not self._extract_count_only:
+            self._hide_job_progress()
+            self._set_job_actions_enabled(True)
         if message == CANCELLED_MESSAGE:
             self._set_status_message("Extract sequences stopped", 6000)
             return
@@ -3575,8 +3696,6 @@ class MainWindow(QMainWindow):
             self._job_cancel.reset()
         if not self._extract_count_only:
             self._job_running = self._worker_thread is not None
-            if self._task_progress is not None:
-                self._task_progress.reset()
             if self._worker_thread is None:
                 self._set_job_actions_enabled(True)
             if self._stop_btn is not None and not self._job_running:
@@ -8191,15 +8310,10 @@ class MainWindow(QMainWindow):
         self._benchmark_worker = worker
         self._benchmark_worker.moveToThread(self._benchmark_thread)
         self._benchmark_thread.started.connect(self._benchmark_worker.run)
-        self._benchmark_worker.progress.connect(self._on_job_progress)
-        self._benchmark_worker.finished.connect(
-            lambda result, title=job_title: self._log_job_finished(title, result)
-        )
-        self._benchmark_worker.failed.connect(
-            lambda error, title=job_title: self._log_job_failed(title, error)
-        )
-        self._benchmark_worker.finished.connect(self._on_te_benchmark_finished)
-        self._benchmark_worker.failed.connect(self._on_te_benchmark_failed)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._benchmark_worker.progress.connect(self._on_job_progress, queued)
+        self._benchmark_worker.finished.connect(self._on_te_benchmark_finished, queued)
+        self._benchmark_worker.failed.connect(self._on_te_benchmark_failed, queued)
         self._benchmark_worker.finished.connect(self._benchmark_thread.quit)
         self._benchmark_worker.failed.connect(self._benchmark_thread.quit)
         self._benchmark_thread.finished.connect(self._cleanup_benchmark_worker)
@@ -8208,25 +8322,35 @@ class MainWindow(QMainWindow):
 
     @Slot(list)
     def _on_te_benchmark_finished(self, created_paths: list[Path]) -> None:
-        self._hide_job_progress()
-        self._set_job_actions_enabled(True)
-        paths = [Path(p).expanduser().resolve() for p in created_paths if Path(p).is_file()]
-        sources = self._last_benchmark_source_files
-        self._refresh_folders_after_job(paths, sources)
-        self._auto_open_outputs(paths)
-        title = self._job_display_title("te_confusion_benchmark")
-        if paths and any(p.name.endswith("_library_benchmark.html") for p in paths):
-            title = self._job_display_title("te_library_benchmark")
-        summary = f"{title} finished"
-        if paths:
-            names = ", ".join(p.name for p in paths[:4])
-            if len(paths) > 4:
-                names += ", …"
-            summary += f" — created: {names}"
-        self._set_status_message(summary, 12000, override_file_link=True)
+        self._log_job_finished(
+            getattr(self, "_active_job_log_title", "benchmark"), created_paths
+        )
+        self._finish_background_job()
+        try:
+            paths = [
+                Path(p).expanduser().resolve()
+                for p in created_paths
+                if Path(p).is_file()
+            ]
+            sources = self._last_benchmark_source_files
+            self._refresh_folders_after_job(paths, sources)
+            self._auto_open_outputs(paths)
+            title = self._job_display_title("te_confusion_benchmark")
+            if paths and any(p.name.endswith("_library_benchmark.html") for p in paths):
+                title = self._job_display_title("te_library_benchmark")
+            summary = f"{title} finished"
+            if paths:
+                names = ", ".join(p.name for p in paths[:4])
+                if len(paths) > 4:
+                    names += ", …"
+                summary += f" — created: {names}"
+            self._set_status_message(summary, 12000, override_file_link=True)
+        finally:
+            self._schedule_after_job_ui_ready()
 
     @Slot(str)
     def _on_te_benchmark_failed(self, error: str) -> None:
+        self._log_job_failed(getattr(self, "_active_job_log_title", "benchmark"), error)
         self._hide_job_progress()
         self._set_job_actions_enabled(True)
         if error == CANCELLED_MESSAGE:
@@ -8788,8 +8912,11 @@ class MainWindow(QMainWindow):
         worker_note = f" ({workers} workers)" if workers > 1 else ""
         self._clear_job_file_highlights()
         self._set_status_message(f"Building TE genome map{worker_note}…", 0)
+        self._job_progress_epoch = getattr(self, "_job_progress_epoch", 0) + 1
+        self._job_work_steps = 6
         if self._task_progress is not None:
-            self._task_progress.start(self._running_job_title("TE genome map"), 6)
+            # +1 reserved until the HTML preview actually opens.
+            self._task_progress.start(self._running_job_title("TE genome map"), 7)
         if self._stop_btn is not None:
             self._stop_btn.setEnabled(True)
         self._genome_map_thread = QThread(self)
@@ -8823,9 +8950,10 @@ class MainWindow(QMainWindow):
         )
         self._genome_map_worker.moveToThread(self._genome_map_thread)
         self._genome_map_thread.started.connect(self._genome_map_worker.run)
-        self._genome_map_worker.progress.connect(self._on_genome_map_progress)
-        self._genome_map_worker.finished.connect(self._on_genome_map_finished)
-        self._genome_map_worker.failed.connect(self._on_genome_map_failed)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._genome_map_worker.progress.connect(self._on_genome_map_progress, queued)
+        self._genome_map_worker.finished.connect(self._on_genome_map_finished, queued)
+        self._genome_map_worker.failed.connect(self._on_genome_map_failed, queued)
         self._genome_map_worker.finished.connect(self._genome_map_thread.quit)
         self._genome_map_worker.failed.connect(self._genome_map_thread.quit)
         self._genome_map_thread.finished.connect(self._cleanup_genome_map_worker)
@@ -8834,39 +8962,53 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_genome_map_finished(self, html_path: object) -> None:
         blast_txt = self._genome_map_blast_txt
-        if self._task_progress is not None:
-            self._task_progress.update(6, Path(str(blast_txt)).name if blast_txt else "")
-        if html_path is None or not Path(html_path).is_file():
-            QMessageBox.warning(self, "TE genome map", "Could not build the genome map.")
-            self._set_status_message("TE genome map failed", 6000, override_file_link=True)
-            return
-        path = Path(html_path).resolve()
-        if blast_txt is not None:
-            self._highlight_genome_map_outputs(path, blast_txt)
-        if self._current_folder and path.parent.resolve() == self._current_folder.resolve():
-            self._select_path_in_file_list(path)
-        self._open_genome_map_in_preview(path)
-        n_inputs = len(self._genome_map_te_paths)
-        detail = (
-            "all TE samples share one y-axis scale"
-            if n_inputs > 1
-            else "chromosome tracks, Mbp on X axis"
-        )
-        self._set_status_message(
-            f"Genome map opened: {path.name} ({detail})",
-            12000,
-            override_file_link=True,
-        )
+        self._finish_background_job()
+        opened = False
+        try:
+            if html_path is None or not Path(html_path).is_file():
+                self._set_status_message(
+                    "TE genome map failed", 6000, override_file_link=True
+                )
+                return
+            path = Path(html_path).resolve()
+            if blast_txt is not None:
+                self._highlight_genome_map_outputs(path, blast_txt)
+            if (
+                self._current_folder
+                and path.parent.resolve() == self._current_folder.resolve()
+            ):
+                self._select_path_in_file_list(path)
+            self._open_genome_map_in_preview(path)
+            opened = True
+            n_inputs = len(self._genome_map_te_paths)
+            detail = (
+                "all TE samples share one y-axis scale"
+                if n_inputs > 1
+                else "chromosome tracks, Mbp on X axis"
+            )
+            self._set_status_message(
+                f"Genome map opened: {path.name} ({detail})",
+                12000,
+                override_file_link=True,
+            )
+        finally:
+            self._schedule_after_job_ui_ready()
+
+        if not opened:
+            QMessageBox.warning(
+                self, "TE genome map", "Could not build the genome map."
+            )
 
     @Slot(int, str)
     def _on_genome_map_progress(self, value: int, label: str) -> None:
         if self._task_progress is not None:
-            self._task_progress.update(value, label)
+            work = getattr(self, "_job_work_steps", 6)
+            self._task_progress.update(min(max(0, int(value)), work), label)
 
     @Slot(str)
     def _on_genome_map_failed(self, error: str) -> None:
-        if self._task_progress is not None:
-            self._task_progress.reset()
+        self._hide_job_progress()
+        self._set_job_actions_enabled(True)
         if error == CANCELLED_MESSAGE:
             self._set_status_message("Stopped TE genome map", 6000, override_file_link=True)
             return
@@ -8882,8 +9024,6 @@ class MainWindow(QMainWindow):
         if cancelled:
             self._job_cancel.reset()
         self._job_running = self._worker_thread is not None
-        if self._task_progress is not None:
-            self._task_progress.reset()
         thread = self._genome_map_thread
         if thread is not None and thread.isRunning():
             thread.quit()
@@ -11408,6 +11548,8 @@ class MainWindow(QMainWindow):
         self._clear_job_file_highlights()
         self._stop_metadata_enrichment()
         self._job_cancel.reset()
+        self._job_finished_callback = on_finished
+        self._job_failed_callback = on_failed
         self._show_job_progress(job_title, total_steps)
         self._set_job_actions_enabled(False)
 
@@ -11417,16 +11559,10 @@ class MainWindow(QMainWindow):
         self._worker_thread.started.connect(self._worker.run)
         queued = Qt.ConnectionType.QueuedConnection
         self._worker.progress.connect(self._on_job_progress, queued)
-        self._worker.finished.connect(
-            lambda result, title=job_title: self._log_job_finished(title, result)
-        )
-        self._worker.failed.connect(
-            lambda error, title=job_title: self._log_job_failed(title, error)
-        )
-        self._worker.finished.connect(self._finish_background_job, queued)
-        self._worker.failed.connect(self._finish_background_job, queued)
-        self._worker.finished.connect(on_finished, queued)
-        self._worker.failed.connect(on_failed, queued)
+        # Bound MainWindow slots only — bare lambdas/closures have no receiver
+        # QObject and can run on the worker thread (QBasicTimer / segfault).
+        self._worker.finished.connect(self._on_background_job_finished, queued)
+        self._worker.failed.connect(self._on_background_job_failed, queued)
         self._worker.finished.connect(self._worker_thread.quit)
         self._worker.failed.connect(self._worker_thread.quit)
         self._worker_thread.finished.connect(self._cleanup_worker)
@@ -11442,7 +11578,10 @@ class MainWindow(QMainWindow):
             label,
         )
         if self._task_progress is not None:
-            self._task_progress.update(value, self._parse_progress_filename(label))
+            # Never fill the last slot here — reserved until results are shown.
+            work = getattr(self, "_job_work_steps", self._task_progress._total)
+            capped = min(max(0, int(value)), max(0, int(work)))
+            self._task_progress.update(capped, self._parse_progress_filename(label))
 
     def _log_job_finished(self, job_title: str, result) -> None:
         if isinstance(result, (list, tuple)):
@@ -11461,11 +11600,6 @@ class MainWindow(QMainWindow):
             self._job_display_title(job_title),
             error,
         )
-
-    @Slot()
-    def _finish_background_job(self) -> None:
-        self._hide_job_progress()
-        self._set_job_actions_enabled(True)
 
     def _set_job_actions_enabled(self, enabled: bool) -> None:
         for control in self._job_toolbar_actions:
