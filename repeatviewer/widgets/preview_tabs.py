@@ -1609,8 +1609,11 @@ class FilePreviewPage(QWidget):
         host = self._preview_progress_host()
         if host is None or not _should_show_preview_open_progress(path):
             return False
-        host.begin_preview_open_progress(path.name, total=total)
-        return True
+        began = host.begin_preview_open_progress(path.name, total=total)
+        # begin may no-op while a background job owns the bar.
+        return bool(began) if began is not None else bool(
+            getattr(host, "_preview_open_progress", False)
+        )
 
     def _update_open_progress(self, completed: int, detail: str = "") -> None:
         host = self._preview_progress_host()
@@ -1646,9 +1649,11 @@ class FilePreviewPage(QWidget):
         started_here = False
         if host is not None and not getattr(host, "_preview_open_progress", False):
             if progress_detail or _should_show_preview_open_progress(path):
-                host.begin_preview_open_progress(path.name, total=0)
-                started_here = True
-                if progress_detail:
+                began = host.begin_preview_open_progress(path.name, total=0)
+                started_here = bool(began) if began is not None else bool(
+                    getattr(host, "_preview_open_progress", False)
+                )
+                if started_here and progress_detail:
                     self._update_open_progress(0, progress_detail)
         try:
             if self._multi_fasta_mode:

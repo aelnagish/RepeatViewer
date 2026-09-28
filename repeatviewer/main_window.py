@@ -2711,14 +2711,16 @@ class MainWindow(QMainWindow):
                 self._stop_btn.setEnabled(False)
             self._hide_job_progress()
 
-    def begin_preview_open_progress(self, filename: str, *, total: int = 0) -> None:
+    def begin_preview_open_progress(self, filename: str, *, total: int = 0) -> bool:
         """Show status-bar progress while opening a large preview file.
 
         Does not mark a cancellable job (Stop stays disabled). Skipped when a
         real background job already owns the progress panel.
+
+        Returns True when the bar is actually shown.
         """
         if self._job_running or self._task_progress is None:
-            return
+            return False
         from repeatviewer.widgets.task_progress import truncate_filename
 
         self._preview_open_progress = True
@@ -2726,11 +2728,26 @@ class MainWindow(QMainWindow):
         short = truncate_filename(str(filename or ""), 28)
         title = f"Opening {short}…" if short else "Opening…"
         self._task_progress.start(title, int(total))
+        # Preview open is sync on the GUI thread — pump paint so the bar is
+        # visible during the read (safe here; not used on the job-finish path).
+        from PySide6.QtCore import QEventLoop
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
+        return True
 
     def update_preview_open_progress(self, completed: int, detail: str = "") -> None:
         if not self._preview_open_progress or self._task_progress is None:
             return
         self._task_progress.update(int(completed), detail)
+        from PySide6.QtCore import QEventLoop
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
 
     def end_preview_open_progress(self) -> None:
         if not self._preview_open_progress:
