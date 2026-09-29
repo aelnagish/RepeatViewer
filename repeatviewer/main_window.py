@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QDrag,
     QFont,
     QFontMetrics,
+    QKeyEvent,
     QKeySequence,
     QMouseEvent,
     QPainter,
@@ -64,6 +65,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QPlainTextEdit,
+    QTextEdit,
     QMessageBox,
     QPushButton,
     QStyle,
@@ -462,6 +465,7 @@ from repeatviewer.widgets.hidden_folders import (
     replace_hidden_root_path,
     unhide_root_folder,
 )
+from repeatviewer.edit_actions import browser_undo_label
 from repeatviewer.widgets.folder_colors import (
     FOLDER_COLOR_PRESETS,
     apply_folder_item_color,
@@ -2098,6 +2102,8 @@ class MainWindow(QMainWindow):
         self._plugins_menu: QMenu | None = None
         self._others_menu: QMenu | None = None
         self._tools_menu: QMenu | None = None
+        self._edit_menu: QMenu | None = None
+        self._edit_actions: dict[str, QAction] = {}
         self._tools_plugin_menu: QMenu | None = None
         self._tools_wrapper_menu: QMenu | None = None
         self._workflows_menu: QMenu | None = None
@@ -5155,6 +5161,8 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("&Quit", self.close, "Ctrl+Q")
 
+        self._build_edit_menu()
+
         seq_menu = self.menuBar().addMenu("&Sequence")
         seq_menu.addAction("New Sequence", self._new_sequence)
         seq_menu.addAction("Combine Sequences to One File", self._group_sequences)
@@ -5178,6 +5186,7 @@ class MainWindow(QMainWindow):
         )
 
         tools_menu = self.menuBar().addMenu("&Tools")
+        tools_menu.setObjectName("ToolsMenu")
         self._tools_menu = tools_menu
         tools_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
         tools_menu.addSeparator()
@@ -5199,8 +5208,10 @@ class MainWindow(QMainWindow):
         # On macOS, Tools items added later in startup (after Workflows) do not
         # show up in the native menu bar.
         self._tools_plugin_menu = tools_menu.addMenu("Plugin (Beta)")
+        self._tools_plugin_menu.setObjectName("ToolsPluginMenu")
         self._fill_tools_plugin_menu(self._tools_plugin_menu)
         self._tools_wrapper_menu = tools_menu.addMenu("Command wrapper")
+        self._tools_wrapper_menu.setObjectName("ToolsWrapperMenu")
         self._fill_tools_wrapper_menu(self._tools_wrapper_menu)
 
         workflows_menu = QMenu("&Workflows", self)
@@ -5226,9 +5237,297 @@ class MainWindow(QMainWindow):
         self._connect_menu_operation_logging()
         self._rebuild_top_toolbar()
 
+    # ------------------------------------------------------------ Edit menu
+
+    def _build_edit_menu(self) -> None:
+        """Build the Edit menu completely, at startup, next to File.
+
+        macOS rules learnt the hard way:
+        * Items added to a menu later in startup never show up in the native
+          menu bar, so everything is created here.
+        * Python references to menu items can go stale on macOS while the item
+          itself lives on ("Internal C++ object already deleted"). So the menu
+          and its items are created from Python and owned by the main window
+          (as the Workflows menu is), and every later access goes through
+          _edit_action(), which finds the live item by object name.
+
+        The shortcut keys live on these items (a key registered twice does
+        nothing in Qt). Each item acts on the panel that has focus, exactly as
+        the key did before; anywhere else the key press is passed on unchanged
+        to the focused widget (text boxes, tables, previews, dialogs).
+        """
+        from repeatviewer.widgets.file_colors import FILE_COLOR_PRESETS
+
+        # macOS appends Writing Tools, AutoFill, Start Dictation and Emoji &
+        # Symbols to any menu titled exactly "Edit". An invisible zero-width
+        # space keeps the title looking the same without that match.
+        title = "Edit\u200b" if platform.system() == "Darwin" else "&Edit"
+        menu = QMenu(title, self)
+        menu.setObjectName("EditMenu")
+        self.menuBar().addMenu(menu)
+        self._edit_menu = menu
+        self._edit_actions = {}
+        std = QKeySequence.StandardKey
+
+        def add(key: str, text: str, handler, shortcut=None) -> None:
+            action = QAction(text, self)
+            action.setObjectName(f"edit_{key}")
+            action.setMenuRole(QAction.MenuRole.NoRole)
+            if shortcut is not None:
+                action.setShortcut(QKeySequence(shortcut))
+            action.triggered.connect(lambda checked=False, h=handler: h())
+            menu.addAction(action)
+            self._edit_actions[key] = action
+
+        add("undo", "Undo", self._edit_undo, std.Undo)
+        menu.addSeparator()
+        add("cut", "Cut", self._edit_cut, std.Cut)
+        add("copy", "Copy", self._edit_copy, std.Copy)
+        add("paste", "Paste", self._edit_paste, std.Paste)
+        # No key on purpose: Del/Backspace keep their panel-scoped shortcuts
+        # (file panel, Annotation view), so the destructive key is not rerouted.
+        add("delete", "Delete", self._edit_delete)
+        add("select_all", "Select All", self._edit_select_all, std.SelectAll)
+        menu.addSeparator()
+        add("rename", "Rename…", self._edit_rename, Qt.Key.Key_F2)
+        add("duplicate", "Duplicate", self._edit_duplicate)
+
+        color_menu = QMenu("File Color", self)
+        color_menu.setObjectName("EditFileColorMenu")
+
+        def add_color(text: str, handler) -> None:
+            action = QAction(text, self)
+            action.setMenuRole(QAction.MenuRole.NoRole)
+            action.triggered.connect(lambda checked=False, h=handler: h())
+            color_menu.addAction(action)
+
+        add_color("Choose Color…", self._edit_choose_file_color)
+        for label, hex_color in FILE_COLOR_PRESETS:
+            add_color(label, lambda c=hex_color: self._edit_set_file_color(c))
+        color_menu.addSeparator()
+        add_color("Clear Color", lambda: self._edit_set_file_color(None))
+        menu.addMenu(color_menu)
+        color_menu.menuAction().setObjectName("edit_file_color")
+        self._edit_actions["file_color"] = color_menu.menuAction()
+
+        add("clear_highlights", "Clear Highlights", self._clear_job_file_highlights)
+        menu.aboutToShow.connect(self._update_edit_menu_state)
+        menu.aboutToHide.connect(self._reset_edit_menu_state)
+
+    def _edit_action(self, key: str) -> QAction | None:
+        """The live Edit menu item ``key`` (re-found by name if the reference went stale)."""
+        action = self._edit_actions.get(key)
+        if self._menu_object_alive(action):
+            return action
+        name = f"edit_{key}"
+        try:
+            for top in self.menuBar().actions():
+                menu = top.menu()
+                if menu is None or menu.objectName() != "EditMenu":
+                    continue
+                for item in menu.actions():
+                    if item.objectName() == name:
+                        self._edit_actions[key] = item
+                        return item
+        except RuntimeError:
+            pass
+        return None
+
+    def _edit_focus(self) -> tuple[str, QWidget | None]:
+        """Where Edit acts: "files", "folders", "tree" (phylogeny view) or "other"."""
+        widget = QApplication.focusWidget()
+        if widget is None:
+            return "other", None
+        if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return "other", widget
+        for area, panel in (("files", self._file_list), ("folders", self._folder_tree)):
+            if panel is not None and (widget is panel or panel.isAncestorOf(widget)):
+                return area, panel
+        parent = widget
+        while parent is not None:
+            if type(parent).__name__ == "TreePanel" and hasattr(parent, "undo"):
+                return "tree", parent
+            parent = parent.parentWidget()
+        return "other", widget
+
+    def _edit_forward_key(self, key: str, sequence_key) -> None:
+        """Give the focused widget the key press it would get without the menu item."""
+        widget = QApplication.focusWidget()
+        sequence = QKeySequence(sequence_key)
+        if widget is None or sequence.isEmpty():
+            return
+        combo = sequence[0]
+        action = self._edit_action(key)
+        # Switch the item off for this moment: otherwise Qt matches the synthetic
+        # key press to this menu shortcut again and it loops back here.
+        was_enabled = action.isEnabled() if action is not None else True
+        if action is not None:
+            action.setEnabled(False)
+        try:
+            for event_type in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                QApplication.sendEvent(
+                    widget, QKeyEvent(event_type, combo.key(), combo.keyboardModifiers())
+                )
+        finally:
+            if action is not None:
+                action.setEnabled(was_enabled)
+
+    def _edit_selected_folders(self) -> list[Path]:
+        if self._folder_tree is None:
+            return []
+        return [folder for folder, _item in self._folder_tree._selected_folder_items()]
+
+    def _edit_undo(self) -> None:
+        area, target = self._edit_focus()
+        if area in ("files", "folders"):
+            self._undo_browser_action()
+        elif area == "tree" and target is not None:
+            target.undo()
+        else:
+            self._edit_forward_key("undo", QKeySequence.StandardKey.Undo)
+
+    def _edit_cut(self) -> None:
+        if self._edit_focus()[0] == "files":
+            self._cut_files_shortcut()
+        else:
+            self._edit_forward_key("cut", QKeySequence.StandardKey.Cut)
+
+    def _edit_copy(self) -> None:
+        if self._edit_focus()[0] == "files":
+            self._copy_files_shortcut()
+        else:
+            self._edit_forward_key("copy", QKeySequence.StandardKey.Copy)
+
+    def _edit_paste(self) -> None:
+        if self._edit_focus()[0] in ("files", "folders"):
+            self._paste_files_shortcut()
+        else:
+            self._edit_forward_key("paste", QKeySequence.StandardKey.Paste)
+
+    def _edit_delete(self) -> None:
+        # Menu only: deletes files only when the file panel has focus.
+        if self._edit_focus()[0] == "files":
+            self._delete_selected_shortcut()
+
+    def _edit_select_all(self) -> None:
+        # Every widget already knows its own Select All (the file panel selects
+        # every file, the folder panel every folder, text boxes their text), so
+        # always pass it on.
+        self._edit_forward_key("select_all", QKeySequence.StandardKey.SelectAll)
+
+    def _edit_rename(self) -> None:
+        area, _target = self._edit_focus()
+        if area == "files":
+            paths = self._selected_files()
+            if len(paths) == 1:
+                self._rename_file(paths[0])
+        elif area == "folders":
+            folders = self._edit_selected_folders()
+            if len(folders) == 1:
+                self._rename_folder(folders[0])
+        else:
+            self._edit_forward_key("rename", Qt.Key.Key_F2)
+
+    def _edit_duplicate(self) -> None:
+        if self._edit_focus()[0] != "files":
+            return
+        paths = self._selected_files()
+        if paths:
+            self._duplicate_selected_files(paths)
+
+    def _edit_set_file_color(self, color: str | None) -> None:
+        if self._edit_focus()[0] != "files":
+            return
+        paths = self._selected_files()
+        if not paths:
+            return
+        if color is None:
+            self._file_list._clear_files_color(paths)
+        else:
+            self._file_list._set_files_color(paths, color)
+
+    def _edit_choose_file_color(self) -> None:
+        if self._edit_focus()[0] != "files":
+            return
+        paths = self._selected_files()
+        if paths:
+            self._file_list._choose_files_color(paths)
+
+    def _update_edit_menu_state(self) -> None:
+        """Grey out what does not apply to the focused panel (menu is opening)."""
+        try:
+            self._apply_edit_menu_state()
+        except RuntimeError:
+            # A stale macOS reference must never break the menu: show all enabled.
+            self._reset_edit_menu_state()
+
+    def _apply_edit_menu_state(self) -> None:
+        area, _target = self._edit_focus()
+        files = self._selected_files() if area == "files" else []
+        browser = area in ("files", "folders")
+
+        def set_state(key: str, enabled: bool, text: str | None = None) -> None:
+            action = self._edit_action(key)
+            if action is None:
+                return
+            if text is not None:
+                action.setText(text)
+            action.setEnabled(enabled)
+
+        if browser:
+            entry = self._browser_undo_stack[-1] if self._browser_undo_stack else None
+            set_state("undo", entry is not None, browser_undo_label(entry))
+        else:
+            set_state("undo", True, "Undo")
+        copy_ok = bool(files) if area == "files" else area != "folders"
+        set_state("cut", copy_ok)
+        set_state("copy", copy_ok)
+        if browser:
+            set_state(
+                "paste", self._current_folder is not None and self._clipboard_can_paste()
+            )
+        else:
+            set_state("paste", True)
+        set_state("delete", bool(files))
+        set_state(
+            "rename",
+            (area == "files" and len(files) == 1)
+            or (area == "folders" and len(self._edit_selected_folders()) == 1),
+        )
+        set_state("duplicate", bool(files))
+        set_state("file_color", bool(files))
+        set_state(
+            "clear_highlights",
+            bool(self._highlight_output_keys or self._highlight_source_keys),
+        )
+
+    def _reset_edit_menu_state(self) -> None:
+        """Menu closed: enable everything again so the shortcut keys always work.
+
+        Each handler checks for itself whether there is something to act on.
+        """
+        for key in (
+            "undo",
+            "cut",
+            "copy",
+            "paste",
+            "delete",
+            "select_all",
+            "rename",
+            "duplicate",
+            "file_color",
+            "clear_highlights",
+        ):
+            try:
+                action = self._edit_action(key)
+                if action is not None:
+                    action.setEnabled(True)
+            except RuntimeError:
+                continue
+
     @staticmethod
     def _clean_menu_label(text: str) -> str:
-        return text.replace("&", "").replace("…", "...").strip()
+        return text.replace("&", "").replace("\u200b", "").replace("…", "...").strip()
 
     def _connect_menu_operation_logging(self) -> None:
         """Log menu-launched operations without logging ordinary file previews."""
@@ -5270,34 +5569,30 @@ class MainWindow(QMainWindow):
         )
 
     def _install_shortcuts(self) -> None:
-        QShortcut(QKeySequence("Ctrl+Shift+G"), self, self._open_set_genome)
-        QShortcut(QKeySequence.StandardKey.Refresh, self, self._refresh_current_folder)
-        QShortcut(QKeySequence(Qt.Key.Key_F5), self, self._refresh_current_folder)
+        # Define Genome's Ctrl+Shift+G lives on its File menu item. It used to be
+        # registered here a second time, which made the key ambiguous: Qt then
+        # runs neither, so the shortcut did nothing.
+        # StandardKey.Refresh already contains F5 on Windows/Linux, so register
+        # every refresh key only once for the same reason.
+        refresh_keys: list[QKeySequence] = []
+        for seq in (
+            *QKeySequence.keyBindings(QKeySequence.StandardKey.Refresh),
+            QKeySequence(Qt.Key.Key_F5),
+        ):
+            if not seq.isEmpty() and seq not in refresh_keys:
+                refresh_keys.append(seq)
+        for seq in refresh_keys:
+            QShortcut(seq, self, self._refresh_current_folder)
+        # One Find shortcut for the whole window; _focus_browser_filter already
+        # picks the folder or the file filter from where the focus is.
         QShortcut(QKeySequence.StandardKey.Find, self, self._focus_browser_filter)
+        # Del/Backspace stay panel-scoped shortcuts (Edit > Delete has no key).
         for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
             shortcut = QShortcut(key, self._file_list)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(self._delete_selected_shortcut)
-        for key, handler in (
-            (QKeySequence.StandardKey.Copy, self._copy_files_shortcut),
-            (QKeySequence.StandardKey.Cut, self._cut_files_shortcut),
-            (QKeySequence.StandardKey.Paste, self._paste_files_shortcut),
-        ):
-            shortcut = QShortcut(key, self._file_list)
-            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(handler)
-        paste_tree = QShortcut(QKeySequence.StandardKey.Paste, self._folder_tree)
-        paste_tree.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        paste_tree.activated.connect(self._paste_files_shortcut)
-        find_tree = QShortcut(QKeySequence.StandardKey.Find, self._folder_tree)
-        find_tree.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        find_tree.activated.connect(lambda: self._folder_filter.setFocus())
-        undo_files = QShortcut(QKeySequence.StandardKey.Undo, self._file_list)
-        undo_files.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        undo_files.activated.connect(self._undo_browser_action)
-        undo_folders = QShortcut(QKeySequence.StandardKey.Undo, self._folder_tree)
-        undo_folders.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        undo_folders.activated.connect(self._undo_browser_action)
+        # Cut / Copy / Paste / Undo / Select All / F2 are on the Edit menu items
+        # (see _build_edit_menu). Do not register those keys again here.
 
     def _focus_browser_filter(self) -> None:
         focus = QApplication.focusWidget()
@@ -12211,13 +12506,34 @@ class MainWindow(QMainWindow):
             empty = menu.addAction("(No wrappers yet)")
             empty.setEnabled(False)
 
+    def _live_tools_submenu(self, cached: QMenu | None, name: str) -> QMenu | None:
+        """The live Tools submenu ``name``; re-found if the macOS reference went stale."""
+        if self._menu_object_alive(cached):
+            return cached
+        try:
+            for top in self.menuBar().actions():
+                menu = top.menu()
+                if menu is None or menu.objectName() != "ToolsMenu":
+                    continue
+                for item in menu.actions():
+                    sub = item.menu()
+                    if sub is not None and sub.objectName() == name:
+                        return sub
+        except RuntimeError:
+            pass
+        return None
+
     def _rebuild_others_menu(self) -> None:
         """Refresh Tools > Plugin (Beta) and Command wrapper after an install or removal."""
+        plugin_menu = self._live_tools_submenu(self._tools_plugin_menu, "ToolsPluginMenu")
+        wrapper_menu = self._live_tools_submenu(self._tools_wrapper_menu, "ToolsWrapperMenu")
+        self._tools_plugin_menu = plugin_menu
+        self._tools_wrapper_menu = wrapper_menu
         for menu, fill in (
-            (self._tools_plugin_menu, self._fill_tools_plugin_menu),
-            (self._tools_wrapper_menu, self._fill_tools_wrapper_menu),
+            (plugin_menu, self._fill_tools_plugin_menu),
+            (wrapper_menu, self._fill_tools_wrapper_menu),
         ):
-            if not self._menu_object_alive(menu):
+            if menu is None:
                 continue
             try:
                 menu.clear()

@@ -146,6 +146,27 @@ def test_reroot_midpoint_and_undo(qapp, tree_file):
     assert not panel._undo
 
 
+def test_ctrl_z_in_the_tree_undoes_the_tree_edit(qapp, tree_file):
+    """The tree claims Cmd/Ctrl+Z itself, so it never competes with Edit > Undo."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtTest import QTest
+
+    panel = _panel(qapp, tree_file)
+    before = te.to_newick(panel.model())
+    panel.reroot_at(("F",))
+    assert panel._undo
+
+    override = QKeyEvent(QEvent.Type.ShortcutOverride, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    override.ignore()
+    qapp.sendEvent(panel._canvas, override)
+    assert override.isAccepted()   # claimed on its way up from the drawing area
+
+    QTest.keyClick(panel._canvas, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert te.to_newick(panel.model()) == before
+    assert not panel._undo
+
+
 def test_swap_collapse_expand(qapp, tree_file):
     panel = _panel(qapp, tree_file)
     order = _tip_order(panel)
