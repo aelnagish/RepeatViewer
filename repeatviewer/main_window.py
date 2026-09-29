@@ -2097,6 +2097,9 @@ class MainWindow(QMainWindow):
         self._plugin_registry = load_plugins()
         self._plugins_menu: QMenu | None = None
         self._others_menu: QMenu | None = None
+        self._tools_menu: QMenu | None = None
+        self._tools_plugin_menu: QMenu | None = None
+        self._tools_wrapper_menu: QMenu | None = None
         self._workflows_menu: QMenu | None = None
         self._toolbar_order = load_toolbar_order(self._plugin_registry)
         self._browser_panel: QWidget | None = None
@@ -5175,6 +5178,7 @@ class MainWindow(QMainWindow):
         )
 
         tools_menu = self.menuBar().addMenu("&Tools")
+        self._tools_menu = tools_menu
         tools_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
         tools_menu.addSeparator()
         self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
@@ -5190,17 +5194,19 @@ class MainWindow(QMainWindow):
         self._populate_te_annotation_menu(tools_menu.addMenu("Sequence &Annotation"))
         tools_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
         self._populate_te_visualization_menu(tools_menu.addMenu("&Visualization"))
+        tools_menu.addSeparator()
+        # Build and fill these here, together with the other Tools submenus.
+        # On macOS, Tools items added later in startup (after Workflows) do not
+        # show up in the native menu bar.
+        self._tools_plugin_menu = tools_menu.addMenu("Plugin (Beta)")
+        self._fill_tools_plugin_menu(self._tools_plugin_menu)
+        self._tools_wrapper_menu = tools_menu.addMenu("Command wrapper")
+        self._fill_tools_wrapper_menu(self._tools_wrapper_menu)
 
         workflows_menu = QMenu("&Workflows", self)
         self.menuBar().addMenu(workflows_menu)
         self._workflows_menu = workflows_menu
         self._rebuild_workflows_menu()
-
-        others_menu = QMenu("&Others", self)
-        self.menuBar().addMenu(others_menu)
-        self._others_menu = others_menu
-        self._plugins_menu = others_menu  # rebuild helpers refresh Others
-        self._rebuild_others_menu()
 
         view_menu = self.menuBar().addMenu("&View")
         if self._dock_folders is not None:
@@ -12171,104 +12177,53 @@ class MainWindow(QMainWindow):
         """Deprecated path — use ``_rebuild_others_menu``."""
         self._rebuild_others_menu()
 
-    def _ensure_others_menu(self) -> QMenu | None:
-        """Return a live Others menu, recreating it if the cached one was deleted."""
-        if self._menu_object_alive(self._others_menu):
-            return self._others_menu
-
-        self._others_menu = None
-        self._plugins_menu = None
-        for action in list(self.menuBar().actions()):
-            candidate = action.menu()
-            if not self._menu_object_alive(candidate):
-                label = self._clean_menu_label(action.text()).lower()
-                if label in {"others", "plugins"}:
-                    self.menuBar().removeAction(action)
-                continue
-            title = self._clean_menu_label(candidate.title()).lower()
-            if title in {"others", "plugins"}:
-                # Migrate old Plugins title to Others.
-                candidate.setTitle("&Others")
-                self._others_menu = candidate
-                self._plugins_menu = candidate
-                return candidate
-
-        self._remove_menubar_menus_named("Others")
-        self._remove_menubar_menus_named("Plugins")
-        menu = QMenu("&Others", self)
-        self._others_menu = menu
-        self._plugins_menu = menu
-        insert_before = None
-        for action in self.menuBar().actions():
-            label = self._clean_menu_label(action.text())
-            if label in {"View", "Help"}:
-                insert_before = action
-                break
-        if insert_before is not None:
-            self.menuBar().insertMenu(insert_before, menu)
+    def _fill_tools_plugin_menu(self, menu: QMenu) -> None:
+        """Fill Tools > Plugin (Beta)."""
+        menu.addAction("Manage plugin", self._open_plugin_manager)
+        menu.addSeparator()
+        installed = [
+            plugin
+            for plugin in self._plugin_registry.all_plugins()
+            if not isinstance(plugin, UserCommandPlugin)
+        ]
+        if installed:
+            for plugin in installed:
+                menu.addAction(
+                    plugin.label,
+                    lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
+                )
         else:
-            self.menuBar().addMenu(menu)
-        return menu
+            none_action = menu.addAction("(No installed plugins)")
+            none_action.setEnabled(False)
 
-    def _ensure_plugins_menu(self) -> QMenu | None:
-        return self._ensure_others_menu()
+    def _fill_tools_wrapper_menu(self, menu: QMenu) -> None:
+        """Fill Tools > Command wrapper."""
+        menu.addAction("Manage wrapper", self._open_wrapper_manager)
+        menu.addSeparator()
+        specs = load_user_command_plugin_specs()
+        if specs:
+            for spec in specs:
+                menu.addAction(
+                    spec.label,
+                    lambda checked=False, pid=spec.id: self._apply_plugin(pid),
+                )
+        else:
+            empty = menu.addAction("(No wrappers yet)")
+            empty.setEnabled(False)
 
     def _rebuild_others_menu(self) -> None:
-        def _fill(menu: QMenu) -> None:
-            menu.clear()
-            plugin_menu = menu.addMenu("Plugin (Beta)")
-            wrapper_menu = menu.addMenu("Command wrapper")
-
-            plugin_menu.addAction("Manage plugin", self._open_plugin_manager)
-            plugin_menu.addSeparator()
-            installed = [
-                plugin
-                for plugin in self._plugin_registry.all_plugins()
-                if not isinstance(plugin, UserCommandPlugin)
-            ]
-            if installed:
-                for plugin in installed:
-                    plugin_menu.addAction(
-                        plugin.label,
-                        lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
-                    )
-            else:
-                none_action = plugin_menu.addAction("(No installed plugins)")
-                none_action.setEnabled(False)
-
-            wrapper_menu.addAction("Manage wrapper", self._open_wrapper_manager)
-            wrapper_menu.addSeparator()
-            specs = load_user_command_plugin_specs()
-            if specs:
-                for spec in specs:
-                    wrapper_menu.addAction(
-                        spec.label,
-                        lambda checked=False, pid=spec.id: self._apply_plugin(pid),
-                    )
-            else:
-                empty = wrapper_menu.addAction("(No wrappers yet)")
-                empty.setEnabled(False)
-
-            self._others_menu = menu
-            self._plugins_menu = menu
-
-        menu = self._ensure_others_menu()
-        if menu is None:
-            return
-        try:
-            _fill(menu)
-        except RuntimeError:
-            self._others_menu = None
-            self._plugins_menu = None
-            self._remove_menubar_menus_named("Others")
-            self._remove_menubar_menus_named("Plugins")
-            menu = self._ensure_others_menu()
-            if menu is None:
-                return
+        """Refresh Tools > Plugin (Beta) and Command wrapper after an install or removal."""
+        for menu, fill in (
+            (self._tools_plugin_menu, self._fill_tools_plugin_menu),
+            (self._tools_wrapper_menu, self._fill_tools_wrapper_menu),
+        ):
+            if not self._menu_object_alive(menu):
+                continue
             try:
-                _fill(menu)
+                menu.clear()
+                fill(menu)
             except RuntimeError:
-                return
+                continue
         self._connect_menu_operation_logging()
 
     def _rebuild_plugins_menu(self) -> None:
