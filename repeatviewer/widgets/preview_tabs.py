@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import logging
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, QSizeF, Qt, QTimer, Signal, Slot
@@ -659,6 +660,7 @@ class FilePreviewPage(QWidget):
         self._text_truncated = False
         self._text_edit_mode = False
         self._text_dirty = False
+        self._text_changed_at = 0.0  # time.monotonic() of the last typed change
         self._text = QTextEdit()
         self._text.setReadOnly(True)
         self._text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
@@ -1091,6 +1093,11 @@ class FilePreviewPage(QWidget):
 
     def reload_from_disk(self) -> None:
         """Refresh the current view after the file on disk changed."""
+        if self.has_unsaved_text():
+            # Never drop unsaved Edit-text changes on a silent reload (same file
+            # clicked again, folder watcher, tab switch). Leaving the file on
+            # purpose goes through PreviewTabWidget.confirm_leave_page().
+            return
         suffix = self.path.suffix.lower()
         if suffix in {".png", ".jpg", ".jpeg", ".svg", ".gif", ".bmp", ".webp"}:
             if self._stack.currentWidget() is self._image:
@@ -1981,6 +1988,7 @@ class FilePreviewPage(QWidget):
             editor.setPlainText("")
             editor.blockSignals(False)
         editor.setReadOnly(False)
+        editor.document().setModified(False)
         editor.setFocus(Qt.FocusReason.OtherFocusReason)
         self._text_edit_mode = True
         self._text_dirty = False
@@ -2005,6 +2013,7 @@ class FilePreviewPage(QWidget):
             return False
         self._text_dirty = False
         self._text_truncated = False
+        editor.document().setModified(False)
         if self._single_fasta_mode:
             self._refresh_sequence_info_bar()
             if self._multi_fasta_mode:
@@ -2033,11 +2042,42 @@ class FilePreviewPage(QWidget):
         if not self._text_edit_mode:
             return
         self._text_dirty = True
+        self._text_changed_at = time.monotonic()
         tab_host = self.parent()
         while tab_host is not None and not isinstance(tab_host, PreviewTabWidget):
             tab_host = tab_host.parent()
         if isinstance(tab_host, PreviewTabWidget):
             tab_host._sync_text_tool_actions()
+
+    def has_unsaved_text(self) -> bool:
+        """Edit text is on and the text differs from what was loaded or last saved.
+
+        Undoing back to the saved text counts as no change (QTextDocument keeps
+        its "modified" flag in step with the undo history).
+        """
+        if not (self._text_edit_mode and self._text_dirty):
+            return False
+        try:
+            return self._active_text_editor().document().isModified()
+        except RuntimeError:
+            return True
+
+    def can_undo_unsaved_text(self) -> bool:
+        """Unsaved typing that Edit > Undo can take back."""
+        if not self.has_unsaved_text():
+            return False
+        try:
+            return self._active_text_editor().document().isUndoAvailable()
+        except RuntimeError:
+            return False
+
+    def undo_text(self) -> None:
+        editor = self._active_text_editor()
+        editor.undo()
+        editor.ensureCursorVisible()
+
+    def text_changed_at(self) -> float:
+        return self._text_changed_at
 
     def _show_text(self, text: str, *, truncated: bool = False) -> None:
         self._text_truncated = truncated
@@ -2707,8 +2747,64 @@ class PreviewTabWidget(QTabWidget):
         self.setTabText(index, resolved.name)
         self._rebuild_path_index()
 
-    def open_file(self, path: Path, *, replace: bool = False) -> None:
-        """Open one file.
+    def unsaved_pages(self) -> list["FilePreviewPage"]:
+        pages = []
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if isinstance(widget, FilePreviewPage) and widget.has_unsaved_text():
+                pages.append(widget)
+        return pages
+
+    def confirm_leave_page(self, page: object) -> bool:
+        """Unsaved Edit-text changes: ask Save / Don't Save / Cancel.
+
+        Returns True when it is fine to leave the page (saved, or the user chose
+        not to save), False to stay (Cancel, or saving failed).
+        """
+        if not isinstance(page, FilePreviewPage) or not page.has_unsaved_text():
+            return True
+        index = self.indexOf(page)
+        if index >= 0 and index != self.currentIndex():
+            self.setCurrentIndex(index)
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved Changes")
+        box.setText(f'Save changes to "{page.path.name}"?')
+        box.setInformativeText("Your edits will be lost if you don't save them.")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.Save)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        answer = (
+            box.standardButton(clicked)
+            if clicked is not None
+            else QMessageBox.StandardButton.Cancel
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            if not page.save_text():
+                return False
+            self._sync_text_tool_actions()
+            return True
+        if answer == QMessageBox.StandardButton.Discard:
+            page._exit_text_edit_mode(clear_dirty=True)
+            self._sync_text_tool_actions()
+            return True
+        return False
+
+    def confirm_close_pages(self, pages: list["FilePreviewPage"]) -> bool:
+        """Ask for each page with unsaved edits; False as soon as one says Cancel."""
+        for page in pages:
+            if not self.confirm_leave_page(page):
+                return False
+        return True
+
+    def open_file(self, path: Path, *, replace: bool = False) -> bool:
+        """Open one file. Returns False if the user chose Cancel at the save prompt.
 
         ``replace=True`` (single click in the file list) reuses the *active*
         tab: whatever tab you are currently on becomes the file you clicked.
@@ -2732,18 +2828,21 @@ class PreviewTabWidget(QTabWidget):
                 self.setCurrentIndex(existing)
                 self._apply_zoom_to_current_tab()
                 self._sync_tab_bar_visible()
-                return
+                return True
             del self._path_to_index[key]
 
         if replace and self.count():
             target = self.currentIndex()
             if not (0 <= target < self.count()):
                 target = 0
+            # Showing another file in this tab would drop unsaved edits.
+            if not self.confirm_leave_page(self.widget(target)):
+                return False
             self._replace_page_at(target, resolved)
             self.setCurrentIndex(target)
             self._apply_zoom_to_current_tab()
             self._sync_tab_bar_visible()
-            return
+            return True
 
         page = FilePreviewPage(resolved)
         index = self._add_preview_page(page, name=resolved.name)
@@ -2753,6 +2852,7 @@ class PreviewTabWidget(QTabWidget):
         page.show()
         self._apply_zoom_to_current_tab()
         self._sync_tab_bar_visible()
+        return True
 
     def open_files_in_tabs(self, paths: list[Path]) -> None:
         """Open many files (e.g. right-click); keeps existing tabs and adds new ones."""
@@ -2787,6 +2887,8 @@ class PreviewTabWidget(QTabWidget):
             self._apply_zoom_to_current_tab()
 
     def close_all_tabs(self) -> None:
+        if not self.confirm_close_pages(self.unsaved_pages()):
+            return
         while self.count():
             widget = self.widget(0)
             if isinstance(widget, FilePreviewPage):
@@ -2804,9 +2906,12 @@ class PreviewTabWidget(QTabWidget):
         if not (0 <= keep_index < self.count()):
             return
         keep = self.widget(keep_index)
+        others = [page for page in self.unsaved_pages() if page is not keep]
+        if not self.confirm_close_pages(others):
+            return
         for index in range(self.count() - 1, -1, -1):
             if self.widget(index) is not keep:
-                self._close_tab(index)
+                self._close_tab(index, ask=False)
 
     def close_paths(self, paths: list[Path]) -> None:
         """Close preview tabs whose files were deleted."""
@@ -2814,7 +2919,8 @@ class PreviewTabWidget(QTabWidget):
         for index in range(self.count() - 1, -1, -1):
             widget = self.widget(index)
             if isinstance(widget, FilePreviewPage) and str(widget.path) in keys:
-                self._close_tab(index)
+                # The file was deleted or renamed: nothing left to save to.
+                self._close_tab(index, ask=False)
 
     def close_under_folder(self, folder: Path) -> None:
         """Close preview tabs for files inside a deleted folder."""
@@ -2825,12 +2931,14 @@ class PreviewTabWidget(QTabWidget):
                 continue
             try:
                 if widget.path.resolve().is_relative_to(folder):
-                    self._close_tab(index)
+                    self._close_tab(index, ask=False)
             except ValueError:
                 continue
 
-    def _close_tab(self, index: int) -> None:
+    def _close_tab(self, index: int, *, ask: bool = True) -> None:
         widget = self.widget(index)
+        if ask and not self.confirm_leave_page(widget):
+            return
         if isinstance(widget, FilePreviewPage):
             key = str(widget.path)
             self._path_to_index.pop(key, None)

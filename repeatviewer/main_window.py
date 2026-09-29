@@ -465,7 +465,7 @@ from repeatviewer.widgets.hidden_folders import (
     replace_hidden_root_path,
     unhide_root_folder,
 )
-from repeatviewer.edit_actions import browser_undo_label
+from repeatviewer.edit_actions import browser_undo_label, path_fingerprint
 from repeatviewer.widgets.folder_colors import (
     FOLDER_COLOR_PRESETS,
     apply_folder_item_color,
@@ -1119,6 +1119,7 @@ class DuplicateFoldersWorker(QObject):
 
         cancelled = self._cancel or (lambda: False)
         created: list[Path] = []
+        fingerprints: list[str | None] = []
         try:
             sizes = [measure_folders([src], entry_limit=10**12) for src, _dest in self._pairs]
             total = sum(size.files for size in sizes)
@@ -1151,9 +1152,13 @@ class DuplicateFoldersWorker(QObject):
 
                 copy_folder(src, dest, progress=on_file, cancelled=cancelled)
                 created.append(dest)
-            self.finished.emit({"created": created})
+                # Undo removes the copy only while it is still unchanged.
+                fingerprints.append(path_fingerprint(dest))
+            self.finished.emit({"created": created, "fingerprints": fingerprints})
         except CopyCancelled:
-            self.finished.emit({"created": created, "cancelled": True})
+            self.finished.emit(
+                {"created": created, "fingerprints": fingerprints, "cancelled": True}
+            )
         except shutil.Error as exc:
             problems = exc.args[0] if exc.args and isinstance(exc.args[0], list) else []
             lines = [f"{Path(str(item[0])).name}: {item[2]}" for item in problems[:5]]
@@ -2650,6 +2655,12 @@ class MainWindow(QMainWindow):
                 dock.deleteLater()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        # Unsaved Edit-text changes: Save / Don't Save / Cancel before quitting.
+        if self._preview_tabs is not None and not self._preview_tabs.confirm_close_pages(
+            self._preview_tabs.unsaved_pages()
+        ):
+            event.ignore()
+            return
         self._stop_metadata_enrichment()
         if self._any_background_job_running():
             self._shutdown_background_threads()
@@ -5461,12 +5472,38 @@ class MainWindow(QMainWindow):
             return []
         return [folder for folder, _item in self._folder_tree._selected_folder_items()]
 
+    def _undo_typing_page(self, area: str):
+        """The Preview page whose unsaved typing Edit > Undo should take back, or None.
+
+        Typing in the open file is undone even after clicking elsewhere, unless
+        the newest file action (delete, paste, rename, ...) is more recent.
+        """
+        tabs = self._preview_tabs
+        page = tabs.currentWidget() if tabs is not None else None
+        can_undo = getattr(page, "can_undo_unsaved_text", None)
+        if not callable(can_undo) or not can_undo():
+            return None
+        if area in ("files", "folders") and self._browser_undo_stack:
+            newest = float(self._browser_undo_stack[-1].get("time", 0.0))
+            if newest > page.text_changed_at():
+                return None
+        return page
+
     def _edit_undo(self) -> None:
         area, target = self._edit_focus()
+        if area == "tree" and target is not None:
+            target.undo()
+            return
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QPlainTextEdit)):
+            # A focused text box undoes its own typing.
+            self._edit_forward_key("undo", QKeySequence.StandardKey.Undo)
+            return
+        page = self._undo_typing_page(area)
+        if page is not None:
+            page.undo_text()
+            return
         if area in ("files", "folders"):
             self._undo_browser_action()
-        elif area == "tree" and target is not None:
-            target.undo()
         else:
             self._edit_forward_key("undo", QKeySequence.StandardKey.Undo)
 
@@ -5562,7 +5599,14 @@ class MainWindow(QMainWindow):
                 action.setText(text)
             action.setEnabled(enabled)
 
-        if browser:
+        focus_is_text = isinstance(
+            QApplication.focusWidget(), (QLineEdit, QTextEdit, QPlainTextEdit)
+        )
+        if area == "tree" or focus_is_text:
+            set_state("undo", True, "Undo")
+        elif self._undo_typing_page(area) is not None:
+            set_state("undo", True, "Undo Typing")
+        elif browser:
             entry = self._browser_undo_stack[-1] if self._browser_undo_stack else None
             set_state("undo", entry is not None, browser_undo_label(entry))
         else:
@@ -8314,6 +8358,16 @@ class MainWindow(QMainWindow):
     def _open_file_in_preview_if_allowed(self, path: Path) -> None:
         if self._file_list.suppress_selection_preview():
             return
+        # This runs one event-loop turn after the click. If the current file has
+        # moved on since (another click, or Cancel at the unsaved-changes prompt
+        # put the selection back), the request is stale: skip it.
+        current = self._preview_path_from_item(self._file_list.currentItem())
+        if current is not None:
+            try:
+                if current.expanduser().resolve() != Path(path).expanduser().resolve():
+                    return
+            except OSError:
+                pass
         self._open_file_in_preview(path)
 
     def _resolve_te_masking_input_path(self, path: Path) -> Path | None:
@@ -11036,7 +11090,7 @@ class MainWindow(QMainWindow):
         if self._preview_tabs is None:
             return
         try:
-            self._preview_tabs.open_file(path, replace=replace)
+            opened = self._preview_tabs.open_file(path, replace=replace)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
                 self,
@@ -11044,8 +11098,26 @@ class MainWindow(QMainWindow):
                 f"Could not open {path.name} in preview:\n{exc}",
             )
             return
+        if opened is False:
+            # Cancel at the unsaved-changes prompt: keep the edited file in view
+            # and put the file list selection back on it.
+            page = self._preview_tabs.currentWidget()
+            edited = getattr(page, "path", None)
+            if isinstance(edited, Path):
+                self._file_list.clearSelection()
+                self._select_path_in_file_list(edited)
+            return
         self._ensure_preview_visible()
         QTimer.singleShot(0, self._ensure_preview_visible)
+
+    def _confirm_unsaved_text_for(self, paths: list[Path]) -> bool:
+        """Before a file is renamed or moved: Save / Don't Save / Cancel its unsaved edits."""
+        tabs = self._preview_tabs
+        if tabs is None:
+            return True
+        keys = {str(Path(p).expanduser().resolve()) for p in paths}
+        pages = [page for page in tabs.unsaved_pages() if str(page.path) in keys]
+        return tabs.confirm_close_pages(pages)
 
     def _prompt_rename_text(
         self,
@@ -11100,6 +11172,8 @@ class MainWindow(QMainWindow):
         if target.exists():
             QMessageBox.warning(self, "Rename failed", f"Already exists:\n{target}")
             return
+        if not self._confirm_unsaved_text_for([path]):
+            return
 
         companion_renames: list[tuple[Path, Path]] = []
         if path.suffix.lower() in _FASTA_SUFFIXES:
@@ -11134,6 +11208,13 @@ class MainWindow(QMainWindow):
         replace_file_color_path(path, target)
         for src, dst in companion_renames:
             replace_file_color_path(src, dst)
+        self._push_browser_undo(
+            {
+                "kind": "rename_file",
+                "pairs": [(path, target), *companion_renames],
+                "fasta": path.suffix.lower() in _FASTA_SUFFIXES,
+            }
+        )
 
         closed = [path, *[src for src, _dst in companion_renames]]
         if self._preview_tabs is not None:
@@ -11176,6 +11257,12 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.critical(self, "Rename failed", str(exc))
             return
+        self._after_folder_renamed(folder, target)
+        self._push_browser_undo({"kind": "rename_folder", "old": folder, "new": target})
+        self._set_status_message(f"Renamed folder to {target.name}", 5000)
+
+    def _after_folder_renamed(self, folder: Path, target: Path) -> None:
+        """Update the tree, colours, hidden roots and current folder after a rename."""
         self._replace_folder_path_in_tree(folder, target)
         replace_folder_color_paths(folder, target)
         apply_folder_colors_to_tree(self._folder_tree)
@@ -11185,7 +11272,6 @@ class MainWindow(QMainWindow):
         if self._current_folder and self._current_folder.resolve() == folder:
             self._current_folder = target
             self._on_folder_selected(target)
-        self._set_status_message(f"Renamed folder to {target.name}", 5000)
 
     def _clear_root_folders(self, folders: list[Path]) -> None:
         if not folders:
@@ -11605,6 +11691,7 @@ class MainWindow(QMainWindow):
 
         created: list[Path] = []
         failed: list[str] = []
+        duplicated = 0
         for path in paths:
             src = path.expanduser().resolve()
             if not src.is_file():
@@ -11613,6 +11700,7 @@ class MainWindow(QMainWindow):
             try:
                 shutil.copy2(src, dest)
                 created.append(dest)
+                duplicated += 1
             except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
                 continue
@@ -11625,6 +11713,19 @@ class MainWindow(QMainWindow):
                     created.append(comp_dest)
                 except OSError as exc:
                     failed.append(f"{comp.name}: {exc}")
+
+        if created:
+            self._push_browser_undo(
+                {
+                    "kind": "transfer",
+                    "action": "Duplicate",
+                    "count": duplicated,
+                    "moved": [],
+                    "created": [(p, path_fingerprint(p)) for p in created],
+                    "replaced": [],
+                    "trash_dir": None,
+                }
+            )
 
         if self._current_folder:
             current = self._current_folder.resolve()
@@ -11751,6 +11852,17 @@ class MainWindow(QMainWindow):
     def _on_duplicate_finished(self, result: object) -> None:
         info = result if isinstance(result, dict) else {}
         created = [Path(str(path)) for path in info.get("created", [])]
+        fingerprints = list(info.get("fingerprints") or [])
+        if created:
+            self._push_browser_undo(
+                {
+                    "kind": "created_folders",
+                    "items": [
+                        (dest, fingerprints[i] if i < len(fingerprints) else None)
+                        for i, dest in enumerate(created)
+                    ],
+                }
+            )
         self._finish_background_job()
         try:
             for dest in created:
@@ -11799,6 +11911,8 @@ class MainWindow(QMainWindow):
             self._duplicate_thread = None
 
     def _push_browser_undo(self, entry: dict[str, Any]) -> None:
+        # When it happened: Edit > Undo compares this with unsaved typing in Preview.
+        entry.setdefault("time", time.monotonic())
         self._browser_undo_stack.append(entry)
         while len(self._browser_undo_stack) > 20:
             old = self._browser_undo_stack.pop(0)
@@ -11806,6 +11920,20 @@ class MainWindow(QMainWindow):
 
     def _discard_browser_undo_entry(self, entry: dict[str, Any]) -> None:
         kind = str(entry.get("kind") or "")
+        if kind == "transfer":
+            # Too old to undo: the overwritten files kept for Undo can go.
+            for _original, kept in entry.get("replaced") or []:
+                try:
+                    Path(kept).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            trash_dir = entry.get("trash_dir")
+            if trash_dir is not None:
+                try:
+                    Path(trash_dir).rmdir()
+                except OSError:
+                    pass
+            return
         if kind in {"files", "delete_folders"}:
             items = list(entry.get("items") or [])
             parents: set[Path] = set()
@@ -11902,8 +12030,204 @@ class MainWindow(QMainWindow):
             self._undo_hidden_folders(list(entry.get("folders") or []))
         elif kind == "delete_folders":
             self._undo_deleted_folders_batch(list(entry.get("items") or []))
+        elif kind == "transfer":
+            self._undo_transfer(entry)
+        elif kind == "created_folders":
+            self._undo_created_folders(entry)
+        elif kind == "rename_file":
+            self._undo_rename_file(entry)
+        elif kind == "rename_folder":
+            self._undo_rename_folder(entry)
         else:
             self._set_status_message("Nothing to undo", 3000)
+
+    def _report_undo_problems(self, problems: list[str]) -> None:
+        if problems:
+            QMessageBox.information(
+                self,
+                "Undo",
+                "Some items were left as they are:\n\n" + "\n".join(problems[:8]),
+            )
+
+    def _undo_transfer(self, entry: dict[str, Any]) -> None:
+        """Undo a paste (copies removed / moved files put back) or a file Duplicate."""
+        from repeatviewer.widgets.file_colors import replace_file_color_path
+
+        moved = [(Path(a), Path(b)) for a, b in entry.get("moved") or []]
+        created = [(Path(a), fp) for a, fp in entry.get("created") or []]
+        replaced = [(Path(a), Path(b)) for a, b in entry.get("replaced") or []]
+        if not self._confirm_unsaved_text_for(
+            [dest for _src, dest in moved] + [path for path, _fp in created]
+        ):
+            self._browser_undo_stack.append(entry)
+            return
+        problems: list[str] = []
+        gone: list[Path] = []
+        removed = moved_back = restored = 0
+        for path, fingerprint in reversed(created):
+            if not path.exists():
+                continue
+            if fingerprint is None or path_fingerprint(path) != fingerprint:
+                problems.append(f"{path.name}: changed after it was made, so it was kept")
+                continue
+            try:
+                path.unlink()
+                removed += 1
+                gone.append(path)
+            except OSError as exc:
+                problems.append(f"{path.name}: {exc}")
+        for src, dest in reversed(moved):
+            if not dest.exists():
+                problems.append(f"{dest.name}: no longer in {dest.parent.name}")
+                continue
+            if src.exists():
+                problems.append(f"{src.name}: {src.parent.name} already has a file with this name")
+                continue
+            try:
+                src.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(dest), str(src))
+                replace_file_color_path(dest, src)
+                moved_back += 1
+                gone.append(dest)
+            except OSError as exc:
+                problems.append(f"{dest.name}: {exc}")
+        for original, kept in replaced:
+            if not kept.exists():
+                continue
+            if original.exists():
+                problems.append(
+                    f"{original.name}: the overwritten file could not be put back "
+                    f"(name in use); it is kept in {kept.parent}"
+                )
+                continue
+            try:
+                shutil.move(str(kept), str(original))
+                restored += 1
+            except OSError as exc:
+                problems.append(f"{original.name}: {exc}")
+        trash_dir = entry.get("trash_dir")
+        if trash_dir is not None:
+            try:
+                Path(trash_dir).rmdir()
+            except OSError:
+                pass
+        if gone and self._preview_tabs is not None:
+            self._preview_tabs.close_paths(gone)
+        if self._current_folder:
+            self._populate_file_list(self._current_folder)
+        parts = []
+        if removed:
+            parts.append(f"removed {removed} {'copy' if removed == 1 else 'copies'}")
+        if moved_back:
+            parts.append(f"moved {moved_back} file(s) back")
+        if restored:
+            parts.append(f"restored {restored} overwritten file(s)")
+        action = str(entry.get("action") or "Copy").lower()
+        if parts:
+            self._set_status_message(f"Undid {action}: " + ", ".join(parts), 6000)
+        self._report_undo_problems(problems)
+
+    def _undo_created_folders(self, entry: dict[str, Any]) -> None:
+        """Undo a folder Duplicate: remove the copy while it is still unchanged."""
+        items = [(Path(a), fp) for a, fp in entry.get("items") or []]
+        tabs = self._preview_tabs
+        if tabs is not None:
+            inside = [
+                page
+                for page in tabs.unsaved_pages()
+                if any(page.path.is_relative_to(dest) for dest, _fp in items)
+            ]
+            if not tabs.confirm_close_pages(inside):
+                self._browser_undo_stack.append(entry)
+                return
+        problems: list[str] = []
+        removed: list[Path] = []
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for dest, fingerprint in items:
+                if not dest.is_dir():
+                    continue
+                if fingerprint is None or path_fingerprint(dest) != fingerprint:
+                    problems.append(f"{dest.name}: changed after it was made, so it was kept")
+                    continue
+                if tabs is not None:
+                    tabs.close_under_folder(dest)
+                try:
+                    shutil.rmtree(dest)
+                except OSError as exc:
+                    problems.append(f"{dest.name}: {exc}")
+                    continue
+                removed.append(dest)
+                self._remove_folder_from_tree(dest)
+                remove_folder_colors_under(dest)
+                self._hidden_root_folders = remove_hidden_root(self._hidden_root_folders, dest)
+                self._navigate_after_folder_removed(dest)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if removed:
+            self._persist_workspace()
+            noun = "copy" if len(removed) == 1 else "copies"
+            self._set_status_message(f"Undid duplicate: removed {len(removed)} folder {noun}", 6000)
+        self._report_undo_problems(problems)
+
+    def _undo_rename_file(self, entry: dict[str, Any]) -> None:
+        from repeatviewer.widgets.file_colors import replace_file_color_path
+
+        pairs = [(Path(a), Path(b)) for a, b in entry.get("pairs") or []]
+        if not pairs:
+            return
+        old, new = pairs[0]
+        if not self._confirm_unsaved_text_for([dst for _src, dst in pairs]):
+            self._browser_undo_stack.append(entry)
+            return
+        if not new.exists():
+            self._report_undo_problems([f"{new.name}: no longer there, so it was not renamed back"])
+            return
+        blocked = [src.name for src, dst in pairs if src.exists() and dst.exists()]
+        if blocked:
+            self._report_undo_problems(
+                [f"{name}: this name is in use again, so nothing was renamed back" for name in blocked]
+            )
+            return
+        try:
+            for src, dst in pairs:
+                if dst.exists():
+                    dst.rename(src)
+        except OSError as exc:
+            QMessageBox.critical(self, "Undo rename failed", str(exc))
+            return
+        if entry.get("fasta") and old.parent == new.parent:
+            from repeatviewer.backends.cyto_images import rename_sequence
+
+            try:
+                rename_sequence(old.parent, new.name, old.name)
+            except OSError:
+                logger.exception("Could not move cytogenetic image links back to %s", old.name)
+        for src, dst in pairs:
+            replace_file_color_path(dst, src)
+        if self._preview_tabs is not None:
+            self._preview_tabs.close_paths([dst for _src, dst in pairs])
+        if self._current_folder:
+            self._populate_file_list(self._current_folder)
+        self._select_path_in_file_list(old)
+        self._set_status_message(f"Renamed back to {old.name}", 5000)
+
+    def _undo_rename_folder(self, entry: dict[str, Any]) -> None:
+        old = Path(str(entry.get("old")))
+        new = Path(str(entry.get("new")))
+        if not new.is_dir():
+            self._report_undo_problems([f"{new.name}: no longer there, so it was not renamed back"])
+            return
+        if old.exists():
+            self._report_undo_problems([f"{old.name}: this name is in use again, so it was not renamed back"])
+            return
+        try:
+            new.rename(old)
+        except OSError as exc:
+            QMessageBox.critical(self, "Undo rename failed", str(exc))
+            return
+        self._after_folder_renamed(new, old)
+        self._set_status_message(f"Renamed folder back to {old.name}", 5000)
 
     def _undo_deleted_files_batch(self, batch: list[tuple[Path, Path]]) -> None:
         restored = 0
@@ -12271,14 +12595,33 @@ class MainWindow(QMainWindow):
         target_dir: Path,
         *,
         mode: Literal["copy", "cut"],
+        undo_action: str | None = None,
     ) -> None:
         target_dir = target_dir.expanduser().resolve()
         if not target_dir.is_dir():
+            return
+        if mode == "cut" and not self._confirm_unsaved_text_for(files):
             return
 
         created: list[Path] = []
         sources: list[Path] = []
         failed: list[str] = []
+        # Undo record: what moved, what was created, and files that were
+        # overwritten (set aside in the session trash instead of deleted).
+        undo_moved: list[tuple[Path, Path]] = []
+        undo_created: list[tuple[Path, str | None]] = []
+        undo_replaced: list[tuple[Path, Path]] = []
+        undo_trash: list[Path | None] = [None]
+        undo_count = 0
+
+        def set_aside(existing: Path) -> None:
+            if undo_trash[0] is None:
+                undo_trash[0] = self._new_trash_batch_dir()
+                if undo_trash[0] is None:
+                    raise OSError("could not create a temporary trash folder for undo")
+            kept = undo_trash[0] / f"{len(undo_replaced):04d}_{existing.name}"
+            shutil.move(str(existing), str(kept))
+            undo_replaced.append((existing, kept))
 
         for raw in files:
             src = raw.expanduser().resolve()
@@ -12292,13 +12635,18 @@ class MainWindow(QMainWindow):
             try:
                 if mode == "cut":
                     if dest.exists():
-                        dest.unlink()
+                        set_aside(dest)
                     shutil.move(src, dest)
                     from repeatviewer.widgets.file_colors import replace_file_color_path
 
                     replace_file_color_path(src, dest)
+                    undo_moved.append((src, dest))
                 else:
+                    if dest.exists():
+                        set_aside(dest)
                     shutil.copy2(src, dest)
+                    undo_created.append((dest, path_fingerprint(dest)))
+                undo_count += 1
                 created.append(dest)
                 sources.append(src)
                 for comp in companion_srcs:
@@ -12307,15 +12655,37 @@ class MainWindow(QMainWindow):
                     try:
                         if mode == "cut":
                             if comp_dest.exists() and comp_dest != comp:
-                                comp_dest.unlink()
+                                set_aside(comp_dest)
                             shutil.move(comp, comp_dest)
+                            undo_moved.append((comp, comp_dest))
                         else:
+                            if comp_dest.exists():
+                                set_aside(comp_dest)
                             shutil.copy2(comp, comp_dest)
+                            undo_created.append((comp_dest, path_fingerprint(comp_dest)))
                         created.append(comp_dest)
                     except OSError as exc:
                         failed.append(f"{comp.name}: {exc}")
             except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
+
+        if undo_moved or undo_created or undo_replaced:
+            self._push_browser_undo(
+                {
+                    "kind": "transfer",
+                    "action": undo_action or ("Move" if mode == "cut" else "Copy"),
+                    "count": undo_count,
+                    "moved": undo_moved,
+                    "created": undo_created,
+                    "replaced": undo_replaced,
+                    "trash_dir": undo_trash[0],
+                }
+            )
+        elif undo_trash[0] is not None:
+            try:
+                undo_trash[0].rmdir()
+            except OSError:
+                pass
 
         if mode == "cut" and self._file_clipboard is not None:
             moved_sources = {str(p) for p in sources}
@@ -12352,10 +12722,12 @@ class MainWindow(QMainWindow):
     def _paste_files_to_folder(self, target_dir: Path) -> None:
         if not self._clipboard_can_paste() or self._file_clipboard is None:
             return
+        mode = self._file_clipboard.mode
         self._transfer_files(
             self._file_clipboard.paths,
             target_dir,
-            mode=self._file_clipboard.mode,
+            mode=mode,
+            undo_action="Move" if mode == "cut" else "Paste",
         )
 
     def _refresh_tree(self) -> None:

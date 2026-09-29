@@ -240,7 +240,10 @@ def _set_macos_bundle_name() -> None:
 
 def _configure_qt_logging() -> None:
     rules = os.environ.get("QT_LOGGING_RULES", "").strip()
-    for rule in ("qt.pointer.dispatch=false",):
+    # qt.accessibility.table: harmless "Cell requested for row N is out of
+    # bounds" lines when a macOS accessibility client (VoiceOver, Hammerspoon,
+    # DockDoor, ...) reads the file list while it is being refilled.
+    for rule in ("qt.pointer.dispatch=false", "qt.accessibility.table=false"):
         if rule.split("=")[0] not in rules:
             rules = f"{rules};{rule}" if rules else rule
     os.environ["QT_LOGGING_RULES"] = rules
