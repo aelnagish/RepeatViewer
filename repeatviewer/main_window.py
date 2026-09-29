@@ -1095,6 +1095,76 @@ class GenomeMapWorker(QObject):
             self.failed.emit(_format_cli_failure(exc))
 
 
+class DuplicateFoldersWorker(QObject):
+    """Copy folders for Edit > Duplicate off the UI thread (Stop removes the partial copy)."""
+
+    total_files = Signal(int)
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, pairs: list[tuple[Path, Path]], cancel=None) -> None:
+        super().__init__()
+        self._pairs = [(Path(src), Path(dest)) for src, dest in pairs]
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from repeatviewer.folder_duplicate import (
+            CopyCancelled,
+            copy_folder,
+            format_size,
+            measure_folders,
+        )
+
+        cancelled = self._cancel or (lambda: False)
+        created: list[Path] = []
+        try:
+            sizes = [measure_folders([src], entry_limit=10**12) for src, _dest in self._pairs]
+            total = sum(size.files for size in sizes)
+            self.total_files.emit(total)
+            done = 0
+            last_sent = 0
+            # About 200 updates at most, so big folders do not flood the UI.
+            step = max(1, total // 200)
+            for (src, dest), size in zip(self._pairs, sizes):
+                free = shutil.disk_usage(dest.parent).free
+                if size.bytes > free:
+                    self.finished.emit(
+                        {
+                            "created": created,
+                            "error": (
+                                f'Not enough free disk space to duplicate "{src.name}": '
+                                f"it needs {format_size(size.bytes)}, "
+                                f"but only {format_size(free)} is free."
+                            ),
+                        }
+                    )
+                    return
+
+                def on_file(_nbytes: int, name: str = src.name) -> None:
+                    nonlocal done, last_sent
+                    done += 1
+                    if done - last_sent >= step or done >= total:
+                        last_sent = done
+                        self.progress.emit(done, name)
+
+                copy_folder(src, dest, progress=on_file, cancelled=cancelled)
+                created.append(dest)
+            self.finished.emit({"created": created})
+        except CopyCancelled:
+            self.finished.emit({"created": created, "cancelled": True})
+        except shutil.Error as exc:
+            problems = exc.args[0] if exc.args and isinstance(exc.args[0], list) else []
+            lines = [f"{Path(str(item[0])).name}: {item[2]}" for item in problems[:5]]
+            detail = "\n".join(lines) if lines else str(exc)
+            self.finished.emit(
+                {"created": created, "error": f"Some files could not be copied:\n{detail}"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.finished.emit({"created": created, "error": str(exc)})
+
+
 class ExtractSequencesWorker(QObject):
     """Extract (or just count) FASTA records named in an ID list, off the UI thread."""
 
@@ -1357,6 +1427,7 @@ class FolderTreeWidget(QTreeWidget):
     folder_dropped = Signal(Path)
     rename_folder_requested = Signal(Path)
     delete_folders_requested = Signal(list)
+    duplicate_folders_requested = Signal(list)
     clear_root_folders_requested = Signal(list)
     paste_to_folder_requested = Signal(Path)
     add_folder_requested = Signal()
@@ -1760,6 +1831,16 @@ class FolderTreeWidget(QTreeWidget):
                         "Paste",
                         lambda f=folder: self.paste_to_folder_requested.emit(f),
                     )
+            if len(folders) == 1:
+                menu.addAction(
+                    "Duplicate",
+                    lambda fs=list(folders): self.duplicate_folders_requested.emit(fs),
+                )
+            else:
+                menu.addAction(
+                    f"Duplicate {len(folders)} Folders",
+                    lambda fs=list(folders): self.duplicate_folders_requested.emit(fs),
+                )
             root_pairs = [
                 (folder, tree_item)
                 for folder, tree_item in folder_items
@@ -2137,6 +2218,8 @@ class MainWindow(QMainWindow):
         self._benchmark_worker: ConfusionMatrixBenchmarkWorker | TeLibraryBenchmarkWorker | None = None
         self._extract_thread: QThread | None = None
         self._extract_worker: ExtractSequencesWorker | None = None
+        self._duplicate_thread: QThread | None = None
+        self._duplicate_worker: DuplicateFoldersWorker | None = None
         self._extract_dialog = None
         self._extract_source: Path | None = None
         self._extract_count_only = False
@@ -2207,6 +2290,7 @@ class MainWindow(QMainWindow):
         cyto_notifier().changed.connect(self._on_cyto_images_changed)
         self._folder_tree.rename_folder_requested.connect(self._rename_folder)
         self._folder_tree.delete_folders_requested.connect(self._delete_folders)
+        self._folder_tree.duplicate_folders_requested.connect(self._duplicate_selected_folders)
         self._folder_tree.clear_root_folders_requested.connect(self._clear_root_folders)
         self._folder_tree.paste_to_folder_requested.connect(self._paste_files_to_folder)
         self._folder_tree.add_folder_requested.connect(self._pick_and_add_folder)
@@ -5429,11 +5513,15 @@ class MainWindow(QMainWindow):
             self._edit_forward_key("rename", Qt.Key.Key_F2)
 
     def _edit_duplicate(self) -> None:
-        if self._edit_focus()[0] != "files":
-            return
-        paths = self._selected_files()
-        if paths:
-            self._duplicate_selected_files(paths)
+        area, _target = self._edit_focus()
+        if area == "files":
+            paths = self._selected_files()
+            if paths:
+                self._duplicate_selected_files(paths)
+        elif area == "folders":
+            folders = self._edit_selected_folders()
+            if folders:
+                self._duplicate_selected_folders(folders)
 
     def _edit_set_file_color(self, color: str | None) -> None:
         if self._edit_focus()[0] != "files":
@@ -5494,7 +5582,10 @@ class MainWindow(QMainWindow):
             (area == "files" and len(files) == 1)
             or (area == "folders" and len(self._edit_selected_folders()) == 1),
         )
-        set_state("duplicate", bool(files))
+        set_state(
+            "duplicate",
+            bool(files) or (area == "folders" and bool(self._edit_selected_folders())),
+        )
         set_state("file_color", bool(files))
         set_state(
             "clear_highlights",
@@ -11557,6 +11648,156 @@ class MainWindow(QMainWindow):
                 5000,
             )
 
+    def _duplicate_selected_folders(self, folders: list[Path]) -> None:
+        """Duplicate folders next to themselves (name_copy), in the background.
+
+        Anything above 1 GB is confirmed first. The copy shows the standard
+        progress bar and Stop button; Stop removes the unfinished copy.
+        """
+        from repeatviewer.folder_duplicate import (
+            LARGE_COPY_BYTES,
+            format_size,
+            measure_folders,
+            outermost_folders,
+            unique_folder_copy_path,
+        )
+
+        folders = [folder for folder in outermost_folders(folders) if folder.is_dir()]
+        if not folders:
+            return
+        if (
+            self._duplicate_thread is not None
+            or self._extract_thread is not None
+            or self._any_background_job_running()
+        ):
+            QMessageBox.information(
+                self,
+                "Duplicate Folder",
+                "Another task is still running. Wait for it to finish, or press Stop, "
+                "then try again.",
+            )
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            size = measure_folders(folders, stop_above_bytes=LARGE_COPY_BYTES)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not size.complete or size.bytes > LARGE_COPY_BYTES:
+            if len(folders) == 1:
+                subject = f'"{folders[0].name}" contains'
+            else:
+                subject = f"The {len(folders)} folders contain"
+            if size.complete:
+                amount = f"{format_size(size.bytes)} in {size.files:,} files"
+            else:
+                amount = f"more than {format_size(LARGE_COPY_BYTES)}"
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Duplicate Folder")
+            box.setText(f"{subject} {amount}.")
+            box.setInformativeText(
+                "The copy needs the same amount of free disk space and may take a "
+                "while. You can press Stop at any time; an unfinished copy is removed."
+            )
+            cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            duplicate_btn = box.addButton("Duplicate", QMessageBox.ButtonRole.AcceptRole)
+            box.setDefaultButton(cancel_btn)
+            box.exec()
+            if box.clickedButton() is not duplicate_btn:
+                return
+
+        pairs = [(folder, unique_folder_copy_path(folder)) for folder in folders]
+        self._job_cancel.reset()
+        self._show_job_progress("Duplicate Folder", 1)
+        if self._task_progress is not None:
+            # Busy bar until the worker has counted the files.
+            self._task_progress.start(self._running_job_title("Duplicate Folder"), 0)
+            self._task_progress.update(0, "Counting files…")
+        self._set_job_actions_enabled(False)
+
+        self._duplicate_thread = QThread(self)
+        self._duplicate_worker = DuplicateFoldersWorker(
+            pairs, cancel=lambda: self._job_cancel.requested
+        )
+        self._duplicate_worker.moveToThread(self._duplicate_thread)
+        self._duplicate_thread.started.connect(self._duplicate_worker.run)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._duplicate_worker.total_files.connect(self._on_duplicate_total, queued)
+        self._duplicate_worker.progress.connect(self._on_duplicate_progress, queued)
+        self._duplicate_worker.finished.connect(self._on_duplicate_finished, queued)
+        self._duplicate_worker.failed.connect(self._on_duplicate_failed, queued)
+        self._duplicate_worker.finished.connect(self._duplicate_thread.quit)
+        self._duplicate_worker.failed.connect(self._duplicate_thread.quit)
+        self._duplicate_thread.finished.connect(self._cleanup_duplicate_worker)
+        self._duplicate_thread.start()
+
+    @Slot(int)
+    def _on_duplicate_total(self, files: int) -> None:
+        self._job_work_steps = max(1, int(files))
+        if self._task_progress is not None:
+            # +1 reserved: the bar is full only once the copy is shown (rule 13).
+            self._task_progress.start(
+                self._running_job_title("Duplicate Folder"), self._job_work_steps + 1
+            )
+
+    @Slot(int, str)
+    def _on_duplicate_progress(self, done: int, name: str) -> None:
+        if self._task_progress is not None:
+            work = getattr(self, "_job_work_steps", 1)
+            self._task_progress.update(min(max(0, int(done)), work), name)
+
+    @Slot(object)
+    def _on_duplicate_finished(self, result: object) -> None:
+        info = result if isinstance(result, dict) else {}
+        created = [Path(str(path)) for path in info.get("created", [])]
+        self._finish_background_job()
+        try:
+            for dest in created:
+                self._reveal_new_folder(dest)
+            noun = "folder" if len(created) == 1 else "folders"
+            if info.get("cancelled"):
+                message = "Duplicate stopped; the unfinished copy was removed"
+                if created:
+                    message += f" ({len(created)} {noun} already copied)"
+                self._set_status_message(message, 8000)
+            elif info.get("error"):
+                QMessageBox.warning(self, "Duplicate Folder", str(info["error"]))
+                self._set_status_message("Duplicate folder failed", 6000)
+            elif created:
+                names = ", ".join(dest.name for dest in created[:3])
+                self._set_status_message(f"Duplicated {len(created)} {noun}: {names}", 6000)
+        finally:
+            self._schedule_after_job_ui_ready()
+
+    @Slot(str)
+    def _on_duplicate_failed(self, message: str) -> None:
+        self._hide_job_progress()
+        self._set_job_actions_enabled(True)
+        if message == CANCELLED_MESSAGE:
+            self._set_status_message("Duplicate stopped", 6000)
+            return
+        QMessageBox.warning(self, "Duplicate Folder", message)
+
+    def _cleanup_duplicate_worker(self) -> None:
+        if self._job_cancel.requested:
+            self._job_cancel.reset()
+        self._job_running = self._worker_thread is not None
+        if self._worker_thread is None:
+            self._set_job_actions_enabled(True)
+        if self._stop_btn is not None and not self._job_running:
+            self._stop_btn.setEnabled(False)
+        thread = self._duplicate_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
+        if self._duplicate_worker is not None:
+            self._duplicate_worker.deleteLater()
+            self._duplicate_worker = None
+        if self._duplicate_thread is not None:
+            self._duplicate_thread.deleteLater()
+            self._duplicate_thread = None
+
     def _push_browser_undo(self, entry: dict[str, Any]) -> None:
         self._browser_undo_stack.append(entry)
         while len(self._browser_undo_stack) > 20:
@@ -13195,6 +13436,7 @@ class MainWindow(QMainWindow):
             or self._genome_map_thread is not None
             or self._benchmark_thread is not None
             or self._extract_thread is not None
+            or self._duplicate_thread is not None
         ):
             self._set_status_message("No running task to stop", 3000)
             return
@@ -13219,6 +13461,8 @@ class MainWindow(QMainWindow):
             threads.append(self._benchmark_thread)
         if self._extract_thread is not None:
             threads.append(self._extract_thread)
+        if self._duplicate_thread is not None:
+            threads.append(self._duplicate_thread)
 
         for thread in threads:
             if thread.isRunning():
