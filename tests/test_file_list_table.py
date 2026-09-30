@@ -107,3 +107,25 @@ def test_header_sort_reorders_rows(tmp_path: Path) -> None:
         for row in range(table.rowCount())
     ]
     assert names_desc == ["zebra.fa", "alpha.fa"]
+
+
+def test_sorting_with_a_missing_sort_key_does_not_recurse(qapp):
+    """A cell without a sort key (e.g. a just-pasted file) used to recurse until
+    the app segfaulted: super().__lt__ dispatches back to the Python override."""
+    import sys
+
+    from PySide6.QtWidgets import QTableWidget
+
+    from repeatviewer.widgets.file_list_table import _SortableTableItem
+
+    table = QTableWidget(3, 1)
+    table.setItem(0, 0, _SortableTableItem("b.fa", sort_key="b"))
+    table.setItem(1, 0, _SortableTableItem("new.fa", sort_key=None))
+    table.setItem(2, 0, _SortableTableItem("a.fa", sort_key="a"))
+    old_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(200)
+    try:
+        table.sortItems(0)
+    finally:
+        sys.setrecursionlimit(old_limit)
+    assert sorted(table.item(r, 0).text() for r in range(3)) == ["a.fa", "b.fa", "new.fa"]

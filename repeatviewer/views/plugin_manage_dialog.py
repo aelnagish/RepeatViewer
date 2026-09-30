@@ -152,7 +152,7 @@ class InstalledPluginManageDialog(QDialog):
         self._update_buttons()
         self._notify_changed()
         detail = message.strip()
-        info = "Plugin installed. It should appear under Others → Plugin (Beta)."
+        info = "Plugin installed. It should appear under Tools → Plugin (Beta)."
         if detail:
             info = f"{info}\n\n{detail[-1500:]}"
         QMessageBox.information(self, "Manage plugin", info)
