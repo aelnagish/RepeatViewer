@@ -418,6 +418,27 @@ def rename_sequence(folder: Path, old_name: str, new_name: str) -> int:
     return changed
 
 
+def rename_sequences(folder: Path, mapping: dict[str, str]) -> int:
+    """Follow several FASTA renames in one folder at once (old name -> new name).
+
+    All links change together, so swaps (a <-> b) and chains (a -> b, b -> c)
+    end up right. Returns the number of links updated.
+    """
+    if not mapping:
+        return 0
+    images = list(load_images(folder))
+    changed = 0
+    for img in images:
+        for target in img.targets:
+            new_name = mapping.get(target.sequence)
+            if new_name is not None and new_name != target.sequence:
+                target.sequence = new_name
+                changed += 1
+    if changed:
+        save_images(folder, images)
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # Caption
 # ---------------------------------------------------------------------------
