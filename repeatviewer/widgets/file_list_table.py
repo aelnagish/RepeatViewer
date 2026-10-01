@@ -97,12 +97,16 @@ class _SortableTableItem(QTableWidgetItem):
         self.setData(_ROLE_SORT, sort_key)
 
     def __lt__(self, other: QTableWidgetItem) -> bool:  # type: ignore[override]
+        # Never call super().__lt__ here: in PySide6 Qt's operator< is virtual
+        # and dispatches straight back to this method, so it recursed until the
+        # app crashed (segfault) whenever a cell had no sort key yet, e.g. a
+        # file that was just pasted. Compare the visible text instead.
         if other is None:
-            return super().__lt__(other)
+            return False
         left = self.data(_ROLE_SORT)
         right = other.data(_ROLE_SORT)
         if left is None or right is None:
-            return super().__lt__(other)
+            return self.text().lower() < other.text().lower()
         try:
             return bool(left < right)
         except TypeError:

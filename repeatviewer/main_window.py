@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QDrag,
     QFont,
     QFontMetrics,
+    QKeyEvent,
     QKeySequence,
     QMouseEvent,
     QPainter,
@@ -64,6 +65,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QPlainTextEdit,
+    QTextEdit,
     QMessageBox,
     QPushButton,
     QStyle,
@@ -460,6 +463,9 @@ from repeatviewer.widgets.hidden_folders import (
     replace_hidden_root_path,
     unhide_root_folder,
 )
+from repeatviewer.backends.find_in_file import find_in_fasta, first_index_after, next_index
+from repeatviewer.backends.motif_search import parse_position
+from repeatviewer.edit_actions import browser_undo_label, path_fingerprint
 from repeatviewer.widgets.folder_colors import (
     FOLDER_COLOR_PRESETS,
     apply_folder_item_color,
@@ -1091,6 +1097,81 @@ class GenomeMapWorker(QObject):
             self.failed.emit(_format_cli_failure(exc))
 
 
+class DuplicateFoldersWorker(QObject):
+    """Copy folders for Edit > Duplicate off the UI thread (Stop removes the partial copy)."""
+
+    total_files = Signal(int)
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, pairs: list[tuple[Path, Path]], cancel=None) -> None:
+        super().__init__()
+        self._pairs = [(Path(src), Path(dest)) for src, dest in pairs]
+        self._cancel = cancel
+
+    @Slot()
+    def run(self) -> None:
+        from repeatviewer.folder_duplicate import (
+            CopyCancelled,
+            copy_folder,
+            format_size,
+            measure_folders,
+        )
+
+        cancelled = self._cancel or (lambda: False)
+        created: list[Path] = []
+        fingerprints: list[str | None] = []
+        try:
+            sizes = [measure_folders([src], entry_limit=10**12) for src, _dest in self._pairs]
+            total = sum(size.files for size in sizes)
+            self.total_files.emit(total)
+            done = 0
+            last_sent = 0
+            # About 200 updates at most, so big folders do not flood the UI.
+            step = max(1, total // 200)
+            for (src, dest), size in zip(self._pairs, sizes):
+                free = shutil.disk_usage(dest.parent).free
+                if size.bytes > free:
+                    self.finished.emit(
+                        {
+                            "created": created,
+                            "error": (
+                                f'Not enough free disk space to duplicate "{src.name}": '
+                                f"it needs {format_size(size.bytes)}, "
+                                f"but only {format_size(free)} is free."
+                            ),
+                        }
+                    )
+                    return
+
+                def on_file(_nbytes: int, name: str = src.name) -> None:
+                    nonlocal done, last_sent
+                    done += 1
+                    if done - last_sent >= step or done >= total:
+                        last_sent = done
+                        self.progress.emit(done, name)
+
+                copy_folder(src, dest, progress=on_file, cancelled=cancelled)
+                created.append(dest)
+                # Undo removes the copy only while it is still unchanged.
+                fingerprints.append(path_fingerprint(dest))
+            self.finished.emit({"created": created, "fingerprints": fingerprints})
+        except CopyCancelled:
+            self.finished.emit(
+                {"created": created, "fingerprints": fingerprints, "cancelled": True}
+            )
+        except shutil.Error as exc:
+            problems = exc.args[0] if exc.args and isinstance(exc.args[0], list) else []
+            lines = [f"{Path(str(item[0])).name}: {item[2]}" for item in problems[:5]]
+            detail = "\n".join(lines) if lines else str(exc)
+            self.finished.emit(
+                {"created": created, "error": f"Some files could not be copied:\n{detail}"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.finished.emit({"created": created, "error": str(exc)})
+
+
 class ExtractSequencesWorker(QObject):
     """Extract (or just count) FASTA records named in an ID list, off the UI thread."""
 
@@ -1353,6 +1434,7 @@ class FolderTreeWidget(QTreeWidget):
     folder_dropped = Signal(Path)
     rename_folder_requested = Signal(Path)
     delete_folders_requested = Signal(list)
+    duplicate_folders_requested = Signal(list)
     clear_root_folders_requested = Signal(list)
     paste_to_folder_requested = Signal(Path)
     add_folder_requested = Signal()
@@ -1756,6 +1838,16 @@ class FolderTreeWidget(QTreeWidget):
                         "Paste",
                         lambda f=folder: self.paste_to_folder_requested.emit(f),
                     )
+            if len(folders) == 1:
+                menu.addAction(
+                    "Duplicate",
+                    lambda fs=list(folders): self.duplicate_folders_requested.emit(fs),
+                )
+            else:
+                menu.addAction(
+                    f"Duplicate {len(folders)} Folders",
+                    lambda fs=list(folders): self.duplicate_folders_requested.emit(fs),
+                )
             root_pairs = [
                 (folder, tree_item)
                 for folder, tree_item in folder_items
@@ -2097,6 +2189,17 @@ class MainWindow(QMainWindow):
         self._plugin_registry = load_plugins()
         self._plugins_menu: QMenu | None = None
         self._others_menu: QMenu | None = None
+        self._tools_menu: QMenu | None = None
+        self._edit_menu: QMenu | None = None
+        self._edit_actions: dict[str, QAction] = {}
+        self._find_dialog = None  # views.find_dialog.FindDialog, created on first use
+        self._find_state: dict[str, Any] | None = None
+        self._find_thread: QThread | None = None
+        self._find_worker = None
+        self._find_pending: dict[str, Any] | None = None
+        self._last_go_to = ""
+        self._tools_plugin_menu: QMenu | None = None
+        self._tools_wrapper_menu: QMenu | None = None
         self._workflows_menu: QMenu | None = None
         self._toolbar_order = load_toolbar_order(self._plugin_registry)
         self._browser_panel: QWidget | None = None
@@ -2128,6 +2231,8 @@ class MainWindow(QMainWindow):
         self._benchmark_worker: ConfusionMatrixBenchmarkWorker | TeLibraryBenchmarkWorker | None = None
         self._extract_thread: QThread | None = None
         self._extract_worker: ExtractSequencesWorker | None = None
+        self._duplicate_thread: QThread | None = None
+        self._duplicate_worker: DuplicateFoldersWorker | None = None
         self._extract_dialog = None
         self._extract_source: Path | None = None
         self._extract_count_only = False
@@ -2198,6 +2303,7 @@ class MainWindow(QMainWindow):
         cyto_notifier().changed.connect(self._on_cyto_images_changed)
         self._folder_tree.rename_folder_requested.connect(self._rename_folder)
         self._folder_tree.delete_folders_requested.connect(self._delete_folders)
+        self._folder_tree.duplicate_folders_requested.connect(self._duplicate_selected_folders)
         self._folder_tree.clear_root_folders_requested.connect(self._clear_root_folders)
         self._folder_tree.paste_to_folder_requested.connect(self._paste_files_to_folder)
         self._folder_tree.add_folder_requested.connect(self._pick_and_add_folder)
@@ -2557,6 +2663,14 @@ class MainWindow(QMainWindow):
                 dock.deleteLater()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        # Unsaved Edit-text changes: Save / Don't Save / Cancel before quitting.
+        if self._preview_tabs is not None and not self._preview_tabs.confirm_close_pages(
+            self._preview_tabs.unsaved_pages()
+        ):
+            event.ignore()
+            return
+        if self._find_dialog is not None:
+            self._find_dialog.save_settings()
         self._stop_metadata_enrichment()
         if self._any_background_job_running():
             self._shutdown_background_threads()
@@ -5217,6 +5331,8 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("&Quit", self.close, "Ctrl+Q")
 
+        self._build_edit_menu()
+
         seq_menu = self.menuBar().addMenu("&Sequence")
         seq_menu.addAction("New Sequence", self._new_sequence)
         seq_menu.addAction("Combine Sequences to One File", self._group_sequences)
@@ -5240,6 +5356,8 @@ class MainWindow(QMainWindow):
         )
 
         tools_menu = self.menuBar().addMenu("&Tools")
+        tools_menu.setObjectName("ToolsMenu")
+        self._tools_menu = tools_menu
         tools_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
         tools_menu.addSeparator()
         self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
@@ -5254,17 +5372,21 @@ class MainWindow(QMainWindow):
         self._populate_te_annotation_menu(tools_menu.addMenu("Sequence &Annotation"))
         tools_menu.addAction("Repeat &Quantify", self._open_repeat_quantify)
         self._populate_te_visualization_menu(tools_menu.addMenu("&Visualization"))
+        tools_menu.addSeparator()
+        # Build and fill these here, together with the other Tools submenus.
+        # On macOS, Tools items added later in startup (after Workflows) do not
+        # show up in the native menu bar.
+        self._tools_plugin_menu = tools_menu.addMenu("Plugin (Beta)")
+        self._tools_plugin_menu.setObjectName("ToolsPluginMenu")
+        self._fill_tools_plugin_menu(self._tools_plugin_menu)
+        self._tools_wrapper_menu = tools_menu.addMenu("Command wrapper")
+        self._tools_wrapper_menu.setObjectName("ToolsWrapperMenu")
+        self._fill_tools_wrapper_menu(self._tools_wrapper_menu)
 
         workflows_menu = QMenu("&Workflows", self)
         self.menuBar().addMenu(workflows_menu)
         self._workflows_menu = workflows_menu
         self._rebuild_workflows_menu()
-
-        others_menu = QMenu("&Others", self)
-        self.menuBar().addMenu(others_menu)
-        self._others_menu = others_menu
-        self._plugins_menu = others_menu  # rebuild helpers refresh Others
-        self._rebuild_others_menu()
 
         view_menu = self.menuBar().addMenu("&View")
         if self._dock_folders is not None:
@@ -5284,9 +5406,733 @@ class MainWindow(QMainWindow):
         self._connect_menu_operation_logging()
         self._rebuild_top_toolbar()
 
+    # ------------------------------------------------------------ Edit menu
+
+    def _build_edit_menu(self) -> None:
+        """Build the Edit menu completely, at startup, next to File.
+
+        macOS rules learnt the hard way:
+        * Items added to a menu later in startup never show up in the native
+          menu bar, so everything is created here.
+        * Python references to menu items can go stale on macOS while the item
+          itself lives on ("Internal C++ object already deleted"). So the menu
+          and its items are created from Python and owned by the main window
+          (as the Workflows menu is), and every later access goes through
+          _edit_action(), which finds the live item by object name.
+
+        The shortcut keys live on these items (a key registered twice does
+        nothing in Qt). Each item acts on the panel that has focus, exactly as
+        the key did before; anywhere else the key press is passed on unchanged
+        to the focused widget (text boxes, tables, previews, dialogs).
+        """
+        from repeatviewer.widgets.file_colors import FILE_COLOR_PRESETS
+
+        # macOS appends Writing Tools, AutoFill, Start Dictation and Emoji &
+        # Symbols to any menu titled exactly "Edit". An invisible zero-width
+        # space keeps the title looking the same without that match.
+        title = "Edit\u200b" if platform.system() == "Darwin" else "&Edit"
+        menu = QMenu(title, self)
+        menu.setObjectName("EditMenu")
+        self.menuBar().addMenu(menu)
+        self._edit_menu = menu
+        self._edit_actions = {}
+        std = QKeySequence.StandardKey
+
+        def add(key: str, text: str, handler, shortcut=None) -> None:
+            action = QAction(text, self)
+            action.setObjectName(f"edit_{key}")
+            action.setMenuRole(QAction.MenuRole.NoRole)
+            if shortcut is not None:
+                action.setShortcut(QKeySequence(shortcut))
+            action.triggered.connect(lambda checked=False, h=handler: h())
+            menu.addAction(action)
+            self._edit_actions[key] = action
+
+        add("undo", "Undo", self._edit_undo, std.Undo)
+        menu.addSeparator()
+        add("cut", "Cut", self._edit_cut, std.Cut)
+        add("copy", "Copy", self._edit_copy, std.Copy)
+        add("paste", "Paste", self._edit_paste, std.Paste)
+        # No key on purpose: Del/Backspace keep their panel-scoped shortcuts
+        # (file panel, Annotation view), so the destructive key is not rerouted.
+        add("delete", "Delete", self._edit_delete)
+        add("select_all", "Select All", self._edit_select_all, std.SelectAll)
+        menu.addSeparator()
+        add("rename", "Rename…", self._edit_rename, Qt.Key.Key_F2)
+        add("duplicate", "Duplicate", self._edit_duplicate)
+
+        color_menu = QMenu("File Color", self)
+        color_menu.setObjectName("EditFileColorMenu")
+
+        def add_color(text: str, handler) -> None:
+            action = QAction(text, self)
+            action.setMenuRole(QAction.MenuRole.NoRole)
+            action.triggered.connect(lambda checked=False, h=handler: h())
+            color_menu.addAction(action)
+
+        add_color("Choose Color…", self._edit_choose_file_color)
+        for label, hex_color in FILE_COLOR_PRESETS:
+            add_color(label, lambda c=hex_color: self._edit_set_file_color(c))
+        color_menu.addSeparator()
+        add_color("Clear Color", lambda: self._edit_set_file_color(None))
+        menu.addMenu(color_menu)
+        color_menu.menuAction().setObjectName("edit_file_color")
+        self._edit_actions["file_color"] = color_menu.menuAction()
+
+        add("clear_highlights", "Clear Highlights", self._clear_job_file_highlights)
+        menu.addSeparator()
+        add("find", "Find…", self._edit_find, std.Find)
+        add("find_next", "Find Next", lambda: self._find_from_menu(1), Qt.Key.Key_F3)
+        self._edit_actions["find_next"].setShortcuts(
+            [QKeySequence(Qt.Key.Key_F3), QKeySequence("Ctrl+G")]
+        )
+        add("find_previous", "Find Previous", lambda: self._find_from_menu(-1), "Shift+F3")
+        add("go_to", "Go To Position…", self._go_to_position, "Ctrl+Alt+G")
+        menu.aboutToShow.connect(self._update_edit_menu_state)
+        menu.aboutToHide.connect(self._reset_edit_menu_state)
+
+    def _edit_action(self, key: str) -> QAction | None:
+        """The live Edit menu item ``key`` (re-found by name if the reference went stale)."""
+        action = self._edit_actions.get(key)
+        if self._menu_object_alive(action):
+            return action
+        name = f"edit_{key}"
+        try:
+            for top in self.menuBar().actions():
+                menu = top.menu()
+                if menu is None or menu.objectName() != "EditMenu":
+                    continue
+                for item in menu.actions():
+                    if item.objectName() == name:
+                        self._edit_actions[key] = item
+                        return item
+        except RuntimeError:
+            pass
+        return None
+
+    def _edit_focus(self) -> tuple[str, QWidget | None]:
+        """Where Edit acts: "files", "folders", "tree" (phylogeny view) or "other"."""
+        widget = QApplication.focusWidget()
+        if widget is None:
+            return "other", None
+        if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return "other", widget
+        for area, panel in (("files", self._file_list), ("folders", self._folder_tree)):
+            if panel is not None and (widget is panel or panel.isAncestorOf(widget)):
+                return area, panel
+        parent = widget
+        while parent is not None:
+            if type(parent).__name__ == "TreePanel" and hasattr(parent, "undo"):
+                return "tree", parent
+            parent = parent.parentWidget()
+        return "other", widget
+
+    def _edit_forward_key(self, key: str, sequence_key) -> None:
+        """Give the focused widget the key press it would get without the menu item."""
+        widget = QApplication.focusWidget()
+        sequence = QKeySequence(sequence_key)
+        if widget is None or sequence.isEmpty():
+            return
+        combo = sequence[0]
+        action = self._edit_action(key)
+        # Switch the item off for this moment: otherwise Qt matches the synthetic
+        # key press to this menu shortcut again and it loops back here.
+        was_enabled = action.isEnabled() if action is not None else True
+        if action is not None:
+            action.setEnabled(False)
+        try:
+            for event_type in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                QApplication.sendEvent(
+                    widget, QKeyEvent(event_type, combo.key(), combo.keyboardModifiers())
+                )
+        finally:
+            if action is not None:
+                action.setEnabled(was_enabled)
+
+    def _edit_selected_folders(self) -> list[Path]:
+        if self._folder_tree is None:
+            return []
+        return [folder for folder, _item in self._folder_tree._selected_folder_items()]
+
+    def _undo_typing_page(self, area: str):
+        """The Preview page whose unsaved typing Edit > Undo should take back, or None.
+
+        Typing in the open file is undone even after clicking elsewhere, unless
+        the newest file action (delete, paste, rename, ...) is more recent.
+        """
+        tabs = self._preview_tabs
+        page = tabs.currentWidget() if tabs is not None else None
+        can_undo = getattr(page, "can_undo_unsaved_text", None)
+        if not callable(can_undo) or not can_undo():
+            return None
+        if area in ("files", "folders") and self._browser_undo_stack:
+            newest = float(self._browser_undo_stack[-1].get("time", 0.0))
+            if newest > page.text_changed_at():
+                return None
+        return page
+
+    def _edit_undo(self) -> None:
+        area, target = self._edit_focus()
+        if area == "tree" and target is not None:
+            target.undo()
+            return
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QPlainTextEdit)):
+            # A focused text box undoes its own typing.
+            self._edit_forward_key("undo", QKeySequence.StandardKey.Undo)
+            return
+        page = self._undo_typing_page(area)
+        if page is not None:
+            page.undo_text()
+            return
+        if area in ("files", "folders"):
+            self._undo_browser_action()
+        else:
+            self._edit_forward_key("undo", QKeySequence.StandardKey.Undo)
+
+    def _edit_cut(self) -> None:
+        if self._edit_focus()[0] == "files":
+            self._cut_files_shortcut()
+        else:
+            self._edit_forward_key("cut", QKeySequence.StandardKey.Cut)
+
+    def _annotation_panel_in_focus(self):
+        """The single-sequence Annotation view that has keyboard focus, if any."""
+        widget = QApplication.focusWidget()
+        while widget is not None:
+            if type(widget).__name__ == "SequenceMapPanel":
+                return widget
+            widget = widget.parentWidget()
+        return None
+
+    def _edit_copy(self) -> None:
+        if self._edit_focus()[0] == "files":
+            self._copy_files_shortcut()
+            return
+        panel = self._annotation_panel_in_focus()
+        if panel is not None:
+            message = panel.copy_selection_to_clipboard()
+            if message:
+                self._set_status_message(message, 5000)
+                return
+        self._edit_forward_key("copy", QKeySequence.StandardKey.Copy)
+
+    def _edit_paste(self) -> None:
+        if self._edit_focus()[0] in ("files", "folders"):
+            self._paste_files_shortcut()
+        else:
+            self._edit_forward_key("paste", QKeySequence.StandardKey.Paste)
+
+    def _edit_delete(self) -> None:
+        # Menu only: deletes files only when the file panel has focus.
+        if self._edit_focus()[0] == "files":
+            self._delete_selected_shortcut()
+
+    def _edit_select_all(self) -> None:
+        # Every widget already knows its own Select All (the file panel selects
+        # every file, the folder panel every folder, text boxes their text), so
+        # always pass it on.
+        self._edit_forward_key("select_all", QKeySequence.StandardKey.SelectAll)
+
+    def _edit_rename(self) -> None:
+        area, _target = self._edit_focus()
+        if area == "files":
+            paths = self._selected_files()
+            if len(paths) == 1:
+                self._rename_file(paths[0])
+        elif area == "folders":
+            folders = self._edit_selected_folders()
+            if len(folders) == 1:
+                self._rename_folder(folders[0])
+        else:
+            self._edit_forward_key("rename", Qt.Key.Key_F2)
+
+    def _edit_duplicate(self) -> None:
+        area, _target = self._edit_focus()
+        if area == "files":
+            paths = self._selected_files()
+            if paths:
+                self._duplicate_selected_files(paths)
+        elif area == "folders":
+            folders = self._edit_selected_folders()
+            if folders:
+                self._duplicate_selected_folders(folders)
+
+    def _edit_set_file_color(self, color: str | None) -> None:
+        if self._edit_focus()[0] != "files":
+            return
+        paths = self._selected_files()
+        if not paths:
+            return
+        if color is None:
+            self._file_list._clear_files_color(paths)
+        else:
+            self._file_list._set_files_color(paths, color)
+
+    def _edit_choose_file_color(self) -> None:
+        if self._edit_focus()[0] != "files":
+            return
+        paths = self._selected_files()
+        if paths:
+            self._file_list._choose_files_color(paths)
+
+    def _update_edit_menu_state(self) -> None:
+        """Grey out what does not apply to the focused panel (menu is opening)."""
+        try:
+            self._apply_edit_menu_state()
+        except RuntimeError:
+            # A stale macOS reference must never break the menu: show all enabled.
+            self._reset_edit_menu_state()
+
+    def _apply_edit_menu_state(self) -> None:
+        area, _target = self._edit_focus()
+        files = self._selected_files() if area == "files" else []
+        browser = area in ("files", "folders")
+
+        def set_state(key: str, enabled: bool, text: str | None = None) -> None:
+            action = self._edit_action(key)
+            if action is None:
+                return
+            if text is not None:
+                action.setText(text)
+            action.setEnabled(enabled)
+
+        focus_is_text = isinstance(
+            QApplication.focusWidget(), (QLineEdit, QTextEdit, QPlainTextEdit)
+        )
+        if area == "tree" or focus_is_text:
+            set_state("undo", True, "Undo")
+        elif self._undo_typing_page(area) is not None:
+            set_state("undo", True, "Undo Typing")
+        elif browser:
+            entry = self._browser_undo_stack[-1] if self._browser_undo_stack else None
+            set_state("undo", entry is not None, browser_undo_label(entry))
+        else:
+            set_state("undo", True, "Undo")
+        copy_ok = bool(files) if area == "files" else area != "folders"
+        set_state("cut", copy_ok)
+        set_state("copy", copy_ok)
+        if browser:
+            set_state(
+                "paste", self._current_folder is not None and self._clipboard_can_paste()
+            )
+        else:
+            set_state("paste", True)
+        set_state("delete", bool(files))
+        set_state(
+            "rename",
+            (area == "files" and len(files) == 1)
+            or (area == "folders" and len(self._edit_selected_folders()) == 1),
+        )
+        set_state(
+            "duplicate",
+            bool(files) or (area == "folders" and bool(self._edit_selected_folders())),
+        )
+        set_state("file_color", bool(files))
+        set_state(
+            "clear_highlights",
+            bool(self._highlight_output_keys or self._highlight_source_keys),
+        )
+
+    def _reset_edit_menu_state(self) -> None:
+        """Menu closed: enable everything again so the shortcut keys always work.
+
+        Each handler checks for itself whether there is something to act on.
+        """
+        for key in (
+            "undo",
+            "cut",
+            "copy",
+            "paste",
+            "delete",
+            "select_all",
+            "rename",
+            "duplicate",
+            "file_color",
+            "clear_highlights",
+            "find",
+            "find_next",
+            "find_previous",
+            "go_to",
+        ):
+            try:
+                action = self._edit_action(key)
+                if action is not None:
+                    action.setEnabled(True)
+            except RuntimeError:
+                continue
+
+    # ------------------------------------------------------------ Edit > Find
+
+    _FIND_IN_BACKGROUND_BYTES = 5 * 1024 * 1024  # bigger files: progress bar + Stop
+
+    def _browser_has_focus(self) -> bool:
+        widget = QApplication.focusWidget()
+        if widget is None:
+            return False
+        for area in (
+            self._folder_tree,
+            self._folder_filter,
+            self._file_list,
+            self._file_filter,
+            self._dock_folders,
+            self._dock_files,
+        ):
+            if area is not None and (widget is area or area.isAncestorOf(widget)):
+                return True
+        return False
+
+    def _edit_find(self) -> None:
+        # Cmd+F typed in the file or folder panel keeps its old job: the filter
+        # box. From the menu, or anywhere else, it opens Find.
+        typed = bool(QApplication.queryKeyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+        if typed and self._browser_has_focus():
+            self._focus_browser_filter()
+            return
+        self._open_find_dialog()
+
+    def _find_page(self):
+        """The current Preview page, if it is a FASTA that Find can search."""
+        tabs = self._preview_tabs
+        page = tabs.currentWidget() if tabs is not None else None
+        supports = getattr(page, "supports_find", None)
+        return page if callable(supports) and supports() else None
+
+    def _find_page_for(self, path: Path):
+        """The Preview page showing ``path`` (made current), opening it if needed."""
+        tabs = self._preview_tabs
+        if tabs is None:
+            return None
+        key = str(Path(path).expanduser().resolve())
+        for index in range(tabs.count()):
+            widget = tabs.widget(index)
+            if str(getattr(widget, "path", "")) == key:
+                if tabs.currentIndex() != index:
+                    tabs.setCurrentIndex(index)
+                return widget
+        tabs.open_file(Path(key), replace=False)
+        widget = tabs.currentWidget()
+        return widget if str(getattr(widget, "path", "")) == key else None
+
+    def _open_find_dialog(self) -> None:
+        from repeatviewer.views.find_dialog import FindDialog
+
+        if self._find_dialog is None:
+            dialog = FindDialog(self)
+            dialog.findRequested.connect(self._find_run)
+            dialog.itemActivated.connect(self._find_show_index)
+            dialog.saveRequested.connect(self._find_save_hits)
+            dialog.closed.connect(self._find_closed)
+            self._find_dialog = dialog
+        if self._find_page() is None and self._find_state is None:
+            self._find_dialog.set_status("Open a FASTA file in Preview to search it.")
+        self._find_dialog.show()
+        self._find_dialog.raise_()
+        self._find_dialog.activateWindow()
+        self._find_dialog.focus_query()
+
+    def _find_from_menu(self, direction: int) -> None:
+        if self._find_dialog is None or not self._find_dialog.query_text():
+            self._open_find_dialog()
+            return
+        self._find_run(direction)
+
+    def _find_closed(self) -> None:
+        """Closing Find removes the highlights; saved annotations stay."""
+        self._find_state = None
+        tabs = self._preview_tabs
+        if tabs is None:
+            return
+        for index in range(tabs.count()):
+            clear = getattr(tabs.widget(index), "clear_find_hits", None)
+            if callable(clear):
+                clear()
+
+    def _find_run(self, direction: int) -> None:
+        dialog = self._find_dialog
+        if dialog is None or self._find_thread is not None:
+            return
+        page = self._find_page()
+        if page is None:
+            dialog.set_status("Open a FASTA file in Preview to search it.")
+            return
+        query = dialog.query_text()
+        if not query:
+            dialog.set_status("Type something to find.")
+            dialog.focus_query()
+            return
+        dialog.save_settings()
+        position = parse_position(query)
+        if position is not None and (position[0] is not None or not any(c.isalpha() for c in query)):
+            name, start, end = position
+            problem = page.go_to_region(name, start, end)
+            where = f"{start:,}" if start == end else f"{start:,}-{end:,}"
+            dialog.set_status(problem or f"Went to position {where}" + (f" of {name}" if name else "") + ".")
+            return
+        request = dialog.request()
+        try:
+            stat = page.path.stat()
+        except OSError:
+            dialog.set_status("The file is no longer there.")
+            return
+        key = (str(page.path), stat.st_mtime_ns, request)
+        if self._find_state is not None and self._find_state["key"] == key:
+            if direction == 0:
+                self._find_show_index(max(0, self._find_state["index"]))
+            else:
+                self._find_step(direction)
+            return
+        self._find_pending = {"key": key, "path": page.path, "direction": direction, "query": query}
+        features = page.annotation_features_for_find() if request.in_annotations else None
+        if stat.st_size <= self._FIND_IN_BACKGROUND_BYTES:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                result = find_in_fasta(page.path, request, features_by_id=features)
+            except (OSError, ValueError) as exc:
+                dialog.set_status(f"Could not search {page.path.name}: {exc}")
+                return
+            finally:
+                QApplication.restoreOverrideCursor()
+            self._find_finished_with(result)
+            return
+        self._find_start_background(page.path, request, features)
+
+    def _find_start_background(self, path: Path, request, features) -> None:
+        from repeatviewer.views.find_dialog import FindWorker
+
+        dialog = self._find_dialog
+        if (
+            self._duplicate_thread is not None
+            or self._extract_thread is not None
+            or self._any_background_job_running()
+        ):
+            dialog.set_status("Another task is still running. Wait for it to finish, or press Stop.")
+            return
+        self._job_cancel.reset()
+        self._show_job_progress("Find", 1)
+        if self._task_progress is not None:
+            self._task_progress.start(self._running_job_title("Find"), 0)
+            self._task_progress.update(0, "Counting sequences…")
+        self._set_job_actions_enabled(False)
+        dialog.set_busy(True)
+        dialog.set_status(f"Searching {path.name}…")
+        self._find_thread = QThread(self)
+        self._find_worker = FindWorker(path, request, features, cancel=lambda: self._job_cancel.requested)
+        self._find_worker.moveToThread(self._find_thread)
+        self._find_thread.started.connect(self._find_worker.run)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._find_worker.total.connect(self._on_find_total, queued)
+        self._find_worker.progress.connect(self._on_find_progress, queued)
+        self._find_worker.finished.connect(self._on_find_finished, queued)
+        self._find_worker.failed.connect(self._on_find_failed, queued)
+        self._find_worker.finished.connect(self._find_thread.quit)
+        self._find_worker.failed.connect(self._find_thread.quit)
+        self._find_thread.finished.connect(self._cleanup_find_worker)
+        self._find_thread.start()
+
+    @Slot(int)
+    def _on_find_total(self, total: int) -> None:
+        self._job_work_steps = max(1, int(total))
+        if self._task_progress is not None and total > 0:
+            self._task_progress.start(self._running_job_title("Find"), self._job_work_steps + 1)
+
+    @Slot(int, str)
+    def _on_find_progress(self, done: int, name: str) -> None:
+        if self._task_progress is not None:
+            work = getattr(self, "_job_work_steps", 1)
+            self._task_progress.update(min(max(0, int(done)), work), name)
+
+    @Slot(object)
+    def _on_find_finished(self, result: object) -> None:
+        self._finish_background_job()
+        try:
+            if self._find_dialog is not None:
+                self._find_dialog.set_busy(False)
+                self._find_finished_with(result)
+        finally:
+            self._schedule_after_job_ui_ready()
+
+    @Slot(str)
+    def _on_find_failed(self, message: str) -> None:
+        self._hide_job_progress()
+        self._set_job_actions_enabled(True)
+        if self._find_dialog is None:
+            return
+        self._find_dialog.set_busy(False)
+        if message == CANCELLED_MESSAGE:
+            self._find_dialog.set_status("Find stopped.")
+        else:
+            self._find_dialog.set_status(f"Find failed: {message}")
+
+    def _cleanup_find_worker(self) -> None:
+        if self._job_cancel.requested:
+            self._job_cancel.reset()
+        self._job_running = self._worker_thread is not None
+        if self._worker_thread is None:
+            self._set_job_actions_enabled(True)
+        if self._stop_btn is not None and not self._job_running:
+            self._stop_btn.setEnabled(False)
+        thread = self._find_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
+        if self._find_worker is not None:
+            self._find_worker.deleteLater()
+            self._find_worker = None
+        if self._find_thread is not None:
+            self._find_thread.deleteLater()
+            self._find_thread = None
+
+    @staticmethod
+    def _find_summary(result, query: str) -> str:
+        items = result.items
+        seq = [i for i in items if i.kind == "sequence"]
+        parts = []
+        if seq:
+            plus = sum(1 for i in seq if i.strand == "+")
+            parts.append(f"{len(seq):,} in the sequence ({plus:,} on +, {len(seq) - plus:,} on -)")
+        names = sum(1 for i in items if i.kind == "name")
+        if names:
+            parts.append(f"{names:,} sequence name{'s' if names != 1 else ''}")
+        notes = sum(1 for i in items if i.kind == "annotation")
+        if notes:
+            parts.append(f"{notes:,} annotation{'s' if notes != 1 else ''}")
+        text = f'"{query}": {len(items):,} hit{"s" if len(items) != 1 else ""}'
+        if parts:
+            text += " (" + ", ".join(parts) + ")"
+        if result.truncated:
+            text += ". Stopped at 100,000 hits; make the motif longer to see them all"
+        return text + "."
+
+    def _find_finished_with(self, result) -> None:
+        dialog = self._find_dialog
+        pending = getattr(self, "_find_pending", None)
+        if dialog is None or pending is None:
+            return
+        hits_by_id: dict[str, list[tuple[int, int]]] = {}
+        for item in result.items:
+            if item.kind != "name":
+                hits_by_id.setdefault(item.seq_id, []).append((item.start, item.end))
+        self._find_state = {
+            "key": pending["key"],
+            "path": pending["path"],
+            "result": result,
+            "index": -1,
+            "hits_by_id": hits_by_id,
+            "summary": self._find_summary(result, pending["query"]),
+        }
+        dialog.set_results(result.items)
+        page = self._find_page_for(pending["path"])
+        if not result.items:
+            if page is not None:
+                page.clear_find_hits()
+            message = f'No hits for "{pending["query"]}" in {pending["path"].name}.'
+            if result.sequence_skipped and pending["key"][2].in_sequence:
+                message += f" Not searched as a sequence: {result.sequence_skipped}"
+            dialog.set_status(message)
+            return
+        start = page.find_start_position() if page is not None else None
+        seq_id, position = start if start is not None else (result.record_ids[0], 1)
+        index = first_index_after(result.items, seq_id, position, result.record_ids)
+        if pending["direction"] < 0:
+            index = (index - 1) % len(result.items)
+        self._find_show_index(index)
+
+    def _find_step(self, direction: int) -> None:
+        state = self._find_state
+        if state is None:
+            return
+        index = next_index(state["result"].items, state["index"], direction)
+        if index >= 0:
+            self._find_show_index(index)
+
+    def _find_show_index(self, index: int) -> None:
+        state = self._find_state
+        dialog = self._find_dialog
+        if state is None or dialog is None:
+            return
+        items = state["result"].items
+        if not 0 <= index < len(items):
+            return
+        item = items[index]
+        state["index"] = index
+        page = self._find_page_for(state["path"])
+        shown = page.show_find_item(item, state["hits_by_id"]) if page is not None else False
+        dialog.set_current(index)
+        where = f"{item.seq_id} {item.start:,}..{item.end:,} ({item.strand})"
+        text = f"Hit {index + 1:,} of {len(items):,}: {where}"
+        if item.kind == "sequence" and item.mismatches:
+            text += f", {item.mismatches} mismatch" + ("es" if item.mismatches > 1 else "")
+        if item.kind == "annotation" and item.label:
+            text += f", annotation {item.label}"
+        if not shown:
+            text += ". Not shown: the sequence is too long for the Annotation view"
+        dialog.set_status(state["summary"] + "\n" + text + ".")
+
+    def _find_save_hits(self) -> None:
+        state = self._find_state
+        dialog = self._find_dialog
+        if state is None or dialog is None:
+            return
+        items = [item for item in state["result"].items if item.kind == "sequence"]
+        if not items:
+            dialog.set_status("There are no sequence hits to save.")
+            return
+        if len(items) > 1000:
+            answer = QMessageBox.question(
+                dialog,
+                "Save Hits as Annotations",
+                f"Save {len(items):,} annotations?",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Save,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Save:
+                return
+        ask = QInputDialog(dialog)
+        ask.setWindowTitle("Save Hits as Annotations")
+        ask.setLabelText("Annotation name:")
+        ask.setTextValue(f"Find {state['key'][2].query}")
+        ask.setOkButtonText("Save")
+        ask.setCancelButtonText("Cancel")
+        if ask.exec() != QDialog.DialogCode.Accepted or not ask.textValue().strip():
+            return
+        name = ask.textValue().strip()
+        page = self._find_page_for(state["path"])
+        saved = page.save_find_items(items, name) if page is not None else 0
+        if saved:
+            dialog.set_status(f'Saved {saved:,} annotation{"s" if saved != 1 else ""} named "{name}".')
+        else:
+            dialog.set_status("The hits could not be saved as annotations.")
+
+    def _go_to_position(self) -> None:
+        page = self._find_page()
+        if page is None:
+            QMessageBox.information(self, "Go To Position", "Open a FASTA file in Preview first.")
+            return
+        ask = QInputDialog(self)
+        ask.setWindowTitle("Go To Position")
+        ask.setLabelText("Position or range, e.g. 114590001, 1000-2000 or scaffold_5:1000-2000:")
+        ask.setTextValue(self._last_go_to)
+        ask.setOkButtonText("Go")
+        ask.setCancelButtonText("Cancel")
+        if ask.exec() != QDialog.DialogCode.Accepted:
+            return
+        text = ask.textValue().strip()
+        self._last_go_to = text
+        position = parse_position(text)
+        if position is None:
+            QMessageBox.information(
+                self, "Go To Position", "Type a position such as 114590001 or 1000-2000."
+            )
+            return
+        problem = page.go_to_region(*position)
+        if problem:
+            QMessageBox.information(self, "Go To Position", problem)
+        else:
+            self._set_status_message(f"Went to {text}", 4000)
+
     @staticmethod
     def _clean_menu_label(text: str) -> str:
-        return text.replace("&", "").replace("…", "...").strip()
+        return text.replace("&", "").replace("\u200b", "").replace("…", "...").strip()
 
     def _connect_menu_operation_logging(self) -> None:
         """Log menu-launched operations without logging ordinary file previews."""
@@ -5328,34 +6174,29 @@ class MainWindow(QMainWindow):
         )
 
     def _install_shortcuts(self) -> None:
-        QShortcut(QKeySequence("Ctrl+Shift+G"), self, self._open_set_genome)
-        QShortcut(QKeySequence.StandardKey.Refresh, self, self._refresh_current_folder)
-        QShortcut(QKeySequence(Qt.Key.Key_F5), self, self._refresh_current_folder)
-        QShortcut(QKeySequence.StandardKey.Find, self, self._focus_browser_filter)
+        # Define Genome's Ctrl+Shift+G lives on its File menu item. It used to be
+        # registered here a second time, which made the key ambiguous: Qt then
+        # runs neither, so the shortcut did nothing.
+        # StandardKey.Refresh already contains F5 on Windows/Linux, so register
+        # every refresh key only once for the same reason.
+        refresh_keys: list[QKeySequence] = []
+        for seq in (
+            *QKeySequence.keyBindings(QKeySequence.StandardKey.Refresh),
+            QKeySequence(Qt.Key.Key_F5),
+        ):
+            if not seq.isEmpty() and seq not in refresh_keys:
+                refresh_keys.append(seq)
+        for seq in refresh_keys:
+            QShortcut(seq, self, self._refresh_current_folder)
+        # Cmd+F is on Edit > Find… (see _edit_find): in the file or folder panel
+        # it still jumps to that panel's filter box.
+        # Del/Backspace stay panel-scoped shortcuts (Edit > Delete has no key).
         for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
             shortcut = QShortcut(key, self._file_list)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(self._delete_selected_shortcut)
-        for key, handler in (
-            (QKeySequence.StandardKey.Copy, self._copy_files_shortcut),
-            (QKeySequence.StandardKey.Cut, self._cut_files_shortcut),
-            (QKeySequence.StandardKey.Paste, self._paste_files_shortcut),
-        ):
-            shortcut = QShortcut(key, self._file_list)
-            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(handler)
-        paste_tree = QShortcut(QKeySequence.StandardKey.Paste, self._folder_tree)
-        paste_tree.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        paste_tree.activated.connect(self._paste_files_shortcut)
-        find_tree = QShortcut(QKeySequence.StandardKey.Find, self._folder_tree)
-        find_tree.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        find_tree.activated.connect(lambda: self._folder_filter.setFocus())
-        undo_files = QShortcut(QKeySequence.StandardKey.Undo, self._file_list)
-        undo_files.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        undo_files.activated.connect(self._undo_browser_action)
-        undo_folders = QShortcut(QKeySequence.StandardKey.Undo, self._folder_tree)
-        undo_folders.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        undo_folders.activated.connect(self._undo_browser_action)
+        # Cut / Copy / Paste / Undo / Select All / F2 are on the Edit menu items
+        # (see _build_edit_menu). Do not register those keys again here.
 
     def _focus_browser_filter(self) -> None:
         focus = QApplication.focusWidget()
@@ -7990,6 +8831,16 @@ class MainWindow(QMainWindow):
     def _open_file_in_preview_if_allowed(self, path: Path) -> None:
         if self._file_list.suppress_selection_preview():
             return
+        # This runs one event-loop turn after the click. If the current file has
+        # moved on since (another click, or Cancel at the unsaved-changes prompt
+        # put the selection back), the request is stale: skip it.
+        current = self._preview_path_from_item(self._file_list.currentItem())
+        if current is not None:
+            try:
+                if current.expanduser().resolve() != Path(path).expanduser().resolve():
+                    return
+            except OSError:
+                pass
         self._open_file_in_preview(path)
 
     def _resolve_te_masking_input_path(self, path: Path) -> Path | None:
@@ -10734,7 +11585,7 @@ class MainWindow(QMainWindow):
         if self._preview_tabs is None:
             return
         try:
-            self._preview_tabs.open_file(path, replace=replace)
+            opened = self._preview_tabs.open_file(path, replace=replace)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
                 self,
@@ -10742,8 +11593,26 @@ class MainWindow(QMainWindow):
                 f"Could not open {path.name} in preview:\n{exc}",
             )
             return
+        if opened is False:
+            # Cancel at the unsaved-changes prompt: keep the edited file in view
+            # and put the file list selection back on it.
+            page = self._preview_tabs.currentWidget()
+            edited = getattr(page, "path", None)
+            if isinstance(edited, Path):
+                self._file_list.clearSelection()
+                self._select_path_in_file_list(edited)
+            return
         self._ensure_preview_visible()
         QTimer.singleShot(0, self._ensure_preview_visible)
+
+    def _confirm_unsaved_text_for(self, paths: list[Path]) -> bool:
+        """Before a file is renamed or moved: Save / Don't Save / Cancel its unsaved edits."""
+        tabs = self._preview_tabs
+        if tabs is None:
+            return True
+        keys = {str(Path(p).expanduser().resolve()) for p in paths}
+        pages = [page for page in tabs.unsaved_pages() if str(page.path) in keys]
+        return tabs.confirm_close_pages(pages)
 
     def _prompt_rename_text(
         self,
@@ -10798,6 +11667,8 @@ class MainWindow(QMainWindow):
         if target.exists():
             QMessageBox.warning(self, "Rename failed", f"Already exists:\n{target}")
             return
+        if not self._confirm_unsaved_text_for([path]):
+            return
 
         companion_renames: list[tuple[Path, Path]] = []
         if path.suffix.lower() in _FASTA_SUFFIXES:
@@ -10832,6 +11703,13 @@ class MainWindow(QMainWindow):
         replace_file_color_path(path, target)
         for src, dst in companion_renames:
             replace_file_color_path(src, dst)
+        self._push_browser_undo(
+            {
+                "kind": "rename_file",
+                "pairs": [(path, target), *companion_renames],
+                "fasta": path.suffix.lower() in _FASTA_SUFFIXES,
+            }
+        )
 
         closed = [path, *[src for src, _dst in companion_renames]]
         if self._preview_tabs is not None:
@@ -10874,6 +11752,12 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.critical(self, "Rename failed", str(exc))
             return
+        self._after_folder_renamed(folder, target)
+        self._push_browser_undo({"kind": "rename_folder", "old": folder, "new": target})
+        self._set_status_message(f"Renamed folder to {target.name}", 5000)
+
+    def _after_folder_renamed(self, folder: Path, target: Path) -> None:
+        """Update the tree, colours, hidden roots and current folder after a rename."""
         self._replace_folder_path_in_tree(folder, target)
         replace_folder_color_paths(folder, target)
         apply_folder_colors_to_tree(self._folder_tree)
@@ -10883,7 +11767,6 @@ class MainWindow(QMainWindow):
         if self._current_folder and self._current_folder.resolve() == folder:
             self._current_folder = target
             self._on_folder_selected(target)
-        self._set_status_message(f"Renamed folder to {target.name}", 5000)
 
     def _clear_root_folders(self, folders: list[Path]) -> None:
         if not folders:
@@ -11303,6 +12186,7 @@ class MainWindow(QMainWindow):
 
         created: list[Path] = []
         failed: list[str] = []
+        duplicated = 0
         for path in paths:
             src = path.expanduser().resolve()
             if not src.is_file():
@@ -11311,6 +12195,7 @@ class MainWindow(QMainWindow):
             try:
                 shutil.copy2(src, dest)
                 created.append(dest)
+                duplicated += 1
             except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
                 continue
@@ -11323,6 +12208,19 @@ class MainWindow(QMainWindow):
                     created.append(comp_dest)
                 except OSError as exc:
                     failed.append(f"{comp.name}: {exc}")
+
+        if created:
+            self._push_browser_undo(
+                {
+                    "kind": "transfer",
+                    "action": "Duplicate",
+                    "count": duplicated,
+                    "moved": [],
+                    "created": [(p, path_fingerprint(p)) for p in created],
+                    "replaced": [],
+                    "trash_dir": None,
+                }
+            )
 
         if self._current_folder:
             current = self._current_folder.resolve()
@@ -11346,7 +12244,170 @@ class MainWindow(QMainWindow):
                 5000,
             )
 
+    def _duplicate_selected_folders(self, folders: list[Path]) -> None:
+        """Duplicate folders next to themselves (name_copy), in the background.
+
+        Anything above 1 GB is confirmed first. The copy shows the standard
+        progress bar and Stop button; Stop removes the unfinished copy.
+        """
+        from repeatviewer.folder_duplicate import (
+            LARGE_COPY_BYTES,
+            format_size,
+            measure_folders,
+            outermost_folders,
+            unique_folder_copy_path,
+        )
+
+        folders = [folder for folder in outermost_folders(folders) if folder.is_dir()]
+        if not folders:
+            return
+        if (
+            self._duplicate_thread is not None
+            or self._extract_thread is not None
+            or self._any_background_job_running()
+        ):
+            QMessageBox.information(
+                self,
+                "Duplicate Folder",
+                "Another task is still running. Wait for it to finish, or press Stop, "
+                "then try again.",
+            )
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            size = measure_folders(folders, stop_above_bytes=LARGE_COPY_BYTES)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not size.complete or size.bytes > LARGE_COPY_BYTES:
+            if len(folders) == 1:
+                subject = f'"{folders[0].name}" contains'
+            else:
+                subject = f"The {len(folders)} folders contain"
+            if size.complete:
+                amount = f"{format_size(size.bytes)} in {size.files:,} files"
+            else:
+                amount = f"more than {format_size(LARGE_COPY_BYTES)}"
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Duplicate Folder")
+            box.setText(f"{subject} {amount}.")
+            box.setInformativeText(
+                "The copy needs the same amount of free disk space and may take a "
+                "while. You can press Stop at any time; an unfinished copy is removed."
+            )
+            cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            duplicate_btn = box.addButton("Duplicate", QMessageBox.ButtonRole.AcceptRole)
+            box.setDefaultButton(cancel_btn)
+            box.exec()
+            if box.clickedButton() is not duplicate_btn:
+                return
+
+        pairs = [(folder, unique_folder_copy_path(folder)) for folder in folders]
+        self._job_cancel.reset()
+        self._show_job_progress("Duplicate Folder", 1)
+        if self._task_progress is not None:
+            # Busy bar until the worker has counted the files.
+            self._task_progress.start(self._running_job_title("Duplicate Folder"), 0)
+            self._task_progress.update(0, "Counting files…")
+        self._set_job_actions_enabled(False)
+
+        self._duplicate_thread = QThread(self)
+        self._duplicate_worker = DuplicateFoldersWorker(
+            pairs, cancel=lambda: self._job_cancel.requested
+        )
+        self._duplicate_worker.moveToThread(self._duplicate_thread)
+        self._duplicate_thread.started.connect(self._duplicate_worker.run)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._duplicate_worker.total_files.connect(self._on_duplicate_total, queued)
+        self._duplicate_worker.progress.connect(self._on_duplicate_progress, queued)
+        self._duplicate_worker.finished.connect(self._on_duplicate_finished, queued)
+        self._duplicate_worker.failed.connect(self._on_duplicate_failed, queued)
+        self._duplicate_worker.finished.connect(self._duplicate_thread.quit)
+        self._duplicate_worker.failed.connect(self._duplicate_thread.quit)
+        self._duplicate_thread.finished.connect(self._cleanup_duplicate_worker)
+        self._duplicate_thread.start()
+
+    @Slot(int)
+    def _on_duplicate_total(self, files: int) -> None:
+        self._job_work_steps = max(1, int(files))
+        if self._task_progress is not None:
+            # +1 reserved: the bar is full only once the copy is shown (rule 13).
+            self._task_progress.start(
+                self._running_job_title("Duplicate Folder"), self._job_work_steps + 1
+            )
+
+    @Slot(int, str)
+    def _on_duplicate_progress(self, done: int, name: str) -> None:
+        if self._task_progress is not None:
+            work = getattr(self, "_job_work_steps", 1)
+            self._task_progress.update(min(max(0, int(done)), work), name)
+
+    @Slot(object)
+    def _on_duplicate_finished(self, result: object) -> None:
+        info = result if isinstance(result, dict) else {}
+        created = [Path(str(path)) for path in info.get("created", [])]
+        fingerprints = list(info.get("fingerprints") or [])
+        if created:
+            self._push_browser_undo(
+                {
+                    "kind": "created_folders",
+                    "items": [
+                        (dest, fingerprints[i] if i < len(fingerprints) else None)
+                        for i, dest in enumerate(created)
+                    ],
+                }
+            )
+        self._finish_background_job()
+        try:
+            for dest in created:
+                self._reveal_new_folder(dest)
+            noun = "folder" if len(created) == 1 else "folders"
+            if info.get("cancelled"):
+                message = "Duplicate stopped; the unfinished copy was removed"
+                if created:
+                    message += f" ({len(created)} {noun} already copied)"
+                self._set_status_message(message, 8000)
+            elif info.get("error"):
+                QMessageBox.warning(self, "Duplicate Folder", str(info["error"]))
+                self._set_status_message("Duplicate folder failed", 6000)
+            elif created:
+                names = ", ".join(dest.name for dest in created[:3])
+                self._set_status_message(f"Duplicated {len(created)} {noun}: {names}", 6000)
+        finally:
+            self._schedule_after_job_ui_ready()
+
+    @Slot(str)
+    def _on_duplicate_failed(self, message: str) -> None:
+        self._hide_job_progress()
+        self._set_job_actions_enabled(True)
+        if message == CANCELLED_MESSAGE:
+            self._set_status_message("Duplicate stopped", 6000)
+            return
+        QMessageBox.warning(self, "Duplicate Folder", message)
+
+    def _cleanup_duplicate_worker(self) -> None:
+        if self._job_cancel.requested:
+            self._job_cancel.reset()
+        self._job_running = self._worker_thread is not None
+        if self._worker_thread is None:
+            self._set_job_actions_enabled(True)
+        if self._stop_btn is not None and not self._job_running:
+            self._stop_btn.setEnabled(False)
+        thread = self._duplicate_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
+        if self._duplicate_worker is not None:
+            self._duplicate_worker.deleteLater()
+            self._duplicate_worker = None
+        if self._duplicate_thread is not None:
+            self._duplicate_thread.deleteLater()
+            self._duplicate_thread = None
+
     def _push_browser_undo(self, entry: dict[str, Any]) -> None:
+        # When it happened: Edit > Undo compares this with unsaved typing in Preview.
+        entry.setdefault("time", time.monotonic())
         self._browser_undo_stack.append(entry)
         while len(self._browser_undo_stack) > 20:
             old = self._browser_undo_stack.pop(0)
@@ -11354,6 +12415,20 @@ class MainWindow(QMainWindow):
 
     def _discard_browser_undo_entry(self, entry: dict[str, Any]) -> None:
         kind = str(entry.get("kind") or "")
+        if kind == "transfer":
+            # Too old to undo: the overwritten files kept for Undo can go.
+            for _original, kept in entry.get("replaced") or []:
+                try:
+                    Path(kept).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            trash_dir = entry.get("trash_dir")
+            if trash_dir is not None:
+                try:
+                    Path(trash_dir).rmdir()
+                except OSError:
+                    pass
+            return
         if kind in {"files", "delete_folders"}:
             items = list(entry.get("items") or [])
             parents: set[Path] = set()
@@ -11450,8 +12525,204 @@ class MainWindow(QMainWindow):
             self._undo_hidden_folders(list(entry.get("folders") or []))
         elif kind == "delete_folders":
             self._undo_deleted_folders_batch(list(entry.get("items") or []))
+        elif kind == "transfer":
+            self._undo_transfer(entry)
+        elif kind == "created_folders":
+            self._undo_created_folders(entry)
+        elif kind == "rename_file":
+            self._undo_rename_file(entry)
+        elif kind == "rename_folder":
+            self._undo_rename_folder(entry)
         else:
             self._set_status_message("Nothing to undo", 3000)
+
+    def _report_undo_problems(self, problems: list[str]) -> None:
+        if problems:
+            QMessageBox.information(
+                self,
+                "Undo",
+                "Some items were left as they are:\n\n" + "\n".join(problems[:8]),
+            )
+
+    def _undo_transfer(self, entry: dict[str, Any]) -> None:
+        """Undo a paste (copies removed / moved files put back) or a file Duplicate."""
+        from repeatviewer.widgets.file_colors import replace_file_color_path
+
+        moved = [(Path(a), Path(b)) for a, b in entry.get("moved") or []]
+        created = [(Path(a), fp) for a, fp in entry.get("created") or []]
+        replaced = [(Path(a), Path(b)) for a, b in entry.get("replaced") or []]
+        if not self._confirm_unsaved_text_for(
+            [dest for _src, dest in moved] + [path for path, _fp in created]
+        ):
+            self._browser_undo_stack.append(entry)
+            return
+        problems: list[str] = []
+        gone: list[Path] = []
+        removed = moved_back = restored = 0
+        for path, fingerprint in reversed(created):
+            if not path.exists():
+                continue
+            if fingerprint is None or path_fingerprint(path) != fingerprint:
+                problems.append(f"{path.name}: changed after it was made, so it was kept")
+                continue
+            try:
+                path.unlink()
+                removed += 1
+                gone.append(path)
+            except OSError as exc:
+                problems.append(f"{path.name}: {exc}")
+        for src, dest in reversed(moved):
+            if not dest.exists():
+                problems.append(f"{dest.name}: no longer in {dest.parent.name}")
+                continue
+            if src.exists():
+                problems.append(f"{src.name}: {src.parent.name} already has a file with this name")
+                continue
+            try:
+                src.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(dest), str(src))
+                replace_file_color_path(dest, src)
+                moved_back += 1
+                gone.append(dest)
+            except OSError as exc:
+                problems.append(f"{dest.name}: {exc}")
+        for original, kept in replaced:
+            if not kept.exists():
+                continue
+            if original.exists():
+                problems.append(
+                    f"{original.name}: the overwritten file could not be put back "
+                    f"(name in use); it is kept in {kept.parent}"
+                )
+                continue
+            try:
+                shutil.move(str(kept), str(original))
+                restored += 1
+            except OSError as exc:
+                problems.append(f"{original.name}: {exc}")
+        trash_dir = entry.get("trash_dir")
+        if trash_dir is not None:
+            try:
+                Path(trash_dir).rmdir()
+            except OSError:
+                pass
+        if gone and self._preview_tabs is not None:
+            self._preview_tabs.close_paths(gone)
+        if self._current_folder:
+            self._populate_file_list(self._current_folder)
+        parts = []
+        if removed:
+            parts.append(f"removed {removed} {'copy' if removed == 1 else 'copies'}")
+        if moved_back:
+            parts.append(f"moved {moved_back} file(s) back")
+        if restored:
+            parts.append(f"restored {restored} overwritten file(s)")
+        action = str(entry.get("action") or "Copy").lower()
+        if parts:
+            self._set_status_message(f"Undid {action}: " + ", ".join(parts), 6000)
+        self._report_undo_problems(problems)
+
+    def _undo_created_folders(self, entry: dict[str, Any]) -> None:
+        """Undo a folder Duplicate: remove the copy while it is still unchanged."""
+        items = [(Path(a), fp) for a, fp in entry.get("items") or []]
+        tabs = self._preview_tabs
+        if tabs is not None:
+            inside = [
+                page
+                for page in tabs.unsaved_pages()
+                if any(page.path.is_relative_to(dest) for dest, _fp in items)
+            ]
+            if not tabs.confirm_close_pages(inside):
+                self._browser_undo_stack.append(entry)
+                return
+        problems: list[str] = []
+        removed: list[Path] = []
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for dest, fingerprint in items:
+                if not dest.is_dir():
+                    continue
+                if fingerprint is None or path_fingerprint(dest) != fingerprint:
+                    problems.append(f"{dest.name}: changed after it was made, so it was kept")
+                    continue
+                if tabs is not None:
+                    tabs.close_under_folder(dest)
+                try:
+                    shutil.rmtree(dest)
+                except OSError as exc:
+                    problems.append(f"{dest.name}: {exc}")
+                    continue
+                removed.append(dest)
+                self._remove_folder_from_tree(dest)
+                remove_folder_colors_under(dest)
+                self._hidden_root_folders = remove_hidden_root(self._hidden_root_folders, dest)
+                self._navigate_after_folder_removed(dest)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if removed:
+            self._persist_workspace()
+            noun = "copy" if len(removed) == 1 else "copies"
+            self._set_status_message(f"Undid duplicate: removed {len(removed)} folder {noun}", 6000)
+        self._report_undo_problems(problems)
+
+    def _undo_rename_file(self, entry: dict[str, Any]) -> None:
+        from repeatviewer.widgets.file_colors import replace_file_color_path
+
+        pairs = [(Path(a), Path(b)) for a, b in entry.get("pairs") or []]
+        if not pairs:
+            return
+        old, new = pairs[0]
+        if not self._confirm_unsaved_text_for([dst for _src, dst in pairs]):
+            self._browser_undo_stack.append(entry)
+            return
+        if not new.exists():
+            self._report_undo_problems([f"{new.name}: no longer there, so it was not renamed back"])
+            return
+        blocked = [src.name for src, dst in pairs if src.exists() and dst.exists()]
+        if blocked:
+            self._report_undo_problems(
+                [f"{name}: this name is in use again, so nothing was renamed back" for name in blocked]
+            )
+            return
+        try:
+            for src, dst in pairs:
+                if dst.exists():
+                    dst.rename(src)
+        except OSError as exc:
+            QMessageBox.critical(self, "Undo rename failed", str(exc))
+            return
+        if entry.get("fasta") and old.parent == new.parent:
+            from repeatviewer.backends.cyto_images import rename_sequence
+
+            try:
+                rename_sequence(old.parent, new.name, old.name)
+            except OSError:
+                logger.exception("Could not move cytogenetic image links back to %s", old.name)
+        for src, dst in pairs:
+            replace_file_color_path(dst, src)
+        if self._preview_tabs is not None:
+            self._preview_tabs.close_paths([dst for _src, dst in pairs])
+        if self._current_folder:
+            self._populate_file_list(self._current_folder)
+        self._select_path_in_file_list(old)
+        self._set_status_message(f"Renamed back to {old.name}", 5000)
+
+    def _undo_rename_folder(self, entry: dict[str, Any]) -> None:
+        old = Path(str(entry.get("old")))
+        new = Path(str(entry.get("new")))
+        if not new.is_dir():
+            self._report_undo_problems([f"{new.name}: no longer there, so it was not renamed back"])
+            return
+        if old.exists():
+            self._report_undo_problems([f"{old.name}: this name is in use again, so it was not renamed back"])
+            return
+        try:
+            new.rename(old)
+        except OSError as exc:
+            QMessageBox.critical(self, "Undo rename failed", str(exc))
+            return
+        self._after_folder_renamed(new, old)
+        self._set_status_message(f"Renamed folder back to {old.name}", 5000)
 
     def _undo_deleted_files_batch(self, batch: list[tuple[Path, Path]]) -> None:
         restored = 0
@@ -11819,14 +13090,33 @@ class MainWindow(QMainWindow):
         target_dir: Path,
         *,
         mode: Literal["copy", "cut"],
+        undo_action: str | None = None,
     ) -> None:
         target_dir = target_dir.expanduser().resolve()
         if not target_dir.is_dir():
+            return
+        if mode == "cut" and not self._confirm_unsaved_text_for(files):
             return
 
         created: list[Path] = []
         sources: list[Path] = []
         failed: list[str] = []
+        # Undo record: what moved, what was created, and files that were
+        # overwritten (set aside in the session trash instead of deleted).
+        undo_moved: list[tuple[Path, Path]] = []
+        undo_created: list[tuple[Path, str | None]] = []
+        undo_replaced: list[tuple[Path, Path]] = []
+        undo_trash: list[Path | None] = [None]
+        undo_count = 0
+
+        def set_aside(existing: Path) -> None:
+            if undo_trash[0] is None:
+                undo_trash[0] = self._new_trash_batch_dir()
+                if undo_trash[0] is None:
+                    raise OSError("could not create a temporary trash folder for undo")
+            kept = undo_trash[0] / f"{len(undo_replaced):04d}_{existing.name}"
+            shutil.move(str(existing), str(kept))
+            undo_replaced.append((existing, kept))
 
         for raw in files:
             src = raw.expanduser().resolve()
@@ -11840,13 +13130,18 @@ class MainWindow(QMainWindow):
             try:
                 if mode == "cut":
                     if dest.exists():
-                        dest.unlink()
+                        set_aside(dest)
                     shutil.move(src, dest)
                     from repeatviewer.widgets.file_colors import replace_file_color_path
 
                     replace_file_color_path(src, dest)
+                    undo_moved.append((src, dest))
                 else:
+                    if dest.exists():
+                        set_aside(dest)
                     shutil.copy2(src, dest)
+                    undo_created.append((dest, path_fingerprint(dest)))
+                undo_count += 1
                 created.append(dest)
                 sources.append(src)
                 for comp in companion_srcs:
@@ -11855,15 +13150,37 @@ class MainWindow(QMainWindow):
                     try:
                         if mode == "cut":
                             if comp_dest.exists() and comp_dest != comp:
-                                comp_dest.unlink()
+                                set_aside(comp_dest)
                             shutil.move(comp, comp_dest)
+                            undo_moved.append((comp, comp_dest))
                         else:
+                            if comp_dest.exists():
+                                set_aside(comp_dest)
                             shutil.copy2(comp, comp_dest)
+                            undo_created.append((comp_dest, path_fingerprint(comp_dest)))
                         created.append(comp_dest)
                     except OSError as exc:
                         failed.append(f"{comp.name}: {exc}")
             except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
+
+        if undo_moved or undo_created or undo_replaced:
+            self._push_browser_undo(
+                {
+                    "kind": "transfer",
+                    "action": undo_action or ("Move" if mode == "cut" else "Copy"),
+                    "count": undo_count,
+                    "moved": undo_moved,
+                    "created": undo_created,
+                    "replaced": undo_replaced,
+                    "trash_dir": undo_trash[0],
+                }
+            )
+        elif undo_trash[0] is not None:
+            try:
+                undo_trash[0].rmdir()
+            except OSError:
+                pass
 
         if mode == "cut" and self._file_clipboard is not None:
             moved_sources = {str(p) for p in sources}
@@ -11900,10 +13217,12 @@ class MainWindow(QMainWindow):
     def _paste_files_to_folder(self, target_dir: Path) -> None:
         if not self._clipboard_can_paste() or self._file_clipboard is None:
             return
+        mode = self._file_clipboard.mode
         self._transfer_files(
             self._file_clipboard.paths,
             target_dir,
-            mode=self._file_clipboard.mode,
+            mode=mode,
+            undo_action="Move" if mode == "cut" else "Paste",
         )
 
     def _refresh_tree(self) -> None:
@@ -12269,104 +13588,74 @@ class MainWindow(QMainWindow):
         """Deprecated path — use ``_rebuild_others_menu``."""
         self._rebuild_others_menu()
 
-    def _ensure_others_menu(self) -> QMenu | None:
-        """Return a live Others menu, recreating it if the cached one was deleted."""
-        if self._menu_object_alive(self._others_menu):
-            return self._others_menu
-
-        self._others_menu = None
-        self._plugins_menu = None
-        for action in list(self.menuBar().actions()):
-            candidate = action.menu()
-            if not self._menu_object_alive(candidate):
-                label = self._clean_menu_label(action.text()).lower()
-                if label in {"others", "plugins"}:
-                    self.menuBar().removeAction(action)
-                continue
-            title = self._clean_menu_label(candidate.title()).lower()
-            if title in {"others", "plugins"}:
-                # Migrate old Plugins title to Others.
-                candidate.setTitle("&Others")
-                self._others_menu = candidate
-                self._plugins_menu = candidate
-                return candidate
-
-        self._remove_menubar_menus_named("Others")
-        self._remove_menubar_menus_named("Plugins")
-        menu = QMenu("&Others", self)
-        self._others_menu = menu
-        self._plugins_menu = menu
-        insert_before = None
-        for action in self.menuBar().actions():
-            label = self._clean_menu_label(action.text())
-            if label in {"View", "Help"}:
-                insert_before = action
-                break
-        if insert_before is not None:
-            self.menuBar().insertMenu(insert_before, menu)
+    def _fill_tools_plugin_menu(self, menu: QMenu) -> None:
+        """Fill Tools > Plugin (Beta)."""
+        menu.addAction("Manage plugin", self._open_plugin_manager)
+        menu.addSeparator()
+        installed = [
+            plugin
+            for plugin in self._plugin_registry.all_plugins()
+            if not isinstance(plugin, UserCommandPlugin)
+        ]
+        if installed:
+            for plugin in installed:
+                menu.addAction(
+                    plugin.label,
+                    lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
+                )
         else:
-            self.menuBar().addMenu(menu)
-        return menu
+            none_action = menu.addAction("(No installed plugins)")
+            none_action.setEnabled(False)
 
-    def _ensure_plugins_menu(self) -> QMenu | None:
-        return self._ensure_others_menu()
+    def _fill_tools_wrapper_menu(self, menu: QMenu) -> None:
+        """Fill Tools > Command wrapper."""
+        menu.addAction("Manage wrapper", self._open_wrapper_manager)
+        menu.addSeparator()
+        specs = load_user_command_plugin_specs()
+        if specs:
+            for spec in specs:
+                menu.addAction(
+                    spec.label,
+                    lambda checked=False, pid=spec.id: self._apply_plugin(pid),
+                )
+        else:
+            empty = menu.addAction("(No wrappers yet)")
+            empty.setEnabled(False)
+
+    def _live_tools_submenu(self, cached: QMenu | None, name: str) -> QMenu | None:
+        """The live Tools submenu ``name``; re-found if the macOS reference went stale."""
+        if self._menu_object_alive(cached):
+            return cached
+        try:
+            for top in self.menuBar().actions():
+                menu = top.menu()
+                if menu is None or menu.objectName() != "ToolsMenu":
+                    continue
+                for item in menu.actions():
+                    sub = item.menu()
+                    if sub is not None and sub.objectName() == name:
+                        return sub
+        except RuntimeError:
+            pass
+        return None
 
     def _rebuild_others_menu(self) -> None:
-        def _fill(menu: QMenu) -> None:
-            menu.clear()
-            plugin_menu = menu.addMenu("Plugin (Beta)")
-            wrapper_menu = menu.addMenu("Command wrapper")
-
-            plugin_menu.addAction("Manage plugin", self._open_plugin_manager)
-            plugin_menu.addSeparator()
-            installed = [
-                plugin
-                for plugin in self._plugin_registry.all_plugins()
-                if not isinstance(plugin, UserCommandPlugin)
-            ]
-            if installed:
-                for plugin in installed:
-                    plugin_menu.addAction(
-                        plugin.label,
-                        lambda checked=False, pid=plugin.id: self._apply_plugin(pid),
-                    )
-            else:
-                none_action = plugin_menu.addAction("(No installed plugins)")
-                none_action.setEnabled(False)
-
-            wrapper_menu.addAction("Manage wrapper", self._open_wrapper_manager)
-            wrapper_menu.addSeparator()
-            specs = load_user_command_plugin_specs()
-            if specs:
-                for spec in specs:
-                    wrapper_menu.addAction(
-                        spec.label,
-                        lambda checked=False, pid=spec.id: self._apply_plugin(pid),
-                    )
-            else:
-                empty = wrapper_menu.addAction("(No wrappers yet)")
-                empty.setEnabled(False)
-
-            self._others_menu = menu
-            self._plugins_menu = menu
-
-        menu = self._ensure_others_menu()
-        if menu is None:
-            return
-        try:
-            _fill(menu)
-        except RuntimeError:
-            self._others_menu = None
-            self._plugins_menu = None
-            self._remove_menubar_menus_named("Others")
-            self._remove_menubar_menus_named("Plugins")
-            menu = self._ensure_others_menu()
+        """Refresh Tools > Plugin (Beta) and Command wrapper after an install or removal."""
+        plugin_menu = self._live_tools_submenu(self._tools_plugin_menu, "ToolsPluginMenu")
+        wrapper_menu = self._live_tools_submenu(self._tools_wrapper_menu, "ToolsWrapperMenu")
+        self._tools_plugin_menu = plugin_menu
+        self._tools_wrapper_menu = wrapper_menu
+        for menu, fill in (
+            (plugin_menu, self._fill_tools_plugin_menu),
+            (wrapper_menu, self._fill_tools_wrapper_menu),
+        ):
             if menu is None:
-                return
+                continue
             try:
-                _fill(menu)
+                menu.clear()
+                fill(menu)
             except RuntimeError:
-                return
+                continue
         self._connect_menu_operation_logging()
 
     def _rebuild_plugins_menu(self) -> None:
@@ -13022,6 +14311,8 @@ class MainWindow(QMainWindow):
             or self._genome_map_thread is not None
             or self._benchmark_thread is not None
             or self._extract_thread is not None
+            or self._duplicate_thread is not None
+            or self._find_thread is not None
         ):
             self._set_status_message("No running task to stop", 3000)
             return
@@ -13046,6 +14337,10 @@ class MainWindow(QMainWindow):
             threads.append(self._benchmark_thread)
         if self._extract_thread is not None:
             threads.append(self._extract_thread)
+        if self._duplicate_thread is not None:
+            threads.append(self._duplicate_thread)
+        if self._find_thread is not None:
+            threads.append(self._find_thread)
 
         for thread in threads:
             if thread.isRunning():

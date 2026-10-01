@@ -27,7 +27,7 @@ import math
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QBrush,
     QDesktopServices,
@@ -44,7 +44,6 @@ from PySide6.QtGui import (
     QPalette,
     QPen,
     QPolygonF,
-    QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -1203,9 +1202,6 @@ class TreePanel(QWidget):
         self._aln_window = None
         self._status = QLabel(self)
         self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        undo_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Undo), self)
-        undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        undo_shortcut.activated.connect(self.undo)
 
         # Button row: a full-width strip in the Preview header colour, line below.
         toolbar = QWidget(self)
@@ -1772,6 +1768,25 @@ class TreePanel(QWidget):
         if message:
             self._update_status(message)
         self._save_view_state()
+
+    def event(self, event) -> bool:  # noqa: N802 (Qt API)
+        # Cmd/Ctrl+Z inside the tree is the tree's own undo. Claiming the key
+        # here (instead of a QShortcut) keeps it working in every window and
+        # stops it competing with the main window's Edit > Undo shortcut, which
+        # would make the key do nothing.
+        if event.type() == QEvent.Type.ShortcutOverride and event.matches(
+            QKeySequence.StandardKey.Undo
+        ):
+            event.accept()
+            return True
+        return super().event(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if event.matches(QKeySequence.StandardKey.Undo):
+            self.undo()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def undo(self) -> None:
         if not self._undo:

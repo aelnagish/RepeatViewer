@@ -46,6 +46,9 @@ from repeatviewer.widgets.preview_controls import (
 )
 
 _BAR_HEIGHT = 7
+_FIND_HIT_FILL = QColor(245, 158, 11, 150)
+_FIND_CURRENT_FILL = QColor(37, 99, 235, 220)
+_FIND_HIT_BORDER = QColor(180, 83, 9, 230)
 _BAR_TOP_PAD = 3
 _FEAT_HEIGHT = 10
 _FEAT_GAP = 2
@@ -381,6 +384,9 @@ class _BarsCanvas(QWidget):
         self._rubber_active = False  # True only after drag exceeds threshold
         self._pending_scroll_bp: float | None = None
         self._pending_anchor: tuple[float, float] | None = None
+        # Edit > Find: hit ranges per record id, and the hit being shown.
+        self._find_hits: dict[str, list[tuple[int, int]]] = {}
+        self._find_current: tuple[str, int, int] | None = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum)
@@ -527,6 +533,16 @@ class _BarsCanvas(QWidget):
         value = self._pending_anchor
         self._pending_anchor = None
         return value
+
+    def set_find_hits(
+        self,
+        hits_by_id: dict[str, list[tuple[int, int]]],
+        current: tuple[str, int, int] | None = None,
+    ) -> None:
+        """Edit > Find hits drawn on the bars ({} clears)."""
+        self._find_hits = {rid: list(ranges) for rid, ranges in (hits_by_id or {}).items()}
+        self._find_current = current
+        self.update()
 
     def set_selected_rows(self, rows: list[int] | set[int]) -> None:
         self._selected_rows = {int(r) for r in rows if 0 <= int(r) < len(self._record_ids)}
@@ -741,6 +757,18 @@ class _BarsCanvas(QWidget):
                 QRectF(self._bar_pad, bar_y, bar_w, _BAR_HEIGHT),
                 _bar_color(self, selected=selected),
             )
+            hits = self._find_hits.get(rid)
+            if hits:
+                current = self._find_current
+                painter.setPen(QPen(_FIND_HIT_BORDER, 1))
+                for hit_start, hit_end in hits:
+                    x0 = self._bar_pad + (hit_start - 1) * self._ppb
+                    x1 = self._bar_pad + hit_end * self._ppb
+                    mark = QRectF(x0, bar_y - 2, max(3.0, x1 - x0), _BAR_HEIGHT + 4)
+                    is_current = current is not None and current == (rid, hit_start, hit_end)
+                    painter.fillRect(mark, _FIND_CURRENT_FILL if is_current else _FIND_HIT_FILL)
+                    painter.drawRect(mark)
+                painter.setPen(Qt.PenStyle.NoPen)
 
             feat_y0 = bar_y + _BAR_HEIGHT + 2
             flat_index = 0
@@ -1128,6 +1156,7 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def load_path(self, path: Path) -> None:
         self._path = path.expanduser().resolve()
+        self._bars.set_find_hits({}, None)  # hits belong to the previous file
         try:
             lengths = fasta_record_lengths(self._path)
         except (OSError, ValueError) as exc:
@@ -1423,6 +1452,89 @@ class MultiSequenceOverviewPanel(QWidget):
             hbar.setValue(max(0, int(new_x - view_x)))
         self._update_scale()
         self._sync_zoom_slider_from_ppb()
+
+    # ------------------------------------------------ Edit > Find / Go To
+
+    def record_ids(self) -> list[str]:
+        return list(self._record_ids)
+
+    def record_length(self, seq_id: str) -> int:
+        return int(self._lengths.get(seq_id, 0))
+
+    def selected_record_id(self) -> str | None:
+        ids = self._selected_record_ids()
+        return ids[0] if ids else None
+
+    def features_by_id(self) -> dict[str, list[SequenceFeature]]:
+        return {rid: list(feats) for rid, feats in self._features.items()}
+
+    def _row_for_id(self, seq_id: str) -> int:
+        wanted = str(seq_id or "").strip()
+        if wanted in self._record_ids:
+            return self._record_ids.index(wanted)
+        from repeatviewer.backends.gff_features import _seqid_matches
+
+        for row, rid in enumerate(self._record_ids):
+            if _seqid_matches(rid, wanted):
+                return row
+        return -1
+
+    def show_find_hit(
+        self,
+        seq_id: str,
+        start: int,
+        end: int,
+        hits_by_id: dict[str, list[tuple[int, int]]],
+        *,
+        whole_sequence: bool = False,
+    ) -> bool:
+        """Select the record, scroll to it and zoom to [start, end]. False if unknown."""
+        row = self._row_for_id(seq_id)
+        if row < 0:
+            return False
+        rid = self._record_ids[row]
+        self._bars.set_find_hits(hits_by_id, (rid, int(start), int(end)))
+        self._bars.set_selected_rows([row])
+        self._sync_names_column()
+        self._scroll_to_row(row)
+        if whole_sequence:
+            self._on_region_zoom(0.0, float(max(1, self._lengths.get(rid, end))))
+        else:
+            span = max(1, int(end) - int(start) + 1)
+            context = max(3 * span, 60)
+            center = (int(start) + int(end)) / 2.0
+            self._on_region_zoom(max(0.0, center - context / 2.0), center + context / 2.0)
+        return True
+
+    def clear_find_hits(self) -> None:
+        self._bars.set_find_hits({}, None)
+
+    def add_features_and_save(self, new_by_id: dict[str, list[SequenceFeature]]) -> bool:
+        """Append features per record and save the annotations (JSON sidecar)."""
+        added = {rid: feats for rid, feats in new_by_id.items() if feats and rid in self._lengths}
+        if not added:
+            return False
+        for rid, feats in added.items():
+            self._features[rid] = list(self._features.get(rid) or []) + list(feats)
+        try:
+            json_path, _gff = save_annotations_multi(
+                self._path,
+                features_by_id=self._features,
+                lengths_by_id=self._lengths,
+                record_ids=list(self._record_ids),
+            )
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return False
+        keep_ppb = self._bars.pixels_per_base()
+        keep_sel = self._bars.selected_rows()
+        self._bars.set_data(self._record_ids, self._lengths, self._features, fit_bars_width=None)
+        self._bars.set_pixels_per_base(keep_ppb)
+        self._bars.set_selected_rows(keep_sel)
+        self._sync_names_column()
+        self._update_scale()
+        self.annotationsSaved.emit(json_path)
+        return True
 
     def _on_region_zoom(self, start_bp: float, end_bp: float) -> None:
         self._sync_viewport_fill()
