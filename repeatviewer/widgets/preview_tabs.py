@@ -1640,6 +1640,131 @@ class FilePreviewPage(QWidget):
         """True if a Go-to click on ``seq_id`` should jump this tab's Annotation view."""
         return self._single_fasta_mode and self.contains_sequence_id(seq_id)
 
+    # ------------------------------------------------ Edit > Find / Go To Position
+
+    def supports_find(self) -> bool:
+        """Edit > Find and Go To Position work on FASTA previews."""
+        return bool(self._single_fasta_mode)
+
+    def _show_annotation_for_find(self):
+        """Switch to the Annotation tab with its data loaded; returns overview or panel."""
+        if self._multi_fasta_mode:
+            view = self._ensure_annotation_overview()
+            self._show_annotation_content(multi=True)
+        else:
+            view = self._ensure_annotation_panel()
+            tab_host = self._preview_tab_host()
+            if tab_host is not None and tab_host._annotation_zoom_bar is not None:
+                view.bind_annotation_zoom_bar(tab_host._annotation_zoom_bar)
+        if self._fasta_stack.currentIndex() != 1:
+            self.set_fasta_tab_index(1)
+            self._notify_preview_host()
+        self._ensure_annotation_data_loaded(progress_detail="Loading annotations…")
+        if not self._multi_fasta_mode and view._map.data() is None:
+            view.load_path(self.path, fit_after_load=False)
+        return view
+
+    def annotation_features_for_find(self) -> dict | None:
+        """Annotations as open in the viewer (unsaved edits included), or None."""
+        if self._multi_fasta_mode:
+            overview = self._annotation_overview
+            if overview is not None and overview.record_ids():
+                return overview.features_by_id()
+            return None
+        panel = self._annotation_panel
+        data = getattr(panel, "_loaded_data", None) if panel is not None else None
+        if data is None:
+            return None
+        features = {rid: list(feats) for rid, feats in data.features_by_id.items()}
+        if data.sequence_id:
+            features[data.sequence_id] = list(panel._map.features())
+        return features
+
+    def find_start_position(self) -> tuple[str, int] | None:
+        """Where Find Next starts: the Annotation selection (record, position)."""
+        if self._multi_fasta_mode:
+            overview = self._annotation_overview
+            rid = overview.selected_record_id() if overview is not None else None
+            return (rid, 1) if rid else None
+        panel = self._annotation_panel
+        if panel is None or panel._map.data() is None:
+            return None
+        selection = panel.selection_range()
+        return panel.active_sequence_id(), (selection[0] if selection else 1)
+
+    def show_find_item(self, item, hits_by_id: dict[str, list[tuple[int, int]]]) -> bool:
+        """Show one Find hit in the Annotation view. False if it cannot be shown."""
+        view = self._show_annotation_for_find()
+        whole = getattr(item, "kind", "") == "name"
+        if self._multi_fasta_mode:
+            return view.show_find_hit(item.seq_id, item.start, item.end, hits_by_id, whole_sequence=whole)
+        return view.show_find_hit(
+            item.seq_id, item.start, item.end, hits_by_id.get(item.seq_id, []), whole_sequence=whole
+        )
+
+    def clear_find_hits(self) -> None:
+        if self._annotation_overview is not None:
+            self._annotation_overview.clear_find_hits()
+        if self._annotation_panel is not None:
+            self._annotation_panel.clear_find_hits()
+
+    def go_to_region(self, seq_id: str | None, start: int, end: int) -> str | None:
+        """Edit > Go To Position. Returns a message for the user when it cannot."""
+        view = self._show_annotation_for_find()
+        if self._multi_fasta_mode:
+            rid = seq_id or view.selected_record_id()
+            if not rid:
+                return "This file has several sequences: type the name too, e.g. scaffold_5:1000-2000."
+            row = view._row_for_id(rid)
+            if row < 0:
+                return f'There is no sequence "{rid}" in {self.path.name}.'
+            rid = view.record_ids()[row]
+            length = view.record_length(rid)
+            hits = view._bars._find_hits
+        else:
+            rid = seq_id or view.active_sequence_id()
+            if seq_id and not view.ensure_active_sequence(seq_id):
+                return f'There is no sequence "{seq_id}" in {self.path.name}.'
+            if view.is_too_long_for_display():
+                return "This sequence is too long to show in the Annotation view."
+            rid = view.active_sequence_id()
+            length = view.active_sequence_length()
+            hits = view._map._canvas.find_hits()
+        if length and start > length:
+            return f"Position {start:,} is past the end of {rid} ({length:,} bp)."
+        end = min(end, length) if length else end
+        view.show_find_hit(rid, start, end, hits)
+        return None
+
+    def save_find_items(self, items: list, name: str) -> int:
+        """Save motif hits as annotations. Returns how many were saved."""
+        from repeatviewer.backends.sequence_features import (
+            REPEATVIEWER_INTERNAL_SOURCE,
+            SequenceFeature,
+        )
+
+        view = self._show_annotation_for_find()
+        by_id: dict[str, list[SequenceFeature]] = {}
+        for item in items:
+            by_id.setdefault(item.seq_id, []).append(
+                SequenceFeature(
+                    start=item.start,
+                    end=item.end,
+                    name=name,
+                    feature_type="others",
+                    color="#f59e0b",
+                    strand=item.strand if item.strand in {"+", "-"} else "+",
+                    source=REPEATVIEWER_INTERNAL_SOURCE,
+                )
+            )
+        if not by_id:
+            return 0
+        if self._multi_fasta_mode:
+            return sum(len(v) for v in by_id.values()) if view.add_features_and_save(by_id) else 0
+        rid = view.active_sequence_id()
+        features = by_id.get(rid) or next(iter(by_id.values()))
+        return len(features) if view.add_features_and_save(features) else 0
+
     def jump_annotation_to_region(self, seq_id: str, start: int, end: int) -> None:
         """Switch to the Annotation sub-tab and jump to [start, end].
 

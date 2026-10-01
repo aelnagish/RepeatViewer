@@ -465,6 +465,8 @@ from repeatviewer.widgets.hidden_folders import (
     replace_hidden_root_path,
     unhide_root_folder,
 )
+from repeatviewer.backends.find_in_file import find_in_fasta, first_index_after, next_index
+from repeatviewer.backends.motif_search import parse_position
 from repeatviewer.edit_actions import browser_undo_label, path_fingerprint
 from repeatviewer.widgets.folder_colors import (
     FOLDER_COLOR_PRESETS,
@@ -2190,6 +2192,12 @@ class MainWindow(QMainWindow):
         self._tools_menu: QMenu | None = None
         self._edit_menu: QMenu | None = None
         self._edit_actions: dict[str, QAction] = {}
+        self._find_dialog = None  # views.find_dialog.FindDialog, created on first use
+        self._find_state: dict[str, Any] | None = None
+        self._find_thread: QThread | None = None
+        self._find_worker = None
+        self._find_pending: dict[str, Any] | None = None
+        self._last_go_to = ""
         self._tools_plugin_menu: QMenu | None = None
         self._tools_wrapper_menu: QMenu | None = None
         self._workflows_menu: QMenu | None = None
@@ -2661,6 +2669,8 @@ class MainWindow(QMainWindow):
         ):
             event.ignore()
             return
+        if self._find_dialog is not None:
+            self._find_dialog.save_settings()
         self._stop_metadata_enrichment()
         if self._any_background_job_running():
             self._shutdown_background_threads()
@@ -5406,6 +5416,14 @@ class MainWindow(QMainWindow):
         self._edit_actions["file_color"] = color_menu.menuAction()
 
         add("clear_highlights", "Clear Highlights", self._clear_job_file_highlights)
+        menu.addSeparator()
+        add("find", "Find…", self._edit_find, std.Find)
+        add("find_next", "Find Next", lambda: self._find_from_menu(1), Qt.Key.Key_F3)
+        self._edit_actions["find_next"].setShortcuts(
+            [QKeySequence(Qt.Key.Key_F3), QKeySequence("Ctrl+G")]
+        )
+        add("find_previous", "Find Previous", lambda: self._find_from_menu(-1), "Shift+F3")
+        add("go_to", "Go To Position…", self._go_to_position, "Ctrl+Alt+G")
         menu.aboutToShow.connect(self._update_edit_menu_state)
         menu.aboutToHide.connect(self._reset_edit_menu_state)
 
@@ -5513,11 +5531,26 @@ class MainWindow(QMainWindow):
         else:
             self._edit_forward_key("cut", QKeySequence.StandardKey.Cut)
 
+    def _annotation_panel_in_focus(self):
+        """The single-sequence Annotation view that has keyboard focus, if any."""
+        widget = QApplication.focusWidget()
+        while widget is not None:
+            if type(widget).__name__ == "SequenceMapPanel":
+                return widget
+            widget = widget.parentWidget()
+        return None
+
     def _edit_copy(self) -> None:
         if self._edit_focus()[0] == "files":
             self._copy_files_shortcut()
-        else:
-            self._edit_forward_key("copy", QKeySequence.StandardKey.Copy)
+            return
+        panel = self._annotation_panel_in_focus()
+        if panel is not None:
+            message = panel.copy_selection_to_clipboard()
+            if message:
+                self._set_status_message(message, 5000)
+                return
+        self._edit_forward_key("copy", QKeySequence.StandardKey.Copy)
 
     def _edit_paste(self) -> None:
         if self._edit_focus()[0] in ("files", "folders"):
@@ -5652,6 +5685,10 @@ class MainWindow(QMainWindow):
             "duplicate",
             "file_color",
             "clear_highlights",
+            "find",
+            "find_next",
+            "find_previous",
+            "go_to",
         ):
             try:
                 action = self._edit_action(key)
@@ -5659,6 +5696,375 @@ class MainWindow(QMainWindow):
                     action.setEnabled(True)
             except RuntimeError:
                 continue
+
+    # ------------------------------------------------------------ Edit > Find
+
+    _FIND_IN_BACKGROUND_BYTES = 5 * 1024 * 1024  # bigger files: progress bar + Stop
+
+    def _browser_has_focus(self) -> bool:
+        widget = QApplication.focusWidget()
+        if widget is None:
+            return False
+        for area in (
+            self._folder_tree,
+            self._folder_filter,
+            self._file_list,
+            self._file_filter,
+            self._dock_folders,
+            self._dock_files,
+        ):
+            if area is not None and (widget is area or area.isAncestorOf(widget)):
+                return True
+        return False
+
+    def _edit_find(self) -> None:
+        # Cmd+F typed in the file or folder panel keeps its old job: the filter
+        # box. From the menu, or anywhere else, it opens Find.
+        typed = bool(QApplication.queryKeyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+        if typed and self._browser_has_focus():
+            self._focus_browser_filter()
+            return
+        self._open_find_dialog()
+
+    def _find_page(self):
+        """The current Preview page, if it is a FASTA that Find can search."""
+        tabs = self._preview_tabs
+        page = tabs.currentWidget() if tabs is not None else None
+        supports = getattr(page, "supports_find", None)
+        return page if callable(supports) and supports() else None
+
+    def _find_page_for(self, path: Path):
+        """The Preview page showing ``path`` (made current), opening it if needed."""
+        tabs = self._preview_tabs
+        if tabs is None:
+            return None
+        key = str(Path(path).expanduser().resolve())
+        for index in range(tabs.count()):
+            widget = tabs.widget(index)
+            if str(getattr(widget, "path", "")) == key:
+                if tabs.currentIndex() != index:
+                    tabs.setCurrentIndex(index)
+                return widget
+        tabs.open_file(Path(key), replace=False)
+        widget = tabs.currentWidget()
+        return widget if str(getattr(widget, "path", "")) == key else None
+
+    def _open_find_dialog(self) -> None:
+        from repeatviewer.views.find_dialog import FindDialog
+
+        if self._find_dialog is None:
+            dialog = FindDialog(self)
+            dialog.findRequested.connect(self._find_run)
+            dialog.itemActivated.connect(self._find_show_index)
+            dialog.saveRequested.connect(self._find_save_hits)
+            dialog.closed.connect(self._find_closed)
+            self._find_dialog = dialog
+        if self._find_page() is None and self._find_state is None:
+            self._find_dialog.set_status("Open a FASTA file in Preview to search it.")
+        self._find_dialog.show()
+        self._find_dialog.raise_()
+        self._find_dialog.activateWindow()
+        self._find_dialog.focus_query()
+
+    def _find_from_menu(self, direction: int) -> None:
+        if self._find_dialog is None or not self._find_dialog.query_text():
+            self._open_find_dialog()
+            return
+        self._find_run(direction)
+
+    def _find_closed(self) -> None:
+        """Closing Find removes the highlights; saved annotations stay."""
+        self._find_state = None
+        tabs = self._preview_tabs
+        if tabs is None:
+            return
+        for index in range(tabs.count()):
+            clear = getattr(tabs.widget(index), "clear_find_hits", None)
+            if callable(clear):
+                clear()
+
+    def _find_run(self, direction: int) -> None:
+        dialog = self._find_dialog
+        if dialog is None or self._find_thread is not None:
+            return
+        page = self._find_page()
+        if page is None:
+            dialog.set_status("Open a FASTA file in Preview to search it.")
+            return
+        query = dialog.query_text()
+        if not query:
+            dialog.set_status("Type something to find.")
+            dialog.focus_query()
+            return
+        dialog.save_settings()
+        position = parse_position(query)
+        if position is not None and (position[0] is not None or not any(c.isalpha() for c in query)):
+            name, start, end = position
+            problem = page.go_to_region(name, start, end)
+            where = f"{start:,}" if start == end else f"{start:,}-{end:,}"
+            dialog.set_status(problem or f"Went to position {where}" + (f" of {name}" if name else "") + ".")
+            return
+        request = dialog.request()
+        try:
+            stat = page.path.stat()
+        except OSError:
+            dialog.set_status("The file is no longer there.")
+            return
+        key = (str(page.path), stat.st_mtime_ns, request)
+        if self._find_state is not None and self._find_state["key"] == key:
+            if direction == 0:
+                self._find_show_index(max(0, self._find_state["index"]))
+            else:
+                self._find_step(direction)
+            return
+        self._find_pending = {"key": key, "path": page.path, "direction": direction, "query": query}
+        features = page.annotation_features_for_find() if request.in_annotations else None
+        if stat.st_size <= self._FIND_IN_BACKGROUND_BYTES:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                result = find_in_fasta(page.path, request, features_by_id=features)
+            except (OSError, ValueError) as exc:
+                dialog.set_status(f"Could not search {page.path.name}: {exc}")
+                return
+            finally:
+                QApplication.restoreOverrideCursor()
+            self._find_finished_with(result)
+            return
+        self._find_start_background(page.path, request, features)
+
+    def _find_start_background(self, path: Path, request, features) -> None:
+        from repeatviewer.views.find_dialog import FindWorker
+
+        dialog = self._find_dialog
+        if (
+            self._duplicate_thread is not None
+            or self._extract_thread is not None
+            or self._any_background_job_running()
+        ):
+            dialog.set_status("Another task is still running. Wait for it to finish, or press Stop.")
+            return
+        self._job_cancel.reset()
+        self._show_job_progress("Find", 1)
+        if self._task_progress is not None:
+            self._task_progress.start(self._running_job_title("Find"), 0)
+            self._task_progress.update(0, "Counting sequences…")
+        self._set_job_actions_enabled(False)
+        dialog.set_busy(True)
+        dialog.set_status(f"Searching {path.name}…")
+        self._find_thread = QThread(self)
+        self._find_worker = FindWorker(path, request, features, cancel=lambda: self._job_cancel.requested)
+        self._find_worker.moveToThread(self._find_thread)
+        self._find_thread.started.connect(self._find_worker.run)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._find_worker.total.connect(self._on_find_total, queued)
+        self._find_worker.progress.connect(self._on_find_progress, queued)
+        self._find_worker.finished.connect(self._on_find_finished, queued)
+        self._find_worker.failed.connect(self._on_find_failed, queued)
+        self._find_worker.finished.connect(self._find_thread.quit)
+        self._find_worker.failed.connect(self._find_thread.quit)
+        self._find_thread.finished.connect(self._cleanup_find_worker)
+        self._find_thread.start()
+
+    @Slot(int)
+    def _on_find_total(self, total: int) -> None:
+        self._job_work_steps = max(1, int(total))
+        if self._task_progress is not None and total > 0:
+            self._task_progress.start(self._running_job_title("Find"), self._job_work_steps + 1)
+
+    @Slot(int, str)
+    def _on_find_progress(self, done: int, name: str) -> None:
+        if self._task_progress is not None:
+            work = getattr(self, "_job_work_steps", 1)
+            self._task_progress.update(min(max(0, int(done)), work), name)
+
+    @Slot(object)
+    def _on_find_finished(self, result: object) -> None:
+        self._finish_background_job()
+        try:
+            if self._find_dialog is not None:
+                self._find_dialog.set_busy(False)
+                self._find_finished_with(result)
+        finally:
+            self._schedule_after_job_ui_ready()
+
+    @Slot(str)
+    def _on_find_failed(self, message: str) -> None:
+        self._hide_job_progress()
+        self._set_job_actions_enabled(True)
+        if self._find_dialog is None:
+            return
+        self._find_dialog.set_busy(False)
+        if message == CANCELLED_MESSAGE:
+            self._find_dialog.set_status("Find stopped.")
+        else:
+            self._find_dialog.set_status(f"Find failed: {message}")
+
+    def _cleanup_find_worker(self) -> None:
+        if self._job_cancel.requested:
+            self._job_cancel.reset()
+        self._job_running = self._worker_thread is not None
+        if self._worker_thread is None:
+            self._set_job_actions_enabled(True)
+        if self._stop_btn is not None and not self._job_running:
+            self._stop_btn.setEnabled(False)
+        thread = self._find_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
+        if self._find_worker is not None:
+            self._find_worker.deleteLater()
+            self._find_worker = None
+        if self._find_thread is not None:
+            self._find_thread.deleteLater()
+            self._find_thread = None
+
+    @staticmethod
+    def _find_summary(result, query: str) -> str:
+        items = result.items
+        seq = [i for i in items if i.kind == "sequence"]
+        parts = []
+        if seq:
+            plus = sum(1 for i in seq if i.strand == "+")
+            parts.append(f"{len(seq):,} in the sequence ({plus:,} on +, {len(seq) - plus:,} on -)")
+        names = sum(1 for i in items if i.kind == "name")
+        if names:
+            parts.append(f"{names:,} sequence name{'s' if names != 1 else ''}")
+        notes = sum(1 for i in items if i.kind == "annotation")
+        if notes:
+            parts.append(f"{notes:,} annotation{'s' if notes != 1 else ''}")
+        text = f'"{query}": {len(items):,} hit{"s" if len(items) != 1 else ""}'
+        if parts:
+            text += " (" + ", ".join(parts) + ")"
+        if result.truncated:
+            text += ". Stopped at 100,000 hits; make the motif longer to see them all"
+        return text + "."
+
+    def _find_finished_with(self, result) -> None:
+        dialog = self._find_dialog
+        pending = getattr(self, "_find_pending", None)
+        if dialog is None or pending is None:
+            return
+        hits_by_id: dict[str, list[tuple[int, int]]] = {}
+        for item in result.items:
+            if item.kind != "name":
+                hits_by_id.setdefault(item.seq_id, []).append((item.start, item.end))
+        self._find_state = {
+            "key": pending["key"],
+            "path": pending["path"],
+            "result": result,
+            "index": -1,
+            "hits_by_id": hits_by_id,
+            "summary": self._find_summary(result, pending["query"]),
+        }
+        dialog.set_results(result.items)
+        page = self._find_page_for(pending["path"])
+        if not result.items:
+            if page is not None:
+                page.clear_find_hits()
+            message = f'No hits for "{pending["query"]}" in {pending["path"].name}.'
+            if result.sequence_skipped and pending["key"][2].in_sequence:
+                message += f" Not searched as a sequence: {result.sequence_skipped}"
+            dialog.set_status(message)
+            return
+        start = page.find_start_position() if page is not None else None
+        seq_id, position = start if start is not None else (result.record_ids[0], 1)
+        index = first_index_after(result.items, seq_id, position, result.record_ids)
+        if pending["direction"] < 0:
+            index = (index - 1) % len(result.items)
+        self._find_show_index(index)
+
+    def _find_step(self, direction: int) -> None:
+        state = self._find_state
+        if state is None:
+            return
+        index = next_index(state["result"].items, state["index"], direction)
+        if index >= 0:
+            self._find_show_index(index)
+
+    def _find_show_index(self, index: int) -> None:
+        state = self._find_state
+        dialog = self._find_dialog
+        if state is None or dialog is None:
+            return
+        items = state["result"].items
+        if not 0 <= index < len(items):
+            return
+        item = items[index]
+        state["index"] = index
+        page = self._find_page_for(state["path"])
+        shown = page.show_find_item(item, state["hits_by_id"]) if page is not None else False
+        dialog.set_current(index)
+        where = f"{item.seq_id} {item.start:,}..{item.end:,} ({item.strand})"
+        text = f"Hit {index + 1:,} of {len(items):,}: {where}"
+        if item.kind == "sequence" and item.mismatches:
+            text += f", {item.mismatches} mismatch" + ("es" if item.mismatches > 1 else "")
+        if item.kind == "annotation" and item.label:
+            text += f", annotation {item.label}"
+        if not shown:
+            text += ". Not shown: the sequence is too long for the Annotation view"
+        dialog.set_status(state["summary"] + "\n" + text + ".")
+
+    def _find_save_hits(self) -> None:
+        state = self._find_state
+        dialog = self._find_dialog
+        if state is None or dialog is None:
+            return
+        items = [item for item in state["result"].items if item.kind == "sequence"]
+        if not items:
+            dialog.set_status("There are no sequence hits to save.")
+            return
+        if len(items) > 1000:
+            answer = QMessageBox.question(
+                dialog,
+                "Save Hits as Annotations",
+                f"Save {len(items):,} annotations?",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Save,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Save:
+                return
+        ask = QInputDialog(dialog)
+        ask.setWindowTitle("Save Hits as Annotations")
+        ask.setLabelText("Annotation name:")
+        ask.setTextValue(f"Find {state['key'][2].query}")
+        ask.setOkButtonText("Save")
+        ask.setCancelButtonText("Cancel")
+        if ask.exec() != QDialog.DialogCode.Accepted or not ask.textValue().strip():
+            return
+        name = ask.textValue().strip()
+        page = self._find_page_for(state["path"])
+        saved = page.save_find_items(items, name) if page is not None else 0
+        if saved:
+            dialog.set_status(f'Saved {saved:,} annotation{"s" if saved != 1 else ""} named "{name}".')
+        else:
+            dialog.set_status("The hits could not be saved as annotations.")
+
+    def _go_to_position(self) -> None:
+        page = self._find_page()
+        if page is None:
+            QMessageBox.information(self, "Go To Position", "Open a FASTA file in Preview first.")
+            return
+        ask = QInputDialog(self)
+        ask.setWindowTitle("Go To Position")
+        ask.setLabelText("Position or range, e.g. 114590001, 1000-2000 or scaffold_5:1000-2000:")
+        ask.setTextValue(self._last_go_to)
+        ask.setOkButtonText("Go")
+        ask.setCancelButtonText("Cancel")
+        if ask.exec() != QDialog.DialogCode.Accepted:
+            return
+        text = ask.textValue().strip()
+        self._last_go_to = text
+        position = parse_position(text)
+        if position is None:
+            QMessageBox.information(
+                self, "Go To Position", "Type a position such as 114590001 or 1000-2000."
+            )
+            return
+        problem = page.go_to_region(*position)
+        if problem:
+            QMessageBox.information(self, "Go To Position", problem)
+        else:
+            self._set_status_message(f"Went to {text}", 4000)
 
     @staticmethod
     def _clean_menu_label(text: str) -> str:
@@ -5718,9 +6124,8 @@ class MainWindow(QMainWindow):
                 refresh_keys.append(seq)
         for seq in refresh_keys:
             QShortcut(seq, self, self._refresh_current_folder)
-        # One Find shortcut for the whole window; _focus_browser_filter already
-        # picks the folder or the file filter from where the focus is.
-        QShortcut(QKeySequence.StandardKey.Find, self, self._focus_browser_filter)
+        # Cmd+F is on Edit > Find… (see _edit_find): in the file or folder panel
+        # it still jumps to that panel's filter box.
         # Del/Backspace stay panel-scoped shortcuts (Edit > Delete has no key).
         for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
             shortcut = QShortcut(key, self._file_list)
@@ -13809,6 +14214,7 @@ class MainWindow(QMainWindow):
             or self._benchmark_thread is not None
             or self._extract_thread is not None
             or self._duplicate_thread is not None
+            or self._find_thread is not None
         ):
             self._set_status_message("No running task to stop", 3000)
             return
@@ -13835,6 +14241,8 @@ class MainWindow(QMainWindow):
             threads.append(self._extract_thread)
         if self._duplicate_thread is not None:
             threads.append(self._duplicate_thread)
+        if self._find_thread is not None:
+            threads.append(self._find_thread)
 
         for thread in threads:
             if thread.isRunning():
