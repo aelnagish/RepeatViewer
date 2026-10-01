@@ -163,10 +163,15 @@ class RepeatMaskerParamsDialog(QDialog):
         self._uncurated = QCheckBox("Include uncurated FamDB (-uncurated)", self)
         self._uncurated.setChecked(s.value("uncurated", False, type=bool))
 
-        process_box, self._show_process_window = make_process_output_box(
-            self,
-            tool_name="RepeatMasker",
-            checked=s.value("show_process_window", False, type=bool),
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="RepeatMasker",
+                checked=s.value("show_process_window", False, type=bool),
+                close_when_finished=s.value(
+                    "close_process_window_when_finished", False, type=bool
+                ),
+            )
         )
 
         s.endGroup()

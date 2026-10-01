@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from repeatviewer.backends import map_reference as mr
-from repeatviewer.backends.sequence_features import SequenceFeature
+from repeatviewer.backends.sequence_features import SequenceFeature, sidecar_path
 from repeatviewer.job_options import (
     MAP_ENGINE_BOWTIE2,
     MAP_ENGINE_MAFFT,
@@ -307,9 +307,11 @@ def test_mafft_run_end_to_end(tmp_path):
         assert (details / data["details"][key]).is_file(), key
     mapped = (details / data["details"]["mapped"]).read_text()
     assert ">v2_reversed " in mapped
-    # the placed sequences carry the lifted annotations
-    assert (details / "variants.fa_map_mapped.RV.gff3").is_file()
-    assert "Motif_E" in (details / "variants.fa_map_consensus.RV.gff3").read_text()
+    # the placed sequences carry the lifted annotations (seqmap JSON sidecar)
+    mapped_sidecar = sidecar_path(details / data["details"]["mapped"])
+    assert mapped_sidecar.is_file()
+    consensus_sidecar = sidecar_path(details / data["details"]["consensus"])
+    assert "Motif_E" in consensus_sidecar.read_text(encoding="utf-8")
     assert report.is_file() and "Methods text" in report.read_text()
 
 

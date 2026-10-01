@@ -141,15 +141,114 @@ def fastga_available() -> bool:
     return fastga_executable() is not None
 
 
-def install_hint() -> str:
+_SUPPORTED_VERSION_HTML = (
+    "<b>Supported version: FastGA 1.5 or newer</b> "
+    "(bioconda / Homebrew currently ship 1.5.1). "
+    "FastGA 1.4 also works; soft-masking flags differ between 1.4 and 1.5+."
+)
+
+
+def fastga_configuration_message(*, rich: bool = True) -> str:
+    """How to install and point RepeatViewer at FastGA (platform-specific)."""
+    version = _SUPPORTED_VERSION_HTML if rich else (
+        "Supported version: FastGA 1.5 or newer "
+        "(bioconda / Homebrew currently ship 1.5.1). "
+        "FastGA 1.4 also works; soft-masking flags differ between 1.4 and 1.5+."
+    )
     if sys.platform == "win32":
+        if rich:
+            return (
+                "FastGA is not bundled with RepeatViewer and is not configured yet.<br><br>"
+                f"{version}<br><br>"
+                "<b>Windows requires WSL2</b> (FastGA does not run as a native Windows "
+                "binary).<br><br>"
+                "<b>1.</b> Install WSL2 if needed (PowerShell as Administrator):<br>"
+                "<code>wsl --install</code><br><br>"
+                "<b>2.</b> Inside your WSL Linux distro, install FastGA in a conda env:"
+                "<br><code>conda install -c bioconda fastga</code><br><br>"
+                "<b>3.</b> In RepeatViewer, bind that env:<br>"
+                "File → Setting → External tools (conda / WSL2) → enter the env name "
+                "(e.g. <code>tetrimmer</code>) or its Linux path "
+                "(e.g. <code>/home/you/miniconda3/envs/tetrimmer</code>), "
+                "then use Check to confirm FastGA resolves."
+            )
         return (
-            "Install FastGA in the WSL2 conda env, then bind it in RepeatViewer:\n"
-            "  conda install -c bioconda fastga\n\n"
-            "File → Setting → External tools (conda / WSL2) → env name or "
-            "Linux path (e.g. /home/qian/miniconda3/envs/TETrimmer)."
+            "FastGA is not bundled with RepeatViewer and is not configured yet.\n\n"
+            f"{version}\n\n"
+            "Windows requires WSL2 (FastGA does not run as a native Windows binary).\n\n"
+            "1. Install WSL2 if needed (PowerShell as Administrator):\n"
+            "   wsl --install\n\n"
+            "2. Inside your WSL Linux distro, install FastGA in a conda env:\n"
+            "   conda install -c bioconda fastga\n\n"
+            "3. In RepeatViewer, bind that env:\n"
+            "   File → Setting → External tools (conda / WSL2) → env name or "
+            "Linux path, then Check."
         )
-    return "Install FastGA with:  conda install -c bioconda fastga"
+    if sys.platform == "darwin":
+        if rich:
+            return (
+                "FastGA is not bundled with RepeatViewer and is not configured yet.<br><br>"
+                f"{version}<br><br>"
+                "<b>macOS — install one of:</b><br>"
+                "• Homebrew: <code>brew install fastga</code><br>"
+                "• Conda: <code>conda install -c bioconda fastga</code><br><br>"
+                "If you use a conda env that is not on PATH, point RepeatViewer at it:"
+                "<br>File → Setting → External tools (conda) → env name or path, "
+                "then Check to confirm FastGA resolves."
+            )
+        return (
+            "FastGA is not bundled with RepeatViewer and is not configured yet.\n\n"
+            f"{version}\n\n"
+            "macOS — install one of:\n"
+            "  brew install fastga\n"
+            "  conda install -c bioconda fastga\n\n"
+            "If the conda env is not on PATH: File → Setting → External tools "
+            "(conda) → env name or path, then Check."
+        )
+    # Linux and other Unix
+    if rich:
+        return (
+            "FastGA is not bundled with RepeatViewer and is not configured yet.<br><br>"
+            f"{version}<br><br>"
+            "<b>Linux — recommended install:</b><br>"
+            "<code>conda install -c bioconda fastga</code><br><br>"
+            "Or build from "
+            "<a href='https://github.com/thegenemyers/FASTGA'>github.com/thegenemyers/FASTGA</a> "
+            "and put <code>FastGA</code> on PATH.<br><br>"
+            "If you use a conda env that is not on PATH, point RepeatViewer at it:"
+            "<br>File → Setting → External tools (conda) → env name or path, "
+            "then Check to confirm FastGA resolves."
+        )
+    return (
+        "FastGA is not bundled with RepeatViewer and is not configured yet.\n\n"
+        f"{version}\n\n"
+        "Linux — recommended:\n"
+        "  conda install -c bioconda fastga\n\n"
+        "Or build from https://github.com/thegenemyers/FASTGA and put FastGA on PATH.\n\n"
+        "If the conda env is not on PATH: File → Setting → External tools "
+        "(conda) → env name or path, then Check."
+    )
+
+
+def install_hint() -> str:
+    """Plain-text install / bind instructions for the current platform."""
+    return fastga_configuration_message(rich=False)
+
+
+def show_fastga_not_configured_dialog(parent=None) -> None:
+    """Remind the user how to install FastGA when it is missing."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    box = QMessageBox(parent)
+    box.setWindowTitle("FastGA not configured")
+    box.setIcon(QMessageBox.Icon.Information)
+    box.setTextFormat(Qt.TextFormat.RichText)
+    box.setText(fastga_configuration_message(rich=True))
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    # Native macOS alerts ignore HTML bold / links.
+    box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+    box.exec()
 
 
 # --------------------------------------------------------------- soft masking
@@ -419,29 +518,93 @@ def reference_queries(files, reference: Path | None) -> list[Path]:
     return out
 
 
+def pairwise_comparisons(files) -> list[tuple[Path, Path]]:
+    """Unique unordered pairs among ``files`` (A vs B, A vs C, B vs C, …)."""
+    import itertools
+
+    paths = [Path(p) for p in files]
+    return list(itertools.combinations(paths, 2))
+
+
+def resolve_pairwise_comparisons(files, options) -> list[tuple[Path, Path]]:
+    """All pairs, or only those listed in ``options.selected_pairs``."""
+    pairs = pairwise_comparisons(files)
+    selected = getattr(options, "selected_pairs", None)
+    if not selected:
+        return pairs
+    wanted: set[tuple[str, str]] = set()
+    for a, b in selected:
+        wanted.add((str(Path(a)), str(Path(b))))
+        wanted.add((str(Path(b)), str(Path(a))))
+    return [(a, b) for a, b in pairs if (str(a), str(b)) in wanted]
+
+
+_FASTGA_FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".faa", ".fsa"}
+
+
+def is_fastga_fasta_path(path: Path) -> bool:
+    """True for uncompressed FASTA-like suffixes FastGA accepts as genomes."""
+    name = path.name.lower()
+    if name.endswith(".gz"):
+        name = name[:-3]
+    return Path(name).suffix in _FASTGA_FASTA_SUFFIXES
+
+
+def expand_fastga_input_paths(paths) -> list[Path]:
+    """Resolve Define-inputs entries: FASTA files and folders of FASTA files."""
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for raw in paths or []:
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            path = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        candidates: list[Path] = []
+        if path.is_file():
+            if is_fastga_fasta_path(path):
+                candidates.append(path)
+        elif path.is_dir():
+            try:
+                children = sorted(path.iterdir(), key=lambda p: p.name.lower())
+            except OSError:
+                children = []
+            for child in children:
+                if child.is_file() and is_fastga_fasta_path(child):
+                    candidates.append(child)
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            out.append(candidate)
+    return out
+
+
 def fastga_mode_summary(
     files,
     mode: str,
     reference: Path | None = None,
     *,
     combined: bool = False,
+    selected_pairs: list[tuple[str, str]] | None = None,
 ) -> str:
     """The grey line in the FastGA tab: what Run will do (pure)."""
     files = [Path(p) for p in files]
     n = len(files)
     if mode == FASTGA_MODE_REFERENCE:
         if reference is None:
-            return "Choose the reference: click it in the Files panel, or Browse."
+            return "Choose the reference genome: click it in Files, or Browse."
         queries = reference_queries(files, reference)
         if not queries:
             if n:
                 return (
-                    f"Only the reference is selected. Select the files to "
-                    f"compare with {reference.name} before opening this window."
+                    f"Only the reference genome is selected. Select the query "
+                    f"genomes to compare with {reference.name}."
                 )
             return (
-                f"No files selected: select the FASTA files to compare with "
-                f"{reference.name} in the Files panel."
+                f"No query genomes selected: select FASTA files to compare with "
+                f"{reference.name}."
             )
         runs = len(queries)
         where = (
@@ -450,21 +613,31 @@ def fastga_mode_summary(
             else "one result file per query"
         )
         return (
-            f"{runs} FASTA selected → {runs} run{'s' if runs != 1 else ''} "
-            f"against {reference.name} ({where})."
+            f"{runs} query genome{'s' if runs != 1 else ''} → {runs} run"
+            f"{'s' if runs != 1 else ''} against {reference.name} ({where})."
         )
     if mode == FASTGA_MODE_PAIRS:
         if n < 2:
-            return "Against each other needs two or more selected FASTA files."
-        pairs = n * (n - 1) // 2
+            return "Pairwise comparison needs two or more selected genomes."
+        from types import SimpleNamespace
+
+        pairs = resolve_pairwise_comparisons(
+            files, SimpleNamespace(selected_pairs=selected_pairs)
+        )
+        total = n * (n - 1) // 2
+        if not pairs:
+            return f"{n} genomes selected → no comparisons checked."
         return (
-            f"{n} FASTA selected → {pairs} pair{'s' if pairs != 1 else ''}, "
-            "written into one file."
+            f"{n} genomes selected → {len(pairs)} comparison"
+            f"{'s' if len(pairs) != 1 else ''}"
+            + (f" (of {total} possible)" if len(pairs) != total else "")
+            + ", written into one file."
         )
     if n == 0:
-        return "Select one or more FASTA files: each is compared against itself."
+        return "Select one or more genomes: each is compared against itself."
     return (
-        f"{n} FASTA selected → {n} self-comparison{'s' if n != 1 else ''}."
+        f"{n} genome{'s' if n != 1 else ''} selected → "
+        f"{n} self-comparison{'s' if n != 1 else ''}."
     )
 
 
@@ -947,7 +1120,7 @@ def fastga_step_count(files, options) -> int:
     mode = getattr(options, "mode", FASTGA_MODE_SELF)
     files = list(files)
     if mode == FASTGA_MODE_PAIRS and len(files) >= 2:
-        return len(files) * (len(files) - 1) // 2
+        return max(1, len(resolve_pairwise_comparisons(files, options)))
     if mode == FASTGA_MODE_REFERENCE:
         ref = Path(options.reference_fasta) if options.reference_fasta else None
         return 1 + len(reference_queries(files, ref))
@@ -1041,8 +1214,10 @@ def run_fastga_batch(
 
     if mode == FASTGA_MODE_PAIRS:
         if len(files) < 2:
-            raise FastgaError("Against each other needs two or more FASTA files.")
-        pairs = list(itertools.combinations(files, 2))
+            raise FastgaError("Pairwise comparison needs two or more genomes.")
+        pairs = resolve_pairwise_comparisons(files, options)
+        if not pairs:
+            raise FastgaError("No pairwise comparisons are checked.")
         first = files[0]
         combine_fmt = FORMAT_PAF if fmt == FORMAT_ALN else fmt
         out_path = first.parent / (

@@ -4,10 +4,17 @@ import random
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
+from collections.abc import Callable
+from pathlib import Path
 
-from repeatviewer.backends.job_cancel import JobCancelledError, run_subprocess_with_cancel
+from repeatviewer.backends.job_cancel import (
+    JobCancelledError,
+    check_cancelled,
+    run_subprocess_with_cancel,
+)
 from repeatviewer.external_process import run_logged_process
 import pandas as pd
 from Bio import SeqIO
@@ -283,6 +290,7 @@ def blast(
     use_system_blast=False,
     output_label=None,
     cancel=None,
+    progress: Callable[[int, int, str], None] | None = None,
 ):
     from repeatviewer.job_options import normalize_blast_evalue
 
@@ -341,55 +349,97 @@ def blast(
         except OSError as exc:
             raise RuntimeError(f"Cannot read BLAST binary {blast_executable}: {exc}") from exc
 
-    # -outfmt 6 use "\t" as deliminator. -outfmt 10 use "," as deliminator
-    blast_cmd = [
-        str(blast_executable),
-        "-query", query_path,
-        "-db", blast_database,
-        "-max_target_seqs", str(10000),
-        "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send sstrand evalue bitscore",
-        "-evalue", str(e_value),
-        "-out", blast_out_file,
-        "-num_threads", str(num_threads)
-    ]
+    def _build_blast_cmd(query: str, out_path: str) -> list[str]:
+        # -outfmt 6 use "\t" as deliminator. -outfmt 10 use "," as deliminator
+        cmd = [
+            str(blast_executable),
+            "-query", query,
+            "-db", blast_database,
+            "-max_target_seqs", str(10000),
+            "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send sstrand evalue bitscore",
+            "-evalue", str(e_value),
+            "-out", out_path,
+            "-num_threads", str(num_threads),
+        ]
+        if self_blast:
+            cmd.extend([
+                "-word_size", str(max(4, min(25, int(word_size)))),
+                "-gapopen", "5",
+                "-gapextend", "2",
+                "-reward", "2",
+                "-penalty", "-3",
+            ])
+        elif program == "blastn":
+            cmd.extend([
+                "-word_size", str(max(4, int(word_size))),
+                "-gapopen", str(max(0, int(gap_open))),
+                "-gapextend", str(max(0, int(gap_extend))),
+                "-penalty", str(min(0, int(penalty))),
+                "-perc_identity", str(max(0.0, min(100.0, float(percent_identity)))),
+                "-qcov_hsp_perc", str(max(0.0, min(100.0, float(query_coverage_hsp)))),
+            ])
+        else:
+            cmd.extend([
+                "-word_size", str(max(2, int(word_size))),
+                "-gapopen", str(max(0, int(gap_open))),
+                "-gapextend", str(max(0, int(gap_extend))),
+                "-qcov_hsp_perc", str(max(0.0, min(100.0, float(query_coverage_hsp)))),
+            ])
+        return cmd
 
-    if self_blast:
-        # Add more parameters for self-blast
-        blast_cmd.extend([
-            "-word_size", str(max(4, min(25, int(word_size)))),
-            "-gapopen", "5",
-            "-gapextend", "2",
-            "-reward", "2",
-            "-penalty", "-3"
-        ])
-    elif program == "blastn":
-        blast_cmd.extend([
-            "-word_size", str(max(4, int(word_size))),
-            "-gapopen", str(max(0, int(gap_open))),
-            "-gapextend", str(max(0, int(gap_extend))),
-            "-penalty", str(min(0, int(penalty))),
-            "-perc_identity", str(max(0.0, min(100.0, float(percent_identity)))),
-            "-qcov_hsp_perc", str(max(0.0, min(100.0, float(query_coverage_hsp)))),
-        ])
-    else:
-        blast_cmd.extend([
-            "-word_size", str(max(2, int(word_size))),
-            "-gapopen", str(max(0, int(gap_open))),
-            "-gapextend", str(max(0, int(gap_extend))),
-            "-qcov_hsp_perc", str(max(0.0, min(100.0, float(query_coverage_hsp)))),
-        ])
+    def _emit_progress(completed: int, total: int, detail: str) -> None:
+        if progress is not None:
+            progress(completed, total, detail)
 
-    try:
-        # Run the BLAST command
+    def _run_blast_query(query: str, out_path: str) -> None:
         run_logged_process(
-            blast_cmd,
+            _build_blast_cmd(query, out_path),
             tool=program,
             inputs=[input_file, blast_database],
             cwd=blast_run_out_dir,
             check=True,
-            output_path=blast_out_file,
+            output_path=out_path,
             cancel=cancel,
         )
+
+    try:
+        records = list(SeqIO.parse(query_path, "fasta"))
+        total_seq = max(1, len(records))
+        if len(records) <= 1:
+            _emit_progress(0, total_seq, f"{base_name}")
+            _run_blast_query(query_path, blast_out_file)
+            _emit_progress(1, total_seq, f"{base_name}")
+        else:
+            # One BLAST run per sequence so the progress bar can advance by seq.
+            with tempfile.TemporaryDirectory(prefix="repeatviewer_blast_") as tmp:
+                tmp_dir = Path(tmp)
+                partials: list[str] = []
+                for index, record in enumerate(records):
+                    check_cancelled(cancel)
+                    rid = str(record.id or f"seq_{index + 1}")
+                    _emit_progress(
+                        index,
+                        total_seq,
+                        f"{base_name}: sequence {index + 1}/{total_seq} ({rid})",
+                    )
+                    temp_fa = tmp_dir / f"query_{index}.fa"
+                    SeqIO.write(record, str(temp_fa), "fasta")
+                    partial = tmp_dir / f"hits_{index}.b"
+                    _run_blast_query(str(temp_fa), str(partial))
+                    if partial.is_file() and partial.stat().st_size > 0:
+                        partials.append(str(partial))
+                    _emit_progress(
+                        index + 1,
+                        total_seq,
+                        f"{base_name}: sequence {index + 1}/{total_seq} ({rid})",
+                    )
+                with open(blast_out_file, "wb") as merged:
+                    for partial_path in partials:
+                        with open(partial_path, "rb") as handle:
+                            shutil.copyfileobj(handle, merged)
+                if not partials:
+                    # Keep an empty file so downstream empty-hit handling is unchanged.
+                    open(blast_out_file, "wb").close()
 
     except FileNotFoundError:
         logging.error(

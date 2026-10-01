@@ -45,4 +45,4 @@ where = ["."]
 include = ["repeatviewer*"]
 
 [tool.setuptools.package-data]
-repeatviewer = ["backends/blast/*", "backends/mafft/**/*", "backends/muscle/**/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*"]
+repeatviewer = ["backends/blast/*", "backends/mafft/**/*", "backends/muscle/**/*", "backends/iqtree/**/*", "backends/minimap2/**/*", "backends/aliview/*", "assets/icons/*", "assets/icons/**/*"]

@@ -756,6 +756,8 @@ def run_workflow(
                 "adjust_direction": options.adjust_direction,
                 "muscle_mode": options.muscle_mode,
                 "muscle_num_threads": options.muscle_num_threads,
+                "muscle_perm": options.muscle_perm,
+                "muscle_perturb": options.muscle_perturb,
             }
             for seq_index, path in enumerate(inputs):
                 check_cancelled(cancel)

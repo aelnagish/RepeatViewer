@@ -9,6 +9,7 @@ import pytest
 from repeatviewer.backends.sequence_aligner import (
     _fasta_sequence_count,
     _mafft_arguments,
+    _muscle_arguments,
     bundled_mafft_command,
     bundled_muscle_command,
     run_alignment,
@@ -129,4 +130,38 @@ def test_custom_mafft_arguments_include_advanced_options() -> None:
         "--ep", "0.2",
         "--reorder",
         "--adjustdirectionaccurately",
+    ]
+
+
+def test_muscle_arguments_defaults_omit_perm_and_perturb() -> None:
+    args = _muscle_arguments(
+        mode="align",
+        num_threads=4,
+        perm="none",
+        perturb=0,
+        input_fasta="in.fa",
+        output_file="out.fa",
+    )
+    assert args == [
+        "-align", "in.fa",
+        "-output", "out.fa",
+        "-threads", "4",
+    ]
+
+
+def test_muscle_arguments_include_perm_and_perturb() -> None:
+    args = _muscle_arguments(
+        mode="super5",
+        num_threads=2,
+        perm="abc",
+        perturb=3,
+        input_fasta="in.fa",
+        output_file="out.fa",
+    )
+    assert args == [
+        "-super5", "in.fa",
+        "-output", "out.fa",
+        "-threads", "2",
+        "-perm", "abc",
+        "-perturb", "3",
     ]

@@ -195,7 +195,8 @@ appeared.
 ### Step 5 — Build and clean an alignment
 
 Click **Align** to align the BLAST hits into a multiple sequence alignment
-(`<yourfile>_msa.fa`, keeping the original extension — e.g. `hits.fa_msa.fa`).
+(`hits.fa_mafft.fa` or `hits.fa_muscle.fa`; `_1`, `_2`, … before `.fa` if that
+name already exists).
 
 Real alignments of genomic copies contain rows that should not be there —
 fragments, unrelated insertions, mostly-gap sequences. Click **MSA Clean** to
@@ -471,17 +472,33 @@ MAFFT parameters:
 
 | Parameter | Meaning |
 |-----------|---------|
-| MAFFT strategy | Algorithm preset |
-| Sequence type | Nucleotide or protein |
-| `--retree` | Guide-tree rebuilds |
-| `--maxiterate` | Refinement cycles |
-| `--op` | Gap-opening penalty |
-| `--ep` | Offset value |
-| Threads | Parallelism |
+| Mode | Combine all selected sequences into one MSA, or align each file separately |
+| Inputs | Use selected Files-panel FASTA, or Define inputs (files/folders) |
+| Strategy | Algorithm preset (FFT-NS-1/2, L/G/E-INS-i, Auto, Custom) |
+| Sequence type | Auto-detect, nucleotide, or protein |
+| Threads | Parallelism (`--thread`) |
+| `--retree` / `--maxiterate` | Advanced: guide-tree rebuilds and refinement cycles (Custom) |
+| `--op` / `--ep` | Advanced: gap-opening penalty and offset |
+| `--reorder` / `--adjustdirectionaccurately` | Advanced: output order and strand correction |
 
-MUSCLE exposes its algorithm choice.
+Strategy meanings follow the [MAFFT algorithms](https://mafft.cbrc.jp/alignment/software/algorithms/algorithms.html) page: progressive FFT-NS methods are faster; L/G/E-INS-i are iterative and more accurate.
 
-**Output:** `<name>_msa.fa`
+MUSCLE parameters:
+
+| Parameter | Meaning |
+|-----------|---------|
+| Mode | Combine all selected sequences into one MSA, or align each file separately |
+| Inputs | Use selected Files-panel FASTA, or Define inputs (files/folders) |
+| Algorithm | `-align` (high accuracy) or `-super5` (large sets) |
+| Threads | Parallelism (`-threads`) |
+| Guide tree permutation | Advanced: `-perm` (`none`, `abc`, `acb`, `bca`) |
+| Perturbation seed | Advanced: `-perturb` (`0` = off) |
+
+Ensemble options (`-stratified`, `-diversified`, `-resample`, …) are not
+exposed here because Align writes a single MSA for the viewer.
+
+**Output:** `<name>_mafft.fa` or `<name>_muscle.fa` (then
+`<name>_mafft_1.fa` / `<name>_muscle_1.fa`, … if that name already exists).
 
 ### MSA Clean
 
@@ -825,12 +842,16 @@ Three mappers; **Auto** picks one from the input:
 - **minimap2** — long reads (ONT, HiFi) or assembled contigs against a genome.
 - **Bowtie2** — many short reads (Illumina).
 
-minimap2 and Bowtie2 are not bundled. Install them into the conda environment
-set in **File → Setting → External tools**:
+minimap2 **2.31** is bundled with RepeatViewer (Windows / Linux x86_64 / macOS).
+Bowtie2 is not bundled — install it into the conda environment set in
+**File → Setting → External tools**, or put it on your PATH:
 
 ```bash
-conda install -c conda-forge -c bioconda minimap2 bowtie2
+conda install -c conda-forge -c bioconda bowtie2
 ```
+
+To use your own minimap2 instead of the bundled copy, tick
+**Use programs from the system PATH** in Map to Reference → Options.
 
 A mapper you chose that is missing stops the run with this hint. If Auto's
 choice is missing, the other read mapper is used and the report says so.
@@ -1139,14 +1160,14 @@ everyday use.
 
 All outputs are written beside their input file unless noted.
 `<name>` is the **full input filename including its extension** (same pattern
-as BLAST), e.g. `reads.fa` → `reads.fa_msa.fa`, `reads.fa_flexidot.html`.
+as BLAST), e.g. `reads.fa` → `reads.fa_mafft.fa`, `reads.fa_flexidot.html`.
 
 | Pattern | Produced by | Contents |
 |---------|-------------|----------|
 | `<name>_b.txt` | BLAST | Tabular hit table |
 | `<name>_b.txt.fa` | BLAST | Hit sequences extracted from the genome |
 | `<name>_b.gff` | BLAST | Hit positions (optional) |
-| `<name>_msa.fa` | Align | Multiple sequence alignment |
+| `<name>_mafft.fa` / `<name>_muscle.fa` | Align | Multiple sequence alignment (`_1`, `_2`, … on conflict) |
 | `<name>_gap.fa` | MSA Clean | Gappy columns removed |
 | `<name>_rowdiv.fa` | MSA Clean | Divergent rows removed |
 | `<name>_rowgap.fa` | MSA Clean | Gappy rows removed |
@@ -1183,10 +1204,12 @@ as BLAST), e.g. `reads.fa` → `reads.fa_msa.fa`, `reads.fa_flexidot.html`.
 **A tool says the genome is not set.** **File → Define genome**. BLAST, MSA
 Extend, genome maps and genome-aware TE-Aid all need it.
 
-**RepeatMasker or FastGA is not found.** They are not bundled. Install them
-and either put them on `PATH` or point **File → Setting → External tools** at
-the conda environment holding them, then use the check button to confirm. On
-Windows they must live in a WSL2 environment.
+**RepeatMasker or FastGA is not found.** They are not bundled. Clicking the
+FastGA tab shows platform-specific setup steps. Install **FastGA 1.5 or newer**
+(bioconda / Homebrew) and either put it on `PATH` or point
+**File → Setting → External tools** at the conda environment holding it, then
+use the check button to confirm. On Windows FastGA must live in a WSL2
+environment.
 
 **BLAST or another tool is very slow.** Check the word size — small values are
 far more sensitive and dramatically slower on repetitive genomes. For Repeat

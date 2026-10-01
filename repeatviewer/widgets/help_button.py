@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMessageBox,
@@ -39,6 +40,25 @@ def help_tooltip_text(help_text: str) -> str:
     return help_text
 
 
+def show_help_message(parent: QWidget | None, title: str, help_text: str) -> None:
+    """Show help with HTML bold labels; native macOS alerts ignore that markup."""
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setIcon(QMessageBox.Icon.Information)
+    box.setTextFormat(Qt.TextFormat.RichText)
+    # Keep body at normal weight so only explicit <b>…</b> labels stand out.
+    body = (
+        f"<div style='font-weight:400'>{help_text}</div>"
+        if _HTML_TAG.search(help_text)
+        else help_text
+    )
+    box.setText(body)
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    # Native alerts strip/ignore HTML and often render the whole body bold.
+    box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+    box.exec()
+
+
 def make_help_button(parent: QWidget | None, title: str, help_text: str) -> QToolButton:
     """Round "?" button: hover shows ``help_text``, click opens it titled ``title``."""
     button = QToolButton(parent)
@@ -49,9 +69,7 @@ def make_help_button(parent: QWidget | None, title: str, help_text: str) -> QToo
     button.setStyleSheet(HELP_BUTTON_STYLE)
     button.setAccessibleName(f"Help: {title}")
     button.clicked.connect(
-        lambda checked=False: QMessageBox.information(
-            button.window(), title, help_text
-        )
+        lambda checked=False: show_help_message(button.window(), title, help_text)
     )
     return button
 

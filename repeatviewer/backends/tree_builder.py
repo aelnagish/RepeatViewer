@@ -104,28 +104,82 @@ class TreeBuildError(RuntimeError):
 # --------------------------------------------------------------------------
 
 
+def engine_uses_system_path(opts: TreeOptions, engine: str | None = None) -> bool:
+    """True when ``engine`` (default: the selected one) must come from PATH only.
+
+    The old single ``use_system_path`` switch still counts for every engine."""
+    engine = engine or opts.engine
+    per_engine = {
+        TREE_ENGINE_IQTREE: opts.use_system_iqtree,
+        TREE_ENGINE_FASTME: opts.use_system_fastme,
+        TREE_ENGINE_FASTTREE: opts.use_system_fasttree,
+    }.get(engine, False)
+    return bool(opts.use_system_path or per_engine)
+
+
 def engine_executable(engine: str, *, system_path_only: bool = False) -> str | None:
-    """Executable for ``engine``: the conda env from Settings first, then PATH.
+    """Executable for ``engine``.
 
-    ``system_path_only`` skips the configured conda env (Options tab)."""
+    ``system_path_only`` (the "Use from system PATH" box): PATH only. Otherwise the
+    bundled program (IQ-TREE), then the conda env from Settings, then PATH."""
     names = _ENGINE_EXECUTABLES.get(engine, ())
-    for name in names:
-        if system_path_only:
+    if system_path_only:
+        for name in names:
             found = shutil.which(name)
-        else:
-            from repeatviewer.conda_tools import which_tool
+            if found:
+                return found
+        return None
+    from repeatviewer.backends.tree_portable_tools import bundled_engine_executable
+    from repeatviewer.conda_tools import which_tool
 
-            found = which_tool(name)
+    bundled = bundled_engine_executable(engine)
+    if bundled:
+        return bundled
+    for name in names:
+        found = which_tool(name) or shutil.which(name)
         if found:
             return found
     return None
 
 
+def engine_status_executable(engine: str, *, system_path_only: bool = False) -> str | None:
+    """Fast Options-tab lookup: bundled file or PATH — no conda probe."""
+    names = _ENGINE_EXECUTABLES.get(engine, ())
+    if system_path_only:
+        for name in names:
+            found = shutil.which(name)
+            if found:
+                return found
+        return None
+    from repeatviewer.backends.tree_portable_tools import bundled_engine_executable
+
+    return bundled_engine_executable(engine)
+
+
 def engine_install_hint(engine: str) -> str:
+    from repeatviewer.backends.tree_portable_tools import (
+        ENGINE_IQTREE,
+        IQTREE_VERSION,
+        bundled_engine_executable,
+    )
+
+    if engine == ENGINE_IQTREE:
+        if bundled_engine_executable(engine):
+            return (
+                f"IQ-TREE {IQTREE_VERSION} is bundled with RepeatViewer. "
+                "Leave \"Use IQ-TREE from the system PATH\" off to use it, "
+                "or tick that box to use your own install."
+            )
+        return (
+            f"IQ-TREE {IQTREE_VERSION} should be bundled with RepeatViewer but was not found. "
+            "Reinstall the app, or tick \"Use IQ-TREE from the system PATH\" and install "
+            "iqtree yourself (e.g. conda install -c bioconda iqtree)."
+        )
     pkg = _CONDA_PACKAGE.get(engine, engine)
     return (
         f"Install it into the conda env set in File → Setting → External tools:\n"
-        f"  conda install -c bioconda {pkg}"
+        f"  conda install -c bioconda {pkg}\n"
+        f"or put it on your system PATH and tick \"Use … from the system PATH\"."
     )
 
 
@@ -1019,7 +1073,7 @@ def build_tree_run(
         raise TreeBuildError("Select one or more FASTA files first.")
 
     # --- engine present? (fail early, never downgrade) ---------------------
-    exe = engine_executable(opts.engine, system_path_only=opts.use_system_path)
+    exe = engine_executable(opts.engine, system_path_only=engine_uses_system_path(opts))
     if not exe:
         raise TreeBuildError(
             f"{ENGINE_LABELS.get(opts.engine, opts.engine)} is selected, but the program "
@@ -1374,7 +1428,7 @@ def _write_rt_traits(tree_path: Path, rt, records: list[SeqRecordLite]) -> Path:
 
 def _run_in_dir(layout, created, inputs, records, n_input, excluded, dna, outgroup,
                 warnings, opts, stamp, say, cancel, rt=None):
-    exe = engine_executable(opts.engine, system_path_only=opts.use_system_path)
+    exe = engine_executable(opts.engine, system_path_only=engine_uses_system_path(opts))
     out = layout.path
     work = layout.details / ".work"
     work.mkdir()

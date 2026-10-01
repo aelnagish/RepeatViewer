@@ -137,19 +137,42 @@ def _fasta_sequence_count(path: Path) -> int:
     return count
 
 
-def combined_alignment_output_stem(seq_files: list[Path]) -> str:
-    """Basename for combined MSA: ``{first.name}_msa_multi`` (same pattern as Flexidot multi)."""
+def alignment_output_stem(
+    input_fasta: Path | str,
+    *,
+    engine: str = ALIGNER_MAFFT,
+) -> str:
+    """Basename stem for Align outputs: ``{input.name}_mafft`` or ``_muscle``."""
     from repeatviewer.tool_output_paths import kept_input_name
 
-    return f"{kept_input_name(seq_files[0].expanduser().resolve())}_msa_multi"
+    tool = "muscle" if engine == ALIGNER_MUSCLE else "mafft"
+    if engine not in (ALIGNER_MAFFT, ALIGNER_MUSCLE):
+        raise ValueError(f"Unknown alignment engine: {engine}")
+    return f"{kept_input_name(input_fasta)}_{tool}"
 
 
-def _next_available_fasta(parent: Path, stem_base: str) -> Path:
-    """``{stem}.fa``, then ``{stem}_2.fa``, ``{stem}_3.fa``, … (same index rule as Flexidot PNGs)."""
+def combined_alignment_output_stem(
+    seq_files: list[Path],
+    *,
+    engine: str = ALIGNER_MAFFT,
+) -> str:
+    """Basename stem for combined MSA: ``{first.name}_mafft`` / ``_muscle``."""
+    if not seq_files:
+        raise ValueError("No FASTA files to align.")
+    return alignment_output_stem(seq_files[0], engine=engine)
+
+
+def _next_available_fasta(
+    parent: Path,
+    stem_base: str,
+    *,
+    first_conflict_index: int = 1,
+) -> Path:
+    """``{stem}.fa``, then ``{stem}_1.fa``, ``{stem}_2.fa``, … on conflict."""
     candidate = parent / f"{stem_base}.fa"
     if not candidate.exists():
         return candidate
-    index = 2
+    index = max(1, int(first_conflict_index))
     while True:
         candidate = parent / f"{stem_base}_{index}.fa"
         if not candidate.exists():
@@ -174,16 +197,16 @@ def run_alignment(
     adjust_direction: bool = False,
     muscle_mode: str = "align",
     muscle_num_threads: int = 5,
+    muscle_perm: str = "none",
+    muscle_perturb: int = 0,
     cancel=None,
 ) -> Path:
     """
-    Align a FASTA/MSA file. Writes ``<name>_msa.fa`` next to the input
-    (keeps the original extension, e.g. ``reads.fa_msa.fa``).
+    Align a FASTA/MSA file. Writes ``<name>_mafft.fa`` or ``<name>_muscle.fa``
+    next to the input (``_1``, ``_2``, … before ``.fa`` if the name exists).
 
     ``engine`` selects MAFFT or MUSCLE 5.
     """
-    from repeatviewer.tool_output_paths import kept_input_name
-
     input_fasta = input_fasta.expanduser().resolve()
     if input_fasta.suffix.lower() not in {".fa", ".fasta", ".fas", ".faa"}:
         raise ValueError("Align only works on .fa / .fasta files.")
@@ -193,7 +216,9 @@ def run_alignment(
             "Alignment needs at least two sequences."
         )
 
-    output_file = input_fasta.parent / f"{kept_input_name(input_fasta)}_msa.fa"
+    output_file = _next_available_fasta(
+        input_fasta.parent, alignment_output_stem(input_fasta, engine=engine)
+    )
     if engine == ALIGNER_MUSCLE:
         resolved = muscle_command(use_system_muscle=use_system_muscle)
         system_selected = use_system_muscle
@@ -219,6 +244,8 @@ def run_alignment(
             env=resolved[1],
             mode=muscle_mode,
             num_threads=muscle_num_threads,
+            perm=muscle_perm,
+            perturb=muscle_perturb,
             cancel=cancel,
         )
     else:
@@ -323,18 +350,22 @@ def _run_muscle(
     env: dict[str, str],
     mode: str,
     num_threads: int,
+    perm: str = "none",
+    perturb: int = 0,
     cancel=None,
 ) -> None:
     if mode not in {"align", "super5"}:
         raise ValueError(f"Unknown MUSCLE mode: {mode}")
     cmd = [
         *command,
-        f"-{mode}",
-        str(input_fasta),
-        "-output",
-        str(output_file),
-        "-threads",
-        str(max(1, num_threads)),
+        *_muscle_arguments(
+            mode=mode,
+            num_threads=num_threads,
+            perm=perm,
+            perturb=perturb,
+            input_fasta=input_fasta,
+            output_file=output_file,
+        ),
     ]
     try:
         result = run_logged_process(
@@ -352,6 +383,37 @@ def _run_muscle(
     if not output_file.is_file() or not output_file.stat().st_size:
         raise RuntimeError("MUSCLE completed without producing an alignment.")
     logger.info("MUSCLE alignment finished: %s", output_file.name)
+
+
+def _muscle_arguments(
+    *,
+    mode: str,
+    num_threads: int,
+    perm: str,
+    perturb: int,
+    input_fasta: Path | str,
+    output_file: Path | str,
+) -> list[str]:
+    """Translate persisted MUSCLE options into MUSCLE 5 CLI arguments."""
+    if mode not in {"align", "super5"}:
+        raise ValueError(f"Unknown MUSCLE mode: {mode}")
+    args = [
+        f"-{mode}",
+        str(input_fasta),
+        "-output",
+        str(output_file),
+        "-threads",
+        str(max(1, num_threads)),
+    ]
+    perm_value = str(perm or "none").lower()
+    if perm_value not in {"none", "abc", "acb", "bca"}:
+        perm_value = "none"
+    if perm_value != "none":
+        args.extend(["-perm", perm_value])
+    perturb_value = max(0, int(perturb))
+    if perturb_value > 0:
+        args.extend(["-perturb", str(perturb_value)])
+    return args
 
 
 def _mafft_arguments(
@@ -426,6 +488,8 @@ def run_alignment_combined(
     adjust_direction: bool = False,
     muscle_mode: str = "align",
     muscle_num_threads: int = 5,
+    muscle_perm: str = "none",
+    muscle_perturb: int = 0,
     cancel=None,
 ) -> Path:
     """Merge selected FASTA files into one input, then align once."""
@@ -452,7 +516,7 @@ def run_alignment_combined(
         raise ValueError("Selected FASTA files contain no sequences.")
     if len(records) < 2:
         raise ValueError("Combined alignment needs at least two sequences.")
-    output_stem = combined_alignment_output_stem(resolved)
+    output_stem = combined_alignment_output_stem(resolved, engine=engine)
     desired = _next_available_fasta(parent, output_stem)
     combined = parent / f".repeatviewer_{desired.stem}_input.fa"
     SeqIO.write(records, str(combined), "fasta")
@@ -473,6 +537,8 @@ def run_alignment_combined(
             adjust_direction=adjust_direction,
             muscle_mode=muscle_mode,
             muscle_num_threads=muscle_num_threads,
+            muscle_perm=muscle_perm,
+            muscle_perturb=muscle_perturb,
             cancel=cancel,
         )
         if aligned.resolve() != desired.resolve() and aligned.is_file():

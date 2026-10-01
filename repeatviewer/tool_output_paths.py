@@ -9,7 +9,7 @@ from pathlib import Path
 def kept_input_name(path: Path | str) -> str:
     """Basename kept in derived tool outputs (same convention as BLAST).
 
-    Example: ``reads.fa`` → ``reads.fa_msa.fa``, ``reads.fa_flexidot.png``.
+    Example: ``reads.fa`` → ``reads.fa_mafft.fa``, ``reads.fa_flexidot.png``.
     Always use the full filename (including extension), never ``Path.stem``.
     """
     return Path(path).name

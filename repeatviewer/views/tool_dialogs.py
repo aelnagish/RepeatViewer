@@ -11,6 +11,7 @@ from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QSize, Qt, QTime
 from PySide6.QtGui import QColor, QMouseEvent, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractScrollArea,
     QCheckBox,
     QColorDialog,
     QCompleter,
@@ -82,18 +83,28 @@ def make_process_output_box(
     *,
     tool_name: str,
     checked: bool = False,
-) -> tuple[QGroupBox, QCheckBox]:
-    """FastGA-style Options-tab group for the live process monitor window."""
+    close_when_finished: bool = False,
+) -> tuple[QGroupBox, QCheckBox, QCheckBox]:
+    """Options-tab group for the live process monitor window."""
     checkbox = QCheckBox(f"Show process window while {tool_name} runs", parent)
     checkbox.setChecked(bool(checked))
     checkbox.setToolTip(
         f"Open a window that first shows the {tool_name} command line, then "
         "streams progress and tool messages. Useful for long runs."
     )
+    close_box = QCheckBox("Close process window when finished", parent)
+    close_box.setChecked(bool(close_when_finished))
+    close_box.setEnabled(checkbox.isChecked())
+    close_box.setToolTip(
+        "Automatically close the process window after a successful run. "
+        "On failure the window stays open so you can read the log."
+    )
+    checkbox.toggled.connect(close_box.setEnabled)
     box = QGroupBox("Process output", parent)
     layout = QVBoxLayout(box)
     layout.addWidget(checkbox)
-    return box, checkbox
+    layout.addWidget(close_box)
+    return box, checkbox, close_box
 
 
 def make_cancel_save_run_bar(
@@ -207,10 +218,20 @@ from repeatviewer.job_options import (
     EXTEND_RIGHT_CLICK_RUN,
     EXTEND_RIGHT_CLICK_DIALOG,
     FASTGA_RIGHT_CLICK_RUN,
-    FASTGA_RIGHT_CLICK_DIALOG,
     FASTGA_MODE_SELF,
     FASTGA_MODE_PAIRS,
     FASTGA_MODE_REFERENCE,
+    FASTGA_INPUT_SELECTED,
+    FASTGA_INPUT_DEFINE,
+    ALIGN_INPUT_SELECTED,
+    ALIGN_INPUT_DEFINE,
+    FASTGA_FORMAT_PAF,
+    FASTGA_FORMAT_PAFX,
+    FASTGA_FORMAT_PAFM,
+    FASTGA_FORMAT_PAFS,
+    FASTGA_FORMAT_PAFS_LONG,
+    FASTGA_FORMAT_PSL,
+    FASTGA_FORMAT_ALN,
     ALIGNER_FASTGA,
     DEFAULT_FLEXIDOT_LCS_SHADING,
     DEFAULT_FLEXIDOT_OUTPUT_FORMAT,
@@ -275,6 +296,10 @@ from repeatviewer.job_options import (
     MAFFT_STRATEGY_LINSI,
     MUSCLE_MODE_ALIGN,
     MUSCLE_MODE_SUPER5,
+    MUSCLE_PERM_ABC,
+    MUSCLE_PERM_ACB,
+    MUSCLE_PERM_BCA,
+    MUSCLE_PERM_NONE,
     ExtendOptions,
     FlexidotOptions,
     MAX_FLEXIDOT_WORDSIZE,
@@ -1054,16 +1079,6 @@ class WrapperManageDialog(QDialog):
 PluginManageDialog = WrapperManageDialog
 
 
-def fastga_executable_text() -> str:
-    """Options tab line: where FastGA was found (it always comes from PATH/conda)."""
-    from repeatviewer.backends.fastga_dotplot import fastga_executable, install_hint
-
-    exe = fastga_executable()
-    if exe:
-        return f"FastGA: {exe}  ✓ found"
-    return "FastGA: not found. " + install_hint().splitlines()[0]
-
-
 class AlignParamsDialog(QDialog):
     def __init__(
         self,
@@ -1073,6 +1088,7 @@ class AlignParamsDialog(QDialog):
         use_system_muscle: bool = False,
         fastga_initial=None,
         fastga_files: list[Path] | None = None,
+        fastga_default_reference: Path | None = None,
         initial_tab: str | None = None,
         title: str = "Alignment parameters",
         for_run: bool = True,
@@ -1087,14 +1103,17 @@ class AlignParamsDialog(QDialog):
         self._initial_align = opts
         fastga_opts = fastga_initial or FastGaOptions()
         self._fastga_panel = FastGaPanel(
-            initial=fastga_opts, files=fastga_files, parent=self
+            initial=fastga_opts,
+            files=fastga_files,
+            default_reference=fastga_default_reference,
+            parent=self,
         )
 
         self._strategy = QComboBox(self)
         for label, value in (
             ("Auto (MAFFT chooses)", MAFFT_STRATEGY_AUTO),
-            ("FFT-NS-1 (very fast)", MAFFT_STRATEGY_FFT_NS_1),
-            ("FFT-NS-2 (fast)", MAFFT_STRATEGY_FFT_NS_2),
+            ("FFT-NS-1 (very fast progressive)", MAFFT_STRATEGY_FFT_NS_1),
+            ("FFT-NS-2 (fast progressive)", MAFFT_STRATEGY_FFT_NS_2),
             ("L-INS-i (local homology)", MAFFT_STRATEGY_LINSI),
             ("G-INS-i (global homology)", MAFFT_STRATEGY_GINSI),
             ("E-INS-i (large internal gaps)", MAFFT_STRATEGY_EINSI),
@@ -1116,17 +1135,13 @@ class AlignParamsDialog(QDialog):
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 64)
         self._threads.setValue(max(1, opts.num_threads))
-        self._threads.setToolTip("Number passed to MAFFT's --thread option.")
 
         self._retree = QSpinBox(self)
         self._retree.setRange(1, 100)
         self._retree.setValue(opts.retree)
-        self._retree.setToolTip("Number of guide-tree rebuilds in Custom mode.")
-
         self._max_iterate = QSpinBox(self)
         self._max_iterate.setRange(0, 1000)
         self._max_iterate.setValue(opts.max_iterate)
-        self._max_iterate.setToolTip("Maximum iterative-refinement cycles in Custom mode.")
         self._custom_retree = opts.retree
         self._custom_max_iterate = opts.max_iterate
         self._last_strategy: str | None = None
@@ -1136,14 +1151,11 @@ class AlignParamsDialog(QDialog):
         self._gap_open.setDecimals(3)
         self._gap_open.setSingleStep(0.1)
         self._gap_open.setValue(opts.gap_open_penalty)
-        self._gap_open.setToolTip("MAFFT --op gap-opening penalty; default 1.53.")
-
         self._offset = QDoubleSpinBox(self)
         self._offset.setRange(-10.0, 10.0)
         self._offset.setDecimals(3)
         self._offset.setSingleStep(0.05)
         self._offset.setValue(opts.offset)
-        self._offset.setToolTip("MAFFT --ep offset value; default 0.0.")
 
         self._reorder = QCheckBox(
             "--reorder (group similar sequences in the output)", self
@@ -1154,7 +1166,6 @@ class AlignParamsDialog(QDialog):
             self,
         )
         self._adjust_direction.setChecked(opts.adjust_direction)
-        self._adjust_direction.setToolTip("Uses MAFFT --adjustdirectionaccurately.")
 
         for field in (
             self._strategy,
@@ -1167,32 +1178,178 @@ class AlignParamsDialog(QDialog):
         ):
             field.setFixedWidth(260)
 
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(10)
-        form.addRow("MAFFT strategy:", self._strategy)
-        form.addRow("Sequence type:", self._sequence_type)
-        form.addRow("Threads:", self._threads)
-        form.addRow("--retree (guide-tree rebuilds):", self._retree)
-        form.addRow("--maxiterate (refinement cycles):", self._max_iterate)
-        form.addRow("--op (gap-opening penalty):", self._gap_open)
-        form.addRow("--ep (offset value):", self._offset)
-        form.addRow("", self._reorder)
-        form.addRow("", self._adjust_direction)
-        self._mafft_combined = QCheckBox(
-            "Combine all selected files into one MSA", self
+        self._mafft_combine = QRadioButton(
+            "Combine all selected sequences then align", self
         )
-        self._mafft_combined.setChecked(opts.mafft_combined)
-        self._mafft_combined.setToolTip(
-            "Pool every sequence from the selected files into a single alignment, "
-            "instead of aligning each file on its own."
+        self._mafft_separate = QRadioButton(
+            "Align each selected sequences separately", self
         )
-        form.addRow("", self._mafft_combined)
+        self._mafft_mode_group = QButtonGroup(self)
+        self._mafft_mode_group.addButton(self._mafft_combine)
+        self._mafft_mode_group.addButton(self._mafft_separate)
+        if opts.mafft_combined:
+            self._mafft_combine.setChecked(True)
+        else:
+            self._mafft_separate.setChecked(True)
+
+        self._mafft_input_group = QButtonGroup(self)
+        self._mafft_input_selected = QRadioButton("Use selected sequences", self)
+        self._mafft_input_define = QRadioButton("Define inputs", self)
+        self._mafft_input_group.addButton(self._mafft_input_selected)
+        self._mafft_input_group.addButton(self._mafft_input_define)
+        self._mafft_input_selected.setChecked(True)
+        initial_mafft_inputs = [
+            Path(p) for p in (opts.mafft_input_paths or []) if str(p).strip()
+        ]
+        self._mafft_define_inputs = TeMultiInputFilesWidget(
+            self,
+            initial=initial_mafft_inputs or None,
+            start_empty=False,
+            placeholder="Click in Files/Folders or Browse…",
+            browse_title="Choose a FASTA file",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file or folder path. Click a file or folder in "
+                "the panel to fill a row, or use Browse."
+            ),
+            path_mode="file_or_directory",
+        )
 
         mafft_tab = QWidget(self)
-        mafft_tab.setLayout(form)
+        mafft_root = QVBoxLayout(mafft_tab)
+        mafft_root.setContentsMargins(16, 10, 16, 10)
+        mafft_root.setSpacing(4)
+        mafft_basic = QWidget(mafft_tab)
+        self._mafft_basic = mafft_basic
+        mafft_form = QFormLayout(mafft_basic)
+        mafft_form.setContentsMargins(0, 0, 0, 0)
+        mafft_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        mafft_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        mafft_form.setHorizontalSpacing(12)
+        mafft_form.setVerticalSpacing(4)
+
+        def _mafft_section(title: str, parent: QWidget | None = None) -> QLabel:
+            return QLabel(f"<b>{title}</b>", parent or mafft_tab)
+
+        mafft_form.addRow(_mafft_section("Mode", mafft_basic))
+        mafft_mode_box = QWidget(mafft_basic)
+        mafft_mode_layout = QVBoxLayout(mafft_mode_box)
+        mafft_mode_layout.setContentsMargins(0, 0, 0, 0)
+        mafft_mode_layout.setSpacing(2)
+        mafft_mode_layout.addWidget(
+            field_with_help(
+                self._mafft_combine,
+                "MAFFT mode",
+                _MAFFT_MODE_HELP,
+                stretch=True,
+            )
+        )
+        mafft_mode_layout.addWidget(self._mafft_separate)
+        mafft_form.addRow("", mafft_mode_box)
+
+        mafft_form.addRow(_form_section_separator())
+        mafft_form.addRow(_mafft_section("Inputs", mafft_basic))
+        mafft_inputs_box = QWidget(mafft_basic)
+        mafft_inputs_layout = QVBoxLayout(mafft_inputs_box)
+        mafft_inputs_layout.setContentsMargins(0, 0, 0, 0)
+        mafft_inputs_layout.setSpacing(2)
+        mafft_inputs_layout.addWidget(
+            field_with_help(
+                self._mafft_input_selected,
+                "MAFFT inputs",
+                _MAFFT_INPUTS_HELP,
+                stretch=True,
+            )
+        )
+        mafft_inputs_layout.addWidget(self._mafft_input_define)
+        mafft_form.addRow("", mafft_inputs_box)
+        mafft_form.addRow("", self._mafft_define_inputs)
+
+        mafft_form.addRow(_form_section_separator())
+        mafft_form.addRow(_mafft_section("Settings", mafft_basic))
+        mafft_form.addRow(
+            "Strategy:",
+            field_with_help(self._strategy, "MAFFT strategy", _MAFFT_STRATEGY_HELP),
+        )
+        mafft_form.addRow(
+            "Sequence type:",
+            field_with_help(
+                self._sequence_type, "Sequence type", _MAFFT_SEQUENCE_TYPE_HELP
+            ),
+        )
+        mafft_form.addRow(
+            "Threads:",
+            field_with_help(self._threads, "Threads", _MAFFT_THREADS_HELP),
+        )
+        mafft_root.addWidget(mafft_basic)
+
+        self._mafft_advanced_panel = QWidget(mafft_tab)
+        self._mafft_advanced_panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        mafft_advanced_form = QFormLayout(self._mafft_advanced_panel)
+        mafft_advanced_form.setContentsMargins(0, 4, 0, 0)
+        mafft_advanced_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        mafft_advanced_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        mafft_advanced_form.setHorizontalSpacing(12)
+        mafft_advanced_form.setVerticalSpacing(4)
+        mafft_advanced_form.addRow(_form_section_separator())
+        mafft_advanced_form.addRow(
+            _mafft_section("Advanced Settings", self._mafft_advanced_panel)
+        )
+        mafft_advanced_form.addRow(
+            "--retree:",
+            field_with_help(self._retree, "Guide-tree rebuilds", _MAFFT_RETREE_HELP),
+        )
+        mafft_advanced_form.addRow(
+            "--maxiterate:",
+            field_with_help(
+                self._max_iterate, "Refinement cycles", _MAFFT_MAXITERATE_HELP
+            ),
+        )
+        mafft_advanced_form.addRow(
+            "--op:",
+            field_with_help(self._gap_open, "Gap-opening penalty", _MAFFT_OP_HELP),
+        )
+        mafft_advanced_form.addRow(
+            "--ep:",
+            field_with_help(self._offset, "Offset value", _MAFFT_EP_HELP),
+        )
+        mafft_advanced_form.addRow(
+            "",
+            field_with_help(self._reorder, "Reorder", _MAFFT_REORDER_HELP),
+        )
+        mafft_advanced_form.addRow(
+            "",
+            field_with_help(
+                self._adjust_direction,
+                "Adjust direction",
+                _MAFFT_ADJUST_DIRECTION_HELP,
+            ),
+        )
+        mafft_root.addWidget(self._mafft_advanced_panel)
+        self._mafft_tab = mafft_tab
+        self._set_mafft_advanced_visible(False)
+        self._mafft_input_selected.toggled.connect(self._sync_mafft_inputs)
+        self._mafft_input_define.toggled.connect(self._sync_mafft_inputs)
+        self._mafft_define_inputs.paths_changed.connect(
+            lambda: self._sync_mafft_inputs()
+        )
+        self._sync_mafft_inputs()
+        mafft_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
 
         self._muscle_mode = QComboBox(self)
         self._muscle_mode.addItem("Align (high accuracy)", MUSCLE_MODE_ALIGN)
@@ -1201,16 +1358,78 @@ class AlignParamsDialog(QDialog):
         if muscle_mode_index >= 0:
             self._muscle_mode.setCurrentIndex(muscle_mode_index)
         self._muscle_mode.setFixedWidth(260)
-        self._muscle_mode.setToolTip(
-            "MUSCLE -align is the normal high-accuracy method; -super5 is intended "
-            "for very large sequence sets."
-        )
         self._muscle_threads = QSpinBox(self)
         self._muscle_threads.setRange(1, 64)
         self._muscle_threads.setValue(max(1, opts.muscle_num_threads))
         self._muscle_threads.setFixedWidth(260)
-        self._muscle_threads.setToolTip("Number passed to MUSCLE's -threads option.")
-        muscle_form = QFormLayout()
+
+        self._muscle_perm = QComboBox(self)
+        for label, value in (
+            ("None (default)", MUSCLE_PERM_NONE),
+            ("abc", MUSCLE_PERM_ABC),
+            ("acb", MUSCLE_PERM_ACB),
+            ("bca", MUSCLE_PERM_BCA),
+        ):
+            self._muscle_perm.addItem(label, value)
+        muscle_perm_index = self._muscle_perm.findData(opts.muscle_perm)
+        if muscle_perm_index >= 0:
+            self._muscle_perm.setCurrentIndex(muscle_perm_index)
+        self._muscle_perm.setFixedWidth(260)
+        self._muscle_perturb = QSpinBox(self)
+        self._muscle_perturb.setRange(0, 1_000_000)
+        self._muscle_perturb.setValue(max(0, int(opts.muscle_perturb)))
+        self._muscle_perturb.setSpecialValueText("Off (0)")
+        self._muscle_perturb.setFixedWidth(260)
+
+        self._muscle_combine = QRadioButton(
+            "Combine all selected sequences then align", self
+        )
+        self._muscle_separate = QRadioButton(
+            "Align each selected sequences separately", self
+        )
+        self._muscle_mode_group = QButtonGroup(self)
+        self._muscle_mode_group.addButton(self._muscle_combine)
+        self._muscle_mode_group.addButton(self._muscle_separate)
+        if opts.muscle_combined:
+            self._muscle_combine.setChecked(True)
+        else:
+            self._muscle_separate.setChecked(True)
+
+        self._muscle_input_group = QButtonGroup(self)
+        self._muscle_input_selected = QRadioButton("Use selected sequences", self)
+        self._muscle_input_define = QRadioButton("Define inputs", self)
+        self._muscle_input_group.addButton(self._muscle_input_selected)
+        self._muscle_input_group.addButton(self._muscle_input_define)
+        # Always open on Use selected (Define is for this run only).
+        self._muscle_input_selected.setChecked(True)
+        initial_muscle_inputs = [
+            Path(p) for p in (opts.muscle_input_paths or []) if str(p).strip()
+        ]
+        self._muscle_define_inputs = TeMultiInputFilesWidget(
+            self,
+            initial=initial_muscle_inputs or None,
+            start_empty=False,
+            placeholder="Click in Files/Folders or Browse…",
+            browse_title="Choose a FASTA file",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file or folder path. Click a file or folder in "
+                "the panel to fill a row, or use Browse."
+            ),
+            path_mode="file_or_directory",
+        )
+
+        muscle_tab = QWidget(self)
+        muscle_root = QVBoxLayout(muscle_tab)
+        muscle_root.setContentsMargins(16, 10, 16, 10)
+        muscle_root.setSpacing(4)
+        muscle_basic = QWidget(muscle_tab)
+        self._muscle_basic = muscle_basic
+        muscle_form = QFormLayout(muscle_basic)
+        muscle_form.setContentsMargins(0, 0, 0, 0)
         muscle_form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
@@ -1218,17 +1437,103 @@ class AlignParamsDialog(QDialog):
             QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
         )
         muscle_form.setHorizontalSpacing(12)
-        muscle_form.setVerticalSpacing(10)
-        muscle_form.addRow("MUSCLE algorithm:", self._muscle_mode)
-        muscle_form.addRow("Threads:", self._muscle_threads)
-        self._muscle_combined = QCheckBox(
-            "Combine all selected files into one MSA", self
+        muscle_form.setVerticalSpacing(4)
+
+        def _muscle_section(title: str, parent: QWidget | None = None) -> QLabel:
+            return QLabel(f"<b>{title}</b>", parent or muscle_tab)
+
+        muscle_form.addRow(_muscle_section("Mode", muscle_basic))
+        muscle_mode_box = QWidget(muscle_basic)
+        muscle_mode_layout = QVBoxLayout(muscle_mode_box)
+        muscle_mode_layout.setContentsMargins(0, 0, 0, 0)
+        muscle_mode_layout.setSpacing(2)
+        muscle_mode_layout.addWidget(
+            field_with_help(
+                self._muscle_combine,
+                "MUSCLE mode",
+                _MUSCLE_MODE_HELP,
+                stretch=True,
+            )
         )
-        self._muscle_combined.setChecked(opts.muscle_combined)
-        self._muscle_combined.setToolTip(self._mafft_combined.toolTip())
-        muscle_form.addRow("", self._muscle_combined)
-        muscle_tab = QWidget(self)
-        muscle_tab.setLayout(muscle_form)
+        muscle_mode_layout.addWidget(self._muscle_separate)
+        muscle_form.addRow("", muscle_mode_box)
+
+        muscle_form.addRow(_form_section_separator())
+        muscle_form.addRow(_muscle_section("Inputs", muscle_basic))
+        muscle_inputs_box = QWidget(muscle_basic)
+        muscle_inputs_layout = QVBoxLayout(muscle_inputs_box)
+        muscle_inputs_layout.setContentsMargins(0, 0, 0, 0)
+        muscle_inputs_layout.setSpacing(2)
+        muscle_inputs_layout.addWidget(
+            field_with_help(
+                self._muscle_input_selected,
+                "MUSCLE inputs",
+                _MUSCLE_INPUTS_HELP,
+                stretch=True,
+            )
+        )
+        muscle_inputs_layout.addWidget(self._muscle_input_define)
+        muscle_form.addRow("", muscle_inputs_box)
+        muscle_form.addRow("", self._muscle_define_inputs)
+
+        muscle_form.addRow(_form_section_separator())
+        muscle_form.addRow(_muscle_section("Settings", muscle_basic))
+        muscle_form.addRow(
+            "Algorithm:",
+            field_with_help(
+                self._muscle_mode, "MUSCLE algorithm", _MUSCLE_ALGORITHM_HELP
+            ),
+        )
+        muscle_form.addRow(
+            "Threads:",
+            field_with_help(
+                self._muscle_threads, "Threads", _MUSCLE_THREADS_HELP
+            ),
+        )
+        muscle_root.addWidget(muscle_basic)
+
+        self._muscle_advanced_panel = QWidget(muscle_tab)
+        self._muscle_advanced_panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        muscle_advanced_form = QFormLayout(self._muscle_advanced_panel)
+        muscle_advanced_form.setContentsMargins(0, 4, 0, 0)
+        muscle_advanced_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        muscle_advanced_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        muscle_advanced_form.setHorizontalSpacing(12)
+        muscle_advanced_form.setVerticalSpacing(4)
+        muscle_advanced_form.addRow(_form_section_separator())
+        muscle_advanced_form.addRow(
+            _muscle_section("Advanced Settings", self._muscle_advanced_panel)
+        )
+        muscle_advanced_form.addRow(
+            "Guide tree permutation:",
+            field_with_help(
+                self._muscle_perm, "Guide tree permutation", _MUSCLE_PERM_HELP
+            ),
+        )
+        muscle_advanced_form.addRow(
+            "Perturbation seed:",
+            field_with_help(
+                self._muscle_perturb, "Perturbation seed", _MUSCLE_PERTURB_HELP
+            ),
+        )
+        muscle_root.addWidget(self._muscle_advanced_panel)
+        self._muscle_tab = muscle_tab
+        self._set_muscle_advanced_visible(False)
+        self._muscle_input_selected.toggled.connect(self._sync_muscle_inputs)
+        self._muscle_input_define.toggled.connect(self._sync_muscle_inputs)
+        self._muscle_define_inputs.paths_changed.connect(
+            lambda: self._sync_muscle_inputs()
+        )
+        self._sync_muscle_inputs()
+        muscle_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
 
         self._use_system_mafft = QCheckBox("Use MAFFT from the system PATH", self)
         self._use_system_mafft.setChecked(use_system_mafft)
@@ -1254,8 +1559,6 @@ class AlignParamsDialog(QDialog):
         )
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
-        rc_row = QHBoxLayout()
-        rc_row.setSpacing(18)
         for label, value in (
             ("MAFFT", ALIGNER_MAFFT),
             ("MUSCLE", ALIGNER_MUSCLE),
@@ -1265,74 +1568,63 @@ class AlignParamsDialog(QDialog):
             radio.setChecked(opts.right_click_aligner == value)
             self._right_click_group.addButton(radio)
             self._right_click_buttons[value] = radio
-            rc_row.addWidget(radio)
-        rc_row.addStretch(1)
-        rc_box_layout.addLayout(rc_row)
+            rc_box_layout.addWidget(radio)
         if not any(b.isChecked() for b in self._right_click_buttons.values()):
             self._right_click_buttons[ALIGNER_MAFFT].setChecked(True)
-        # The FastGA toolbar button (and Tools → FastGA) keeps its own action.
-        rc_box_layout.addWidget(QLabel("Right-clicking the FastGA button:", self))
-        self._fastga_rc_group = QButtonGroup(self)
-        self._fastga_rc_buttons: dict[str, QRadioButton] = {}
-        fastga_rc_row = QHBoxLayout()
-        fastga_rc_row.setSpacing(18)
-        for label, value in (
-            ("Run FastGA with saved parameters", FASTGA_RIGHT_CLICK_RUN),
-            ("Open this window", FASTGA_RIGHT_CLICK_DIALOG),
-        ):
-            radio = QRadioButton(label, self)
-            radio.setChecked(fastga_opts.right_click_action == value)
-            self._fastga_rc_group.addButton(radio)
-            self._fastga_rc_buttons[value] = radio
-            fastga_rc_row.addWidget(radio)
-        fastga_rc_row.addStretch(1)
-        rc_box_layout.addLayout(fastga_rc_row)
-        if not any(b.isChecked() for b in self._fastga_rc_buttons.values()):
-            self._fastga_rc_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
         options_layout.addWidget(rc_box)
 
         exe_box = QGroupBox("Executables", self)
         exe_box_layout = QVBoxLayout(exe_box)
         exe_box_layout.addWidget(self._use_system_mafft)
         exe_box_layout.addWidget(self._use_system_muscle)
-        self._fastga_exe_label = QLabel(fastga_executable_text(), self)
-        self._fastga_exe_label.setWordWrap(True)
-        self._fastga_exe_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        exe_box_layout.addWidget(self._fastga_exe_label)
         options_layout.addWidget(exe_box)
 
-        process_box, self._show_process_window = make_process_output_box(
-            self,
-            tool_name="the aligner",
-            checked=bool(
-                getattr(opts, "show_process_window", False)
-                or getattr(fastga_opts, "show_process_window", False)
-            ),
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="the aligner",
+                checked=bool(
+                    getattr(opts, "show_process_window", False)
+                    or getattr(fastga_opts, "show_process_window", False)
+                ),
+                close_when_finished=bool(
+                    getattr(opts, "close_process_window_when_finished", False)
+                    or getattr(
+                        fastga_opts, "close_process_window_when_finished", False
+                    )
+                ),
+            )
         )
         options_layout.addWidget(process_box)
         options_layout.addStretch(1)
 
         self._aligner_tabs = QTabWidget(self)
+        self._aligner_tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
         self._mafft_tab = mafft_tab
         self._muscle_tab = muscle_tab
         self._options_tab = options_tab
-        fastga_scroll = QScrollArea(self)
-        fastga_scroll.setWidgetResizable(True)
-        fastga_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        fastga_scroll.setWidget(self._fastga_panel)
-        fastga_scroll.setMinimumSize(660, 460)
-        self._fastga_tab = fastga_scroll
+        # Use the panel directly (no scroll area) so Advanced Settings can grow
+        # the dialog height instead of disappearing into an empty viewport.
+        self._fastga_panel.setMinimumWidth(560)
+        self._fastga_panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._fastga_tab = self._fastga_panel
+        self._fastga_compact_size: QSize | None = None
+        self._muscle_compact_size: QSize | None = None
+        self._mafft_compact_size: QSize | None = None
         self._aligner_tabs.addTab(mafft_tab, "MAFFT")
         self._aligner_tabs.addTab(muscle_tab, "MUSCLE")
-        self._aligner_tabs.addTab(fastga_scroll, "FastGA")
+        self._aligner_tabs.addTab(self._fastga_panel, "FastGA")
         self._aligner_tabs.addTab(options_tab, "Options")
         self._options_tab_index = self._aligner_tabs.indexOf(options_tab)
+        self._aligner_tabs.currentChanged.connect(self._on_aligner_tab_changed)
         tab_for = {
             ALIGNER_MAFFT: mafft_tab,
             ALIGNER_MUSCLE: muscle_tab,
-            ALIGNER_FASTGA: fastga_scroll,
+            ALIGNER_FASTGA: self._fastga_panel,
             "options": options_tab,
         }
         if initial_tab in tab_for:
@@ -1341,19 +1633,309 @@ class AlignParamsDialog(QDialog):
         self._close_action = "cancel"
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_settings_toggled)
         self._button_box = make_cancel_save_run_bar(
             self,
-            left_widgets=[restore],
+            left_widgets=[restore, self._advanced_settings_btn],
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
-        layout.addWidget(self._aligner_tabs)
-        layout.addWidget(self._button_box)
+        layout.addWidget(self._aligner_tabs, stretch=0)
+        layout.addWidget(self._button_box, stretch=0)
 
         self._strategy.currentIndexChanged.connect(self._sync_controls)
         self._sequence_type.currentIndexChanged.connect(self._sync_controls)
         self._sync_controls()
+        self._update_advanced_settings_button()
+        if initial_tab == ALIGNER_FASTGA:
+            QTimer.singleShot(0, self._shrink_to_fastga_content)
+        elif initial_tab == ALIGNER_MUSCLE:
+            QTimer.singleShot(0, self._shrink_to_muscle_content)
+        elif initial_tab == ALIGNER_MAFFT:
+            QTimer.singleShot(0, self._shrink_to_mafft_content)
+
+    def _remind_fastga_if_needed(self) -> None:
+        """Show install/bind instructions when FastGA is not configured."""
+        from repeatviewer.backends.fastga_dotplot import (
+            fastga_available,
+            show_fastga_not_configured_dialog,
+        )
+
+        if fastga_available():
+            return
+        show_fastga_not_configured_dialog(self)
+
+    def _on_aligner_tab_changed(self, _index: int) -> None:
+        self._update_advanced_settings_button()
+        current = self._aligner_tabs.currentWidget()
+        if current is self._fastga_tab:
+            # Defer so the FastGA tab paints before any availability probe / reminder.
+            QTimer.singleShot(0, self._remind_fastga_if_needed)
+        if (
+            current is self._fastga_tab
+            and self._fastga_compact_size is None
+            and not self._fastga_panel.advanced_visible()
+        ):
+            QTimer.singleShot(0, self._shrink_to_fastga_content)
+        elif (
+            current is self._muscle_tab
+            and self._muscle_compact_size is None
+            and not self._muscle_advanced_visible()
+        ):
+            QTimer.singleShot(0, self._shrink_to_muscle_content)
+        elif (
+            current is self._mafft_tab
+            and self._mafft_compact_size is None
+            and not self._mafft_advanced_visible()
+        ):
+            QTimer.singleShot(0, self._shrink_to_mafft_content)
+
+    def _on_advanced_settings_toggled(self, checked: bool) -> None:
+        current = self._aligner_tabs.currentWidget()
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        if current is self._fastga_tab:
+            if checked:
+                self._fastga_compact_size = self.size()
+            self._fastga_panel.set_advanced_visible(checked)
+            self._resize_for_fastga_advanced(checked)
+        elif current is self._muscle_tab:
+            if checked:
+                self._muscle_compact_size = self.size()
+            self._set_muscle_advanced_visible(checked)
+            self._resize_for_muscle_advanced(checked)
+        elif current is self._mafft_tab:
+            if checked:
+                self._mafft_compact_size = self.size()
+            self._set_mafft_advanced_visible(checked)
+            self._resize_for_mafft_advanced(checked)
+
+    def _dialog_chrome_height(self) -> int:
+        """Height of margins, tab bar, and footer buttons around the active tab."""
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 14
+        tab_bar_h = self._aligner_tabs.tabBar().sizeHint().height() + 10
+        buttons_h = self._button_box.sizeHint().height()
+        return margin_h + spacing + tab_bar_h + buttons_h
+
+    def _fastga_dialog_chrome_height(self) -> int:
+        return self._dialog_chrome_height()
+
+    def _shrink_to_fastga_content(self) -> None:
+        """Fit the dialog to the current FastGA form (no unused blank height)."""
+        if self._aligner_tabs.currentWidget() is not self._fastga_tab:
+            return
+        if self._fastga_panel.advanced_visible():
+            return
+        self._resize_for_fastga_advanced(False)
+
+    def _shrink_to_muscle_content(self) -> None:
+        if self._aligner_tabs.currentWidget() is not self._muscle_tab:
+            return
+        if self._muscle_advanced_visible():
+            return
+        self._resize_for_muscle_advanced(False)
+
+    def _muscle_advanced_visible(self) -> bool:
+        return bool(self._muscle_advanced_panel.isVisible())
+
+    def _set_muscle_advanced_visible(self, visible: bool) -> None:
+        self._muscle_advanced_panel.setVisible(visible)
+        if visible:
+            self._muscle_advanced_panel.setMaximumHeight(16777215)
+        else:
+            self._muscle_advanced_panel.setMaximumHeight(0)
+        self._muscle_advanced_panel.updateGeometry()
+        root = self._muscle_tab.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self._muscle_tab.updateGeometry()
+
+    def _muscle_compact_content_height(self) -> int:
+        root = self._muscle_tab.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        basic_h = max(
+            self._muscle_basic.minimumSizeHint().height(),
+            self._muscle_basic.sizeHint().height(),
+        )
+        return margin_h + basic_h + spacing
+
+    def _resize_for_fastga_advanced(self, expanded: bool) -> None:
+        """Grow the dialog for Advanced Settings; shrink back when collapsed."""
+        panel = self._fastga_panel
+        adv = panel._advanced_panel
+        root = panel.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        panel.updateGeometry()
+        self._aligner_tabs.updateGeometry()
+
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._dialog_chrome_height()
+        width = max(self.width(), 560)
+
+        if not expanded:
+            height = chrome + panel.compact_content_height()
+            height = min(max(height, 220), max_h)
+            self.setMinimumHeight(0)
+            self._aligner_tabs.setMinimumHeight(0)
+            panel.setMinimumHeight(0)
+            self.setMaximumHeight(height)
+            self.resize(width, height)
+            self.setMaximumHeight(16777215)
+            self._fastga_compact_size = QSize(width, height)
+            return
+
+        extra = max(0, adv.sizeHint().height())
+        base = self._fastga_compact_size or self.size()
+        height = min(base.height() + extra + 12, max_h)
+        height = max(
+            height,
+            min(chrome + panel.compact_content_height() + extra, max_h),
+        )
+        self.resize(width, height)
+
+    def _resize_for_muscle_advanced(self, expanded: bool) -> None:
+        panel = self._muscle_tab
+        adv = self._muscle_advanced_panel
+        root = panel.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        panel.updateGeometry()
+        self._aligner_tabs.updateGeometry()
+
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._dialog_chrome_height()
+        width = max(self.width(), 560)
+
+        if not expanded:
+            height = chrome + self._muscle_compact_content_height()
+            height = min(max(height, 220), max_h)
+            self.setMinimumHeight(0)
+            self._aligner_tabs.setMinimumHeight(0)
+            panel.setMinimumHeight(0)
+            self.setMaximumHeight(height)
+            self.resize(width, height)
+            self.setMaximumHeight(16777215)
+            self._muscle_compact_size = QSize(width, height)
+            return
+
+        extra = max(0, adv.sizeHint().height())
+        base = self._muscle_compact_size or self.size()
+        height = min(base.height() + extra + 12, max_h)
+        height = max(
+            height,
+            min(chrome + self._muscle_compact_content_height() + extra, max_h),
+        )
+        self.resize(width, height)
+
+    def _shrink_to_mafft_content(self) -> None:
+        if self._aligner_tabs.currentWidget() is not self._mafft_tab:
+            return
+        if self._mafft_advanced_visible():
+            return
+        self._resize_for_mafft_advanced(False)
+
+    def _mafft_advanced_visible(self) -> bool:
+        return bool(self._mafft_advanced_panel.isVisible())
+
+    def _set_mafft_advanced_visible(self, visible: bool) -> None:
+        self._mafft_advanced_panel.setVisible(visible)
+        if visible:
+            self._mafft_advanced_panel.setMaximumHeight(16777215)
+        else:
+            self._mafft_advanced_panel.setMaximumHeight(0)
+        self._mafft_advanced_panel.updateGeometry()
+        root = self._mafft_tab.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self._mafft_tab.updateGeometry()
+
+    def _mafft_compact_content_height(self) -> int:
+        root = self._mafft_tab.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        basic_h = max(
+            self._mafft_basic.minimumSizeHint().height(),
+            self._mafft_basic.sizeHint().height(),
+        )
+        return margin_h + basic_h + spacing
+
+    def _resize_for_mafft_advanced(self, expanded: bool) -> None:
+        panel = self._mafft_tab
+        adv = self._mafft_advanced_panel
+        root = panel.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        panel.updateGeometry()
+        self._aligner_tabs.updateGeometry()
+
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._dialog_chrome_height()
+        width = max(self.width(), 560)
+
+        if not expanded:
+            height = chrome + self._mafft_compact_content_height()
+            height = min(max(height, 220), max_h)
+            self.setMinimumHeight(0)
+            self._aligner_tabs.setMinimumHeight(0)
+            panel.setMinimumHeight(0)
+            self.setMaximumHeight(height)
+            self.resize(width, height)
+            self.setMaximumHeight(16777215)
+            self._mafft_compact_size = QSize(width, height)
+            return
+
+        extra = max(0, adv.sizeHint().height())
+        base = self._mafft_compact_size or self.size()
+        height = min(base.height() + extra + 12, max_h)
+        height = max(
+            height,
+            min(chrome + self._mafft_compact_content_height() + extra, max_h),
+        )
+        self.resize(width, height)
+
+    def _update_advanced_settings_button(self) -> None:
+        current = self._aligner_tabs.currentWidget()
+        on_advanced_tab = current in (
+            self._fastga_tab,
+            self._muscle_tab,
+            self._mafft_tab,
+        )
+        self._advanced_settings_btn.setVisible(on_advanced_tab)
+        if not on_advanced_tab:
+            return
+        if current is self._fastga_tab:
+            expanded = self._fastga_panel.advanced_visible()
+        elif current is self._muscle_tab:
+            expanded = self._muscle_advanced_visible()
+        else:
+            expanded = self._mafft_advanced_visible()
+        self._advanced_settings_btn.blockSignals(True)
+        self._advanced_settings_btn.setChecked(expanded)
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if expanded else "Advanced Settings ▸"
+        )
+        self._advanced_settings_btn.blockSignals(False)
 
     def should_run(self) -> bool:
         """True when the dialog was closed with Run (not Save or Cancel)."""
@@ -1374,19 +1956,112 @@ class AlignParamsDialog(QDialog):
         return self._fastga_panel
 
     def apply_path_from_panel(self, path: Path) -> bool:
-        """Files-panel click: fills the FastGA reference while that tab is shown."""
-        if self._aligner_tabs.currentWidget() is not self._fastga_tab:
+        """Files-panel click: fills Align Define inputs or FastGA reference."""
+        current = self._aligner_tabs.currentWidget()
+        if current is self._mafft_tab:
+            return self._apply_mafft_path_from_panel(path)
+        if current is self._muscle_tab:
+            return self._apply_muscle_path_from_panel(path)
+        if current is self._fastga_tab:
+            return self._fastga_panel.apply_path_from_panel(path)
+        return False
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        """Folders-panel click: fills Align/FastGA Define-inputs path."""
+        current = self._aligner_tabs.currentWidget()
+        if current is self._mafft_tab:
+            return self._apply_mafft_folder_from_panel(folder)
+        if current is self._muscle_tab:
+            return self._apply_muscle_folder_from_panel(folder)
+        if current is self._fastga_tab:
+            return self._fastga_panel.apply_folder_from_panel(folder)
+        return False
+
+    def mafft_input_source(self) -> str:
+        if self._mafft_input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def mafft_run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        """FASTA inputs for Run: panel selection or expanded Define inputs."""
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+
+        if self.mafft_input_source() == ALIGN_INPUT_DEFINE:
+            return expand_fastga_input_paths(self._mafft_define_inputs.paths())
+        return [Path(p) for p in (panel_files or [])]
+
+    def _sync_mafft_inputs(self) -> None:
+        define = self.mafft_input_source() == ALIGN_INPUT_DEFINE
+        self._mafft_define_inputs.setVisible(define)
+
+    def _apply_mafft_path_from_panel(self, path: Path) -> bool:
+        if self.mafft_input_source() != ALIGN_INPUT_DEFINE:
             return False
-        return self._fastga_panel.apply_path_from_panel(path)
+        try:
+            candidate = Path(path).expanduser().resolve()
+        except OSError:
+            return False
+        return bool(self._mafft_define_inputs.accept_path(candidate))
+
+    def _apply_mafft_folder_from_panel(self, folder: Path) -> bool:
+        if self.mafft_input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        try:
+            candidate = Path(folder).expanduser().resolve()
+        except OSError:
+            return False
+        if not candidate.is_dir():
+            return False
+        return bool(self._mafft_define_inputs.accept_path(candidate))
+
+    def muscle_input_source(self) -> str:
+        if self._muscle_input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def muscle_run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        """FASTA inputs for Run: panel selection or expanded Define inputs."""
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+
+        if self.muscle_input_source() == ALIGN_INPUT_DEFINE:
+            return expand_fastga_input_paths(self._muscle_define_inputs.paths())
+        return [Path(p) for p in (panel_files or [])]
+
+    def _sync_muscle_inputs(self) -> None:
+        define = self.muscle_input_source() == ALIGN_INPUT_DEFINE
+        self._muscle_define_inputs.setVisible(define)
+
+    def _apply_muscle_path_from_panel(self, path: Path) -> bool:
+        if self.muscle_input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        try:
+            candidate = Path(path).expanduser().resolve()
+        except OSError:
+            return False
+        return bool(self._muscle_define_inputs.accept_path(candidate))
+
+    def _apply_muscle_folder_from_panel(self, folder: Path) -> bool:
+        if self.muscle_input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        try:
+            candidate = Path(folder).expanduser().resolve()
+        except OSError:
+            return False
+        if not candidate.is_dir():
+            return False
+        return bool(self._muscle_define_inputs.accept_path(candidate))
+
+    def fastga_run_files(self) -> list[Path]:
+        """Query genomes for Run: panel selection or expanded Define inputs."""
+        return self._fastga_panel.files()
 
     def fastga_options(self):
-        right_click = next(
-            (v for v, b in self._fastga_rc_buttons.items() if b.isChecked()),
-            FASTGA_RIGHT_CLICK_RUN,
-        )
         return self._fastga_panel.options(
-            right_click_action=right_click,
+            right_click_action=FASTGA_RIGHT_CLICK_RUN,
             show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=(
+                self._close_process_window.isChecked()
+            ),
         )
 
     def right_click_aligner(self) -> str:
@@ -1398,8 +2073,8 @@ class AlignParamsDialog(QDialog):
     def combined_for(self, aligner: str) -> bool:
         """Whether the given aligner should combine into one MSA."""
         if aligner == ALIGNER_MUSCLE:
-            return self._muscle_combined.isChecked()
-        return self._mafft_combined.isChecked()
+            return self._muscle_combine.isChecked()
+        return self._mafft_combine.isChecked()
 
     def _sync_controls(self) -> None:
         strategy = str(self._strategy.currentData())
@@ -1474,10 +2149,19 @@ class AlignParamsDialog(QDialog):
             ),
             muscle_mode=str(self._muscle_mode.currentData()),
             muscle_num_threads=max(1, int(self._muscle_threads.value())),
-            mafft_combined=self._mafft_combined.isChecked(),
-            muscle_combined=self._muscle_combined.isChecked(),
+            muscle_perm=str(self._muscle_perm.currentData()),
+            muscle_perturb=max(0, int(self._muscle_perturb.value())),
+            muscle_input_source=ALIGN_INPUT_SELECTED,
+            muscle_input_paths=[str(p) for p in self._muscle_define_inputs.paths()],
+            mafft_input_source=ALIGN_INPUT_SELECTED,
+            mafft_input_paths=[str(p) for p in self._mafft_define_inputs.paths()],
+            mafft_combined=self._mafft_combine.isChecked(),
+            muscle_combined=self._muscle_combine.isChecked(),
             right_click_aligner=self.right_click_aligner(),
             show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=(
+                self._close_process_window.isChecked()
+            ),
         )
 
     def use_system_mafft(self) -> bool:
@@ -1504,21 +2188,39 @@ class AlignParamsDialog(QDialog):
         self._offset.setValue(defaults.offset)
         self._reorder.setChecked(defaults.reorder)
         self._adjust_direction.setChecked(defaults.adjust_direction)
-        self._mafft_combined.setChecked(defaults.mafft_combined)
+        if defaults.mafft_combined:
+            self._mafft_combine.setChecked(True)
+        else:
+            self._mafft_separate.setChecked(True)
+        self._mafft_input_selected.setChecked(True)
+        self._mafft_define_inputs.clear_paths()
+        self._sync_mafft_inputs()
 
         muscle_idx = self._muscle_mode.findData(defaults.muscle_mode)
         if muscle_idx >= 0:
             self._muscle_mode.setCurrentIndex(muscle_idx)
         self._muscle_threads.setValue(max(1, defaults.muscle_num_threads))
-        self._muscle_combined.setChecked(defaults.muscle_combined)
+        muscle_perm_idx = self._muscle_perm.findData(defaults.muscle_perm)
+        if muscle_perm_idx >= 0:
+            self._muscle_perm.setCurrentIndex(muscle_perm_idx)
+        self._muscle_perturb.setValue(max(0, defaults.muscle_perturb))
+        self._muscle_input_selected.setChecked(True)
+        self._muscle_define_inputs.clear_paths()
+        self._sync_muscle_inputs()
+        if defaults.muscle_combined:
+            self._muscle_combine.setChecked(True)
+        else:
+            self._muscle_separate.setChecked(True)
 
         for value, radio in self._right_click_buttons.items():
             radio.setChecked(value == defaults.right_click_aligner)
         self._show_process_window.setChecked(defaults.show_process_window)
+        self._close_process_window.setChecked(
+            defaults.close_process_window_when_finished
+        )
         # Default: bundled MAFFT / MUSCLE binaries, not system PATH.
         self._use_system_mafft.setChecked(False)
         self._use_system_muscle.setChecked(False)
-        self._fastga_rc_buttons[FASTGA_RIGHT_CLICK_RUN].setChecked(True)
         self._fastga_panel.restore_defaults()
         self._sync_controls()
 
@@ -2402,25 +3104,118 @@ class ExtractSequencesDialog(QDialog):
         self._refresh_default_file_name()
 
 
+_MAFFT_MODE_HELP = (
+    "<b>Combine all selected sequences then align</b>: pool every sequence from the "
+    "selected files into one MSA.<br>"
+    "<b>Align each selected sequences separately</b>: run MAFFT once per selected "
+    "file, each with its own alignment."
+)
+_MAFFT_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): MAFFT uses the FASTA files that were "
+    "selected in the Files panel when this window opened.<br>"
+    "<b>Define inputs</b>: choose FASTA files or folders yourself. Click a file or "
+    "folder in the panel to fill a path, use Browse (file or folder), and Add another "
+    "input for more. Folders expand to the FASTA files they contain."
+)
+_MAFFT_STRATEGY_HELP = (
+    "MAFFT strategies trade speed for accuracy "
+    "(see <a href='https://mafft.cbrc.jp/alignment/software/algorithms/algorithms.html'>"
+    "MAFFT algorithms</a>).<br>"
+    "<b>Auto</b>: MAFFT chooses a strategy.<br>"
+    "<b>FFT-NS-1</b>: fastest progressive method "
+    "(<code>--retree 1</code>).<br>"
+    "<b>FFT-NS-2</b>: progressive with a rebuilt guide tree "
+    "(<code>--retree 2</code>); a good default for large sets.<br>"
+    "<b>L-INS-i</b>: iterative refinement with local pairwise alignment "
+    "(<code>--localpair --maxiterate 1000</code>); one alignable domain with flanks.<br>"
+    "<b>G-INS-i</b>: iterative refinement with global pairwise alignment "
+    "(<code>--globalpair --maxiterate 1000</code>); assumes the whole region aligns.<br>"
+    "<b>E-INS-i</b>: iterative refinement with generalized affine gaps "
+    "(<code>--genafpair --maxiterate 1000</code>); conserved motifs in long "
+    "unalignable regions.<br>"
+    "<b>Custom</b>: set <code>--retree</code> and <code>--maxiterate</code> yourself "
+    "in Advanced Settings."
+)
+_MAFFT_SEQUENCE_TYPE_HELP = (
+    "<b>Auto-detect</b>: let MAFFT decide nucleotide vs protein.<br>"
+    "<b>Nucleotide</b>: force <code>--nuc</code>.<br>"
+    "<b>Protein</b>: force <code>--amino</code>."
+)
+_MAFFT_THREADS_HELP = "Number passed to MAFFT's <b>--thread</b> option."
+_MAFFT_RETREE_HELP = (
+    "MAFFT <b>--retree</b>: how many times to rebuild the guide tree. "
+    "Editable only with the Custom strategy; presets fix this value."
+)
+_MAFFT_MAXITERATE_HELP = (
+    "MAFFT <b>--maxiterate</b>: iterative refinement cycles. "
+    "Editable only with the Custom strategy; INS-i presets use 1000."
+)
+_MAFFT_OP_HELP = (
+    "MAFFT <b>--op</b>: gap-opening penalty. Default <b>1.53</b> "
+    "(tuned for amino-acid alignments)."
+)
+_MAFFT_EP_HELP = (
+    "MAFFT <b>--ep</b>: offset value (behaves like a gap-extension term). "
+    "Default in this dialog is <b>0.0</b>."
+)
+_MAFFT_REORDER_HELP = (
+    "MAFFT <b>--reorder</b>: order output sequences by similarity instead of "
+    "keeping the input order."
+)
+_MAFFT_ADJUST_DIRECTION_HELP = (
+    "MAFFT <b>--adjustdirectionaccurately</b>: reverse-complement nucleotide "
+    "sequences as needed. Disabled for protein."
+)
+
+_MUSCLE_MODE_HELP = (
+    "<b>Combine all selected sequences then align</b>: pool every sequence from the "
+    "selected files into one MSA.<br>"
+    "<b>Align each selected sequences separately</b>: run MUSCLE once per selected "
+    "file, each with its own alignment."
+)
+_MUSCLE_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): MUSCLE uses the FASTA files that were "
+    "selected in the Files panel when this window opened.<br>"
+    "<b>Define inputs</b>: choose FASTA files or folders yourself. Click a file or "
+    "folder in the panel to fill a path, use Browse (file or folder), and Add another "
+    "input for more. Folders expand to the FASTA files they contain."
+)
+_MUSCLE_ALGORITHM_HELP = (
+    "<b>Align (high accuracy)</b>: MUSCLE <b>-align</b>, the normal high-accuracy "
+    "method.<br>"
+    "<b>Super5 (large datasets)</b>: MUSCLE <b>-super5</b>, intended for very large "
+    "sequence sets."
+)
+_MUSCLE_THREADS_HELP = "Number passed to MUSCLE's <b>-threads</b> option."
+_MUSCLE_PERM_HELP = (
+    "MUSCLE <b>-perm</b>: guide-tree permutation for a single replicate alignment "
+    "(<b>none</b>, <b>abc</b>, <b>acb</b>, or <b>bca</b>). Default is none."
+)
+_MUSCLE_PERTURB_HELP = (
+    "MUSCLE <b>-perturb</b>: perturbation seed for a single replicate. "
+    "<b>0</b> means do not perturb (MUSCLE default)."
+)
+
 _FASTGA_MODE_HELP = (
-    "<b>Each file against itself</b>: every selected FASTA is aligned with itself, "
-    "skipping the trivial self match, which shows its repeats. "
-    "Output: &lt;file&gt;_FastGA.paf.<br>"
-    "<b>Selected files against each other</b>: every selected file is compared with "
-    "every other one (A, B, C: A vs B, A vs C, B vs C). All results go into one file "
-    "named after the first selected file: &lt;first&gt;_multi_FastGA.paf.<br>"
-    "<b>Selected files against a reference</b>: each selected FASTA is aligned with the "
-    "reference, one run per file. The reference is indexed once and reused for every "
-    "run. Output: &lt;file&gt;_FastGA_vs_&lt;reference&gt;.paf next to each file, or "
-    "one &lt;first&gt;_multi_FastGA_vs_&lt;reference&gt;.paf with "
-    "<b>Write all into one file</b>."
+    "<b>Self comparison</b>: each selected genome is aligned with itself (repeats "
+    "within that sequence). One output file per genome.<br>"
+    "<b>Pairwise comparison</b>: every unique pair among the selected genomes (A vs B, "
+    "A vs C, …). Uncheck pairs you do not want; all results go into one combined file.<br>"
+    "<b>Compare against a reference</b>: each selected query genome is aligned to one "
+    "reference genome. The reference index is built once and reused."
+)
+_FASTGA_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): FastGA uses the FASTA files that were "
+    "selected in the Files panel when this window opened.<br>"
+    "<b>Define inputs</b>: choose FASTA files or folders yourself. Click a file or "
+    "folder in the panel to fill a path, use Browse (file or folder), and Add another "
+    "input for more. Folders expand to the FASTA files they contain."
 )
 _FASTGA_REFERENCE_HELP = (
-    "The genome every selected file is aligned to (the target columns of the PAF).<br>"
-    "Click it in the Files panel while this window is open, or use Browse. If the "
-    "reference is also selected in the Files panel it is skipped, so it is never "
-    "compared with itself.<br>"
-    "The files compared are the ones selected when this window was opened."
+    "The genome every query file is aligned to (the target columns of the PAF).<br>"
+    "Defaults to the project setting genome (Define Genome). Click another file in "
+    "the Files panel while this window is open, or use Browse. If the reference is "
+    "also among the query inputs it is skipped, so it is never compared with itself."
 )
 _FASTGA_COMBINED_HELP = (
     "Write the alignments of all selected files into one PAF file, "
@@ -2429,10 +3224,11 @@ _FASTGA_COMBINED_HELP = (
     "A .1aln file cannot be joined, so this always writes PAF text."
 )
 _FASTGA_FORMAT_HELP = (
-    "<b>PAF</b> and <b>PSL</b> are text files (-paf, -pafx, -pafm, -pafs, -pafS, -psl). "
-    "-pafx and -pafm add a CIGAR string, -pafs and -pafS a CS string.<br>"
-    "<b>-1</b> writes a binary .1aln (ONEcode) file.<br>"
-    "PAF and .1aln results open in the dotplot view; PSL files do not preview."
+    "<b>PAF</b> is the usual text alignment format. Optional <b>Include CIGAR</b> or "
+    "<b>Include CS tag</b> add extra columns (only one at a time).<br>"
+    "<b>PSL</b> is UCSC PSL text; it does not open in the dotplot view.<br>"
+    "<b>FastGA alignment (.1aln)</b> is FastGA's binary ONEcode output; it opens in "
+    "the dotplot view."
 )
 _FASTGA_THREADS_HELP = "FastGA <b>-T</b>: number of threads."
 _FASTGA_IDENTITY_HELP = (
@@ -2447,8 +3243,8 @@ _FASTGA_LENGTH_HELP = (
 _FASTGA_SEED_HELP = (
     "FastGA <b>-f</b>: seeds that occur more often than this are treated as repetitive "
     "and dropped before alignment.<br>"
-    "FastGA's own default is 10, which removes satellite arrays entirely. RepeatViewer "
-    "uses 200 so repeats stay visible. Higher values are slower."
+    "FastGA's default is 10; RepeatViewer Align uses the same default. Higher values "
+    "are slower and keep more repetitive seeds."
 )
 _FASTGA_CHAIN_COV_HELP = (
     "FastGA <b>-c</b>: a seed chain must cover at least this many bases in both genomes "
@@ -2464,14 +3260,9 @@ _FASTGA_SYMMETRIC_HELP = (
     "slower. FastGA recommends it for repeat structure, not for synteny."
 )
 _FASTGA_SOFT_MASK_HELP = (
-    "<b>On</b>: alignments can only start in UPPERCASE bases. Lowercase (soft-masked) "
-    "regions, e.g. from RepeatMasker, cannot start an alignment, although an alignment "
-    "may extend into them.<br>"
-    "<b>Off</b> (default): repeats are aligned like any other sequence, which is usually "
-    "what you want when studying repeats.<br>"
-    "A file that is lowercase throughout counts as unmasked. RepeatViewer sends -M "
-    "(FastGA 1.5 and later) or leaves out -N (older FastGA), depending on the installed "
-    "version. With soft masking on, the reference is indexed on every run instead of once."
+    "Alignments may only <b>start</b> in uppercase bases; lowercase (soft-masked) "
+    "regions cannot start a hit. Default off. With soft masking on, a reference index "
+    "is rebuilt every run instead of reused."
 )
 _FASTGA_KEEP_INDEX_HELP = (
     "FastGA <b>-k</b>: keep the genome index (.1gdb / .gix) so later runs skip building "
@@ -2481,51 +3272,54 @@ _FASTGA_KEEP_INDEX_HELP = (
     ".repeatviewer_fastga folder next to it, and reused while the reference is unchanged. "
     "Indexes of the other files are always removed."
 )
-_FASTGA_TEMP_HELP = (
-    "FastGA <b>-P</b>: folder for FastGA's temporary files, which can be large.<br>"
-    "<b>Empty</b> (default): a hidden folder next to the input, removed afterwards.<br>"
-    "Choose a folder only if that disk is too small or slow. The macOS temporary folder "
-    "of a desktop app is small, and FastGA fails there with \"Cannot write overlap "
-    "gather file\"."
-)
 
 
 class FastGaPanel(QWidget):
     """The FastGA tab of the Alignment window.
 
     Holds the FastGA-only settings (mode, reference, output, alignment
-    parameters, index and temp files). Right-click action and the process
-    window live in the Options tab of the owning dialog.
+    parameters, and index). Right-click action and the process window live
+    in the Options tab of the owning dialog.
     """
 
     changed = Signal()
 
-    def __init__(self, *, initial=None, files=None, parent=None) -> None:
+    def __init__(
+        self,
+        *,
+        initial=None,
+        files=None,
+        default_reference: Path | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
-        from repeatviewer.backends.fastga_dotplot import FORMAT_LABELS
         from repeatviewer.job_options import FastGaOptions
 
         opts = initial or FastGaOptions()
         self._initial = opts
         self._files = [Path(p) for p in (files or [])]
+        self._default_reference = self._resolve_existing_path(default_reference)
 
         # --- Mode ---------------------------------------------------------
         self._mode_group = QButtonGroup(self)
         self._mode_buttons: dict[str, QRadioButton] = {}
         for label, value in (
-            ("Each file against itself", FASTGA_MODE_SELF),
-            ("Selected files against each other", FASTGA_MODE_PAIRS),
-            ("Selected files against a reference", FASTGA_MODE_REFERENCE),
+            ("Self comparison", FASTGA_MODE_SELF),
+            ("Pairwise comparison", FASTGA_MODE_PAIRS),
+            ("Compare against a reference", FASTGA_MODE_REFERENCE),
         ):
             radio = QRadioButton(label, self)
             self._mode_group.addButton(radio)
             self._mode_buttons[value] = radio
         self._set_mode(opts.mode)
 
+        reference_initial = self._resolve_existing_path(opts.reference_fasta)
+        if reference_initial is None:
+            reference_initial = self._default_reference
         self._reference = PathBrowseRow(
             self,
-            initial=opts.reference_fasta or None,
-            placeholder="Reference FASTA: click it in Files, or Browse",
+            initial=str(reference_initial) if reference_initial else None,
+            placeholder="Click in Files or Browse…",
             browse_title="Choose the reference FASTA",
             file_filter=(
                 "FASTA (*.fa *.fasta *.fna *.fa.gz *.fasta.gz *.fna.gz);;"
@@ -2536,29 +3330,31 @@ class FastGaPanel(QWidget):
         self._combined = QCheckBox("Write all into one file", self)
         self._combined.setChecked(bool(opts.reference_combined))
 
-        self._summary = QLabel(self)
-        self._summary.setWordWrap(True)
-        self._summary.setMinimumWidth(420)
-        self._summary.setStyleSheet("color: palette(mid);")
-
         # --- Output -------------------------------------------------------
         self._format = QComboBox(self)
-        for label, value in FORMAT_LABELS:
+        for label, value in (
+            ("PAF", FASTGA_FORMAT_PAF),
+            ("PSL", FASTGA_FORMAT_PSL),
+            ("FastGA alignment (.1aln)", FASTGA_FORMAT_ALN),
+        ):
             self._format.addItem(label, value)
-        idx = self._format.findData(opts.output_format)
-        self._format.setCurrentIndex(idx if idx >= 0 else 0)
+        self._format.setFixedWidth(280)
+        self._cigar = QCheckBox("Include CIGAR", self)
+        self._cs = QCheckBox("Include CS tag", self)
+        self._apply_saved_output_format(opts.output_format)
 
-        # --- Alignment ----------------------------------------------------
+        # --- Settings (threads + advanced) --------------------------------
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 128)
         self._threads.setValue(max(1, opts.threads))
+        self._threads.setFixedWidth(280)
+
         self._identity = QDoubleSpinBox(self)
         self._identity.setRange(0.5, 1.0)
         self._identity.setSingleStep(0.05)
         self._identity.setDecimals(2)
         self._identity.setValue(opts.min_identity)
         self._min_length = QSpinBox(self)
-        # Below 100 FastGA fails: a hit needs a 40 bp seed and 85 bp of chain.
         self._min_length.setRange(100, 1_000_000)
         self._min_length.setSingleStep(50)
         self._min_length.setValue(max(100, opts.min_length))
@@ -2573,53 +3369,72 @@ class FastGaPanel(QWidget):
         self._chain_gap.setRange(1, 10_000_000)
         self._chain_gap.setSingleStep(100)
         self._chain_gap.setValue(max(1, opts.chain_gap))
-        self._symmetric = QCheckBox("Symmetric seeding (-S)", self)
+        self._symmetric = QCheckBox("Symmetric alignment (-S)", self)
         self._symmetric.setChecked(opts.symmetric)
-        self._soft_mask = QCheckBox("Use soft mask (lowercase bases)", self)
+        self._soft_mask = QCheckBox("Soft masking (uppercase seeds only)", self)
         self._soft_mask.setChecked(bool(opts.soft_mask))
         for field in (
-            self._format, self._threads, self._identity, self._min_length,
-            self._seed_freq, self._chain_coverage, self._chain_gap,
+            self._identity, self._min_length, self._seed_freq,
+            self._chain_coverage, self._chain_gap,
         ):
             field.setFixedWidth(280)
 
-        # --- Index & temp files -------------------------------------------
         self._keep_index = QCheckBox("Keep genome index (-k)", self)
         self._keep_index.setChecked(opts.keep_index)
-        self._temp_dir = PathBrowseRow(
-            self,
-            initial=opts.temp_dir or None,
-            placeholder="Empty: a hidden folder next to the input",
-            browse_title="Folder for FastGA temporary files",
-            mode="directory",
-        )
-        self._temp_dir.setFixedWidth(360)
 
-        self._platform_note = QLabel(
-            "Large genomes take minutes to hours; cancel from the progress bar."
-            + ("  Windows: FastGA runs in WSL." if sys.platform == "win32" else ""),
+        # --- Inputs -------------------------------------------------------
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        if opts.input_source == FASTGA_INPUT_DEFINE:
+            self._input_define.setChecked(True)
+        else:
+            self._input_selected.setChecked(True)
+        initial_inputs = [
+            Path(p) for p in (opts.input_paths or []) if str(p).strip()
+        ]
+        self._define_inputs = TeMultiInputFilesWidget(
             self,
+            initial=initial_inputs or None,
+            start_empty=False,
+            placeholder="Click in Files/Folders or Browse…",
+            browse_title="Choose a FASTA genome",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file or folder path. Click a file or folder in "
+                "the panel to fill a row, or use Browse."
+            ),
+            path_mode="file_or_directory",
         )
-        self._platform_note.setWordWrap(True)
-        self._platform_note.setStyleSheet("color: palette(mid);")
+        self._path_target = "input"  # or "reference"
 
         # --- Layout -------------------------------------------------------
-        def _section(title: str) -> QLabel:
-            label = QLabel(f"<b>{title}</b>", self)
-            return label
+        def _section(title: str, parent: QWidget | None = None) -> QLabel:
+            return QLabel(f"<b>{title}</b>", parent or self)
 
-        form = QFormLayout(self)
-        form.setContentsMargins(16, 14, 16, 14)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 10, 16, 10)
+        root.setSpacing(4)
+
+        basic = QWidget(self)
+        self._basic_panel = basic
+        form = QFormLayout(basic)
+        form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(8)
+        form.setVerticalSpacing(4)
 
-        form.addRow(_section("Mode"))
-        mode_box = QWidget(self)
+        form.addRow(_section("Mode", basic))
+        mode_box = QWidget(basic)
         mode_layout = QVBoxLayout(mode_box)
         mode_layout.setContentsMargins(0, 0, 0, 0)
-        mode_layout.setSpacing(4)
+        mode_layout.setSpacing(2)
         for index, radio in enumerate(self._mode_buttons.values()):
             if index == 0:
                 mode_layout.addWidget(
@@ -2628,49 +3443,226 @@ class FastGaPanel(QWidget):
             else:
                 mode_layout.addWidget(radio)
         form.addRow("", mode_box)
-        form.addRow("Reference:", field_with_help(
-            self._reference, "Reference", _FASTGA_REFERENCE_HELP))
-        form.addRow("", field_with_help(
-            self._combined, "Write all into one file", _FASTGA_COMBINED_HELP))
-        form.addRow("", self._summary)
+        self._reference_label = QLabel("Reference genome:", basic)
+        self._reference_field = field_with_help(
+            self._reference, "Reference genome", _FASTGA_REFERENCE_HELP
+        )
+        form.addRow(self._reference_label, self._reference_field)
+        self._combined_field = field_with_help(
+            self._combined, "Write all into one file", _FASTGA_COMBINED_HELP
+        )
+        form.addRow("", self._combined_field)
+        self._combined_label = form.labelForField(self._combined_field)
 
-        form.addRow(_section("Output"))
-        form.addRow("Output format:", field_with_help(
-            self._format, "Output format", _FASTGA_FORMAT_HELP))
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Inputs", basic))
+        inputs_box = QWidget(basic)
+        inputs_layout = QVBoxLayout(inputs_box)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(2)
+        inputs_layout.addWidget(
+            field_with_help(
+                self._input_selected, "FastGA inputs", _FASTGA_INPUTS_HELP, stretch=True
+            )
+        )
+        inputs_layout.addWidget(self._input_define)
+        form.addRow("", inputs_box)
+        form.addRow("", self._define_inputs)
 
-        form.addRow(_section("Alignment"))
-        form.addRow("-T (threads):", field_with_help(
-            self._threads, "Threads", _FASTGA_THREADS_HELP))
-        form.addRow("-i (min identity):", field_with_help(
-            self._identity, "Minimum identity", _FASTGA_IDENTITY_HELP))
-        form.addRow("-l (min length):", field_with_help(
-            self._min_length, "Minimum length", _FASTGA_LENGTH_HELP))
-        form.addRow("-f (seed cutoff):", field_with_help(
-            self._seed_freq, "Seed cutoff", _FASTGA_SEED_HELP))
-        form.addRow("-c (chain coverage):", field_with_help(
-            self._chain_coverage, "Chain coverage", _FASTGA_CHAIN_COV_HELP))
-        form.addRow("-s (chain gap):", field_with_help(
-            self._chain_gap, "Chain gap", _FASTGA_CHAIN_GAP_HELP))
-        form.addRow("", field_with_help(
-            self._symmetric, "Symmetric seeding", _FASTGA_SYMMETRIC_HELP))
-        form.addRow("", field_with_help(
-            self._soft_mask, "Soft mask", _FASTGA_SOFT_MASK_HELP))
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Output", basic))
+        form.addRow(
+            "Format:",
+            field_with_help(self._format, "Output format", _FASTGA_FORMAT_HELP),
+        )
+        form.addRow("", self._cigar)
+        form.addRow("", self._cs)
 
-        form.addRow(_section("Index &amp; temp files"))
-        form.addRow("", field_with_help(
-            self._keep_index, "Keep genome index", _FASTGA_KEEP_INDEX_HELP))
-        form.addRow("Temp dir (-P):", field_with_help(
-            self._temp_dir, "Temporary files", _FASTGA_TEMP_HELP))
-        form.addRow("", self._platform_note)
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Settings", basic))
+        form.addRow(
+            "Threads:",
+            field_with_help(self._threads, "Threads", _FASTGA_THREADS_HELP),
+        )
+        root.addWidget(basic)
+
+        # Sibling of the basic form (not a QFormLayout row): hide/show is reliable.
+        self._advanced_panel = QWidget(self)
+        self._advanced_panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        advanced_form = QFormLayout(self._advanced_panel)
+        advanced_form.setContentsMargins(0, 4, 0, 0)
+        advanced_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        advanced_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        advanced_form.setHorizontalSpacing(12)
+        advanced_form.setVerticalSpacing(4)
+        advanced_form.addRow(_form_section_separator())
+        self._advanced_header = _section("Advanced Settings", self._advanced_panel)
+        advanced_form.addRow(self._advanced_header)
+        advanced_form.addRow(
+            "Minimum identity:",
+            field_with_help(self._identity, "Minimum identity", _FASTGA_IDENTITY_HELP),
+        )
+        advanced_form.addRow(
+            "Minimum alignment length:",
+            field_with_help(self._min_length, "Minimum alignment length", _FASTGA_LENGTH_HELP),
+        )
+        advanced_form.addRow(
+            "Seed cutoff:",
+            field_with_help(self._seed_freq, "Seed cutoff", _FASTGA_SEED_HELP),
+        )
+        advanced_form.addRow(
+            "Chain coverage:",
+            field_with_help(self._chain_coverage, "Chain coverage", _FASTGA_CHAIN_COV_HELP),
+        )
+        advanced_form.addRow(
+            "Chain gap:",
+            field_with_help(self._chain_gap, "Chain gap", _FASTGA_CHAIN_GAP_HELP),
+        )
+        advanced_form.addRow(
+            "",
+            field_with_help(self._soft_mask, "Soft masking", _FASTGA_SOFT_MASK_HELP),
+        )
+        advanced_form.addRow(
+            "",
+            field_with_help(self._symmetric, "Symmetric alignment", _FASTGA_SYMMETRIC_HELP),
+        )
+        advanced_form.addRow(
+            "",
+            field_with_help(self._keep_index, "Keep genome index", _FASTGA_KEEP_INDEX_HELP),
+        )
+        root.addWidget(self._advanced_panel)
+        self.set_advanced_visible(False)
 
         for radio in self._mode_buttons.values():
             radio.toggled.connect(self._sync)
+        self._input_selected.toggled.connect(self._sync)
+        self._input_define.toggled.connect(self._sync)
+        self._define_inputs.paths_changed.connect(self._sync)
+        self._define_inputs.field_activated.connect(
+            lambda: setattr(self, "_path_target", "input")
+        )
+        self._reference.activated.connect(
+            lambda _w: setattr(self, "_path_target", "reference")
+        )
         self._reference.text_changed.connect(lambda _t: self._sync())
         self._combined.toggled.connect(self._sync)
-        self._format.currentIndexChanged.connect(self._sync)
+        self._format.currentIndexChanged.connect(self._on_format_changed)
+        self._cigar.toggled.connect(self._on_cigar_toggled)
+        self._cs.toggled.connect(self._on_cs_toggled)
+        for w in (
+            self._threads, self._identity, self._min_length, self._seed_freq,
+            self._chain_coverage, self._chain_gap, self._symmetric, self._soft_mask,
+            self._keep_index,
+        ):
+            if hasattr(w, "valueChanged"):
+                w.valueChanged.connect(lambda _v: self.changed.emit())
+            elif hasattr(w, "toggled"):
+                w.toggled.connect(lambda _c: self.changed.emit())
         self._sync()
 
     # ----------------------------------------------------------------- state
+
+    def set_advanced_visible(self, visible: bool) -> None:
+        self._advanced_panel.setVisible(visible)
+        # Force the layout to drop or reclaim height (setVisible alone can leave a gap).
+        if visible:
+            self._advanced_panel.setMaximumHeight(16777215)
+        else:
+            self._advanced_panel.setMaximumHeight(0)
+        self._advanced_panel.updateGeometry()
+        root = self.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self.updateGeometry()
+
+    def advanced_visible(self) -> bool:
+        return bool(self._advanced_panel.isVisible())
+
+    def compact_content_height(self) -> int:
+        """Height of the FastGA form without Advanced Settings."""
+        root = self.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        basic_h = max(
+            self._basic_panel.minimumSizeHint().height(),
+            self._basic_panel.sizeHint().height(),
+        )
+        return margin_h + basic_h + spacing
+
+    def _apply_saved_output_format(self, fmt: str) -> None:
+        fmt = str(fmt)
+        self._cigar.blockSignals(True)
+        self._cs.blockSignals(True)
+        self._cigar.setChecked(False)
+        self._cs.setChecked(False)
+        if fmt in (FASTGA_FORMAT_PAFX, FASTGA_FORMAT_PAFM):
+            idx = self._format.findData(FASTGA_FORMAT_PAF)
+            self._format.setCurrentIndex(idx if idx >= 0 else 0)
+            self._cigar.setChecked(True)
+        elif fmt in (FASTGA_FORMAT_PAFS, FASTGA_FORMAT_PAFS_LONG):
+            idx = self._format.findData(FASTGA_FORMAT_PAF)
+            self._format.setCurrentIndex(idx if idx >= 0 else 0)
+            self._cs.setChecked(True)
+        elif fmt == FASTGA_FORMAT_PSL:
+            idx = self._format.findData(FASTGA_FORMAT_PSL)
+            self._format.setCurrentIndex(idx if idx >= 0 else 0)
+        elif fmt == FASTGA_FORMAT_ALN:
+            idx = self._format.findData(FASTGA_FORMAT_ALN)
+            self._format.setCurrentIndex(idx if idx >= 0 else 0)
+        else:
+            idx = self._format.findData(FASTGA_FORMAT_PAF)
+            self._format.setCurrentIndex(idx if idx >= 0 else 0)
+        self._cigar.blockSignals(False)
+        self._cs.blockSignals(False)
+        self._update_paf_extras_enabled()
+
+    def _output_format_value(self) -> str:
+        fmt = str(self._format.currentData())
+        if fmt == FASTGA_FORMAT_PAF:
+            if self._cigar.isChecked():
+                return FASTGA_FORMAT_PAFX
+            if self._cs.isChecked():
+                return FASTGA_FORMAT_PAFS
+            return FASTGA_FORMAT_PAF
+        return fmt
+
+    def _update_paf_extras_enabled(self) -> None:
+        paf = str(self._format.currentData()) == FASTGA_FORMAT_PAF
+        self._cigar.setEnabled(paf)
+        self._cs.setEnabled(paf)
+        if not paf:
+            self._cigar.blockSignals(True)
+            self._cs.blockSignals(True)
+            self._cigar.setChecked(False)
+            self._cs.setChecked(False)
+            self._cigar.blockSignals(False)
+            self._cs.blockSignals(False)
+
+    def _on_format_changed(self, _index: int) -> None:
+        self._update_paf_extras_enabled()
+        self._sync()
+
+    def _on_cigar_toggled(self, checked: bool) -> None:
+        if checked:
+            self._cs.blockSignals(True)
+            self._cs.setChecked(False)
+            self._cs.blockSignals(False)
+        self._sync()
+
+    def _on_cs_toggled(self, checked: bool) -> None:
+        if checked:
+            self._cigar.blockSignals(True)
+            self._cigar.setChecked(False)
+            self._cigar.blockSignals(False)
+        self._sync()
 
     def _set_mode(self, mode: str) -> None:
         radio = self._mode_buttons.get(mode) or self._mode_buttons[FASTGA_MODE_SELF]
@@ -2685,51 +3677,105 @@ class FastGaPanel(QWidget):
     def reference(self) -> Path | None:
         return self._reference.path()
 
+    def input_source(self) -> str:
+        if self._input_define.isChecked():
+            return FASTGA_INPUT_DEFINE
+        return FASTGA_INPUT_SELECTED
+
+    def defined_input_paths(self) -> list[Path]:
+        return self._define_inputs.paths()
+
     def files(self) -> list[Path]:
+        """Query genomes FastGA will run on (selection or expanded Define inputs)."""
+        if self.input_source() == FASTGA_INPUT_DEFINE:
+            from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+
+            return expand_fastga_input_paths(self.defined_input_paths())
         return list(self._files)
 
-    def summary_text(self) -> str:
-        return self._summary.text()
-
     def _sync(self) -> None:
-        from repeatviewer.backends.fastga_dotplot import fastga_mode_summary
-
         mode = self.mode()
         reference_mode = mode == FASTGA_MODE_REFERENCE
-        self._reference.setEnabled(reference_mode)
-        self._combined.setEnabled(reference_mode)
-        reference = self.reference() if reference_mode else None
-        combined = self._combined.isChecked()
-        self._summary.setText(
-            fastga_mode_summary(self._files, mode, reference, combined=combined)
-        )
+        for widget in (
+            self._reference_label,
+            self._reference_field,
+            self._combined_label,
+            self._combined_field,
+        ):
+            if widget is not None:
+                widget.setVisible(reference_mode)
+
+        define = self.input_source() == FASTGA_INPUT_DEFINE
+        self._define_inputs.setVisible(define)
 
         self.changed.emit()
 
     def apply_path_from_panel(self, path: Path) -> bool:
-        """A FASTA clicked in Files becomes the reference (reference mode only)."""
-        if self.mode() != FASTGA_MODE_REFERENCE:
-            return False
+        """Fill Define-inputs or the reference from a Files-panel click."""
+        from repeatviewer.backends.fastga_dotplot import is_fastga_fasta_path
+
         candidate = Path(path).expanduser()
-        name = candidate.name.lower()
-        if name.endswith(".gz"):
-            name = name[:-3]
-        if not candidate.is_file() or Path(name).suffix not in {
-            ".fa", ".fasta", ".fna", ".fas",
-        }:
+        try:
+            candidate = candidate.resolve()
+        except OSError:
             return False
-        self._reference.set_path(candidate)
-        return True
+        if not candidate.is_file() or not is_fastga_fasta_path(candidate):
+            return False
+
+        define = self.input_source() == FASTGA_INPUT_DEFINE
+        prefer_input = define and self._path_target == "input"
+        prefer_reference = (
+            self.mode() == FASTGA_MODE_REFERENCE and self._path_target == "reference"
+        )
+        if prefer_input or (define and not prefer_reference):
+            if self._define_inputs.accept_path(candidate):
+                self._path_target = "input"
+                return True
+        if self.mode() == FASTGA_MODE_REFERENCE:
+            self._reference.set_path(candidate)
+            self._path_target = "reference"
+            return True
+        if define and self._define_inputs.accept_path(candidate):
+            self._path_target = "input"
+            return True
+        return False
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        """Fill a Define-inputs row from a Folders-panel click."""
+        if self.input_source() != FASTGA_INPUT_DEFINE:
+            return False
+        candidate = Path(folder).expanduser()
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            return False
+        if not candidate.is_dir():
+            return False
+        if self._define_inputs.accept_path(candidate):
+            self._path_target = "input"
+            return True
+        return False
+
+    @staticmethod
+    def _resolve_existing_path(path) -> Path | None:
+        if path is None or path == "":
+            return None
+        candidate = Path(path).expanduser()
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            return None
+        return candidate if candidate.is_file() else None
 
     def restore_defaults(self) -> None:
         from repeatviewer.job_options import FastGaOptions
 
         d = FastGaOptions()
         self._set_mode(d.mode)
+        self._input_selected.setChecked(True)
+        self._define_inputs.clear_paths()
         self._combined.setChecked(d.reference_combined)
-        idx = self._format.findData(d.output_format)
-        if idx >= 0:
-            self._format.setCurrentIndex(idx)
+        self._apply_saved_output_format(d.output_format)
         self._threads.setValue(max(1, d.threads))
         self._identity.setValue(d.min_identity)
         self._min_length.setValue(max(100, d.min_length))
@@ -2739,18 +3785,19 @@ class FastGaPanel(QWidget):
         self._symmetric.setChecked(d.symmetric)
         self._soft_mask.setChecked(d.soft_mask)
         self._keep_index.setChecked(d.keep_index)
-        self._temp_dir.clear()
-        # The reference is a choice of file, not a parameter: kept.
+        # Reference defaults to the project setting genome when available.
+        if self._default_reference is not None:
+            self._reference.set_path(self._default_reference)
         self._sync()
 
-    def options(self, *, right_click_action: str, show_process_window: bool):
+    def options(self, *, right_click_action: str, show_process_window: bool,
+                close_process_window_when_finished: bool = False):
         from dataclasses import replace
 
         ref = self._reference.path()
-        temp = self._temp_dir.path()
         return replace(
             self._initial,
-            output_format=str(self._format.currentData()),
+            output_format=self._output_format_value(),
             threads=int(self._threads.value()),
             min_identity=float(self._identity.value()),
             min_length=int(self._min_length.value()),
@@ -2763,9 +3810,15 @@ class FastGaPanel(QWidget):
             mode=self.mode(),
             reference_fasta=str(ref) if ref else "",
             reference_combined=self._combined.isChecked(),
-            temp_dir=str(temp) if temp else "",
+            temp_dir="",
+            input_source=self.input_source(),
+            input_paths=[str(p) for p in self.defined_input_paths()],
+            selected_pairs=None,
             right_click_action=right_click_action,
             show_process_window=bool(show_process_window),
+            close_process_window_when_finished=bool(
+                close_process_window_when_finished
+            ),
         )
 
 
@@ -3454,10 +4507,15 @@ class BlastParamsDialog(QDialog):
         exe_box_layout.addWidget(self._use_system_blast)
         options_layout.addWidget(exe_box)
 
-        process_box, self._show_process_window = make_process_output_box(
-            self,
-            tool_name="BLAST",
-            checked=bool(getattr(opts, "show_process_window", False)),
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="BLAST",
+                checked=bool(getattr(opts, "show_process_window", False)),
+                close_when_finished=bool(
+                    getattr(opts, "close_process_window_when_finished", False)
+                ),
+            )
         )
         options_layout.addWidget(process_box)
 
@@ -3707,6 +4765,9 @@ class BlastParamsDialog(QDialog):
         self._blastx_database.setCurrentIndex(0)
         self._use_system_blast.setChecked(False)
         self._show_process_window.setChecked(defaults.show_process_window)
+        self._close_process_window.setChecked(
+            defaults.close_process_window_when_finished
+        )
         self._right_click_buttons[BLAST_PROGRAM_BLASTN].setChecked(True)
 
     def use_system_blast(self) -> bool:
@@ -3754,6 +4815,9 @@ class BlastParamsDialog(QDialog):
             blastx_write_gff=self._blastx_write_gff.isChecked(),
             right_click_program=self._selected_right_click_program(),
             show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=(
+                self._close_process_window.isChecked()
+            ),
         )
 
     def _selected_right_click_program(self) -> str:
@@ -4096,10 +5160,15 @@ class FlexidotParamsDialog(QDialog):
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 
-        process_box, self._show_process_window = make_process_output_box(
-            self,
-            tool_name="Flexidot",
-            checked=bool(getattr(opts, "show_process_window", False)),
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="Flexidot",
+                checked=bool(getattr(opts, "show_process_window", False)),
+                close_when_finished=bool(
+                    getattr(opts, "close_process_window_when_finished", False)
+                ),
+            )
         )
 
         options_tab = QWidget(self)
@@ -4181,6 +5250,9 @@ class FlexidotParamsDialog(QDialog):
         self._length_scaling.setChecked(defaults.length_scaling)
         self._combined.setChecked(defaults.combined)
         self._show_process_window.setChecked(defaults.show_process_window)
+        self._close_process_window.setChecked(
+            defaults.close_process_window_when_finished
+        )
         self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
         self._on_sequence_type_changed()
 
@@ -4216,6 +5288,9 @@ class FlexidotParamsDialog(QDialog):
             modes=DEFAULT_FLEXIDOT_MODES,
             right_click_action=right_click_action,
             show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=(
+                self._close_process_window.isChecked()
+            ),
         )
 
 
@@ -5927,6 +7002,7 @@ class _TeInputFileRow(QWidget):
         browse_title: str = "Select RepeatMasker .out or BLAST hit table",
         file_filter: str = "TE hit tables (*.out *_b.txt *_blast.txt);;RepeatMasker (*.out);;All files (*)",
         start_dir: str = "",
+        path_mode: str = "file",
     ) -> None:
         super().__init__(parent)
         self._row = PathBrowseRow(
@@ -5936,7 +7012,7 @@ class _TeInputFileRow(QWidget):
             browse_title=browse_title,
             file_filter=file_filter,
             start_dir=start_dir,
-            mode="file",
+            mode=path_mode,
         )
         self._path = self._row.line_edit()
         self._row.activated.connect(lambda _w: self.activated.emit(self))
@@ -5956,7 +7032,7 @@ class _TeInputFileRow(QWidget):
     def set_removable(self, removable: bool) -> None:
         self._remove_btn.setVisible(removable)
 
-    def set_path(self, path: Path) -> None:
+    def set_path(self, path: Path | None) -> None:
         self._row.set_path(path)
 
     def path(self) -> Path | None:
@@ -5985,6 +7061,7 @@ class TeMultiInputFilesWidget(QWidget):
         ),
         allow_multiple: bool = True,
         start_dir: str = "",
+        path_mode: str = "file",
     ) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
@@ -5993,6 +7070,7 @@ class TeMultiInputFilesWidget(QWidget):
         self._file_filter = file_filter
         self._allow_multiple = allow_multiple
         self._start_dir = start_dir
+        self._path_mode = path_mode
 
         self._rows_layout = QVBoxLayout()
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -6037,6 +7115,7 @@ class TeMultiInputFilesWidget(QWidget):
             browse_title=self._browse_title,
             file_filter=self._file_filter,
             start_dir=self._start_dir,
+            path_mode=self._path_mode,
         )
         row.remove_requested.connect(lambda r=row: self._remove_row(r))
         row.activated.connect(self._on_row_activated)
@@ -6081,6 +7160,50 @@ class TeMultiInputFilesWidget(QWidget):
     def set_primary_path(self, path: Path) -> bool:
         return self.set_path_at_focus(path)
 
+    def accept_path(self, path: Path) -> bool:
+        """Fill the focused row, else the first empty row, else append / overwrite."""
+        if self.set_path_at_focus(path):
+            return True
+        for row in self._rows:
+            if row.path() is None:
+                row.set_path(path)
+                self._on_row_activated(row)
+                return True
+        if self._allow_multiple:
+            self.add_row(path, focus=True)
+            return True
+        if self._rows:
+            self._rows[0].set_path(path)
+            self._on_row_activated(self._rows[0])
+            return True
+        self.add_row(path, focus=True)
+        return True
+
+    def clear_paths(self) -> None:
+        while len(self._rows) > 1:
+            self._remove_row(self._rows[-1])
+        if self._rows:
+            self._rows[0].set_path(None)
+        else:
+            self.add_row()
+
+    def set_paths(self, paths: list[Path] | None) -> None:
+        paths = list(paths or [])
+        while len(self._rows) > 1:
+            self._remove_row(self._rows[-1])
+        if not paths:
+            if self._rows:
+                self._rows[0].set_path(None)
+            else:
+                self.add_row()
+            return
+        if not self._rows:
+            self.add_row(paths[0])
+        else:
+            self._rows[0].set_path(paths[0])
+        for path in paths[1:]:
+            self.add_row(path)
+
     def paths(self) -> list[Path]:
         out: list[Path] = []
         for row in self._rows:
@@ -6088,7 +7211,6 @@ class TeMultiInputFilesWidget(QWidget):
             if picked is not None:
                 out.append(picked.expanduser().resolve())
         return out
-
 
 class TeHitTableInputWidget(QWidget):
     """RepeatMasker .out / BLAST hit table path entry with browse."""
@@ -6135,14 +7257,16 @@ class GeneInputFileWidget(QWidget):
 
 
 def _form_section_separator() -> QWidget:
-    """Thin horizontal rule between major dialog sections."""
+    """Thin grey horizontal rule between major dialog sections."""
     host = QWidget()
-    host.setFixedHeight(9)
+    host.setFixedHeight(7)
     layout = QVBoxLayout(host)
     layout.setContentsMargins(0, 2, 0, 2)
     line = QFrame()
     line.setFrameShape(QFrame.Shape.HLine)
     line.setFrameShadow(QFrame.Shadow.Plain)
+    line.setFixedHeight(1)
+    line.setStyleSheet("background-color: palette(mid); border: none; max-height: 1px;")
     layout.addWidget(line)
     return host
 

@@ -88,6 +88,16 @@ def collect_datas_for(target: str) -> list[tuple[str, str]]:
             _add_file(datas, BACKENDS / "blast" / name, blast_dst)
         _add_tree(datas, BACKENDS / "mafft" / "macos", "repeatviewer/backends/mafft/macos")
         _add_file(datas, BACKENDS / "mafft" / "NOTICE.md", "repeatviewer/backends/mafft")
+        _add_tree(datas, BACKENDS / "iqtree" / "macos", "repeatviewer/backends/iqtree/macos")
+        _add_file(datas, BACKENDS / "iqtree" / "NOTICE.md", "repeatviewer/backends/iqtree")
+        # minimap2: ship only the host CPU bottle
+        mm_arch = "arm64" if cpu == "aarch64" else "x86_64"
+        _add_tree(
+            datas,
+            BACKENDS / "minimap2" / "macos" / mm_arch,
+            f"repeatviewer/backends/minimap2/macos/{mm_arch}",
+        )
+        _add_file(datas, BACKENDS / "minimap2" / "NOTICE.md", "repeatviewer/backends/minimap2")
         # Bundled MUSCLE for macOS is arm64-only in this repo.
         muscle_arch = "arm64" if cpu == "aarch64" else None
         if muscle_arch:
@@ -122,6 +132,24 @@ def collect_datas_for(target: str) -> list[tuple[str, str]]:
                 f"WARNING: bundled Linux BLAST/MAFFT are x86_64; "
                 f"skipping them for host CPU {cpu!r}. Use system tools or conda."
             )
+        # IQ-TREE Linux universal covers intel + arm via launcher.
+        _add_tree(datas, BACKENDS / "iqtree" / "linux", "repeatviewer/backends/iqtree/linux")
+        _add_file(datas, BACKENDS / "iqtree" / "NOTICE.md", "repeatviewer/backends/iqtree")
+        # Official minimap2 Linux binary is x86_64 only.
+        if cpu == "x86_64":
+            _add_tree(
+                datas,
+                BACKENDS / "minimap2" / "linux",
+                "repeatviewer/backends/minimap2/linux",
+            )
+            _add_file(
+                datas, BACKENDS / "minimap2" / "NOTICE.md", "repeatviewer/backends/minimap2"
+            )
+        else:
+            print(
+                f"WARNING: bundled Linux minimap2 is x86_64; "
+                f"skipping it for host CPU {cpu!r}."
+            )
         # MUSCLE: only the matching arch subdirectory (not both).
         if cpu in {"x86_64", "aarch64"}:
             _add_tree(
@@ -148,6 +176,18 @@ def collect_datas_for(target: str) -> list[tuple[str, str]]:
             "repeatviewer/backends/mafft/windows",
         )
         _add_file(datas, BACKENDS / "mafft" / "NOTICE.md", "repeatviewer/backends/mafft")
+        _add_tree(
+            datas,
+            BACKENDS / "iqtree" / "windows",
+            "repeatviewer/backends/iqtree/windows",
+        )
+        _add_file(datas, BACKENDS / "iqtree" / "NOTICE.md", "repeatviewer/backends/iqtree")
+        _add_tree(
+            datas,
+            BACKENDS / "minimap2" / "windows",
+            "repeatviewer/backends/minimap2/windows",
+        )
+        _add_file(datas, BACKENDS / "minimap2" / "NOTICE.md", "repeatviewer/backends/minimap2")
         _add_tree(
             datas,
             BACKENDS / "muscle" / "windows",

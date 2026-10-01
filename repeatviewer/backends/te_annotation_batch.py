@@ -159,13 +159,16 @@ def run_te_annotation_on_fasta(
     similarity_settings: SimilarityAnnotationSettings | None = None,
     use_system_blast: bool | None = None,
     cancel: JobCancellation | None = None,
-    progress: Callable[[str], None] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> list[Path]:
     """
     Run selected annotation modules on a FASTA (one or many sequences).
 
     Existing JSON sidecar features are kept and new detections are added on top.
     Returns paths to the JSON sidecar (and companion GFF3 when written).
+
+    ``progress(completed, total, label)`` is called after each sequence finishes
+    (and once with completed=0 when work starts).
     """
     if not options.auto_modes and not options.similarity_databases:
         raise ValueError("Select at least one annotation module.")
@@ -195,9 +198,18 @@ def run_te_annotation_on_fasta(
         for rid in record_ids
     }
 
+    def _detail_progress(message: str) -> None:
+        if progress is None:
+            return
+        # Keep the last completed count; detail-only updates use completed=-1 sentinel
+        # via a nested helper — callers that only care about sequence steps ignore this.
+        progress(-1, len(record_ids), message)
+
     # Single-sequence path: annotate the file directly (no temp split).
     if len(record_ids) == 1:
         rid = record_ids[0]
+        if progress is not None:
+            progress(0, 1, resolved.name)
         features = _annotate_one_record_fasta(
             resolved,
             options,
@@ -206,10 +218,12 @@ def run_te_annotation_on_fasta(
             use_blast=use_blast,
             base_features=tuple(existing_by_id.get(rid) or []),
             cancel=cancel,
-            progress=progress,
+            progress=_detail_progress,
             label=resolved.name,
         )
         features_by_id = {rid: features}
+        if progress is not None:
+            progress(1, 1, resolved.name)
     else:
         features_by_id = {rid: list(existing_by_id.get(rid) or []) for rid in record_ids}
         records = list(SeqIO.parse(str(resolved), "fasta"))
@@ -225,7 +239,9 @@ def run_te_annotation_on_fasta(
                 check_cancelled(cancel)
                 if progress is not None:
                     progress(
-                        f"{resolved.name}: sequence {index + 1}/{total} ({rid})"
+                        index,
+                        total,
+                        f"{resolved.name}: sequence {index + 1}/{total} ({rid})",
                     )
                 original_id = rid.split("#", 1)[0]
                 temp_record = SeqRecord(
@@ -245,10 +261,16 @@ def run_te_annotation_on_fasta(
                     use_blast=use_blast,
                     base_features=tuple(features_by_id.get(rid) or []),
                     cancel=cancel,
-                    progress=progress,
+                    progress=_detail_progress,
                     label=f"{resolved.name} [{rid}]",
                 )
                 features_by_id[rid] = new_feats
+                if progress is not None:
+                    progress(
+                        index + 1,
+                        total,
+                        f"{resolved.name}: sequence {index + 1}/{total} ({rid})",
+                    )
 
     json_path, gff_path = save_annotations_multi(
         resolved,

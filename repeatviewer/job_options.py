@@ -212,6 +212,20 @@ RIGHT_CLICK_ALIGNERS = (ALIGNER_MAFFT, ALIGNER_MUSCLE, ALIGNER_FASTGA)
 MUSCLE_MODE_ALIGN = "align"
 MUSCLE_MODE_SUPER5 = "super5"
 MUSCLE_MODES = (MUSCLE_MODE_ALIGN, MUSCLE_MODE_SUPER5)
+MUSCLE_PERM_NONE = "none"
+MUSCLE_PERM_ABC = "abc"
+MUSCLE_PERM_ACB = "acb"
+MUSCLE_PERM_BCA = "bca"
+MUSCLE_PERMS = (MUSCLE_PERM_NONE, MUSCLE_PERM_ABC, MUSCLE_PERM_ACB, MUSCLE_PERM_BCA)
+
+# Where Align / FastGA query files come from (Inputs radios).
+ALIGN_INPUT_SELECTED = "selected"  # Files-panel selection
+ALIGN_INPUT_DEFINE = "define"      # explicit file/folder paths
+ALIGN_INPUT_SOURCES = (ALIGN_INPUT_SELECTED, ALIGN_INPUT_DEFINE)
+# FastGA keeps these aliases (same values).
+FASTGA_INPUT_SELECTED = ALIGN_INPUT_SELECTED
+FASTGA_INPUT_DEFINE = ALIGN_INPUT_DEFINE
+FASTGA_INPUT_SOURCES = ALIGN_INPUT_SOURCES
 
 
 @dataclass
@@ -230,12 +244,19 @@ class AlignOptions:
     adjust_direction: bool = False
     muscle_mode: str = MUSCLE_MODE_ALIGN
     muscle_num_threads: int = field(default_factory=_default_tool_threads)
+    muscle_perm: str = MUSCLE_PERM_NONE
+    muscle_perturb: int = 0
+    muscle_input_source: str = ALIGN_INPUT_SELECTED
+    muscle_input_paths: list[str] = field(default_factory=list)
+    mafft_input_source: str = ALIGN_INPUT_SELECTED
+    mafft_input_paths: list[str] = field(default_factory=list)
     # Per-aligner "combine all selected files into one MSA" choice.
     mafft_combined: bool = False
     muscle_combined: bool = False
     # Which aligner a right-click on the Align toolbar button runs.
     right_click_aligner: str = ALIGNER_MAFFT
     show_process_window: bool = False
+    close_process_window_when_finished: bool = False
 
 
 # FastGA output formats (CLI streaming flags, except 1aln which uses -1:file).
@@ -262,10 +283,10 @@ FASTGA_RIGHT_CLICK_ACTIONS = (FASTGA_RIGHT_CLICK_RUN, FASTGA_RIGHT_CLICK_DIALOG)
 
 DEFAULT_FASTGA_MIN_IDENTITY = 0.7
 DEFAULT_FASTGA_MIN_LENGTH = 100
-DEFAULT_FASTGA_SEED_FREQ = 200
+DEFAULT_FASTGA_SEED_FREQ = 10  # FastGA's own -f default
 DEFAULT_FASTGA_CHAIN_COVERAGE = 85
 DEFAULT_FASTGA_CHAIN_GAP = 1000
-DEFAULT_FASTGA_SYMMETRIC = True
+DEFAULT_FASTGA_SYMMETRIC = False  # FastGA default: off; enable in Advanced for repeats
 DEFAULT_FASTGA_KEEP_INDEX = True
 DEFAULT_FASTGA_SOFT_MASK = False
 DEFAULT_FASTGA_SHOW_PROCESS_WINDOW = False
@@ -303,8 +324,15 @@ class FastGaOptions:
     reference_fasta: str = ""
     reference_combined: bool = False
     temp_dir: str = ""
+    input_source: str = FASTGA_INPUT_SELECTED
+    # Absolute FASTA files and/or folders (expanded at run time). Used when
+    # input_source is FASTGA_INPUT_DEFINE.
+    input_paths: list[str] = field(default_factory=list)
     right_click_action: str = FASTGA_RIGHT_CLICK_RUN
     show_process_window: bool = DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = False
+    # Ephemeral: absolute path pairs chosen in the UI (None = every pair). Not saved.
+    selected_pairs: list[tuple[str, str]] | None = None
 
 
 def load_fastga_options() -> FastGaOptions:
@@ -319,6 +347,11 @@ def load_fastga_options() -> FastGaOptions:
     if mode not in FASTGA_MODES:
         # Settings from before the Mode choice: "Do each pair comparison".
         mode = FASTGA_MODE_PAIRS if _to_bool(v.get("pairwise"), False) else FASTGA_MODE_SELF
+    input_source = str(v.get("input_source", FASTGA_INPUT_SELECTED) or "")
+    if input_source not in FASTGA_INPUT_SOURCES:
+        input_source = FASTGA_INPUT_SELECTED
+    raw_inputs = str(v.get("input_paths", "") or "")
+    input_paths = [p.strip() for p in raw_inputs.split("\n") if p.strip()]
     return FastGaOptions(
         output_format=fmt,
         threads=max(1, int(v.get("threads", _default_tool_threads()))),
@@ -327,7 +360,12 @@ def load_fastga_options() -> FastGaOptions:
             min(1.0, float(v.get("min_identity", DEFAULT_FASTGA_MIN_IDENTITY))),
         ),
         min_length=max(1, int(v.get("min_length", DEFAULT_FASTGA_MIN_LENGTH))),
-        seed_freq=max(1, int(v.get("seed_freq", DEFAULT_FASTGA_SEED_FREQ))),
+        seed_freq=max(
+            1,
+            DEFAULT_FASTGA_SEED_FREQ
+            if int(v.get("seed_freq", DEFAULT_FASTGA_SEED_FREQ)) == 200
+            else int(v.get("seed_freq", DEFAULT_FASTGA_SEED_FREQ)),
+        ),  # 200 was RepeatViewer's old default; FastGA's -f default is 10
         chain_coverage=max(
             1, int(v.get("chain_coverage", DEFAULT_FASTGA_CHAIN_COVERAGE))
         ),
@@ -339,9 +377,14 @@ def load_fastga_options() -> FastGaOptions:
         reference_fasta=str(v.get("reference_fasta", "") or ""),
         reference_combined=_to_bool(v.get("reference_combined"), False),
         temp_dir=str(v.get("temp_dir", "") or ""),
+        input_source=input_source,
+        input_paths=input_paths,
         right_click_action=right_click_action,
         show_process_window=_to_bool(
             v.get("show_process_window"), DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
+        ),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"), False
         ),
     )
 
@@ -366,8 +409,11 @@ def save_fastga_options(opts: FastGaOptions) -> None:
             "reference_fasta": opts.reference_fasta,
             "reference_combined": opts.reference_combined,
             "temp_dir": opts.temp_dir,
+            "input_source": opts.input_source,
+            "input_paths": "\n".join(opts.input_paths),
             "right_click_action": opts.right_click_action,
             "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": opts.close_process_window_when_finished,
         },
     )
 
@@ -410,6 +456,7 @@ class BlastOptions:
     # Which program a right-click on the BLAST toolbar button runs.
     right_click_program: str = BLAST_PROGRAM_BLASTN
     show_process_window: bool = False
+    close_process_window_when_finished: bool = False
 
     @property
     def active_database_name(self) -> str | None:
@@ -535,6 +582,7 @@ class FlexidotOptions:
     modes: tuple[str, ...] = DEFAULT_FLEXIDOT_MODES
     right_click_action: str = FLEXIDOT_RIGHT_CLICK_RUN
     show_process_window: bool = False
+    close_process_window_when_finished: bool = False
 
 
 TE_ANNOTATION_RIGHT_CLICK_RUN = "run"
@@ -914,6 +962,9 @@ def load_blast_options() -> BlastOptions:
             else BLAST_PROGRAM_BLASTN
         ),
         show_process_window=_to_bool(v.get("show_process_window"), False),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"), False
+        ),
     )
 
 
@@ -956,6 +1007,9 @@ def save_blast_options(opts: BlastOptions) -> None:
             "blastx_num_threads": opts.blastx_num_threads,
             "right_click_program": opts.right_click_program,
             "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": (
+                opts.close_process_window_when_finished
+            ),
         },
     )
 
@@ -1126,6 +1180,25 @@ def load_align_options() -> AlignOptions:
     muscle_mode = str(v.get("muscle_mode", MUSCLE_MODE_ALIGN))
     if muscle_mode not in MUSCLE_MODES:
         muscle_mode = MUSCLE_MODE_ALIGN
+    muscle_perm = str(v.get("muscle_perm", MUSCLE_PERM_NONE))
+    if muscle_perm not in MUSCLE_PERMS:
+        muscle_perm = MUSCLE_PERM_NONE
+    muscle_input_source = str(v.get("muscle_input_source", ALIGN_INPUT_SELECTED) or "")
+    if muscle_input_source not in ALIGN_INPUT_SOURCES:
+        muscle_input_source = ALIGN_INPUT_SELECTED
+    raw_muscle_paths = v.get("muscle_input_paths", []) or []
+    if isinstance(raw_muscle_paths, str):
+        muscle_input_paths = [p.strip() for p in raw_muscle_paths.split("\n") if p.strip()]
+    else:
+        muscle_input_paths = [str(p).strip() for p in raw_muscle_paths if str(p).strip()]
+    mafft_input_source = str(v.get("mafft_input_source", ALIGN_INPUT_SELECTED) or "")
+    if mafft_input_source not in ALIGN_INPUT_SOURCES:
+        mafft_input_source = ALIGN_INPUT_SELECTED
+    raw_mafft_paths = v.get("mafft_input_paths", []) or []
+    if isinstance(raw_mafft_paths, str):
+        mafft_input_paths = [p.strip() for p in raw_mafft_paths.split("\n") if p.strip()]
+    else:
+        mafft_input_paths = [str(p).strip() for p in raw_mafft_paths if str(p).strip()]
     right_click_aligner = str(v.get("right_click_aligner", ALIGNER_MAFFT))
     if right_click_aligner not in RIGHT_CLICK_ALIGNERS:
         right_click_aligner = ALIGNER_MAFFT
@@ -1148,10 +1221,17 @@ def load_align_options() -> AlignOptions:
         muscle_num_threads=max(
             1, int(v.get("muscle_num_threads", _default_tool_threads()))
         ),
+        muscle_perm=muscle_perm,
+        muscle_perturb=max(0, int(v.get("muscle_perturb", 0))),
+        muscle_input_source=muscle_input_source,
+        muscle_input_paths=muscle_input_paths,
+        mafft_input_source=mafft_input_source,
+        mafft_input_paths=mafft_input_paths,
         mafft_combined=_flag("mafft_combined"),
         muscle_combined=_flag("muscle_combined"),
         right_click_aligner=right_click_aligner,
         show_process_window=_flag("show_process_window"),
+        close_process_window_when_finished=_flag("close_process_window_when_finished"),
     )
 
 
@@ -1171,10 +1251,19 @@ def save_align_options(opts: AlignOptions) -> None:
             "adjust_direction": opts.adjust_direction,
             "muscle_mode": opts.muscle_mode,
             "muscle_num_threads": opts.muscle_num_threads,
+            "muscle_perm": opts.muscle_perm,
+            "muscle_perturb": opts.muscle_perturb,
+            "muscle_input_source": opts.muscle_input_source,
+            "muscle_input_paths": list(opts.muscle_input_paths or []),
+            "mafft_input_source": opts.mafft_input_source,
+            "mafft_input_paths": list(opts.mafft_input_paths or []),
             "mafft_combined": opts.mafft_combined,
             "muscle_combined": opts.muscle_combined,
             "right_click_aligner": opts.right_click_aligner,
             "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": (
+                opts.close_process_window_when_finished
+            ),
         },
     )
 
@@ -1666,6 +1755,10 @@ def load_flexidot_options() -> FlexidotOptions:
         right_click_action=right_click_action,
         show_process_window=str(v.get("show_process_window", "false")).lower()
         in {"1", "true", "yes"},
+        close_process_window_when_finished=str(
+            v.get("close_process_window_when_finished", "false")
+        ).lower()
+        in {"1", "true", "yes"},
     )
 
 
@@ -1693,6 +1786,9 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
                 else FLEXIDOT_RIGHT_CLICK_RUN
             ),
             "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": (
+                opts.close_process_window_when_finished
+            ),
         },
     )
 
@@ -1906,8 +2002,13 @@ class TreeOptions:
     # Options tab
     right_click_action: str = TREE_RIGHT_CLICK_RUN
     show_process_window: bool = False
+    close_process_window_when_finished: bool = False
+    right_click_engine: str = TREE_ENGINE_IQTREE   # program run by right-click
     use_system_mafft: bool = False
-    use_system_path: bool = False      # tree programs: system PATH only
+    use_system_iqtree: bool = False    # per program: system PATH only
+    use_system_fastme: bool = False
+    use_system_fasttree: bool = False
+    use_system_path: bool = False      # old single switch: counts for every tree program
     # Methylation check: also build a tree without CG / CHG columns and compare.
     # Set in the Tree tab (saved) or for one run by Tools → Tree → masked run.
     methylation_mask: str = ""         # "", "CG" or "CG_CHG"
@@ -1930,6 +2031,8 @@ def load_tree_options() -> TreeOptions:
     outgroup = v.get("outgroup") or []
     if isinstance(outgroup, str):
         outgroup = [x for x in outgroup.split(",") if x]
+    engine = _pick("engine", TREE_ENGINES, d.engine)
+    legacy_system = _to_bool(v.get("use_system_path"), False)
     return TreeOptions(
         align_mode=_pick("align_mode", TREE_ALIGN_MODES, d.align_mode),
         mafft_strategy=str(v.get("mafft_strategy", d.mafft_strategy)),
@@ -1944,7 +2047,7 @@ def load_tree_options() -> TreeOptions:
         min_coverage=_num("min_coverage", d.min_coverage, float, 0.0, 1.0),
         coverage_reference=_pick("coverage_reference", TREE_COVERAGE_REFERENCES,
                                  d.coverage_reference),
-        engine=_pick("engine", TREE_ENGINES, d.engine),
+        engine=engine,
         model=str(v.get("model", d.model) or d.model).strip(),
         runs=_num("runs", d.runs, int, 1, 100),
         seed=_num("seed", d.seed, int, 1, 2_000_000_000),
@@ -1959,8 +2062,17 @@ def load_tree_options() -> TreeOptions:
             "right_click_action", TREE_RIGHT_CLICK_ACTIONS, d.right_click_action
         ),
         show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"),
+            d.close_process_window_when_finished,
+        ),
+        right_click_engine=_pick("right_click_engine", TREE_ENGINES, engine),
         use_system_mafft=_to_bool(v.get("use_system_mafft"), d.use_system_mafft),
-        use_system_path=_to_bool(v.get("use_system_path"), d.use_system_path),
+        # settings saved before the per-program boxes: the one switch meant all three
+        use_system_iqtree=_to_bool(v.get("use_system_iqtree"), legacy_system),
+        use_system_fastme=_to_bool(v.get("use_system_fastme"), legacy_system),
+        use_system_fasttree=_to_bool(v.get("use_system_fasttree"), legacy_system),
+        use_system_path=False,
     )
 
 
@@ -1993,8 +2105,15 @@ def save_tree_options(opts: TreeOptions) -> None:
             "outgroup": list(opts.outgroup),
             "right_click_action": opts.right_click_action,
             "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": (
+                opts.close_process_window_when_finished
+            ),
+            "right_click_engine": opts.right_click_engine,
             "use_system_mafft": opts.use_system_mafft,
-            "use_system_path": opts.use_system_path,
+            "use_system_iqtree": opts.use_system_iqtree or opts.use_system_path,
+            "use_system_fastme": opts.use_system_fastme or opts.use_system_path,
+            "use_system_fasttree": opts.use_system_fasttree or opts.use_system_path,
+            "use_system_path": False,
         },
     )
 
@@ -2069,6 +2188,7 @@ class MapOptions:
     # Options tab
     right_click_action: str = MAP_RIGHT_CLICK_RUN
     show_process_window: bool = False
+    close_process_window_when_finished: bool = False
     use_system_path: bool = False
 
 
@@ -2109,6 +2229,10 @@ def load_map_options() -> MapOptions:
         right_click_action=_pick("right_click_action", MAP_RIGHT_CLICK_ACTIONS,
                                  d.right_click_action),
         show_process_window=_to_bool(v.get("show_process_window"), d.show_process_window),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"),
+            d.close_process_window_when_finished,
+        ),
         use_system_path=_to_bool(v.get("use_system_path"), d.use_system_path),
     )
 
@@ -2137,6 +2261,9 @@ def save_map_options(opts: MapOptions) -> None:
             "max_display_reads": opts.max_display_reads,
             "right_click_action": opts.right_click_action,
             "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": (
+                opts.close_process_window_when_finished
+            ),
             "use_system_path": opts.use_system_path,
         },
     )
