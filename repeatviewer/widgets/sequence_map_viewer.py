@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import platform
+from bisect import bisect_left, bisect_right
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -267,6 +268,9 @@ _NO_COLOR_FG = QColor("#222222")
 _NO_COLOR_BG = QColor("#fafafa")
 _SELECTION_FILL = QColor(10, 40, 120, 100)
 _SELECTION_BORDER = QColor(5, 20, 70, 255)
+# Edit > Find hits (the current hit is also selected, so it shows in blue on top).
+_FIND_HIT_FILL = QColor(245, 158, 11, 110)
+_FIND_HIT_BORDER = QColor(180, 83, 9, 230)
 _FEATURE_SELECTION_BORDER = QColor("#0b5cab")
 _FEATURE_SELECTION_OUTLINE = QColor("#ffffff")
 _FEATURE_SELECTION_OVERLAY = QColor(11, 92, 171, 120)
@@ -1915,6 +1919,9 @@ class SequenceMapCanvas(QWidget):
         self._selected_indices: set[int] = set()
         self._select_start_bp: int | None = None
         self._select_end_bp: int | None = None
+        self._find_hits: list[tuple[int, int]] = []
+        self._find_starts: list[int] = []
+        self._find_max_len = 0
         self._drag_select = False
         self._mouse_grabbed = False
         self._pending_selection_emit: tuple[int, int] | None = None
@@ -2148,6 +2155,16 @@ class SequenceMapCanvas(QWidget):
         self._select_end_bp = None
         self._selected_indices.clear()
         self.update()
+
+    def set_find_hits(self, hits: list[tuple[int, int]]) -> None:
+        """Edit > Find hits to highlight (1-based inclusive ranges); [] clears."""
+        self._find_hits = sorted((min(int(a), int(b)), max(int(a), int(b))) for a, b in hits)
+        self._find_starts = [a for a, _b in self._find_hits]
+        self._find_max_len = max((b - a + 1 for a, b in self._find_hits), default=0)
+        self.update()
+
+    def find_hits(self) -> list[tuple[int, int]]:
+        return list(self._find_hits)
 
     def selection_range(self) -> tuple[int, int] | None:
         if self._select_start_bp is None or self._select_end_bp is None:
@@ -2684,6 +2701,8 @@ class SequenceMapCanvas(QWidget):
                 )
 
         clip = QRectF(event.rect())
+        if self._find_hits and not self.uses_wrap():
+            self._paint_find_hits(painter, clip)
         sel = self.selection_range()
         if sel:
             a, b = sel
@@ -2713,6 +2732,27 @@ class SequenceMapCanvas(QWidget):
                     painter.drawRect(rect)
             painter.setPen(Qt.PenStyle.NoPen)
         painter.end()
+
+    def _paint_find_hits(self, painter: QPainter, clip: QRectF) -> None:
+        """Amber boxes for the Find hits that are on screen (bisect, not all hits)."""
+        origin_x, origin_y, cell_w, cell_h = self._nucleotide_cell_geometry()
+        if cell_w <= 0:
+            return
+        first_bp = int((clip.left() + self._scroll_px - origin_x) / cell_w) + 1 - self._find_max_len
+        last_bp = int((clip.right() + self._scroll_px - origin_x) / cell_w) + 2
+        lo = bisect_left(self._find_starts, max(1, first_bp))
+        hi = bisect_right(self._find_starts, last_bp)
+        top = float(origin_y - _SELECTION_HIGHLIGHT_MARGIN)
+        height = float(cell_h + 2 * _SELECTION_HIGHLIGHT_MARGIN)
+        painter.setPen(QPen(_FIND_HIT_BORDER, 1))
+        for a, b in self._find_hits[lo:hi]:
+            x1 = origin_x + (a - 1) * cell_w - self._scroll_px
+            x2 = origin_x + b * cell_w - self._scroll_px
+            rect = QRectF(x1, top, max(2.0, x2 - x1), height)
+            if clip.intersects(rect):
+                painter.fillRect(rect, _FIND_HIT_FILL)
+                painter.drawRect(rect)
+        painter.setPen(Qt.PenStyle.NoPen)
 
     def _selection_paint_rect(self, sel: tuple[int, int]) -> QRect:
         """Pixel rect for a selection range (including highlight margin)."""
@@ -3628,6 +3668,46 @@ class SequenceMapWidget(QWidget):
         max_scroll = self._hbar.maximum()
         self._hbar.setValue(max(0, min(max_scroll, target)))
         self._sync_overview_now()
+
+    def show_region(self, start: int, end: int, *, _attempt: int = 0) -> None:
+        """Select [start, end] and bring it into view (Edit > Find, Go To Position).
+
+        Unlike select_by_position, this keeps the current zoom when the region
+        fits and the letters are readable; otherwise it zooms so the region is
+        shown with some sequence on either side.
+        """
+        if self._data is None or self.is_too_long_for_display():
+            return
+        self._layout_intent_generation += 1
+        viewport_w = self._scroll_viewport_width()
+        if (not self.isVisible() or viewport_w <= 20) and _attempt < 40:
+            QTimer.singleShot(
+                50,
+                lambda s=int(start), e=int(end), a=_attempt + 1: self.show_region(
+                    s, e, _attempt=a
+                ),
+            )
+            return
+        a, b = sorted((int(start), int(end)))
+        self._canvas.set_selection_range(a, b)
+        self._sync_position_spins(a, b)
+        span = max(1, b - a + 1)
+        usable_w = max(1.0, float(viewport_w - _LEFT_MARGIN - _RIGHT_MARGIN))
+        visible_bp = usable_w / max(self._canvas.pixels_per_bp(), 1e-9)
+        if not self._canvas.shows_letters() or span > 0.9 * visible_bp:
+            target_ppb = usable_w / max(3 * span, 60)  # the region with context
+            letters_ppb = float(self._canvas._font_letter_cell_size()[0])
+            if span * letters_ppb <= 0.9 * usable_w:
+                target_ppb = max(target_ppb, letters_ppb)  # readable letters when it fits
+            target_ppb = min(target_ppb, usable_w / span)  # the whole region stays on screen
+            target_ppb = max(_FIT_MIN_PPB, min(self._canvas.zoom_ppb_max(), target_ppb))
+            self._apply_zoom_ppb(target_ppb, sync_slider=True)
+        self._scroll_to_bp_range(a, b)
+        QTimer.singleShot(0, lambda lo=a, hi=b: self._scroll_to_bp_range(lo, hi))
+        self.refresh_layout()
+
+    def set_find_hits(self, hits: list[tuple[int, int]]) -> None:
+        self._canvas.set_find_hits(hits)
 
     def select_by_position(self, start: int, end: int, *, _attempt: int = 0) -> None:
         if self._data is None or self.is_too_long_for_display():
@@ -5550,6 +5630,73 @@ class SequenceMapPanel(QWidget):
         """Select and zoom/scroll the map to a (1-based, inclusive) bp range."""
         self.jump_to_region(start, end)
 
+    # ------------------------------------------------ Edit > Find / Go To / Copy
+
+    def active_sequence_id(self) -> str:
+        data = self._loaded_data or self._map.data()
+        return str(getattr(data, "sequence_id", "") or "")
+
+    def active_sequence_length(self) -> int:
+        data = self._map.data()
+        return len(data.sequence) if data is not None else 0
+
+    def is_too_long_for_display(self) -> bool:
+        return self._map.is_too_long_for_display()
+
+    def show_find_hit(
+        self,
+        seq_id: str,
+        start: int,
+        end: int,
+        hits: list[tuple[int, int]],
+        *,
+        whole_sequence: bool = False,
+    ) -> bool:
+        """Highlight ``hits`` and select/show [start, end] of ``seq_id``. False if not shown."""
+        if self._map.data() is None:
+            self.load_path(self._path, fit_after_load=False)
+        if seq_id and not self.ensure_active_sequence(seq_id):
+            return False
+        if self._map.data() is None or self._map.is_too_long_for_display():
+            return False
+        self._map.set_find_hits(hits)
+        if whole_sequence:
+            self._map.fit_window()
+            self._map._canvas.set_selection_range(start, end)
+        else:
+            self._map.show_region(start, end)
+        return True
+
+    def clear_find_hits(self) -> None:
+        self._map.set_find_hits([])
+
+    def copy_selection_to_clipboard(self) -> str | None:
+        """Cmd+C: selected annotations as before, else the selected bases as text."""
+        data = self._loaded_data or self._map.data()
+        if data is None or not getattr(data, "sequence", ""):
+            return None
+        if self._selected_features():
+            self._copy_selected_feature_sequences()
+            return "Copied the selected annotation sequence(s)"
+        selection = self._map.selection_range()
+        if selection is None:
+            return None
+        a, b = selection
+        fragment = data.sequence[a - 1 : b]
+        if not fragment:
+            return None
+        QApplication.clipboard().setText(fragment)
+        return f"Copied {len(fragment):,} bp ({data.sequence_id}:{a:,}-{b:,})"
+
+    def add_features_and_save(self, features: list[SequenceFeature]) -> bool:
+        """Append features to the shown sequence and save the annotations."""
+        if self._map.data() is None or not features:
+            return False
+        current = list(self._map.features())
+        current.extend(features)
+        self._map.set_features(current)
+        return self.save_annotations(silent=True)
+
     def fasta_path(self) -> Path:
         return self._path
 
@@ -5557,6 +5704,8 @@ class SequenceMapPanel(QWidget):
         return self._map.is_dirty()
 
     def load_path(self, path: Path, *, fit_after_load: bool = True) -> None:
+        if path.expanduser().resolve() != self._path:
+            self._map.set_find_hits([])  # hits belong to the previous file
         self._path = path.expanduser().resolve()
         try:
             data = load_sequence_map_data(self._path)
