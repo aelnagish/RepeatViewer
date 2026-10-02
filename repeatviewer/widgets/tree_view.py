@@ -7,7 +7,7 @@ Opens ``.treefile`` (IQ-TREE), ``.nwk``, ``.newick``, ``.tre`` and ``.tree``.
 * Edit (right-click a branch, or the Edit menu for the selected branch):
   reroot here, midpoint root, swap branches, collapse / expand a clade,
   colour a clade, show one clade only; collapse all branches below a support
-  value; undo (Cmd+Z / Ctrl+Z).
+  value; undo (Cmd+Z / Ctrl+Z) and redo (Cmd+Shift+Z / Ctrl+Shift+Z).
 * Keep: colours, collapsed clades and view settings are remembered in a hidden
   file next to the tree (``.<tree name>.view.json``). Rerooting and swapping
   change the tree itself, which is never overwritten: Save → "Tree"
@@ -163,7 +163,7 @@ EDIT_HELP = (
     "next to the tree: the original sequences from your input, or as aligned.<br>"
     "<b>Double-click a tip</b> (or right-click it → Show in alignment) to see that sequence "
     "in the tree's alignment, highlighted.<br>"
-    "Undo: Cmd+Z / Ctrl+Z.<br>"
+    "Undo: Cmd+Z / Ctrl+Z. Redo: Cmd+Shift+Z / Ctrl+Shift+Z.<br>"
     "Colours and collapsed clades are remembered for this tree. Rerooting and swapping "
     "change the tree: the file is never overwritten, use <b>Save → Tree</b>."
 )
@@ -935,6 +935,7 @@ class TreePanel(QWidget):
         self._model: tl.TreeModel | None = None
         self._state = TreeViewState()
         self._undo: list[tuple[tl.TreeModel, TreeViewState, TreeViewOptions]] = []
+        self._redo: list[tuple[tl.TreeModel, TreeViewState, TreeViewOptions]] = []
         self._display: Display | None = None
         self._selected: tuple[str, ...] | None = None
         self._opts = replace(_last_options)
@@ -1414,6 +1415,7 @@ class TreePanel(QWidget):
         self._path = new_path
         self._loaded_mtime = mtime
         self._undo.clear()
+        self._redo.clear()
         self._selected = None
         self._state = TreeViewState()
         try:
@@ -1723,6 +1725,8 @@ class TreePanel(QWidget):
         menu.addSeparator()
         act = menu.addAction("Undo", self.undo)
         act.setEnabled(bool(self._undo))
+        act = menu.addAction("Redo", self.redo)
+        act.setEnabled(bool(self._redo))
         menu.addAction("Save tree (.treefile)", self._save_tree_as)
 
     def _fill_edit_menu(self) -> None:
@@ -1754,9 +1758,11 @@ class TreePanel(QWidget):
     # ------------------------------------------------------------ edits
 
     def _push_undo(self) -> None:
+        # A new edit: what was undone can no longer be redone.
         if self._model is not None:
             self._undo.append((self._model, self._state.copy(), replace(self._opts)))
             del self._undo[:-50]
+        self._redo.clear()
         self._update_undo_button()
 
     def _update_undo_button(self) -> None:
@@ -1773,9 +1779,10 @@ class TreePanel(QWidget):
         # Cmd/Ctrl+Z inside the tree is the tree's own undo. Claiming the key
         # here (instead of a QShortcut) keeps it working in every window and
         # stops it competing with the main window's Edit > Undo shortcut, which
-        # would make the key do nothing.
-        if event.type() == QEvent.Type.ShortcutOverride and event.matches(
-            QKeySequence.StandardKey.Undo
+        # would make the key do nothing. Same for Redo (Cmd+Shift+Z / Ctrl+Shift+Z).
+        if event.type() == QEvent.Type.ShortcutOverride and (
+            event.matches(QKeySequence.StandardKey.Undo)
+            or event.matches(QKeySequence.StandardKey.Redo)
         ):
             event.accept()
             return True
@@ -1786,14 +1793,35 @@ class TreePanel(QWidget):
             self.undo()
             event.accept()
             return
+        if event.matches(QKeySequence.StandardKey.Redo):
+            self.redo()
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    def _snapshot(self) -> tuple[tl.TreeModel, TreeViewState, TreeViewOptions]:
+        return (self._model, self._state.copy(), replace(self._opts))
 
     def undo(self) -> None:
         if not self._undo:
             return
+        if self._model is not None:
+            self._redo.append(self._snapshot())
         self._model, self._state, self._opts = self._undo.pop()
         self._apply_options_to_controls()
         self._after_edit("undone")
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def redo(self) -> None:
+        if not self._redo:
+            return
+        if self._model is not None:
+            self._undo.append(self._snapshot())
+        self._model, self._state, self._opts = self._redo.pop()
+        self._apply_options_to_controls()
+        self._after_edit("redone")
 
     def _node_in_model(self, key) -> int | None:
         if self._model is None or key is None:

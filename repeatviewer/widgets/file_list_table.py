@@ -170,6 +170,7 @@ class FileListTableWidget(QTableWidget):
     copy_files_requested = Signal(list)
     paste_files_requested = Signal()
     rename_file_requested = Signal(Path)
+    batch_rename_requested = Signal(list)  # Edit > Batch Rename… for these files
     separate_fasta_requested = Signal(Path)
     separate_fasta_subfolders_requested = Signal(Path)
     extract_sequences_requested = Signal(Path)      # pick records out of one file
@@ -1044,6 +1045,10 @@ class FileListTableWidget(QTableWidget):
                     menu.addAction(
                         f"Open {len(paths)} Files in Text Editor",
                         lambda: self.open_in_text_editor_requested.emit(paths),
+                    )
+                    menu.addAction(
+                        "Batch Rename…",
+                        lambda ps=list(paths): self.batch_rename_requested.emit(ps),
                     )
                 menu.addSeparator()
                 if len(paths) == 1:

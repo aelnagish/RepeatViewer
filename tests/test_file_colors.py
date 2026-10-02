@@ -114,3 +114,19 @@ def test_replace_file_color_path(tmp_path: Path) -> None:
     assert get_file_color(new) == "#16a34a"
 
     settings.clear()
+
+
+def test_replace_file_color_paths_handles_swaps(tmp_path: Path) -> None:
+    from repeatviewer.widgets.file_colors import replace_file_color_paths
+
+    QApplication.instance() or QApplication([])
+    QSettings().clear()
+    a, b = tmp_path / "a.fa", tmp_path / "b.fa"
+    set_file_color(a, "#ff0000")
+    set_file_color(b, "#00ff00")
+    replace_file_color_paths([(a, b), (b, a)])
+    assert get_file_color(a) == "#00ff00"
+    assert get_file_color(b) == "#ff0000"
+    replace_file_color_paths([(a, tmp_path / "c.fa")])
+    assert get_file_color(tmp_path / "c.fa") == "#00ff00"
+    assert get_file_color(a) is None
