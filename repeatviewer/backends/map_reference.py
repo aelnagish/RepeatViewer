@@ -3,13 +3,13 @@
 Places sequences or reads on an (annotated) reference and reports what differs,
 like Geneious Prime's "Map to Reference", with additions for repeat work:
 
-* **Engines.** MAFFT ``--addfragments`` (bundled) for a few sequences on a short
-  reference, e.g. satellite variants on an annotated monomer array; minimap2 for
-  long reads or assemblies; Bowtie2 for short reads. ``auto`` picks by input.
-  Nothing is silently downgraded: a missing engine the user chose is an error
-  with an install hint; ``auto`` records any fallback in the report.
+* **Engines.** minimap2 for long reads or assemblies; HISAT2 for short DNA/RNA-seq.
+  ``auto`` picks between them by input. minimap2 is bundled where platform
+  builds exist; HISAT2 comes from conda or PATH. A missing engine the user
+  chose is an error with an install hint; ``auto`` records any fallback in the
+  report.
 * **No pysam / samtools.** minimap2 writes PAF with the long ``cs`` tag and
-  Bowtie2 writes SAM with ``MD``; both are parsed here in pure Python.
+  HISAT2 writes SAM; both are parsed here in pure Python.
 * **Annotation lift-over.** Every reference feature (``.RV.gff3``) is checked in
   every mapped sequence: intact, changed, partial, lost or not covered, with its
   position on the mapped sequence. Mapped sequences and the consensus are
@@ -45,11 +45,18 @@ import numpy as np
 
 from repeatviewer.job_options import (
     MAP_ENGINE_AUTO,
-    MAP_ENGINE_BOWTIE2,
+    MAP_ENGINE_HISAT2,
     MAP_ENGINE_MAFFT,
     MAP_ENGINE_MINIMAP2,
+    MAP_HISAT2_DNA,
+    MAP_HISAT2_RNA,
+    MAP_HISAT2_READS_PAIRED,
+    MAP_HISAT2_READS_SINGLE,
+    MAP_MINIMAP2_OUT_PAF,
+    MAP_MINIMAP2_OUT_SAM,
     MAP_MINIMAP2_PRESET_AUTO,
     MAP_MULTI_ALL,
+    MAP_MULTI_BEST,
     MAP_MULTI_NONE,
     MAP_NO_COVERAGE_REFERENCE,
     MAP_NO_COVERAGE_SKIP,
@@ -64,12 +71,9 @@ RVMAP_FORMAT = "repeatviewer-map"
 RVMAP_VERSION = 1
 RUN_STAMP_FORMAT = "%Y-%m-%d_%H%M"
 
-# Auto engine choice. MAFFT aligns every sequence against the whole reference,
-# so it is for small jobs; above these limits a read mapper is used.
-MAFFT_MAX_REFERENCE = 50_000
-MAFFT_MAX_QUERIES = 500
-MAFFT_MAX_QUERY_LENGTH = 50_000
+# Auto engine: HISAT2 for many short reads, otherwise minimap2.
 SHORT_READ_LENGTH = 400
+SHORT_READ_MIN_QUERIES = 500
 # Per-base detail (consensus, variants, lift-over) up to this reference length;
 # longer contigs get binned coverage and the reads only.
 DETAIL_LIMIT = 5_000_000
@@ -82,20 +86,18 @@ JSON_MAX_FEATURES = 20_000       # reference features per sequence stored in the
 
 ENGINE_LABELS = {
     MAP_ENGINE_AUTO: "Auto (choose by input)",
-    MAP_ENGINE_MAFFT: "MAFFT add fragments (few sequences, short reference)",
     MAP_ENGINE_MINIMAP2: "minimap2 (long reads, assemblies)",
-    MAP_ENGINE_BOWTIE2: "Bowtie2 (short reads)",
+    MAP_ENGINE_HISAT2: "HISAT2 (short DNA / RNA-seq)",
 }
 ENGINE_NAMES = {
-    MAP_ENGINE_MAFFT: "MAFFT",
     MAP_ENGINE_MINIMAP2: "minimap2",
-    MAP_ENGINE_BOWTIE2: "Bowtie2",
+    MAP_ENGINE_HISAT2: "HISAT2",
 }
 _EXECUTABLES = {
     MAP_ENGINE_MINIMAP2: ("minimap2",),
-    MAP_ENGINE_BOWTIE2: ("bowtie2",),
+    MAP_ENGINE_HISAT2: ("hisat2",),
 }
-_CONDA_PACKAGE = {MAP_ENGINE_MINIMAP2: "minimap2", MAP_ENGINE_BOWTIE2: "bowtie2"}
+_CONDA_PACKAGE = {MAP_ENGINE_MINIMAP2: "minimap2", MAP_ENGINE_HISAT2: "hisat2"}
 
 STATUS_INTACT = "intact"
 STATUS_CHANGED = "changed"
@@ -258,12 +260,12 @@ def revcomp(seq: str) -> str:
 
 
 def engine_executable(engine: str, *, system_path_only: bool = False) -> str | None:
-    """minimap2 / Bowtie2 executable.
+    """minimap2 / HISAT2 executable.
 
-    ``system_path_only``: PATH only. Otherwise for minimap2 the bundled binary,
-    then the conda env from Settings, then PATH. Bowtie2 is not bundled.
+    ``system_path_only``: PATH only. Otherwise prefer the bundled binary
+    (minimap2), then the conda env from Settings, then PATH.
     """
-    if engine == MAP_ENGINE_MINIMAP2 and not system_path_only:
+    if not system_path_only and engine == MAP_ENGINE_MINIMAP2:
         from repeatviewer.backends.minimap2_tools import bundled_minimap2_executable
 
         bundled = bundled_minimap2_executable()
@@ -281,18 +283,18 @@ def engine_executable(engine: str, *, system_path_only: bool = False) -> str | N
     return None
 
 
-def bowtie2_build_executable(bowtie2: str) -> str | None:
-    """``bowtie2-build`` next to ``bowtie2`` (same install), else PATH."""
-    sibling = Path(bowtie2).with_name("bowtie2-build")
+def hisat2_build_executable(hisat2: str) -> str | None:
+    """``hisat2-build`` next to ``hisat2`` (same install), else PATH."""
+    sibling = Path(hisat2).with_name("hisat2-build")
     if sibling.is_file():
         return str(sibling)
-    for name in ("bowtie2-build", "bowtie2-build.exe"):
-        sib = Path(bowtie2).parent / name
+    for name in ("hisat2-build", "hisat2-build.exe", "hisat2-build.bat"):
+        sib = Path(hisat2).parent / name
         if sib.is_file():
             return str(sib)
     from repeatviewer.conda_tools import which_tool
 
-    return which_tool("bowtie2-build") or shutil.which("bowtie2-build")
+    return which_tool("hisat2-build") or shutil.which("hisat2-build")
 
 
 def engine_install_hint(engine: str) -> str:
@@ -305,13 +307,19 @@ def engine_install_hint(engine: str) -> str:
         if bundled_minimap2_executable():
             return (
                 f"minimap2 {MINIMAP2_VERSION} is bundled with RepeatViewer. "
-                "Leave \"Use programs from the system PATH\" off to use it, "
-                "or tick that box to use your own install."
+                "Leave \"Use Minimap2 from the system PATH or defined Conda environment\" "
+                "off to use it, or tick that box to use your own install."
             )
         return (
             f"minimap2 {MINIMAP2_VERSION} should be bundled with RepeatViewer but was not found. "
             "Reinstall the app, or install it yourself:\n"
             "  conda install -c conda-forge -c bioconda minimap2"
+        )
+    if engine == MAP_ENGINE_HISAT2:
+        return (
+            "Install HISAT2 into the conda env set in File → Settings → External tools, "
+            "or put it on PATH:\n"
+            "  conda install -c conda-forge -c bioconda hisat2"
         )
     pkg = _CONDA_PACKAGE.get(engine, engine)
     return ("Install it into the conda env set in File → Settings → External tools:\n"
@@ -320,54 +328,100 @@ def engine_install_hint(engine: str) -> str:
 
 def engine_available(engine: str, *, system_path_only: bool = False) -> bool:
     if engine == MAP_ENGINE_MAFFT:
-        from repeatviewer.backends.sequence_aligner import mafft_command
-
-        return mafft_command(use_system_mafft=system_path_only) is not None
+        # MAFFT is no longer a Mapping engine.
+        return False
     return engine_executable(engine, system_path_only=system_path_only) is not None
 
 
 def choose_engine(ref_lengths: dict[str, int], queries: InputInfo) -> str:
-    """The engine ``auto`` uses for this input (see the module docstring)."""
-    single_short_ref = len(ref_lengths) == 1 and max(ref_lengths.values(), default=0) \
-        <= MAFFT_MAX_REFERENCE
-    if (single_short_ref and queries.complete and queries.n <= MAFFT_MAX_QUERIES
-            and queries.longest <= MAFFT_MAX_QUERY_LENGTH):
-        return MAP_ENGINE_MAFFT
-    if queries.median and queries.median < SHORT_READ_LENGTH and queries.n > MAFFT_MAX_QUERIES:
-        return MAP_ENGINE_BOWTIE2
+    """The engine ``auto`` uses for this input (minimap2 or HISAT2)."""
+    del ref_lengths  # kept for call-site compatibility
+    if (
+        queries.median
+        and queries.median < SHORT_READ_LENGTH
+        and queries.n > SHORT_READ_MIN_QUERIES
+    ):
+        return MAP_ENGINE_HISAT2
     return MAP_ENGINE_MINIMAP2
 
 
 def auto_minimap2_preset(queries: InputInfo) -> str:
+    """``-x`` value for Map Options → Preset = Auto.
+
+    * median length &lt; 400 bp → ``sr`` (short reads)
+    * ≤200 sequences and median ≥100 kb → ``asm20`` (assemblies / BACs)
+    * otherwise → ``map-ont`` (tolerant long-read default)
+    """
     if queries.median and queries.median < SHORT_READ_LENGTH:
         return "sr"
     if queries.n <= 200 and queries.median >= 100_000:
-        return "asm20"      # assembled contigs / BACs
-    return "map-ont"         # tolerant of both ONT and HiFi error profiles
+        return "asm20"
+    return "map-ont"
+
+
+def preset_kmer_window(preset: str) -> tuple[int, int]:
+    """Concrete ``-k`` / ``-w`` for a resolved minimap2 ``-x`` preset."""
+    from repeatviewer.job_options import MAP_MINIMAP2_PRESET_KW
+
+    return MAP_MINIMAP2_PRESET_KW.get(preset, (15, 10))
 
 
 def minimap2_arguments(opts: MapOptions, preset: str) -> list[str]:
-    args = ["-c", "--cs=long", "-x", preset, "-t", str(max(1, opts.threads))]
-    if opts.sensitivity == MAP_SENS_HIGH:
-        # smaller seeds and chaining thresholds: finds diverged repeat copies
-        args += ["-k", "11", "-w", "5", "-m", "20", "-s", "20"] if preset != "sr" \
-            else ["-k", "15", "-w", "5"]
-    elif opts.sensitivity != MAP_SENS_FAST and preset != "sr":
-        args += ["-k", "13", "-w", "7"]
+    """CLI args for minimap2 (after the executable; before reference and query)."""
+    out = getattr(opts, "minimap2_output", MAP_MINIMAP2_OUT_PAF) or MAP_MINIMAP2_OUT_PAF
+    args: list[str] = ["-x", preset, "-t", str(max(1, opts.threads))]
+    if out == MAP_MINIMAP2_OUT_SAM:
+        args = ["-a", "--MD", *args]
+        if getattr(opts, "minimap2_include_cs", False):
+            args.append("--cs=long")
+    else:
+        # PAF (default). Contig view needs long cs; CIGAR is optional (-c).
+        if getattr(opts, "minimap2_include_cigar", True):
+            args.append("-c")
+        if getattr(opts, "minimap2_include_cs", True):
+            args.append("--cs=long")
+        args.append("--paf-no-hit")
+    k = int(getattr(opts, "minimap2_kmer", 0) or 0)
+    w = int(getattr(opts, "minimap2_window", 0) or 0)
+    # Auto always uses the resolved preset's -k/-w; explicit presets use the spinbox values.
+    if getattr(opts, "minimap2_preset", "") == MAP_MINIMAP2_PRESET_AUTO or k <= 0 or w <= 0:
+        dk, dw = preset_kmer_window(preset)
+        if getattr(opts, "minimap2_preset", "") == MAP_MINIMAP2_PRESET_AUTO or k <= 0:
+            k = dk
+        if getattr(opts, "minimap2_preset", "") == MAP_MINIMAP2_PRESET_AUTO or w <= 0:
+            w = dw
+    args += ["-k", str(min(28, k)), "-w", str(w)]
     if opts.multiple_hits == MAP_MULTI_ALL:
         args += ["-N", "50", "-p", "0.95", "--secondary=yes"]
     else:
         args += ["--secondary=no"]
-    args += ["--paf-no-hit"]
     return args
 
 
-def bowtie2_arguments(opts: MapOptions) -> list[str]:
-    preset = {MAP_SENS_FAST: "--fast-local", MAP_SENS_HIGH: "--very-sensitive-local"}.get(
-        opts.sensitivity, "--sensitive-local")
-    args = [preset, "-p", str(max(1, opts.threads))]
+def hisat2_arguments(opts: MapOptions) -> list[str]:
+    """CLI args for HISAT2 (after the executable; before -x / -U / -S)."""
+    args = ["-p", str(max(1, opts.threads))]
+    library = getattr(opts, "hisat2_library", MAP_HISAT2_RNA) or MAP_HISAT2_RNA
+    if library == MAP_HISAT2_DNA:
+        args.append("--no-spliced-alignment")
+    else:
+        strand = getattr(opts, "hisat2_strandness", "") or ""
+        if strand:
+            args += ["--rna-strandness", strand]
+        if getattr(opts, "hisat2_dta", False):
+            args.append("--dta")
+        min_i = int(getattr(opts, "hisat2_min_intron", 20) or 20)
+        max_i = int(getattr(opts, "hisat2_max_intron", 500_000) or 500_000)
+        if min_i > 0:
+            args += ["--min-intronlen", str(min_i)]
+        if max_i > 0:
+            args += ["--max-intronlen", str(max(min_i, max_i))]
+    if getattr(opts, "hisat2_no_softclip", False):
+        args.append("--no-softclip")
     if opts.multiple_hits == MAP_MULTI_ALL:
-        args += ["-k", "20"]
+        args += ["-k", "20", "--secondary"]
+    elif opts.multiple_hits == MAP_MULTI_BEST:
+        args += ["-k", "1"]
     return args
 
 
@@ -693,15 +747,15 @@ def placement_verdict(read: MappedRead, opts: MapOptions, engine: str) -> str | 
     silently unless 'every equally good place' is chosen."""
     if read.kind == "secondary" and opts.multiple_hits != MAP_MULTI_ALL:
         return ""
-    ambiguous_mapq = 1 if engine == MAP_ENGINE_BOWTIE2 else 0
+    ambiguous_mapq = 1 if engine == MAP_ENGINE_HISAT2 else 0
     if (opts.multiple_hits == MAP_MULTI_NONE and read.kind == "primary"
-            and 0 <= read.mapq <= ambiguous_mapq and engine != MAP_ENGINE_MAFFT):
+            and 0 <= read.mapq <= ambiguous_mapq):
         return "ambiguous: fits equally well in several places"
     if read.aligned_bp < opts.min_aligned_bp:
         return f"aligned part shorter than {opts.min_aligned_bp} bp"
     if read.identity < opts.min_identity:
         return f"identity {read.identity:.0%} below {opts.min_identity:.0%}"
-    if read.mapq >= 0 and read.mapq < opts.min_mapq and engine != MAP_ENGINE_MAFFT:
+    if read.mapq >= 0 and read.mapq < opts.min_mapq:
         return f"mapping quality {read.mapq} below {opts.min_mapq}"
     return None
 
@@ -1230,6 +1284,93 @@ def _single_query_file(queries: list[Path], work: Path, *, fasta_only: bool = Fa
     return combined
 
 
+# Illumina-style mate tags in the filename (before .fastq / .fq / .gz).
+_HISAT2_MATE_RE = re.compile(
+    r"(?P<pre>.*?)(?P<tag>"
+    r"_R1|_R2"           # sample_R1.fastq.gz / sample_R1_001.fastq
+    r"|_1|_2"            # sample_1.fastq / sample_2.fastq
+    r"|\.1|\.2"          # sample.1.fq / sample.2.fq (older)
+    r")(?P<suf>(?:_\d+)?(?:\.(?:fastq|fq|fasta|fa|fna))+)$",
+    re.IGNORECASE,
+)
+
+
+def _hisat2_mate_parts(path: Path) -> tuple[str, int, str] | None:
+    """``(pair_key, mate 1|2, suffix)`` from an Illumina-style filename, else None."""
+    name = path.name
+    lower = name.lower()
+    if lower.endswith(".gz"):
+        name = name[:-3]
+    m = _HISAT2_MATE_RE.match(name)
+    if not m:
+        return None
+    tag = m.group("tag").upper().replace(".", "_")
+    if tag in ("_R1", "_1"):
+        mate = 1
+    elif tag in ("_R2", "_2"):
+        mate = 2
+    else:
+        return None
+    key = f"{m.group('pre').lower()}|{m.group('suf').lower()}"
+    return key, mate, m.group("suf")
+
+
+def pair_hisat2_queries(queries: list[Path]) -> tuple[list[Path], list[Path]]:
+    """Split Illumina R1/R2 FASTQ paths into mate-1 and mate-2 lists for ``-1``/``-2``.
+
+    Pairs by filename: ``*_R1*``/``*_R2*``, ``*_1.*``/``*_2.*``, or ``*.1.*``/``*.2.*``.
+    Raises ``MapReferenceError`` when files cannot be paired.
+    """
+    if len(queries) < 2:
+        raise MapReferenceError(
+            "Paired-end HISAT2 needs both mates (R1 and R2).\n\n"
+            "Select two FASTQ files whose names differ by R1/R2 (or _1/_2), "
+            "for example sample_R1.fastq.gz and sample_R2.fastq.gz."
+        )
+    if len(queries) % 2 != 0:
+        raise MapReferenceError(
+            "Paired-end HISAT2 needs an even number of FASTQ files "
+            f"(got {len(queries)}).\n\n"
+            "Each R1 file must have a matching R2 file."
+        )
+    buckets: dict[str, dict[int, Path]] = {}
+    unpaired: list[Path] = []
+    for path in queries:
+        parts = _hisat2_mate_parts(path)
+        if parts is None:
+            unpaired.append(path)
+            continue
+        key, mate, _suf = parts
+        slot = buckets.setdefault(key, {})
+        if mate in slot:
+            raise MapReferenceError(
+                f"Two files look like mate {mate} for the same sample:\n"
+                f"  {slot[mate].name}\n  {path.name}"
+            )
+        slot[mate] = path
+    if unpaired:
+        names = "\n".join(f"  {p.name}" for p in unpaired)
+        raise MapReferenceError(
+            "These files do not look like Illumina R1/R2 pairs:\n"
+            f"{names}\n\n"
+            "Rename them so mates share a name and differ by R1/R2 "
+            "(e.g. sample_R1.fastq.gz / sample_R2.fastq.gz), "
+            "or switch Reads to Single-end."
+        )
+    mates1: list[Path] = []
+    mates2: list[Path] = []
+    for key, slot in sorted(buckets.items()):
+        if set(slot) != {1, 2}:
+            have = ", ".join(p.name for p in slot.values())
+            missing = "R2" if 1 in slot else "R1"
+            raise MapReferenceError(
+                f"Incomplete pair (missing {missing}):\n  {have}"
+            )
+        mates1.append(slot[1])
+        mates2.append(slot[2])
+    return mates1, mates2
+
+
 def _mafft_version(command: list[str], env: dict) -> str:
     try:
         from repeatviewer.conda_tools import prepare_command
@@ -1248,40 +1389,43 @@ def _summarize_error(tool: str, returncode: int, output: str) -> str:
     return f"{tool} failed (exit {returncode})." + (f"\n\n{tail}" if tail else "")
 
 
-def bowtie2_index_dir(reference: Path) -> Path:
+def hisat2_index_dir(reference: Path) -> Path:
     ref = Path(reference).expanduser().resolve()
     st = ref.stat()
     sig = hashlib.md5(f"{ref.name}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()[:10]
-    return ref.parent / ".repeatviewer_bowtie2" / f"{ref.name}_{sig}"
+    return ref.parent / ".repeatviewer_hisat2" / f"{ref.name}_{sig}"
 
 
-def ensure_bowtie2_index(reference: Path, bowtie2: str, threads: int, commands: list[str],
-                         say, cancel) -> Path:
+def ensure_hisat2_index(reference: Path, hisat2: str, threads: int, commands: list[str],
+                        say, cancel) -> Path:
     """Build (once) and return the index prefix; kept next to the reference."""
     from repeatviewer.external_process import command_text, run_logged_process
 
-    folder = bowtie2_index_dir(reference)
+    folder = hisat2_index_dir(reference)
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError:
         # reference folder is read-only: keep the index in the user's home
-        folder = Path.home() / ".repeatviewer" / "bowtie2" / folder.name
+        folder = Path.home() / ".repeatviewer" / "hisat2" / folder.name
     prefix = folder / "index"
     done = folder / "BUILT"
-    if done.is_file():
+    # Small indexes use .1.ht2; large genomes use .1.ht2l.
+    if done.is_file() and (
+        Path(f"{prefix}.1.ht2").is_file() or Path(f"{prefix}.1.ht2l").is_file()
+    ):
         return prefix
-    build = bowtie2_build_executable(bowtie2)
+    build = hisat2_build_executable(hisat2)
     if not build:
-        raise MapReferenceError("bowtie2-build was not found next to bowtie2.\n\n"
-                                + engine_install_hint(MAP_ENGINE_BOWTIE2))
+        raise MapReferenceError("hisat2-build was not found next to hisat2.\n\n"
+                                + engine_install_hint(MAP_ENGINE_HISAT2))
     folder.mkdir(parents=True, exist_ok=True)
-    say("Indexing the reference for Bowtie2 (once)…")
-    cmd = [build, "--threads", str(max(1, threads)), str(reference), str(prefix)]
+    say("Indexing the reference for HISAT2 (once)…")
+    cmd = [build, "-p", str(max(1, threads)), str(reference), str(prefix)]
     commands.append(command_text(cmd))
-    result = run_logged_process(cmd, tool="bowtie2-build", cwd=folder, cancel=cancel)
+    result = run_logged_process(cmd, tool="hisat2-build", cwd=folder, cancel=cancel)
     _check_cancel(cancel)
     if result.returncode != 0:
-        raise MapReferenceError(_summarize_error("bowtie2-build", result.returncode,
+        raise MapReferenceError(_summarize_error("hisat2-build", result.returncode,
                                                  result.stderr or result.stdout))
     done.write_text(f"{reference}\n", encoding="utf-8")
     return prefix
@@ -1347,8 +1491,8 @@ def run_mafft_engine(reference: Path, ref_id: str, ref_seq: str, queries: list[P
 
 def run_minimap2_engine(reference: Path, queries: list[Path], opts: MapOptions,
                         info: InputInfo, work: Path, commands: list[str], cancel
-                        ) -> tuple[Path, str, str]:
-    """Run minimap2; returns (PAF path, preset, version)."""
+                        ) -> tuple[Path, str, str, str]:
+    """Run minimap2; returns (alignment path, preset, version, format ``paf``|``sam``)."""
     from repeatviewer.external_process import command_text, run_logged_process
 
     exe = engine_executable(MAP_ENGINE_MINIMAP2, system_path_only=opts.use_system_path)
@@ -1357,42 +1501,70 @@ def run_minimap2_engine(reference: Path, queries: list[Path], opts: MapOptions,
                                 + engine_install_hint(MAP_ENGINE_MINIMAP2))
     preset = (auto_minimap2_preset(info) if opts.minimap2_preset == MAP_MINIMAP2_PRESET_AUTO
               else opts.minimap2_preset)
+    out_fmt = getattr(opts, "minimap2_output", MAP_MINIMAP2_OUT_PAF) or MAP_MINIMAP2_OUT_PAF
+    # PAF without cs cannot build the contig view.
+    if out_fmt == MAP_MINIMAP2_OUT_PAF and not getattr(opts, "minimap2_include_cs", True):
+        raise MapReferenceError(
+            "PAF output needs Include CS tag (--cs=long) for the contig view.\n"
+            "Tick it under Minimap2 → Output, or choose SAM."
+        )
     query = _single_query_file(queries, work)
-    paf = work / "minimap2.paf"
-    cmd = [exe, *minimap2_arguments(opts, preset), "-o", str(paf), str(reference), str(query)]
+    if out_fmt == MAP_MINIMAP2_OUT_SAM:
+        out_path = work / "minimap2.sam"
+    else:
+        out_fmt = MAP_MINIMAP2_OUT_PAF
+        out_path = work / "minimap2.paf"
+    cmd = [exe, *minimap2_arguments(opts, preset), "-o", str(out_path),
+           str(reference), str(query)]
     commands.append(command_text(cmd))
     result = run_logged_process(cmd, tool="minimap2", cwd=work, cancel=cancel)
     _check_cancel(cancel)
-    if result.returncode != 0 or not paf.is_file():
+    if result.returncode != 0 or not out_path.is_file():
         raise MapReferenceError(_summarize_error("minimap2", result.returncode,
                                                  result.stderr or result.stdout))
-    return paf, preset, tool_version(exe)
+    return out_path, preset, tool_version(exe), out_fmt
 
 
-def run_bowtie2_engine(reference: Path, queries: list[Path], opts: MapOptions, work: Path,
-                       commands: list[str], say, cancel) -> tuple[Path, str]:
-    """Run Bowtie2 (building the index once); returns (SAM path, version)."""
+def run_hisat2_engine(reference: Path, queries: list[Path], opts: MapOptions, work: Path,
+                      commands: list[str], say, cancel) -> tuple[Path, str]:
+    """Run HISAT2 (building the index once); returns (SAM path, version)."""
     from repeatviewer.external_process import command_text, run_logged_process
 
-    exe = engine_executable(MAP_ENGINE_BOWTIE2, system_path_only=opts.use_system_path)
+    exe = engine_executable(MAP_ENGINE_HISAT2, system_path_only=opts.use_system_path)
     if not exe:
-        raise MapReferenceError("Bowtie2 was not found.\n\n"
-                                + engine_install_hint(MAP_ENGINE_BOWTIE2))
-    prefix = ensure_bowtie2_index(reference, exe, opts.threads, commands, say, cancel)
-    fastq = all(is_fastq(q) for q in queries)
-    query = queries[0] if len(queries) == 1 else _single_query_file(queries, work,
-                                                                    fasta_only=True)
-    if len(queries) > 1:
-        fastq = False
-    sam = work / "bowtie2.sam"
-    cmd = [exe, *bowtie2_arguments(opts), "-x", str(prefix), "-U", str(query),
-           *([] if fastq else ["-f"]), "-S", str(sam)]
+        raise MapReferenceError("HISAT2 was not found.\n\n"
+                                + engine_install_hint(MAP_ENGINE_HISAT2))
+    prefix = ensure_hisat2_index(reference, exe, opts.threads, commands, say, cancel)
+    paired = getattr(opts, "hisat2_reads", MAP_HISAT2_READS_SINGLE) == MAP_HISAT2_READS_PAIRED
+    sam = work / "hisat2.sam"
+    cmd = [exe, *hisat2_arguments(opts), "-x", str(prefix)]
+    if paired:
+        if not all(is_fastq(q) for q in queries):
+            raise MapReferenceError(
+                "Paired-end HISAT2 expects FASTQ mates (R1/R2).\n\n"
+                "FASTA inputs are treated as single-end — switch Reads to Single-end."
+            )
+        mates1, mates2 = pair_hisat2_queries(queries)
+        cmd += [
+            "-1", ",".join(str(p) for p in mates1),
+            "-2", ",".join(str(p) for p in mates2),
+        ]
+        say(f"Mapping {len(mates1)} Illumina pair(s) with HISAT2…")
+    else:
+        fastq = all(is_fastq(q) for q in queries)
+        query = queries[0] if len(queries) == 1 else _single_query_file(
+            queries, work, fasta_only=True
+        )
+        if len(queries) > 1:
+            fastq = False
+        cmd += ["-U", str(query), *([] if fastq else ["-f"])]
+        say("Mapping with HISAT2…")
+    cmd += ["-S", str(sam)]
     commands.append(command_text(cmd))
-    say("Mapping with Bowtie2…")
-    result = run_logged_process(cmd, tool="Bowtie2", cwd=work, cancel=cancel)
+    result = run_logged_process(cmd, tool="HISAT2", cwd=work, cancel=cancel)
     _check_cancel(cancel)
     if result.returncode != 0 or not sam.is_file():
-        raise MapReferenceError(_summarize_error("Bowtie2", result.returncode,
+        raise MapReferenceError(_summarize_error("HISAT2", result.returncode,
                                                  result.stderr or result.stdout))
     return sam, tool_version(exe)
 
@@ -1523,10 +1695,15 @@ def run_mapping(
         warnings.append("Some sequence names occur more than once; their results are merged. "
                         "Rename them for separate results.")
     engine = opts.engine
+    if engine == MAP_ENGINE_MAFFT:
+        warnings.append(
+            "MAFFT is no longer used for Mapping; Auto chose the mapper instead."
+        )
+        engine = MAP_ENGINE_AUTO
     if engine == MAP_ENGINE_AUTO:
         engine = choose_engine(ref_lengths, info)
         if not engine_available(engine, system_path_only=opts.use_system_path):
-            fallback = next((e for e in (MAP_ENGINE_MINIMAP2, MAP_ENGINE_BOWTIE2)
+            fallback = next((e for e in (MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2)
                              if e != engine and engine_available(
                                  e, system_path_only=opts.use_system_path)), None)
             if fallback is None:
@@ -1536,17 +1713,8 @@ def run_mapping(
             warnings.append(f"Auto would use {ENGINE_NAMES[engine]} for this input, which was "
                             f"not found; {ENGINE_NAMES[fallback]} was used instead.")
             engine = fallback
-    if engine == MAP_ENGINE_MAFFT:
-        if len(ref_lengths) != 1:
-            raise MapReferenceError(
-                f"MAFFT places sequences on one reference sequence; {reference.name} has "
-                f"{len(ref_lengths)}. Choose minimap2 or Bowtie2, or a single-sequence reference.")
-        if not info.complete or info.n > MAFFT_MAX_QUERIES \
-                or max(ref_lengths.values()) > MAFFT_MAX_REFERENCE:
-            warnings.append("MAFFT with this many sequences or this long a reference is slow; "
-                            "minimap2 is the usual choice here.")
     elif not engine_available(engine, system_path_only=opts.use_system_path):
-        raise MapReferenceError(f"{ENGINE_NAMES[engine]} was not found.\n\n"
+        raise MapReferenceError(f"{ENGINE_NAMES.get(engine, engine)} was not found.\n\n"
                                 + engine_install_hint(engine))
 
     features_by_id = (load_reference_features(reference, ref_lengths)
@@ -1581,7 +1749,7 @@ def _write_failure_log(queries: list[Path], error: str) -> Path | None:
     path = Path(queries[0]).expanduser().resolve().parent / \
         f"{output_base_name(queries)}_map_failed.log"
     try:
-        path.write_text(f"Map to Reference failed {datetime.now():%Y-%m-%d %H:%M}\n\n{error}\n\n"
+        path.write_text(f"Mapping failed {datetime.now():%Y-%m-%d %H:%M}\n\n{error}\n\n"
                         + traceback.format_exc(), encoding="utf-8")
         return path
     except OSError:
@@ -1597,30 +1765,30 @@ def _map(layout: OutputLayout, reference: Path, ref_lengths: dict[str, int],
     preset = ""
     ref_seqs: dict[str, str] = {}
     unmapped_extra: list[str] = []
-    if engine == MAP_ENGINE_MAFFT:
-        ref_id = next(iter(ref_lengths))
-        ref_seqs = load_reference_records(reference)
-        say("Placing the sequences with MAFFT…")
-        reads, unmapped_extra, aligned, version = run_mafft_engine(
-            reference, ref_id, ref_seqs[ref_id], queries, opts, work, commands, cancel)
-        raw = layout.path(".aln.fa")
-        _write_fasta(raw, aligned)
-        lengths = {r.name: r.query_length for r in reads}
-        records = iter([(r.name, lengths.get(r.name, 0), r) for r in reads])
-        preset = "multipair" if opts.sensitivity != MAP_SENS_FAST else "6merpair"
-    elif engine == MAP_ENGINE_MINIMAP2:
+    if engine == MAP_ENGINE_MINIMAP2:
         say("Mapping with minimap2…")
-        paf, preset, version = run_minimap2_engine(reference, queries, opts, info, work,
-                                                   commands, cancel)
-        raw = layout.path(".paf")
-        shutil.move(str(paf), str(raw))
-        records = iter_paf(raw)
-    else:
-        sam, version = run_bowtie2_engine(reference, queries, opts, work, commands, say, cancel)
+        aln, preset, version, out_fmt = run_minimap2_engine(
+            reference, queries, opts, info, work, commands, cancel
+        )
+        if out_fmt == MAP_MINIMAP2_OUT_SAM:
+            raw = layout.path(".sam")
+            shutil.move(str(aln), str(raw))
+            records = iter_sam(raw)
+        else:
+            raw = layout.path(".paf")
+            shutil.move(str(aln), str(raw))
+            records = iter_paf(raw)
+    elif engine == MAP_ENGINE_HISAT2:
+        sam, version = run_hisat2_engine(reference, queries, opts, work, commands, say, cancel)
         raw = layout.path(".sam")
         shutil.move(str(sam), str(raw))
         records = iter_sam(raw)
-        preset = bowtie2_arguments(opts)[0].lstrip("-")
+        library = getattr(opts, "hisat2_library", MAP_HISAT2_RNA) or MAP_HISAT2_RNA
+        preset = "dna" if library == MAP_HISAT2_DNA else "rna"
+    else:
+        raise MapReferenceError(
+            f"Unknown Mapping engine: {engine!r}. Use minimap2 or HISAT2."
+        )
 
     say("Collecting the placements…")
     detail_budget = 50_000_000
@@ -1670,15 +1838,13 @@ def _map(layout: OutputLayout, reference: Path, ref_lengths: dict[str, int],
                 round(read.identity, 4), read.mismatches, read.deleted, read.inserted,
                 read.aligned_bp, read.mapq, read.kind, read.query_length, read.clipped,
                 read.clip_left, lifted, placements[qname]))
-    # MAFFT: every input name is known. minimap2 (--paf-no-hit) and Bowtie2 list
-    # every read in their output, so large read files are never read twice.
-    all_names = info.names if engine == MAP_ENGINE_MAFFT else seen
-    for name in all_names:
+    # minimap2 (--paf-no-hit) and HISAT2 list every read in their output.
+    for name in seen:
         if name not in placed:
             unused.setdefault(name, "no alignment found")
     for name in placed:
         unused.pop(name, None)
-    n_queries = info.n if engine == MAP_ENGINE_MAFFT else len(seen | set(unmapped_extra))
+    n_queries = len(seen | set(unmapped_extra))
     if n_placements > MAX_READ_TABLE:
         warnings.append(f"{n_placements:,} placements: the read and feature tables list the "
                         f"first {MAX_READ_TABLE:,}; coverage, consensus and variants use all.")
@@ -1722,19 +1888,14 @@ def _map(layout: OutputLayout, reference: Path, ref_lengths: dict[str, int],
 # --------------------------------------------------------------------------
 
 CITATIONS = {
-    MAP_ENGINE_MAFFT: [
-        "Katoh K, Standley DM (2013) MAFFT multiple sequence alignment software version 7: "
-        "improvements in performance and usability. Mol Biol Evol 30:772–780.",
-        "Katoh K, Frith MC (2012) Adding unaligned sequences into an existing alignment "
-        "using MAFFT and LAST. Bioinformatics 28:3144–3146.",
-    ],
     MAP_ENGINE_MINIMAP2: [
         "Li H (2018) Minimap2: pairwise alignment for nucleotide sequences. "
         "Bioinformatics 34:3094–3100.",
     ],
-    MAP_ENGINE_BOWTIE2: [
-        "Langmead B, Salzberg SL (2012) Fast gapped-read alignment with Bowtie 2. "
-        "Nat Methods 9:357–359.",
+    MAP_ENGINE_HISAT2: [
+        "Kim D, Paggi JM, Park C, Bennett C, Salzberg SL (2019) Graph-based genome "
+        "alignment and genotyping with HISAT2 and HISAT-genotype. Nat Biotechnol "
+        "37:907–915.",
     ],
 }
 
@@ -1746,13 +1907,14 @@ def threshold_label(threshold: float) -> str:
 def methods_paragraph(run: MapRun) -> str:
     o = run.opts
     name = ENGINE_NAMES[run.engine] + (f" v{run.engine_version}" if run.engine_version else "")
-    how = {
-        MAP_ENGINE_MAFFT: (f"with {name} (--addfragments, --{run.preset}, "
-                           "--adjustdirectionaccurately), which places each sequence on the "
-                           "reference without aligning the sequences to each other"),
-        MAP_ENGINE_MINIMAP2: f"with {name} (preset {run.preset}, base-level alignment with -c)",
-        MAP_ENGINE_BOWTIE2: f"with {name} (--{run.preset})",
-    }[run.engine]
+    if run.engine == MAP_ENGINE_MINIMAP2:
+        out = getattr(o, "minimap2_output", MAP_MINIMAP2_OUT_PAF) or MAP_MINIMAP2_OUT_PAF
+        fmt = "SAM (-a --MD)" if out == MAP_MINIMAP2_OUT_SAM else "PAF (-c --cs=long)"
+        how = f"with {name} (preset {run.preset}, {fmt})"
+    elif run.engine == MAP_ENGINE_HISAT2:
+        how = f"with {name} ({run.preset or 'rna'})"
+    else:
+        how = f"with {name}"
     multi = {"best": "Sequences fitting equally well in several places were placed once, "
                      "in the place chosen by the mapper.",
              "all": "Sequences fitting equally well in several places were placed in every "
@@ -1762,8 +1924,8 @@ def methods_paragraph(run: MapRun) -> str:
             f"Placements with less than {o.min_identity:.0%} identity or fewer than "
             f"{o.min_aligned_bp} aligned bases were not used"
             + (f", nor those with mapping quality below {o.min_mapq}"
-               if o.min_mapq and run.engine != MAP_ENGINE_MAFFT else "") + ". "
-            + (multi[o.multiple_hits] + " " if run.engine != MAP_ENGINE_MAFFT else "")
+               if o.min_mapq else "") + ". "
+            + multi[o.multiple_hits] + " "
             + f"{len(run.placed_names)} sequence(s) were placed ({run.n_placements} placements"
             f"{', ' + str(len(run.reversed_names)) + ' reverse-complemented' if run.reversed_names else ''}). "
             f"The consensus was called by {threshold_label(o.consensus_threshold)}. ")
@@ -2045,7 +2207,7 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
                     encoding="utf-8")
     created.append(path)
     path = layout.path("_commands.txt")
-    path.write_text(f"RepeatViewer Map to Reference, run {run.stamp}\n"
+    path.write_text(f"RepeatViewer Mapping, run {run.stamp}\n"
                     f"{ENGINE_NAMES[run.engine]} {run.engine_version}\n\n"
                     + "\n".join(run.commands) + "\n", encoding="utf-8")
     created.append(path)
@@ -2063,6 +2225,8 @@ def _write_outputs(run: MapRun, layout: OutputLayout, info: InputInfo, created: 
         "reference": str(run.reference), "queries": [str(q) for q in run.queries],
         "engine": run.engine, "engine_version": run.engine_version, "preset": run.preset,
         "options": {"sensitivity": o.sensitivity, "multiple_hits": o.multiple_hits,
+                    "minimap2_preset": o.minimap2_preset,
+                    "minimap2_output": getattr(o, "minimap2_output", "paf"),
                     "min_identity": o.min_identity, "min_aligned_bp": o.min_aligned_bp,
                     "min_mapq": o.min_mapq, "consensus_threshold": o.consensus_threshold,
                     "no_coverage": o.no_coverage},

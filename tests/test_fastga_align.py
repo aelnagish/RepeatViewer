@@ -304,6 +304,45 @@ def test_align_window_has_a_fastga_tab_and_follows_the_rules(qapp, tmp_path):
     assert dlg.selected_aligner() == ALIGNER_MAFFT  # right-click choice
 
 
+def test_fastga_reference_path_matches_define_inputs_width(qapp, tmp_path, monkeypatch):
+    """Reference genome path box / Browse must match Define-inputs width."""
+    from repeatviewer.job_options import FASTGA_INPUT_DEFINE
+
+    monkeypatch.setattr(
+        "repeatviewer.views.tool_dialogs.AlignParamsDialog._remind_fastga_if_needed",
+        lambda self: None,
+    )
+    ref = tmp_path / "ref.fa"
+    ref.write_text(">x\nACGT\n")
+    dlg, _files = _align_dialog(
+        qapp,
+        tmp_path,
+        initial_tab=ALIGNER_FASTGA,
+        fastga_initial=FastGaOptions(
+            mode=FASTGA_MODE_REFERENCE, reference_fasta=str(ref)
+        ),
+    )
+    dlg.show()
+    qapp.processEvents()
+    panel = dlg.fastga_panel()
+    panel._mode_buttons[FASTGA_MODE_REFERENCE].setChecked(True)
+    panel._input_define.setChecked(True)
+    panel._sync()
+    panel._sync_field_column()
+    qapp.processEvents()
+    assert panel.input_source() == FASTGA_INPUT_DEFINE
+    define_row = panel._define_inputs._rows[0]._row
+    ref_path = panel._reference.line_edit()
+    define_path = define_row.line_edit()
+    assert abs(ref_path.width() - define_path.width()) <= 2
+    ref_browse = panel._reference._browse_btn
+    define_browse = define_row._browse_btn
+    assert abs(
+        ref_browse.mapTo(dlg, ref_browse.rect().topLeft()).x()
+        - define_browse.mapTo(dlg, define_browse.rect().topLeft()).x()
+    ) <= 2
+
+
 def test_files_panel_click_fills_the_reference_only_in_reference_mode(qapp, tmp_path):
     dlg, (q1, _q2, ref) = _align_dialog(
         qapp, tmp_path, initial_tab=ALIGNER_FASTGA,

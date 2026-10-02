@@ -2156,15 +2156,41 @@ def save_tree_options(opts: TreeOptions) -> None:
 # --------------------------------------------------------------------------
 
 MAP_ENGINE_AUTO = "auto"
-MAP_ENGINE_MAFFT = "mafft"
+MAP_ENGINE_MAFFT = "mafft"  # legacy saved value; migrated to auto on load
 MAP_ENGINE_MINIMAP2 = "minimap2"
-MAP_ENGINE_BOWTIE2 = "bowtie2"
-MAP_ENGINES = (MAP_ENGINE_AUTO, MAP_ENGINE_MAFFT, MAP_ENGINE_MINIMAP2, MAP_ENGINE_BOWTIE2)
+MAP_ENGINE_HISAT2 = "hisat2"
+MAP_ENGINE_BOWTIE2 = "bowtie2"  # legacy; migrated to hisat2 on load
+MAP_ENGINES = (MAP_ENGINE_AUTO, MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2)
 
+# Kept for old saved MapOptions; HISAT2 no longer uses Bowtie2 sensitivity presets.
 MAP_SENS_FAST = "fast"
 MAP_SENS_MEDIUM = "medium"
 MAP_SENS_HIGH = "high"
 MAP_SENSITIVITIES = (MAP_SENS_FAST, MAP_SENS_MEDIUM, MAP_SENS_HIGH)
+
+# HISAT2 library / alignment mode (Settings).
+MAP_HISAT2_RNA = "rna"  # spliced (default)
+MAP_HISAT2_DNA = "dna"  # --no-spliced-alignment
+MAP_HISAT2_LIBRARIES = (MAP_HISAT2_RNA, MAP_HISAT2_DNA)
+
+# HISAT2 read layout (Settings): single-end (-U) vs Illumina paired-end (-1/-2).
+MAP_HISAT2_READS_SINGLE = "single"
+MAP_HISAT2_READS_PAIRED = "paired"
+MAP_HISAT2_READS = (MAP_HISAT2_READS_SINGLE, MAP_HISAT2_READS_PAIRED)
+
+# HISAT2 --rna-strandness (empty = unstranded / default).
+MAP_HISAT2_STRAND_UNSTRANDED = ""
+MAP_HISAT2_STRAND_F = "F"
+MAP_HISAT2_STRAND_R = "R"
+MAP_HISAT2_STRAND_FR = "FR"
+MAP_HISAT2_STRAND_RF = "RF"
+MAP_HISAT2_STRANDS = (
+    MAP_HISAT2_STRAND_UNSTRANDED,
+    MAP_HISAT2_STRAND_F,
+    MAP_HISAT2_STRAND_R,
+    MAP_HISAT2_STRAND_FR,
+    MAP_HISAT2_STRAND_RF,
+)
 
 # A sequence that fits equally well in several places (common in satellite arrays).
 MAP_MULTI_BEST = "best"    # one place (the mapper's best; ties at random)
@@ -2172,9 +2198,59 @@ MAP_MULTI_ALL = "all"      # every equally good place
 MAP_MULTI_NONE = "none"    # none: listed as ambiguous with the unused sequences
 MAP_MULTI_MODES = (MAP_MULTI_BEST, MAP_MULTI_ALL, MAP_MULTI_NONE)
 
-MAP_MINIMAP2_PRESET_AUTO = "auto"
-MAP_MINIMAP2_PRESETS = (MAP_MINIMAP2_PRESET_AUTO, "map-ont", "map-hifi", "map-pb",
-                        "asm5", "asm10", "asm20", "sr")
+MAP_MINIMAP2_PRESET_AUTO = "auto"  # legacy saved value; migrated to map-ont on load
+MAP_MINIMAP2_PRESETS = (
+    "map-ont",
+    "map-hifi",
+    "map-pb",
+    "map-iclr",
+    "lr:hq",
+    "asm5",
+    "asm10",
+    "asm20",
+    "sr",
+    "splice",
+    "splice:hq",
+    "splice:sr",
+)
+
+# Short combo labels (fit TOOL_PARAMS_FIELD_WIDTH); details live in the ? help.
+MAP_MINIMAP2_PRESET_LABELS: dict[str, str] = {
+    "map-ont": "map-ont (ONT genomic)",
+    "map-hifi": "map-hifi (PacBio HiFi)",
+    "map-pb": "map-pb (PacBio CLR)",
+    "map-iclr": "map-iclr (Illumina CLR)",
+    "lr:hq": "lr:hq (Nanopore Q20)",
+    "asm5": "asm5 (~0.1% divergence)",
+    "asm10": "asm10 (~1% divergence)",
+    "asm20": "asm20 (~5% divergence)",
+    "sr": "sr (short genomic)",
+    "splice": "splice (long RNA/cDNA)",
+    "splice:hq": "splice:hq (Iso-seq / HQ RNA)",
+    "splice:sr": "splice:sr (short RNA-seq)",
+}
+
+# minimap2 -k / -w for each -x preset (from minimap2.1). map-ont uses the
+# tool defaults (15 / 10). Auto resolves at run time — see auto_minimap2_preset.
+MAP_MINIMAP2_PRESET_KW: dict[str, tuple[int, int]] = {
+    "map-ont": (15, 10),
+    "map-pb": (19, 10),       # -H -k19
+    "map-hifi": (19, 19),     # via lr:hq
+    "lr:hq": (19, 19),
+    "map-iclr": (19, 10),
+    "asm5": (19, 19),
+    "asm10": (19, 19),
+    "asm20": (19, 10),
+    "sr": (21, 11),
+    "splice": (15, 5),        # -k15 -w5 --splice …
+    "splice:hq": (15, 5),     # -xsplice + HQ scoring
+    "splice:sr": (15, 5),     # -xsplice:hq + short-read flags
+}
+
+# minimap2 alignment file written next to the .rvmap (PAF is the viewer default).
+MAP_MINIMAP2_OUT_PAF = "paf"
+MAP_MINIMAP2_OUT_SAM = "sam"
+MAP_MINIMAP2_OUTPUTS = (MAP_MINIMAP2_OUT_PAF, MAP_MINIMAP2_OUT_SAM)
 
 # Consensus threshold, as a fraction of the sequences covering a position.
 # 0 = majority (the most common base); higher values give IUPAC codes.
@@ -2191,24 +2267,37 @@ MAP_RIGHT_CLICK_ACTIONS = (MAP_RIGHT_CLICK_RUN, MAP_RIGHT_CLICK_DIALOG)
 
 @dataclass
 class MapOptions:
-    """Map sequences or reads to a reference (Tools → Map to Reference).
+    """Map sequences or reads to a reference (Tools → Mapping).
 
-    MAFFT (bundled) places a few sequences on a short reference, e.g. satellite
-    variants on an annotated monomer array; minimap2 maps long reads or
-    assemblies to a genome; Bowtie2 maps short reads. ``auto`` picks by input.
+    minimap2 maps long reads or assemblies to a genome; HISAT2 maps short
+    DNA or RNA-seq reads. ``auto`` picks between them by input.
     """
 
     reference_fasta: str = ""
     engine: str = MAP_ENGINE_AUTO
-    sensitivity: str = MAP_SENS_MEDIUM
+    sensitivity: str = MAP_SENS_MEDIUM  # legacy Bowtie2; unused by HISAT2
     multiple_hits: str = MAP_MULTI_BEST
-    minimap2_preset: str = MAP_MINIMAP2_PRESET_AUTO
+    minimap2_preset: str = "map-ont"
+    minimap2_output: str = MAP_MINIMAP2_OUT_PAF
+    minimap2_include_cigar: bool = True   # PAF -c
+    minimap2_include_cs: bool = True      # PAF --cs=long (needed for contig view)
+    # minimap2 -k / -w (concrete numbers; updated from the chosen -x preset)
+    minimap2_kmer: int = 15
+    minimap2_window: int = 10
+    # HISAT2 Settings / Advanced
+    hisat2_library: str = MAP_HISAT2_RNA
+    hisat2_reads: str = MAP_HISAT2_READS_SINGLE
+    hisat2_strandness: str = MAP_HISAT2_STRAND_UNSTRANDED
+    hisat2_dta: bool = False              # --dta (StringTie-oriented)
+    hisat2_min_intron: int = 20           # --min-intronlen
+    hisat2_max_intron: int = 500_000      # --max-intronlen
+    hisat2_no_softclip: bool = False      # --no-softclip
     # Advanced: a mapped sequence is kept only when it passes all of these.
     min_identity: float = 0.70         # fraction of aligned columns that match
     min_aligned_bp: int = 25
-    min_mapq: int = 0                  # minimap2 / Bowtie2 only
+    min_mapq: int = 0                  # minimap2 / HISAT2
     threads: int = field(default_factory=_default_tool_threads)
-    # Output
+    # Output (RepeatViewer contig view / sidecars)
     consensus_threshold: float = 0.0   # 0 = majority
     no_coverage: str = MAP_NO_COVERAGE_N
     min_variant_freq: float = 0.0      # variants table: 0 = every difference
@@ -2240,12 +2329,38 @@ def load_map_options() -> MapOptions:
             return default
 
     threshold = _num("consensus_threshold", d.consensus_threshold, float, 0.0, 1.0)
+    engine = v.get("engine", d.engine)
+    if engine == MAP_ENGINE_BOWTIE2:
+        engine = MAP_ENGINE_HISAT2
+    elif engine == MAP_ENGINE_MAFFT or engine not in MAP_ENGINES:
+        engine = MAP_ENGINE_AUTO
+    mm_preset = v.get("minimap2_preset", d.minimap2_preset)
+    if mm_preset == MAP_MINIMAP2_PRESET_AUTO or mm_preset not in MAP_MINIMAP2_PRESETS:
+        mm_preset = "map-ont"
     return MapOptions(
         reference_fasta=str(v.get("reference_fasta", d.reference_fasta) or ""),
-        engine=_pick("engine", MAP_ENGINES, d.engine),
+        engine=engine,
         sensitivity=_pick("sensitivity", MAP_SENSITIVITIES, d.sensitivity),
         multiple_hits=_pick("multiple_hits", MAP_MULTI_MODES, d.multiple_hits),
-        minimap2_preset=_pick("minimap2_preset", MAP_MINIMAP2_PRESETS, d.minimap2_preset),
+        minimap2_preset=mm_preset,
+        minimap2_output=_pick("minimap2_output", MAP_MINIMAP2_OUTPUTS, d.minimap2_output),
+        minimap2_include_cigar=_to_bool(
+            v.get("minimap2_include_cigar"), d.minimap2_include_cigar
+        ),
+        minimap2_include_cs=_to_bool(v.get("minimap2_include_cs"), d.minimap2_include_cs),
+        minimap2_kmer=_num("minimap2_kmer", d.minimap2_kmer, int, 1, 28),
+        minimap2_window=_num("minimap2_window", d.minimap2_window, int, 1, 1000),
+        hisat2_library=_pick("hisat2_library", MAP_HISAT2_LIBRARIES, d.hisat2_library),
+        hisat2_reads=_pick("hisat2_reads", MAP_HISAT2_READS, d.hisat2_reads),
+        hisat2_strandness=_pick(
+            "hisat2_strandness", MAP_HISAT2_STRANDS, d.hisat2_strandness
+        ),
+        hisat2_dta=_to_bool(v.get("hisat2_dta"), d.hisat2_dta),
+        hisat2_min_intron=_num("hisat2_min_intron", d.hisat2_min_intron, int, 1, 1_000_000),
+        hisat2_max_intron=_num(
+            "hisat2_max_intron", d.hisat2_max_intron, int, 1, 10_000_000
+        ),
+        hisat2_no_softclip=_to_bool(v.get("hisat2_no_softclip"), d.hisat2_no_softclip),
         min_identity=_num("min_identity", d.min_identity, float, 0.0, 1.0),
         min_aligned_bp=_num("min_aligned_bp", d.min_aligned_bp, int, 1, 1_000_000),
         min_mapq=_num("min_mapq", d.min_mapq, int, 0, 255),
@@ -2279,6 +2394,18 @@ def save_map_options(opts: MapOptions) -> None:
             "sensitivity": opts.sensitivity,
             "multiple_hits": opts.multiple_hits,
             "minimap2_preset": opts.minimap2_preset,
+            "minimap2_output": opts.minimap2_output,
+            "minimap2_include_cigar": opts.minimap2_include_cigar,
+            "minimap2_include_cs": opts.minimap2_include_cs,
+            "minimap2_kmer": opts.minimap2_kmer,
+            "minimap2_window": opts.minimap2_window,
+            "hisat2_library": opts.hisat2_library,
+            "hisat2_reads": opts.hisat2_reads,
+            "hisat2_strandness": opts.hisat2_strandness,
+            "hisat2_dta": opts.hisat2_dta,
+            "hisat2_min_intron": opts.hisat2_min_intron,
+            "hisat2_max_intron": opts.hisat2_max_intron,
+            "hisat2_no_softclip": opts.hisat2_no_softclip,
             "min_identity": opts.min_identity,
             "min_aligned_bp": opts.min_aligned_bp,
             "min_mapq": opts.min_mapq,

@@ -1,23 +1,20 @@
-"""Map to Reference dialog (Tools → Map to Reference).
+"""Mapping dialog (Tools → Mapping).
 
-Mapping tab: the reference (click it in Files, or Browse), the mapper, the
-sensitivity, what to do with sequences that fit in several places, and the
-annotation check. Advanced: the limits a placement must pass. Output: consensus
-and the files to write. Options: right-click action, process window, programs
-from PATH. Cancel / Save / Run, as in every RepeatViewer tool dialog.
-
-The sequences to map are the files selected in the file panel when the dialog
-opens; a click in Files while it is open fills the Reference field.
+Tabs: **Minimap2** | **HISAT2** | **Options**. Each engine tab shows that
+mapper's real CLI settings; RepeatViewer-only output options live under
+Advanced. Queries come from the Files panel or Define inputs; a Files click
+fills Reference.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFormLayout,
     QGroupBox,
@@ -25,18 +22,35 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QRadioButton,
-    QTabWidget,
+    QSizePolicy,
+    QSpinBox,
+    QStackedWidget,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
 
 from repeatviewer.backends import map_reference as mr
 from repeatviewer.job_options import (
+    ALIGN_INPUT_DEFINE,
+    ALIGN_INPUT_SELECTED,
     MAP_CONSENSUS_THRESHOLDS,
     MAP_ENGINE_AUTO,
-    MAP_ENGINE_BOWTIE2,
-    MAP_ENGINE_MAFFT,
+    MAP_ENGINE_HISAT2,
     MAP_ENGINE_MINIMAP2,
+    MAP_HISAT2_DNA,
+    MAP_HISAT2_RNA,
+    MAP_HISAT2_READS_PAIRED,
+    MAP_HISAT2_READS_SINGLE,
+    MAP_HISAT2_STRAND_F,
+    MAP_HISAT2_STRAND_FR,
+    MAP_HISAT2_STRAND_R,
+    MAP_HISAT2_STRAND_RF,
+    MAP_HISAT2_STRAND_UNSTRANDED,
+    MAP_MINIMAP2_OUT_PAF,
+    MAP_MINIMAP2_OUT_SAM,
+    MAP_MINIMAP2_PRESET_KW,
+    MAP_MINIMAP2_PRESET_LABELS,
     MAP_MINIMAP2_PRESETS,
     MAP_MULTI_ALL,
     MAP_MULTI_BEST,
@@ -46,116 +60,135 @@ from repeatviewer.job_options import (
     MAP_NO_COVERAGE_SKIP,
     MAP_RIGHT_CLICK_DIALOG,
     MAP_RIGHT_CLICK_RUN,
-    MAP_SENS_FAST,
-    MAP_SENS_HIGH,
-    MAP_SENS_MEDIUM,
     MapOptions,
 )
 from repeatviewer.views.tool_dialogs import (
-    QComboBox,
-    QSpinBox,
+    TOOL_PARAMS_DIALOG_WIDTH,
+    TOOL_PARAMS_FIELD_WIDTH,
+    TeMultiInputFilesWidget,
+    _form_section_separator,
     dialog_should_run,
+    executable_checkbox_row,
     make_cancel_save_run_bar,
+    make_executable_status_label,
     make_process_output_box,
+    resolve_system_executable,
+    set_named_executable_status,
+    set_path_checkbox_status,
+    sync_form_field_column_spacers,
+    system_path_executable_label,
 )
-from repeatviewer.widgets.help_button import make_help_button
+from repeatviewer.widgets.help_button import field_with_help
 from repeatviewer.widgets.path_browse import PathBrowseRow
 
-_FIELD_WIDTH = 320
-_NUMBER_WIDTH = 110
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".faa", ".fsa", ".ffn", ".seq"}
-_SCAN_LIMIT_BYTES = 30_000_000     # count sequences for the summary line up to this size
 
-REFERENCE_INFO = (
-    "The sequence(s) to map to: a satellite monomer or array, a TE consensus, a BAC or a "
-    "genome. Click it in the Files panel, or use Browse.<br>"
-    "Annotations of the reference (its <b>.RV.gff3</b>, made in the sequence viewer or by "
-    "Sequence Annotation) are shown above the mapped sequences and checked in each of them."
-)
-MAPPER_INFO = (
-    "<b>Auto</b>: MAFFT for a few sequences on one short reference (up to 500 sequences, "
-    "50 kb), Bowtie2 for many short reads (under 400 bp), otherwise minimap2.<br>"
-    "<b>MAFFT add fragments</b> (bundled): the most accurate placement of a few sequences, "
-    "e.g. satellite variants on an annotated monomer array. One reference sequence only.<br>"
-    "<b>minimap2</b>: long reads (ONT, HiFi) or assembled contigs against a genome.<br>"
-    "<b>Bowtie2</b>: short reads (Illumina). Bisulfite and EM-seq reads need a "
-    "conversion-aware mapper such as Bismark and are not handled here."
-)
-SENSITIVITY_INFO = (
-    "<b>Fast</b>: the mapper's defaults.<br>"
-    "<b>Medium</b>: smaller seeds, finds more diverged copies (MAFFT: --multipair; "
-    "minimap2: -k13 -w7; Bowtie2: --sensitive-local).<br>"
-    "<b>High</b>: the most sensitive; for old, diverged repeat copies. Slower "
-    "(minimap2: -k11 -w5; Bowtie2: --very-sensitive-local)."
-)
-MULTI_INFO = (
-    "In a satellite array or a TE family a sequence often fits equally well in several "
-    "places.<br>"
-    "<b>Best place only</b>: one place, the mapper's best (ties chosen at random).<br>"
-    "<b>Every equally good place</b>: the sequence is shown in all of them "
-    "(minimap2: score within 95 % of the best; Bowtie2: up to 20 places).<br>"
-    "<b>Do not place</b>: such sequences are listed with the unused ones as ambiguous.<br>"
-    "MAFFT maps to a single sequence, so this does not apply."
-)
-LIFT_INFO = (
-    "Every feature of the reference (subrepeats, motifs, domains…) is looked up in every "
-    "mapped sequence: <b>intact</b>, <b>changed</b> (with the number of differing bases), "
-    "<b>partial</b> (only part covered), or <b>lost</b> (half or more deleted).<br>"
-    "The Features tab of the result shows this as a table, and the placed sequences and the "
-    "consensus are written with the annotations moved onto them."
-)
-LIMITS_INFO = (
-    "A placement is kept only when it passes all limits; the others are listed with the "
-    "unused sequences, with the reason.<br>"
-    "<b>Minimum identity</b>: share of aligned columns that match.<br>"
-    "<b>Minimum aligned length</b>: bases of the sequence placed on the reference.<br>"
-    "<b>Minimum mapping quality</b> (minimap2, Bowtie2): 0 keeps all."
-)
-CONSENSUS_INFO = (
-    "<b>Majority</b>: the most common base at each position (ties as IUPAC codes).<br>"
-    "<b>50 % … 100 %</b>: the fewest bases that together reach this share of the sequences "
-    "at the position, written as one IUPAC code (e.g. R = A or G).<br>"
-    "A deletion wins only when it is the most common state; an insertion is included when "
-    "at least half the sequences (or the threshold) have it."
+_MAP_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): map the FASTA / FASTQ files selected in "
+    "the Files panel when you click Run.<br><br>"
+    "<b>Define inputs</b>: choose different query files for this run only."
 )
 PRESET_INFO = (
-    "<b>Auto</b>: sr for short reads, asm20 for long assembled contigs, map-ont otherwise "
-    "(works for ONT and HiFi). Choose map-hifi for HiFi reads, asm5 / asm10 / asm20 for "
-    "assemblies at < 1 %, < 5 %, < 20 % divergence."
+    "minimap2 <b>-x</b> preset (applied before other options). Pick the preset that "
+    "matches your data — there is no Auto mode.<br><br>"
+    "<b>Long genomic reads</b><br>"
+    "<b>map-ont</b>: Oxford Nanopore genomic reads (ordinary minimizers; default).<br>"
+    "<b>map-pb</b>: PacBio CLR; uses homopolymer-compressed minimizers.<br>"
+    "<b>map-hifi</b>: PacBio HiFi / CCS genomic reads.<br>"
+    "<b>lr:hq</b>: Nanopore Q20 / other high-accuracy long genomic reads.<br>"
+    "<b>map-iclr</b>: Illumina Complete Long Reads.<br><br>"
+    "<b>RNA / cDNA (spliced)</b><br>"
+    "<b>splice</b>: long mRNA / cDNA vs genome; strand unknown (Nanopore cDNA).<br>"
+    "<b>splice:hq</b>: accurate long RNA (PacBio Iso-seq / Kinnex).<br>"
+    "<b>splice:sr</b>: short RNA-seq (Illumina), spliced.<br><br>"
+    "<b>Assemblies &amp; short DNA</b><br>"
+    "<b>asm5 / asm10 / asm20</b>: assembly vs reference (~0.1 / 1 / 5% divergence).<br>"
+    "<b>sr</b>: short genomic reads (no splicing)."
 )
-DISPLAY_INFO = (
-    "How many placements the contig view draws per reference sequence. Coverage, consensus "
-    "and variants always use all of them; above this number a random sample is drawn."
+OUTPUT_FMT_INFO = (
+    "<b>PAF</b> (default): text alignment. CIGAR (<code>-c</code>) and CS "
+    "(<code>--cs=long</code>) are under Advanced Settings; the contig view needs CS.<br><br>"
+    "<b>SAM</b>: <code>-a</code> with <code>--MD</code> for the contig view."
 )
-
-
-def _row(parent: QWidget, *widgets: QWidget, stretch: bool = True) -> QWidget:
-    row = QWidget(parent)
-    lay = QHBoxLayout(row)
-    lay.setContentsMargins(0, 0, 0, 0)
-    lay.setSpacing(6)
-    for w in widgets:
-        lay.addWidget(w)
-    if stretch:
-        lay.addStretch(1)
-    return row
-
-
-def _note(text: str, parent: QWidget) -> QLabel:
-    label = QLabel(text, parent)
-    label.setWordWrap(True)
-    label.setStyleSheet("color: palette(mid);")
-    return label
-
-
-def _form(parent: QWidget) -> QFormLayout:
-    f = QFormLayout(parent)
-    f.setContentsMargins(16, 14, 16, 14)
-    f.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-    f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-    f.setHorizontalSpacing(12)
-    f.setVerticalSpacing(9)
-    return f
+CIGAR_INFO = (
+    "PAF only: add a CIGAR string with <code>-c</code> (base-level alignment). "
+    "SAM always includes CIGAR. Leave on unless you want approximate mapping only."
+)
+CS_INFO = (
+    "PAF only: add the long <code>cs</code> tag (<code>--cs=long</code>), which encodes "
+    "mismatches and indels. The contig view needs this for PAF. SAM uses "
+    "<code>--MD</code> instead."
+)
+KMER_INFO = (
+    "minimap2 <b>-k</b> / <b>-w</b>. These change with <b>Map mode</b> (<code>-x</code>) "
+    "(e.g. map-ont 15/10, splice 15/5, lr:hq 19/19, sr 21/11). Changing Map mode "
+    "fills these numbers; you can still edit them. For noisy Nanopore Direct "
+    "RNA-seq, try a smaller <b>-k</b> (e.g. 14) with <b>splice</b>."
+)
+MULTI_MM_INFO = (
+    "When a query maps to more than one place on the reference, minimap2 ranks "
+    "hits: the best is <b>primary</b>; others are <b>secondary</b> "
+    "(e.g. near-identical copies).<br><br>"
+    "<b>Primary only</b> (default): <code>--secondary=no</code> — keep only the "
+    "best hit. One place per sequence.<br><br>"
+    "<b>Up to 50 places (-N 50)</b>: <code>--secondary=yes -N 50 -p 0.95</code>. "
+    "<code>-N</code> is how many secondary alignments to report (minimap2’s own "
+    "default is 5; RepeatViewer allows up to 50). <code>-p 0.95</code> keeps a "
+    "secondary only if its score is at least 95% of its primary.<br><br>"
+    "<b>Do not place ambiguous</b>: after mapping, drop low-MAPQ primaries "
+    "(unreliable best hit) instead of placing them."
+)
+MULTI_HS_INFO = (
+    "HISAT2 multi-mapping (<code>-k</code>).<br><br>"
+    "<b>Best place only</b> (default): <code>-k 1</code> — one primary alignment.<br><br>"
+    "<b>Up to 20 places (-k 20)</b>: report up to 20 distinct alignments and mark "
+    "extras as secondary (<code>--secondary</code>).<br><br>"
+    "<b>Do not place ambiguous</b>: after mapping, drop low-MAPQ primaries."
+)
+HISAT2_LIBRARY_INFO = (
+    "HISAT2 alignment mode.<br><br>"
+    "<b>RNA-seq (spliced)</b> (default): allow splice junctions — for short RNA-seq "
+    "or cDNA vs a genome.<br><br>"
+    "<b>DNA-seq</b>: <code>--no-spliced-alignment</code> — genomic short reads "
+    "(Illumina DNA) with no intron gaps."
+)
+HISAT2_READS_INFO = (
+    "How selected FASTQ files are passed to HISAT2.<br><br>"
+    "<b>Single-end</b> (default): <code>-U</code> — each file is unpaired "
+    "(or several files are merged).<br><br>"
+    "<b>Paired-end (Illumina R1/R2)</b>: <code>-1</code> / <code>-2</code>. "
+    "Select both mates; names must differ by <code>R1</code>/<code>R2</code> "
+    "(or <code>_1</code>/<code>_2</code>), e.g. "
+    "<code>sample_R1.fastq.gz</code> + <code>sample_R2.fastq.gz</code>. "
+    "Several samples are fine if every R1 has a matching R2.<br><br>"
+    "Strandness FR/RF is the RNA kit protocol — it does <b>not</b> pair files."
+)
+HISAT2_STRAND_INFO = (
+    "HISAT2 <code>--rna-strandness</code> (RNA-seq only; ignored for DNA-seq).<br><br>"
+    "This is the library strand protocol, <b>not</b> how files are paired.<br><br>"
+    "<b>Unstranded</b> (default): no strand constraint.<br>"
+    "<b>F / R</b>: single-end forward or reverse (use with Reads → Single-end).<br>"
+    "<b>FR / RF</b>: paired-end strand protocols (use with Reads → Paired-end; "
+    "Illumina stranded kits are often RF)."
+)
+HISAT2_DTA_INFO = (
+    "HISAT2 <code>--dta</code> (downstream transcriptome assembly). Longer anchors "
+    "for splice discovery — recommended when feeding alignments to StringTie. "
+    "RNA-seq mode only."
+)
+HISAT2_INTRON_INFO = (
+    "HISAT2 <code>--min-intronlen</code> / <code>--max-intronlen</code> (RNA-seq only). "
+    "Defaults 20 / 500000. Narrow the range for compact genomes or to avoid "
+    "implausibly long introns."
+)
+HISAT2_SOFTCLIP_INFO = (
+    "HISAT2 <code>--no-softclip</code>: disallow soft-clipping at read ends. "
+    "Off by default."
+)
+_RIGHT_CLICK_ENGINE_HELP = (
+    "When right-click runs the tool: <b>Auto</b> picks minimap2 or HISAT2 from the "
+    "input; otherwise the saved engine from the last Minimap2 / HISAT2 tab you used."
+)
 
 
 def _is_fasta(path: Path) -> bool:
@@ -165,94 +198,227 @@ def _is_fasta(path: Path) -> bool:
     return Path(name).suffix in _FASTA_SUFFIXES
 
 
-def input_summary_text(files: list[Path], reference: Path | None) -> str:
-    """The grey line under the reference: what will be mapped to what."""
-    if not files:
-        return "Select the FASTA / FASTQ files to map in the Files panel first."
-    names = ", ".join(p.name for p in files[:3]) + (" …" if len(files) > 3 else "")
-    try:
-        size = sum(p.stat().st_size for p in files)
-    except OSError:
-        size = _SCAN_LIMIT_BYTES + 1
-    if size <= _SCAN_LIMIT_BYTES:
-        try:
-            n = mr.scan_inputs(files, keep_names=0).n
-            what = f"{n:,} sequence{'s' if n != 1 else ''} ({names})"
-        except OSError:
-            what = names
-    else:
-        what = f"{len(files)} file{'s' if len(files) != 1 else ''} ({names})"
-    target = reference.name if reference else "the reference"
-    return f"{what} will be mapped to {target}."
-
-
 class MapReferenceDialog(QDialog):
-    """Map the selected sequences or reads to a reference."""
+    """Map selected sequences or reads to a reference (Align-style engine tabs)."""
+
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+    _TAB_MINIMAP2 = 0
+    _TAB_HISAT2 = 1
+    _TAB_OPTIONS = 2
+    # Longest Settings label — Inputs radios / Advanced checkboxes share this column.
+    _SETTINGS_LABEL_REF = "Secondaries:"
 
     def __init__(
         self,
         *,
         initial: MapOptions | None = None,
         files: list[Path] | None = None,
-        title: str = "Map to Reference",
+        project_genome: Path | None = None,
+        title: str = "Mapping",
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
+        self.setMinimumWidth(self._DIALOG_WIDTH)
         opts = initial or MapOptions()
-        self._files = [Path(p) for p in (files or [])]
-        self._ref_info_cache: dict[str, tuple] = {}
+        self._panel_files = [Path(p) for p in (files or [])]
+        self._engine_compact_size = None
+        self._project_genome = (
+            project_genome.expanduser().resolve()
+            if project_genome is not None and Path(project_genome).expanduser().is_file()
+            else None
+        )
+        # Saved reference if set; otherwise the project genome from File → Define genome.
+        initial_ref = str(opts.reference_fasta or "").strip()
+        if not initial_ref and self._project_genome is not None:
+            initial_ref = str(self._project_genome)
 
-        # --- Mapping tab -------------------------------------------------------
+        # --- shared controls -------------------------------------------------
         self._reference = PathBrowseRow(
             self,
-            initial=opts.reference_fasta or None,
+            initial=initial_ref or None,
             placeholder="Reference FASTA: click it in Files, or Browse",
             browse_title="Choose the reference FASTA",
             file_filter="FASTA (*.fa *.fasta *.fna *.fas *.fa.gz *.fasta.gz);;All files (*)",
         )
-        self._reference.setFixedWidth(_FIELD_WIDTH)
-        self._summary = _note("", self)
-        self._summary.setFixedWidth(_FIELD_WIDTH + 30)
-        self._engine = QComboBox(self)
-        for value in (MAP_ENGINE_AUTO, MAP_ENGINE_MAFFT, MAP_ENGINE_MINIMAP2, MAP_ENGINE_BOWTIE2):
-            self._engine.addItem(mr.ENGINE_LABELS[value], value)
-        self._set_combo(self._engine, opts.engine)
-        self._engine_note = _note("", self)
-        self._engine_note.setFixedWidth(_FIELD_WIDTH + 30)
-        self._sensitivity = QComboBox(self)
-        for label, value in (("Fast", MAP_SENS_FAST), ("Medium", MAP_SENS_MEDIUM),
-                             ("High, for diverged repeat copies", MAP_SENS_HIGH)):
-            self._sensitivity.addItem(label, value)
-        self._set_combo(self._sensitivity, opts.sensitivity)
-        self._multi = QComboBox(self)
-        for label, value in (("Best place only", MAP_MULTI_BEST),
-                             ("Every equally good place", MAP_MULTI_ALL),
-                             ("Do not place (list as ambiguous)", MAP_MULTI_NONE)):
-            self._multi.addItem(label, value)
-        self._set_combo(self._multi, opts.multiple_hits)
+
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        self._input_selected.setChecked(True)
+        self._define_inputs = TeMultiInputFilesWidget(
+            self,
+            initial=None,
+            allow_multiple=True,
+            start_empty=False,
+            placeholder="Query FASTA / FASTQ (.fa / .fq / .gz)",
+            browse_title="Choose query files",
+            file_filter=(
+                "Sequence (*.fa *.fasta *.fna *.fas *.fq *.fastq "
+                "*.fa.gz *.fasta.gz *.fq.gz *.fastq.gz);;All files (*)"
+            ),
+            path_mode="file",
+        )
+        self._input_selected.toggled.connect(self._sync_inputs)
+        self._input_define.toggled.connect(self._sync_inputs)
+
+        self._hisat2_library = QComboBox(self)
+        for label, value in (
+            ("RNA-seq (spliced)", MAP_HISAT2_RNA),
+            ("DNA-seq (--no-spliced-alignment)", MAP_HISAT2_DNA),
+        ):
+            self._hisat2_library.addItem(label, value)
+        self._set_combo(
+            self._hisat2_library,
+            getattr(opts, "hisat2_library", MAP_HISAT2_RNA),
+        )
+        self._hisat2_library.currentIndexChanged.connect(self._sync_hisat2_library)
+
+        self._hisat2_reads = QComboBox(self)
+        for label, value in (
+            ("Single-end (-U)", MAP_HISAT2_READS_SINGLE),
+            ("Paired-end Illumina R1/R2 (-1/-2)", MAP_HISAT2_READS_PAIRED),
+        ):
+            self._hisat2_reads.addItem(label, value)
+        self._set_combo(
+            self._hisat2_reads,
+            getattr(opts, "hisat2_reads", MAP_HISAT2_READS_SINGLE),
+        )
+        self._hisat2_reads.currentIndexChanged.connect(self._sync_hisat2_reads)
+
+        self._hisat2_strand = QComboBox(self)
+        for label, value in (
+            ("Unstranded", MAP_HISAT2_STRAND_UNSTRANDED),
+            ("F (single-end forward)", MAP_HISAT2_STRAND_F),
+            ("R (single-end reverse)", MAP_HISAT2_STRAND_R),
+            ("FR (paired)", MAP_HISAT2_STRAND_FR),
+            ("RF (paired)", MAP_HISAT2_STRAND_RF),
+        ):
+            self._hisat2_strand.addItem(label, value)
+        self._set_combo(
+            self._hisat2_strand,
+            getattr(opts, "hisat2_strandness", MAP_HISAT2_STRAND_UNSTRANDED),
+        )
+
+        self._multi_mm = QComboBox(self)
+        for label, value in (
+            ("Primary only", MAP_MULTI_BEST),
+            ("Up to 50 places (-N 50)", MAP_MULTI_ALL),
+            ("Do not place ambiguous", MAP_MULTI_NONE),
+        ):
+            self._multi_mm.addItem(label, value)
+        self._set_combo(self._multi_mm, opts.multiple_hits)
+
+        self._multi_hs = QComboBox(self)
+        for label, value in (
+            ("Best place only", MAP_MULTI_BEST),
+            ("Up to 20 places (-k 20)", MAP_MULTI_ALL),
+            ("Do not place ambiguous", MAP_MULTI_NONE),
+        ):
+            self._multi_hs.addItem(label, value)
+        self._set_combo(self._multi_hs, opts.multiple_hits)
+
+        def _sync_multi(source: QComboBox, target: QComboBox) -> None:
+            target.blockSignals(True)
+            self._set_combo(target, source.currentData())
+            target.blockSignals(False)
+
+        self._multi_mm.currentIndexChanged.connect(
+            lambda _i: _sync_multi(self._multi_mm, self._multi_hs)
+        )
+        self._multi_hs.currentIndexChanged.connect(
+            lambda _i: _sync_multi(self._multi_hs, self._multi_mm)
+        )
+
+        self._hisat2_dta = QCheckBox("Tailor for StringTie (--dta)", self)
+        self._hisat2_dta.setChecked(bool(getattr(opts, "hisat2_dta", False)))
+        self._hisat2_no_softclip = QCheckBox("Disallow soft-clipping (--no-softclip)", self)
+        self._hisat2_no_softclip.setChecked(
+            bool(getattr(opts, "hisat2_no_softclip", False))
+        )
+        self._hisat2_min_intron = QSpinBox(self)
+        self._hisat2_min_intron.setRange(1, 1_000_000)
+        self._hisat2_min_intron.setValue(int(getattr(opts, "hisat2_min_intron", 20) or 20))
+        self._hisat2_max_intron = QSpinBox(self)
+        self._hisat2_max_intron.setRange(1, 10_000_000)
+        self._hisat2_max_intron.setValue(
+            int(getattr(opts, "hisat2_max_intron", 500_000) or 500_000)
+        )
+
+        self._preset = QComboBox(self)
+        for value in MAP_MINIMAP2_PRESETS:
+            label = MAP_MINIMAP2_PRESET_LABELS.get(value, value)
+            self._preset.addItem(label, value)
+        preset = opts.minimap2_preset if opts.minimap2_preset in MAP_MINIMAP2_PRESETS else "map-ont"
+        self._set_combo(self._preset, preset)
+        self._preset.currentIndexChanged.connect(self._on_preset_changed)
+
+        self._mm_format = QComboBox(self)
+        self._mm_format.addItem("PAF", MAP_MINIMAP2_OUT_PAF)
+        self._mm_format.addItem("SAM", MAP_MINIMAP2_OUT_SAM)
+        self._set_combo(
+            self._mm_format,
+            getattr(opts, "minimap2_output", MAP_MINIMAP2_OUT_PAF),
+        )
+        self._mm_cigar = QCheckBox("Include CIGAR", self)
+        self._mm_cigar.setChecked(bool(getattr(opts, "minimap2_include_cigar", True)))
+        self._mm_cs = QCheckBox("Include CS tag", self)
+        self._mm_cs.setChecked(bool(getattr(opts, "minimap2_include_cs", True)))
+        self._mm_format.currentIndexChanged.connect(self._update_mm_output_extras)
+        self._update_mm_output_extras()
+
+        k0, w0 = self._kw_for_preset(preset, opts.minimap2_kmer, opts.minimap2_window)
+        self._mm_kmer = QSpinBox(self)
+        self._mm_kmer.setRange(1, 28)
+        self._mm_kmer.setValue(k0)
+        self._mm_window = QSpinBox(self)
+        self._mm_window.setRange(1, 1000)
+        self._mm_window.setValue(w0)
+
         self._lift = QCheckBox("Check the reference annotations in every sequence", self)
         self._lift.setChecked(opts.lift_annotations)
-        for w in (self._engine, self._sensitivity, self._multi):
-            w.setFixedWidth(_FIELD_WIDTH)
 
-        mapping_tab = QWidget(self)
-        f = _form(mapping_tab)
-        f.addRow("Reference:", _row(self, self._reference,
-                                    make_help_button(self, "Reference", REFERENCE_INFO)))
-        f.addRow("", self._summary)
-        f.addRow("Mapper:", _row(self, self._engine,
-                                 make_help_button(self, "Mapper", MAPPER_INFO)))
-        f.addRow("", self._engine_note)
-        f.addRow("Sensitivity:", _row(self, self._sensitivity,
-                                      make_help_button(self, "Sensitivity", SENSITIVITY_INFO)))
-        f.addRow("Several places:", _row(self, self._multi,
-                                         make_help_button(self, "Several equally good places",
-                                                          MULTI_INFO)))
-        f.addRow("Annotations:", _row(self, self._lift,
-                                      make_help_button(self, "Annotation check", LIFT_INFO)))
+        self._threshold = QComboBox(self)
+        for t in MAP_CONSENSUS_THRESHOLDS:
+            label = (
+                "Majority (most common base)"
+                if t == 0
+                else ("100 % (identical)" if t == 1 else f"{t:.0%}")
+            )
+            self._threshold.addItem(label, t)
+        self._set_combo(self._threshold, opts.consensus_threshold)
 
-        # --- Advanced tab --------------------------------------------------------
+        self._no_cov = QComboBox(self)
+        for label, value in (
+            ("N", MAP_NO_COVERAGE_N),
+            ("Reference base", MAP_NO_COVERAGE_REFERENCE),
+            ("Leave out", MAP_NO_COVERAGE_SKIP),
+        ):
+            self._no_cov.addItem(label, value)
+        self._set_combo(self._no_cov, opts.no_coverage)
+
+        self._min_var = QSpinBox(self)
+        self._min_var.setRange(0, 100)
+        self._min_var.setSuffix(" %")
+        self._min_var.setSpecialValueText("Every difference")
+        self._min_var.setValue(round(opts.min_variant_freq * 100))
+
+        self._display = QSpinBox(self)
+        self._display.setRange(50, 100_000)
+        self._display.setSingleStep(500)
+        self._display.setValue(opts.max_display_reads)
+
+        self._save_consensus = QCheckBox("Consensus", self)
+        self._save_consensus.setChecked(opts.save_consensus)
+        self._save_mapped = QCheckBox("Placed sequences (turned to the reference strand)", self)
+        self._save_mapped.setChecked(opts.save_mapped)
+        self._save_unused = QCheckBox("Unused sequences, with the reason", self)
+        self._save_unused.setChecked(opts.save_unused)
+        self._save_variants = QCheckBox("Variants table", self)
+        self._save_variants.setChecked(opts.save_variants)
+
         self._min_identity = QSpinBox(self)
         self._min_identity.setRange(0, 100)
         self._min_identity.setSuffix(" %")
@@ -264,86 +430,181 @@ class MapReferenceDialog(QDialog):
         self._min_mapq = QSpinBox(self)
         self._min_mapq.setRange(0, 255)
         self._min_mapq.setValue(opts.min_mapq)
-        self._preset = QComboBox(self)
-        for value in MAP_MINIMAP2_PRESETS:
-            self._preset.addItem("Auto" if value == "auto" else value, value)
-        self._set_combo(self._preset, opts.minimap2_preset)
-        self._preset.setFixedWidth(160)
         self._threads = QSpinBox(self)
         self._threads.setRange(1, 256)
         self._threads.setValue(max(1, opts.threads))
-        for w in (self._min_identity, self._min_aligned, self._min_mapq, self._threads):
-            w.setFixedWidth(_NUMBER_WIDTH)
-        advanced_tab = QWidget(self)
-        a = _form(advanced_tab)
-        a.addRow("Minimum identity:", _row(self, self._min_identity,
-                                           make_help_button(self, "Limits", LIMITS_INFO)))
-        a.addRow("Minimum aligned length:", self._min_aligned)
-        a.addRow("Minimum mapping quality:", self._min_mapq)
-        a.addRow("minimap2 preset:", _row(self, self._preset,
-                                          make_help_button(self, "minimap2 preset", PRESET_INFO)))
-        a.addRow("Threads:", self._threads)
-        self._advanced_form = a
 
-        # --- Output tab -------------------------------------------------------------
-        self._threshold = QComboBox(self)
-        for t in MAP_CONSENSUS_THRESHOLDS:
-            label = "Majority (most common base)" if t == 0 else (
-                "100 % (identical)" if t == 1 else f"{t:.0%}")
-            self._threshold.addItem(label, t)
-        self._set_combo(self._threshold, opts.consensus_threshold)
-        self._no_cov = QComboBox(self)
-        for label, value in (("N", MAP_NO_COVERAGE_N), ("Reference base", MAP_NO_COVERAGE_REFERENCE),
-                             ("Leave out", MAP_NO_COVERAGE_SKIP)):
-            self._no_cov.addItem(label, value)
-        self._set_combo(self._no_cov, opts.no_coverage)
-        self._min_var = QSpinBox(self)
-        self._min_var.setRange(0, 100)
-        self._min_var.setSuffix(" %")
-        self._min_var.setSpecialValueText("Every difference")
-        self._min_var.setValue(round(opts.min_variant_freq * 100))
-        self._min_var.setFixedWidth(150)
-        self._display = QSpinBox(self)
-        self._display.setRange(50, 100_000)
-        self._display.setSingleStep(500)
-        self._display.setValue(opts.max_display_reads)
-        self._display.setFixedWidth(_NUMBER_WIDTH)
-        self._save_consensus = QCheckBox("Consensus", self)
-        self._save_consensus.setChecked(opts.save_consensus)
-        self._save_mapped = QCheckBox("Placed sequences (turned to the reference strand)", self)
-        self._save_mapped.setChecked(opts.save_mapped)
-        self._save_unused = QCheckBox("Unused sequences, with the reason", self)
-        self._save_unused.setChecked(opts.save_unused)
-        self._save_variants = QCheckBox("Variants table", self)
-        self._save_variants.setChecked(opts.save_variants)
-        for w in (self._threshold, self._no_cov):
-            w.setFixedWidth(220)
-        saves = QWidget(self)
-        sl = QVBoxLayout(saves)
-        sl.setContentsMargins(0, 0, 0, 0)
-        sl.setSpacing(4)
-        for w in (self._save_consensus, self._save_mapped, self._save_unused, self._save_variants):
-            sl.addWidget(w)
-        output_tab = QWidget(self)
-        o = _form(output_tab)
-        o.addRow("Consensus:", _row(self, self._threshold,
-                                    make_help_button(self, "Consensus", CONSENSUS_INFO)))
-        o.addRow("No coverage:", self._no_cov)
-        o.addRow("Variants from:", self._min_var)
-        o.addRow("Sequences drawn:", _row(self, self._display,
-                                          make_help_button(self, "Sequences drawn", DISPLAY_INFO)))
-        o.addRow("Save:", saves)
-        o.addRow("", _note("Always written: the result (.rvmap, opens in the contig view), the "
-                           "report, the reads and features tables and the aligner output, in "
-                           "the <input>_map_details folder.", self))
+        for field in (
+            self._hisat2_library,
+            self._hisat2_reads,
+            self._hisat2_strand,
+            self._multi_mm,
+            self._multi_hs,
+            self._threshold,
+            self._no_cov,
+            self._preset,
+            self._mm_format,
+            self._threads,
+            self._mm_kmer,
+            self._mm_window,
+            self._hisat2_min_intron,
+            self._hisat2_max_intron,
+        ):
+            field.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        for field in (
+            self._min_identity,
+            self._min_aligned,
+            self._min_mapq,
+            self._min_var,
+            self._display,
+        ):
+            field.setFixedWidth(120)
 
-        # --- Options tab ---------------------------------------------------------------
+        # --- engine page (shared Inputs; Settings/Advanced swap by tab) ------
+        engine_page = QWidget(self)
+        self._engine_page = engine_page
+        engine_page.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        engine_root = QVBoxLayout(engine_page)
+        engine_root.setContentsMargins(16, 10, 16, 10)
+        engine_root.setSpacing(4)
+        engine_root.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        basic = QWidget(engine_page)
+        self._engine_basic = basic
+        basic.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        form = QFormLayout(basic)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+        self._basic_form = form
+
+        def _section(title: str) -> QLabel:
+            return QLabel(f"<b>{title}</b>", engine_page)
+
+        form.addRow(_section("Inputs"))
+        inputs_box = QWidget(basic)
+        inputs_layout = QVBoxLayout(inputs_box)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(2)
+        inputs_layout.addWidget(
+            field_with_help(
+                self._input_selected, "Map inputs", _MAP_INPUTS_HELP, stretch=True
+            )
+        )
+        inputs_layout.addWidget(self._input_define)
+        # Empty labels sized to Settings so radio dots line up with Map mode.
+        self._inputs_radios_label = QLabel("")
+        self._inputs_define_label = QLabel("")
+        form.addRow(self._inputs_radios_label, inputs_box)
+        form.addRow(self._inputs_define_label, self._define_inputs)
+        form.addRow("Reference:", self._reference)
+
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Settings"))
+        # Minimap2-only settings (real minimap2 CLI).
+        self._preset_field = field_with_help(self._preset, "Map mode (-x)", PRESET_INFO)
+        form.addRow("Map mode:", self._preset_field)
+        self._multi_mm_field = field_with_help(
+            self._multi_mm, "Secondaries (-N)", MULTI_MM_INFO
+        )
+        # HISAT2-only settings (real HISAT2 CLI).
+        self._hisat2_library_field = field_with_help(
+            self._hisat2_library, "HISAT2 library", HISAT2_LIBRARY_INFO
+        )
+        form.addRow("Library:", self._hisat2_library_field)
+        self._hisat2_reads_field = field_with_help(
+            self._hisat2_reads, "HISAT2 reads", HISAT2_READS_INFO
+        )
+        form.addRow("Reads:", self._hisat2_reads_field)
+        self._hisat2_strand_field = field_with_help(
+            self._hisat2_strand, "RNA strandness", HISAT2_STRAND_INFO
+        )
+        form.addRow("Strandness:", self._hisat2_strand_field)
+        self._multi_hs_field = field_with_help(
+            self._multi_hs, "Multi-mapping", MULTI_HS_INFO
+        )
+        form.addRow("Secondaries:", self._multi_mm_field)
+        form.addRow("Report:", self._multi_hs_field)
+        form.addRow("Threads:", self._threads)
+
+        # Minimap2 Output (FastGA-style Format + optional tags).
+        self._mm_output_sep = _form_section_separator()
+        form.addRow(self._mm_output_sep)
+        self._mm_output_heading = _section("Output")
+        form.addRow(self._mm_output_heading)
+        self._mm_format_field = field_with_help(
+            self._mm_format, "Output format", OUTPUT_FMT_INFO
+        )
+        form.addRow("Format:", self._mm_format_field)
+        engine_root.addWidget(basic)
+
+        advanced = QWidget(engine_page)
+        self._advanced_panel = advanced
+        advanced.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        adv = QFormLayout(advanced)
+        adv.setContentsMargins(0, 4, 0, 0)
+        adv.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        adv.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        adv.setHorizontalSpacing(12)
+        adv.setVerticalSpacing(4)
+        adv.addRow(_form_section_separator())
+        adv.addRow(_section("Advanced Settings"))
+        self._kmer_field = field_with_help(self._mm_kmer, "minimap2 -k", KMER_INFO)
+        self._window_field = field_with_help(self._mm_window, "minimap2 -w", KMER_INFO)
+        adv.addRow("K-mer (-k):", self._kmer_field)
+        adv.addRow("Window (-w):", self._window_field)
+        # CIGAR / CS: needed for contig view defaults, rarely toggled → Advanced.
+        self._mm_cigar_field = field_with_help(
+            self._mm_cigar, "Include CIGAR", CIGAR_INFO
+        )
+        self._mm_cs_field = field_with_help(self._mm_cs, "Include CS tag", CS_INFO)
+        self._mm_cigar_label = QLabel("")
+        self._mm_cs_label = QLabel("")
+        adv.addRow(self._mm_cigar_label, self._mm_cigar_field)
+        adv.addRow(self._mm_cs_label, self._mm_cs_field)
+        # HISAT2 Advanced (RNA-seq / softclip).
+        self._hisat2_dta_field = field_with_help(
+            self._hisat2_dta, "HISAT2 --dta", HISAT2_DTA_INFO
+        )
+        self._hisat2_dta_label = QLabel("")
+        adv.addRow(self._hisat2_dta_label, self._hisat2_dta_field)
+        self._hisat2_min_intron_field = field_with_help(
+            self._hisat2_min_intron, "min intron", HISAT2_INTRON_INFO
+        )
+        self._hisat2_max_intron_field = field_with_help(
+            self._hisat2_max_intron, "max intron", HISAT2_INTRON_INFO
+        )
+        adv.addRow("Min intron:", self._hisat2_min_intron_field)
+        adv.addRow("Max intron:", self._hisat2_max_intron_field)
+        self._hisat2_softclip_field = field_with_help(
+            self._hisat2_no_softclip, "HISAT2 --no-softclip", HISAT2_SOFTCLIP_INFO
+        )
+        self._hisat2_softclip_label = QLabel("")
+        adv.addRow(self._hisat2_softclip_label, self._hisat2_softclip_field)
+        self._advanced_form = adv
+        engine_root.addWidget(advanced)
+        self._sync_field_column()
+        # No stretch: dialog height follows content (avoids a tall empty window).
+
+        # --- Options page ----------------------------------------------------
         self._right_click_buttons: dict[str, QRadioButton] = {}
         group = QButtonGroup(self)
-        rc_box = QGroupBox("Right-click on Map to Reference", self)
+        rc_box = QGroupBox("Right-click on Mapping", self)
         rcl = QVBoxLayout(rc_box)
-        for label, value in (("Map with saved settings", MAP_RIGHT_CLICK_RUN),
-                             ("Open this window", MAP_RIGHT_CLICK_DIALOG)):
+        for label, value in (
+            ("Map with saved settings", MAP_RIGHT_CLICK_RUN),
+            ("Open this window", MAP_RIGHT_CLICK_DIALOG),
+        ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_action == value)
             group.addButton(radio)
@@ -351,216 +612,546 @@ class MapReferenceDialog(QDialog):
             rcl.addWidget(radio)
         if not any(b.isChecked() for b in self._right_click_buttons.values()):
             self._right_click_buttons[MAP_RIGHT_CLICK_RUN].setChecked(True)
+
+        self._rc_engine = QComboBox(self)
+        self._rc_engine.addItem(mr.ENGINE_LABELS[MAP_ENGINE_AUTO], MAP_ENGINE_AUTO)
+        self._rc_engine.addItem("minimap2", MAP_ENGINE_MINIMAP2)
+        self._rc_engine.addItem("HISAT2", MAP_ENGINE_HISAT2)
+        rc_engine = opts.engine if opts.engine in (
+            MAP_ENGINE_AUTO,
+            MAP_ENGINE_MINIMAP2,
+            MAP_ENGINE_HISAT2,
+        ) else MAP_ENGINE_AUTO
+        self._set_combo(self._rc_engine, rc_engine)
+        self._rc_engine.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        rc_engine_row = QWidget(self)
+        rcel = QHBoxLayout(rc_engine_row)
+        rcel.setContentsMargins(0, 0, 0, 0)
+        rcel.addWidget(QLabel("Mapper for right-click / Save:", self))
+        rcel.addWidget(
+            field_with_help(
+                self._rc_engine, "Right-click mapper", _RIGHT_CLICK_ENGINE_HELP
+            )
+        )
+        rcel.addStretch(1)
+        rcl.addWidget(rc_engine_row)
+
+        self._use_system_path = QCheckBox(
+            system_path_executable_label("Minimap2"), self
+        )
+        self._use_system_path.setChecked(opts.use_system_path)
+        self._use_system_path.setToolTip(
+            "Use minimap2 from PATH or the conda env in File → Settings → External tools "
+            "instead of the bundled Minimap2."
+        )
+        self._minimap2_path_status = make_executable_status_label(self)
+        self._hisat2_path_status = make_executable_status_label(self)
+        self._use_system_path.toggled.connect(self._update_executable_status)
+        exe_box = QGroupBox("Executables", self)
+        exe_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        exl = QVBoxLayout(exe_box)
+        exl.setContentsMargins(10, 8, 10, 8)
+        exl.setSpacing(8)
+        exl.addWidget(
+            executable_checkbox_row(
+                self, self._use_system_path, self._minimap2_path_status
+            )
+        )
+        exl.addWidget(self._hisat2_path_status)
+
         process_box, self._show_process_window, self._close_process_window = (
             make_process_output_box(
-                self, tool_name="the mapping", checked=opts.show_process_window,
+                self,
+                tool_name="the mapping",
+                checked=opts.show_process_window,
                 close_when_finished=bool(
                     getattr(opts, "close_process_window_when_finished", False)
                 ),
             )
         )
-        self._use_system_path = QCheckBox("Use programs from the system PATH", self)
-        self._use_system_path.setChecked(opts.use_system_path)
-        self._use_system_path.setToolTip(
-            "Off: RepeatViewer's bundled MAFFT and minimap2; Bowtie2 from the conda env "
-            "in File → Settings → External tools (then PATH). On: all from PATH.")
-        self._found = _note("", self)
-        self._found.setWordWrap(False)
-        exe_box = QGroupBox("Programs", self)
-        exl = QVBoxLayout(exe_box)
-        exl.addWidget(self._use_system_path)
-        exl.addWidget(self._found)
-        from repeatviewer.backends.minimap2_tools import MINIMAP2_VERSION
-        exl.addWidget(_note(
-            f"minimap2 {MINIMAP2_VERSION} is included with RepeatViewer "
-            "(Windows / Linux x86_64 / macOS). Bowtie2 still needs conda or PATH.",
-            self))
-        options_tab = QWidget(self)
-        ol = QVBoxLayout(options_tab)
+
+        # RepeatViewer result options keep saved defaults (not shown — not mapper flags).
+        for w in (
+            self._min_identity,
+            self._min_aligned,
+            self._min_mapq,
+            self._lift,
+            self._threshold,
+            self._no_cov,
+            self._min_var,
+            self._display,
+            self._save_consensus,
+            self._save_mapped,
+            self._save_unused,
+            self._save_variants,
+        ):
+            w.hide()
+
+        options_page = QWidget(self)
+        self._options_page = options_page
+        options_page.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        ol = QVBoxLayout(options_page)
         ol.setContentsMargins(16, 14, 16, 14)
         ol.setSpacing(14)
+        ol.setAlignment(Qt.AlignmentFlag.AlignTop)
         ol.addWidget(rc_box)
-        ol.addWidget(process_box)
         ol.addWidget(exe_box)
-        ol.addStretch(1)
+        ol.addWidget(process_box)
 
-        self._tabs = QTabWidget(self)
-        self._tabs.addTab(mapping_tab, "Mapping")
-        self._tabs.addTab(advanced_tab, "Advanced")
-        self._tabs.addTab(output_tab, "Output")
-        self._tabs.addTab(options_tab, "Options")
+        self._tab_bar = QTabBar(self)
+        self._tab_bar.setExpanding(False)
+        self._tab_bar.setDocumentMode(True)
+        self._tab_bar.addTab("Minimap2")
+        self._tab_bar.addTab("HISAT2")
+        self._tab_bar.addTab("Options")
+        self._stack = QStackedWidget(self)
+        self._stack.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._stack.addWidget(engine_page)
+        self._stack.addWidget(options_page)
+
+        if opts.engine == MAP_ENGINE_HISAT2:
+            self._tab_bar.setCurrentIndex(self._TAB_HISAT2)
+        else:
+            self._tab_bar.setCurrentIndex(self._TAB_MINIMAP2)
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        self._button_box = make_cancel_save_run_bar(self, left_widgets=[restore])
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_toggled)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore, self._advanced_settings_btn],
+        )
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
-        layout.setSpacing(12)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._button_box)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tab_bar, 0)
+        layout.addWidget(self._stack, 0)
+        layout.addWidget(self._button_box, 0)
 
-        self._reference.path_changed.connect(self._sync)
-        self._engine.currentIndexChanged.connect(self._sync)
-        self._use_system_path.toggled.connect(self._sync)
-        self._sync()
+        self._tab_bar.currentChanged.connect(self._on_tab_changed)
+        self._set_advanced_visible(False)
+        self._sync_inputs(resize=False)
+        self._on_tab_changed(self._tab_bar.currentIndex())
+        self.resize(self._DIALOG_WIDTH, 360)
+        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
 
-    # ------------------------------------------------------------------ helpers
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._engine_compact_size = None
+        self._sync_field_column()
+        if self._tab_bar.currentIndex() == self._TAB_OPTIONS:
+            self._update_executable_status()
+        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
+
+    def _sync_field_column(self) -> None:
+        """Indent Inputs radios / Advanced checkboxes to the Settings field column."""
+        if not hasattr(self, "_inputs_radios_label"):
+            return
+        sync_form_field_column_spacers(
+            self,
+            [
+                self._inputs_radios_label,
+                self._inputs_define_label,
+                self._mm_cigar_label,
+                self._mm_cs_label,
+                self._hisat2_dta_label,
+                self._hisat2_softclip_label,
+            ],
+            [self._basic_form, getattr(self, "_advanced_form", None)],
+            ref_label=self._SETTINGS_LABEL_REF,
+        )
 
     @staticmethod
-    def _set_combo(combo, value) -> None:
+    def _set_combo(combo: QComboBox, value) -> None:
         idx = combo.findData(value)
         if idx >= 0:
             combo.setCurrentIndex(idx)
 
-    def _reference_info(self, path: Path | None) -> tuple[dict[str, int], str]:
-        """(record lengths, error) for the reference; cached per path."""
-        if path is None:
-            return {}, ""
-        key = str(path)
-        if key not in self._ref_info_cache:
-            try:
-                if not path.is_file():
-                    raise OSError("not found")
-                if path.stat().st_size > _SCAN_LIMIT_BYTES:
-                    self._ref_info_cache[key] = ({}, "")
-                else:
-                    self._ref_info_cache[key] = (mr.reference_lengths(path), "")
-            except OSError:
-                self._ref_info_cache[key] = ({}, f"{path.name}: not found.")
-        return self._ref_info_cache[key]
+    def _active_engine(self) -> str:
+        if self._tab_bar.currentIndex() == self._TAB_HISAT2:
+            return MAP_ENGINE_HISAT2
+        if self._tab_bar.currentIndex() == self._TAB_MINIMAP2:
+            return MAP_ENGINE_MINIMAP2
+        # Options tab: keep last engine radio / combo
+        return str(self._rc_engine.currentData() or MAP_ENGINE_AUTO)
 
-    def _auto_choice(self) -> str | None:
-        lengths, _err = self._reference_info(self._reference.path())
-        if not lengths or not self._files:
-            return None
-        try:
-            size = sum(p.stat().st_size for p in self._files)
-        except OSError:
-            return None
-        if size > _SCAN_LIMIT_BYTES:
-            return None
-        return mr.choose_engine(lengths, mr.scan_inputs(self._files, keep_names=0))
+    def _on_tab_changed(self, index: int) -> None:
+        on_options = index == self._TAB_OPTIONS
+        on_mm = index == self._TAB_MINIMAP2
+        on_hs = index == self._TAB_HISAT2
+        self._stack.setCurrentIndex(1 if on_options else 0)
+        self._apply_engine_row_visibility(on_mm=on_mm, on_hs=on_hs)
+        # Keep Options mapper in sync when leaving an engine tab.
+        if index in (self._TAB_MINIMAP2, self._TAB_HISAT2):
+            self._set_combo(self._rc_engine, self._active_engine())
+        if on_options:
+            self._advanced_settings_btn.setVisible(False)
+            if self._advanced_settings_btn.isChecked():
+                self._advanced_settings_btn.blockSignals(True)
+                self._advanced_settings_btn.setChecked(False)
+                self._advanced_settings_btn.setText("Advanced Settings ▸")
+                self._advanced_settings_btn.blockSignals(False)
+                self._set_advanced_visible(False)
+            self._update_executable_status()
+            if self.isVisible():
+                self._fit_options()
+            return
+        if self.isVisible():
+            self._resize_for_advanced(self._advanced_settings_btn.isChecked())
 
-    def _sync(self, *_args) -> None:
-        ref = self._reference.path()
-        _lengths, err = self._reference_info(ref)
-        self._summary.setText(err or input_summary_text(self._files, ref))
-        self._summary.setStyleSheet("color: #b00020;" if err else "color: palette(mid);")
-        system = self._use_system_path.isChecked()
-        for i in range(self._engine.count()):
-            value = self._engine.itemData(i)
-            label = mr.ENGINE_LABELS[value]
-            if value != MAP_ENGINE_AUTO and not mr.engine_available(value, system_path_only=system):
-                label += " (not found)"
-            self._engine.setItemText(i, label)
-        engine = self._engine.currentData()
-        note = ""
-        if engine == MAP_ENGINE_AUTO:
-            choice = self._auto_choice()
-            if choice:
-                note = f"Auto will use {mr.ENGINE_NAMES[choice]} for this input."
-                if not mr.engine_available(choice, system_path_only=system):
-                    note += " It was not found: " + mr.engine_install_hint(choice).split(":\n")[-1]
-        elif engine == MAP_ENGINE_MAFFT and len(_lengths) > 1:
-            note = (f"MAFFT maps to one sequence; {ref.name if ref else 'the reference'} has "
-                    f"{len(_lengths)}. Choose minimap2 or Bowtie2.")
-        elif engine != MAP_ENGINE_AUTO and not mr.engine_available(engine, system_path_only=system):
-            note = "Not found. " + mr.engine_install_hint(engine).replace("\n", " ")
-        self._engine_note.setText(note)
-        self._engine_note.setVisible(bool(note))
-        mafft = engine == MAP_ENGINE_MAFFT
-        self._multi.setEnabled(not mafft)
-        self._min_mapq.setEnabled(not mafft)
-        self._preset.setEnabled(engine in (MAP_ENGINE_AUTO, MAP_ENGINE_MINIMAP2))
-        self._update_found()
+    def _update_executable_status(self, *_args) -> None:
+        """Refresh Minimap2 PATH / HISAT2 lines on Options → Executables."""
+        if not hasattr(self, "_minimap2_path_status"):
+            return
+        set_path_checkbox_status(
+            self._minimap2_path_status,
+            resolve_system_executable("minimap2"),
+            checked=self._use_system_path.isChecked(),
+            has_builtin=True,
+        )
+        set_named_executable_status(
+            self._hisat2_path_status,
+            "HISAT2",
+            resolve_system_executable("hisat2"),
+            missing_text="not configured",
+        )
+        # Grow / shrink the dialog for the new status line — do not squeeze groups.
+        if (
+            self.isVisible()
+            and self._tab_bar.currentIndex() == self._TAB_OPTIONS
+        ):
+            QTimer.singleShot(0, self._fit_options)
 
-    def _update_found(self) -> None:
-        from repeatviewer.backends.minimap2_tools import bundled_minimap2_executable
-        from repeatviewer.backends.sequence_aligner import mafft_command
+    def _sync_hisat2_library(self, _index: int = 0) -> None:
+        rna = self._hisat2_library.currentData() == MAP_HISAT2_RNA
+        self._hisat2_strand.setEnabled(rna)
+        self._hisat2_dta.setEnabled(rna)
+        self._hisat2_min_intron.setEnabled(rna)
+        self._hisat2_max_intron.setEnabled(rna)
+        self._sync_hisat2_reads()
 
-        system = self._use_system_path.isChecked()
-        lines, paths = [], []
-        cmd = mafft_command(use_system_mafft=system)
-        if cmd and not system:
-            mafft_label = "bundled"
+    def _sync_hisat2_reads(self, _index: int = 0) -> None:
+        """Paired-end uses FR/RF strandness; single-end uses F/R."""
+        paired = self._hisat2_reads.currentData() == MAP_HISAT2_READS_PAIRED
+        current = self._hisat2_strand.currentData()
+        for i in range(self._hisat2_strand.count()):
+            value = self._hisat2_strand.itemData(i)
+            if value in (MAP_HISAT2_STRAND_F, MAP_HISAT2_STRAND_R):
+                self._hisat2_strand.model().item(i).setEnabled(not paired)
+            elif value in (MAP_HISAT2_STRAND_FR, MAP_HISAT2_STRAND_RF):
+                self._hisat2_strand.model().item(i).setEnabled(paired)
+        if paired and current in (MAP_HISAT2_STRAND_F, MAP_HISAT2_STRAND_R):
+            self._set_combo(self._hisat2_strand, MAP_HISAT2_STRAND_UNSTRANDED)
+        if not paired and current in (MAP_HISAT2_STRAND_FR, MAP_HISAT2_STRAND_RF):
+            self._set_combo(self._hisat2_strand, MAP_HISAT2_STRAND_UNSTRANDED)
+
+    def _apply_engine_row_visibility(self, *, on_mm: bool, on_hs: bool) -> None:
+        """Show Minimap2 vs HISAT2 Settings / Advanced / Output for the active tab."""
+        basic = getattr(self, "_basic_form", None)
+        adv = getattr(self, "_advanced_form", None)
+        on_engine = on_mm or on_hs
+        if basic is not None:
+            basic.setRowVisible(self._preset_field, on_mm)
+            basic.setRowVisible(self._multi_mm_field, on_mm)
+            basic.setRowVisible(self._mm_output_sep, on_mm)
+            basic.setRowVisible(self._mm_output_heading, on_mm)
+            basic.setRowVisible(self._mm_format_field, on_mm)
+            basic.setRowVisible(self._hisat2_library_field, on_hs)
+            basic.setRowVisible(self._hisat2_reads_field, on_hs)
+            basic.setRowVisible(self._hisat2_strand_field, on_hs)
+            basic.setRowVisible(self._multi_hs_field, on_hs)
+        if adv is not None:
+            self._advanced_settings_btn.setVisible(
+                on_engine and self._tab_bar.currentIndex() != self._TAB_OPTIONS
+            )
+            adv.setRowVisible(self._kmer_field, on_mm)
+            adv.setRowVisible(self._window_field, on_mm)
+            adv.setRowVisible(self._mm_cigar_field, on_mm)
+            adv.setRowVisible(self._mm_cs_field, on_mm)
+            adv.setRowVisible(self._hisat2_dta_field, on_hs)
+            adv.setRowVisible(self._hisat2_min_intron_field, on_hs)
+            adv.setRowVisible(self._hisat2_max_intron_field, on_hs)
+            adv.setRowVisible(self._hisat2_softclip_field, on_hs)
+            if on_hs:
+                self._sync_hisat2_library()
+            if on_engine and self._advanced_settings_btn.isChecked():
+                # Keep advanced open when switching engines; just refresh rows.
+                self._set_advanced_visible(True)
+
+    def _kw_for_preset(
+        self, preset: str, saved_k: int | None = None, saved_w: int | None = None
+    ) -> tuple[int, int]:
+        """Concrete -k/-w for the chosen ``-x`` preset."""
+        table = MAP_MINIMAP2_PRESET_KW.get(preset, (15, 10))
+        k = int(saved_k) if saved_k and int(saved_k) > 0 else table[0]
+        w = int(saved_w) if saved_w and int(saved_w) > 0 else table[1]
+        return k, w
+
+    def _on_preset_changed(self, _index: int = 0) -> None:
+        preset = str(self._preset.currentData() or "map-ont")
+        k, w = self._kw_for_preset(preset)
+        self._mm_kmer.blockSignals(True)
+        self._mm_window.blockSignals(True)
+        self._mm_kmer.setValue(k)
+        self._mm_window.setValue(w)
+        self._mm_kmer.blockSignals(False)
+        self._mm_window.blockSignals(False)
+
+    def _update_mm_output_extras(self, _index: int = 0) -> None:
+        paf = str(self._mm_format.currentData()) == MAP_MINIMAP2_OUT_PAF
+        self._mm_cigar.setEnabled(paf)
+        self._mm_cs.setEnabled(paf)
+        if not paf:
+            self._mm_cigar.blockSignals(True)
+            self._mm_cs.blockSignals(True)
+            self._mm_cigar.setChecked(False)
+            self._mm_cs.setChecked(False)
+            self._mm_cigar.blockSignals(False)
+            self._mm_cs.blockSignals(False)
+        elif not self._mm_cigar.isChecked() and not self._mm_cs.isChecked():
+            # Sensible PAF defaults for the contig view.
+            self._mm_cigar.setChecked(True)
+            self._mm_cs.setChecked(True)
+    def _sync_inputs(self, *, resize: bool = True) -> None:
+        define = self._input_define.isChecked()
+        form = self._engine_basic.layout()
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._define_inputs, define)
+        self._define_inputs.setVisible(define)
+        if define:
+            self._define_inputs.setMinimumHeight(0)
+            self._define_inputs.setMaximumHeight(16777215)
         else:
-            mafft_label = "found" if cmd else "not found"
-        lines.append(f"MAFFT: {mafft_label}")
-        paths.append(f"MAFFT: {cmd[0][0] if cmd else 'not found'}")
-        if not system and bundled_minimap2_executable():
-            exe = bundled_minimap2_executable()
-            lines.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_MINIMAP2]}: bundled")
-            paths.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_MINIMAP2]}: {exe}")
+            self._define_inputs.setFixedHeight(0)
+        self._define_inputs.updateGeometry()
+        self._engine_basic.updateGeometry()
+        self._sync_field_column()
+        if (
+            resize
+            and self.isVisible()
+            and self._tab_bar.currentIndex() != self._TAB_OPTIONS
+            and not self._advanced_settings_btn.isChecked()
+        ):
+            self._engine_compact_size = None
+            self._resize_for_advanced(False)
+
+    def _set_advanced_visible(self, visible: bool) -> None:
+        panel = self._advanced_panel
+        panel.setVisible(visible)
+        if visible:
+            panel.setMaximumHeight(16777215)
         else:
-            exe = mr.engine_executable(MAP_ENGINE_MINIMAP2, system_path_only=system)
-            lines.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_MINIMAP2]}: "
-                         f"{'found' if exe else 'not found'}")
-            paths.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_MINIMAP2]}: {exe or 'not found'}")
-        if system:
-            exe = mr.engine_executable(MAP_ENGINE_BOWTIE2, system_path_only=True)
-            lines.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_BOWTIE2]}: "
-                         f"{'found' if exe else 'not found'}")
-            paths.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_BOWTIE2]}: {exe or 'not found'}")
-        else:
-            # Soft status without conda probe (runtime still searches conda then PATH).
-            lines.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_BOWTIE2]}: conda / PATH")
-            paths.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_BOWTIE2]}: "
-                         + mr.engine_install_hint(MAP_ENGINE_BOWTIE2).replace("\n", " "))
-        self._found.setText("\n".join(lines))
-        self._found.setToolTip("\n".join(paths))
+            panel.setMaximumHeight(0)
+        panel.updateGeometry()
+
+    def _on_advanced_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        if checked:
+            self._engine_compact_size = self.size()
+        self._set_advanced_visible(checked)
+        self._resize_for_advanced(checked)
+
+    def _dialog_chrome_height(self) -> int:
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 8
+        # tab bar + stack + buttons → 2 gaps
+        tab_h = max(24, self._tab_bar.sizeHint().height()) + 4
+        buttons_h = self._button_box.sizeHint().height()
+        return margin_h + (spacing * 2) + tab_h + buttons_h
+
+    def _engine_page_height(self, *, expanded: bool) -> int:
+        """Height of the engine stack page (basic ± Advanced), not Options."""
+        root = self._engine_page.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        self._engine_basic.ensurePolished()
+        basic_h = max(
+            self._engine_basic.minimumSizeHint().height(),
+            self._engine_basic.sizeHint().height(),
+        )
+        if not expanded:
+            return margin_h + basic_h + spacing
+        self._advanced_panel.ensurePolished()
+        extra = max(0, self._advanced_panel.sizeHint().height())
+        return margin_h + basic_h + spacing + extra
+
+    def _pin_stack_height(self, content_h: int) -> None:
+        """Constrain the stack to the active page so Options cannot leave a gap."""
+        h = max(1, content_h)
+        self._stack.setMinimumHeight(0)
+        self._stack.setMaximumHeight(h)
+        page = self._stack.currentWidget()
+        if page is not None:
+            page.setMinimumHeight(0)
+            page.setMaximumHeight(h)
+
+    def _resize_for_advanced(self, expanded: bool) -> None:
+        if self._tab_bar.currentIndex() == self._TAB_OPTIONS:
+            self._fit_options()
+            return
+        self._engine_page.ensurePolished()
+        self._engine_basic.ensurePolished()
+        content_h = self._engine_page_height(expanded=expanded)
+        chrome = self._dialog_chrome_height()
+        width = self._DIALOG_WIDTH
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        height = min(max(chrome + content_h, 200), max_h)
+        self._pin_stack_height(content_h)
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
+        if not expanded:
+            self._engine_compact_size = self.size()
+
+    def _fit_options(self) -> None:
+        page = self._options_page
+        # Clear a previous pin so newly shown status lines can increase sizeHint.
+        self._stack.setMaximumHeight(16777215)
+        page.setMaximumHeight(16777215)
+        page.ensurePolished()
+        page.adjustSize()
+        root = page.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        content_h = page.minimumSizeHint().expandedTo(page.sizeHint()).height()
+        if root is not None:
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        height = self._dialog_chrome_height() + content_h
+        self._pin_stack_height(content_h)
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(self._DIALOG_WIDTH, height)
+        self.setMaximumHeight(16777215)
 
     def _restore_defaults(self) -> None:
         d = MapOptions()
-        self._set_combo(self._engine, d.engine)
-        self._set_combo(self._sensitivity, d.sensitivity)
-        self._set_combo(self._multi, d.multiple_hits)
+        self._input_selected.setChecked(True)
+        self._define_inputs.clear_paths()
+        self._set_combo(self._hisat2_library, d.hisat2_library)
+        self._set_combo(self._hisat2_reads, d.hisat2_reads)
+        self._set_combo(self._hisat2_strand, d.hisat2_strandness)
+        self._hisat2_dta.setChecked(d.hisat2_dta)
+        self._hisat2_no_softclip.setChecked(d.hisat2_no_softclip)
+        self._hisat2_min_intron.setValue(d.hisat2_min_intron)
+        self._hisat2_max_intron.setValue(d.hisat2_max_intron)
+        self._set_combo(self._multi_mm, d.multiple_hits)
+        self._set_combo(self._multi_hs, d.multiple_hits)
         self._lift.setChecked(d.lift_annotations)
         self._min_identity.setValue(round(d.min_identity * 100))
         self._min_aligned.setValue(d.min_aligned_bp)
         self._min_mapq.setValue(d.min_mapq)
         self._set_combo(self._preset, d.minimap2_preset)
+        self._set_combo(self._mm_format, d.minimap2_output)
+        self._mm_cigar.setChecked(d.minimap2_include_cigar)
+        self._mm_cs.setChecked(d.minimap2_include_cs)
+        self._update_mm_output_extras()
+        self._on_preset_changed()
         self._threads.setValue(max(1, d.threads))
         self._set_combo(self._threshold, d.consensus_threshold)
         self._set_combo(self._no_cov, d.no_coverage)
         self._min_var.setValue(round(d.min_variant_freq * 100))
         self._display.setValue(d.max_display_reads)
-        for box, value in ((self._save_consensus, d.save_consensus),
-                           (self._save_mapped, d.save_mapped),
-                           (self._save_unused, d.save_unused),
-                           (self._save_variants, d.save_variants)):
+        for box, value in (
+            (self._save_consensus, d.save_consensus),
+            (self._save_mapped, d.save_mapped),
+            (self._save_unused, d.save_unused),
+            (self._save_variants, d.save_variants),
+        ):
             box.setChecked(value)
         self._right_click_buttons[d.right_click_action].setChecked(True)
+        self._set_combo(self._rc_engine, MAP_ENGINE_AUTO)
         self._show_process_window.setChecked(d.show_process_window)
         self._close_process_window.setChecked(d.close_process_window_when_finished)
         self._use_system_path.setChecked(d.use_system_path)
-        self._sync()
-
-    # ------------------------------------------------------------------ results
+        self._update_executable_status()
+        self._tab_bar.setCurrentIndex(self._TAB_MINIMAP2)
+        self._sync_hisat2_library()
+        self._sync_inputs()
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
+    def input_source(self) -> str:
+        if self._input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        if self.input_source() == ALIGN_INPUT_DEFINE:
+            return self._define_inputs.paths()
+        return [Path(p) for p in (panel_files if panel_files is not None else self._panel_files)]
+
     def files(self) -> list[Path]:
-        return list(self._files)
+        return self.run_files()
 
     def apply_path_from_panel(self, path: Path) -> bool:
-        """A FASTA clicked in the Files panel becomes the reference."""
+        """FASTA click: fills Define inputs when that mode is on, else Reference."""
         resolved = Path(path).expanduser()
-        if not resolved.is_file() or not _is_fasta(resolved):
+        if not resolved.is_file():
+            return False
+        if self.input_source() == ALIGN_INPUT_DEFINE:
+            return bool(self._define_inputs.accept_path(resolved))
+        if not _is_fasta(resolved):
             return False
         self._reference.set_path(resolved)
         return True
 
     def options(self) -> MapOptions:
-        right_click = next((v for v, b in self._right_click_buttons.items() if b.isChecked()),
-                           MAP_RIGHT_CLICK_RUN)
+        right_click = next(
+            (v for v, b in self._right_click_buttons.items() if b.isChecked()),
+            MAP_RIGHT_CLICK_RUN,
+        )
         ref = self._reference.path()
+        # Engine: current engine tab when on Minimap2/HISAT2; Options combo otherwise.
+        if self._tab_bar.currentIndex() in (self._TAB_MINIMAP2, self._TAB_HISAT2):
+            engine = self._active_engine()
+            self._set_combo(self._rc_engine, engine)
+        else:
+            engine = str(self._rc_engine.currentData() or MAP_ENGINE_AUTO)
+        multi = (
+            self._multi_hs.currentData()
+            if self._tab_bar.currentIndex() == self._TAB_HISAT2
+            else self._multi_mm.currentData()
+        )
         return MapOptions(
             reference_fasta=str(ref) if ref else "",
-            engine=str(self._engine.currentData()),
-            sensitivity=str(self._sensitivity.currentData()),
-            multiple_hits=str(self._multi.currentData()),
+            engine=engine,
+            multiple_hits=str(multi),
+            hisat2_library=str(self._hisat2_library.currentData() or MAP_HISAT2_RNA),
+            hisat2_reads=str(self._hisat2_reads.currentData() or MAP_HISAT2_READS_SINGLE),
+            hisat2_strandness=str(self._hisat2_strand.currentData() or ""),
+            hisat2_dta=bool(self._hisat2_dta.isChecked()),
+            hisat2_min_intron=int(self._hisat2_min_intron.value()),
+            hisat2_max_intron=int(self._hisat2_max_intron.value()),
+            hisat2_no_softclip=bool(self._hisat2_no_softclip.isChecked()),
             minimap2_preset=str(self._preset.currentData()),
+            minimap2_output=str(self._mm_format.currentData() or MAP_MINIMAP2_OUT_PAF),
+            minimap2_include_cigar=bool(self._mm_cigar.isChecked()),
+            minimap2_include_cs=bool(self._mm_cs.isChecked()),
+            minimap2_kmer=int(self._mm_kmer.value()),
+            minimap2_window=int(self._mm_window.value()),
             min_identity=self._min_identity.value() / 100.0,
             min_aligned_bp=self._min_aligned.value(),
             min_mapq=self._min_mapq.value(),

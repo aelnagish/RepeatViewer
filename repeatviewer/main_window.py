@@ -556,7 +556,7 @@ _TOOLBAR_TOOLTIPS = {
     "align": "Align FASTA using default parameters",
     "fastga": "FastGA whole-genome alignment (each file against itself, against each other, or against a reference)",
     "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
-    "map_reference": "Map the selected sequences or reads to a reference (MAFFT / minimap2 / Bowtie2)",
+    "map_reference": "Map the selected sequences or reads to a reference (minimap2 / HISAT2)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "te_genome_map": "TE density plot using default parameters",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
@@ -4492,29 +4492,44 @@ class MainWindow(QMainWindow):
                 return
             self._start_tree_job(run_files, self._tree_options)
 
-        # Non-modal so a click in Files can fill the REXdb path (apply_path_from_panel).
+        # Non-modal so Files clicks can update the selection after open.
         self._present_te_viz_dialog(dialog, _accepted)
 
     def _run_tree_rt_domains(self) -> None:
         """Saved settings, with the sequences replaced by their RT domains (REXdb)."""
+        from PySide6.QtWidgets import QFileDialog
+
         from repeatviewer.backends.rt_domains import looks_like_rexdb
-        from repeatviewer.job_options import TREE_SEQ_RT
+        from repeatviewer.job_options import TREE_SEQ_RT, save_tree_options
 
         rexdb = self._tree_options.rexdb_fasta
         if not rexdb or not looks_like_rexdb(Path(rexdb)):
-            QMessageBox.information(
+            chosen, _filter = QFileDialog.getOpenFileName(
                 self,
-                "RT-domain tree",
-                "Choose REXdb first: Tree parameters → REXdb.\n\n"
-                "Download Viridiplantae_v4.0.fasta and Viridiplantae_v4.0.classification "
-                "from github.com/repeatexplorer/rexdb into one folder.",
+                "Choose the REXdb protein FASTA",
+                "",
+                "FASTA (*.fasta *.fa *.faa);;All files (*)",
             )
-            self._open_tree_dialog(require_selection=False)
-            return
+            if not chosen:
+                return
+            path = Path(chosen)
+            if not looks_like_rexdb(path):
+                QMessageBox.warning(
+                    self,
+                    "RT-domain tree",
+                    f"{path.name} needs its .classification table in the same folder.\n\n"
+                    "Download Viridiplantae_v4.0.fasta and "
+                    "Viridiplantae_v4.0.classification from "
+                    "github.com/repeatexplorer/rexdb into one folder.",
+                )
+                return
+            self._tree_options = replace(self._tree_options, rexdb_fasta=str(path))
+            save_tree_options(self._tree_options)
         files = self._selected_files_for_tree()
         if files:
-            self._start_tree_job(files, replace(self._tree_options, sequence_mode=TREE_SEQ_RT))
-
+            self._start_tree_job(
+                files, replace(self._tree_options, sequence_mode=TREE_SEQ_RT)
+            )
     def _start_tree_job(self, files: list[Path], options) -> None:
         title = (f"Tree ({files[0].name})" if len(files) == 1
                  else f"Tree ({len(files)} files combined)")
@@ -4578,7 +4593,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         # Settings can be changed without a selection (Run then asks for one).
         menu.addAction(
-            "Change Map to Reference parameters",
+            "Change Mapping parameters",
             lambda: self._open_map_dialog(require_selection=False),
         )
 
@@ -4599,16 +4614,25 @@ class MainWindow(QMainWindow):
         if not files:
             QMessageBox.information(
                 self,
-                "Map to Reference",
+                "Mapping",
                 "Select the FASTA or FASTQ files to map in the file panel first.\n"
-                "The reference is chosen in the Map to Reference window.",
+                "The reference is chosen in the Mapping window.",
             )
         return files
 
     def _run_map_default(self) -> None:
         if not self._map_options.reference_fasta:
-            self._open_map_dialog()
-            return
+            genome = self._genome_path_resolved()
+            if genome is not None:
+                from dataclasses import replace
+
+                self._map_options = replace(
+                    self._map_options, reference_fasta=str(genome)
+                )
+                save_map_options(self._map_options)
+            else:
+                self._open_map_dialog()
+                return
         files = self._selected_files_for_map()
         if files:
             self._start_map_job(files, self._map_options)
@@ -4620,32 +4644,53 @@ class MainWindow(QMainWindow):
             return
         self._run_map_default()
 
-    def _open_map_dialog(self, *, require_selection: bool = True) -> None:
-        """Map to Reference → parameters dialog (Cancel / Save / Run), non-modal so a
-        click in Files fills the Reference field."""
+    def _open_map_dialog(self, *, require_selection: bool = False) -> None:
+        """Map to Reference → parameters dialog (Cancel / Save / Run).
+
+        Opens even with no FASTA/FASTQ selection so settings can be changed and
+        Define inputs / reference chosen; Run then asks for queries if needed.
+        Non-modal so a Files click fills the Reference field.
+        """
+        del require_selection  # kept for call-site compatibility; never blocks open
+        from repeatviewer.job_options import ALIGN_INPUT_DEFINE
         from repeatviewer.views.map_reference_dialog import MapReferenceDialog
 
         files = self._map_candidate_files()
-        if require_selection and not files:
-            self._selected_files_for_map()  # shows the "select files" message
-            return
-        dialog = MapReferenceDialog(initial=self._map_options, files=files, parent=self)
+        dialog = MapReferenceDialog(
+            initial=self._map_options,
+            files=files,
+            project_genome=self._genome_path_resolved(),
+            parent=self,
+        )
 
         def _accepted(d) -> None:
             self._map_options = d.options()
             save_map_options(self._map_options)
             if not d.should_run():
-                self._set_status_message("Map to Reference settings saved", 4000)
+                self._set_status_message("Mapping settings saved", 4000)
                 return
             reference = self._map_options.reference_fasta
-            run_files = [p for p in (files or self._selected_files_for_map())
-                         if str(p) != reference]
             if not reference:
-                QMessageBox.information(self, "Map to Reference",
-                                        "Choose a reference first (Mapping tab).")
+                QMessageBox.information(
+                    self,
+                    "Mapping",
+                    "Choose a reference first (Minimap2 / HISAT2 tab).",
+                )
                 return
-            if run_files:
-                self._start_map_job(run_files, self._map_options)
+            if d.input_source() == ALIGN_INPUT_DEFINE:
+                run_files = [p for p in d.run_files() if str(p) != reference]
+            else:
+                panel = files or self._map_candidate_files()
+                run_files = [p for p in d.run_files(panel_files=panel) if str(p) != reference]
+            if not run_files:
+                QMessageBox.information(
+                    self,
+                    "Mapping",
+                    "Select query FASTA / FASTQ files in the Files panel, "
+                    "or use Define inputs.",
+                )
+                return
+            self._start_map_job(run_files, self._map_options)
 
         self._present_te_viz_dialog(dialog, _accepted)
 
@@ -4690,7 +4735,7 @@ class MainWindow(QMainWindow):
         if rvmap.is_file():
             self._auto_open_outputs([rvmap])
         self._set_status_message(
-            f"Map to Reference completed — {rvmap.name} (report in {rvmap.stem}_details)",
+            f"Mapping completed — {rvmap.name} (report in {rvmap.stem}_details)",
             12000, override_file_link=True,
         )
 
@@ -4698,7 +4743,7 @@ class MainWindow(QMainWindow):
     def _on_map_failed(self, error: str) -> None:
         if error.strip() == CANCELLED_MESSAGE:
             return
-        QMessageBox.warning(self, "Map to Reference failed", error.strip() or "Unknown error.")
+        QMessageBox.warning(self, "Mapping failed", error.strip() or "Unknown error.")
 
     def _on_preview_open_requested(self, path: object) -> None:
         """A result file asked for from a preview (contig view → Results menu)."""
@@ -5367,7 +5412,7 @@ class MainWindow(QMainWindow):
         self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
-        self._populate_map_menu(tools_menu.addMenu("&Map to Reference"))
+        self._populate_map_menu(tools_menu.addMenu("&Mapping"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
@@ -6886,7 +6931,7 @@ class MainWindow(QMainWindow):
         elif tool_id == "map_reference":
             self._add_toolbar_action_button(
                 bar,
-                "Map to Reference",
+                "Mapping",
                 lambda: self._open_map_dialog(),
                 tooltip=(
                     "Click: set parameters and run.\n"
@@ -9712,14 +9757,17 @@ class MainWindow(QMainWindow):
             if use_system:
                 detail = (
                     f"System {tool_name} is enabled but no '{engine}' command was found "
-                    f"on PATH. Disable 'Use {tool_name} from the system PATH' in "
-                    "Alignment parameters to use the bundled copy."
+                    f"on PATH or in the defined Conda environment. Disable "
+                    f"'Use {tool_name} from the system PATH or defined Conda environment' "
+                    "in Alignment parameters to use the bundled copy."
                 )
             else:
                 detail = (
                     f"The bundled {tool_name} does not support this operating-system "
-                    f"architecture. Install {tool_name} on PATH and enable "
-                    f"'Use {tool_name} from the system PATH' in Alignment parameters."
+                    f"architecture. Install {tool_name} on PATH or in the defined Conda "
+                    f"environment and enable "
+                    f"'Use {tool_name} from the system PATH or defined Conda environment' "
+                    "in Alignment parameters."
                 )
             QMessageBox.warning(
                 self,
@@ -10616,14 +10664,28 @@ class MainWindow(QMainWindow):
         self._msa_plot_options = load_msa_plot_options()
 
         def _on_accept(dialog: MsaPlotDialog) -> None:
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
             self._msa_plot_options = dialog.options()
             save_msa_plot_options(self._msa_plot_options)
             if not dialog.should_run():
                 self._set_status_message("MSA plot settings saved", 4000)
                 return
-            files = dialog.input_files()
+            panel_files = [
+                p
+                for p in self._selected_files()
+                if p.is_file() and self._is_fasta_file(p)
+            ]
+            if dialog.input_source() == ALIGN_INPUT_DEFINE:
+                files = dialog.run_files()
+            else:
+                files = dialog.run_files(panel_files=panel_files)
             if not files:
-                QMessageBox.warning(self, "MSA plot", "Select an aligned FASTA file.")
+                QMessageBox.warning(
+                    self,
+                    "MSA plot",
+                    "Select an aligned FASTA in the Files panel, or use Define inputs.",
+                )
                 return
             source = files[0].expanduser().resolve()
             if not source.is_file() or not self._is_fasta_file(source):

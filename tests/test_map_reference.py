@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import random
-import shutil
 from collections import Counter
 from pathlib import Path
 
@@ -15,12 +14,16 @@ import pytest
 from repeatviewer.backends import map_reference as mr
 from repeatviewer.backends.sequence_features import SequenceFeature, sidecar_path
 from repeatviewer.job_options import (
-    MAP_ENGINE_BOWTIE2,
-    MAP_ENGINE_MAFFT,
+    MAP_ENGINE_AUTO,
+    MAP_ENGINE_HISAT2,
     MAP_ENGINE_MINIMAP2,
+    MAP_HISAT2_DNA,
+    MAP_HISAT2_RNA,
+    MAP_HISAT2_STRAND_FR,
     MAP_MULTI_ALL,
     MAP_MULTI_NONE,
     MapOptions,
+    load_map_options,
 )
 
 
@@ -111,7 +114,8 @@ def test_placement_verdicts():
     amb = _read("ACGTACGTAC", ref_row="ACGTACGTAC", mapq=0)
     none = MapOptions(multiple_hits=MAP_MULTI_NONE, min_aligned_bp=5)
     assert "ambiguous" in mr.placement_verdict(amb, none, MAP_ENGINE_MINIMAP2)
-    assert mr.placement_verdict(amb, none, MAP_ENGINE_MAFFT) is None
+    # HISAT2 treats MAPQ 0–1 as ambiguous when “Do not place” is chosen.
+    assert "ambiguous" in mr.placement_verdict(amb, none, MAP_ENGINE_HISAT2)
 
 
 def test_filter_placements_collects_unused():
@@ -215,14 +219,26 @@ def test_rle_roundtrip():
 
 
 def test_choose_engine():
+    # Auto never returns MAFFT — short-ref satellite-style inputs use minimap2.
     small = mr.InputInfo(n=6, longest=400, lengths_sample=[150, 300, 400])
-    assert mr.choose_engine({"sat": 828}, small) == MAP_ENGINE_MAFFT
+    assert mr.choose_engine({"sat": 828}, small) == MAP_ENGINE_MINIMAP2
     short = mr.InputInfo(n=10_000, longest=150, lengths_sample=[150] * 100)
-    assert mr.choose_engine({"chr1": 10**7}, short) == MAP_ENGINE_BOWTIE2
+    assert mr.choose_engine({"chr1": 10**7}, short) == MAP_ENGINE_HISAT2
     long = mr.InputInfo(n=1000, longest=30_000, lengths_sample=[15_000] * 100)
     assert mr.choose_engine({"chr1": 10**7, "chr2": 10**7}, long) == MAP_ENGINE_MINIMAP2
     assert mr.auto_minimap2_preset(short) == "sr"
     assert mr.auto_minimap2_preset(long) == "map-ont"
+    assert mr.choose_engine({"sat": 800}, small) != "mafft"
+
+
+def test_load_map_options_migrates_mafft_to_auto(monkeypatch):
+    monkeypatch.setattr(
+        "repeatviewer.job_options._load_settings_group",
+        lambda g: {"engine": "mafft", "min_identity": 0.7} if g == "map_reference" else {},
+    )
+    opts = load_map_options()
+    assert opts.engine == MAP_ENGINE_AUTO
+    assert opts.min_identity == 0.7
 
 
 def test_plan_outputs_keeps_full_name_and_never_overwrites(tmp_path):
@@ -236,13 +252,106 @@ def test_plan_outputs_keeps_full_name_and_never_overwrites(tmp_path):
     assert second.base == "variant2.fa_map_2"
 
 
-def test_minimap2_and_bowtie2_arguments():
+def test_pair_hisat2_queries_illumina_names(tmp_path):
+    r1 = tmp_path / "sample_R1.fastq.gz"
+    r2 = tmp_path / "sample_R2.fastq.gz"
+    r1.write_text("@a\nACGT\n+\nIIII\n")
+    r2.write_text("@a\nACGT\n+\nIIII\n")
+    m1, m2 = mr.pair_hisat2_queries([r2, r1])
+    assert m1 == [r1] and m2 == [r2]
+    a1 = tmp_path / "lib_S1_L001_R1_001.fastq"
+    a2 = tmp_path / "lib_S1_L001_R2_001.fastq"
+    a1.write_text("@a\nACGT\n+\nIIII\n")
+    a2.write_text("@a\nACGT\n+\nIIII\n")
+    m1, m2 = mr.pair_hisat2_queries([a1, a2])
+    assert m1 == [a1] and m2 == [a2]
+    with pytest.raises(mr.MapReferenceError, match="R1 and R2"):
+        mr.pair_hisat2_queries([r1])
+    odd = tmp_path / "other.fastq"
+    odd.write_text("@a\nACGT\n+\nIIII\n")
+    with pytest.raises(mr.MapReferenceError, match="do not look like"):
+        mr.pair_hisat2_queries([odd, tmp_path / "also.fastq"])
+
+
+def test_minimap2_and_hisat2_arguments():
     opts = MapOptions(threads=3, multiple_hits=MAP_MULTI_ALL)
     args = mr.minimap2_arguments(opts, "map-ont")
-    assert "--cs=long" in args and "-N" in args and "--paf-no-hit" in args
+    assert "--cs=long" in args and "-c" in args and "-N" in args and "--paf-no-hit" in args
+    assert args[args.index("-k") + 1] == "15"
+    assert args[args.index("-w") + 1] == "10"
+    assert "-a" not in args
     assert "--secondary=no" in mr.minimap2_arguments(MapOptions(), "sr")
-    b = mr.bowtie2_arguments(opts)
-    assert b[0] == "--sensitive-local" and "-k" in b
+    sam = mr.minimap2_arguments(
+        MapOptions(
+            minimap2_preset="map-hifi",
+            minimap2_output="sam",
+            minimap2_include_cs=True,
+            minimap2_kmer=11,
+            minimap2_window=5,
+        ),
+        "map-hifi",
+    )
+    assert "-a" in sam and "--MD" in sam and "--cs=long" in sam
+    assert sam[sam.index("-k") + 1] == "11"
+    assert "--paf-no-hit" not in sam
+    bare = mr.minimap2_arguments(
+        MapOptions(
+            minimap2_preset="sr",
+            minimap2_include_cigar=False,
+            minimap2_include_cs=True,
+            minimap2_kmer=21,
+            minimap2_window=11,
+        ),
+        "sr",
+    )
+    assert "-c" not in bare and "--cs=long" in bare
+    assert bare[bare.index("-k") + 1] == "21"
+    h = mr.hisat2_arguments(opts)
+    assert "-p" in h and h[h.index("-p") + 1] == "3"
+    assert "-k" in h and h[h.index("-k") + 1] == "20"
+    assert "--secondary" in h
+    rna = mr.hisat2_arguments(
+        MapOptions(
+            hisat2_library=MAP_HISAT2_RNA,
+            hisat2_strandness=MAP_HISAT2_STRAND_FR,
+            hisat2_dta=True,
+            hisat2_min_intron=25,
+            hisat2_max_intron=200_000,
+            multiple_hits=MAP_MULTI_ALL,
+        )
+    )
+    assert "--rna-strandness" in rna and rna[rna.index("--rna-strandness") + 1] == "FR"
+    assert "--dta" in rna
+    assert rna[rna.index("--min-intronlen") + 1] == "25"
+    assert rna[rna.index("--max-intronlen") + 1] == "200000"
+    dna = mr.hisat2_arguments(
+        MapOptions(hisat2_library=MAP_HISAT2_DNA, hisat2_no_softclip=True)
+    )
+    assert "--no-spliced-alignment" in dna
+    assert "--rna-strandness" not in dna
+    assert "--dta" not in dna
+    assert "--no-softclip" in dna
+
+
+def test_preset_kmer_window_table():
+    assert mr.preset_kmer_window("map-ont") == (15, 10)
+    assert mr.preset_kmer_window("lr:hq") == (19, 19)
+    assert mr.preset_kmer_window("asm20") == (19, 10)
+    assert mr.preset_kmer_window("sr") == (21, 11)
+    assert mr.preset_kmer_window("splice") == (15, 5)
+    assert mr.preset_kmer_window("splice:hq") == (15, 5)
+    assert mr.preset_kmer_window("splice:sr") == (15, 5)
+
+
+def test_hisat2_uses_path_not_bundle(monkeypatch):
+    """HISAT2 is conda/PATH only (no vendored binaries)."""
+    monkeypatch.setattr(
+        mr.shutil, "which", lambda name, path=None: f"/usr/bin/{name}"
+    )
+    assert mr.engine_executable(MAP_ENGINE_HISAT2) == "/usr/bin/hisat2"
+    assert "conda" in mr.engine_install_hint(MAP_ENGINE_HISAT2).lower()
+    assert "hisat2" in mr.engine_install_hint(MAP_ENGINE_HISAT2).lower()
+    assert "bundled" not in mr.engine_install_hint(MAP_ENGINE_HISAT2).lower()
 
 
 # --- real runs ----------------------------------------------------------------
@@ -275,25 +384,29 @@ def _crosat(tmp_path: Path):
     return tmp_path / "ref.fa", tmp_path / "variants.fa"
 
 
-def _mafft_options(ref: Path) -> MapOptions | None:
-    from repeatviewer.backends.sequence_aligner import mafft_command
-
-    if mafft_command(use_system_mafft=False) is not None:
-        return MapOptions(reference_fasta=str(ref), engine=MAP_ENGINE_MAFFT, threads=2)
-    if mafft_command(use_system_mafft=True) is not None:
-        return MapOptions(reference_fasta=str(ref), engine=MAP_ENGINE_MAFFT, threads=2,
-                          use_system_path=True)
+def _minimap2_options(ref: Path) -> MapOptions | None:
+    if mr.engine_executable(MAP_ENGINE_MINIMAP2):
+        return MapOptions(reference_fasta=str(ref), engine=MAP_ENGINE_MINIMAP2, threads=2)
+    if mr.engine_executable(MAP_ENGINE_MINIMAP2, system_path_only=True):
+        return MapOptions(
+            reference_fasta=str(ref),
+            engine=MAP_ENGINE_MINIMAP2,
+            threads=2,
+            use_system_path=True,
+        )
     return None
 
 
-def test_mafft_run_end_to_end(tmp_path):
+def test_minimap2_satellite_end_to_end(tmp_path):
+    """Satellite-style map (formerly MAFFT e2e) via bundled/PATH minimap2."""
     ref, variants = _crosat(tmp_path)
-    opts = _mafft_options(ref)
+    opts = _minimap2_options(ref)
     if opts is None:
-        pytest.skip("MAFFT not available")
+        pytest.skip("minimap2 not available")
     rvmap, files, report = mr.run_mapping([variants], opts)
     assert rvmap.name == "variants.fa_map.rvmap" and rvmap.parent == tmp_path
     data = mr.load_rvmap(rvmap)
+    assert data["engine"] == MAP_ENGINE_MINIMAP2
     assert data["summary"]["n_placed"] == 3 and data["summary"]["n_reversed"] == 1
     contig = data["contigs"][0]
     reads = {r["name"]: r for r in contig["reads"]}
@@ -307,7 +420,6 @@ def test_mafft_run_end_to_end(tmp_path):
         assert (details / data["details"][key]).is_file(), key
     mapped = (details / data["details"]["mapped"]).read_text()
     assert ">v2_reversed " in mapped
-    # the placed sequences carry the lifted annotations (seqmap JSON sidecar)
     mapped_sidecar = sidecar_path(details / data["details"]["mapped"])
     assert mapped_sidecar.is_file()
     consensus_sidecar = sidecar_path(details / data["details"]["consensus"])
@@ -324,21 +436,25 @@ def test_missing_reference_is_a_clear_error(tmp_path):
         mr.run_mapping([q], MapOptions(reference_fasta=str(tmp_path / "none.fa")))
 
 
-def test_mafft_refuses_multi_sequence_reference(tmp_path):
+def test_legacy_mafft_engine_runs_as_auto(tmp_path):
+    """Saved engine=mafft is remapped; run uses Auto → minimap2/HISAT2."""
+    if not mr.engine_executable(MAP_ENGINE_MINIMAP2):
+        pytest.skip("minimap2 not available")
     ref = tmp_path / "ref.fa"
-    ref.write_text(">a\nACGTACGTAC\n>b\nACGTACGTAC\n")
+    ref.write_text(">a\n" + "ACGT" * 50 + "\n")
     q = tmp_path / "q.fa"
-    q.write_text(">x\nACGTACG\n")
-    with pytest.raises(mr.MapReferenceError, match="one reference sequence"):
-        mr.run_mapping([q], MapOptions(reference_fasta=str(ref), engine=MAP_ENGINE_MAFFT))
-    assert not list(tmp_path.glob("*_map_details"))           # nothing half-written
+    q.write_text(">x\n" + "ACGT" * 40 + "\n")
+    rvmap, _files, _report = mr.run_mapping(
+        [q], MapOptions(reference_fasta=str(ref), engine="mafft", threads=2)
+    )
+    data = mr.load_rvmap(rvmap)
+    assert data["engine"] in (MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2)
 
 
-@pytest.mark.parametrize("engine", [MAP_ENGINE_MINIMAP2, MAP_ENGINE_BOWTIE2])
+@pytest.mark.parametrize("engine", [MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2])
 def test_read_mappers_end_to_end(tmp_path, engine):
-    exe = {"minimap2": "minimap2", "bowtie2": "bowtie2"}[engine]
-    if shutil.which(exe) is None:
-        pytest.skip(f"{exe} not on PATH")
+    if not mr.engine_available(engine):
+        pytest.skip(f"{engine} not available (bundled or PATH)")
     rng = random.Random(5)
     genome = "".join(rng.choice("ACGT") for _ in range(20_000))
     (tmp_path / "g.fa").write_text(">chr1\n" + genome + "\n")
@@ -350,8 +466,7 @@ def test_read_mappers_end_to_end(tmp_path, engine):
     reads.append(("nohit", "".join(rng.choice("ACGT") for _ in range(150))))
     (tmp_path / "reads.fq").write_text("".join(f"@{n}\n{s}\n+\n{'I' * len(s)}\n"
                                                for n, s in reads))
-    opts = MapOptions(reference_fasta=str(tmp_path / "g.fa"), engine=engine,
-                      use_system_path=True, threads=2)
+    opts = MapOptions(reference_fasta=str(tmp_path / "g.fa"), engine=engine, threads=2)
     rvmap, _files, _report = mr.run_mapping([tmp_path / "reads.fq"], opts)
     data = json.loads(rvmap.read_text())
     assert data["engine"] == engine
@@ -375,12 +490,12 @@ def test_scan_inputs_cap_marks_incomplete(tmp_path):
     q.write_text("".join(f">r{i}\nACGTACGT\n" for i in range(30)))
     info = mr.scan_inputs([q], max_records=10)
     assert info.n == 10 and not info.complete
-    assert mr.choose_engine({"sat": 800}, info) != MAP_ENGINE_MAFFT
+    assert mr.choose_engine({"sat": 800}, info) == MAP_ENGINE_MINIMAP2
 
 
 def test_long_reference_without_base_detail(tmp_path, monkeypatch):
-    if shutil.which("minimap2") is None:
-        pytest.skip("minimap2 not on PATH")
+    if not mr.engine_available(MAP_ENGINE_MINIMAP2):
+        pytest.skip("minimap2 not available")
     from repeatviewer.widgets.contig_view import ContigModel
 
     monkeypatch.setattr(mr, "DETAIL_LIMIT", 1000)
@@ -395,7 +510,7 @@ def test_long_reference_without_base_detail(tmp_path, monkeypatch):
         reads.append((f"L{i}", "".join(s)))
     (tmp_path / "long.fa").write_text("".join(f">{n}\n{s}\n" for n, s in reads))
     opts = MapOptions(reference_fasta=str(tmp_path / "g.fa"), engine=MAP_ENGINE_MINIMAP2,
-                      use_system_path=True, threads=2)
+                      threads=2)
     rvmap, _f, _r = mr.run_mapping([tmp_path / "long.fa"], opts)
     data = mr.load_rvmap(rvmap)
     contig = data["contigs"][0]

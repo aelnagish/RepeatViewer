@@ -6,7 +6,8 @@ Layout under ``backends/minimap2/``:
 * ``windows/bin/minimap2.exe`` (+ DLLs) — win-ngs community UCRT64 build
 * ``macos/arm64/minimap2``, ``macos/x86_64/minimap2`` — Homebrew bottles
 
-All three are **2.31 (r1302)**. Tick *Use programs from the system PATH* to ignore
+All three are **2.31 (r1302)**. Tick *Use Minimap2 from the system PATH or defined
+Conda environment* to ignore
 the bundle and use the user's own install.
 """
 

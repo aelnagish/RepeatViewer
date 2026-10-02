@@ -104,7 +104,7 @@ TOOLBAR_LABELS: dict[str, str] = {
     "align": "Align",
     "fastga": "FastGA",
     "tree": "Tree",
-    "map_reference": "Map to Reference",
+    "map_reference": "Mapping",
     "repeat_quantify": "Repeat Quantify",
     "blast": "BLAST",
     "extend": "MSA Extend",

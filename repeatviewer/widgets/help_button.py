@@ -10,6 +10,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QLabel,
     QMessageBox,
     QToolButton,
     QWidget,
@@ -84,4 +85,27 @@ def field_with_help(
     row.addWidget(make_help_button(wrap, title, help_text))
     if stretch:
         row.addStretch(1)
+    return wrap
+
+
+def label_with_help(
+    text: str,
+    title: str,
+    help_text: str,
+    *,
+    parent: QWidget | None = None,
+) -> QWidget:
+    """Right-aligned ``Foo:`` + ``?`` for a form label column.
+
+    Use for path rows so Browse lines up with Define-inputs Browse (help is not
+    after the Browse button).
+    """
+    wrap = QWidget(parent)
+    row = QHBoxLayout(wrap)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(4)
+    lab = QLabel(text, wrap)
+    lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    row.addWidget(lab, stretch=1)
+    row.addWidget(make_help_button(wrap, title, help_text))
     return wrap

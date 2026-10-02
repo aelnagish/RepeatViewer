@@ -152,12 +152,39 @@ def test_blast_define_inputs_are_session_only_and_fill_from_panel(
     assert saved["max_msa_lines"] == 250
 
 
-def test_blast_advanced_settings_toggle(qapp: QApplication) -> None:
-    dlg = _blast_dialog(qapp)
-    assert dlg._blastn_advanced.isHidden()
-    dlg._advanced_settings_btn.setChecked(True)
-    assert not dlg._blastn_advanced.isHidden()
-    assert "▾" in dlg._advanced_settings_btn.text()
-    dlg._tabs.setCurrentIndex(1)
-    assert dlg._advanced_settings_btn.isChecked() is False
-    assert dlg._blastp_advanced.isHidden()
+def test_blast_and_align_share_inputs_indent(qapp: QApplication) -> None:
+    """BLAST, MAFFT, and FastGA Inputs radios share one label-column width."""
+    from PySide6.QtCore import Qt
+
+    from repeatviewer.views.tool_dialogs import (
+        AlignParamsDialog,
+        TOOL_PARAMS_LABEL_COLUMN_REF,
+    )
+
+    blast = _blast_dialog(qapp)
+    blast._sync_blast_inputs_field_column()
+    align = AlignParamsDialog(parent=None)
+    align._sync_align_field_columns()
+    qapp.processEvents()
+    expected = blast.fontMetrics().horizontalAdvance(TOOL_PARAMS_LABEL_COLUMN_REF)
+    assert blast._inputs_radios_label.width() == expected
+    assert align._mafft_inputs_radios_label.width() == expected
+    assert align._mafft_mode_label.width() == expected
+    # FastGA must not widen past MAFFT / BLAST (previously used a longer ref_label).
+    panel = align.fastga_panel()
+    panel._sync_field_column()
+    assert panel._inputs_radios_label.width() == expected
+    assert panel._mode_label.width() == expected
+    # Settings labels are right-aligned in that column so short text meets the field.
+    strategy_lab = None
+    form = align._mafft_basic.layout()
+    for row in range(form.rowCount()):
+        item = form.itemAt(row, form.ItemRole.LabelRole)
+        w = item.widget() if item is not None else None
+        if isinstance(w, QLabel) and w.text() == "Strategy:":
+            strategy_lab = w
+            break
+    assert strategy_lab is not None
+    assert strategy_lab.width() == expected
+    assert int(strategy_lab.alignment()) & int(Qt.AlignmentFlag.AlignRight)
+

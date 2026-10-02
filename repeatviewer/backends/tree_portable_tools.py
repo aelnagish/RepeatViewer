@@ -6,7 +6,8 @@
 * Linux universal (``iqtree-3.1.4-Linux.tar.gz`` — launcher + intel/arm builds)
 * Windows 64-bit (``iqtree-3.1.4-Windows.zip``)
 
-``engine_executable`` prefers these unless the user ticks *Use … from the system PATH*.
+``engine_executable`` prefers these unless the user ticks
+*Use … from the system PATH or defined Conda environment*.
 
 FastME publishes no ready multi-platform binaries (source / conda only).
 FastTree publishes Windows and Linux x86-64 builds on the authors' site, but not

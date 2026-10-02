@@ -167,19 +167,21 @@ def engine_install_hint(engine: str) -> str:
         if bundled_engine_executable(engine):
             return (
                 f"IQ-TREE {IQTREE_VERSION} is bundled with RepeatViewer. "
-                "Leave \"Use IQ-TREE from the system PATH\" off to use it, "
-                "or tick that box to use your own install."
+                "Leave \"Use IQ-TREE from the system PATH or defined Conda environment\" "
+                "off to use it, or tick that box to use your own install."
             )
         return (
             f"IQ-TREE {IQTREE_VERSION} should be bundled with RepeatViewer but was not found. "
-            "Reinstall the app, or tick \"Use IQ-TREE from the system PATH\" and install "
+            "Reinstall the app, or tick "
+            "\"Use IQ-TREE from the system PATH or defined Conda environment\" and install "
             "iqtree yourself (e.g. conda install -c bioconda iqtree)."
         )
     pkg = _CONDA_PACKAGE.get(engine, engine)
     return (
         f"Install it into the conda env set in File → Setting → External tools:\n"
         f"  conda install -c bioconda {pkg}\n"
-        f"or put it on your system PATH and tick \"Use … from the system PATH\"."
+        f"or put it on your system PATH and tick "
+        f"\"Use … from the system PATH or defined Conda environment\"."
     )
 
 

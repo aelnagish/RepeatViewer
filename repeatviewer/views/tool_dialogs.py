@@ -55,7 +55,7 @@ from repeatviewer.widgets.spin_boxes import (  # noqa: E402
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox  # noqa: E402
 from repeatviewer.widgets.path_browse import PathBrowseRow  # noqa: E402
-from repeatviewer.widgets.help_button import field_with_help, make_help_button  # noqa: E402
+from repeatviewer.widgets.help_button import field_with_help, make_help_button, label_with_help  # noqa: E402
 
 
 def exec_modal_dialog(dialog: QDialog) -> bool:
@@ -78,6 +78,139 @@ def _prepare_option_dialog(dialog: QDialog) -> None:
         | Qt.WindowType.WindowTitleHint
         | Qt.WindowType.WindowCloseButtonHint
     )
+
+
+def system_path_executable_label(tool_name: str) -> str:
+    """Checkbox text for Options → Executables (Align / BLAST / Map / Tree)."""
+    return (
+        f"Use {tool_name} from the system PATH or defined Conda environment"
+    )
+
+
+def resolve_system_executable(*names: str) -> str | None:
+    """First match from the Settings conda env, then PATH."""
+    import shutil
+
+    from repeatviewer.conda_tools import which_tool
+
+    for name in names:
+        found = which_tool(name) or shutil.which(name)
+        if found:
+            return str(found)
+    return None
+
+
+def make_executable_status_label(parent: QWidget | None = None) -> QLabel:
+    """Status line next to a PATH checkbox or under a named tool (FastGA / HISAT2)."""
+    label = QLabel(parent)
+    label.setWordWrap(False)
+    label.setTextInteractionFlags(
+        Qt.TextInteractionFlag.TextSelectableByMouse
+    )
+    label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+    # Grey info line (path / not-found / not configured).
+    label.setStyleSheet("color: palette(mid);")
+    return label
+
+
+def _executable_status_width(label: QLabel) -> int:
+    """Usable width for eliding a long executable path."""
+    width = label.width()
+    if width >= 40:
+        return width
+    parent = label.parentWidget()
+    while parent is not None:
+        pw = parent.width()
+        if pw >= 80:
+            # Leave room for group-box / dialog chrome.
+            return max(40, pw - 48)
+        parent = parent.parentWidget()
+    # Match TOOL_PARAMS_DIALOG_WIDTH when the widget is not laid out yet.
+    return max(40, 608 - 80)
+
+
+def _elide_middle(text: str, label: QLabel, *, reserve: int = 0) -> str:
+    """Middle-elide ``text`` to fit the status label; full string stays in tooltip."""
+    if not text:
+        return text
+    available = max(40, _executable_status_width(label) - max(0, reserve))
+    return label.fontMetrics().elidedText(
+        text, Qt.TextElideMode.ElideMiddle, available
+    )
+
+
+def set_path_checkbox_status(
+    label: QLabel,
+    path: str | None,
+    *,
+    checked: bool,
+    has_builtin: bool = True,
+) -> None:
+    """Update status for a “Use … from PATH” checkbox.
+
+    When checked: grey path (elided if long) or grey not-found message.
+    When unchecked: hide the status line (no empty gap).
+    """
+    label.setStyleSheet("color: palette(mid);")
+    if not checked:
+        label.clear()
+        label.setToolTip("")
+        label.hide()
+        return
+    label.show()
+    if path:
+        elided = _elide_middle(path, label)
+        label.setText(elided)
+        label.setToolTip(path)
+        return
+    if has_builtin:
+        text = "not found on PATH — using the built-in one"
+    else:
+        text = "not found on PATH or Conda environment"
+    label.setText(text)
+    label.setToolTip(text)
+
+
+def set_named_executable_status(
+    label: QLabel,
+    name: str,
+    path: str | None,
+    *,
+    missing_text: str = "not configured",
+) -> None:
+    """Grey ``**FastGA**: /path`` (elided) or ``**FastGA**: not configured``."""
+    label.setStyleSheet("color: palette(mid);")
+    label.show()
+    prefix = f"<b>{name}</b>: "
+    # Approximate bold-name width so the path elides inside the remaining space.
+    reserve = label.fontMetrics().horizontalAdvance(f"{name}: ")
+    if path:
+        elided = _elide_middle(path, label, reserve=reserve)
+        label.setText(f"{prefix}{elided}")
+        label.setToolTip(path)
+    else:
+        label.setText(f"{prefix}{missing_text}")
+        label.setToolTip(missing_text)
+
+
+def executable_checkbox_row(
+    parent: QWidget,
+    checkbox: QCheckBox,
+    status: QLabel,
+) -> QWidget:
+    """Checkbox; grey path / not-found on the next line, flush with the tick."""
+    wrap = QWidget(parent)
+    lay = QVBoxLayout(wrap)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(2)
+    # Keep indicator tight to the label (macOS styles can add a wide gap).
+    checkbox.setStyleSheet("QCheckBox { spacing: 6px; }")
+    lay.addWidget(checkbox)
+    # Same left edge as the checkbox — no extra indent before the status line.
+    status.setContentsMargins(0, 0, 0, 0)
+    status.hide()
+    lay.addWidget(status)
+    return wrap
 
 
 def make_process_output_box(
@@ -178,6 +311,52 @@ def dialog_should_run(dialog: QDialog) -> bool:
 TOOL_PARAMS_DIALOG_WIDTH = 608
 # Numeric/combo field width on Parameters forms (Align / BLAST / TE-Aid).
 TOOL_PARAMS_FIELD_WIDTH = 260
+# Longest Settings ``Foo:`` label across Align / BLAST / Mapping / TE-Aid / Flexidot /
+# MSA / FastGA. Spacers and Settings labels share this width so every tool’s field
+# column starts on the same vertical line. Keep this the longest real label — do
+# not let per-dialog ``ref_label`` widen one tab past the others.
+TOOL_PARAMS_LABEL_COLUMN_REF = "Minimum alignment length:"
+
+
+def settings_form_label_column_width(
+    host: QWidget,
+    forms: list[QFormLayout | None] | None = None,
+    *,
+    ref_label: str | None = None,
+) -> int:
+    """Shared Settings label-column width (same across all tool dialogs)."""
+    del forms, ref_label  # width is global; args kept for call-site compatibility
+    return max(1, host.fontMetrics().horizontalAdvance(TOOL_PARAMS_LABEL_COLUMN_REF))
+
+
+def sync_form_field_column_spacers(
+    host: QWidget,
+    spacer_labels: list[QLabel],
+    forms: list[QFormLayout | None],
+    *,
+    ref_label: str | None = None,
+) -> None:
+    """Indent empty-label rows to the shared Settings field column.
+
+    Spacer ``QLabel``s on Inputs / Mode / checkbox rows, and every Settings
+    ``*:`` label in ``forms``, are fixed to ``TOOL_PARAMS_LABEL_COLUMN_REF``.
+    Colon labels are right-aligned so short text (``Map mode:``, ``Format:``)
+    sits next to the field instead of leaving a gap on the right of the label.
+    """
+    width = settings_form_label_column_width(host, forms, ref_label=ref_label)
+    for lab in spacer_labels:
+        lab.setFixedWidth(width)
+    for form in forms:
+        if form is None:
+            continue
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            widget = item.widget() if item is not None else None
+            if isinstance(widget, QLabel) and widget.text().endswith(":"):
+                widget.setFixedWidth(width)
+                widget.setAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
 
 
 def _run_cancel_button_box(parent: QWidget) -> QDialogButtonBox:
@@ -1269,7 +1448,8 @@ class AlignParamsDialog(QDialog):
             )
         )
         mafft_mode_layout.addWidget(self._mafft_separate)
-        mafft_form.addRow("", mafft_mode_box)
+        self._mafft_mode_label = QLabel("")
+        mafft_form.addRow(self._mafft_mode_label, mafft_mode_box)
 
         mafft_form.addRow(_form_section_separator())
         mafft_form.addRow(_mafft_section("Inputs", mafft_basic))
@@ -1286,8 +1466,10 @@ class AlignParamsDialog(QDialog):
             )
         )
         mafft_inputs_layout.addWidget(self._mafft_input_define)
-        mafft_form.addRow("", mafft_inputs_box)
-        mafft_form.addRow("", self._mafft_define_inputs)
+        self._mafft_inputs_radios_label = QLabel("")
+        self._mafft_inputs_define_label = QLabel("")
+        mafft_form.addRow(self._mafft_inputs_radios_label, mafft_inputs_box)
+        mafft_form.addRow(self._mafft_inputs_define_label, self._mafft_define_inputs)
 
         mafft_form.addRow(_form_section_separator())
         mafft_form.addRow(_mafft_section("Settings", mafft_basic))
@@ -1470,7 +1652,8 @@ class AlignParamsDialog(QDialog):
             )
         )
         muscle_mode_layout.addWidget(self._muscle_separate)
-        muscle_form.addRow("", muscle_mode_box)
+        self._muscle_mode_label = QLabel("")
+        muscle_form.addRow(self._muscle_mode_label, muscle_mode_box)
 
         muscle_form.addRow(_form_section_separator())
         muscle_form.addRow(_muscle_section("Inputs", muscle_basic))
@@ -1487,8 +1670,10 @@ class AlignParamsDialog(QDialog):
             )
         )
         muscle_inputs_layout.addWidget(self._muscle_input_define)
-        muscle_form.addRow("", muscle_inputs_box)
-        muscle_form.addRow("", self._muscle_define_inputs)
+        self._muscle_inputs_radios_label = QLabel("")
+        self._muscle_inputs_define_label = QLabel("")
+        muscle_form.addRow(self._muscle_inputs_radios_label, muscle_inputs_box)
+        muscle_form.addRow(self._muscle_inputs_define_label, self._muscle_define_inputs)
 
         muscle_form.addRow(_form_section_separator())
         muscle_form.addRow(_muscle_section("Settings", muscle_basic))
@@ -1549,16 +1734,27 @@ class AlignParamsDialog(QDialog):
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
 
-        self._use_system_mafft = QCheckBox("Use MAFFT from the system PATH", self)
+        self._use_system_mafft = QCheckBox(
+            system_path_executable_label("MAFFT"), self
+        )
         self._use_system_mafft.setChecked(use_system_mafft)
         self._use_system_mafft.setToolTip(
-            "Use the system mafft command instead of the bundled MAFFT."
+            "Use mafft from PATH or the conda env in File → Settings → External tools "
+            "instead of the bundled MAFFT."
         )
-        self._use_system_muscle = QCheckBox("Use MUSCLE from the system PATH", self)
+        self._use_system_muscle = QCheckBox(
+            system_path_executable_label("MUSCLE"), self
+        )
         self._use_system_muscle.setChecked(use_system_muscle)
         self._use_system_muscle.setToolTip(
-            "Use the system muscle command instead of the bundled MUSCLE."
+            "Use muscle from PATH or the conda env in File → Settings → External tools "
+            "instead of the bundled MUSCLE."
         )
+        self._mafft_path_status = make_executable_status_label(self)
+        self._muscle_path_status = make_executable_status_label(self)
+        self._fastga_path_status = make_executable_status_label(self)
+        self._use_system_mafft.toggled.connect(self._update_executable_status)
+        self._use_system_muscle.toggled.connect(self._update_executable_status)
 
         options_tab = QWidget(self)
         options_layout = QVBoxLayout(options_tab)
@@ -1588,9 +1784,21 @@ class AlignParamsDialog(QDialog):
         options_layout.addWidget(rc_box)
 
         exe_box = QGroupBox("Executables", self)
+        exe_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         exe_box_layout = QVBoxLayout(exe_box)
-        exe_box_layout.addWidget(self._use_system_mafft)
-        exe_box_layout.addWidget(self._use_system_muscle)
+        exe_box_layout.setContentsMargins(10, 8, 10, 8)
+        exe_box_layout.setSpacing(8)
+        exe_box_layout.addWidget(
+            executable_checkbox_row(
+                self, self._use_system_mafft, self._mafft_path_status
+            )
+        )
+        exe_box_layout.addWidget(
+            executable_checkbox_row(
+                self, self._use_system_muscle, self._muscle_path_status
+            )
+        )
+        exe_box_layout.addWidget(self._fastga_path_status)
         options_layout.addWidget(exe_box)
 
         process_box, self._show_process_window, self._close_process_window = (
@@ -1614,7 +1822,7 @@ class AlignParamsDialog(QDialog):
 
         self._aligner_tabs = QTabWidget(self)
         self._aligner_tabs.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         self._mafft_tab = mafft_tab
         self._muscle_tab = muscle_tab
@@ -1669,12 +1877,114 @@ class AlignParamsDialog(QDialog):
         self._sequence_type.currentIndexChanged.connect(self._sync_controls)
         self._sync_controls()
         self._update_advanced_settings_button()
-        if initial_tab == ALIGNER_FASTGA:
-            QTimer.singleShot(0, self._shrink_to_fastga_content)
-        elif initial_tab == ALIGNER_MUSCLE:
-            QTimer.singleShot(0, self._shrink_to_muscle_content)
-        elif initial_tab == ALIGNER_MAFFT:
-            QTimer.singleShot(0, self._shrink_to_mafft_content)
+        self._sync_align_field_columns()
+        self._update_executable_status()
+        # Always fit the active tab — default open is MAFFT with initial_tab=None.
+        QTimer.singleShot(0, self._fit_current_align_tab)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_align_field_columns()
+        if self._aligner_tabs.currentWidget() is self._options_tab:
+            self._update_executable_status()
+        QTimer.singleShot(0, self._fit_current_align_tab)
+
+    def _fit_current_align_tab(self) -> None:
+        """Shrink / grow the dialog to the active tab’s real content height."""
+        if not self.isVisible():
+            return
+        current = self._aligner_tabs.currentWidget()
+        if current is self._options_tab:
+            self._fit_options_content()
+        elif current is self._fastga_tab:
+            if not self._fastga_panel.advanced_visible():
+                self._resize_for_fastga_advanced(False)
+        elif current is self._muscle_tab:
+            if not self._muscle_advanced_visible():
+                self._resize_for_muscle_advanced(False)
+        elif current is self._mafft_tab:
+            if not self._mafft_advanced_visible():
+                self._resize_for_mafft_advanced(False)
+
+    def _fit_options_content(self) -> None:
+        page = self._options_tab
+        # Clear any prior height pin so newly shown PATH status can grow sizeHint.
+        self._aligner_tabs.setMaximumHeight(16777215)
+        page.setMaximumHeight(16777215)
+        page.ensurePolished()
+        page.adjustSize()
+        root = page.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
+        content_h = page_hint.height()
+        if root is not None:
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        chrome = self._dialog_chrome_height()
+        height = chrome + content_h
+        width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
+        self.setMinimumHeight(0)
+        self._aligner_tabs.setMinimumHeight(0)
+        page.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
+
+    def _sync_align_field_columns(self) -> None:
+        """Indent Mode / Inputs radios to the shared Settings field column."""
+        mafft_form = (
+            self._mafft_basic.layout()
+            if hasattr(self, "_mafft_basic")
+            else None
+        )
+        mafft_adv = (
+            self._mafft_advanced_panel.layout()
+            if hasattr(self, "_mafft_advanced_panel")
+            else None
+        )
+        sync_form_field_column_spacers(
+            self,
+            [
+                self._mafft_mode_label,
+                self._mafft_inputs_radios_label,
+                self._mafft_inputs_define_label,
+            ],
+            [
+                mafft_form if isinstance(mafft_form, QFormLayout) else None,
+                mafft_adv if isinstance(mafft_adv, QFormLayout) else None,
+            ],
+        )
+        muscle_form = (
+            self._muscle_basic.layout()
+            if hasattr(self, "_muscle_basic")
+            else None
+        )
+        muscle_adv = (
+            self._muscle_advanced_panel.layout()
+            if hasattr(self, "_muscle_advanced_panel")
+            else None
+        )
+        sync_form_field_column_spacers(
+            self,
+            [
+                self._muscle_mode_label,
+                self._muscle_inputs_radios_label,
+                self._muscle_inputs_define_label,
+            ],
+            [
+                muscle_form if isinstance(muscle_form, QFormLayout) else None,
+                muscle_adv if isinstance(muscle_adv, QFormLayout) else None,
+            ],
+        )
+        if hasattr(self, "_fastga_panel") and hasattr(
+            self._fastga_panel, "_sync_field_column"
+        ):
+            self._fastga_panel._sync_field_column()
 
     def _remind_fastga_if_needed(self) -> None:
         """Show install/bind instructions when FastGA is not configured."""
@@ -1689,28 +1999,15 @@ class AlignParamsDialog(QDialog):
 
     def _on_aligner_tab_changed(self, _index: int) -> None:
         self._update_advanced_settings_button()
+        self._sync_align_field_columns()
         current = self._aligner_tabs.currentWidget()
+        if current is self._options_tab:
+            self._update_executable_status()
         if current is self._fastga_tab:
             # Defer so the FastGA tab paints before any availability probe / reminder.
             QTimer.singleShot(0, self._remind_fastga_if_needed)
-        if (
-            current is self._fastga_tab
-            and self._fastga_compact_size is None
-            and not self._fastga_panel.advanced_visible()
-        ):
-            QTimer.singleShot(0, self._shrink_to_fastga_content)
-        elif (
-            current is self._muscle_tab
-            and self._muscle_compact_size is None
-            and not self._muscle_advanced_visible()
-        ):
-            QTimer.singleShot(0, self._shrink_to_muscle_content)
-        elif (
-            current is self._mafft_tab
-            and self._mafft_compact_size is None
-            and not self._mafft_advanced_visible()
-        ):
-            QTimer.singleShot(0, self._shrink_to_mafft_content)
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit_current_align_tab)
 
     def _on_advanced_settings_toggled(self, checked: bool) -> None:
         current = self._aligner_tabs.currentWidget()
@@ -2012,6 +2309,8 @@ class AlignParamsDialog(QDialog):
     def _sync_mafft_inputs(self) -> None:
         define = self.mafft_input_source() == ALIGN_INPUT_DEFINE
         self._mafft_define_inputs.setVisible(define)
+        if hasattr(self, "_muscle_mode_label"):
+            self._sync_align_field_columns()
 
     def _apply_mafft_path_from_panel(self, path: Path) -> bool:
         if self.mafft_input_source() != ALIGN_INPUT_DEFINE:
@@ -2049,6 +2348,8 @@ class AlignParamsDialog(QDialog):
     def _sync_muscle_inputs(self) -> None:
         define = self.muscle_input_source() == ALIGN_INPUT_DEFINE
         self._muscle_define_inputs.setVisible(define)
+        if hasattr(self, "_muscle_mode_label"):
+            self._sync_align_field_columns()
 
     def _apply_muscle_path_from_panel(self, path: Path) -> bool:
         if self.muscle_input_source() != ALIGN_INPUT_DEFINE:
@@ -2189,6 +2490,36 @@ class AlignParamsDialog(QDialog):
     def use_system_muscle(self) -> bool:
         return self._use_system_muscle.isChecked()
 
+    def _update_executable_status(self, *_args) -> None:
+        """Refresh PATH / FastGA lines on the Options → Executables box."""
+        if not hasattr(self, "_mafft_path_status"):
+            return
+        set_path_checkbox_status(
+            self._mafft_path_status,
+            resolve_system_executable("mafft"),
+            checked=self._use_system_mafft.isChecked(),
+            has_builtin=True,
+        )
+        set_path_checkbox_status(
+            self._muscle_path_status,
+            resolve_system_executable("muscle"),
+            checked=self._use_system_muscle.isChecked(),
+            has_builtin=True,
+        )
+        from repeatviewer.backends.fastga_dotplot import fastga_executable
+
+        set_named_executable_status(
+            self._fastga_path_status,
+            "FastGA",
+            fastga_executable(),
+            missing_text="not configured",
+        )
+        if (
+            self.isVisible()
+            and self._aligner_tabs.currentWidget() is self._options_tab
+        ):
+            QTimer.singleShot(0, self._fit_options_content)
+
     def _restore_defaults(self) -> None:
         """Reset MAFFT/MUSCLE options and use bundled binaries (not system PATH)."""
         defaults = AlignOptions()
@@ -2242,6 +2573,7 @@ class AlignParamsDialog(QDialog):
         self._use_system_muscle.setChecked(False)
         self._fastga_panel.restore_defaults()
         self._sync_controls()
+        self._update_executable_status()
 
 
 class NewSequenceDialog(QDialog):
@@ -3441,7 +3773,7 @@ class FastGaPanel(QWidget):
         form = QFormLayout(basic)
         form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(4)
 
@@ -3457,16 +3789,22 @@ class FastGaPanel(QWidget):
                 )
             else:
                 mode_layout.addWidget(radio)
-        form.addRow("", mode_box)
-        self._reference_label = QLabel("Reference genome:", basic)
-        self._reference_field = field_with_help(
-            self._reference, "Reference genome", _FASTGA_REFERENCE_HELP
+        self._mode_label = QLabel("")
+        form.addRow(self._mode_label, mode_box)
+        # Help on the label so Reference Browse / path width match Define inputs.
+        self._reference_label = label_with_help(
+            "Reference genome:",
+            "Reference genome",
+            _FASTGA_REFERENCE_HELP,
+            parent=basic,
         )
+        self._reference_field = self._reference
         form.addRow(self._reference_label, self._reference_field)
         self._combined_field = field_with_help(
             self._combined, "Write all into one file", _FASTGA_COMBINED_HELP
         )
-        form.addRow("", self._combined_field)
+        self._combined_spacer = QLabel("")
+        form.addRow(self._combined_spacer, self._combined_field)
         self._combined_label = form.labelForField(self._combined_field)
 
         form.addRow(_form_section_separator())
@@ -3481,8 +3819,10 @@ class FastGaPanel(QWidget):
             )
         )
         inputs_layout.addWidget(self._input_define)
-        form.addRow("", inputs_box)
-        form.addRow("", self._define_inputs)
+        self._inputs_radios_label = QLabel("")
+        self._inputs_define_label = QLabel("")
+        form.addRow(self._inputs_radios_label, inputs_box)
+        form.addRow(self._inputs_define_label, self._define_inputs)
 
         form.addRow(_form_section_separator())
         form.addRow(_section("Output", basic))
@@ -3490,8 +3830,10 @@ class FastGaPanel(QWidget):
             "Format:",
             field_with_help(self._format, "Output format", _FASTGA_FORMAT_HELP),
         )
-        form.addRow("", self._cigar)
-        form.addRow("", self._cs)
+        self._cigar_spacer = QLabel("")
+        self._cs_spacer = QLabel("")
+        form.addRow(self._cigar_spacer, self._cigar)
+        form.addRow(self._cs_spacer, self._cs)
 
         form.addRow(_form_section_separator())
         form.addRow(_section("Settings", basic))
@@ -3539,20 +3881,26 @@ class FastGaPanel(QWidget):
             "Chain gap:",
             field_with_help(self._chain_gap, "Chain gap", _FASTGA_CHAIN_GAP_HELP),
         )
+        self._soft_mask_spacer = QLabel("")
+        self._symmetric_spacer = QLabel("")
+        self._keep_index_spacer = QLabel("")
         advanced_form.addRow(
-            "",
+            self._soft_mask_spacer,
             field_with_help(self._soft_mask, "Soft masking", _FASTGA_SOFT_MASK_HELP),
         )
         advanced_form.addRow(
-            "",
+            self._symmetric_spacer,
             field_with_help(self._symmetric, "Symmetric alignment", _FASTGA_SYMMETRIC_HELP),
         )
         advanced_form.addRow(
-            "",
+            self._keep_index_spacer,
             field_with_help(self._keep_index, "Keep genome index", _FASTGA_KEEP_INDEX_HELP),
         )
+        self._basic_form = form
+        self._advanced_form = advanced_form
         root.addWidget(self._advanced_panel)
         self.set_advanced_visible(False)
+        self._sync_field_column()
 
         for radio in self._mode_buttons.values():
             radio.toggled.connect(self._sync)
@@ -3722,8 +4070,32 @@ class FastGaPanel(QWidget):
 
         define = self.input_source() == FASTGA_INPUT_DEFINE
         self._define_inputs.setVisible(define)
+        self._sync_field_column()
 
         self.changed.emit()
+
+    def _sync_field_column(self) -> None:
+        if not hasattr(self, "_inputs_radios_label"):
+            return
+        sync_form_field_column_spacers(
+            self,
+            [
+                self._mode_label,
+                self._reference_label,
+                self._combined_spacer,
+                self._inputs_radios_label,
+                self._inputs_define_label,
+                self._cigar_spacer,
+                self._cs_spacer,
+                self._soft_mask_spacer,
+                self._symmetric_spacer,
+                self._keep_index_spacer,
+            ],
+            [
+                getattr(self, "_basic_form", None),
+                getattr(self, "_advanced_form", None),
+            ],
+        )
 
     def apply_path_from_panel(self, path: Path) -> bool:
         """Fill Define-inputs or the reference from a Files-panel click."""
@@ -4583,11 +4955,14 @@ class BlastParamsDialog(QDialog):
 
         self._blast_compact_size: QSize | None = None
 
-        self._use_system_blast = QCheckBox("Use BLAST+ from the system PATH")
+        self._use_system_blast = QCheckBox(system_path_executable_label("BLAST+"))
         self._use_system_blast.setChecked(project.use_system_blast)
         self._use_system_blast.setToolTip(
-            "Use BLAST+ programs installed on the system PATH instead of the bundled programs."
+            "Use BLAST+ from PATH or the conda env in File → Settings → External tools "
+            "instead of the bundled programs."
         )
+        self._blast_path_status = make_executable_status_label(self)
+        self._use_system_blast.toggled.connect(self._update_executable_status)
 
         (
             self._blastn_tab,
@@ -4747,7 +5122,13 @@ class BlastParamsDialog(QDialog):
         exe_box = QGroupBox("Executables", self)
         exe_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         exe_box_layout = QVBoxLayout(exe_box)
-        exe_box_layout.addWidget(self._use_system_blast)
+        exe_box_layout.setContentsMargins(10, 8, 10, 8)
+        exe_box_layout.setSpacing(8)
+        exe_box_layout.addWidget(
+            executable_checkbox_row(
+                self, self._use_system_blast, self._blast_path_status
+            )
+        )
         options_layout.addWidget(exe_box)
 
         process_box, self._show_process_window, self._close_process_window = (
@@ -4831,6 +5212,8 @@ class BlastParamsDialog(QDialog):
         # Force a tight compact height after polish (no blank gap under Inputs).
         self._blast_compact_size = None
         self._sync_blast_inputs_field_column()
+        if self._tabs.currentIndex() == self._options_tab_index:
+            self._update_executable_status()
         QTimer.singleShot(0, lambda: self._resize_for_blast_advanced(False))
 
     def _refresh_database_combos(
@@ -5012,22 +5395,14 @@ class BlastParamsDialog(QDialog):
         """Indent Inputs radios to the Settings field column (Align-style)."""
         if not hasattr(self, "_inputs_radios_label"):
             return
-        width = self.fontMetrics().horizontalAdvance(self._SETTINGS_LABEL_REF)
         basic = self._current_blast_basic() if hasattr(self, "_blastn_basic") else None
-        if basic is not None:
-            form = basic.layout()
-            if isinstance(form, QFormLayout):
-                for row in range(form.rowCount()):
-                    item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
-                    widget = item.widget() if item is not None else None
-                    if isinstance(widget, QLabel) and widget.text().endswith(":"):
-                        width = max(
-                            width,
-                            widget.sizeHint().width(),
-                            max(0, widget.width()),
-                        )
-        for lab in (self._inputs_radios_label, self._inputs_define_label):
-            lab.setFixedWidth(width)
+        form = basic.layout() if basic is not None else None
+        sync_form_field_column_spacers(
+            self,
+            [self._inputs_radios_label, self._inputs_define_label],
+            [form if isinstance(form, QFormLayout) else None],
+            ref_label=self._SETTINGS_LABEL_REF,
+        )
 
     def apply_path_from_panel(self, path: Path) -> bool:
         if self.input_source() != ALIGN_INPUT_DEFINE:
@@ -5070,6 +5445,7 @@ class BlastParamsDialog(QDialog):
         self._inputs_panel.setVisible(on_program)
         self._advanced_settings_btn.setVisible(on_program)
         if not on_program:
+            self._update_executable_status()
             if self.isVisible():
                 self._fit_to_content()
             return
@@ -5431,9 +5807,26 @@ class BlastParamsDialog(QDialog):
             defaults.close_process_window_when_finished
         )
         self._right_click_buttons[BLAST_PROGRAM_BLASTN].setChecked(True)
+        self._update_executable_status()
 
     def use_system_blast(self) -> bool:
         return self._use_system_blast.isChecked()
+
+    def _update_executable_status(self, *_args) -> None:
+        """Refresh PATH status on Options → Executables."""
+        if not hasattr(self, "_blast_path_status"):
+            return
+        set_path_checkbox_status(
+            self._blast_path_status,
+            resolve_system_executable("blastn"),
+            checked=self._use_system_blast.isChecked(),
+            has_builtin=True,
+        )
+        if (
+            self.isVisible()
+            and self._tabs.currentIndex() == self._options_tab_index
+        ):
+            QTimer.singleShot(0, self._fit_to_content)
 
     def options(self) -> BlastOptions:
         program = {
@@ -5787,6 +6180,7 @@ class FlexidotParamsDialog(QDialog):
     """
 
     _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+    _SETTINGS_LABEL_REF = "Output format:"
 
     def __init__(
         self,
@@ -5956,7 +6350,8 @@ class FlexidotParamsDialog(QDialog):
             )
         )
         mode_layout.addWidget(self._separate)
-        form.addRow("", mode_box)
+        self._mode_label = QLabel("")
+        form.addRow(self._mode_label, mode_box)
 
         form.addRow(_form_section_separator())
         form.addRow(_section("Inputs", basic))
@@ -5973,8 +6368,10 @@ class FlexidotParamsDialog(QDialog):
             )
         )
         inputs_layout.addWidget(self._input_define)
-        form.addRow("", inputs_box)
-        form.addRow("", self._define_inputs)
+        self._inputs_radios_label = QLabel("")
+        self._inputs_define_label = QLabel("")
+        form.addRow(self._inputs_radios_label, inputs_box)
+        form.addRow(self._inputs_define_label, self._define_inputs)
 
         form.addRow(_form_section_separator())
         form.addRow(_section("Outputs", basic))
@@ -5997,10 +6394,12 @@ class FlexidotParamsDialog(QDialog):
                 self._sequence_type, "Sequence type", _FLEXIDOT_SEQUENCE_TYPE_HELP
             ),
         )
+        self._use_gff_spacer = QLabel("")
         form.addRow(
-            "",
+            self._use_gff_spacer,
             field_with_help(self._use_gff, "Show GFF features", _FLEXIDOT_GFF_HELP),
         )
+        self._flexidot_basic_form = form
         params_root.addWidget(basic)
 
         advanced = QWidget(params_tab)
@@ -6038,14 +6437,17 @@ class FlexidotParamsDialog(QDialog):
                 self._line_width, "Match line thickness", _FLEXIDOT_LINE_WIDTH_HELP
             ),
         )
+        self._wobble_spacer = QLabel("")
+        self._include_reverse_spacer = QLabel("")
+        self._length_scaling_spacer = QLabel("")
         advanced_form.addRow(
-            "",
+            self._wobble_spacer,
             field_with_help(
                 self._wobble, "Expand ambiguous IUPAC bases", _FLEXIDOT_WOBBLE_HELP
             ),
         )
         advanced_form.addRow(
-            "",
+            self._include_reverse_spacer,
             field_with_help(
                 self._include_reverse,
                 "Reverse-complement matches",
@@ -6053,17 +6455,19 @@ class FlexidotParamsDialog(QDialog):
             ),
         )
         advanced_form.addRow(
-            "",
+            self._length_scaling_spacer,
             field_with_help(
                 self._length_scaling,
                 "Length scaling",
                 _FLEXIDOT_LENGTH_SCALING_HELP,
             ),
         )
+        self._flexidot_advanced_form = advanced_form
         params_root.addWidget(advanced)
         advanced.setVisible(False)
         advanced.setMaximumHeight(0)
         self._params_tab = params_tab
+        self._sync_field_column()
 
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
@@ -6147,6 +6551,7 @@ class FlexidotParamsDialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._flexidot_compact_size = None
+        self._sync_field_column()
         QTimer.singleShot(0, lambda: self._resize_for_flexidot_advanced(False))
 
     def should_run(self) -> bool:
@@ -6201,6 +6606,7 @@ class FlexidotParamsDialog(QDialog):
             self._define_inputs.setFixedHeight(0)
         self._define_inputs.updateGeometry()
         self._flexidot_basic.updateGeometry()
+        self._sync_field_column()
         if (
             resize
             and self.isVisible()
@@ -6209,6 +6615,27 @@ class FlexidotParamsDialog(QDialog):
         ):
             self._flexidot_compact_size = None
             self._resize_for_flexidot_advanced(False)
+
+    def _sync_field_column(self) -> None:
+        if not hasattr(self, "_inputs_radios_label"):
+            return
+        sync_form_field_column_spacers(
+            self,
+            [
+                self._mode_label,
+                self._inputs_radios_label,
+                self._inputs_define_label,
+                self._use_gff_spacer,
+                self._wobble_spacer,
+                self._include_reverse_spacer,
+                self._length_scaling_spacer,
+            ],
+            [
+                getattr(self, "_flexidot_basic_form", None),
+                getattr(self, "_flexidot_advanced_form", None),
+            ],
+            ref_label=self._SETTINGS_LABEL_REF,
+        )
 
     def _on_flexidot_tab_changed(self, _index: int) -> None:
         on_params = self._tabs.currentWidget() is self._params_tab
@@ -7125,6 +7552,7 @@ class TeaAidParamsDialog(QDialog):
     """
 
     _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+    _SETTINGS_LABEL_REF = "Genome BLAST E-value:"
 
     def __init__(
         self,
@@ -7317,8 +7745,10 @@ class TeaAidParamsDialog(QDialog):
             )
         )
         inputs_layout.addWidget(self._input_define)
-        form.addRow("", inputs_box)
-        form.addRow("", self._define_inputs)
+        self._inputs_radios_label = QLabel("")
+        self._inputs_define_label = QLabel("")
+        form.addRow(self._inputs_radios_label, inputs_box)
+        form.addRow(self._inputs_define_label, self._define_inputs)
 
         form.addRow(_form_section_separator())
         form.addRow(_section("Settings"))
@@ -7339,6 +7769,7 @@ class TeaAidParamsDialog(QDialog):
             "Threads:",
             field_with_help(self._threads, "Threads", _TEAID_THREADS_HELP),
         )
+        self._teaid_basic_form = form
         params_root.addWidget(basic)
 
         advanced = QWidget(params_tab)
@@ -7462,6 +7893,7 @@ class TeaAidParamsDialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._teaid_compact_size = None
+        self._sync_field_column()
         QTimer.singleShot(0, lambda: self._resize_for_teaid_advanced(False))
 
     def should_run(self) -> bool:
@@ -7516,6 +7948,7 @@ class TeaAidParamsDialog(QDialog):
             self._define_inputs.setFixedHeight(0)
         self._define_inputs.updateGeometry()
         self._teaid_basic.updateGeometry()
+        self._sync_field_column()
         if (
             resize
             and self.isVisible()
@@ -7524,6 +7957,24 @@ class TeaAidParamsDialog(QDialog):
         ):
             self._teaid_compact_size = None
             self._resize_for_teaid_advanced(False)
+
+    def _sync_field_column(self) -> None:
+        if not hasattr(self, "_inputs_radios_label"):
+            return
+        adv = (
+            self._teaid_advanced_panel.layout()
+            if hasattr(self, "_teaid_advanced_panel")
+            else None
+        )
+        sync_form_field_column_spacers(
+            self,
+            [self._inputs_radios_label, self._inputs_define_label],
+            [
+                getattr(self, "_teaid_basic_form", None),
+                adv if isinstance(adv, QFormLayout) else None,
+            ],
+            ref_label=self._SETTINGS_LABEL_REF,
+        )
 
     def _on_teaid_tab_changed(self, _index: int) -> None:
         on_params = self._tabs.currentWidget() is self._params_tab
@@ -9331,8 +9782,35 @@ class TeAbundancePlotDialog(QDialog):
 from repeatviewer.widgets.residue_color_grid import ResidueColorGrid as _ResidueColorGrid
 
 
+_MSA_PLOT_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): plot the aligned FASTA selected in "
+    "the Files panel when you click Run.<br><br>"
+    "<b>Define inputs</b>: choose a different aligned FASTA for this run only."
+)
+_MSA_PLOT_SEQ_TYPE_HELP = (
+    "How residues are coloured. <b>Auto-detect</b> inspects the alignment; "
+    "choose <b>Nucleotide</b> or <b>Protein</b> to force a palette."
+)
+_MSA_PLOT_FORMAT_HELP = "PNG for a bitmap image, or PDF for a vector figure."
+_MSA_PLOT_DPI_HELP = (
+    "Image resolution for PNG (higher = sharper and larger file). PDF ignores DPI."
+)
+_MSA_PLOT_HEIGHT_HELP = (
+    "Figure height reserved for each sequence row (centimeters). "
+    "Increase to make rows taller."
+)
+_MSA_PLOT_DISTANCE_HELP = (
+    "White distance between consecutive sequence rows (centimeters). "
+    "Set to 0 to remove spacing."
+)
+
+
 class MsaPlotDialog(QDialog):
-    """MSA overview plot (nucleotide or protein) with custom residue colors."""
+    """MSA overview plot (Align-style Inputs / Settings / Advanced colors)."""
+
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+    _COLORS_SCROLL_MAX_HEIGHT = 320
+    _SETTINGS_LABEL_REF = "Sequence distance:"
 
     def __init__(
         self,
@@ -9358,25 +9836,45 @@ class MsaPlotDialog(QDialog):
 
         _prepare_option_dialog(self)
         self.setWindowTitle("MSA plot")
-        self.setMinimumWidth(640)
+        self.setMinimumWidth(self._DIALOG_WIDTH)
         self._opts = initial or MsaPlotJobOptions()
         self._default_nuc = dict(DEFAULT_NUCLEOTIDE_COLORS)
         self._default_aa = dict(DEFAULT_AMINO_ACID_COLORS)
+        self._msa_compact_size: QSize | None = None
+        self._msa_seq_auto = MSA_PLOT_SEQ_AUTO
+        self._msa_seq_nuc = MSA_PLOT_SEQ_NUCLEOTIDE
+        self._msa_seq_prot = MSA_PLOT_SEQ_PROTEIN
+        self._msa_fmt_png = MSA_PLOT_FORMAT_PNG
+        self._msa_fmt_pdf = MSA_PLOT_FORMAT_PDF
+        self._msa_nuc_presets = list(NUCLEOTIDE_COLOR_PRESETS)
+        self._msa_aa_presets = list(AMINO_ACID_COLOR_PRESETS)
 
-        self._input = TeMultiInputFilesWidget(
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        self._input_selected.setChecked(True)
+        self._define_inputs = TeMultiInputFilesWidget(
             self,
-            initial=[input_file] if input_file is not None else None,
+            initial=None,
             allow_multiple=False,
+            start_empty=False,
             placeholder="Aligned FASTA (.fa / .fasta / .faa)",
             browse_title="Select MSA FASTA",
             file_filter="FASTA (*.fa *.fasta *.fas *.fna *.faa);;All files (*)",
         )
+        # Kept for call-site compatibility; Inputs uses panel selection by default.
+        _ = input_file
         self._focused_file_input: TeMultiInputFilesWidget | None = None
-        self._input.field_activated.connect(self._on_file_input_field_activated)
+        self._define_inputs.field_activated.connect(self._on_file_input_field_activated)
+        self._input_selected.toggled.connect(self._sync_msa_inputs)
+        self._input_define.toggled.connect(self._sync_msa_inputs)
+        self._define_inputs.paths_changed.connect(self._sync_msa_inputs)
 
         self._seq_type = QComboBox(self)
         self._seq_type.addItem("Auto-detect", MSA_PLOT_SEQ_AUTO)
-        self._seq_type.addItem("Nucleotide (DNA/RNA)", MSA_PLOT_SEQ_NUCLEOTIDE)
+        self._seq_type.addItem("Nucleotide", MSA_PLOT_SEQ_NUCLEOTIDE)
         self._seq_type.addItem("Protein", MSA_PLOT_SEQ_PROTEIN)
         idx = self._seq_type.findData(self._opts.sequence_type)
         if idx >= 0:
@@ -9394,7 +9892,6 @@ class MsaPlotDialog(QDialog):
         self._dpi.setSingleStep(25)
         self._dpi.setValue(int(self._opts.dpi))
         self._dpi.setSuffix(" DPI")
-        self._dpi.setToolTip("Image resolution / quality (higher = larger file).")
 
         self._seq_height = QDoubleSpinBox(self)
         self._seq_height.setRange(0.1, 5.0)
@@ -9402,10 +9899,6 @@ class MsaPlotDialog(QDialog):
         self._seq_height.setSingleStep(0.05)
         self._seq_height.setValue(float(self._opts.sequence_height_cm))
         self._seq_height.setSuffix(" cm")
-        self._seq_height.setToolTip(
-            "Figure height reserved for each sequence row (centimeters). "
-            "Increase to make rows taller."
-        )
 
         self._seq_distance = QDoubleSpinBox(self)
         self._seq_distance.setRange(0.0, 2.0)
@@ -9413,10 +9906,15 @@ class MsaPlotDialog(QDialog):
         self._seq_distance.setSingleStep(0.01)
         self._seq_distance.setValue(float(self._opts.sequence_distance_cm))
         self._seq_distance.setSuffix(" cm")
-        self._seq_distance.setToolTip(
-            "White distance between consecutive sequence rows (centimeters). "
-            "Set to 0 to remove spacing."
-        )
+
+        for field in (
+            self._seq_type,
+            self._format,
+            self._dpi,
+            self._seq_height,
+            self._seq_distance,
+        ):
+            field.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
 
         nuc_colors = dict(self._default_nuc)
         nuc_colors.update(self._opts.nucleotide_colors or {})
@@ -9440,6 +9938,9 @@ class MsaPlotDialog(QDialog):
         nuc_presets.setSpacing(6)
         nuc_preset_label = QLabel("Preset:", self)
         nuc_preset_label.setFixedWidth(_ResidueColorGrid.LABEL_WIDTH)
+        nuc_preset_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         nuc_presets.addWidget(nuc_preset_label)
         nuc_tips = {
             "Default": "Standard A/C/G/T colours",
@@ -9464,6 +9965,9 @@ class MsaPlotDialog(QDialog):
         aa_presets.setSpacing(6)
         aa_preset_label = QLabel("Preset:", self)
         aa_preset_label.setFixedWidth(_ResidueColorGrid.LABEL_WIDTH)
+        aa_preset_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         aa_presets.addWidget(aa_preset_label)
         aa_tips = {
             "Clustal": "Most common MSA colouring (ClustalX / Jalview)",
@@ -9491,51 +9995,295 @@ class MsaPlotDialog(QDialog):
         aa_layout.addLayout(aa_presets)
         aa_layout.addWidget(self._aa_grid)
 
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form.addRow("MSA FASTA:", self._input)
-        form.addRow("Sequence type:", self._seq_type)
-        form.addRow("Output format:", self._format)
-        form.addRow("Quality:", self._dpi)
-        form.addRow("Sequence height:", self._seq_height)
-        form.addRow("Sequence distance:", self._seq_distance)
+        root = QWidget(self)
+        self._msa_root = root
+        root.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(16, 10, 16, 10)
+        root_layout.setSpacing(4)
 
-        self._colors_toggle = QPushButton("▶ Color", self)
-        self._colors_toggle.setCheckable(True)
-        self._colors_toggle.setChecked(False)
-        self._colors_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._colors_toggle.setToolTip("Show or hide nucleotide / amino-acid colour settings")
-        self._colors_toggle.toggled.connect(self._on_colors_section_toggled)
+        basic = QWidget(root)
+        self._msa_basic = basic
+        basic.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        form = QFormLayout(basic)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
 
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        colors_host = QWidget()
+        def _section(title: str) -> QLabel:
+            return QLabel(f"<b>{title}</b>", root)
+
+        form.addRow(_section("Inputs"))
+        inputs_box = QWidget(basic)
+        inputs_layout = QVBoxLayout(inputs_box)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(2)
+        inputs_layout.addWidget(
+            field_with_help(
+                self._input_selected,
+                "MSA plot inputs",
+                _MSA_PLOT_INPUTS_HELP,
+                stretch=True,
+            )
+        )
+        inputs_layout.addWidget(self._input_define)
+        self._inputs_radios_label = QLabel("")
+        self._inputs_define_label = QLabel("")
+        form.addRow(self._inputs_radios_label, inputs_box)
+        form.addRow(self._inputs_define_label, self._define_inputs)
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Settings"))
+        form.addRow(
+            "Sequence type:",
+            field_with_help(self._seq_type, "Sequence type", _MSA_PLOT_SEQ_TYPE_HELP),
+        )
+        form.addRow(
+            "Output format:",
+            field_with_help(self._format, "Output format", _MSA_PLOT_FORMAT_HELP),
+        )
+        form.addRow(
+            "Quality:",
+            field_with_help(self._dpi, "Quality", _MSA_PLOT_DPI_HELP),
+        )
+        form.addRow(
+            "Sequence height:",
+            field_with_help(self._seq_height, "Sequence height", _MSA_PLOT_HEIGHT_HELP),
+        )
+        form.addRow(
+            "Sequence distance:",
+            field_with_help(
+                self._seq_distance, "Sequence distance", _MSA_PLOT_DISTANCE_HELP
+            ),
+        )
+        self._msa_basic_form = form
+        root_layout.addWidget(basic)
+
+        advanced = QWidget(root)
+        self._msa_advanced_panel = advanced
+        advanced.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        advanced_form = QFormLayout(advanced)
+        advanced_form.setContentsMargins(0, 4, 0, 0)
+        advanced_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        advanced_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        advanced_form.setHorizontalSpacing(12)
+        advanced_form.setVerticalSpacing(4)
+        advanced_form.addRow(_form_section_separator())
+        advanced_form.addRow(_section("Advanced Settings"))
+
+        colors_host = QWidget(advanced)
         colors_layout = QVBoxLayout(colors_host)
         colors_layout.setContentsMargins(0, 0, 0, 0)
+        colors_layout.setSpacing(8)
         colors_layout.addWidget(nuc_box)
         colors_layout.addWidget(aa_box)
-        scroll.setWidget(colors_host)
-        scroll.setMinimumHeight(260)
-        scroll.setVisible(False)
-        self._colors_panel = scroll
 
-        buttons = make_cancel_save_run_bar(self)
+        scroll = QScrollArea(advanced)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(colors_host)
+        scroll.setMaximumHeight(self._COLORS_SCROLL_MAX_HEIGHT)
+        self._colors_scroll = scroll
+        advanced_form.addRow(scroll)
+        root_layout.addWidget(advanced)
+        root_layout.addStretch(1)
+
+        restore = QPushButton("Restore Defaults", self)
+        restore.clicked.connect(self._restore_defaults)
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_settings_toggled)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore, self._advanced_settings_btn],
+        )
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(12)
-        layout.addLayout(form)
-        layout.addWidget(self._colors_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(self._colors_panel, stretch=1)
-        layout.addWidget(buttons)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(14)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(root, 0)
+        layout.addWidget(self._button_box, 0)
+
+        self._sync_msa_inputs(resize=False)
+        self._set_msa_advanced_visible(False)
+        self.resize(self._DIALOG_WIDTH, 420)
+        QTimer.singleShot(0, lambda: self._resize_for_msa_advanced(False))
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._msa_compact_size = None
+        self._sync_field_column()
+        QTimer.singleShot(0, lambda: self._resize_for_msa_advanced(False))
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
-    def _on_colors_section_toggled(self, checked: bool) -> None:
-        self._colors_panel.setVisible(checked)
-        self._colors_toggle.setText("▼ Color" if checked else "▶ Color")
-        self.adjustSize()
+    def input_source(self) -> str:
+        if self._input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+
+        if self.input_source() == ALIGN_INPUT_DEFINE:
+            return expand_fastga_input_paths(self._define_inputs.paths())
+        return [Path(p) for p in (panel_files or [])]
+
+    def _sync_msa_inputs(self, *, resize: bool = True) -> None:
+        define = self.input_source() == ALIGN_INPUT_DEFINE
+        form = self._msa_basic.layout()
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._define_inputs, define)
+        self._define_inputs.setVisible(define)
+        if define:
+            self._define_inputs.setMinimumHeight(0)
+            self._define_inputs.setMaximumHeight(16777215)
+        else:
+            self._define_inputs.setFixedHeight(0)
+        self._define_inputs.updateGeometry()
+        self._msa_basic.updateGeometry()
+        self._sync_field_column()
+        if (
+            resize
+            and self.isVisible()
+            and not self._advanced_settings_btn.isChecked()
+        ):
+            self._msa_compact_size = None
+            self._resize_for_msa_advanced(False)
+
+    def _sync_field_column(self) -> None:
+        if not hasattr(self, "_inputs_radios_label"):
+            return
+        sync_form_field_column_spacers(
+            self,
+            [self._inputs_radios_label, self._inputs_define_label],
+            [getattr(self, "_msa_basic_form", None)],
+            ref_label=self._SETTINGS_LABEL_REF,
+        )
+
+    def _set_msa_advanced_visible(self, visible: bool) -> None:
+        panel = self._msa_advanced_panel
+        panel.setVisible(visible)
+        if visible:
+            panel.setMaximumHeight(16777215)
+        else:
+            panel.setMaximumHeight(0)
+        panel.updateGeometry()
+        root = self._msa_root.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self._msa_root.updateGeometry()
+
+    def _on_advanced_settings_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        if checked:
+            self._msa_compact_size = self.size()
+        self._set_msa_advanced_visible(checked)
+        self._resize_for_msa_advanced(checked)
+
+    def _dialog_chrome_height(self) -> int:
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 14
+        buttons_h = self._button_box.sizeHint().height()
+        return margin_h + spacing + buttons_h
+
+    def _msa_compact_content_height(self) -> int:
+        root = self._msa_root.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        basic_h = max(
+            self._msa_basic.minimumSizeHint().height(),
+            self._msa_basic.sizeHint().height(),
+        )
+        return margin_h + basic_h + spacing
+
+    def _msa_advanced_extra_height(self) -> int:
+        """Header + scroll viewport — not the full unwrapped colour grids."""
+        adv = self._msa_advanced_panel
+        scroll_h = min(
+            self._COLORS_SCROLL_MAX_HEIGHT,
+            max(180, self._colors_scroll.sizeHint().height()),
+        )
+        # Separator + "Advanced Settings" title above the scroll.
+        header = 36
+        return header + scroll_h + 12
+
+    def _resize_for_msa_advanced(self, expanded: bool) -> None:
+        panel = self._msa_root
+        root = panel.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        panel.updateGeometry()
+
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._dialog_chrome_height()
+        width = self._DIALOG_WIDTH
+
+        if not expanded:
+            height = chrome + self._msa_compact_content_height()
+            height = min(max(height, 220), max_h)
+            self.setMinimumHeight(0)
+            panel.setMinimumHeight(0)
+            self.setMaximumHeight(height)
+            self.resize(width, height)
+            self.setMaximumHeight(16777215)
+            self._msa_compact_size = QSize(width, height)
+            return
+
+        extra = self._msa_advanced_extra_height()
+        base = self._msa_compact_size or self.size()
+        height = min(base.height() + extra + 12, max_h)
+        height = max(
+            height,
+            min(chrome + self._msa_compact_content_height() + extra, max_h),
+        )
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
+
+    def _restore_defaults(self) -> None:
+        from repeatviewer.job_options import (
+            DEFAULT_MSA_PLOT_DPI,
+            DEFAULT_MSA_PLOT_SEQUENCE_DISTANCE_CM,
+            DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM,
+        )
+
+        self._input_selected.setChecked(True)
+        self._define_inputs.clear_paths()
+        self._seq_type.setCurrentIndex(
+            max(0, self._seq_type.findData(self._msa_seq_auto))
+        )
+        self._format.setCurrentIndex(
+            max(0, self._format.findData(self._msa_fmt_png))
+        )
+        self._dpi.setValue(DEFAULT_MSA_PLOT_DPI)
+        self._seq_height.setValue(DEFAULT_MSA_PLOT_SEQUENCE_HEIGHT_CM)
+        self._seq_distance.setValue(DEFAULT_MSA_PLOT_SEQUENCE_DISTANCE_CM)
+        self._nuc_grid.set_colors(dict(self._default_nuc))
+        self._aa_grid.set_colors(dict(self._default_aa))
+        self._sync_msa_inputs()
 
     def _on_file_input_field_activated(self) -> None:
         sender = self.sender()
@@ -9543,12 +10291,20 @@ class MsaPlotDialog(QDialog):
             self._focused_file_input = sender
 
     def apply_path_from_panel(self, path: Path) -> bool:
-        if self._focused_file_input is None:
-            return self._input.set_path_at_focus(path)
-        return self._focused_file_input.set_path_at_focus(path)
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        try:
+            candidate = Path(path).expanduser().resolve()
+        except OSError:
+            return False
+        if self._focused_file_input is not None:
+            if self._focused_file_input.set_path_at_focus(candidate):
+                return True
+        return bool(self._define_inputs.accept_path(candidate))
 
     def input_files(self) -> list[Path]:
-        return self._input.paths()
+        """Legacy helper: defined paths only (prefer run_files + input_source)."""
+        return self._define_inputs.paths()
 
     def options(self) -> MsaPlotJobOptions:
         nuc = self._nuc_grid.colors()

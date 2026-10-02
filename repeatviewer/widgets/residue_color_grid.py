@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (
 class ResidueColorGrid(QWidget):
     """Residue → color buttons, optionally laid out by category."""
 
-    # Keep in sync with MsaPlotDialog preset rows so Default/Clustal line up with A.
-    LABEL_WIDTH = 130
+    # Wide enough for "Negative charge" / "Positive charge"; keep buttons aligned.
+    LABEL_WIDTH = 140
 
     def __init__(
         self,
@@ -44,18 +44,29 @@ class ResidueColorGrid(QWidget):
         outer.setSpacing(6)
 
         if categories:
-            for category_name, group in categories:
-                row = QHBoxLayout()
-                row.setContentsMargins(0, 0, 0, 0)
-                row.setSpacing(6)
+            grid = QGridLayout()
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(6)
+            grid.setColumnMinimumWidth(0, self.LABEL_WIDTH)
+            grid.setColumnStretch(1, 1)
+            for row_index, (category_name, group) in enumerate(categories):
                 label = QLabel(category_name, self)
                 label.setFixedWidth(self.LABEL_WIDTH)
+                label.setAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
                 label.setStyleSheet("color: #444;")
-                row.addWidget(label)
+                buttons = QWidget(self)
+                row = QHBoxLayout(buttons)
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(6)
                 for residue in group:
                     row.addWidget(self._make_residue_button(residue, colors))
                 row.addStretch(1)
-                outer.addLayout(row)
+                grid.addWidget(label, row_index, 0, Qt.AlignmentFlag.AlignRight)
+                grid.addWidget(buttons, row_index, 1)
+            outer.addLayout(grid)
         else:
             grid = QGridLayout()
             grid.setContentsMargins(0, 0, 0, 0)

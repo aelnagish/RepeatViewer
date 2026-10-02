@@ -854,54 +854,66 @@ the report warns that the root position is uncertain.
 reason in plain words, and the full log (commands and program output) is saved
 next to the input as `<input>_tree_failed.log`, ready to send with a bug report.
 
-### Map to Reference
+### Mapping
 
-**Toolbar: Map to Reference (add it in File → Setting → Toolbar) · Tools → Map to Reference**
+**Toolbar: Mapping (add it in File → Setting → Toolbar) · Tools → Mapping**
 
 Places the selected sequences or reads on a reference and shows what differs,
-like Geneious' *Map to Reference*. Select the files to map in the Files panel
-(FASTA or FASTQ, gzipped too), open the dialog, and click the reference in the
-Files panel (or Browse). The grey line under the reference says what will be
-mapped to what.
+like Geneious' *Map to Reference*. The dialog follows Align: **Minimap2**,
+**HISAT2**, and **Options** tabs. Select the files to map in the Files panel
+(FASTA or FASTQ, gzipped too), or use **Define inputs**; click the reference in
+the Files panel (or Browse).
 
-Three mappers; **Auto** picks one from the input:
+Two mappers; **Auto** (Options → mapper for right-click) picks one from the input:
 
-- **MAFFT add fragments** (bundled) — a few sequences (up to 500) on one short
-  reference (up to 50 kb), for example satellite variants on an annotated
-  monomer array. The most accurate placement; copies from the other strand are
-  turned round and shown as *(reversed)*.
 - **minimap2** — long reads (ONT, HiFi) or assembled contigs against a genome.
-- **Bowtie2** — many short reads (Illumina).
+- **HISAT2** — short DNA / RNA-seq (Illumina), including spliced RNA.
 
-minimap2 **2.31** is bundled with RepeatViewer (Windows / Linux x86_64 / macOS).
-Bowtie2 is not bundled — install it into the conda environment set in
-**File → Setting → External tools**, or put it on your PATH:
+minimap2 **2.31** is bundled with RepeatViewer where platform builds exist.
+HISAT2 is **not** bundled (binaries are large); install it via conda or PATH:
 
-```bash
-conda install -c conda-forge -c bioconda bowtie2
+```
+conda install -c conda-forge -c bioconda hisat2
 ```
 
-To use your own minimap2 instead of the bundled copy, tick
-**Use programs from the system PATH** in Map to Reference → Options.
+To use your own minimap2 instead of the bundle, tick
+**Use Minimap2 from the system PATH or defined Conda environment** in
+Mapping → Options.
 
 A mapper you chose that is missing stops the run with this hint. If Auto's
 choice is missing, the other read mapper is used and the report says so.
-Bowtie2 builds its index once and keeps it next to the reference in the hidden
-folder `.repeatviewer_bowtie2`.
+HISAT2 builds its index once and keeps it next to the reference in the hidden
+folder `.repeatviewer_hisat2`.
 
 | Tab | Setting | Default | Why |
 |-----|---------|---------|-----|
-| Mapping | Mapper | Auto | See above |
-| | Sensitivity | Medium | *High* finds older, more diverged repeat copies (smaller seeds) |
-| | Several places | Best place only | For sequences that fit equally well in several places of an array or family: one place, every place, or none (listed as ambiguous) |
-| | Annotations | On | Every reference feature is checked in every mapped sequence |
-| Advanced | Minimum identity / aligned length / mapping quality | 70 % / 25 bp / 0 | Placements below these are not used; the reason is listed |
-| | minimap2 preset | Auto | `sr` for short reads, `asm20` for long contigs, otherwise `map-ont` |
-| Output | Consensus | Majority | Or 50–100 % thresholds with IUPAC codes |
-| | No coverage | N | Or the reference base, or leave out |
-| | Variants from | Every difference | Minimum frequency for the variants table |
-| | Sequences drawn | 2,000 | Per reference sequence; coverage, consensus and variants use all |
-| Options | Right-click action, process window, programs from `PATH` | | |
+| Minimap2 | Inputs / Reference | Use selected; project genome if set | Or Define inputs / Browse |
+| | Map mode (`-x`) | map-ont | Real minimap2 preset (no Auto); includes RNA/cDNA splice presets |
+| | Secondaries | Primary only | `--secondary=no` / `-N 50` |
+| | Threads | CPU count | minimap2 `-t` / HISAT2 `-p` |
+| | Output Format | PAF | Or SAM |
+| | Advanced `-k` / `-w` | From preset | e.g. map-ont 15/10, splice 15/5, sr 21/11 |
+| | Advanced CIGAR / CS | On for PAF | `-c` and `--cs=long` (contig view needs CS) |
+| HISAT2 | Library | RNA-seq (spliced) | Or DNA-seq (`--no-spliced-alignment`) |
+| | Reads | Single-end | Or Paired-end Illumina R1/R2 (`-1`/`-2` from filenames) |
+| | Strandness | Unstranded | `--rna-strandness` F / R (SE) or FR / RF (PE); not file pairing |
+| | Report | Best place only | Or `-k 20` |
+| | Threads | CPU count | |
+| | Advanced `--dta` | Off | Longer anchors for StringTie (RNA) |
+| | Advanced intron lengths | 20 / 500000 | `--min-intronlen` / `--max-intronlen` |
+| | Advanced `--no-softclip` | Off | Disallow soft-clipping |
+| Options | Right-click mapper | Auto | Auto, minimap2, or HISAT2 |
+| | Process window, executables | | Use Minimap2 from the system PATH or defined Conda environment |
+
+**Map mode (`-x`).** Choose a real minimap2 preset (there is no Auto in minimap2).
+Default is `map-ont`. Changing Map mode fills `-k` / `-w`.
+
+- **Long genomic:** `map-ont` (ONT), `map-pb` (PacBio CLR), `map-hifi` (HiFi/CCS),
+  `lr:hq` (Nanopore Q20), `map-iclr` (Illumina Complete Long Reads)
+- **RNA / cDNA:** `splice` (long RNA/cDNA, strand unknown), `splice:hq`
+  (PacBio Iso-seq / accurate long RNA), `splice:sr` (short RNA-seq)
+- **Assemblies / short DNA:** `asm5` / `asm10` / `asm20` (~0.1 / 1 / 5% divergence),
+  `sr` (short genomic reads)
 
 **The contig view.** The result, `<input>_map.rvmap`, is written next to the
 input and opens in the contig view: the reference annotations, the consensus
@@ -934,7 +946,7 @@ except the `.rvmap` is in `<input>_map_details/`:
 | `<input>_map_variants.tsv` / `_features.tsv` / `_reads.tsv` | The three tables |
 | `<input>_map.aln.fa` / `.paf` / `.sam` | The mapper's own output |
 
-No pysam or samtools is needed: minimap2 and Bowtie2 output is read directly.
+No pysam or samtools is needed: minimap2 and HISAT2 output is read directly.
 A second run on the same input writes `<input>_map_2…`; nothing is
 overwritten. If a run fails, nothing half-finished is left and the full log is
 saved as `<input>_map_failed.log`.
@@ -1015,6 +1027,23 @@ genome.
 
 **Output:** `<name>_RM_abund_plot.html` (or
 `<name>_multi_abund_plot.html` for multiple sources)
+
+### MSA plot
+
+**Tools → Visualization → MSA plot** (or the MSA plot entry where exposed)
+
+Overview image of an aligned FASTA. The dialog follows Align: **Inputs**,
+**Settings**, and collapsible **Advanced Settings** for residue colors.
+
+| Section | Parameter | Meaning |
+|---------|-----------|---------|
+| Inputs | Use selected / Define inputs | Files-panel selection, or an explicit aligned FASTA |
+| Settings | Sequence type | Auto-detect, Nucleotide, or Protein |
+| Settings | Output format / Quality | PNG or PDF; DPI for PNG |
+| Settings | Sequence height / distance | Row height and gap between rows (cm) |
+| Advanced | Nucleotide / amino-acid colors | Presets and per-residue colour pickers (scrollable) |
+
+**Output:** `<name>_msa_plot.png` or `<name>_msa_plot.pdf`
 
 ---
 

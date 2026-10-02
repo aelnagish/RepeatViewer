@@ -223,9 +223,9 @@ def test_question_mark_help(qapp, tmp_path):
     assert not [lab for lab in dlg.findChildren(QLabel) if lab.text() == "ⓘ"]
     helps = [b for b in dlg.findChildren(QToolButton) if b.text() == "?"]
     # shared: Alignment, Monomers, Root, Skip fragments;
-    # Options: REXdb; IQ-TREE: Branch support, Model, Methylation check, Searches;
-    # FastME and FastTree: support
-    assert len(helps) == 11
+    # IQ-TREE: Branch support, Model, Methylation check, Searches;
+    # FastME and FastTree: support  (no REXdb on Options)
+    assert len(helps) == 10
     joined = " ".join(b.toolTip() for b in helps)
     for piece in ("L-INS-i", "FFT-NS-2", "Align tool", "ModelFinder", "UFBoot", "Midpoint", "CHG"):
         assert piece in joined
@@ -261,7 +261,8 @@ def test_opens_without_selection(qapp):
     assert dlg.options().outgroup == []
 
 
-def test_rexdb_on_options_tab(qapp, tmp_path):
+def test_rexdb_not_on_options_tab(qapp, tmp_path):
+    """REXdb is picked when running RT-domain tree; not shown on Tree Options."""
     rex = tmp_path / "Viridiplantae_v4.0.fasta"
     rex.write_text(">Ty1-RT__REXdb_ID1\nMKV\n")
     (tmp_path / "Viridiplantae_v4.0.classification").write_text("REXdb_ID1\tClass_I\tAle\n")
@@ -269,21 +270,28 @@ def test_rexdb_on_options_tab(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path, initial=opts)
     _wait_summary(dlg, qapp)
     assert dlg.options() == _normalised(opts)
-    assert dlg._options_tab.isAncestorOf(dlg._rexdb_refs)
-    assert "Found" in dlg._rexdb_status.text()
+    assert not hasattr(dlg, "_rexdb")
+    assert not hasattr(dlg, "_rexdb_refs")
     other = tmp_path / "copies.fa"
     other.write_text(">a\nACGT\n")
     assert not dlg.apply_path_from_panel(other)
     assert dlg.apply_path_from_panel(rex)
+    assert dlg.options().rexdb_fasta == str(rex)
     assert dlg.options().sequence_mode == TREE_SEQ_AS_IS
+    assert dlg.width() == dlg._DIALOG_WIDTH
 
 
-def test_options_tab_shows_bundled_iqtree_without_download(qapp, tmp_path):
+def test_options_tab_executable_status(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path)
     dlg._tabs.setCurrentIndex(dlg._options_index)
     dlg._update_found()
-    assert dlg._found["iqtree"].text() == "bundled"
-    assert dlg._found["fastme"].text() == "conda / PATH"
-    assert dlg._found["fasttree"].text() == "conda / PATH"
+    # Unchecked PATH boxes hide the status line.
+    assert dlg._found["iqtree"].isHidden()
+    assert dlg._found["fastme"].isHidden()
+    dlg._system_boxes["iqtree"].setChecked(True)
+    dlg._update_found()
+    status = dlg._found["iqtree"].text()
+    assert status
+    assert status.startswith("/") or "built-in" in status
     assert "IQ-TREE" in dlg._system_boxes["iqtree"].toolTip()
     assert "bundled" in dlg._system_boxes["iqtree"].toolTip().lower() or "3.1.4" in dlg._system_boxes["iqtree"].toolTip()

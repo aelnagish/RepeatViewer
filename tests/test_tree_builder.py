@@ -268,7 +268,10 @@ def test_missing_engine_is_an_error_not_a_downgrade(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path))
     fa = tmp_path / "a.fa"
     fa.write_text("".join(f">s{i}\nACGT\n" for i in range(5)))
-    with pytest.raises(tb.TreeBuildError, match="conda install -c bioconda iqtree"):
+    with pytest.raises(
+        tb.TreeBuildError,
+        match="Use IQ-TREE from the system PATH or defined Conda environment",
+    ):
         tb.build_tree_run([fa], TreeOptions(use_system_path=True), stamp="t")
     assert not any(tmp_path.glob("a.fa_tree*"))
 

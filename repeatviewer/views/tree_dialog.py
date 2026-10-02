@@ -1,4 +1,4 @@
-"""Tree dialog (Tools → Tree), laid out like the BLAST parameters dialog.
+"""Tree dialog (Tools → Tree), Align / BLAST–style function window.
 
 Above the tabs: Alignment, monomer rotation, Root and Skip fragments. Tabs:
 IQ-TREE | FastME | FastTree | Options. Save / Run take the engine from the open
@@ -8,9 +8,8 @@ RT-domain trees are started from Tools → Tree → RT-domain tree.
 The dialog opens immediately; sequence lengths for Skip fragments / Outgroup are
 loaded in the background so large FASTA files do not block the window.
 
-Options tab: right-click engine, process window, per-program PATH toggles
-(IQ-TREE and MAFFT are bundled; tick PATH to use your own), and optional REXdb
-path for RT-domain trees.
+Options tab: right-click engine, Executables (PATH checkboxes + grey status),
+then Process output. REXdb is not configured here (RT-domain tree picks it when needed).
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -55,17 +55,21 @@ from repeatviewer.job_options import (
     TreeOptions,
 )
 from repeatviewer.views.tool_dialogs import (
+    TOOL_PARAMS_DIALOG_WIDTH,
+    TOOL_PARAMS_FIELD_WIDTH,
     QComboBox,
     QSpinBox,
     dialog_should_run,
+    executable_checkbox_row,
     make_cancel_save_run_bar,
+    make_executable_status_label,
     make_process_output_box,
+    resolve_system_executable,
+    set_path_checkbox_status,
+    sync_form_field_column_spacers,
+    system_path_executable_label,
 )
-from repeatviewer.widgets.help_button import make_help_button
-from repeatviewer.widgets.path_browse import PathBrowseRow
-
-_FIELD_WIDTH = 300
-_NUMBER_WIDTH = 110
+from repeatviewer.widgets.help_button import field_with_help
 
 ENGINE_TABS = (TREE_ENGINE_IQTREE, TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE)
 _ENGINE_TITLES = {
@@ -114,11 +118,6 @@ FRAG_INFO = (
     "sequence), e.g. 5′-truncated TE copies; they would sit on long, wrong branches. "
     "0 = keep all. Left-out sequences are listed in the report."
 )
-REXDB_INFO = (
-    "Protein FASTA from REXdb (github.com/repeatexplorer/rexdb), with its "
-    "<code>.classification</code> table in the same folder. Used only for "
-    "<b>Tools → Tree → RT-domain tree</b>."
-)
 SEARCH_INFO = (
     "<b>Searches</b> (IQ-TREE): independent tree searches; the tree with the best "
     "likelihood is kept, and the report says how many found the same tree.<br>"
@@ -133,7 +132,6 @@ MASK_INFO = (
     "<b>CG</b>: CG sites only. <b>CG and CHG</b>: also CHG sites (plants).<br>"
     "DNA only. Takes about twice as long."
 )
-
 MODEL_INFO = (
     "<b>ModelFinder</b>: tests the models and selects the best by BIC "
     "(Bayesian information criterion).<br>"
@@ -146,9 +144,7 @@ MODEL_INFO = (
     "(4 gamma categories)."
 )
 
-
-
-IQ_SUPPORT = (            # data "alrt,ufboot" (Qt keeps strings, not tuples)
+IQ_SUPPORT = (  # data "alrt,ufboot" (Qt keeps strings, not tuples)
     ("SH-aLRT + UFBoot, 1000 each", "1000,1000"),
     ("UFBoot only, 1000", "0,1000"),
     ("SH-aLRT only, 1000", "1000,0"),
@@ -180,10 +176,6 @@ def _note(text: str, parent: QWidget) -> QLabel:
     return label
 
 
-def _help(parent: QWidget, title: str, text: str):
-    return make_help_button(parent, title, text)
-
-
 def _form(parent: QWidget, *, margins: tuple[int, int, int, int]) -> QFormLayout:
     f = QFormLayout(parent)
     f.setContentsMargins(*margins)
@@ -209,7 +201,9 @@ class OutgroupDialog(QDialog):
         for name in names:
             item = QListWidgetItem(name, self._list)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if name in wanted else Qt.CheckState.Unchecked)
+            item.setCheckState(
+                Qt.CheckState.Checked if name in wanted else Qt.CheckState.Unchecked
+            )
         bar = make_cancel_save_run_bar(self, include_run=False)
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel("Sequences known to lie outside the rest:", self))
@@ -224,9 +218,11 @@ class OutgroupDialog(QDialog):
             item.setHidden(bool(needle) and needle not in item.text().lower())
 
     def chosen(self) -> list[str]:
-        return [self._list.item(i).text() for i in range(self._list.count())
-                if self._list.item(i).checkState() == Qt.CheckState.Checked]
-
+        return [
+            self._list.item(i).text()
+            for i in range(self._list.count())
+            if self._list.item(i).checkState() == Qt.CheckState.Checked
+        ]
 
 
 class _SummaryLoader(QThread):
@@ -246,12 +242,16 @@ class _SummaryLoader(QThread):
         try:
             self.ready.emit(tb.input_summary(self._files, self._min_coverage))
         except Exception as exc:  # noqa: BLE001
-            self.ready.emit(tb.InputSummary(
-                0, [], True, False, None, None, 0, error=str(exc)))
+            self.ready.emit(
+                tb.InputSummary(0, [], True, False, None, None, 0, error=str(exc))
+            )
 
 
 class TreeParamsDialog(QDialog):
     """Build a phylogenetic tree from the selected FASTA file(s)."""
+
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+    _SETTINGS_LABEL_REF = "Methylation check:"
 
     def __init__(
         self,
@@ -263,6 +263,7 @@ class TreeParamsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
+        self.setMinimumWidth(self._DIALOG_WIDTH)
         opts = initial or TreeOptions()
         self._initial = opts
         self._files = [Path(p) for p in (files or [])]
@@ -270,17 +271,28 @@ class TreeParamsDialog(QDialog):
         self._summary = None
         self._summary_loader: _SummaryLoader | None = None
         self._found_timer: QTimer | None = None
+        # REXdb is configured when running RT-domain tree, not on this form.
+        self._rexdb_fasta = str(opts.rexdb_fasta or "")
+        self._rexdb_references = int(opts.rexdb_references)
 
         self._build_shared(opts)
         self._build_engine_tabs(opts)
         self._build_options_tab(opts)
 
         self._tabs = QTabWidget(self)
+        self._tabs.tabBar().setExpanding(False)
+        self._tabs.tabBar().setDocumentMode(True)
+        self._tabs.setDocumentMode(True)
+        self._tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         self._tab_index: dict[str, int] = {}
         for engine, page in zip(ENGINE_TABS, (self._iq_tab, self._fme_tab, self._ft_tab)):
             self._tab_index[engine] = self._tabs.addTab(page, _ENGINE_TITLES[engine])
         self._options_index = self._tabs.addTab(self._options_tab, "Options")
-        self._last_engine = opts.engine if opts.engine in ENGINE_TABS else TREE_ENGINE_IQTREE
+        self._last_engine = (
+            opts.engine if opts.engine in ENGINE_TABS else TREE_ENGINE_IQTREE
+        )
         self._tabs.setCurrentIndex(self._tab_index[self._last_engine])
         self._tabs.currentChanged.connect(self._tab_changed)
 
@@ -289,31 +301,34 @@ class TreeParamsDialog(QDialog):
         self._button_box = make_cancel_save_run_bar(self, left_widgets=[restore])
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
-        layout.setSpacing(12)
-        layout.addWidget(self._shared)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._button_box)
-
-        # one label column across the shared rows and the engine tabs, so nothing jumps
-        forms = (self._top_form, self._iq_form, self._fme_form, self._ft_form)
-        labels = []
-        for f in forms:
-            for i in range(f.rowCount()):
-                item = f.itemAt(i, QFormLayout.ItemRole.LabelRole)
-                if item is not None and item.widget() is not None:
-                    labels.append(item.widget())
-        width = max((lab.sizeHint().width() for lab in labels), default=0)
-        for lab in labels:
-            lab.setMinimumWidth(width)
-            lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._shared, 0)
+        layout.addWidget(self._tabs, 0)
+        layout.addWidget(self._button_box, 0)
 
         for w in (self._align_mode, self._root_mode, self._cov_ref):
             w.currentIndexChanged.connect(self._sync)
         self._min_cov.valueChanged.connect(self._update_check)
-        self._tabs.currentChanged.connect(self._maybe_update_found)
+        self._tabs.currentChanged.connect(self._on_tab_for_found_and_fit)
+        self._sync_field_columns()
         self._sync()
-        # Large FASTAs: do not block opening — load lengths in the background.
         QTimer.singleShot(0, self._start_summary_load)
+        QTimer.singleShot(0, self._fit_to_content)
+        self.resize(self._DIALOG_WIDTH, 420)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_field_columns()
+        QTimer.singleShot(0, self._fit_to_content)
+
+    def _sync_field_columns(self) -> None:
+        sync_form_field_column_spacers(
+            self,
+            [self._frag_hint_label],
+            [self._top_form, self._iq_form, self._fme_form, self._ft_form],
+            ref_label=self._SETTINGS_LABEL_REF,
+        )
 
     # ------------------------------------------------------------------ building
 
@@ -322,16 +337,22 @@ class TreeParamsDialog(QDialog):
         self._align_mode.addItem("Align with MAFFT", TREE_ALIGN_ALWAYS)
         self._align_mode.addItem("Already aligned, use as is", TREE_ALIGN_NEVER)
         self._align_mode.setCurrentIndex(1 if opts.align_mode == TREE_ALIGN_NEVER else 0)
+        self._align_mode.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
 
         self._rotate = QCheckBox("Rotate satellite monomers to a common start", self)
         self._rotate.setChecked(opts.rotate_monomers)
 
         self._root_mode = QComboBox(self)
-        for label, value in (("Unrooted", TREE_ROOT_NONE), ("Midpoint", TREE_ROOT_MIDPOINT),
-                             ("Outgroup", TREE_ROOT_OUTGROUP)):
+        for label, value in (
+            ("Unrooted", TREE_ROOT_NONE),
+            ("Midpoint", TREE_ROOT_MIDPOINT),
+            ("Outgroup", TREE_ROOT_OUTGROUP),
+        ):
             self._root_mode.addItem(label, value)
         self._set_combo(self._root_mode, opts.root_mode)
+        self._root_mode.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH - 136)
         self._outgroup_btn = QPushButton("Outgroup…", self)
+        self._outgroup_btn.setFixedWidth(130)
         self._outgroup_btn.clicked.connect(self._choose_outgroup)
 
         self._min_cov = QSpinBox(self)
@@ -343,40 +364,58 @@ class TreeParamsDialog(QDialog):
         self._cov_ref.addItem("of the median length", TREE_COVERAGE_MEDIAN)
         self._cov_ref.addItem("of the longest sequence", TREE_COVERAGE_LONGEST)
         self._set_combo(self._cov_ref, opts.coverage_reference)
-        self._cov_ref.setFixedWidth(_FIELD_WIDTH - 96)
+        self._cov_ref.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH - 96)
         self._frag_hint = _note("Counting sequences…", self)
         self._frag_hint.setWordWrap(False)
-
-        self._align_mode.setFixedWidth(_FIELD_WIDTH)
-        self._root_mode.setFixedWidth(_FIELD_WIDTH - 136)
-        self._outgroup_btn.setFixedWidth(130)
+        self._frag_hint_label = QLabel("")
 
         self._shared = QWidget(self)
+        self._shared.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         f = _form(self._shared, margins=(16, 4, 16, 4))
         self._top_form = f
-        f.addRow("Alignment:", _row(self, self._align_mode, _help(self, "Alignment", ALIGN_INFO)))
-        f.addRow("Monomers:", _row(self, self._rotate, _help(self, "Rotate monomers", ROTATE_INFO)))
-        f.addRow("Root:", _row(self, self._root_mode, self._outgroup_btn,
-                               _help(self, "Root", ROOT_INFO)))
-        f.addRow("Skip fragments:",
-                 _row(self, self._min_cov, self._cov_ref, _help(self, "Skip fragments", FRAG_INFO)))
-        f.addRow("", self._frag_hint)
-        # Hide the hint until lengths are known (or there is nothing to count).
+        f.addRow(
+            "Alignment:",
+            field_with_help(self._align_mode, "Alignment", ALIGN_INFO),
+        )
+        f.addRow(
+            "Monomers:",
+            field_with_help(self._rotate, "Rotate monomers", ROTATE_INFO),
+        )
+        f.addRow(
+            "Root:",
+            field_with_help(
+                _row(self, self._root_mode, self._outgroup_btn, stretch=False),
+                "Root",
+                ROOT_INFO,
+            ),
+        )
+        f.addRow(
+            "Skip fragments:",
+            field_with_help(
+                _row(self, self._min_cov, self._cov_ref, stretch=False),
+                "Skip fragments",
+                FRAG_INFO,
+            ),
+        )
+        f.addRow(self._frag_hint_label, self._frag_hint)
         self._set_row(f, self._frag_hint, bool(self._files))
 
     def _number_spin(self, lo: int, hi: int, value: int) -> QSpinBox:
         box = QSpinBox(self)
         box.setRange(lo, hi)
         box.setValue(value)
-        box.setFixedWidth(_NUMBER_WIDTH)
+        box.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
         return box
 
     def _build_engine_tabs(self, opts: TreeOptions) -> None:
         threads = max(1, opts.threads)
-        # IQ-TREE
         self._support_iq = self._support_combo(
-            IQ_SUPPORT, f"{opts.alrt},{opts.ufboot}",
-            lambda v: "SH-aLRT {}, UFBoot {}".format(*v.split(",")))
+            IQ_SUPPORT,
+            f"{opts.alrt},{opts.ufboot}",
+            lambda v: "SH-aLRT {}, UFBoot {}".format(*v.split(",")),
+        )
         self._model = QComboBox(self)
         self._model.setEditable(True)
         self._model.addItem("ModelFinder, best model by BIC", TREE_MODEL_FINDER)
@@ -386,22 +425,25 @@ class TreeParamsDialog(QDialog):
             self._model.setCurrentIndex(0)
         else:
             self._model.setCurrentText(opts.model)
-        self._model.setFixedWidth(_FIELD_WIDTH)
+        self._model.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
         self._mask = QComboBox(self)
         for label, value in (("Off", ""), ("CG", "CG"), ("CG and CHG", "CG_CHG")):
             self._mask.addItem(label, value)
         self._set_combo(self._mask, opts.methylation_mask)
-        self._mask.setFixedWidth(_FIELD_WIDTH)
+        self._mask.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
         self._runs = self._number_spin(1, 100, opts.runs)
         self._seed = self._number_spin(1, 2_000_000_000, opts.seed)
         self._threads = self._number_spin(1, 256, threads)
-        self._threads.setToolTip("Most threads to use. IQ-TREE picks the best number up to this.")
-        # FastME
-        self._support_fme = self._support_combo(FASTME_SUPPORT, opts.distance_bootstrap,
-                                                lambda v: f"Bootstrap, {v} replicates")
+        self._threads.setToolTip(
+            "Most threads to use. IQ-TREE picks the best number up to this."
+        )
+        self._support_fme = self._support_combo(
+            FASTME_SUPPORT,
+            opts.distance_bootstrap,
+            lambda v: f"Bootstrap, {v} replicates",
+        )
         self._threads_fme = self._number_spin(1, 256, threads)
         self._threads_fme.setToolTip("Most threads to use.")
-        # FastTree
         self._support_ft = QLabel("Local support (built in)", self)
         self._threads_ft = self._number_spin(1, 256, threads)
         self._threads_ft.setToolTip("Most threads to use.")
@@ -409,41 +451,64 @@ class TreeParamsDialog(QDialog):
         for box in self._thread_boxes:
             box.valueChanged.connect(self._threads_changed)
 
-        margins = (16, 14, 16, 14)
+        margins = (16, 10, 16, 10)
         self._iq_tab = QWidget(self)
         f = self._iq_form = _form(self._iq_tab, margins=margins)
-        f.addRow("Branch support:",
-                 _row(self, self._support_iq, _help(self, "Branch support", IQ_SUPPORT_INFO)))
-        f.addRow("Model:", _row(self, self._model, _help(self, "Substitution model", MODEL_INFO)))
-        f.addRow("Methylation check:",
-                 _row(self, self._mask, _help(self, "Methylation check", MASK_INFO)))
-        f.addRow("Searches:", _row(self, self._runs, _help(self, "Searches and seed", SEARCH_INFO)))
+        f.addRow(
+            "Branch support:",
+            field_with_help(self._support_iq, "Branch support", IQ_SUPPORT_INFO),
+        )
+        f.addRow(
+            "Model:",
+            field_with_help(self._model, "Substitution model", MODEL_INFO),
+        )
+        f.addRow(
+            "Methylation check:",
+            field_with_help(self._mask, "Methylation check", MASK_INFO),
+        )
+        f.addRow(
+            "Searches:",
+            field_with_help(self._runs, "Searches and seed", SEARCH_INFO),
+        )
         f.addRow("Random seed:", self._seed)
         f.addRow("Threads:", self._threads)
 
         self._fme_tab = QWidget(self)
         f = self._fme_form = _form(self._fme_tab, margins=margins)
-        f.addRow("Branch support:",
-                 _row(self, self._support_fme, _help(self, "Branch support", FASTME_SUPPORT_INFO)))
+        f.addRow(
+            "Branch support:",
+            field_with_help(self._support_fme, "Branch support", FASTME_SUPPORT_INFO),
+        )
         f.addRow("Threads:", self._threads_fme)
 
         self._ft_tab = QWidget(self)
         f = self._ft_form = _form(self._ft_tab, margins=margins)
-        f.addRow("Branch support:",
-                 _row(self, self._support_ft, _help(self, "FastTree", FASTTREE_SUPPORT_INFO)))
-        f.addRow("", _note("Local support values (0 to 1) are built in and always computed.",
-                           self._ft_tab))
+        f.addRow(
+            "Branch support:",
+            field_with_help(self._support_ft, "FastTree", FASTTREE_SUPPORT_INFO),
+        )
+        f.addRow(
+            "",
+            _note(
+                "Local support values (0 to 1) are built in and always computed.",
+                self._ft_tab,
+            ),
+        )
         f.addRow("Threads:", self._threads_ft)
         for page in (self._iq_tab, self._fme_tab, self._ft_tab):
-            page.setMinimumWidth(_FIELD_WIDTH + 200)
+            page.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+            )
 
     def _build_options_tab(self, opts: TreeOptions) -> None:
-        # right-click program (like BLAST's right-click program)
         rc_box = QGroupBox("Right-click action", self)
+        rc_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         rcl = QVBoxLayout(rc_box)
         rcl.setSpacing(6)
         rc_label = QLabel(
-            "Right-clicking the Tree button builds the tree, with saved settings, using:", self)
+            "Right-clicking the Tree button builds the tree, with saved settings, using:",
+            self,
+        )
         rc_label.setWordWrap(True)
         rcl.addWidget(rc_label)
         self._right_click_group = QButtonGroup(self)
@@ -459,19 +524,22 @@ class TreeParamsDialog(QDialog):
 
         process_box, self._show_process_window, self._close_process_window = (
             make_process_output_box(
-                self, tool_name="the tree build", checked=opts.show_process_window,
+                self,
+                tool_name="the tree build",
+                checked=opts.show_process_window,
                 close_when_finished=bool(
                     getattr(opts, "close_process_window_when_finished", False)
                 ),
             )
         )
 
-        # programs: bundled IQ-TREE / MAFFT, or PATH / conda for the rest
         self._system_boxes: dict[str, QCheckBox] = {}
         self._found: dict[str, QLabel] = {}
-        exe_box = QGroupBox("Programs", self)
+        exe_box = QGroupBox("Executables", self)
+        exe_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         exl = QVBoxLayout(exe_box)
-        exl.setSpacing(6)
+        exl.setContentsMargins(10, 8, 10, 8)
+        exl.setSpacing(8)
         legacy = opts.use_system_path
         states = {
             TREE_ENGINE_IQTREE: opts.use_system_iqtree or legacy,
@@ -484,29 +552,31 @@ class TreeParamsDialog(QDialog):
             TREE_ENGINE_IQTREE: (
                 f"Off: IQ-TREE {tpt.IQTREE_VERSION} bundled with RepeatViewer "
                 "(macOS universal / Linux universal / Windows 64-bit). "
-                "On: iqtree from your system PATH."
+                "On: iqtree from PATH or the defined conda environment."
             ),
             TREE_ENGINE_FASTME: (
                 "Off: FastME from the conda env in File → Settings → External tools, "
-                "then PATH. On: PATH only. FastME has no official multi-platform binary."
+                "then PATH. On: PATH / conda only. FastME has no official multi-platform binary."
             ),
             TREE_ENGINE_FASTTREE: (
                 "Off: FastTree from the conda env in File → Settings → External tools, "
-                "then PATH. On: PATH only. FastTree has Windows/Linux builds online but "
+                "then PATH. On: PATH / conda only. FastTree has Windows/Linux builds online but "
                 "no macOS binary, so it is not bundled."
             ),
-            "mafft": "Off: the MAFFT bundled with RepeatViewer. On: MAFFT from the system PATH.",
+            "mafft": (
+                "Off: the MAFFT bundled with RepeatViewer. "
+                "On: MAFFT from PATH or the defined conda environment."
+            ),
         }
         for key in (*ENGINE_TABS, "mafft"):
-            box = QCheckBox(f"Use {names[key]} from the system PATH", self)
+            box = QCheckBox(system_path_executable_label(names[key]), self)
             box.setChecked(bool(states[key]))
             box.setToolTip(tooltips[key])
             box.toggled.connect(self._schedule_found_update)
-            label = _note("", self)
-            label.setWordWrap(False)
+            status = make_executable_status_label(self)
             self._system_boxes[key] = box
-            self._found[key] = label
-            exl.addWidget(_row(self, box, label))
+            self._found[key] = status
+            exl.addWidget(executable_checkbox_row(self, box, status))
         note = _note(
             f"IQ-TREE {tpt.IQTREE_VERSION} is included with RepeatViewer. "
             "FastME and FastTree need conda or your PATH.",
@@ -514,41 +584,18 @@ class TreeParamsDialog(QDialog):
         )
         exl.addWidget(note)
 
-        # REXdb: only for Tools → Tree → RT-domain tree (not shown on the main Tree form)
-        rex_box = QGroupBox("REXdb (RT-domain tree)", self)
-        rxf = _form(rex_box, margins=(10, 10, 10, 10))
-        self._rexdb = PathBrowseRow(
-            self,
-            initial=opts.rexdb_fasta or None,
-            placeholder="REXdb protein FASTA: click it in Files, or Browse",
-            browse_title="Choose the REXdb protein FASTA",
-            file_filter="FASTA (*.fasta *.fa *.faa);;All files (*)",
-        )
-        self._rexdb.set_default_tooltip(
-            "Viridiplantae_v4.0.fasta, with Viridiplantae_v4.0.classification next to it.")
-        self._rexdb.path_changed.connect(self._update_rexdb_status)
-        self._rexdb_refs = QSpinBox(self)
-        self._rexdb_refs.setRange(0, 50)
-        self._rexdb_refs.setValue(opts.rexdb_references)
-        self._rexdb_refs.setSuffix(" per lineage")
-        self._rexdb_refs.setFixedWidth(140)
-        self._rexdb_status = _note("", self)
-        self._rexdb_status.setWordWrap(False)
-        self._rexdb_row = _row(self, self._rexdb, _help(self, "REXdb", REXDB_INFO), stretch=False)
-        rxf.addRow("REXdb:", self._rexdb_row)
-        rxf.addRow("References:", self._rexdb_refs)
-        rxf.addRow("", self._rexdb_status)
-
         self._options_tab = QWidget(self)
+        self._options_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         ol = QVBoxLayout(self._options_tab)
         ol.setContentsMargins(16, 14, 16, 14)
         ol.setSpacing(14)
+        ol.setAlignment(Qt.AlignmentFlag.AlignTop)
         ol.addWidget(rc_box)
-        ol.addWidget(process_box)
         ol.addWidget(exe_box)
-        ol.addWidget(rex_box)
+        ol.addWidget(process_box)
         ol.addStretch(1)
-        self._update_rexdb_status()
 
     # ------------------------------------------------------------------ helpers
 
@@ -563,21 +610,25 @@ class TreeParamsDialog(QDialog):
         for label, value in items:
             box.addItem(label, value)
         idx = box.findData(current)
-        if idx < 0:                       # a setting made before: keep it
+        if idx < 0:
             box.insertItem(0, custom_label(current), current)
             idx = 0
         box.setCurrentIndex(idx)
-        box.setFixedWidth(_FIELD_WIDTH)
+        box.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
         return box
 
     def _engine(self) -> str:
-        """Engine of the open engine tab (on Options: the last engine tab used)."""
         return self._last_engine
 
     def _tab_changed(self, index: int) -> None:
         for engine, i in self._tab_index.items():
             if i == index:
                 self._last_engine = engine
+
+    def _on_tab_for_found_and_fit(self, *_args) -> None:
+        self._schedule_found_update()
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit_to_content)
 
     def _threads_changed(self, value: int) -> None:
         for box in self._thread_boxes:
@@ -595,14 +646,17 @@ class TreeParamsDialog(QDialog):
         form.setRowVisible(field, visible)
 
     def _choose_outgroup(self) -> None:
-        names = self._summary.names if (self._summary and not self._summary.error) else list(self._outgroup)
+        names = (
+            self._summary.names
+            if (self._summary and not self._summary.error)
+            else list(self._outgroup)
+        )
         dlg = OutgroupDialog(names, self._outgroup, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._outgroup = dlg.chosen()
             self._sync()
 
     def _start_summary_load(self) -> None:
-        """Load FASTA lengths off the GUI thread so opening stays instant."""
         if self._summary_loader is not None:
             return
         if not self._files:
@@ -620,17 +674,23 @@ class TreeParamsDialog(QDialog):
         self._summary_loader = None
         self._summary = summary
         self._sync()
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit_to_content)
 
     def _update_check(self, *_args) -> None:
-        """One grey line under Skip fragments: how many sequences it leaves out."""
         s = self._summary
         show = bool(self._files) and s is not None and not s.error and bool(s.lengths)
         if show:
-            frag = tb.fragment_count(s.lengths, self._min_cov.value() / 100.0,
-                                     str(self._cov_ref.currentData()))
+            frag = tb.fragment_count(
+                s.lengths,
+                self._min_cov.value() / 100.0,
+                str(self._cov_ref.currentData()),
+            )
             self._frag_hint.setText(
                 f"{frag} of {s.n_sequences} sequences fall below this and will be left out."
-                if frag else f"None of the {s.n_sequences} sequences fall below this.")
+                if frag
+                else f"None of the {s.n_sequences} sequences fall below this."
+            )
         elif self._files and s is None:
             self._frag_hint.setText("Counting sequences…")
             show = True
@@ -639,37 +699,26 @@ class TreeParamsDialog(QDialog):
             show = True
         self._set_row(self._top_form, self._frag_hint, show)
 
-    def _update_rexdb_status(self, *_args) -> None:
-        from repeatviewer.backends.rt_domains import looks_like_rexdb
-
-        path = self._rexdb.path()
-        if path is None:
-            msg, ok = "Optional. Needed for Tools → Tree → RT-domain tree.", True
-        elif looks_like_rexdb(path):
-            msg, ok = "Found, with its .classification table.", True
-        else:
-            msg, ok = (f"{path.name}: not found, or {path.with_suffix('.classification').name} "
-                       "is not next to it."), False
-        self._rexdb_status.setText(msg)
-        self._rexdb_status.setStyleSheet("color: palette(mid);" if ok else "color: #b00020;")
-
     def _sync(self, *_args) -> None:
-        """Show only what applies to the current choices."""
         protein = self._protein()
         aligning = self._align_mode.currentData() != TREE_ALIGN_NEVER
-        self._set_row(self._top_form, self._rotate.parentWidget(), aligning and not protein)
+        self._set_row(
+            self._top_form, self._rotate.parentWidget(), aligning and not protein
+        )
         self._set_row(self._iq_form, self._mask.parentWidget(), not protein)
         outgroup = self._root_mode.currentData() == TREE_ROOT_OUTGROUP
         self._outgroup_btn.setEnabled(outgroup)
         n = len(self._outgroup)
         self._outgroup_btn.setText(f"Outgroup ({n})…" if n else "Outgroup…")
-        self._outgroup_btn.setToolTip(", ".join(self._outgroup) if n else
-                                      "Choose the sequences that lie outside the rest.")
+        self._outgroup_btn.setToolTip(
+            ", ".join(self._outgroup)
+            if n
+            else "Choose the sequences that lie outside the rest."
+        )
         self._update_check()
         self._schedule_found_update()
 
     def _schedule_found_update(self, *_args) -> None:
-        """Update found labels after the Options tab has painted (avoids lag on click)."""
         if getattr(self, "_tabs", None) is None:
             return
         if self._tabs.currentIndex() != self._options_index:
@@ -680,45 +729,92 @@ class TreeParamsDialog(QDialog):
             self._found_timer.timeout.connect(self._update_found)
         self._found_timer.start(0)
 
-    def _maybe_update_found(self, *_args) -> None:
-        self._schedule_found_update()
-
     def _update_found(self) -> None:
-        from repeatviewer.backends.sequence_aligner import mafft_command
-        from repeatviewer.backends.tree_portable_tools import bundled_engine_executable
-
         if getattr(self, "_tabs", None) is None:
             return
         if self._tabs.currentIndex() != self._options_index:
             return
         for engine in ENGINE_TABS:
             use_path = self._system_boxes[engine].isChecked()
-            if use_path:
-                exe = tb.engine_status_executable(engine, system_path_only=True)
-                label = "found" if exe else "not found"
-                tip = str(exe) if exe else tb.engine_install_hint(engine)
-                missing = exe is None
-            else:
-                exe = bundled_engine_executable(engine)
-                if exe:
-                    label, tip, missing = "bundled", str(exe), False
-                else:
-                    # FastME / FastTree: no vendored binary; runtime still tries conda then PATH.
-                    # Do not probe conda here — that made Options lag on every open.
-                    label, tip, missing = "conda / PATH", tb.engine_install_hint(engine), False
-            self._found[engine].setText(label)
-            self._found[engine].setToolTip(tip)
+            exe = (
+                tb.engine_status_executable(engine, system_path_only=True)
+                if use_path
+                else None
+            )
+            set_path_checkbox_status(
+                self._found[engine],
+                str(exe) if exe else None,
+                checked=use_path,
+                has_builtin=(engine == TREE_ENGINE_IQTREE),
+            )
+            missing = use_path and exe is None and engine != TREE_ENGINE_IQTREE
+            # IQ-TREE still has a bundled fallback when PATH is missing.
+            if use_path and exe is None and engine == TREE_ENGINE_IQTREE:
+                missing = False
             self._right_click_buttons[engine].setText(
-                _ENGINE_TITLES[engine] + (" (not found)" if missing else ""))
-        cmd = mafft_command(use_system_mafft=self._system_boxes["mafft"].isChecked())
-        if cmd and not self._system_boxes["mafft"].isChecked():
-            self._found["mafft"].setText("bundled")
-        else:
-            self._found["mafft"].setText("found" if cmd else "not found")
-        self._found["mafft"].setToolTip(cmd[0][0] if cmd else "MAFFT was not found.")
+                _ENGINE_TITLES[engine] + (" (not found)" if missing else "")
+            )
+        use_mafft = self._system_boxes["mafft"].isChecked()
+        set_path_checkbox_status(
+            self._found["mafft"],
+            resolve_system_executable("mafft") if use_mafft else None,
+            checked=use_mafft,
+            has_builtin=True,
+        )
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit_to_content)
+
+    def _dialog_chrome_height(self) -> int:
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 8
+        shared_h = max(
+            self._shared.minimumSizeHint().height(),
+            self._shared.sizeHint().height(),
+        )
+        tab_bar_h = self._tabs.tabBar().sizeHint().height() + 8
+        buttons_h = self._button_box.sizeHint().height()
+        # shared + tabs + buttons → two spacings
+        return margin_h + shared_h + tab_bar_h + buttons_h + (2 * spacing)
+
+    def _fit_to_content(self) -> None:
+        """Shrink / grow to the active tab’s real height (no blank band)."""
+        page = self._tabs.currentWidget()
+        if page is None:
+            return
+        # Clear prior pins so newly shown PATH status lines can grow sizeHint.
+        self._tabs.setMaximumHeight(16777215)
+        page.setMaximumHeight(16777215)
+        self._shared.ensurePolished()
+        page.ensurePolished()
+        page.adjustSize()
+        root = page.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
+        content_h = page_hint.height()
+        if root is not None:
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        chrome = self._dialog_chrome_height()
+        height = chrome + content_h
+        width = max(self.width(), self._DIALOG_WIDTH)
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        height = min(max(height, 220), max_h)
+        self.setMinimumHeight(0)
+        self._tabs.setMinimumHeight(0)
+        page.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
 
     def done(self, result: int) -> None:  # noqa: N802
-        """Detach a still-running summary loader so the dialog can close."""
         loader = self._summary_loader
         if loader is not None and loader.isRunning():
             loader.ready.disconnect(self._on_summary_ready)
@@ -730,8 +826,8 @@ class TreeParamsDialog(QDialog):
 
     def _restore_defaults(self) -> None:
         d = TreeOptions()
-        self._rexdb.set_path(Path(d.rexdb_fasta) if d.rexdb_fasta else None)
-        self._rexdb_refs.setValue(d.rexdb_references)
+        self._rexdb_fasta = str(d.rexdb_fasta or "")
+        self._rexdb_references = int(d.rexdb_references)
         self._align_mode.setCurrentIndex(1 if d.align_mode == TREE_ALIGN_NEVER else 0)
         self._rotate.setChecked(d.rotate_monomers)
         self._set_combo(self._mask, d.methylation_mask)
@@ -752,18 +848,20 @@ class TreeParamsDialog(QDialog):
         self._last_engine = d.engine
         self._tabs.setCurrentIndex(self._tab_index[d.engine])
         self._sync()
+        self._update_found()
+        QTimer.singleShot(0, self._fit_to_content)
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
     def apply_path_from_panel(self, path: Path) -> bool:
-        """Files-panel click on a REXdb FASTA fills the REXdb field."""
+        """Files-panel click on a REXdb FASTA still stores it for RT-domain runs."""
         from repeatviewer.backends.rt_domains import looks_like_rexdb
 
         resolved = Path(path).expanduser()
         if not looks_like_rexdb(resolved):
             return False
-        self._rexdb.set_path(resolved)
+        self._rexdb_fasta = str(resolved)
         return True
 
     def options(self) -> TreeOptions:
@@ -780,8 +878,11 @@ class TreeParamsDialog(QDialog):
         protein = self._protein()
         d = TreeOptions()
         engine = self._engine()
-        threads = {TREE_ENGINE_IQTREE: self._threads, TREE_ENGINE_FASTME: self._threads_fme,
-                   TREE_ENGINE_FASTTREE: self._threads_ft}[engine].value()
+        threads = {
+            TREE_ENGINE_IQTREE: self._threads,
+            TREE_ENGINE_FASTME: self._threads_fme,
+            TREE_ENGINE_FASTTREE: self._threads_ft,
+        }[engine].value()
         sysbox = self._system_boxes
         return TreeOptions(
             align_mode=str(self._align_mode.currentData()),
@@ -789,8 +890,8 @@ class TreeParamsDialog(QDialog):
             adjust_direction=True,
             rotate_monomers=self._rotate.isChecked(),
             sequence_mode=TREE_SEQ_AS_IS,
-            rexdb_fasta=str(self._rexdb.path() or ""),
-            rexdb_references=self._rexdb_refs.value(),
+            rexdb_fasta=self._rexdb_fasta,
+            rexdb_references=self._rexdb_references,
             methylation_mask="" if protein else str(self._mask.currentData() or ""),
             mafft_gap_open=d.mafft_gap_open,
             mafft_offset=d.mafft_offset,

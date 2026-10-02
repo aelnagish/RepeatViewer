@@ -58,9 +58,13 @@ NUCLEOTIDE_COLORS_COLORBLIND: dict[str, str] = {
 }
 
 # Categories for the nucleotide colour picker.
+# Ambiguity is two rows so the dialog stays at TOOL_PARAMS_DIALOG_WIDTH.
+_NUCLEOTIDE_AMBIGUITY_ROW1 = _NUCLEOTIDE_AMBIGUITY_LETTERS[:6]
+_NUCLEOTIDE_AMBIGUITY_ROW2 = _NUCLEOTIDE_AMBIGUITY_LETTERS[6:]
 NUCLEOTIDE_CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Bases", ("A", "T", "U", "G", "C")),
-    ("Ambiguity", _NUCLEOTIDE_AMBIGUITY_LETTERS),
+    ("Ambiguity", _NUCLEOTIDE_AMBIGUITY_ROW1),
+    ("", _NUCLEOTIDE_AMBIGUITY_ROW2),
     ("Other / gap", ("N", "X", "-")),
 )
 
