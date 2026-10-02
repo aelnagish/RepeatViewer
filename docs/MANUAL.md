@@ -497,8 +497,9 @@ MUSCLE parameters:
 Ensemble options (`-stratified`, `-diversified`, `-resample`, …) are not
 exposed here because Align writes a single MSA for the viewer.
 
-**Output:** `<name>_mafft.fa` or `<name>_muscle.fa` (then
-`<name>_mafft_1.fa` / `<name>_muscle_1.fa`, … if that name already exists).
+**Output:** one file at a time → `<name>_mafft.fa` / `<name>_muscle.fa`;
+combined sequences → `<name>_cmafft.fa` / `<name>_cmuscle.fa` (then
+`_1`, `_2`, … before `.fa` if that name already exists).
 
 ### MSA Clean
 
@@ -1176,7 +1177,8 @@ as BLAST), e.g. `reads.fa` → `reads.fa_mafft.fa`, `reads.fa_flexidot.html`.
 | `<name>_b.txt` | BLAST | Tabular hit table |
 | `<name>_b.txt.fa` | BLAST | Hit sequences extracted from the genome |
 | `<name>_b.gff` | BLAST | Hit positions (optional) |
-| `<name>_mafft.fa` / `<name>_muscle.fa` | Align | Multiple sequence alignment (`_1`, `_2`, … on conflict) |
+| `<name>_mafft.fa` / `<name>_muscle.fa` | Align (each file) | MSA of one FASTA (`_1`, `_2`, … on conflict) |
+| `<name>_cmafft.fa` / `<name>_cmuscle.fa` | Align (combined) | MSA after merging selected sequences (`_1`, `_2`, … on conflict) |
 | `<name>_gap.fa` | MSA Clean | Gappy columns removed |
 | `<name>_rowdiv.fa` | MSA Clean | Divergent rows removed |
 | `<name>_rowgap.fa` | MSA Clean | Gappy rows removed |

@@ -156,10 +156,18 @@ def combined_alignment_output_stem(
     *,
     engine: str = ALIGNER_MAFFT,
 ) -> str:
-    """Basename stem for combined MSA: ``{first.name}_mafft`` / ``_muscle``."""
+    """Basename stem for combined MSA: ``{first.name}_cmafft`` / ``_cmuscle``."""
     if not seq_files:
         raise ValueError("No FASTA files to align.")
-    return alignment_output_stem(seq_files[0], engine=engine)
+    from repeatviewer.tool_output_paths import kept_input_name
+
+    if engine == ALIGNER_MUSCLE:
+        tool = "cmuscle"
+    elif engine == ALIGNER_MAFFT:
+        tool = "cmafft"
+    else:
+        raise ValueError(f"Unknown alignment engine: {engine}")
+    return f"{kept_input_name(seq_files[0])}_{tool}"
 
 
 def _next_available_fasta(

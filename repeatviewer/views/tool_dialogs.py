@@ -3192,10 +3192,11 @@ _MUSCLE_PERTURB_HELP = (
 )
 
 _FASTGA_MODE_HELP = (
-    "<b>Self comparison</b>: each selected genome is aligned with itself (repeats "
-    "within that sequence). One output file per genome.<br>"
-    "<b>Pairwise comparison</b>: every unique pair among the selected genomes (A vs B, "
-    "A vs C, …). Uncheck pairs you do not want; all results go into one combined file.<br>"
+    "<b>Self comparison</b>: each selected FASTA file is compared with itself.<br><br>"
+    "<b>Pairwise comparison</b>: each selected file is compared with every other "
+    "selected file. Example: with <code>A.fa</code> and <code>B.fa</code>, every "
+    "sequence in <code>A.fa</code> is compared with every sequence in "
+    "<code>B.fa</code>. All pair results go into one combined file.<br><br>"
     "<b>Compare against a reference</b>: each selected query genome is aligned to one "
     "reference genome. The reference index is built once and reused."
 )

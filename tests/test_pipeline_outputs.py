@@ -102,13 +102,13 @@ def test_kept_input_name_used_by_align_and_combine(tmp_path: Path) -> None:
     assert kept_input_name(a) == "reads.fa"
     assert alignment_output_stem(a, engine="mafft") == "reads.fa_mafft"
     assert alignment_output_stem(a, engine="muscle") == "reads.fa_muscle"
-    assert combined_alignment_output_stem([a, b], engine="mafft") == "reads.fa_mafft"
-    assert combined_alignment_output_stem([a, b], engine="muscle") == "reads.fa_muscle"
-    first = _next_available_fasta(tmp_path, "reads.fa_mafft")
-    assert first.name == "reads.fa_mafft.fa"
+    assert combined_alignment_output_stem([a, b], engine="mafft") == "reads.fa_cmafft"
+    assert combined_alignment_output_stem([a, b], engine="muscle") == "reads.fa_cmuscle"
+    first = _next_available_fasta(tmp_path, "reads.fa_cmafft")
+    assert first.name == "reads.fa_cmafft.fa"
     first.write_text(">x\nA\n")
-    second = _next_available_fasta(tmp_path, "reads.fa_mafft")
-    assert second.name == "reads.fa_mafft_1.fa"
+    second = _next_available_fasta(tmp_path, "reads.fa_cmafft")
+    assert second.name == "reads.fa_cmafft_1.fa"
     assert default_group_name([a, b]) == "reads.fa_and_other.fasta_comb"
 
 
