@@ -1179,10 +1179,10 @@ class AlignParamsDialog(QDialog):
             field.setFixedWidth(260)
 
         self._mafft_combine = QRadioButton(
-            "Combine all selected sequences then align", self
+            "Combine selected sequences and align", self
         )
         self._mafft_separate = QRadioButton(
-            "Align each selected sequences separately", self
+            "Align each selected file separately", self
         )
         self._mafft_mode_group = QButtonGroup(self)
         self._mafft_mode_group.addButton(self._mafft_combine)
@@ -1198,12 +1198,10 @@ class AlignParamsDialog(QDialog):
         self._mafft_input_group.addButton(self._mafft_input_selected)
         self._mafft_input_group.addButton(self._mafft_input_define)
         self._mafft_input_selected.setChecked(True)
-        initial_mafft_inputs = [
-            Path(p) for p in (opts.mafft_input_paths or []) if str(p).strip()
-        ]
+        # Define-input paths are session-only; do not restore last run's paths.
         self._mafft_define_inputs = TeMultiInputFilesWidget(
             self,
-            initial=initial_mafft_inputs or None,
+            initial=None,
             start_empty=False,
             placeholder="Click in Files/Folders or Browse…",
             browse_title="Choose a FASTA file",
@@ -1382,10 +1380,10 @@ class AlignParamsDialog(QDialog):
         self._muscle_perturb.setFixedWidth(260)
 
         self._muscle_combine = QRadioButton(
-            "Combine all selected sequences then align", self
+            "Combine selected sequences and align", self
         )
         self._muscle_separate = QRadioButton(
-            "Align each selected sequences separately", self
+            "Align each selected file separately", self
         )
         self._muscle_mode_group = QButtonGroup(self)
         self._muscle_mode_group.addButton(self._muscle_combine)
@@ -1402,12 +1400,9 @@ class AlignParamsDialog(QDialog):
         self._muscle_input_group.addButton(self._muscle_input_define)
         # Always open on Use selected (Define is for this run only).
         self._muscle_input_selected.setChecked(True)
-        initial_muscle_inputs = [
-            Path(p) for p in (opts.muscle_input_paths or []) if str(p).strip()
-        ]
         self._muscle_define_inputs = TeMultiInputFilesWidget(
             self,
-            initial=initial_muscle_inputs or None,
+            initial=None,
             start_empty=False,
             placeholder="Click in Files/Folders or Browse…",
             browse_title="Choose a FASTA file",
@@ -2152,9 +2147,9 @@ class AlignParamsDialog(QDialog):
             muscle_perm=str(self._muscle_perm.currentData()),
             muscle_perturb=max(0, int(self._muscle_perturb.value())),
             muscle_input_source=ALIGN_INPUT_SELECTED,
-            muscle_input_paths=[str(p) for p in self._muscle_define_inputs.paths()],
+            muscle_input_paths=[],
             mafft_input_source=ALIGN_INPUT_SELECTED,
-            mafft_input_paths=[str(p) for p in self._mafft_define_inputs.paths()],
+            mafft_input_paths=[],
             mafft_combined=self._mafft_combine.isChecked(),
             muscle_combined=self._muscle_combine.isChecked(),
             right_click_aligner=self.right_click_aligner(),
@@ -3105,17 +3100,17 @@ class ExtractSequencesDialog(QDialog):
 
 
 _MAFFT_MODE_HELP = (
-    "<b>Combine all selected sequences then align</b>: pool every sequence from the "
-    "selected files into one MSA.<br>"
-    "<b>Align each selected sequences separately</b>: run MAFFT once per selected "
-    "file, each with its own alignment."
+    "<b>Combine selected sequences and align</b>: merge every sequence from the "
+    "selected files into a single FASTA, then run MAFFT once on that combined "
+    "file.<br>"
+    "<b>Align each selected file separately</b>: align each selected FASTA file "
+    "separately with MAFFT."
 )
 _MAFFT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MAFFT uses the FASTA files that were "
     "selected in the Files panel when this window opened.<br>"
-    "<b>Define inputs</b>: choose FASTA files or folders yourself. Click a file or "
-    "folder in the panel to fill a path, use Browse (file or folder), and Add another "
-    "input for more. Folders expand to the FASTA files they contain."
+    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
+    "this run only and are not remembered next time."
 )
 _MAFFT_STRATEGY_HELP = (
     "MAFFT strategies trade speed for accuracy "
@@ -3168,17 +3163,17 @@ _MAFFT_ADJUST_DIRECTION_HELP = (
 )
 
 _MUSCLE_MODE_HELP = (
-    "<b>Combine all selected sequences then align</b>: pool every sequence from the "
-    "selected files into one MSA.<br>"
-    "<b>Align each selected sequences separately</b>: run MUSCLE once per selected "
-    "file, each with its own alignment."
+    "<b>Combine selected sequences and align</b>: merge every sequence from the "
+    "selected files into a single FASTA, then run MUSCLE once on that combined "
+    "file.<br>"
+    "<b>Align each selected file separately</b>: align each selected FASTA file "
+    "separately with MUSCLE."
 )
 _MUSCLE_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MUSCLE uses the FASTA files that were "
     "selected in the Files panel when this window opened.<br>"
-    "<b>Define inputs</b>: choose FASTA files or folders yourself. Click a file or "
-    "folder in the panel to fill a path, use Browse (file or folder), and Add another "
-    "input for more. Folders expand to the FASTA files they contain."
+    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
+    "this run only and are not remembered next time."
 )
 _MUSCLE_ALGORITHM_HELP = (
     "<b>Align (high accuracy)</b>: MUSCLE <b>-align</b>, the normal high-accuracy "
@@ -3207,9 +3202,8 @@ _FASTGA_MODE_HELP = (
 _FASTGA_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): FastGA uses the FASTA files that were "
     "selected in the Files panel when this window opened.<br>"
-    "<b>Define inputs</b>: choose FASTA files or folders yourself. Click a file or "
-    "folder in the panel to fill a path, use Browse (file or folder), and Add another "
-    "input for more. Folders expand to the FASTA files they contain."
+    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
+    "this run only and are not remembered next time."
 )
 _FASTGA_REFERENCE_HELP = (
     "The genome every query file is aligned to (the target columns of the PAF).<br>"
@@ -3388,16 +3382,12 @@ class FastGaPanel(QWidget):
         self._input_define = QRadioButton("Define inputs", self)
         self._input_group.addButton(self._input_selected)
         self._input_group.addButton(self._input_define)
-        if opts.input_source == FASTGA_INPUT_DEFINE:
-            self._input_define.setChecked(True)
-        else:
-            self._input_selected.setChecked(True)
-        initial_inputs = [
-            Path(p) for p in (opts.input_paths or []) if str(p).strip()
-        ]
+        # Always open on Use selected (Define is for this run only).
+        self._input_selected.setChecked(True)
+        # Define-input paths are session-only; do not restore last run's paths.
         self._define_inputs = TeMultiInputFilesWidget(
             self,
-            initial=initial_inputs or None,
+            initial=None,
             start_empty=False,
             placeholder="Click in Files/Folders or Browse…",
             browse_title="Choose a FASTA genome",

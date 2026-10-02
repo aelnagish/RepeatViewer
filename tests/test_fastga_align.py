@@ -327,9 +327,12 @@ def test_define_inputs_accepts_panel_files_and_folders(qapp, tmp_path):
         qapp,
         tmp_path,
         initial_tab=ALIGNER_FASTGA,
-        fastga_initial=FastGaOptions(input_source=FASTGA_INPUT_DEFINE),
+        fastga_initial=FastGaOptions(),
     )
     panel = dlg.fastga_panel()
+    # Define inputs is for this session only; the dialog always opens on Use selected.
+    assert panel.input_source() != FASTGA_INPUT_DEFINE
+    panel._input_define.setChecked(True)
     assert panel.input_source() == FASTGA_INPUT_DEFINE
     assert panel._define_inputs.isVisible()
     assert dlg.apply_path_from_panel(q1) is True

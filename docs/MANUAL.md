@@ -472,8 +472,8 @@ MAFFT parameters:
 
 | Parameter | Meaning |
 |-----------|---------|
-| Mode | Combine all selected sequences into one MSA, or align each file separately |
-| Inputs | Use selected Files-panel FASTA, or Define inputs (files/folders) |
+| Mode | Combine selected sequences and align, or align each selected file separately |
+| Inputs | Use selected Files-panel FASTA, or Define inputs for this run only (paths not remembered) |
 | Strategy | Algorithm preset (FFT-NS-1/2, L/G/E-INS-i, Auto, Custom) |
 | Sequence type | Auto-detect, nucleotide, or protein |
 | Threads | Parallelism (`--thread`) |
@@ -487,8 +487,8 @@ MUSCLE parameters:
 
 | Parameter | Meaning |
 |-----------|---------|
-| Mode | Combine all selected sequences into one MSA, or align each file separately |
-| Inputs | Use selected Files-panel FASTA, or Define inputs (files/folders) |
+| Mode | Combine selected sequences and align, or align each selected file separately |
+| Inputs | Use selected Files-panel FASTA, or Define inputs for this run only (paths not remembered) |
 | Algorithm | `-align` (high accuracy) or `-super5` (large sets) |
 | Threads | Parallelism (`-threads`) |
 | Guide tree permutation | Advanced: `-perm` (`none`, `abc`, `acb`, `bca`) |
@@ -714,8 +714,17 @@ currently use.
 Whole-genome alignment for large sequences, where BLAST is too slow. FastGA
 lives in the **Align** window, on its own **FastGA** tab; the FastGA button and
 **Tools → FastGA → Change FastGA parameters** open that tab. Requires FastGA
-from conda (`conda install -c bioconda fastga`); the Options tab shows where
-it was found. On Windows it runs in WSL.
+1.5 or newer from conda into a shared env, for example:
+
+```bash
+# if rv_env exists
+conda install -n rv_env -c bioconda fastga=1.5.1
+# else
+conda create -n rv_env -c bioconda fastga=1.5.1
+```
+
+Then point **File → Setting → External tools** at `rv_env`. The Options
+tab shows where it was found. On Windows it runs in WSL.
 
 **Mode**
 
@@ -1205,11 +1214,12 @@ as BLAST), e.g. `reads.fa` → `reads.fa_mafft.fa`, `reads.fa_flexidot.html`.
 Extend, genome maps and genome-aware TE-Aid all need it.
 
 **RepeatMasker or FastGA is not found.** They are not bundled. Clicking the
-FastGA tab shows platform-specific setup steps. Install **FastGA 1.5 or newer**
-(bioconda / Homebrew) and either put it on `PATH` or point
-**File → Setting → External tools** at the conda environment holding it, then
-use the check button to confirm. On Windows FastGA must live in a WSL2
-environment.
+FastGA tab shows platform-specific setup steps. Use a shared conda env
+`rv_env` with **FastGA 1.5 or newer**
+(`conda install -n rv_env -c bioconda fastga=1.5.1` if the env exists, else
+`conda create -n rv_env -c bioconda fastga=1.5.1`) and point
+**File → Setting → External tools** at it, then use Test to confirm. On Windows
+FastGA must live in a WSL2 environment.
 
 **BLAST or another tool is very slow.** Check the word size — small values are
 far more sensitive and dramatically slower on repetitive genomes. For Repeat

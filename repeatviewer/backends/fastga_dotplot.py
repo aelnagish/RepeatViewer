@@ -141,92 +141,92 @@ def fastga_available() -> bool:
     return fastga_executable() is not None
 
 
-_SUPPORTED_VERSION_HTML = (
-    "<b>Supported version: FastGA 1.5 or newer</b> "
-    "(bioconda / Homebrew currently ship 1.5.1). "
-    "FastGA 1.4 also works; soft-masking flags differ between 1.4 and 1.5+."
+_SUPPORTED_VERSION_HTML = "<b>Supported version: FastGA 1.5 or newer</b>"
+_SUPPORTED_VERSION_PLAIN = "Supported version: FastGA 1.5 or newer"
+
+_RECOMMENDED_ENV = "rv_env"
+_RECOMMENDED_FASTGA = "fastga=1.5.1"
+_CONDA_CREATE_CMD = (
+    f"conda create -n {_RECOMMENDED_ENV} -c bioconda {_RECOMMENDED_FASTGA}"
+)
+_CONDA_INSTALL_CMD = (
+    f"conda install -n {_RECOMMENDED_ENV} -c bioconda {_RECOMMENDED_FASTGA}"
 )
 
 
-def fastga_configuration_message(*, rich: bool = True) -> str:
-    """How to install and point RepeatViewer at FastGA (platform-specific)."""
-    version = _SUPPORTED_VERSION_HTML if rich else (
-        "Supported version: FastGA 1.5 or newer "
-        "(bioconda / Homebrew currently ship 1.5.1). "
-        "FastGA 1.4 also works; soft-masking flags differ between 1.4 and 1.5+."
+def _fastga_conda_install_block(*, rich: bool) -> str:
+    """Create-or-install into the shared recommended env (may already exist)."""
+    if rich:
+        return (
+            "Open a Terminal window.<br><br>"
+            "Install FastGA with conda into RepeatViewer:<br>"
+            f"<b>If</b> Conda environment <code>{_RECOMMENDED_ENV}</code> exists:<br>"
+            f"<code>{_CONDA_INSTALL_CMD}</code><br>"
+            "<b>else:</b><br>"
+            f"<code>{_CONDA_CREATE_CMD}</code>"
+        )
+    return (
+        "Open a Terminal window.\n\n"
+        "Install FastGA with conda into RepeatViewer:\n"
+        f"If Conda environment {_RECOMMENDED_ENV} exists:\n"
+        f"  {_CONDA_INSTALL_CMD}\n"
+        "else:\n"
+        f"  {_CONDA_CREATE_CMD}"
     )
+
+
+def fastga_configuration_message(*, rich: bool = True) -> str:
+    """How to install and point RepeatViewer at FastGA (platform-specific).
+
+    Packed builds have no shell conda env; users must install FastGA separately
+    and bind it under File → Setting → External tools.
+    """
+    version = _SUPPORTED_VERSION_HTML if rich else _SUPPORTED_VERSION_PLAIN
+    install = _fastga_conda_install_block(rich=rich)
+    env_name = _RECOMMENDED_ENV
     if sys.platform == "win32":
         if rich:
             return (
                 "FastGA is not bundled with RepeatViewer and is not configured yet.<br><br>"
                 f"{version}<br><br>"
-                "<b>Windows requires WSL2</b> (FastGA does not run as a native Windows "
+                "On Windows, FastGA runs inside WSL2 (not as a native Windows "
                 "binary).<br><br>"
-                "<b>1.</b> Install WSL2 if needed (PowerShell as Administrator):<br>"
-                "<code>wsl --install</code><br><br>"
-                "<b>2.</b> Inside your WSL Linux distro, install FastGA in a conda env:"
-                "<br><code>conda install -c bioconda fastga</code><br><br>"
-                "<b>3.</b> In RepeatViewer, bind that env:<br>"
-                "File → Setting → External tools (conda / WSL2) → enter the env name "
-                "(e.g. <code>tetrimmer</code>) or its Linux path "
-                "(e.g. <code>/home/you/miniconda3/envs/tetrimmer</code>), "
-                "then use Check to confirm FastGA resolves."
+                "1. Install WSL2 if needed (PowerShell as Administrator):"
+                "<br><code>wsl --install</code><br><br>"
+                f"2. Inside your WSL Linux distro:<br>{install}<br><br>"
+                "3. <b>Then</b>, in RepeatViewer:<br>"
+                "File → Setting → External tools (conda / WSL2) → enter "
+                f"<code>{env_name}</code> (or the Linux path to that env), "
+                "then click Test to confirm FastGA resolves."
             )
         return (
             "FastGA is not bundled with RepeatViewer and is not configured yet.\n\n"
             f"{version}\n\n"
-            "Windows requires WSL2 (FastGA does not run as a native Windows binary).\n\n"
+            "On Windows, FastGA runs inside WSL2 (not as a native Windows binary).\n\n"
             "1. Install WSL2 if needed (PowerShell as Administrator):\n"
             "   wsl --install\n\n"
-            "2. Inside your WSL Linux distro, install FastGA in a conda env:\n"
-            "   conda install -c bioconda fastga\n\n"
-            "3. In RepeatViewer, bind that env:\n"
-            "   File → Setting → External tools (conda / WSL2) → env name or "
-            "Linux path, then Check."
+            f"2. Inside your WSL Linux distro:\n{install}\n\n"
+            "3. Then, in RepeatViewer:\n"
+            "   File → Setting → External tools (conda / WSL2) → enter "
+            f"{env_name} (or the Linux path to that env), then Test."
         )
-    if sys.platform == "darwin":
-        if rich:
-            return (
-                "FastGA is not bundled with RepeatViewer and is not configured yet.<br><br>"
-                f"{version}<br><br>"
-                "<b>macOS — install one of:</b><br>"
-                "• Homebrew: <code>brew install fastga</code><br>"
-                "• Conda: <code>conda install -c bioconda fastga</code><br><br>"
-                "If you use a conda env that is not on PATH, point RepeatViewer at it:"
-                "<br>File → Setting → External tools (conda) → env name or path, "
-                "then Check to confirm FastGA resolves."
-            )
-        return (
-            "FastGA is not bundled with RepeatViewer and is not configured yet.\n\n"
-            f"{version}\n\n"
-            "macOS — install one of:\n"
-            "  brew install fastga\n"
-            "  conda install -c bioconda fastga\n\n"
-            "If the conda env is not on PATH: File → Setting → External tools "
-            "(conda) → env name or path, then Check."
-        )
-    # Linux and other Unix
     if rich:
         return (
             "FastGA is not bundled with RepeatViewer and is not configured yet.<br><br>"
             f"{version}<br><br>"
-            "<b>Linux — recommended install:</b><br>"
-            "<code>conda install -c bioconda fastga</code><br><br>"
-            "Or build from "
-            "<a href='https://github.com/thegenemyers/FASTGA'>github.com/thegenemyers/FASTGA</a> "
-            "and put <code>FastGA</code> on PATH.<br><br>"
-            "If you use a conda env that is not on PATH, point RepeatViewer at it:"
-            "<br>File → Setting → External tools (conda) → env name or path, "
-            "then Check to confirm FastGA resolves."
+            f"{install}<br><br>"
+            "<b>Then</b>, in RepeatViewer:<br>"
+            "File → Setting → External tools (conda) → enter "
+            f"<code>{env_name}</code> (or the path to that env), "
+            "then click Test to confirm FastGA resolves."
         )
     return (
         "FastGA is not bundled with RepeatViewer and is not configured yet.\n\n"
         f"{version}\n\n"
-        "Linux — recommended:\n"
-        "  conda install -c bioconda fastga\n\n"
-        "Or build from https://github.com/thegenemyers/FASTGA and put FastGA on PATH.\n\n"
-        "If the conda env is not on PATH: File → Setting → External tools "
-        "(conda) → env name or path, then Check."
+        f"{install}\n\n"
+        "Then, in RepeatViewer:\n"
+        "  File → Setting → External tools (conda) → enter "
+        f"{env_name} (or the path to that env), then Test."
     )
 
 
@@ -244,9 +244,13 @@ def show_fastga_not_configured_dialog(parent=None) -> None:
     box.setWindowTitle("FastGA not configured")
     box.setIcon(QMessageBox.Icon.Information)
     box.setTextFormat(Qt.TextFormat.RichText)
-    box.setText(fastga_configuration_message(rich=True))
+    # QMessageBox often renders setText() at bold weight; keep the body normal
+    # so only explicit <b>…</b> (supported version) stands out — same as help_button.
+    box.setText(
+        f"<div style='font-weight:400'>{fastga_configuration_message(rich=True)}</div>"
+    )
     box.setStandardButtons(QMessageBox.StandardButton.Ok)
-    # Native macOS alerts ignore HTML bold / links.
+    # Native macOS alerts ignore HTML weight / links.
     box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
     box.exec()
 

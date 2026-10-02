@@ -9493,7 +9493,9 @@ class MainWindow(QMainWindow):
             run_files = d.fastga_run_files()
             # Next open/run always uses the Files selection again.
             self._fastga_options = replace(
-                run_opts, input_source=FASTGA_INPUT_SELECTED
+                run_opts,
+                input_source=FASTGA_INPUT_SELECTED,
+                input_paths=[],
             )
             save_fastga_options(self._fastga_options)
             self._project.use_system_mafft = d.use_system_mafft()
