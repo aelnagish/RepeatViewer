@@ -427,21 +427,26 @@ Writes the protein translation as `<name>_translated.faa`.
 
 Searches your sequences against the reference genome or a saved database.
 Three programs, each on its own tab: **BLASTn** (nucleotide), **BLASTp** and
-**BLASTx** (protein).
+**BLASTx** (protein). Each program tab uses **Inputs** / **Settings** /
+collapsible **Advanced Settings** (same pattern as Align). There is no Mode —
+each selected query file is blasted separately. The **Options** tab sets the
+right-click program, system BLAST+, and the process window.
 
 | Parameter | Meaning |
 |-----------|---------|
+| Inputs | Use selected Files-panel FASTA, or Define inputs for this run only (paths not remembered) |
 | Database | Reference genome, or a saved BLAST database |
-| `-evalue` | Expectation threshold |
+| `-evalue` | Expectation threshold (NCBI BLAST+) |
+| Threads | `-num_threads`; defaults to your CPU count minus the UI reserve |
 | `-word_size` | Seed length. Smaller is more sensitive and much slower on repetitive genomes |
-| `-gapopen`, `-gapextend` | Gap penalties |
-| `-penalty` | Mismatch penalty (BLASTn) |
-| `-perc_identity` | Minimum percent identity |
-| `-qcov_hsp_perc` | Minimum query coverage per HSP |
-| Threads | Defaults to your CPU count minus the UI reserve |
-| Max MSA lines | Cap on hits carried into an alignment |
-| Top longest lines | Prefer the longest hits when capping |
-| Minimum bit score (GFF) | Score floor for hits written to GFF |
+| Export text / GFF | Keep `*_b.txt` and/or write `*_b.gff` |
+| Max sequence number | Cap on hit sequences kept for the extracted FASTA / MSA (default 100) |
+| Top longest sequences | When capping: keep this many longest hits first, then fill at random up to Max sequence number (default 100) |
+| `-gapopen`, `-gapextend` | Advanced: gap penalties |
+| `-penalty` | Advanced: mismatch penalty (BLASTn) |
+| `-perc_identity` | Advanced: minimum percent identity (BLASTn) |
+| `-qcov_hsp_perc` | Advanced: minimum query coverage per HSP |
+| Minimum bit score (GFF) | Advanced: score floor for hits written to GFF |
 
 **Outputs:**
 
@@ -452,10 +457,11 @@ Three programs, each on its own tab: **BLASTn** (nucleotide), **BLASTp** and
 | `<name>_b.gff` | Hit positions, when GFF output is enabled |
 
 The hit table is ordinary tabular BLAST output — readable in the preview pane,
-and the input for the TE density and divergence plots. **Max MSA lines** and
-**Top longest lines** cap how many hits are carried into the `.fa`, which
+and the input for the TE density and divergence plots. **Max sequence number**
+and **Top longest sequences** cap how many hits are carried into the `.fa`, which
 matters because a high-copy element can otherwise produce an alignment too
-large to work with.
+large to work with. BLAST+ option meanings follow the
+[NCBI BLAST Command Line Applications User Manual](https://www.ncbi.nlm.nih.gov/books/NBK1762/).
 
 ### Align
 
@@ -559,8 +565,9 @@ Collapses an alignment to a single sequence.
 
 | Parameter | Meaning |
 |-----------|---------|
-| Majority threshold | Fraction of rows that must agree for a base to be called |
-| Ambiguous base | Character written where no base reaches the threshold |
+| Sequence type | Auto-detect, nucleotide, or protein (Biopython alignment consensus) |
+| Majority threshold | Fraction of rows that must agree for a residue to be called |
+| Ambiguous base / residue | **N** (DNA/RNA) or **X** (protein) where no residue reaches the threshold |
 
 Consensus needs either a **multiple sequence alignment** — every row the same
 length — or a single-sequence FASTA. An unaligned multi-FASTA is rejected with
@@ -576,12 +583,20 @@ therefore coexist in one folder and be compared.
 
 An interactive HTML report for one consensus: self-alignment structure,
 terminal repeats, ORFs, and genome hit coverage in one page. This is the
-clearest single view of whether a consensus is finished.
+clearest single view of whether a consensus is finished. The parameters
+dialog follows the BLAST / Flexidot layout: **Inputs**, **Settings**,
+collapsible **Advanced Settings**, and **Options**.
 
-| Parameter | Meaning |
-|-----------|---------|
-| Genome BLAST E-value | Threshold for the genome hit track |
-| Self BLAST word size | Seed length for the self-comparison |
+| Section | Parameter | Meaning |
+|---------|-----------|---------|
+| Inputs | Use selected / Define inputs | Files-panel selection, or explicit FASTA paths for this run only |
+| Settings | Genome | Project genome or a saved nucleotide BLAST database |
+| Settings | Genome BLAST E-value | Threshold for genome BLAST (finds copies of the input) |
+| Settings | Self BLAST word size | Seed length for self-BLAST (finds repetitive regions) |
+| Settings | Threads | Threads for genome BLAST and self-BLAST |
+| Advanced | Line transparency | Opacity of genome BLAST hit lines |
+| Advanced | Full-/mid-length hits | Color bands by hit length vs consensus |
+| Options | Process output | Live genome BLAST and self-BLAST progress window |
 
 **Output:** `<name>_TEAid.html`, rendered in the preview pane.
 
@@ -589,15 +604,21 @@ clearest single view of whether a consensus is finished.
 
 **Toolbar: Flexidot · Tools → Flexidot**
 
-Dotplots: self, pairwise, or all-against-all for a multi-FASTA.
+Dotplots: self, pairwise, or all-against-all for a multi-FASTA. The parameters
+dialog follows the same layout as Align: **Mode**, **Inputs**, **Outputs**,
+**Settings**, and collapsible **Advanced Settings**.
 
-| Parameter | Meaning |
-|-----------|---------|
-| Word size (k-mer, `-k`) | Match length. Lower finds more, and more noise |
-| Output format (`-f`) | HTML for interactive, or a static image |
-| Allowed substitutions (`-S`) | Mismatches tolerated within a word |
-| Maximum N content (`--max_n`) | Skip windows above this N fraction |
-| Match line thickness (`-A`) | Line width in the plot |
+| Section | Parameter | Meaning |
+|---------|-----------|---------|
+| Mode | Combine / separate | One dotplot for all selected files, or one run per file |
+| Inputs | Use selected / Define inputs | Files-panel selection, or explicit FASTA paths for this run only |
+| Outputs | Output format (`-f`) | HTML for interactive, or a static image |
+| Settings | k-mer (`-k`) | Match length. Lower finds more, and more noise |
+| Settings | Sequence type (`-t`) | DNA (nuc) or protein (aa) |
+| Settings | Show GFF features | Shade with companion annotation GFF (`-g`) |
+| Advanced | Allowed substitutions (`-S`) | Mismatches tolerated within a word |
+| Advanced | Maximum N content (`--max_n`) | Skip windows above this N fraction when wobble is on |
+| Advanced | Match line thickness (`-A`) | Line width in the plot |
 
 Choose HTML output to get **Go-to → Annotation**: clicking a region in the
 dotplot jumps the Annotation preview tab to that coordinate. This is the

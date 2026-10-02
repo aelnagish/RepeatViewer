@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
-from Bio import AlignIO, BiopythonDeprecationWarning, SeqIO
+from Bio import Align, AlignIO, BiopythonDeprecationWarning, SeqIO
 from Bio.Seq import Seq
 from Bio.Align import AlignInfo
 from Bio.SeqRecord import SeqRecord
@@ -24,7 +24,10 @@ from repeatviewer.backends.gui_functions import (
 from repeatviewer.job_options import (
     DEFAULT_TE_DIVERGENCE_BIN_WIDTH,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
+    MAFFT_SEQUENCE_AUTO,
     clamp_teaid_self_blast_word_size,
+    normalize_consensus_ambiguous,
+    normalize_consensus_sequence_type,
 )
 
 # Suppress all deprecation warnings
@@ -67,9 +70,26 @@ def _pan_genome_panel_px(num_genomes: int) -> int:
     return TEAID_PAN_PANEL_PX_MIN
 
 
-def con_generater(input_file, output_dir, threshold=0.8, ambiguous='N'):
+def _resolve_consensus_sequence_type(records, sequence_type: str) -> str:
+    """Resolve auto-detect to nucleotide or protein from alignment content."""
+    resolved = normalize_consensus_sequence_type(sequence_type)
+    if resolved != MAFFT_SEQUENCE_AUTO:
+        return resolved
+    from repeatviewer.backends.msa_plot import detect_sequence_type
+
+    seqs = [list(str(rec.seq).upper()) for rec in records]
+    return detect_sequence_type(np.asarray(seqs, dtype="<U1"))
+
+
+def con_generater(
+    input_file,
+    output_dir,
+    threshold=0.8,
+    ambiguous="N",
+    sequence_type=MAFFT_SEQUENCE_AUTO,
+):
     """
-    Build a consensus sequence for TE-Aid.
+    Build a consensus sequence for TE-Aid and the Consensus tool.
 
     Accepts a single-sequence FASTA or a multiple sequence alignment (all rows
     the same length). Unaligned multi-FASTA files are rejected with a clear error.
@@ -80,6 +100,8 @@ def con_generater(input_file, output_dir, threshold=0.8, ambiguous='N'):
             f"No sequences found in {os.path.basename(input_file)}."
         )
 
+    amb = normalize_consensus_ambiguous(ambiguous)
+
     if len(records) == 1:
         consensus_seq = Seq(str(records[0].seq).replace("-", "")).upper()
     else:
@@ -89,38 +111,25 @@ def con_generater(input_file, output_dir, threshold=0.8, ambiguous='N'):
             max_len = max(lengths)
             raise TeaidInputError(
                 f"{os.path.basename(input_file)} contains {len(records)} sequences "
-                f"with different lengths ({min_len}–{max_len} bp). "
-                "TE-Aid requires a multiple sequence alignment (all rows the same length). "
+                f"with different lengths ({min_len}–{max_len}). "
+                "Provide a multiple sequence alignment (all rows the same length). "
                 "Align the sequences first (Align menu) or use a single-sequence FASTA."
             )
 
-        n_cols = len(records[0].seq)
-        consensus_chars = []
-        for i in range(n_cols):
-            col = "".join(str(rec.seq[i]).upper() for rec in records)
-            bases = [b for b in col if b in {"A", "C", "G", "T"}]
-
-            if not bases:
-                consensus_chars.append(ambiguous)
-                continue
-
-            counts = {
-                "A": bases.count("A"),
-                "C": bases.count("C"),
-                "G": bases.count("G"),
-                "T": bases.count("T"),
-            }
-            winner = max(counts, key=counts.get)
-            freq = counts[winner] / len(bases)
-            consensus_chars.append(winner if freq >= threshold else ambiguous)
-
-        consensus_seq = Seq("".join(consensus_chars)).upper()
+        alignment = Align.MultipleSeqAlignment(records)
+        consensus_seq = AlignInfo.SummaryInfo(alignment).dumb_consensus(
+            threshold=threshold,
+            ambiguous=amb,
+        )
+        if not isinstance(consensus_seq, Seq):
+            consensus_seq = Seq(str(consensus_seq))
+        consensus_seq = consensus_seq.upper()
 
     consensus_seq_len = len(consensus_seq)
     consensus_seq_obj = SeqRecord(
         consensus_seq,
         id="consensus",
-        description=f"threshold={threshold};amb={ambiguous}",
+        description=f"threshold={threshold};amb={amb}",
     )
 
     output_file = os.path.join(output_dir, f'{os.path.basename(input_file)}_{threshold}_co.fa')

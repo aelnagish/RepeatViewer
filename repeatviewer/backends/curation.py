@@ -806,7 +806,7 @@ def run_on_sequence(
                     str(teaid_work_dir),
                     genome_targets,
                     e_value=teaid_opts.e_value,
-                    num_threads=analysis_threads_per_job(project.batch_workers),
+                    num_threads=max(1, int(teaid_opts.num_threads)),
                     use_system_blast=project.use_system_blast,
                     self_blast_word_size=teaid_opts.self_blast_word_size,
                     x_axis_label=teaid_opts.x_axis_label,
@@ -823,7 +823,7 @@ def run_on_sequence(
                     str(active_genome) if active_genome else None,
                     None,
                     e_value=teaid_opts.e_value,
-                    num_threads=analysis_threads_per_job(project.batch_workers),
+                    num_threads=max(1, int(teaid_opts.num_threads)),
                     use_system_blast=project.use_system_blast,
                     self_blast_word_size=teaid_opts.self_blast_word_size,
                     output_name_tag=genome_label or None,
@@ -964,6 +964,7 @@ def run_on_sequence(
             str(out_dir),
             threshold=cons_opts.threshold,
             ambiguous=cons_opts.ambiguous,
+            sequence_type=cons_opts.sequence_type,
         )
         created.append(cons_out)
 

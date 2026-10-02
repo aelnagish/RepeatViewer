@@ -33,7 +33,8 @@ def test_help_button_look_and_tooltip(qapp):
     assert button.text() == "?"
     assert button.width() == button.height() == HELP_BUTTON_SIZE
     assert button.styleSheet() == HELP_BUTTON_STYLE
-    assert button.toolTip() == "Sliding window in bp."
+    assert button.toolTip().startswith("<div style='max-width:")
+    assert "Sliding window in bp." in button.toolTip()
 
 
 def test_rich_help_tooltip_is_width_capped(qapp):
@@ -42,6 +43,47 @@ def test_rich_help_tooltip_is_width_capped(qapp):
     button = make_help_button(None, "Model", "<b>HKY</b> — unequal base frequencies.")
     assert button.toolTip().startswith("<div style='max-width:")
     assert "<b>HKY</b>" in button.toolTip()
+
+
+def test_plain_help_message_is_not_bold(qapp, monkeypatch):
+    from repeatviewer.widgets import help_button
+
+    seen: dict[str, object] = {}
+
+    class _FakeBox:
+        Option = help_button.QMessageBox.Option
+        StandardButton = help_button.QMessageBox.StandardButton
+        Icon = help_button.QMessageBox.Icon
+
+        def __init__(self, parent=None):
+            seen["parent"] = parent
+
+        def setWindowTitle(self, title):
+            seen["title"] = title
+
+        def setIcon(self, icon):
+            seen["icon"] = icon
+
+        def setTextFormat(self, fmt):
+            seen["format"] = fmt
+
+        def setText(self, text):
+            seen["text"] = text
+
+        def setStandardButtons(self, buttons):
+            seen["buttons"] = buttons
+
+        def setOption(self, option, on=True):
+            seen["option"] = (option, on)
+
+        def exec(self):
+            seen["exec"] = True
+
+    monkeypatch.setattr(help_button, "QMessageBox", _FakeBox)
+    help_button.show_help_message(None, "Show GFF features", "Short plain help.")
+    assert "font-weight:400" in str(seen["text"])
+    assert "Short plain help." in str(seen["text"])
+    assert seen["option"] == (_FakeBox.Option.DontUseNativeDialog, True)
 
 
 def test_field_with_help_puts_button_right_of_field(qapp):

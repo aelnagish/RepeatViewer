@@ -453,6 +453,9 @@ class BlastOptions:
     blastx_write_text: bool = DEFAULT_BLASTX_WRITE_TEXT
     blastx_write_gff: bool = DEFAULT_BLASTX_WRITE_GFF
     blastx_num_threads: int = field(default_factory=_default_tool_threads)
+    # Query Inputs (Align-style); Define paths are session-only.
+    input_source: str = ALIGN_INPUT_SELECTED
+    input_paths: list[str] = field(default_factory=list)
     # Which program a right-click on the BLAST toolbar button runs.
     right_click_program: str = BLAST_PROGRAM_BLASTN
     show_process_window: bool = False
@@ -479,7 +482,20 @@ CONSENSUS_RIGHT_CLICK_ACTIONS = (CONSENSUS_RIGHT_CLICK_RUN, CONSENSUS_RIGHT_CLIC
 class ConsensusOptions:
     threshold: float = DEFAULT_CONSENSUS_THRESHOLD
     ambiguous: str = DEFAULT_CONSENSUS_AMBIGUOUS
+    sequence_type: str = MAFFT_SEQUENCE_AUTO
     right_click_action: str = CONSENSUS_RIGHT_CLICK_RUN
+
+
+def normalize_consensus_sequence_type(raw: object) -> str:
+    """Return ``auto``, ``nucleotide``, or ``protein`` for consensus generation."""
+    value = str(raw or MAFFT_SEQUENCE_AUTO).strip().lower()
+    if value in {"nuc", "nucleotide", "dna", "rna"}:
+        return MAFFT_SEQUENCE_NUCLEOTIDE
+    if value in {"aa", "protein", "amino", "aminoacid", "amino_acid"}:
+        return MAFFT_SEQUENCE_PROTEIN
+    if value in MAFFT_SEQUENCE_TYPES:
+        return value
+    return MAFFT_SEQUENCE_AUTO
 
 
 def normalize_consensus_ambiguous(raw: object) -> str:
@@ -680,6 +696,8 @@ class TeaAidOptions:
     right_click_action: str = TEAID_RIGHT_CLICK_RUN
     # Single-genome mode: empty means use the project genome from Define Genome.
     genome_path: str | None = None
+    show_process_window: bool = False
+    close_process_window_when_finished: bool = False
 
 
 # remove_gaps_with_similarity_check defaults (TEtrimmerGUI)
@@ -956,6 +974,8 @@ def load_blast_options() -> BlastOptions:
         blastx_num_threads=max(
             1, int(v.get("blastx_num_threads", _default_tool_threads()))
         ),
+        input_source=ALIGN_INPUT_SELECTED,
+        input_paths=[],
         right_click_program=(
             str(v.get("right_click_program", BLAST_PROGRAM_BLASTN))
             if str(v.get("right_click_program", BLAST_PROGRAM_BLASTN)) in BLAST_PROGRAMS
@@ -1110,6 +1130,10 @@ def load_teaid_options() -> TeaAidOptions:
         hit_line_transparency=_load_teaid_line_transparency(v),
         right_click_action=right_click_action,
         genome_path=str(genome_path).strip() if genome_path else None,
+        show_process_window=_to_bool(v.get("show_process_window"), False),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"), False
+        ),
     )
 
 
@@ -1146,6 +1170,7 @@ def save_teaid_options(opts: TeaAidOptions) -> None:
         {
             "e_value": opts.e_value,
             "self_blast_word_size": opts.self_blast_word_size,
+            "num_threads": max(1, int(opts.num_threads)),
             "x_axis_label": opts.x_axis_label,
             "hit_len_high_pct": high_pct,
             "hit_len_mid_pct": mid_pct,
@@ -1160,6 +1185,10 @@ def save_teaid_options(opts: TeaAidOptions) -> None:
                 else TEAID_RIGHT_CLICK_RUN
             ),
             "genome_path": opts.genome_path or "",
+            "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": (
+                opts.close_process_window_when_finished
+            ),
         },
     )
 
@@ -1702,6 +1731,9 @@ def load_consensus_options() -> ConsensusOptions:
         ambiguous=normalize_consensus_ambiguous(
             v.get("ambiguous", DEFAULT_CONSENSUS_AMBIGUOUS)
         ),
+        sequence_type=normalize_consensus_sequence_type(
+            v.get("sequence_type", MAFFT_SEQUENCE_AUTO)
+        ),
         right_click_action=right_click_action,
     )
 
@@ -1712,6 +1744,7 @@ def save_consensus_options(opts: ConsensusOptions) -> None:
         {
             "threshold": opts.threshold,
             "ambiguous": normalize_consensus_ambiguous(opts.ambiguous),
+            "sequence_type": normalize_consensus_sequence_type(opts.sequence_type),
             "right_click_action": (
                 opts.right_click_action
                 if opts.right_click_action in CONSENSUS_RIGHT_CLICK_ACTIONS

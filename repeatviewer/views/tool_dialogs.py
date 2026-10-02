@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStyle,
     QStyleOptionViewItem,
+    QStackedWidget,
+    QTabBar,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -85,7 +87,11 @@ def make_process_output_box(
     checked: bool = False,
     close_when_finished: bool = False,
 ) -> tuple[QGroupBox, QCheckBox, QCheckBox]:
-    """Options-tab group for the live process monitor window."""
+    """Options-tab group for the live process monitor window.
+
+    Stays compact: never stretch the two checkboxes apart when the Options
+    page is taller than its sizeHint (e.g. after visiting a Parameters tab).
+    """
     checkbox = QCheckBox(f"Show process window while {tool_name} runs", parent)
     checkbox.setChecked(bool(checked))
     checkbox.setToolTip(
@@ -101,7 +107,11 @@ def make_process_output_box(
     )
     checkbox.toggled.connect(close_box.setEnabled)
     box = QGroupBox("Process output", parent)
+    box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
     layout = QVBoxLayout(box)
+    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setSpacing(6)
+    layout.setAlignment(Qt.AlignmentFlag.AlignTop)
     layout.addWidget(checkbox)
     layout.addWidget(close_box)
     return box, checkbox, close_box
@@ -161,6 +171,13 @@ def make_cancel_save_run_bar(
 def dialog_should_run(dialog: QDialog) -> bool:
     """True when the dialog was closed with Run."""
     return getattr(dialog, "_close_action", "") == "run"
+
+
+# Outer width shared with AlignParamsDialog's default sizeHint (FastGA panel
+# minimum 560 plus dialog margins / chrome). BLAST / Flexidot / TE-Aid match this.
+TOOL_PARAMS_DIALOG_WIDTH = 608
+# Numeric/combo field width on Parameters forms (Align / BLAST / TE-Aid).
+TOOL_PARAMS_FIELD_WIDTH = 260
 
 
 def _run_cancel_button_box(parent: QWidget) -> QDialogButtonBox:
@@ -267,6 +284,7 @@ from repeatviewer.job_options import (
     DEFAULT_TEAID_EVALUE,
     DEFAULT_TEAID_X_AXIS_LABEL,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
+    DEFAULT_TEAID_THREADS,
     DEFAULT_TEAID_HIT_LEN_HIGH_PCT,
     DEFAULT_TEAID_HIT_LEN_MID_PCT,
     DEFAULT_TEAID_HIT_COLOR_HIGH,
@@ -281,6 +299,7 @@ from repeatviewer.job_options import (
     BlastOptions,
     ConsensusOptions,
     normalize_consensus_ambiguous,
+    normalize_consensus_sequence_type,
     configure_report_evalue_spinbox,
     DivergenceRowOptions,
     AlignOptions,
@@ -1615,15 +1634,6 @@ class AlignParamsDialog(QDialog):
         self._aligner_tabs.addTab(self._fastga_panel, "FastGA")
         self._aligner_tabs.addTab(options_tab, "Options")
         self._options_tab_index = self._aligner_tabs.indexOf(options_tab)
-        self._aligner_tabs.currentChanged.connect(self._on_aligner_tab_changed)
-        tab_for = {
-            ALIGNER_MAFFT: mafft_tab,
-            ALIGNER_MUSCLE: muscle_tab,
-            ALIGNER_FASTGA: self._fastga_panel,
-            "options": options_tab,
-        }
-        if initial_tab in tab_for:
-            self._aligner_tabs.setCurrentWidget(tab_for[initial_tab])
 
         self._close_action = "cancel"
         restore = QPushButton("Restore Defaults", self)
@@ -1637,6 +1647,18 @@ class AlignParamsDialog(QDialog):
             self,
             left_widgets=[restore, self._advanced_settings_btn],
         )
+
+        # Connect after Advanced button exists — setCurrentWidget emits currentChanged.
+        self._aligner_tabs.currentChanged.connect(self._on_aligner_tab_changed)
+        tab_for = {
+            ALIGNER_MAFFT: mafft_tab,
+            ALIGNER_MUSCLE: muscle_tab,
+            ALIGNER_FASTGA: self._fastga_panel,
+            "options": options_tab,
+        }
+        if initial_tab in tab_for:
+            self._aligner_tabs.setCurrentWidget(tab_for[initial_tab])
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
@@ -1780,7 +1802,7 @@ class AlignParamsDialog(QDialog):
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = max(self.width(), 560)
+        width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
 
         if not expanded:
             height = chrome + panel.compact_content_height()
@@ -1816,7 +1838,7 @@ class AlignParamsDialog(QDialog):
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = max(self.width(), 560)
+        width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
 
         if not expanded:
             height = chrome + self._muscle_compact_content_height()
@@ -1886,7 +1908,7 @@ class AlignParamsDialog(QDialog):
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = max(self.width(), 560)
+        width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
 
         if not expanded:
             height = chrome + self._mafft_compact_content_height()
@@ -1910,6 +1932,8 @@ class AlignParamsDialog(QDialog):
         self.resize(width, height)
 
     def _update_advanced_settings_button(self) -> None:
+        if not hasattr(self, "_advanced_settings_btn"):
+            return
         current = self._aligner_tabs.currentWidget()
         on_advanced_tab = current in (
             self._fastga_tab,
@@ -3102,38 +3126,38 @@ class ExtractSequencesDialog(QDialog):
 _MAFFT_MODE_HELP = (
     "<b>Combine selected sequences and align</b>: merge every sequence from the "
     "selected files into a single FASTA, then run MAFFT once on that combined "
-    "file.<br>"
+    "file.<br><br>"
     "<b>Align each selected file separately</b>: align each selected FASTA file "
     "separately with MAFFT."
 )
 _MAFFT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MAFFT uses the FASTA files that were "
-    "selected in the Files panel when this window opened.<br>"
+    "selected in the Files panel when this window opened.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
     "this run only and are not remembered next time."
 )
 _MAFFT_STRATEGY_HELP = (
     "MAFFT strategies trade speed for accuracy "
     "(see <a href='https://mafft.cbrc.jp/alignment/software/algorithms/algorithms.html'>"
-    "MAFFT algorithms</a>).<br>"
-    "<b>Auto</b>: MAFFT chooses a strategy.<br>"
+    "MAFFT algorithms</a>).<br><br>"
+    "<b>Auto</b>: MAFFT chooses a strategy.<br><br>"
     "<b>FFT-NS-1</b>: fastest progressive method "
-    "(<code>--retree 1</code>).<br>"
+    "(<code>--retree 1</code>).<br><br>"
     "<b>FFT-NS-2</b>: progressive with a rebuilt guide tree "
-    "(<code>--retree 2</code>); a good default for large sets.<br>"
+    "(<code>--retree 2</code>); a good default for large sets.<br><br>"
     "<b>L-INS-i</b>: iterative refinement with local pairwise alignment "
-    "(<code>--localpair --maxiterate 1000</code>); one alignable domain with flanks.<br>"
+    "(<code>--localpair --maxiterate 1000</code>); one alignable domain with flanks.<br><br>"
     "<b>G-INS-i</b>: iterative refinement with global pairwise alignment "
-    "(<code>--globalpair --maxiterate 1000</code>); assumes the whole region aligns.<br>"
+    "(<code>--globalpair --maxiterate 1000</code>); assumes the whole region aligns.<br><br>"
     "<b>E-INS-i</b>: iterative refinement with generalized affine gaps "
     "(<code>--genafpair --maxiterate 1000</code>); conserved motifs in long "
-    "unalignable regions.<br>"
+    "unalignable regions.<br><br>"
     "<b>Custom</b>: set <code>--retree</code> and <code>--maxiterate</code> yourself "
     "in Advanced Settings."
 )
 _MAFFT_SEQUENCE_TYPE_HELP = (
-    "<b>Auto-detect</b>: let MAFFT decide nucleotide vs protein.<br>"
-    "<b>Nucleotide</b>: force <code>--nuc</code>.<br>"
+    "<b>Auto-detect</b>: let MAFFT decide nucleotide vs protein.<br><br>"
+    "<b>Nucleotide</b>: force <code>--nuc</code>.<br><br>"
     "<b>Protein</b>: force <code>--amino</code>."
 )
 _MAFFT_THREADS_HELP = "Number passed to MAFFT's <b>--thread</b> option."
@@ -3165,19 +3189,19 @@ _MAFFT_ADJUST_DIRECTION_HELP = (
 _MUSCLE_MODE_HELP = (
     "<b>Combine selected sequences and align</b>: merge every sequence from the "
     "selected files into a single FASTA, then run MUSCLE once on that combined "
-    "file.<br>"
+    "file.<br><br>"
     "<b>Align each selected file separately</b>: align each selected FASTA file "
     "separately with MUSCLE."
 )
 _MUSCLE_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MUSCLE uses the FASTA files that were "
-    "selected in the Files panel when this window opened.<br>"
+    "selected in the Files panel when this window opened.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
     "this run only and are not remembered next time."
 )
 _MUSCLE_ALGORITHM_HELP = (
     "<b>Align (high accuracy)</b>: MUSCLE <b>-align</b>, the normal high-accuracy "
-    "method.<br>"
+    "method.<br><br>"
     "<b>Super5 (large datasets)</b>: MUSCLE <b>-super5</b>, intended for very large "
     "sequence sets."
 )
@@ -3202,12 +3226,12 @@ _FASTGA_MODE_HELP = (
 )
 _FASTGA_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): FastGA uses the FASTA files that were "
-    "selected in the Files panel when this window opened.<br>"
+    "selected in the Files panel when this window opened.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
     "this run only and are not remembered next time."
 )
 _FASTGA_REFERENCE_HELP = (
-    "The genome every query file is aligned to (the target columns of the PAF).<br>"
+    "The genome every query file is aligned to (the target columns of the PAF).<br><br>"
     "Defaults to the project setting genome (Define Genome). Click another file in "
     "the Files panel while this window is open, or use Browse. If the reference is "
     "also among the query inputs it is skipped, so it is never compared with itself."
@@ -3215,13 +3239,13 @@ _FASTGA_REFERENCE_HELP = (
 _FASTGA_COMBINED_HELP = (
     "Write the alignments of all selected files into one PAF file, "
     "&lt;first&gt;_multi_FastGA_vs_&lt;reference&gt;.paf, instead of one file per "
-    "selected file.<br>"
+    "selected file.<br><br>"
     "A .1aln file cannot be joined, so this always writes PAF text."
 )
 _FASTGA_FORMAT_HELP = (
     "<b>PAF</b> is the usual text alignment format. Optional <b>Include CIGAR</b> or "
-    "<b>Include CS tag</b> add extra columns (only one at a time).<br>"
-    "<b>PSL</b> is UCSC PSL text; it does not open in the dotplot view.<br>"
+    "<b>Include CS tag</b> add extra columns (only one at a time).<br><br>"
+    "<b>PSL</b> is UCSC PSL text; it does not open in the dotplot view.<br><br>"
     "<b>FastGA alignment (.1aln)</b> is FastGA's binary ONEcode output; it opens in "
     "the dotplot view."
 )
@@ -3261,8 +3285,8 @@ _FASTGA_SOFT_MASK_HELP = (
 )
 _FASTGA_KEEP_INDEX_HELP = (
     "FastGA <b>-k</b>: keep the genome index (.1gdb / .gix) so later runs skip building "
-    "it. An index takes about 14 GB per gigabase of genome.<br>"
-    "<b>Against itself</b> and <b>against each other</b>: kept next to each FASTA.<br>"
+    "it. An index takes about 14 GB per gigabase of genome.<br><br>"
+    "<b>Against itself</b> and <b>against each other</b>: kept next to each FASTA.<br><br>"
     "<b>Against a reference</b>: only the reference index is kept, in a hidden "
     ".repeatviewer_fastga folder next to it, and reused while the reference is unchanged. "
     "Indexes of the other files are always removed."
@@ -3824,6 +3848,8 @@ class GenomeBlastDatabaseRow(QWidget):
         project_genome: Path | None = None,
         selected_path: str | None = None,
         manage_title: str = "Manage BLAST databases",
+        help_title: str | None = None,
+        help_text: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._project = project
@@ -3836,23 +3862,22 @@ class GenomeBlastDatabaseRow(QWidget):
         self._blast_manager_dialog = None
 
         self._combo = QComboBox(self)
-        self._combo.setMinimumWidth(260)
-        self._combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self._combo.setMinimumContentsLength(28)
-        self.refresh(selected_path=selected_path)
+        self._combo.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
 
-        manage = QPushButton("Add/Manage databases", self)
+        manage = QPushButton("Manage BLAST databases", self)
         manage.clicked.connect(self._manage_databases)
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        # Keep the button next to the combo (do not stretch the combo across the row).
-        layout.addWidget(self._combo)
-        layout.addWidget(manage)
-        layout.addStretch(1)
+        # Help sits on the combo row only (Align/BLAST), not centered on Manage.
+        if help_title and help_text:
+            layout.addWidget(field_with_help(self._combo, help_title, help_text))
+        else:
+            layout.addWidget(self._combo)
+        layout.addWidget(manage, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.refresh(selected_path=selected_path)
 
     def selected_path(self) -> str | None:
         return self._combo.currentData() or None
@@ -4161,8 +4186,96 @@ class TsdSearchParamsDialog(QDialog):
 
 _KEEP_CURRENT = object()
 
+# Help text for BLAST dialog fields. BLAST+ option wording follows the NCBI
+# BLAST Command Line Applications User Manual:
+# https://www.ncbi.nlm.nih.gov/books/NBK1762/
+
+_BLAST_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): BLAST uses the FASTA files that were "
+    "selected in the Files panel when this window opened.<br><br>"
+    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
+    "this run only and are not remembered next time."
+)
+_BLAST_DATABASE_HELP = (
+    "Subject database for the search.<br><br>"
+    "BLASTn can use the project genome or a saved nucleotide BLAST database. "
+    "BLASTp and BLASTx search a protein database chosen under "
+    "<b>Manage BLAST databases</b>."
+)
+_BLAST_EVALUE_HELP = (
+    "<b>-evalue</b>: Expectation value (E) threshold for saving hits.<br><br>"
+    "Hits with an E-value above this threshold are discarded. Lower values keep "
+    "fewer, more significant alignments. Typical default in BLAST+ is 10; "
+    "RepeatViewer often uses a stricter value for TE work."
+)
+_BLAST_THREADS_HELP = (
+    "<b>-num_threads</b>: Number of threads (CPUs) used to perform a search."
+)
+_BLAST_WORD_SIZE_HELP = (
+    "<b>-word_size</b>: Length of the exact seed match (wordfinder) used to begin "
+    "a search.<br><br>"
+    "Smaller values are more sensitive but slower, especially on large or "
+    "repetitive genomes. Typical BLASTn default is 11; protein searches "
+    "(BLASTp / BLASTx) often use 3."
+)
+_BLAST_GAPOPEN_HELP = (
+    "<b>-gapopen</b>: Cost to open a gap. Must be consistent with the scoring "
+    "system used by the program."
+)
+_BLAST_GAPEXTEND_HELP = (
+    "<b>-gapextend</b>: Cost to extend a gap."
+)
+_BLAST_PENALTY_HELP = (
+    "<b>-penalty</b> (BLASTn): Penalty for a nucleotide mismatch. Must be a "
+    "negative integer."
+)
+_BLAST_PERC_IDENTITY_HELP = (
+    "<b>-perc_identity</b> (BLASTn): Percent identity cutoff.<br><br>"
+    "Alignments below this percent identity are discarded. Use 0 to disable the "
+    "filter."
+)
+_BLAST_QCOV_HELP = (
+    "<b>-qcov_hsp_perc</b>: Percent query coverage per HSP.<br><br>"
+    "Alignments that cover less than this percentage of the query length are "
+    "discarded. Use 0 to disable the filter."
+)
+_BLAST_WRITE_TEXT_HELP = (
+    "Keep the tabular hit table (<code>*_b.txt</code>) next to the query. "
+    "When unchecked, the table is removed after BLAST."
+)
+_BLAST_WRITE_GFF_HELP = (
+    "Write a GFF next to the query (<code>*_b.gff</code>). "
+    "When unchecked, any previous <code>*_b.gff</code> for this query is removed."
+)
+_BLAST_MAX_SEQ_HELP = (
+    "<b>Max sequence number</b><br><br>"
+    "Maximum number of hit sequences included in the extracted FASTA used for "
+    "multiple sequence alignment.<br><br>"
+    "When a query has many BLAST hits, only this many sequences are kept so the "
+    "downstream MSA stays manageable.<br><br>"
+    "Default: <b>100</b>."
+)
+_BLAST_TOP_LONGEST_HELP = (
+    "<b>Top longest sequences</b><br><br>"
+    "Used with <b>Max sequence number</b>. If there are more BLAST hits than "
+    "Max sequence number:<br><br>"
+    "1. Sort hits by length and keep this many <b>longest</b> sequences.<br><br>"
+    "2. Fill any remaining slots at random from the other hits until "
+    "Max sequence number is reached.<br><br>"
+    "Default: <b>100</b>."
+)
+_BLAST_MIN_BIT_HELP = (
+    "Minimum bit score for hits written to the GFF export. Hits below this score "
+    "are omitted from the GFF; the tabular hit table is not filtered by this value."
+)
+
 
 class BlastParamsDialog(QDialog):
+    # Same default outer width as AlignParamsDialog.
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+    # Longest Settings label — keeps Inputs radios in the Settings field column.
+    _SETTINGS_LABEL_REF = "Top longest sequences:"
+
     def __init__(
         self,
         *,
@@ -4177,214 +4290,210 @@ class BlastParamsDialog(QDialog):
         self._for_run = for_run
         opts = initial or BlastOptions()
         self._initial_program = opts.program
+        self.setMinimumWidth(self._DIALOG_WIDTH)
 
         # Always show the latest Manage-BLAST list (and current genome name).
         from repeatviewer.database_settings import reload_blast_databases_into_project
 
         reload_blast_databases_into_project(self._project)
 
-        self._tabs = QTabWidget()
         self._blastn_database = QComboBox()
         self._blastp_database = QComboBox()
         for combo in (self._blastn_database, self._blastp_database):
-            combo.setMinimumWidth(260)
-            combo.setSizeAdjustPolicy(
-                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-            )
-            combo.setMinimumContentsLength(28)
+            combo.setFixedWidth(260)
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
         self._evalue.setValue(normalize_blast_evalue(opts.e_value))
+        self._evalue.setToolTip(_BLAST_EVALUE_HELP)
 
         self._threads = QSpinBox()
         self._threads.setRange(1, 128)
         self._threads.setValue(max(1, opts.num_threads))
-        self._threads.setToolTip("BLASTN -num_threads: CPU threads used for this search.")
+        self._threads.setToolTip(_BLAST_THREADS_HELP)
 
         self._word_size = QSpinBox()
         self._word_size.setRange(4, 10_000)
         self._word_size.setValue(opts.word_size)
-        self._word_size.setToolTip(
-            "BLASTN -word_size: length of the exact seed match used to begin a search. "
-            "Smaller values are more sensitive but slower."
-        )
+        self._word_size.setToolTip(_BLAST_WORD_SIZE_HELP)
 
         self._gap_open = QSpinBox()
         self._gap_open.setRange(0, 1000)
         self._gap_open.setValue(opts.gap_open)
-        self._gap_open.setToolTip("BLASTN -gapopen: cost for opening a gap.")
+        self._gap_open.setToolTip(_BLAST_GAPOPEN_HELP)
 
         self._gap_extend = QSpinBox()
         self._gap_extend.setRange(0, 1000)
         self._gap_extend.setValue(opts.gap_extend)
-        self._gap_extend.setToolTip("BLASTN -gapextend: cost for extending an existing gap.")
+        self._gap_extend.setToolTip(_BLAST_GAPEXTEND_HELP)
 
         self._penalty = QSpinBox()
         self._penalty.setRange(-1000, 0)
         self._penalty.setValue(opts.penalty)
-        self._penalty.setToolTip("BLASTN -penalty: score assigned to a nucleotide mismatch.")
+        self._penalty.setToolTip(_BLAST_PENALTY_HELP)
 
         self._percent_identity = QDoubleSpinBox()
         self._percent_identity.setRange(0.0, 100.0)
         self._percent_identity.setDecimals(1)
         self._percent_identity.setSuffix(" %")
         self._percent_identity.setValue(opts.percent_identity)
-        self._percent_identity.setToolTip(
-            "BLASTN -perc_identity: discard HSPs below this percent identity; 0 disables the filter."
-        )
+        self._percent_identity.setToolTip(_BLAST_PERC_IDENTITY_HELP)
 
         self._query_coverage = QDoubleSpinBox()
         self._query_coverage.setRange(0.0, 100.0)
         self._query_coverage.setDecimals(1)
         self._query_coverage.setSuffix(" %")
         self._query_coverage.setValue(opts.query_coverage_hsp)
-        self._query_coverage.setToolTip(
-            "BLASTN -qcov_hsp_perc: discard HSPs covering less than this percentage "
-            "of the query; 0 disables the filter."
-        )
+        self._query_coverage.setToolTip(_BLAST_QCOV_HELP)
 
         self._blastn_write_text = QCheckBox("Export BLAST text file (*.txt)")
         self._blastn_write_text.setChecked(opts.write_text)
-        self._blastn_write_text.setToolTip(
-            "Keep the hit table (*_b.txt) next to the query. "
-            "When unchecked, the table is removed after Blast "
-            "(density / genome-map runs still keep it when needed)."
-        )
+        self._blastn_write_text.setToolTip(_BLAST_WRITE_TEXT_HELP)
         self._blastn_write_gff = QCheckBox("Export GFF file (*.gff)")
         self._blastn_write_gff.setChecked(opts.write_gff)
-        self._blastn_write_gff.setToolTip(
-            "Write a GFF next to the query (*_b.gff). "
-            "When unchecked, any previous *_b.gff for this query is removed."
-        )
+        self._blastn_write_gff.setToolTip(_BLAST_WRITE_GFF_HELP)
 
         self._blastp_evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._blastp_evalue)
         self._blastp_evalue.setValue(normalize_blast_evalue(opts.blastp_e_value))
+        self._blastp_evalue.setToolTip(_BLAST_EVALUE_HELP)
 
         self._blastp_threads = QSpinBox()
         self._blastp_threads.setRange(1, 128)
         self._blastp_threads.setValue(max(1, opts.blastp_num_threads))
-        self._blastp_threads.setToolTip("BLASTP -num_threads: CPU threads used for this search.")
+        self._blastp_threads.setToolTip(_BLAST_THREADS_HELP)
 
         self._blastp_word_size = QSpinBox()
         self._blastp_word_size.setRange(2, 10_000)
         self._blastp_word_size.setValue(opts.blastp_word_size)
-        self._blastp_word_size.setToolTip(
-            "BLASTP -word_size: length of the protein seed used to begin a search."
-        )
+        self._blastp_word_size.setToolTip(_BLAST_WORD_SIZE_HELP)
 
         self._blastp_gap_open = QSpinBox()
         self._blastp_gap_open.setRange(0, 1000)
         self._blastp_gap_open.setValue(opts.blastp_gap_open)
-        self._blastp_gap_open.setToolTip("BLASTP -gapopen: cost for opening a gap.")
+        self._blastp_gap_open.setToolTip(_BLAST_GAPOPEN_HELP)
 
         self._blastp_gap_extend = QSpinBox()
         self._blastp_gap_extend.setRange(0, 1000)
         self._blastp_gap_extend.setValue(opts.blastp_gap_extend)
-        self._blastp_gap_extend.setToolTip("BLASTP -gapextend: cost for extending a gap.")
+        self._blastp_gap_extend.setToolTip(_BLAST_GAPEXTEND_HELP)
 
         self._blastp_query_coverage = QDoubleSpinBox()
         self._blastp_query_coverage.setRange(0.0, 100.0)
         self._blastp_query_coverage.setDecimals(1)
         self._blastp_query_coverage.setSuffix(" %")
         self._blastp_query_coverage.setValue(opts.blastp_query_coverage_hsp)
-        self._blastp_query_coverage.setToolTip(
-            "BLASTP -qcov_hsp_perc: discard HSPs below this query coverage; 0 disables the filter."
-        )
+        self._blastp_query_coverage.setToolTip(_BLAST_QCOV_HELP)
         self._blastp_write_text = QCheckBox("Export BLAST text file (*.txt)")
         self._blastp_write_text.setChecked(opts.blastp_write_text)
-        self._blastp_write_text.setToolTip(
-            "Keep the hit table (*_b.txt). When unchecked, it is removed after Blast."
-        )
+        self._blastp_write_text.setToolTip(_BLAST_WRITE_TEXT_HELP)
         self._blastp_write_gff = QCheckBox("Export GFF file (*.gff)")
         self._blastp_write_gff.setChecked(opts.blastp_write_gff)
-        self._blastp_write_gff.setToolTip(
-            "Write *_b.gff next to the query. When unchecked, any previous one is removed."
-        )
+        self._blastp_write_gff.setToolTip(_BLAST_WRITE_GFF_HELP)
 
         # --- blastx: nucleotide query translated against a protein database ---
         self._blastx_database = QComboBox()
-        self._blastx_database.setMinimumWidth(260)
-        self._blastx_database.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self._blastx_database.setMinimumContentsLength(28)
+        self._blastx_database.setFixedWidth(260)
 
         self._blastx_evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._blastx_evalue)
         self._blastx_evalue.setValue(normalize_blast_evalue(opts.blastx_e_value))
+        self._blastx_evalue.setToolTip(_BLAST_EVALUE_HELP)
 
         self._blastx_threads = QSpinBox()
         self._blastx_threads.setRange(1, 128)
         self._blastx_threads.setValue(max(1, opts.blastx_num_threads))
-        self._blastx_threads.setToolTip("BLASTX -num_threads: CPU threads used for this search.")
+        self._blastx_threads.setToolTip(_BLAST_THREADS_HELP)
 
         self._blastx_word_size = QSpinBox()
         self._blastx_word_size.setRange(2, 10_000)
         self._blastx_word_size.setValue(opts.blastx_word_size)
-        self._blastx_word_size.setToolTip(
-            "BLASTX -word_size: length of the protein seed used to begin a search."
-        )
+        self._blastx_word_size.setToolTip(_BLAST_WORD_SIZE_HELP)
 
         self._blastx_gap_open = QSpinBox()
         self._blastx_gap_open.setRange(0, 1000)
         self._blastx_gap_open.setValue(opts.blastx_gap_open)
-        self._blastx_gap_open.setToolTip("BLASTX -gapopen: cost for opening a gap.")
+        self._blastx_gap_open.setToolTip(_BLAST_GAPOPEN_HELP)
 
         self._blastx_gap_extend = QSpinBox()
         self._blastx_gap_extend.setRange(0, 1000)
         self._blastx_gap_extend.setValue(opts.blastx_gap_extend)
-        self._blastx_gap_extend.setToolTip("BLASTX -gapextend: cost for extending a gap.")
+        self._blastx_gap_extend.setToolTip(_BLAST_GAPEXTEND_HELP)
 
         self._blastx_query_coverage = QDoubleSpinBox()
         self._blastx_query_coverage.setRange(0.0, 100.0)
         self._blastx_query_coverage.setDecimals(1)
         self._blastx_query_coverage.setSuffix(" %")
         self._blastx_query_coverage.setValue(opts.blastx_query_coverage_hsp)
-        self._blastx_query_coverage.setToolTip(
-            "BLASTX -qcov_hsp_perc: discard HSPs below this query coverage; 0 disables the filter."
-        )
+        self._blastx_query_coverage.setToolTip(_BLAST_QCOV_HELP)
         self._blastx_write_text = QCheckBox("Export BLAST text file (*.txt)")
         self._blastx_write_text.setChecked(opts.blastx_write_text)
-        self._blastx_write_text.setToolTip(
-            "Keep the hit table (*_b.txt). When unchecked, it is removed after Blast."
-        )
+        self._blastx_write_text.setToolTip(_BLAST_WRITE_TEXT_HELP)
         self._blastx_write_gff = QCheckBox("Export GFF file (*.gff)")
         self._blastx_write_gff.setChecked(opts.blastx_write_gff)
-        self._blastx_write_gff.setToolTip(
-            "Write *_b.gff next to the query. When unchecked, any previous one is removed."
-        )
+        self._blastx_write_gff.setToolTip(_BLAST_WRITE_GFF_HELP)
 
+        # Shared post-processing limits: one spinbox set per program page, kept in sync.
         self._max_msa = QSpinBox()
         self._max_msa.setRange(10, 5000)
         self._max_msa.setValue(opts.max_msa_lines)
-        self._max_msa_help = (
-            "Set the maximum number of sequences to be included in a multiple sequence "
-            "alignment. Default: 100"
-        )
-        self._max_msa.setToolTip(self._max_msa_help)
-
+        self._max_msa.setToolTip(_BLAST_MAX_SEQ_HELP)
         self._top_msa = QSpinBox()
         self._top_msa.setRange(10, 5000)
         self._top_msa.setMaximum(self._max_msa.value())
         self._top_msa.setValue(opts.top_msa_lines)
-        self._max_msa.valueChanged.connect(self._top_msa.setMaximum)
-        self._top_msa_help = (
-            "If the sequence number of the multiple sequence alignment (MSA) is greater "
-            "than <max_msa_lines>, TEtrimmer first sorts sequences by length and chooses "
-            "<top_msa_lines> sequences. It then randomly selects sequences from all remaining "
-            "BLAST hits until <max_msa_lines> sequences are found for the multiple sequence "
-            "alignment. Default: 100"
-        )
-        self._top_msa.setToolTip(self._top_msa_help)
-
+        self._top_msa.setToolTip(_BLAST_TOP_LONGEST_HELP)
         self._min_bit_score = QDoubleSpinBox()
         self._min_bit_score.setRange(0.0, 1_000_000.0)
         self._min_bit_score.setDecimals(1)
         self._min_bit_score.setSingleStep(1.0)
         self._min_bit_score.setValue(opts.minimum_bit_score)
-        self._min_bit_score.setToolTip("Minimum bit score for hits written to GFF.")
+        self._min_bit_score.setToolTip(_BLAST_MIN_BIT_HELP)
+
+        self._blastp_max_msa = QSpinBox()
+        self._blastp_max_msa.setRange(10, 5000)
+        self._blastp_max_msa.setValue(opts.max_msa_lines)
+        self._blastp_max_msa.setToolTip(_BLAST_MAX_SEQ_HELP)
+        self._blastp_top_msa = QSpinBox()
+        self._blastp_top_msa.setRange(10, 5000)
+        self._blastp_top_msa.setMaximum(self._blastp_max_msa.value())
+        self._blastp_top_msa.setValue(opts.top_msa_lines)
+        self._blastp_top_msa.setToolTip(_BLAST_TOP_LONGEST_HELP)
+        self._blastp_min_bit_score = QDoubleSpinBox()
+        self._blastp_min_bit_score.setRange(0.0, 1_000_000.0)
+        self._blastp_min_bit_score.setDecimals(1)
+        self._blastp_min_bit_score.setSingleStep(1.0)
+        self._blastp_min_bit_score.setValue(opts.minimum_bit_score)
+        self._blastp_min_bit_score.setToolTip(_BLAST_MIN_BIT_HELP)
+
+        self._blastx_max_msa = QSpinBox()
+        self._blastx_max_msa.setRange(10, 5000)
+        self._blastx_max_msa.setValue(opts.max_msa_lines)
+        self._blastx_max_msa.setToolTip(_BLAST_MAX_SEQ_HELP)
+        self._blastx_top_msa = QSpinBox()
+        self._blastx_top_msa.setRange(10, 5000)
+        self._blastx_top_msa.setMaximum(self._blastx_max_msa.value())
+        self._blastx_top_msa.setValue(opts.top_msa_lines)
+        self._blastx_top_msa.setToolTip(_BLAST_TOP_LONGEST_HELP)
+        self._blastx_min_bit_score = QDoubleSpinBox()
+        self._blastx_min_bit_score.setRange(0.0, 1_000_000.0)
+        self._blastx_min_bit_score.setDecimals(1)
+        self._blastx_min_bit_score.setSingleStep(1.0)
+        self._blastx_min_bit_score.setValue(opts.minimum_bit_score)
+        self._blastx_min_bit_score.setToolTip(_BLAST_MIN_BIT_HELP)
+
+        self._max_msa_spins = (self._max_msa, self._blastp_max_msa, self._blastx_max_msa)
+        self._top_msa_spins = (self._top_msa, self._blastp_top_msa, self._blastx_top_msa)
+        self._min_bit_spins = (
+            self._min_bit_score,
+            self._blastp_min_bit_score,
+            self._blastx_min_bit_score,
+        )
+        for max_spin, top_spin in zip(self._max_msa_spins, self._top_msa_spins):
+            max_spin.valueChanged.connect(top_spin.setMaximum)
+        self._wire_synced_spins(self._max_msa_spins)
+        self._wire_synced_spins(self._top_msa_spins)
+        self._wire_synced_spins(self._min_bit_spins)
 
         # Uniform field size so the inputs line up symmetrically.
         for field in (
@@ -4408,60 +4517,201 @@ class BlastParamsDialog(QDialog):
             self._blastx_gap_open,
             self._blastx_gap_extend,
             self._blastx_query_coverage,
-            self._max_msa,
-            self._top_msa,
-            self._min_bit_score,
+            *self._max_msa_spins,
+            *self._top_msa_spins,
+            *self._min_bit_spins,
         ):
             field.setFixedWidth(260)
             field.setAlignment(Qt.AlignmentFlag.AlignRight)
 
-        blastn_tab = QWidget()
-        blastn_form = self._parameter_form(blastn_tab)
-        blastn_form.addRow("Database:", self._database_row(self._blastn_database))
-        blastn_form.addRow("-evalue:", self._evalue)
-        blastn_form.addRow("Threads:", self._threads)
-        blastn_form.addRow("-word_size:", self._word_size)
-        blastn_form.addRow("-gapopen:", self._gap_open)
-        blastn_form.addRow("-gapextend:", self._gap_extend)
-        blastn_form.addRow("-penalty:", self._penalty)
-        blastn_form.addRow("-perc_identity:", self._percent_identity)
-        blastn_form.addRow("-qcov_hsp_perc:", self._query_coverage)
-        blastn_form.addRow("", self._blastn_write_text)
-        blastn_form.addRow("", self._blastn_write_gff)
-        # The system-PATH toggle applies to all three programs, so it lives once
-        # on the Options tab rather than being repeated on every program tab.
+        # Shared Inputs panel (below tab bar; hidden on Options — no reparenting).
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        self._input_selected.setChecked(True)
+        self._define_inputs = TeMultiInputFilesWidget(
+            self,
+            initial=None,
+            start_empty=False,
+            placeholder="Click in Files/Folders or Browse…",
+            browse_title="Choose a FASTA file",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file or folder path. Click a file or folder in "
+                "the panel to fill a row, or use Browse."
+            ),
+            path_mode="file_or_directory",
+        )
+        self._input_selected.toggled.connect(self._sync_blast_inputs)
+        self._input_define.toggled.connect(self._sync_blast_inputs)
+        self._define_inputs.paths_changed.connect(self._sync_blast_inputs)
+
+        self._inputs_panel = QWidget(self)
+        self._inputs_panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._inputs_form = self._parameter_form(self._inputs_panel)
+        self._inputs_form.setContentsMargins(16, 10, 16, 0)
+        self._inputs_form.setVerticalSpacing(4)
+        self._inputs_form.addRow(self._blast_section("Inputs", self._inputs_panel))
+        self._inputs_radios_box = QWidget(self._inputs_panel)
+        inputs_radios_layout = QVBoxLayout(self._inputs_radios_box)
+        inputs_radios_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_radios_layout.setSpacing(2)
+        inputs_radios_layout.addWidget(
+            field_with_help(
+                self._input_selected,
+                "BLAST inputs",
+                _BLAST_INPUTS_HELP,
+                stretch=True,
+            )
+        )
+        inputs_radios_layout.addWidget(self._input_define)
+        # Empty labels sized to Settings so radio dots line up with Database.
+        self._inputs_radios_label = QLabel("")
+        self._inputs_define_label = QLabel("")
+        self._inputs_form.addRow(self._inputs_radios_label, self._inputs_radios_box)
+        self._inputs_form.addRow(self._inputs_define_label, self._define_inputs)
+        self._inputs_form.addRow(_form_section_separator())
+        self._sync_blast_inputs_field_column()
+        self._sync_blast_inputs(resize=False)
+
+        self._blast_compact_size: QSize | None = None
+
         self._use_system_blast = QCheckBox("Use BLAST+ from the system PATH")
         self._use_system_blast.setChecked(project.use_system_blast)
         self._use_system_blast.setToolTip(
             "Use BLAST+ programs installed on the system PATH instead of the bundled programs."
         )
-        self._tabs.addTab(blastn_tab, "BLASTn")
 
-        blastp_tab = QWidget()
-        blastp_form = self._parameter_form(blastp_tab)
-        blastp_form.addRow("Database:", self._database_row(self._blastp_database))
-        blastp_form.addRow("-evalue:", self._blastp_evalue)
-        blastp_form.addRow("Threads:", self._blastp_threads)
-        blastp_form.addRow("-word_size:", self._blastp_word_size)
-        blastp_form.addRow("-gapopen:", self._blastp_gap_open)
-        blastp_form.addRow("-gapextend:", self._blastp_gap_extend)
-        blastp_form.addRow("-qcov_hsp_perc:", self._blastp_query_coverage)
-        blastp_form.addRow("", self._blastp_write_text)
-        blastp_form.addRow("", self._blastp_write_gff)
-        self._tabs.addTab(blastp_tab, "BLASTp")
-
-        blastx_tab = QWidget()
-        blastx_form = self._parameter_form(blastx_tab)
-        blastx_form.addRow("Database:", self._database_row(self._blastx_database))
-        blastx_form.addRow("-evalue:", self._blastx_evalue)
-        blastx_form.addRow("Threads:", self._blastx_threads)
-        blastx_form.addRow("-word_size:", self._blastx_word_size)
-        blastx_form.addRow("-gapopen:", self._blastx_gap_open)
-        blastx_form.addRow("-gapextend:", self._blastx_gap_extend)
-        blastx_form.addRow("-qcov_hsp_perc:", self._blastx_query_coverage)
-        blastx_form.addRow("", self._blastx_write_text)
-        blastx_form.addRow("", self._blastx_write_gff)
-        self._tabs.addTab(blastx_tab, "BLASTx")
+        (
+            self._blastn_tab,
+            self._blastn_basic,
+            self._blastn_advanced,
+        ) = self._build_program_tab(
+            database_combo=self._blastn_database,
+            evalue=self._evalue,
+            threads=self._threads,
+            word_size=self._word_size,
+            max_msa=self._max_msa,
+            top_msa=self._top_msa,
+            write_text=self._blastn_write_text,
+            write_gff=self._blastn_write_gff,
+            min_bit_score=self._min_bit_score,
+            advanced_rows=[
+                (
+                    "-gapopen:",
+                    self._field_with_help(
+                        self._gap_open, "-gapopen", _BLAST_GAPOPEN_HELP
+                    ),
+                ),
+                (
+                    "-gapextend:",
+                    self._field_with_help(
+                        self._gap_extend, "-gapextend", _BLAST_GAPEXTEND_HELP
+                    ),
+                ),
+                (
+                    "-penalty:",
+                    self._field_with_help(
+                        self._penalty, "-penalty", _BLAST_PENALTY_HELP
+                    ),
+                ),
+                (
+                    "-perc_identity:",
+                    self._field_with_help(
+                        self._percent_identity,
+                        "-perc_identity",
+                        _BLAST_PERC_IDENTITY_HELP,
+                    ),
+                ),
+                (
+                    "-qcov_hsp_perc:",
+                    self._field_with_help(
+                        self._query_coverage, "-qcov_hsp_perc", _BLAST_QCOV_HELP
+                    ),
+                ),
+            ],
+        )
+        (
+            self._blastp_tab,
+            self._blastp_basic,
+            self._blastp_advanced,
+        ) = self._build_program_tab(
+            database_combo=self._blastp_database,
+            evalue=self._blastp_evalue,
+            threads=self._blastp_threads,
+            word_size=self._blastp_word_size,
+            max_msa=self._blastp_max_msa,
+            top_msa=self._blastp_top_msa,
+            write_text=self._blastp_write_text,
+            write_gff=self._blastp_write_gff,
+            min_bit_score=self._blastp_min_bit_score,
+            advanced_rows=[
+                (
+                    "-gapopen:",
+                    self._field_with_help(
+                        self._blastp_gap_open, "-gapopen", _BLAST_GAPOPEN_HELP
+                    ),
+                ),
+                (
+                    "-gapextend:",
+                    self._field_with_help(
+                        self._blastp_gap_extend, "-gapextend", _BLAST_GAPEXTEND_HELP
+                    ),
+                ),
+                (
+                    "-qcov_hsp_perc:",
+                    self._field_with_help(
+                        self._blastp_query_coverage,
+                        "-qcov_hsp_perc",
+                        _BLAST_QCOV_HELP,
+                    ),
+                ),
+            ],
+        )
+        (
+            self._blastx_tab,
+            self._blastx_basic,
+            self._blastx_advanced,
+        ) = self._build_program_tab(
+            database_combo=self._blastx_database,
+            evalue=self._blastx_evalue,
+            threads=self._blastx_threads,
+            word_size=self._blastx_word_size,
+            max_msa=self._blastx_max_msa,
+            top_msa=self._blastx_top_msa,
+            write_text=self._blastx_write_text,
+            write_gff=self._blastx_write_gff,
+            min_bit_score=self._blastx_min_bit_score,
+            advanced_rows=[
+                (
+                    "-gapopen:",
+                    self._field_with_help(
+                        self._blastx_gap_open, "-gapopen", _BLAST_GAPOPEN_HELP
+                    ),
+                ),
+                (
+                    "-gapextend:",
+                    self._field_with_help(
+                        self._blastx_gap_extend, "-gapextend", _BLAST_GAPEXTEND_HELP
+                    ),
+                ),
+                (
+                    "-qcov_hsp_perc:",
+                    self._field_with_help(
+                        self._blastx_query_coverage,
+                        "-qcov_hsp_perc",
+                        _BLAST_QCOV_HELP,
+                    ),
+                ),
+            ],
+        )
 
         # --- Options: right-click program + shared executable setting ---
         options_tab = QWidget()
@@ -4470,6 +4720,7 @@ class BlastParamsDialog(QDialog):
         options_layout.setSpacing(14)
 
         rc_box = QGroupBox("Right-click action", self)
+        rc_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         rc_box_layout = QVBoxLayout(rc_box)
         rc_box_layout.setSpacing(6)
         rc_label = QLabel(
@@ -4480,9 +4731,9 @@ class BlastParamsDialog(QDialog):
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
         for label, value in (
-            ("blastn", BLAST_PROGRAM_BLASTN),
-            ("blastp", BLAST_PROGRAM_BLASTP),
-            ("blastx", BLAST_PROGRAM_BLASTX),
+            ("BLASTn", BLAST_PROGRAM_BLASTN),
+            ("BLASTp", BLAST_PROGRAM_BLASTP),
+            ("BLASTx", BLAST_PROGRAM_BLASTX),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_program == value)
@@ -4494,6 +4745,7 @@ class BlastParamsDialog(QDialog):
         options_layout.addWidget(rc_box)
 
         exe_box = QGroupBox("Executables", self)
+        exe_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         exe_box_layout = QVBoxLayout(exe_box)
         exe_box_layout.addWidget(self._use_system_blast)
         options_layout.addWidget(exe_box)
@@ -4509,9 +4761,31 @@ class BlastParamsDialog(QDialog):
             )
         )
         options_layout.addWidget(process_box)
-
+        # Absorb leftover height so group boxes stay tight (Align Options pattern).
         options_layout.addStretch(1)
-        self._tabs.addTab(options_tab, "Options")
+        options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        options_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._options_tab = options_tab
+
+        self._tabs = QTabBar(self)
+        self._tabs.setExpanding(False)
+        self._tabs.setDocumentMode(True)
+        self._tabs.addTab("BLASTn")
+        self._tabs.addTab("BLASTp")
+        self._tabs.addTab("BLASTx")
+        self._tabs.addTab("Options")
+        self._options_tab_index = 3
+
+        self._stack = QStackedWidget(self)
+        self._stack.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._stack.addWidget(self._blastn_tab)
+        self._stack.addWidget(self._blastp_tab)
+        self._stack.addWidget(self._blastx_tab)
+        self._stack.addWidget(self._options_tab)
 
         self._populate_database_combos(
             blastn_name=opts.blast_database_name,
@@ -4523,47 +4797,41 @@ class BlastParamsDialog(QDialog):
             BLAST_PROGRAM_BLASTX: 2,
         }.get(opts.program, 0)
         self._tabs.setCurrentIndex(program_tab)
-
-        self._post_box = QGroupBox("Post-processing")
-        post_layout = QVBoxLayout(self._post_box)
-        post_form = QFormLayout()
-        post_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        post_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        post_form.setHorizontalSpacing(12)
-        post_form.setVerticalSpacing(10)
-        post_form.addRow(
-            "Max MSA lines:",
-            self._field_with_help(self._max_msa, "Max MSA lines", self._max_msa_help),
-        )
-        post_form.addRow(
-            "Top longest lines:",
-            self._field_with_help(self._top_msa, "Top longest lines", self._top_msa_help),
-        )
-        post_form.addRow("Minimum bit score (GFF):", self._min_bit_score)
-        post_layout.addLayout(post_form)
+        self._stack.setCurrentIndex(program_tab)
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_settings_toggled)
         self._button_box = make_cancel_save_run_bar(
             self,
-            left_widgets=[restore],
+            left_widgets=[restore, self._advanced_settings_btn],
         )
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._post_box)
-        layout.addWidget(self._button_box)
-        self._tabs.currentChanged.connect(self._update_postprocessing_visibility)
-        self._update_postprocessing_visibility(self._tabs.currentIndex())
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tabs, 0)
+        layout.addWidget(self._inputs_panel, 0)
+        layout.addWidget(self._stack, 0)
+        layout.addWidget(self._button_box, 0)
+        self._tabs.currentChanged.connect(self._on_blast_tab_changed)
+        self._on_blast_tab_changed(self._tabs.currentIndex())
+        self.resize(self._DIALOG_WIDTH, 420)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         # Refresh in case Manage / Add ran while this dialog was constructed,
         # and pick up a newly defined genome for the "Current genome" row.
         self._refresh_database_combos()
-        # After dialog polish's adjustSize(), shrink to the active tab so the
-        # wider Options page does not leave blank space on BLASTn/p/x.
-        QTimer.singleShot(0, self._fit_to_content)
+        # Force a tight compact height after polish (no blank gap under Inputs).
+        self._blast_compact_size = None
+        self._sync_blast_inputs_field_column()
+        QTimer.singleShot(0, lambda: self._resize_for_blast_advanced(False))
 
     def _refresh_database_combos(
         self,
@@ -4585,6 +4853,394 @@ class BlastParamsDialog(QDialog):
         return dialog_should_run(self)
 
     @staticmethod
+    def _wire_synced_spins(spins: tuple) -> None:
+        def _sync(source) -> None:
+            value = source.value()
+
+            def _apply() -> None:
+                for spin in spins:
+                    if spin is source:
+                        continue
+                    if spin.value() == value:
+                        continue
+                    spin.blockSignals(True)
+                    spin.setValue(value)
+                    spin.blockSignals(False)
+
+            _apply()
+
+        for spin in spins:
+            spin.valueChanged.connect(lambda _v, s=spin: _sync(s))
+
+    def _blast_section(self, title: str, parent: QWidget | None = None) -> QLabel:
+        return QLabel(f"<b>{title}</b>", parent or self)
+
+    def _build_program_tab(
+        self,
+        *,
+        database_combo: QComboBox,
+        evalue: QDoubleSpinBox,
+        threads: QSpinBox,
+        word_size: QSpinBox,
+        max_msa: QSpinBox,
+        top_msa: QSpinBox,
+        write_text: QCheckBox,
+        write_gff: QCheckBox,
+        min_bit_score: QDoubleSpinBox,
+        advanced_rows: list[tuple[str, QWidget]],
+    ) -> tuple[QWidget, QWidget, QWidget]:
+        tab = QWidget()
+        tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        root = QVBoxLayout(tab)
+        root.setContentsMargins(16, 0, 16, 10)
+        root.setSpacing(4)
+        basic = QWidget(tab)
+        basic.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        form = self._parameter_form(basic)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setVerticalSpacing(4)
+
+        form.addRow(self._blast_section("Settings", basic))
+        form.addRow("Database:", self._database_field(database_combo))
+        form.addRow(
+            "-evalue:",
+            self._field_with_help(evalue, "-evalue", _BLAST_EVALUE_HELP),
+        )
+        form.addRow(
+            "Threads:",
+            self._field_with_help(threads, "Threads", _BLAST_THREADS_HELP),
+        )
+        form.addRow(
+            "-word_size:",
+            self._field_with_help(word_size, "-word_size", _BLAST_WORD_SIZE_HELP),
+        )
+        form.addRow(
+            "Max sequence number:",
+            self._field_with_help(
+                max_msa, "Max sequence number", _BLAST_MAX_SEQ_HELP
+            ),
+        )
+        form.addRow(
+            "Top longest sequences:",
+            self._field_with_help(
+                top_msa, "Top longest sequences", _BLAST_TOP_LONGEST_HELP
+            ),
+        )
+        form.addRow(
+            "",
+            self._field_with_help(
+                write_text, "Export BLAST text file", _BLAST_WRITE_TEXT_HELP
+            ),
+        )
+        form.addRow(
+            "",
+            self._field_with_help(write_gff, "Export GFF file", _BLAST_WRITE_GFF_HELP),
+        )
+        root.addWidget(basic)
+
+        advanced = QWidget(tab)
+        advanced.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        advanced_form = QFormLayout(advanced)
+        advanced_form.setContentsMargins(0, 4, 0, 0)
+        advanced_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        advanced_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        advanced_form.setHorizontalSpacing(12)
+        advanced_form.setVerticalSpacing(4)
+        advanced_form.addRow(_form_section_separator())
+        advanced_form.addRow(self._blast_section("Advanced Settings", advanced))
+        for label, widget in advanced_rows:
+            advanced_form.addRow(label, widget)
+        advanced_form.addRow(
+            "Minimum bit score (GFF):",
+            self._field_with_help(
+                min_bit_score, "Minimum bit score (GFF)", _BLAST_MIN_BIT_HELP
+            ),
+        )
+        root.addWidget(advanced)
+        advanced.setVisible(False)
+        advanced.setMaximumHeight(0)
+        return (tab, basic, advanced)
+
+    def input_source(self) -> str:
+        if self._input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+
+        if self.input_source() == ALIGN_INPUT_DEFINE:
+            return expand_fastga_input_paths(self._define_inputs.paths())
+        return [Path(p) for p in (panel_files or [])]
+
+    def _sync_blast_inputs(self, *, resize: bool = True) -> None:
+        define = self.input_source() == ALIGN_INPUT_DEFINE
+        # Collapse the form row fully — a hidden TeMultiInputFilesWidget still
+        # reports a large sizeHint and leaves a blank gap above Settings.
+        if hasattr(self, "_inputs_form"):
+            self._inputs_form.setRowVisible(self._define_inputs, define)
+        self._define_inputs.setVisible(define)
+        if define:
+            self._define_inputs.setMinimumHeight(0)
+            self._define_inputs.setMaximumHeight(16777215)
+        else:
+            self._define_inputs.setFixedHeight(0)
+        self._define_inputs.updateGeometry()
+        self._inputs_panel.updateGeometry()
+        self._sync_blast_inputs_field_column()
+        # Keep dialog height in sync when Define inputs opens/closes (Align-style).
+        if (
+            resize
+            and self.isVisible()
+            and hasattr(self, "_advanced_settings_btn")
+            and not self._advanced_settings_btn.isChecked()
+        ):
+            self._blast_compact_size = None
+            self._resize_for_blast_advanced(False)
+
+    def _sync_blast_inputs_field_column(self) -> None:
+        """Indent Inputs radios to the Settings field column (Align-style)."""
+        if not hasattr(self, "_inputs_radios_label"):
+            return
+        width = self.fontMetrics().horizontalAdvance(self._SETTINGS_LABEL_REF)
+        basic = self._current_blast_basic() if hasattr(self, "_blastn_basic") else None
+        if basic is not None:
+            form = basic.layout()
+            if isinstance(form, QFormLayout):
+                for row in range(form.rowCount()):
+                    item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+                    widget = item.widget() if item is not None else None
+                    if isinstance(widget, QLabel) and widget.text().endswith(":"):
+                        width = max(
+                            width,
+                            widget.sizeHint().width(),
+                            max(0, widget.width()),
+                        )
+        for lab in (self._inputs_radios_label, self._inputs_define_label):
+            lab.setFixedWidth(width)
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        if self._tabs.currentIndex() == self._options_tab_index:
+            return False
+        try:
+            candidate = Path(path).expanduser().resolve()
+        except OSError:
+            return False
+        return bool(self._define_inputs.accept_path(candidate))
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        if self._tabs.currentIndex() == self._options_tab_index:
+            return False
+        try:
+            candidate = Path(folder).expanduser().resolve()
+        except OSError:
+            return False
+        if not candidate.is_dir():
+            return False
+        return bool(self._define_inputs.accept_path(candidate))
+
+    def _current_advanced_panel(self) -> QWidget | None:
+        index = self._tabs.currentIndex()
+        if index == 0:
+            return self._blastn_advanced
+        if index == 1:
+            return self._blastp_advanced
+        if index == 2:
+            return self._blastx_advanced
+        return None
+
+    def _on_blast_tab_changed(self, tab_index: int) -> None:
+        """Switch program tabs like Align: no window flash, resize only when needed."""
+        on_program = tab_index in (0, 1, 2)
+        self._stack.setCurrentIndex(tab_index)
+        self._inputs_panel.setVisible(on_program)
+        self._advanced_settings_btn.setVisible(on_program)
+        if not on_program:
+            if self.isVisible():
+                self._fit_to_content()
+            return
+
+        advanced_was_open = self._advanced_settings_btn.isChecked()
+        if advanced_was_open:
+            self._advanced_settings_btn.blockSignals(True)
+            self._advanced_settings_btn.setChecked(False)
+            self._advanced_settings_btn.setText("Advanced Settings ▸")
+            self._advanced_settings_btn.blockSignals(False)
+        for panel in (
+            self._blastn_advanced,
+            self._blastp_advanced,
+            self._blastx_advanced,
+        ):
+            if panel.isVisible() or panel.maximumHeight() != 0:
+                panel.setVisible(False)
+                panel.setMaximumHeight(0)
+
+        # Align keeps each tab's own size; always re-fit when switching back
+        # from Options (or after Advanced) so height/pin stay consistent.
+        if self.isVisible():
+            self._blast_compact_size = None
+            self._resize_for_blast_advanced(False)
+
+    def _set_blast_advanced_visible(self, panel: QWidget, visible: bool) -> None:
+        panel.setVisible(visible)
+        if visible:
+            panel.setMaximumHeight(16777215)
+        else:
+            panel.setMaximumHeight(0)
+        panel.updateGeometry()
+        page = self._stack.currentWidget()
+        if page is not None:
+            root = page.layout()
+            if root is not None:
+                root.invalidate()
+                root.activate()
+            page.updateGeometry()
+        self._stack.updateGeometry()
+
+    def _on_advanced_settings_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        panel = self._current_advanced_panel()
+        if panel is None:
+            return
+        if checked:
+            # Remember tight height before expanding (Align-style).
+            self._blast_compact_size = self.size()
+        self._set_blast_advanced_visible(panel, checked)
+        # Resize immediately — no QTimer, avoids window flash.
+        self._resize_for_blast_advanced(checked)
+
+    def _blast_dialog_chrome_height(self) -> int:
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 8
+        # tab bar + (inputs) + stack + buttons
+        n_gaps = 3 if self._inputs_panel.isVisible() else 2
+        tab_bar_h = self._tabs.sizeHint().height() + 4
+        buttons_h = self._button_box.sizeHint().height()
+        return margin_h + (spacing * n_gaps) + tab_bar_h + buttons_h
+
+    def _current_blast_basic(self) -> QWidget | None:
+        index = self._tabs.currentIndex()
+        if index == 0:
+            return self._blastn_basic
+        if index == 1:
+            return self._blastp_basic
+        if index == 2:
+            return self._blastx_basic
+        return None
+
+    def _blast_stack_page_height(self, *, expanded: bool) -> int:
+        """Height of the active stack page (Settings ± Advanced), not Inputs."""
+        page = self._stack.currentWidget()
+        basic = self._current_blast_basic()
+        if page is None or basic is None:
+            return 220
+        root = page.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 10
+        spacing = root.spacing() if root is not None else 4
+        basic.ensurePolished()
+        basic_h = max(basic.minimumSizeHint().height(), basic.sizeHint().height())
+        # Keep the layout spacing before Advanced even when it is collapsed
+        # (Align-style), so the pinned stack height matches the real layout.
+        if not expanded:
+            return margin_h + basic_h + spacing
+        panel = self._current_advanced_panel()
+        extra = max(0, panel.sizeHint().height()) if panel is not None else 0
+        return margin_h + basic_h + spacing + extra
+
+    def _blast_inputs_height(self) -> int:
+        if not self._inputs_panel.isVisible():
+            return 0
+        self._inputs_panel.ensurePolished()
+        return max(
+            self._inputs_panel.minimumSizeHint().height(),
+            self._inputs_panel.sizeHint().height(),
+        )
+
+    def _pin_stack_height(self, page_h: int | None) -> None:
+        """Constrain the stack to the active page so max-page sizeHint cannot gap."""
+        page = self._stack.currentWidget()
+        if page_h is None:
+            self._stack.setMinimumHeight(0)
+            self._stack.setMaximumHeight(16777215)
+            if page is not None:
+                page.setMinimumHeight(0)
+                page.setMaximumHeight(16777215)
+            return
+        self._stack.setMinimumHeight(0)
+        self._stack.setMaximumHeight(page_h)
+        if page is not None:
+            page.setMinimumHeight(0)
+            page.setMaximumHeight(page_h)
+
+    def _resize_for_blast_advanced(self, expanded: bool) -> None:
+        if self._tabs.currentIndex() == self._options_tab_index:
+            self._pin_stack_height(None)
+            self._fit_to_content()
+            return
+        page = self._stack.currentWidget()
+        if page is not None:
+            root = page.layout()
+            if root is not None:
+                root.invalidate()
+                root.activate()
+            page.updateGeometry()
+        self._stack.updateGeometry()
+        self._inputs_panel.updateGeometry()
+        self._sync_blast_inputs_field_column()
+
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._blast_dialog_chrome_height()
+        inputs_h = self._blast_inputs_height()
+        page_h = self._blast_stack_page_height(expanded=expanded)
+        width = self._DIALOG_WIDTH
+
+        if not expanded:
+            height = chrome + inputs_h + page_h
+            height = min(max(height, 220), max_h)
+            self.setMinimumHeight(0)
+            self._pin_stack_height(page_h)
+            self.setMaximumHeight(height)
+            self.resize(width, height)
+            self.setMaximumHeight(16777215)
+            self._blast_compact_size = QSize(width, height)
+            return
+
+        self._pin_stack_height(page_h)
+        height = chrome + inputs_h + page_h
+        height = min(max(height, 220), max_h)
+        if self._blast_compact_size is not None:
+            # Grow from the remembered compact size when Advanced opens.
+            height = max(height, self._blast_compact_size.height())
+            height = min(height, max_h)
+        self.resize(width, height)
+
+    def _fit_to_blast_content(self) -> None:
+        if self._tabs.currentIndex() == self._options_tab_index:
+            self._fit_to_content()
+            return
+        self._resize_for_blast_advanced(self._advanced_settings_btn.isChecked())
+
+    @staticmethod
     def _parameter_form(parent: QWidget) -> QFormLayout:
         form = QFormLayout(parent)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -4593,58 +5249,69 @@ class BlastParamsDialog(QDialog):
         form.setVerticalSpacing(10)
         return form
 
-    def _database_row(self, combo: QComboBox) -> QWidget:
-        manage = QPushButton("Add/Manage databases")
+    def _database_field(self, combo: QComboBox) -> QWidget:
+        """Database combo with Manage BLAST databases on the next line."""
+        manage = QPushButton("Manage BLAST databases")
         manage.clicked.connect(self._manage_databases)
-        row = QWidget()
-        layout = QHBoxLayout(row)
+        box = QWidget()
+        layout = QVBoxLayout(box)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addWidget(combo, 1)
-        layout.addWidget(manage)
-        return row
+        layout.setSpacing(6)
+        layout.addWidget(
+            self._field_with_help(combo, "Database", _BLAST_DATABASE_HELP)
+        )
+        layout.addWidget(manage, 0, Qt.AlignmentFlag.AlignLeft)
+        return box
 
     def _field_with_help(self, field: QWidget, title: str, help_text: str) -> QWidget:
         return field_with_help(field, title, help_text)
 
-    def _update_postprocessing_visibility(self, tab_index: int) -> None:
-        self._post_box.setVisible(tab_index == 0)
-        if self.isVisible():
-            QTimer.singleShot(0, self._fit_to_content)
-
     def _fit_to_content(self) -> None:
-        """Size width/height to the active tab (not the widest tab page)."""
-        page = self._tabs.currentWidget()
+        """Size width/height to the active Options page (not the widest stack page)."""
+        page = self._stack.currentWidget()
         if page is None or self.layout() is None:
             return
+        self._pin_stack_height(None)
         page.ensurePolished()
         page.adjustSize()
-        page_hint = page.sizeHint()
-        post_w = self._post_box.sizeHint().width() if self._post_box.isVisible() else 0
-        post_h = self._post_box.sizeHint().height() if self._post_box.isVisible() else 0
-        tab_chrome = max(24, self._tabs.tabBar().sizeHint().height()) + 8
+        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
+        # Ignore stretch-inflated hints: use content height from layout.
+        root = page.layout()
+        content_h = page_hint.height()
+        if root is not None:
+            root.activate()
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        tab_chrome = max(24, self._tabs.sizeHint().height()) + 8
         buttons_h = self._button_box.sizeHint().height()
         buttons_w = self._button_box.sizeHint().width()
         margins = self.layout().contentsMargins()
         spacing = max(0, self.layout().spacing())
-        gaps = 2 if self._post_box.isVisible() else 1
         width = max(
-            420,
+            self._DIALOG_WIDTH,
             page_hint.width() + margins.left() + margins.right() + 24,
-            post_w + margins.left() + margins.right() + 24,
             buttons_w + margins.left() + margins.right(),
         )
         height = (
-            page_hint.height()
+            content_h
             + tab_chrome
-            + post_h
             + buttons_h
             + margins.top()
             + margins.bottom()
-            + spacing * gaps
+            + spacing * 2
             + 4
         )
+        self._stack.setMinimumHeight(0)
+        self._stack.setMaximumHeight(max(1, content_h))
+        page.setMinimumHeight(0)
+        page.setMaximumHeight(max(1, content_h))
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
         self.resize(width, height)
+        self.setMaximumHeight(16777215)
 
     def _populate_database_combo(
         self,
@@ -4748,12 +5415,16 @@ class BlastParamsDialog(QDialog):
         self._blastx_query_coverage.setValue(defaults.blastx_query_coverage_hsp)
         self._blastx_write_text.setChecked(defaults.blastx_write_text)
         self._blastx_write_gff.setChecked(defaults.blastx_write_gff)
+        # Canonical copies drive synced values on the other program pages.
         self._max_msa.setValue(defaults.max_msa_lines)
         self._top_msa.setValue(defaults.top_msa_lines)
         self._min_bit_score.setValue(defaults.minimum_bit_score)
         self._blastn_database.setCurrentIndex(0)
         self._blastp_database.setCurrentIndex(0)
         self._blastx_database.setCurrentIndex(0)
+        self._input_selected.setChecked(True)
+        self._define_inputs.clear_paths()
+        self._sync_blast_inputs()
         self._use_system_blast.setChecked(False)
         self._show_process_window.setChecked(defaults.show_process_window)
         self._close_process_window.setChecked(
@@ -4770,6 +5441,8 @@ class BlastParamsDialog(QDialog):
             1: BLAST_PROGRAM_BLASTP,
             2: BLAST_PROGRAM_BLASTX,
         }.get(self._tabs.currentIndex(), self._initial_program)
+        # Define-input paths are session-only; always reopen on Use selected.
+        # Shared limits: read from the blastn (canonical) copies; all pages stay synced.
         return BlastOptions(
             program=program,
             e_value=normalize_blast_evalue(self._evalue.value()),
@@ -4804,6 +5477,8 @@ class BlastParamsDialog(QDialog):
             blastx_database_name=self._blastx_database.currentData(),
             blastx_write_text=self._blastx_write_text.isChecked(),
             blastx_write_gff=self._blastx_write_gff.isChecked(),
+            input_source=ALIGN_INPUT_SELECTED,
+            input_paths=[],
             right_click_program=self._selected_right_click_program(),
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(
@@ -4816,6 +5491,16 @@ class BlastParamsDialog(QDialog):
             if radio.isChecked():
                 return value
         return BLAST_PROGRAM_BLASTN
+
+
+_CONSENSUS_SEQUENCE_TYPE_HELP = (
+    "<b>Auto-detect</b>: infer nucleotide vs protein from alignment "
+    "residues (gaps ignored).<br><br>"
+    "<b>Nucleotide</b>: treat columns as DNA/RNA (A, C, G, T/U, and IUPAC "
+    "ambiguity codes).<br><br>"
+    "<b>Protein</b>: treat columns as amino acids; use <b>X</b> (or "
+    "<b>N</b>) for ambiguous positions."
+)
 
 
 class ConsensusParamsDialog(QDialog):
@@ -4839,14 +5524,25 @@ class ConsensusParamsDialog(QDialog):
         self._for_run = for_run
         self._run_after = False
 
+        self._sequence_type = QComboBox(self)
+        self._sequence_type.addItem("Auto-detect", MAFFT_SEQUENCE_AUTO)
+        self._sequence_type.addItem("Nucleotide", MAFFT_SEQUENCE_NUCLEOTIDE)
+        self._sequence_type.addItem("Protein", MAFFT_SEQUENCE_PROTEIN)
+        seq_idx = self._sequence_type.findData(
+            normalize_consensus_sequence_type(opts.sequence_type)
+        )
+        self._sequence_type.setCurrentIndex(seq_idx if seq_idx >= 0 else 0)
+        self._sequence_type.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        self._sequence_type.currentIndexChanged.connect(self._on_sequence_type_changed)
+
         self._threshold = QDoubleSpinBox()
         self._threshold.setRange(0.0, 1.0)
         self._threshold.setDecimals(2)
         self._threshold.setSingleStep(0.05)
         self._threshold.setValue(opts.threshold)
-        self._threshold.setFixedWidth(260)
+        self._threshold.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
         self._threshold.setToolTip(
-            "Minimum fraction of sequences that must share a base for it to "
+            "Minimum fraction of sequences that must share a residue for it to "
             "appear in the consensus (0–1)."
         )
 
@@ -4858,10 +5554,11 @@ class ConsensusParamsDialog(QDialog):
             self._ambiguous.setCurrentIndex(amb_index)
         else:
             self._ambiguous.setCurrentIndex(0)
-        self._ambiguous.setFixedWidth(260)
+        self._ambiguous.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
         self._ambiguous.setToolTip(
-            "Character used when no base reaches the majority threshold."
+            "Character used when no residue reaches the majority threshold."
         )
+        self._ambiguous_label = QLabel("Ambiguous base:", self)
 
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
@@ -4904,9 +5601,27 @@ class ConsensusParamsDialog(QDialog):
         )
         params_form.setHorizontalSpacing(12)
         params_form.setVerticalSpacing(8)
+        params_form.addRow(
+            "Sequence type:",
+            field_with_help(
+                self._sequence_type,
+                "Sequence type",
+                _CONSENSUS_SEQUENCE_TYPE_HELP,
+            ),
+        )
         params_form.addRow("Majority threshold:", self._threshold)
-        params_form.addRow("Ambiguous base:", self._ambiguous)
+        params_form.addRow(
+            self._ambiguous_label,
+            field_with_help(
+                self._ambiguous,
+                "Ambiguous character",
+                "Character written at columns where no residue meets the "
+                "majority threshold. Use <b>N</b> for nucleotide alignments "
+                "and <b>X</b> for protein (Biopython consensus).",
+            ),
+        )
         self._tabs.addTab(params_tab, "Parameters")
+        self._on_sequence_type_changed()
         self._tabs.addTab(options_tab, "Options")
 
         restore = QPushButton("Restore Defaults", self)
@@ -4966,10 +5681,29 @@ class ConsensusParamsDialog(QDialog):
         return dialog_should_run(self)
 
     def _restore_defaults(self) -> None:
+        self._sequence_type.setCurrentIndex(
+            max(0, self._sequence_type.findData(MAFFT_SEQUENCE_AUTO))
+        )
         self._threshold.setValue(DEFAULT_CONSENSUS_THRESHOLD)
         amb_index = self._ambiguous.findText(DEFAULT_CONSENSUS_AMBIGUOUS)
         self._ambiguous.setCurrentIndex(amb_index if amb_index >= 0 else 0)
         self._right_click_buttons[CONSENSUS_RIGHT_CLICK_RUN].setChecked(True)
+        self._on_sequence_type_changed()
+
+    def _on_sequence_type_changed(self, *_args) -> None:
+        protein = self._sequence_type.currentData() == MAFFT_SEQUENCE_PROTEIN
+        self._ambiguous_label.setText(
+            "Ambiguous residue:" if protein else "Ambiguous base:"
+        )
+        if protein and self._ambiguous.currentText() == "N":
+            x_idx = self._ambiguous.findText("X")
+            if x_idx >= 0:
+                self._ambiguous.setCurrentIndex(x_idx)
+        elif not protein and self._sequence_type.currentData() != MAFFT_SEQUENCE_AUTO:
+            if self._ambiguous.currentText() == "X":
+                n_idx = self._ambiguous.findText("N")
+                if n_idx >= 0:
+                    self._ambiguous.setCurrentIndex(n_idx)
 
     def options(self) -> ConsensusOptions:
         right_click_action = CONSENSUS_RIGHT_CLICK_RUN
@@ -4980,17 +5714,79 @@ class ConsensusParamsDialog(QDialog):
         return ConsensusOptions(
             threshold=self._threshold.value(),
             ambiguous=normalize_consensus_ambiguous(self._ambiguous.currentText()),
+            sequence_type=str(self._sequence_type.currentData()),
             right_click_action=right_click_action,
         )
 
 
+_FLEXIDOT_MODE_HELP = (
+    "<b>Combine all selected files into one dotplot</b>: draw a single Flexidot "
+    "comparison across every selected FASTA.<br><br>"
+    "<b>Plot each selected file separately</b>: run Flexidot once per selected "
+    "FASTA (self / pairwise / all-vs-all is chosen automatically from sequence "
+    "count)."
+)
+_FLEXIDOT_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): Flexidot uses the FASTA files that "
+    "were selected in the Files panel when this window opened.<br><br>"
+    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are "
+    "for this run only and are not remembered next time."
+)
+_FLEXIDOT_OUTPUT_FORMAT_HELP = (
+    f"Flexidot output format (<code>-f</code>). HTML gives interactive dotplots "
+    f"with Go-to → Annotation inside {APP_DISPLAY_NAME} (forked Flexidot); it "
+    "falls back to PNG automatically if that build isn't installed. "
+    "PNG/SVG/PDF write a static image."
+)
+_FLEXIDOT_WORDSIZE_HELP = (
+    f"K-mer length (<code>-k</code>), {MIN_FLEXIDOT_WORDSIZE}–"
+    f"{MAX_FLEXIDOT_WORDSIZE}. Larger values are faster but less sensitive."
+)
+_FLEXIDOT_SEQUENCE_TYPE_HELP = (
+    "Flexidot <code>-t</code>: sequence alphabet. DNA (nuc) is the default; "
+    "choose Protein (aa) for amino-acid FASTA such as .faa files."
+)
+_FLEXIDOT_GFF_HELP = (
+    "Shade the dotplot with a companion annotation GFF beside each FASTA "
+    "(e.g. <code>Name.RV.gff3</code> from Annotation).<br><br>"
+    "BLAST hit tables (<code>*_b.gff</code>) are skipped. "
+    "If none is found, Flexidot runs without shading."
+)
+_FLEXIDOT_SUBSTITUTIONS_HELP = (
+    "Flexidot <code>-S</code>: substitutions allowed inside each k-mer window. "
+    "Zero uses the much faster exact-match engine."
+)
+_FLEXIDOT_WOBBLE_HELP = (
+    "Treat ambiguity codes such as R, Y, and N as their possible bases "
+    "(<code>-w</code>). This can substantially increase computation time."
+)
+_FLEXIDOT_MAX_N_HELP = (
+    "Flexidot <code>--max_n</code>: maximum N percentage allowed in a k-mer when "
+    "ambiguous-base expansion is enabled."
+)
+_FLEXIDOT_REVERSE_HELP = (
+    "Enabled by default. Clear it to pass Flexidot <code>-r</code> / "
+    "<code>--norev</code> and omit reverse-complement matches."
+)
+_FLEXIDOT_LINE_WIDTH_HELP = (
+    "Flexidot <code>-A</code> / <code>--line_width</code>: thickness of forward "
+    "and reverse-complement match lines in the generated dotplot."
+)
+_FLEXIDOT_LENGTH_SCALING_HELP = (
+    "Scale each dotplot to the sequence lengths instead of a square panel "
+    "(<code>-L</code>). Only affects pairwise and all-vs-all comparisons."
+)
+
+
 class FlexidotParamsDialog(QDialog):
-    """Flexidot parameters.
+    """Flexidot parameters (Align-style Mode / Inputs / Outputs / Settings).
 
     Left-click the toolbar button opens this dialog. The Parameters tab holds
-    matching and output settings; the Options tab sets what right-clicking the
-    toolbar button does.
+    matching and output settings; Advanced Settings collapses less-used flags.
+    The Options tab sets what right-clicking the toolbar button does.
     """
+
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
 
     def __init__(
         self,
@@ -5001,21 +5797,62 @@ class FlexidotParamsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Flexidot parameters")
+        self.setMinimumWidth(self._DIALOG_WIDTH)
         opts = initial or FlexidotOptions()
         self._for_run = for_run
         self._run_after = False
-        # These supported settings remain persisted but are intentionally not
-        # exposed in this compact dialog.
+        # Persisted but not exposed in the compact Advanced panel.
         self._lcs_shading = opts.lcs_shading
         self._only_vs_first_value = opts.only_vs_first
+        self._flexidot_compact_size: QSize | None = None
+
+        self._combine = QRadioButton(
+            "Combine all selected files into one dotplot", self
+        )
+        self._separate = QRadioButton(
+            "Plot each selected file separately", self
+        )
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self._combine)
+        self._mode_group.addButton(self._separate)
+        if opts.combined:
+            self._combine.setChecked(True)
+        else:
+            self._separate.setChecked(True)
+
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        self._input_selected.setChecked(True)
+        self._define_inputs = TeMultiInputFilesWidget(
+            self,
+            initial=None,
+            start_empty=False,
+            placeholder="Click in Files/Folders or Browse…",
+            browse_title="Choose a FASTA file",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file or folder path. Click a file or folder in "
+                "the panel to fill a row, or use Browse."
+            ),
+            path_mode="file_or_directory",
+        )
+        self._input_selected.toggled.connect(self._sync_flexidot_inputs)
+        self._input_define.toggled.connect(self._sync_flexidot_inputs)
+        self._define_inputs.paths_changed.connect(self._sync_flexidot_inputs)
+
         self._wordsize = QSpinBox()
         self._wordsize.setRange(MIN_FLEXIDOT_WORDSIZE, MAX_FLEXIDOT_WORDSIZE)
         self._wordsize.setValue(
             max(MIN_FLEXIDOT_WORDSIZE, min(MAX_FLEXIDOT_WORDSIZE, opts.wordsize))
         )
         self._wordsize.setToolTip(
-            f"K-mer length (-k), {MIN_FLEXIDOT_WORDSIZE}–{MAX_FLEXIDOT_WORDSIZE}. "
-            "Larger values are faster but less sensitive."
+            f"K-mer length (-k), {MIN_FLEXIDOT_WORDSIZE}–{MAX_FLEXIDOT_WORDSIZE}."
         )
 
         self._sequence_type = QComboBox()
@@ -5024,25 +5861,12 @@ class FlexidotParamsDialog(QDialog):
         seq_type = normalize_flexidot_sequence_type(opts.sequence_type)
         seq_idx = self._sequence_type.findData(seq_type)
         self._sequence_type.setCurrentIndex(seq_idx if seq_idx >= 0 else 0)
-        self._sequence_type.setToolTip(
-            "Flexidot -t: sequence alphabet. DNA (nuc) is the default; "
-            "choose Protein (aa) for amino-acid FASTA such as .faa files."
-        )
         self._sequence_type.currentIndexChanged.connect(self._on_sequence_type_changed)
 
-        self._use_gff = QCheckBox("Show GFF features on dotplot (-g)")
+        self._use_gff = QCheckBox("Show GFF features on dotplot")
         self._use_gff.setChecked(opts.use_gff)
-        self._use_gff.setToolTip(
-            "Shade the dotplot with companion annotation GFF next to each FASTA "
-            "(e.g. Name.RV.gff3 from the Annotation tab). "
-            "BLAST hit tables (*_b.gff) are not used. "
-            "If no companion GFF is found, Flexidot runs without shading."
-        )
 
         self._output_format = QComboBox()
-        # HTML (interactive Go-to) is the default and needs the forked Flexidot.
-        # If the stock build is installed it automatically falls back to PNG at
-        # run time, so it is always safe to offer/select here.
         self._output_format.addItem(
             f"HTML (interactive; Go-to in {APP_DISPLAY_NAME})",
             FLEXIDOT_OUTPUT_HTML,
@@ -5054,35 +5878,19 @@ class FlexidotParamsDialog(QDialog):
             normalize_flexidot_output_format(opts.output_format)
         )
         self._output_format.setCurrentIndex(fmt_index if fmt_index >= 0 else 0)
-        self._output_format.setToolTip(
-            f"Flexidot output format (-f). HTML gives interactive dotplots with "
-            f"Go-to → Annotation inside {APP_DISPLAY_NAME} (forked Flexidot); it "
-            "falls back to PNG automatically if that build isn't installed. "
-            "PNG/SVG/PDF write a static image."
-        )
 
         self._substitutions = QSpinBox()
         self._substitutions.setRange(0, 20)
         self._substitutions.setValue(opts.substitution_count)
-        self._substitutions.setToolTip(
-            "Flexidot -S: substitutions allowed inside each k-mer window. "
-            "Zero uses the much faster exact-match engine."
-        )
+
         self._wobble = QCheckBox("Expand ambiguous IUPAC bases (-w)")
         self._wobble.setChecked(opts.wobble_conversion)
-        self._wobble.setToolTip(
-            "Treat ambiguity codes such as R, Y, and N as their possible bases. "
-            "This can substantially increase computation time."
-        )
+
         self._max_n = QDoubleSpinBox()
         self._max_n.setRange(0.0, 100.0)
         self._max_n.setDecimals(1)
         self._max_n.setSuffix(" %")
         self._max_n.setValue(opts.max_n_percentage)
-        self._max_n.setToolTip(
-            "Flexidot --max_n: maximum N percentage allowed in a k-mer when "
-            "ambiguous-base expansion is enabled."
-        )
         self._wobble.toggled.connect(self._max_n.setEnabled)
         self._max_n.setEnabled(self._wobble.isChecked())
 
@@ -5090,19 +5898,17 @@ class FlexidotParamsDialog(QDialog):
             "Calculate reverse-complement matches (disable: -r / --norev)"
         )
         self._include_reverse.setChecked(opts.include_reverse)
-        self._include_reverse.setToolTip(
-            "Enabled by default. Clear it to pass Flexidot -r / --norev and "
-            "omit reverse-complement matches."
-        )
+
         self._line_width = QDoubleSpinBox()
         self._line_width.setRange(0.1, 20.0)
         self._line_width.setDecimals(1)
         self._line_width.setSingleStep(0.2)
         self._line_width.setValue(opts.line_width)
-        self._line_width.setToolTip(
-            "Flexidot -A / --line_width: thickness of forward and "
-            "reverse-complement match lines in the generated dotplot."
+
+        self._length_scaling = QCheckBox(
+            "Scale plots by sequence length (-L, pairwise / all-vs-all)"
         )
+        self._length_scaling.setChecked(opts.length_scaling)
 
         for field in (
             self._wordsize,
@@ -5114,20 +5920,150 @@ class FlexidotParamsDialog(QDialog):
         ):
             field.setFixedWidth(260)
 
-        self._length_scaling = QCheckBox(
-            "Scale plots by sequence length (-L, pairwise / all-vs-all)"
+        params_tab = QWidget(self)
+        params_root = QVBoxLayout(params_tab)
+        params_root.setContentsMargins(16, 10, 16, 10)
+        params_root.setSpacing(4)
+
+        basic = QWidget(params_tab)
+        self._flexidot_basic = basic
+        basic.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
-        self._length_scaling.setChecked(opts.length_scaling)
-        self._length_scaling.setToolTip(
-            "Scale each dotplot to the sequence lengths instead of a square "
-            "panel. Only affects pairwise and all-vs-all comparisons."
+        form = QFormLayout(basic)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self._combined = QCheckBox("Combine all selected files into one dotplot")
-        self._combined.setChecked(opts.combined)
-        self._combined.setToolTip(
-            "Draw a single dotplot comparing all selected files. When unticked, "
-            "each selected file is plotted separately."
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+
+        def _section(title: str, parent: QWidget | None = None) -> QLabel:
+            return QLabel(f"<b>{title}</b>", parent or params_tab)
+
+        form.addRow(_section("Mode", basic))
+        mode_box = QWidget(basic)
+        mode_layout = QVBoxLayout(mode_box)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(2)
+        mode_layout.addWidget(
+            field_with_help(
+                self._combine,
+                "Flexidot mode",
+                _FLEXIDOT_MODE_HELP,
+                stretch=True,
+            )
         )
+        mode_layout.addWidget(self._separate)
+        form.addRow("", mode_box)
+
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Inputs", basic))
+        inputs_box = QWidget(basic)
+        inputs_layout = QVBoxLayout(inputs_box)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(2)
+        inputs_layout.addWidget(
+            field_with_help(
+                self._input_selected,
+                "Flexidot inputs",
+                _FLEXIDOT_INPUTS_HELP,
+                stretch=True,
+            )
+        )
+        inputs_layout.addWidget(self._input_define)
+        form.addRow("", inputs_box)
+        form.addRow("", self._define_inputs)
+
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Outputs", basic))
+        form.addRow(
+            "Output format:",
+            field_with_help(
+                self._output_format, "Output format", _FLEXIDOT_OUTPUT_FORMAT_HELP
+            ),
+        )
+
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Settings", basic))
+        form.addRow(
+            "k-mer:",
+            field_with_help(self._wordsize, "k-mer", _FLEXIDOT_WORDSIZE_HELP),
+        )
+        form.addRow(
+            "Sequence type:",
+            field_with_help(
+                self._sequence_type, "Sequence type", _FLEXIDOT_SEQUENCE_TYPE_HELP
+            ),
+        )
+        form.addRow(
+            "",
+            field_with_help(self._use_gff, "Show GFF features", _FLEXIDOT_GFF_HELP),
+        )
+        params_root.addWidget(basic)
+
+        advanced = QWidget(params_tab)
+        self._flexidot_advanced_panel = advanced
+        advanced.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        advanced_form = QFormLayout(advanced)
+        advanced_form.setContentsMargins(0, 4, 0, 0)
+        advanced_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        advanced_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        advanced_form.setHorizontalSpacing(12)
+        advanced_form.setVerticalSpacing(4)
+        advanced_form.addRow(_form_section_separator())
+        advanced_form.addRow(_section("Advanced Settings", advanced))
+        advanced_form.addRow(
+            "Allowed substitutions:",
+            field_with_help(
+                self._substitutions,
+                "Allowed substitutions",
+                _FLEXIDOT_SUBSTITUTIONS_HELP,
+            ),
+        )
+        advanced_form.addRow(
+            "Maximum N content:",
+            field_with_help(self._max_n, "Maximum N content", _FLEXIDOT_MAX_N_HELP),
+        )
+        advanced_form.addRow(
+            "Match line thickness:",
+            field_with_help(
+                self._line_width, "Match line thickness", _FLEXIDOT_LINE_WIDTH_HELP
+            ),
+        )
+        advanced_form.addRow(
+            "",
+            field_with_help(
+                self._wobble, "Expand ambiguous IUPAC bases", _FLEXIDOT_WOBBLE_HELP
+            ),
+        )
+        advanced_form.addRow(
+            "",
+            field_with_help(
+                self._include_reverse,
+                "Reverse-complement matches",
+                _FLEXIDOT_REVERSE_HELP,
+            ),
+        )
+        advanced_form.addRow(
+            "",
+            field_with_help(
+                self._length_scaling,
+                "Length scaling",
+                _FLEXIDOT_LENGTH_SCALING_HELP,
+            ),
+        )
+        params_root.addWidget(advanced)
+        advanced.setVisible(False)
+        advanced.setMaximumHeight(0)
+        self._params_tab = params_tab
 
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
@@ -5143,6 +6079,7 @@ class FlexidotParamsDialog(QDialog):
             self._right_click_buttons[FLEXIDOT_RIGHT_CLICK_RUN].setChecked(True)
 
         rc_box = QGroupBox("Right-click action", self)
+        rc_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         rc_box_layout = QVBoxLayout(rc_box)
         rc_box_layout.setSpacing(6)
         rc_box_layout.addWidget(
@@ -5166,63 +6103,249 @@ class FlexidotParamsDialog(QDialog):
         options_layout = QVBoxLayout(options_tab)
         options_layout.setContentsMargins(16, 14, 16, 14)
         options_layout.setSpacing(14)
+        options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
         options_layout.addWidget(process_box)
         options_layout.addStretch(1)
+        options_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._options_tab = options_tab
 
         self._tabs = QTabWidget(self)
-        params_tab = QWidget(self)
-        params_form = QFormLayout(params_tab)
-        params_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        self._tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
         )
-        params_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
-        )
-        params_form.setHorizontalSpacing(12)
-        params_form.setVerticalSpacing(10)
-        params_form.addRow("Word size (k-mer, -k):", self._wordsize)
-        params_form.addRow("Sequence type (-t):", self._sequence_type)
-        params_form.addRow("Output format (-f):", self._output_format)
-        params_form.addRow("Allowed substitutions (-S):", self._substitutions)
-        params_form.addRow("Maximum N content (--max_n):", self._max_n)
-        params_form.addRow(
-            "Match line thickness (-A / --line_width):", self._line_width
-        )
-        params_form.addRow("", self._wobble)
-        params_form.addRow("", self._include_reverse)
-        params_form.addRow("", self._length_scaling)
-        params_form.addRow("", self._use_gff)
-        params_form.addRow("", self._combined)
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
+        self._tabs.currentChanged.connect(self._on_flexidot_tab_changed)
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_settings_toggled)
         self._button_box = make_cancel_save_run_bar(
             self,
-            left_widgets=[restore],
+            left_widgets=[restore, self._advanced_settings_btn],
         )
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._button_box)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(14)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tabs, 0)
+        layout.addWidget(self._button_box, 0)
+
+        self._sync_flexidot_inputs(resize=False)
         self._on_sequence_type_changed()
+        self.resize(self._DIALOG_WIDTH, 420)
+        QTimer.singleShot(0, lambda: self._resize_for_flexidot_advanced(False))
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._flexidot_compact_size = None
+        QTimer.singleShot(0, lambda: self._resize_for_flexidot_advanced(False))
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
+
+    def input_source(self) -> str:
+        if self._input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+
+        if self.input_source() == ALIGN_INPUT_DEFINE:
+            return expand_fastga_input_paths(self._define_inputs.paths())
+        return [Path(p) for p in (panel_files or [])]
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        if self._tabs.currentWidget() is self._options_tab:
+            return False
+        try:
+            candidate = Path(path).expanduser().resolve()
+        except OSError:
+            return False
+        return bool(self._define_inputs.accept_path(candidate))
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        if self._tabs.currentWidget() is self._options_tab:
+            return False
+        try:
+            candidate = Path(folder).expanduser().resolve()
+        except OSError:
+            return False
+        if not candidate.is_dir():
+            return False
+        return bool(self._define_inputs.accept_path(candidate))
+
+    def _sync_flexidot_inputs(self, *, resize: bool = True) -> None:
+        define = self.input_source() == ALIGN_INPUT_DEFINE
+        form = self._flexidot_basic.layout()
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._define_inputs, define)
+        self._define_inputs.setVisible(define)
+        if define:
+            self._define_inputs.setMinimumHeight(0)
+            self._define_inputs.setMaximumHeight(16777215)
+        else:
+            self._define_inputs.setFixedHeight(0)
+        self._define_inputs.updateGeometry()
+        self._flexidot_basic.updateGeometry()
+        if (
+            resize
+            and self.isVisible()
+            and not self._advanced_settings_btn.isChecked()
+            and self._tabs.currentWidget() is self._params_tab
+        ):
+            self._flexidot_compact_size = None
+            self._resize_for_flexidot_advanced(False)
+
+    def _on_flexidot_tab_changed(self, _index: int) -> None:
+        on_params = self._tabs.currentWidget() is self._params_tab
+        self._advanced_settings_btn.setVisible(on_params)
+        if not on_params:
+            if self._advanced_settings_btn.isChecked():
+                self._advanced_settings_btn.blockSignals(True)
+                self._advanced_settings_btn.setChecked(False)
+                self._advanced_settings_btn.setText("Advanced Settings ▸")
+                self._advanced_settings_btn.blockSignals(False)
+                self._set_flexidot_advanced_visible(False)
+            if self.isVisible():
+                self._fit_options_content()
+            return
+        if self.isVisible():
+            self._resize_for_flexidot_advanced(False)
+
+    def _set_flexidot_advanced_visible(self, visible: bool) -> None:
+        panel = self._flexidot_advanced_panel
+        panel.setVisible(visible)
+        if visible:
+            panel.setMaximumHeight(16777215)
+        else:
+            panel.setMaximumHeight(0)
+        panel.updateGeometry()
+        root = self._params_tab.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self._params_tab.updateGeometry()
+        self._tabs.updateGeometry()
+
+    def _on_advanced_settings_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        if checked:
+            self._flexidot_compact_size = self.size()
+        self._set_flexidot_advanced_visible(checked)
+        self._resize_for_flexidot_advanced(checked)
+
+    def _dialog_chrome_height(self) -> int:
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 14
+        tab_bar_h = self._tabs.tabBar().sizeHint().height() + 10
+        buttons_h = self._button_box.sizeHint().height()
+        return margin_h + spacing + tab_bar_h + buttons_h
+
+    def _flexidot_compact_content_height(self) -> int:
+        root = self._params_tab.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        basic_h = max(
+            self._flexidot_basic.minimumSizeHint().height(),
+            self._flexidot_basic.sizeHint().height(),
+        )
+        return margin_h + basic_h + spacing
+
+    def _resize_for_flexidot_advanced(self, expanded: bool) -> None:
+        if self._tabs.currentWidget() is not self._params_tab:
+            self._fit_options_content()
+            return
+        panel = self._params_tab
+        adv = self._flexidot_advanced_panel
+        root = panel.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        panel.updateGeometry()
+        self._tabs.updateGeometry()
+
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._dialog_chrome_height()
+        width = self._DIALOG_WIDTH
+
+        if not expanded:
+            height = chrome + self._flexidot_compact_content_height()
+            height = min(max(height, 220), max_h)
+            self.setMinimumHeight(0)
+            self._tabs.setMinimumHeight(0)
+            panel.setMinimumHeight(0)
+            self.setMaximumHeight(height)
+            self.resize(width, height)
+            self.setMaximumHeight(16777215)
+            self._flexidot_compact_size = QSize(width, height)
+            return
+
+        extra = max(0, adv.sizeHint().height())
+        base = self._flexidot_compact_size or self.size()
+        height = min(base.height() + extra + 12, max_h)
+        height = max(
+            height,
+            min(chrome + self._flexidot_compact_content_height() + extra, max_h),
+        )
+        self.resize(width, height)
+
+    def _fit_options_content(self) -> None:
+        page = self._options_tab
+        page.ensurePolished()
+        page.adjustSize()
+        root = page.layout()
+        if root is not None:
+            root.activate()
+        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
+        content_h = page_hint.height()
+        if root is not None:
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        chrome = self._dialog_chrome_height()
+        height = chrome + content_h
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(self._DIALOG_WIDTH, height)
+        self.setMaximumHeight(16777215)
 
     def _on_sequence_type_changed(self, *_args) -> None:
         is_protein = (
             str(self._sequence_type.currentData()) == FLEXIDOT_SEQUENCE_AA
         )
-        # Reverse-complement matching only applies to DNA.
         self._include_reverse.setEnabled(not is_protein)
         if is_protein:
             self._include_reverse.setChecked(False)
 
     def _restore_defaults(self) -> None:
         defaults = FlexidotOptions()
+        self._combine.setChecked(defaults.combined)
+        self._separate.setChecked(not defaults.combined)
+        self._input_selected.setChecked(True)
+        self._define_inputs.clear_paths()
+        self._sync_flexidot_inputs()
         self._wordsize.setValue(defaults.wordsize)
         self._sequence_type.setCurrentIndex(
             max(0, self._sequence_type.findData(defaults.sequence_type))
@@ -5239,7 +6362,6 @@ class FlexidotParamsDialog(QDialog):
         self._only_vs_first_value = defaults.only_vs_first
         self._line_width.setValue(defaults.line_width)
         self._length_scaling.setChecked(defaults.length_scaling)
-        self._combined.setChecked(defaults.combined)
         self._show_process_window.setChecked(defaults.show_process_window)
         self._close_process_window.setChecked(
             defaults.close_process_window_when_finished
@@ -5273,7 +6395,7 @@ class FlexidotParamsDialog(QDialog):
             only_vs_first=self._only_vs_first_value,
             line_width=self._line_width.value(),
             length_scaling=self._length_scaling.isChecked(),
-            combined=self._combined.isChecked(),
+            combined=self._combine.isChecked(),
             # Comparison mode is automatic: self for one sequence,
             # pairwise/all-vs-all for multiple.
             modes=DEFAULT_FLEXIDOT_MODES,
@@ -5950,12 +7072,59 @@ class OrfPredictionParamsDialog(QDialog):
         )
 
 
-class TeaAidParamsDialog(QDialog):
-    """TE-Aid parameters.
+_TEAID_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): TE-Aid uses the FASTA files that "
+    "were selected in the Files panel when this window opened.<br><br>"
+    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are "
+    "for this run only and are not remembered next time."
+)
+_TEAID_GENOME_HELP = (
+    "Subject genome for the genome BLAST step. Use the project genome or a "
+    "saved nucleotide BLAST database under <b>Manage BLAST databases</b>."
+)
+_TEAID_EVALUE_HELP = (
+    "Reporting E-value for the genome BLAST search. TE-Aid BLAST-searches the "
+    "genome first to find copies of the provided sequence, then draws those "
+    "hits on the coverage track."
+)
+_TEAID_WORD_SIZE_HELP = (
+    "BLASTN <code>word_size</code> for the self-BLAST step (range 4–25). TE-Aid "
+    "self-BLASTs the input sequence to find repetitive regions and draw the "
+    "self-alignment / terminal-repeat panels."
+)
+_TEAID_TRANSPARENCY_HELP = (
+    "Transparency of genome BLAST hit lines on the coverage track "
+    "(0% = fully opaque, 100% = invisible)."
+)
+_TEAID_THREADS_HELP = (
+    "Number of threads for TE-Aid genome BLAST and self-BLAST "
+    "(<code>-num_threads</code>)."
+)
+_TEAID_HIT_HIGH_HELP = (
+    "Hits covering at least this percent of the input / consensus length use "
+    "the chosen color on the genome coverage track. Click the color swatch to "
+    "change it."
+)
+_TEAID_HIT_MID_HELP = (
+    "Hits at least this long but shorter than the full-length threshold use "
+    "the mid color. Must stay below the full-length threshold. Click the "
+    "color swatch to change it."
+)
+_TEAID_PROCESS_HELP = (
+    "Open a window that shows the TE-Aid command line, then streams genome "
+    "BLAST and self-BLAST progress. Useful for long runs."
+)
 
-    Left-click the toolbar button opens this dialog. The Parameters tab holds
-    BLAST settings and hit colors; the Options tab sets right-click behavior.
+
+class TeaAidParamsDialog(QDialog):
+    """TE-Aid parameters (BLAST-style Inputs / Settings / Advanced / Options).
+
+    Left-click the toolbar button opens this dialog. Parameters holds genome
+    BLAST settings; Advanced Settings holds display tuning; Options sets
+    right-click and process output.
     """
+
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
 
     def __init__(
         self,
@@ -5969,33 +7138,62 @@ class TeaAidParamsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("TE-Aid parameters")
+        self.setMinimumWidth(self._DIALOG_WIDTH)
         opts = initial or TeaAidOptions()
         self._for_run = for_run
         self._run_after = False
-        # genome_history kept for call-site compatibility; Genome list uses BLAST DBs.
+        # Kept for call-site compatibility; Genome list uses BLAST DBs.
         _ = genome_history
+        self._teaid_compact_size: QSize | None = None
+        # Plot-axis label stays persisted but is not shown in this dialog.
+        self._x_axis_label_value = (
+            (opts.x_axis_label or "").strip() or DEFAULT_TEAID_X_AXIS_LABEL
+        )
 
         high_pct, mid_pct = clamp_teaid_hit_len_pct(
             opts.hit_len_high_pct, opts.hit_len_mid_pct
         )
 
-        # Genome: same chrome as Blast / Extend — current genome + nucleotide DBs.
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        self._input_selected.setChecked(True)
+        self._define_inputs = TeMultiInputFilesWidget(
+            self,
+            initial=None,
+            start_empty=False,
+            placeholder="Click in Files/Folders or Browse…",
+            browse_title="Choose a FASTA file",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file or folder path. Click a file or folder in "
+                "the panel to fill a row, or use Browse."
+            ),
+            path_mode="file_or_directory",
+        )
+        self._input_selected.toggled.connect(self._sync_teaid_inputs)
+        self._input_define.toggled.connect(self._sync_teaid_inputs)
+        self._define_inputs.paths_changed.connect(self._sync_teaid_inputs)
+
         self._genome_row = GenomeBlastDatabaseRow(
             self,
             project=project,
             project_genome=project_genome,
             selected_path=opts.genome_path,
-            manage_title="TE-Aid parameters",
+            manage_title="Manage BLAST databases",
+            help_title="Genome",
+            help_text=_TEAID_GENOME_HELP,
         )
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
         self._evalue.setValue(
             normalize_blast_evalue(opts.e_value, default=DEFAULT_TEAID_EVALUE)
-        )
-        self._evalue.setFixedWidth(120)
-        self._evalue.setToolTip(
-            "Reporting E-value for the TE-Aid genome BLAST search only."
         )
 
         self._word_size = QSpinBox()
@@ -6008,23 +7206,18 @@ class TeaAidParamsDialog(QDialog):
                 min(MAX_TEAID_SELF_BLAST_WORD_SIZE, opts.self_blast_word_size),
             )
         )
-        self._word_size.setFixedWidth(120)
-        self._word_size.setToolTip(
-            "BLASTN word size (-word_size) for the TE-Aid self-BLAST dot plot only (4–25)."
-        )
+
+        self._threads = QSpinBox()
+        self._threads.setRange(1, 128)
+        self._threads.setValue(max(1, int(opts.num_threads)))
 
         self._line_transparency = QDoubleSpinBox()
         self._line_transparency.setRange(0.0, 100.0)
         self._line_transparency.setDecimals(0)
         self._line_transparency.setSingleStep(5.0)
         self._line_transparency.setSuffix(" %")
-        self._line_transparency.setFixedWidth(120)
         self._line_transparency.setValue(
             clamp_teaid_hit_line_transparency(opts.hit_line_transparency) * 100.0
-        )
-        self._line_transparency.setToolTip(
-            "Transparency of all genome BLAST hit lines (black, mid, and full-length). "
-            "0% = fully opaque; 100% = invisible."
         )
 
         self._hit_high_pct = QDoubleSpinBox()
@@ -6033,15 +7226,10 @@ class TeaAidParamsDialog(QDialog):
         self._hit_high_pct.setSingleStep(1.0)
         self._hit_high_pct.setSuffix(" %")
         self._hit_high_pct.setValue(high_pct)
-        self._hit_high_pct.setFixedWidth(100)
-        self._hit_high_pct.setToolTip(
-            "Hits at least this long (percent of the input / consensus length) "
-            "use the upper color."
-        )
         self._hit_color_high = opts.hit_color_high or DEFAULT_TEAID_HIT_COLOR_HIGH
         self._hit_color_high_btn = QPushButton()
         self._hit_color_high_btn.setFixedSize(56, 22)
-        self._hit_color_high_btn.setToolTip("Color for hits longer than the value above")
+        self._hit_color_high_btn.setToolTip("Color for full-length hits")
         self._hit_color_high_btn.clicked.connect(self._pick_hit_color_high)
         self._update_hit_color_button(self._hit_color_high_btn, self._hit_color_high)
 
@@ -6051,30 +7239,37 @@ class TeaAidParamsDialog(QDialog):
         self._hit_mid_pct.setSingleStep(1.0)
         self._hit_mid_pct.setSuffix(" %")
         self._hit_mid_pct.setValue(mid_pct)
-        self._hit_mid_pct.setFixedWidth(100)
-        self._hit_mid_pct.setToolTip(
-            "Hits at least this long but shorter than the upper threshold use the "
-            "mid color. Cannot be greater than or equal to the upper threshold."
-        )
         self._hit_color_mid = opts.hit_color_mid or DEFAULT_TEAID_HIT_COLOR_MID
         self._hit_color_mid_btn = QPushButton()
         self._hit_color_mid_btn.setFixedSize(56, 22)
-        self._hit_color_mid_btn.setToolTip(
-            "Color for hits longer than this value but below the upper threshold"
-        )
+        self._hit_color_mid_btn.setToolTip("Color for mid-length hits")
         self._hit_color_mid_btn.clicked.connect(self._pick_hit_color_mid)
         self._update_hit_color_button(self._hit_color_mid_btn, self._hit_color_mid)
 
         self._hit_high_pct.valueChanged.connect(self._on_hit_high_changed)
         self._hit_mid_pct.valueChanged.connect(self._on_hit_mid_changed)
 
+        for field in (
+            self._evalue,
+            self._word_size,
+            self._threads,
+            self._line_transparency,
+        ):
+            field.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+            if hasattr(field, "setAlignment"):
+                field.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # Hit rows: compact % + color + suffix (previous style; not full 260).
+        for field in (self._hit_high_pct, self._hit_mid_pct):
+            field.setFixedWidth(100)
+            field.setAlignment(Qt.AlignmentFlag.AlignRight)
+
         high_row = QWidget(self)
         high_layout = QHBoxLayout(high_row)
         high_layout.setContentsMargins(0, 0, 0, 0)
         high_layout.setSpacing(8)
-        high_layout.addWidget(self._hit_color_high_btn)
-        high_layout.addWidget(QLabel("Hit longer than:", self))
         high_layout.addWidget(self._hit_high_pct)
+        high_layout.addWidget(self._hit_color_high_btn)
         high_layout.addWidget(QLabel("of sequence length", self))
         high_layout.addStretch(1)
 
@@ -6082,18 +7277,108 @@ class TeaAidParamsDialog(QDialog):
         mid_layout = QHBoxLayout(mid_row)
         mid_layout.setContentsMargins(0, 0, 0, 0)
         mid_layout.setSpacing(8)
-        mid_layout.addWidget(self._hit_color_mid_btn)
-        mid_layout.addWidget(QLabel("Hit longer than:", self))
         mid_layout.addWidget(self._hit_mid_pct)
-        mid_layout.addWidget(QLabel("but below the value above", self))
+        mid_layout.addWidget(self._hit_color_mid_btn)
+        mid_layout.addWidget(QLabel("but below full-length", self))
         mid_layout.addStretch(1)
 
-        colors_box = QGroupBox("Genome BLAST hit colors", self)
-        colors_layout = QVBoxLayout(colors_box)
-        colors_layout.setContentsMargins(10, 8, 10, 8)
-        colors_layout.setSpacing(8)
-        colors_layout.addWidget(high_row)
-        colors_layout.addWidget(mid_row)
+        params_tab = QWidget(self)
+        params_root = QVBoxLayout(params_tab)
+        params_root.setContentsMargins(16, 10, 16, 10)
+        params_root.setSpacing(4)
+        basic = QWidget(params_tab)
+        self._teaid_basic = basic
+        basic.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        form = QFormLayout(basic)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+
+        def _section(title: str) -> QLabel:
+            return QLabel(f"<b>{title}</b>", params_tab)
+
+        form.addRow(_section("Inputs"))
+        inputs_box = QWidget(basic)
+        inputs_layout = QVBoxLayout(inputs_box)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(2)
+        inputs_layout.addWidget(
+            field_with_help(
+                self._input_selected,
+                "TE-Aid inputs",
+                _TEAID_INPUTS_HELP,
+                stretch=True,
+            )
+        )
+        inputs_layout.addWidget(self._input_define)
+        form.addRow("", inputs_box)
+        form.addRow("", self._define_inputs)
+
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Settings"))
+        form.addRow("Genome:", self._genome_row)
+        form.addRow(
+            "Genome BLAST E-value:",
+            field_with_help(
+                self._evalue, "Genome BLAST E-value", _TEAID_EVALUE_HELP
+            ),
+        )
+        form.addRow(
+            "Self BLAST word size:",
+            field_with_help(
+                self._word_size, "Self BLAST word size", _TEAID_WORD_SIZE_HELP
+            ),
+        )
+        form.addRow(
+            "Threads:",
+            field_with_help(self._threads, "Threads", _TEAID_THREADS_HELP),
+        )
+        params_root.addWidget(basic)
+
+        advanced = QWidget(params_tab)
+        self._teaid_advanced_panel = advanced
+        advanced.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        advanced_form = QFormLayout(advanced)
+        advanced_form.setContentsMargins(0, 4, 0, 0)
+        advanced_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        advanced_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        advanced_form.setHorizontalSpacing(12)
+        advanced_form.setVerticalSpacing(4)
+        advanced_form.addRow(_form_section_separator())
+        advanced_form.addRow(_section("Advanced Settings"))
+        advanced_form.addRow(
+            "Line transparency:",
+            field_with_help(
+                self._line_transparency,
+                "Line transparency",
+                _TEAID_TRANSPARENCY_HELP,
+            ),
+        )
+        advanced_form.addRow(
+            "Full-length hits (≥):",
+            field_with_help(
+                high_row, "Full-length hits", _TEAID_HIT_HIGH_HELP
+            ),
+        )
+        advanced_form.addRow(
+            "Mid-length hits (≥):",
+            field_with_help(mid_row, "Mid-length hits", _TEAID_HIT_MID_HELP),
+        )
+        params_root.addWidget(advanced)
+        params_root.addStretch(1)
+        self._params_tab = params_tab
 
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
@@ -6109,126 +7394,263 @@ class TeaAidParamsDialog(QDialog):
             self._right_click_buttons[TEAID_RIGHT_CLICK_RUN].setChecked(True)
 
         rc_box = QGroupBox("Right-click action", self)
+        rc_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         rc_box_layout = QVBoxLayout(rc_box)
         rc_box_layout.setSpacing(6)
         rc_box_layout.addWidget(QLabel("Right-clicking the TE-Aid button does:", self))
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="TE-Aid",
+                checked=bool(getattr(opts, "show_process_window", False)),
+                close_when_finished=bool(
+                    getattr(opts, "close_process_window_when_finished", False)
+                ),
+            )
+        )
+        self._show_process_window.setToolTip(_TEAID_PROCESS_HELP)
+
         options_tab = QWidget(self)
         options_layout = QVBoxLayout(options_tab)
-        options_layout.setContentsMargins(12, 10, 12, 10)
-        options_layout.setSpacing(8)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+        options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
-
-        self._x_axis_label = QLineEdit(self)
-        self._x_axis_label.setText(
-            (opts.x_axis_label or "").strip() or DEFAULT_TEAID_X_AXIS_LABEL
+        options_layout.addWidget(process_box)
+        options_layout.addStretch(1)
+        options_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
-        self._x_axis_label.setPlaceholderText(DEFAULT_TEAID_X_AXIS_LABEL)
-        self._x_axis_label.setToolTip(
-            "Axis title for the consensus position in the TE-Aid plots."
-        )
-        axis_box = QGroupBox("Plot labels", self)
-        axis_form = QFormLayout(axis_box)
-        axis_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        axis_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
-        )
-        axis_form.addRow(
-            "Consensus axis label:",
-            field_with_help(
-                self._x_axis_label,
-                "Consensus axis label",
-                "Title of the consensus-position axis in the divergence, "
-                "coverage and self dot plots (default: "
-                f"\"{DEFAULT_TEAID_X_AXIS_LABEL}\"). Change it when the input "
-                "is not a TE, e.g. \"satDNA monomer (bp)\". "
-                "Leave empty to use the default.",
-                parent=self,
-            ),
-        )
-        options_layout.addWidget(axis_box)
+        self._options_tab = options_tab
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
-        params_tab = QWidget(self)
-        params_layout = QVBoxLayout(params_tab)
-        params_layout.setContentsMargins(12, 10, 12, 10)
-        params_layout.setSpacing(10)
-        params_form = QFormLayout()
-        params_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        self._tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
         )
-        params_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
-        )
-        params_form.setHorizontalSpacing(12)
-        params_form.setVerticalSpacing(8)
-        params_form.addRow("Genome:", self._genome_row)
-        params_form.addRow("Genome BLAST E-value:", self._evalue)
-        params_form.addRow("Self BLAST word size:", self._word_size)
-        params_form.addRow("Line transparency:", self._line_transparency)
-        params_layout.addLayout(params_form)
-        params_layout.addWidget(colors_box)
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
+        self._tabs.currentChanged.connect(self._on_teaid_tab_changed)
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_settings_toggled)
         self._button_box = make_cancel_save_run_bar(
             self,
-            left_widgets=[restore],
+            left_widgets=[restore, self._advanced_settings_btn],
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._button_box)
-        self._tabs.currentChanged.connect(self._on_tab_changed)
-        self._on_tab_changed(self._tabs.currentIndex())
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(14)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tabs, 0)
+        layout.addWidget(self._button_box, 0)
+
+        self._sync_teaid_inputs(resize=False)
+        self._set_teaid_advanced_visible(False)
+        self.resize(self._DIALOG_WIDTH, 420)
+        QTimer.singleShot(0, lambda: self._resize_for_teaid_advanced(False))
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        QTimer.singleShot(0, self._fit_to_current_tab)
-
-    def _on_tab_changed(self, tab_index: int) -> None:
-        self._fit_to_current_tab()
-
-    def _fit_to_current_tab(self) -> None:
-        page = self._tabs.currentWidget()
-        if page is None:
-            return
-        page.ensurePolished()
-        page.adjustSize()
-        page_hint = page.sizeHint()
-        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
-        tab_chrome = tab_bar_h + 8
-        buttons_h = self._button_box.sizeHint().height()
-        margins = self.layout().contentsMargins()
-        spacing = self.layout().spacing()
-        height = (
-            page_hint.height()
-            + tab_chrome
-            + buttons_h
-            + margins.top()
-            + margins.bottom()
-            + spacing
-            + 4
-        )
-        width = max(
-            600,
-            page_hint.width() + margins.left() + margins.right() + 40,
-            self._button_box.sizeHint().width() + margins.left() + margins.right(),
-        )
-        self.setFixedSize(width, height)
+        self._teaid_compact_size = None
+        QTimer.singleShot(0, lambda: self._resize_for_teaid_advanced(False))
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
+    def input_source(self) -> str:
+        if self._input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+
+        if self.input_source() == ALIGN_INPUT_DEFINE:
+            return expand_fastga_input_paths(self._define_inputs.paths())
+        return [Path(p) for p in (panel_files or [])]
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        if self._tabs.currentWidget() is self._options_tab:
+            return False
+        try:
+            candidate = Path(path).expanduser().resolve()
+        except OSError:
+            return False
+        return bool(self._define_inputs.accept_path(candidate))
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        if self._tabs.currentWidget() is self._options_tab:
+            return False
+        try:
+            candidate = Path(folder).expanduser().resolve()
+        except OSError:
+            return False
+        if not candidate.is_dir():
+            return False
+        return bool(self._define_inputs.accept_path(candidate))
+
+    def _sync_teaid_inputs(self, *, resize: bool = True) -> None:
+        define = self.input_source() == ALIGN_INPUT_DEFINE
+        form = self._teaid_basic.layout()
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._define_inputs, define)
+        self._define_inputs.setVisible(define)
+        if define:
+            self._define_inputs.setMinimumHeight(0)
+            self._define_inputs.setMaximumHeight(16777215)
+        else:
+            self._define_inputs.setFixedHeight(0)
+        self._define_inputs.updateGeometry()
+        self._teaid_basic.updateGeometry()
+        if (
+            resize
+            and self.isVisible()
+            and not self._advanced_settings_btn.isChecked()
+            and self._tabs.currentWidget() is self._params_tab
+        ):
+            self._teaid_compact_size = None
+            self._resize_for_teaid_advanced(False)
+
+    def _on_teaid_tab_changed(self, _index: int) -> None:
+        on_params = self._tabs.currentWidget() is self._params_tab
+        self._advanced_settings_btn.setVisible(on_params)
+        if not on_params:
+            if self._advanced_settings_btn.isChecked():
+                self._advanced_settings_btn.blockSignals(True)
+                self._advanced_settings_btn.setChecked(False)
+                self._advanced_settings_btn.setText("Advanced Settings ▸")
+                self._advanced_settings_btn.blockSignals(False)
+                self._set_teaid_advanced_visible(False)
+            if self.isVisible():
+                self._fit_options_content()
+            return
+        if self.isVisible():
+            self._resize_for_teaid_advanced(False)
+
+    def _set_teaid_advanced_visible(self, visible: bool) -> None:
+        panel = self._teaid_advanced_panel
+        panel.setVisible(visible)
+        if visible:
+            panel.setMaximumHeight(16777215)
+        else:
+            panel.setMaximumHeight(0)
+        panel.updateGeometry()
+        root = self._params_tab.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self._params_tab.updateGeometry()
+        self._tabs.updateGeometry()
+
+    def _on_advanced_settings_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        if checked:
+            self._teaid_compact_size = self.size()
+        self._set_teaid_advanced_visible(checked)
+        self._resize_for_teaid_advanced(checked)
+
+    def _dialog_chrome_height(self) -> int:
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 14
+        tab_bar_h = self._tabs.tabBar().sizeHint().height() + 10
+        buttons_h = self._button_box.sizeHint().height()
+        return margin_h + spacing + tab_bar_h + buttons_h
+
+    def _teaid_compact_content_height(self) -> int:
+        root = self._params_tab.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        basic_h = max(
+            self._teaid_basic.minimumSizeHint().height(),
+            self._teaid_basic.sizeHint().height(),
+        )
+        return margin_h + basic_h + spacing
+
+    def _resize_for_teaid_advanced(self, expanded: bool) -> None:
+        if self._tabs.currentWidget() is not self._params_tab:
+            self._fit_options_content()
+            return
+        panel = self._params_tab
+        adv = self._teaid_advanced_panel
+        root = panel.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        panel.updateGeometry()
+        self._tabs.updateGeometry()
+
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._dialog_chrome_height()
+        width = self._DIALOG_WIDTH
+
+        if not expanded:
+            height = chrome + self._teaid_compact_content_height()
+            height = min(max(height, 220), max_h)
+            self.setMinimumHeight(0)
+            self._tabs.setMinimumHeight(0)
+            panel.setMinimumHeight(0)
+            self.setMaximumHeight(height)
+            self.resize(width, height)
+            self.setMaximumHeight(16777215)
+            self._teaid_compact_size = QSize(width, height)
+            return
+
+        extra = max(0, adv.sizeHint().height())
+        base = self._teaid_compact_size or self.size()
+        height = min(base.height() + extra + 12, max_h)
+        height = max(
+            height,
+            min(chrome + self._teaid_compact_content_height() + extra, max_h),
+        )
+        self.resize(width, height)
+
+    def _fit_options_content(self) -> None:
+        page = self._options_tab
+        page.ensurePolished()
+        page.adjustSize()
+        root = page.layout()
+        if root is not None:
+            root.activate()
+        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
+        content_h = page_hint.height()
+        if root is not None:
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        chrome = self._dialog_chrome_height()
+        height = chrome + content_h
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(self._DIALOG_WIDTH, height)
+        self.setMaximumHeight(16777215)
+
+    def _fit_to_current_tab(self) -> None:
+        if self._tabs.currentWidget() is self._options_tab:
+            self._fit_options_content()
+            return
+        self._resize_for_teaid_advanced(self._advanced_settings_btn.isChecked())
     @staticmethod
     def _update_hit_color_button(button: QPushButton, color: str) -> None:
         hex_color = QColor(color).name(QColor.NameFormat.HexRgb)
@@ -6236,7 +7658,7 @@ class TeaAidParamsDialog(QDialog):
 
     def _pick_hit_color_high(self) -> None:
         chosen = QColorDialog.getColor(
-            QColor(self._hit_color_high), self, "Hit color (upper band)"
+            QColor(self._hit_color_high), self, "Hit color (full-length)"
         )
         if not chosen.isValid():
             return
@@ -6245,7 +7667,7 @@ class TeaAidParamsDialog(QDialog):
 
     def _pick_hit_color_mid(self) -> None:
         chosen = QColorDialog.getColor(
-            QColor(self._hit_color_mid), self, "Hit color (mid band)"
+            QColor(self._hit_color_mid), self, "Hit color (mid-length)"
         )
         if not chosen.isValid():
             return
@@ -6271,9 +7693,14 @@ class TeaAidParamsDialog(QDialog):
             self._hit_mid_pct.blockSignals(False)
 
     def _restore_defaults(self) -> None:
+        defaults = TeaAidOptions()
+        self._input_selected.setChecked(True)
+        self._define_inputs.clear_paths()
+        self._sync_teaid_inputs()
         self._genome_row.reset_to_default()
         self._evalue.setValue(DEFAULT_TEAID_EVALUE)
         self._word_size.setValue(DEFAULT_TEAID_SELF_BLAST_WORD_SIZE)
+        self._threads.setValue(DEFAULT_TEAID_THREADS)
         self._hit_high_pct.blockSignals(True)
         self._hit_mid_pct.blockSignals(True)
         self._hit_high_pct.setValue(DEFAULT_TEAID_HIT_LEN_HIGH_PCT)
@@ -6285,8 +7712,12 @@ class TeaAidParamsDialog(QDialog):
         self._update_hit_color_button(self._hit_color_high_btn, self._hit_color_high)
         self._update_hit_color_button(self._hit_color_mid_btn, self._hit_color_mid)
         self._line_transparency.setValue(DEFAULT_TEAID_HIT_LINE_TRANSPARENCY * 100.0)
+        self._x_axis_label_value = DEFAULT_TEAID_X_AXIS_LABEL
         self._right_click_buttons[TEAID_RIGHT_CLICK_RUN].setChecked(True)
-        self._x_axis_label.setText(DEFAULT_TEAID_X_AXIS_LABEL)
+        self._show_process_window.setChecked(defaults.show_process_window)
+        self._close_process_window.setChecked(
+            defaults.close_process_window_when_finished
+        )
 
     def options(self) -> TeaAidOptions:
         high_pct, mid_pct = clamp_teaid_hit_len_pct(
@@ -6303,8 +7734,8 @@ class TeaAidParamsDialog(QDialog):
                 default=DEFAULT_TEAID_EVALUE,
             ),
             self_blast_word_size=self._word_size.value(),
-            x_axis_label=self._x_axis_label.text().strip()
-            or DEFAULT_TEAID_X_AXIS_LABEL,
+            num_threads=max(1, self._threads.value()),
+            x_axis_label=self._x_axis_label_value or DEFAULT_TEAID_X_AXIS_LABEL,
             hit_len_high_pct=high_pct,
             hit_len_mid_pct=mid_pct,
             hit_color_high=self._hit_color_high or DEFAULT_TEAID_HIT_COLOR_HIGH,
@@ -6314,6 +7745,10 @@ class TeaAidParamsDialog(QDialog):
             ),
             right_click_action=right_click_action,
             genome_path=self._genome_row.selected_path(),
+            show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=(
+                self._close_process_window.isChecked()
+            ),
         )
 
 

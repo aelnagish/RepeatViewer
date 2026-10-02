@@ -7,8 +7,6 @@ the same text in a message box.
 
 from __future__ import annotations
 
-import re
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -19,7 +17,6 @@ from PySide6.QtWidgets import (
 
 HELP_BUTTON_SIZE = 22
 TOOLTIP_MAX_WIDTH = 420
-_HTML_TAG = re.compile(r"<[A-Za-z/][^>]*>")
 
 HELP_BUTTON_STYLE = (
     "QToolButton {"
@@ -35,26 +32,22 @@ HELP_BUTTON_STYLE = (
 
 def help_tooltip_text(help_text: str) -> str:
     """Rich text is width-capped so long help does not span the screen."""
-    if _HTML_TAG.search(help_text):
-        return f"<div style='max-width:{TOOLTIP_MAX_WIDTH}px'>{help_text}</div>"
-    return help_text
+    return f"<div style='max-width:{TOOLTIP_MAX_WIDTH}px'>{help_text}</div>"
 
 
 def show_help_message(parent: QWidget | None, title: str, help_text: str) -> None:
-    """Show help with HTML bold labels; native macOS alerts ignore that markup."""
+    """Show help; body stays normal weight (only explicit <b>…</b> is bold)."""
     box = QMessageBox(parent)
     box.setWindowTitle(title)
     box.setIcon(QMessageBox.Icon.Information)
     box.setTextFormat(Qt.TextFormat.RichText)
     # Keep body at normal weight so only explicit <b>…</b> labels stand out.
-    body = (
-        f"<div style='font-weight:400'>{help_text}</div>"
-        if _HTML_TAG.search(help_text)
-        else help_text
+    # Native macOS alerts often force the whole setText() body bold.
+    box.setText(
+        f"<div style='font-weight:400; max-width:{TOOLTIP_MAX_WIDTH}px'>"
+        f"{help_text}</div>"
     )
-    box.setText(body)
     box.setStandardButtons(QMessageBox.StandardButton.Ok)
-    # Native alerts strip/ignore HTML and often render the whole body bold.
     box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
     box.exec()
 

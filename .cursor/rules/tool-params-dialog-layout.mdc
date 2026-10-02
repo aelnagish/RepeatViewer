@@ -1,0 +1,49 @@
+---
+description: Align-style tool parameter dialogs — Options tab and Process output must stay compact
+globs: repeatviewer/views/tool_dialogs.py
+alwaysApply: false
+---
+
+# Tool parameter dialog layout (Align template)
+
+When adding or editing a tool parameters window (`*ParamsDialog` in `tool_dialogs.py`), follow Align / BLAST / Flexidot / TE-Aid:
+
+## Required sections (Parameters tab)
+
+Use bold section headers + `_form_section_separator()` like Align:
+
+- **Mode** (if the tool has combine/separate or equivalent)
+- **Inputs** (Use selected sequences / Define inputs)
+- **Outputs** (if applicable)
+- **Settings** (primary run settings)
+- **Advanced Settings** (collapsible panel + footer **Advanced Settings ▸** button)
+
+Shared width: `TOOL_PARAMS_DIALOG_WIDTH` (same as Align).
+
+Numeric/combo **option boxes** on Settings rows use **`TOOL_PARAMS_FIELD_WIDTH` (260)** — same as BLAST `-evalue` / Threads / word size.
+
+Exception: TE-Aid full-/mid-length hit rows keep the previous compact style — narrow % spinbox (~100), color swatch after the box, then suffix text (“of sequence length” / “but below full-length”). Do not force those % boxes to 260.
+
+For Genome / Database rows with **Manage BLAST databases** under the combo, put the `?` help on the **combo row only** (not beside the whole combo+button stack), matching BLAST `_database_field`.
+
+## Options tab — never stretch group contents
+
+Returning from a tall Parameters tab must not leave blank gaps inside Options groups.
+
+1. Options page: `QSizePolicy.Preferred, Maximum`, `layout.setAlignment(AlignTop)`.
+2. After the last group box, **`options_layout.addStretch(1)`** so leftover height goes below the groups, not inside them.
+3. Every `QGroupBox` on Options: vertical `Maximum` size policy.
+4. On tab switch to Options, **shrink the dialog** to Options content (`_fit_to_content` / `_fit_options_content` with `setMaximumHeight` then clear), same idea as compact Advanced collapse.
+5. Hide **Advanced Settings** on the Options tab.
+
+## Process output box
+
+Always build via **`make_process_output_box(...)`**. Do not hand-roll two checkboxes in a `QGroupBox`.
+
+That helper must keep **Show process window** and **Close process window when finished** tightly spaced (no large vertical gap). It already sets Maximum policy, top alignment, and fixed spacing — do not remove those.
+
+## Anti-patterns (caused BLAST/Flexidot Options bugs)
+
+- Options `QVBoxLayout` **without** a trailing stretch while group boxes use Preferred vertical policy → Qt grows the Process output box and spaces its checkboxes apart.
+- Leaving the dialog at Parameters height when switching to Options without a shrink-to-content pass.
+- Custom Process-output layouts that omit Maximum / AlignTop / tight spacing.

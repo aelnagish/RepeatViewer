@@ -7946,6 +7946,7 @@ class MainWindow(QMainWindow):
     def _on_folder_selected(self, folder: Path) -> None:
         self._sync_define_database_dialog_from_folder(folder)
         self._sync_te_viz_dialog_from_folder(folder)
+        self._sync_blast_params_dialog_from_folder(folder)
         self._sync_create_folder_dialog_from_folder(folder)
         self._populate_file_list(folder, record_history=True)
         self._update_directory_watchers()
@@ -9423,6 +9424,7 @@ class MainWindow(QMainWindow):
             self._sync_define_database_dialog_from_files(panel_path)
             self._sync_add_annotation_dialog_from_files(panel_path)
             self._sync_add_blast_database_dialog_from_files(panel_path)
+            self._sync_blast_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
 
     def _open_tree_panels(self):
@@ -9842,9 +9844,42 @@ class MainWindow(QMainWindow):
         self._project.use_system_blast = dialog.use_system_blast()
         self._persist_workspace()
         if dialog.should_run():
-            self._apply_function("blast", blast_options=self._blast_options)
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+            if dialog.input_source() == ALIGN_INPUT_DEFINE:
+                run_files = dialog.run_files()
+                if not run_files:
+                    QMessageBox.information(
+                        self,
+                        "No FASTA inputs",
+                        "Add one or more FASTA files or folders under Define inputs.",
+                    )
+                    return
+                self._apply_function(
+                    "blast",
+                    blast_options=self._blast_options,
+                    preselected=run_files,
+                )
+            else:
+                self._apply_function("blast", blast_options=self._blast_options)
         else:
             self._set_status_message("BLAST settings saved", 4000)
+
+    def _sync_blast_params_dialog_from_files(
+        self, clicked_path: Path | None = None
+    ) -> None:
+        """Fill BLAST Define inputs from a Files-panel click."""
+        dialog = self._blast_params_dialog
+        if dialog is None or not dialog.isVisible() or clicked_path is None:
+            return
+        dialog.apply_path_from_panel(clicked_path)
+
+    def _sync_blast_params_dialog_from_folder(self, folder: Path) -> None:
+        """Fill BLAST Define inputs from a Folders-panel click."""
+        dialog = self._blast_params_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        dialog.apply_folder_from_panel(folder)
 
     def _change_blast_parameters(self) -> None:
         """Menu: same Cancel / Save / Run dialog as the BLAST toolbar button."""
@@ -11233,10 +11268,28 @@ class MainWindow(QMainWindow):
             save_teaid_options(self._teaid_options)
             self._persist_workspace()
             run_after = dialog.should_run()
+            input_source = dialog.input_source()
+            run_files = dialog.run_files() if run_after else []
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
         if run_after:
-            self._run_teaid()
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+            if input_source == ALIGN_INPUT_DEFINE:
+                if not run_files:
+                    QMessageBox.information(
+                        self,
+                        "No FASTA inputs",
+                        "Add one or more FASTA files or folders under Define inputs.",
+                    )
+                    return
+                self._apply_function(
+                    "teaid",
+                    teaid_options=self._teaid_options,
+                    preselected=run_files,
+                )
+            else:
+                self._run_teaid()
         else:
             self._set_status_message("TE-Aid settings saved", 4000)
 
@@ -11437,10 +11490,29 @@ class MainWindow(QMainWindow):
             save_flexidot_options(self._flexidot_options)
             self._persist_workspace()
             run_after = dialog.should_run()
+            input_source = dialog.input_source()
+            run_files = dialog.run_files() if run_after else []
         finally:
             QTimer.singleShot(0, self._repair_browser_chrome)
         if run_after:
-            self._run_flexidot_saved()
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+            if input_source == ALIGN_INPUT_DEFINE:
+                if not run_files:
+                    QMessageBox.information(
+                        self,
+                        "No FASTA inputs",
+                        "Add one or more FASTA files or folders under Define inputs.",
+                    )
+                    return
+                self._apply_function(
+                    "flexidot",
+                    flexidot_combined=self._flexidot_options.combined,
+                    flexidot_options=self._flexidot_options,
+                    preselected=run_files,
+                )
+            else:
+                self._run_flexidot_saved()
         else:
             self._set_status_message("Flexidot settings saved", 4000)
 
@@ -13955,6 +14027,12 @@ class MainWindow(QMainWindow):
             show_log = bool(getattr(flex_opts, "show_process_window", False))
             close_when_finished = bool(
                 getattr(flex_opts, "close_process_window_when_finished", False)
+            )
+        elif func_name == "teaid":
+            teaid_opts = job_kwargs.get("teaid_options") or self._teaid_options
+            show_log = bool(getattr(teaid_opts, "show_process_window", False))
+            close_when_finished = bool(
+                getattr(teaid_opts, "close_process_window_when_finished", False)
             )
         worker = FunctionWorker(
             self._run_function_job,
