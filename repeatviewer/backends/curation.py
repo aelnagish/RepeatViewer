@@ -69,10 +69,23 @@ from repeatviewer.job_options import (
 )
 from repeatviewer.pan_genome import genome_output_suffix
 from repeatviewer.backends.te_annotation_batch import TeAnnotationOptions, run_te_annotation_on_fasta
+from repeatviewer.backends.separate_fasta import count_fasta_sequences
 from repeatviewer.project import BlastDatabase, RepeatViewerProject
 from repeatviewer.backends.database_prepare import blast_database_is_ready
 
 ProgressCallback = Callable[[int, str], None]
+# completed_in_file, total_in_file, label — completed=-1 means label-only update.
+SequenceProgressCallback = Callable[[int, int, str], None]
+
+_PER_SEQUENCE_FUNCS = frozenset({"te_annotation"})
+
+
+def _fasta_sequence_units(path: Path) -> int:
+    try:
+        return max(1, int(count_fasta_sequences(path)))
+    except Exception:  # noqa: BLE001
+        return 1
+
 
 _DISPLAY_NAMES = {
     "teaid": "TE-Aid",
@@ -619,6 +632,7 @@ def run_on_sequence(
     tsd_search_options: TsdSearchOptions | None = None,
     orf_prediction_settings=None,
     cancel: JobCancellation | None = None,
+    sequence_progress: SequenceProgressCallback | None = None,
 ) -> list[str]:
     """Run one tool on one FASTA. Returns list of created output paths (strings)."""
     seq_path = seq_path.expanduser().resolve()
@@ -675,6 +689,7 @@ def run_on_sequence(
             use_system_blast=project.use_system_blast,
             output_label=genome_label or None,
             cancel=cancel,
+            progress=sequence_progress,
         )
         if is_protein:
             if not blast_txt:
@@ -1002,6 +1017,7 @@ def run_on_sequence(
             seq_path,
             te_opts,
             cancel=cancel,
+            progress=sequence_progress,
         )
         created.extend(str(p) for p in outs)
 
@@ -1152,6 +1168,13 @@ def run_batch(
         for seq_path in seq_list:
             work_items.append((seq_path, "", None))
 
+    per_sequence = func_name in _PER_SEQUENCE_FUNCS
+    item_units = [
+        _fasta_sequence_units(seq_path) if per_sequence else 1
+        for seq_path, _genome_label, _genome_path in work_items
+    ]
+    total_units = max(1, sum(item_units))
+
     workers = 1 if func_name == "te_annotation" else effective_batch_workers(
         max_workers, len(work_items)
     )
@@ -1165,7 +1188,25 @@ def run_batch(
         seq_path: Path,
         genome_label: str,
         genome_path: Path | None,
-    ) -> tuple[Path, str, list[str], str | None]:
+        units: int,
+    ) -> tuple[Path, str, list[str], str | None, int, int]:
+        """Returns path, label, outs, error, units, sequences_reported."""
+        last_reported = 0
+
+        def _sequence_progress(completed: int, total: int, label: str) -> None:
+            nonlocal last_reported, completed_count
+            display = f"{display_name}: {label}"
+            with progress_lock:
+                if completed < 0:
+                    progress_cb(completed_count, display)
+                    return
+                done = max(0, min(int(completed), int(units)))
+                delta = done - last_reported
+                if delta > 0:
+                    last_reported = done
+                    completed_count += delta
+                progress_cb(completed_count, display)
+
         try:
             with process_log_sink(log_sink):
                 check_cancelled(cancel)
@@ -1196,25 +1237,31 @@ def run_batch(
                     tsd_search_options=tsd_search_options,
                     orf_prediction_settings=orf_prediction_settings,
                     cancel=cancel,
+                    sequence_progress=_sequence_progress if per_sequence else None,
                 )
-            return seq_path, genome_label, outs, None
+            return seq_path, genome_label, outs, None, units, last_reported
         except JobCancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            return seq_path, genome_label, [], str(exc)
+            return seq_path, genome_label, [], str(exc), units, last_reported
 
     def _record_finished(
         seq_path: Path,
         genome_label: str,
         outs: list[str],
         error: str | None,
+        units: int,
+        reported: int,
     ) -> None:
         nonlocal completed_count
         label = f" ({genome_label})" if genome_label else ""
         with progress_lock:
-            completed_count += 1
-            # Report completed count (not count-1) so a finished 1-file BLAST
-            # advances the bar to 1 before the reserved "open results" step.
+            if per_sequence:
+                remaining = max(0, int(units) - int(reported))
+                if remaining:
+                    completed_count += remaining
+            else:
+                completed_count += 1
             progress_cb(
                 completed_count,
                 f"{display_name}: {seq_path.name}{label}",
@@ -1226,36 +1273,41 @@ def run_batch(
             source_files.append(str(seq_path.resolve()))
 
     if workers == 1:
-        for seq_path, genome_label, genome_path in work_items:
+        for (seq_path, genome_label, genome_path), units in zip(
+            work_items, item_units, strict=True
+        ):
             check_cancelled(cancel)
             label = f" ({genome_label})" if genome_label else ""
-            # Show which file is running (multi-file); count stays at completed so far.
             progress_cb(
                 completed_count,
                 f"{display_name}: {seq_path.name}{label}",
             )
-            path, glabel, outs, error = _run_single(seq_path, genome_label, genome_path)
-            _record_finished(path, glabel, outs, error)
+            path, glabel, outs, error, units_out, reported = _run_single(
+                seq_path, genome_label, genome_path, units
+            )
+            _record_finished(path, glabel, outs, error, units_out, reported)
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
-                pool.submit(_run_single, seq_path, genome_label, genome_path)
-                for seq_path, genome_label, genome_path in work_items
+                pool.submit(_run_single, seq_path, genome_label, genome_path, units)
+                for (seq_path, genome_label, genome_path), units in zip(
+                    work_items, item_units, strict=True
+                )
             ]
             for future in as_completed(futures):
                 try:
-                    path, label, outs, error = future.result()
+                    path, label, outs, error, units_out, reported = future.result()
                 except JobCancelledError:
                     for pending in futures:
                         pending.cancel()
                     raise
-                _record_finished(path, label, outs, error)
+                _record_finished(path, label, outs, error, units_out, reported)
 
-    progress_cb(len(work_items), f"{display_name}: finished")
+    progress_cb(total_units, f"{display_name}: finished")
 
     return {
         "func_name": func_name,
-        "total": len(work_items),
+        "total": total_units,
         "failures": failures,
         "created_outputs": created_outputs,
         "source_files": source_files,

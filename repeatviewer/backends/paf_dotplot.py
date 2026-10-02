@@ -126,10 +126,11 @@ def convert_aln_to_paf(path: Path, out_path: Path | None = None) -> Path:
     """Convert a binary .1aln to PAF using FastGA's ALNtoPAF."""
     exe = alntopaf_executable()
     if not exe:
+        from repeatviewer.backends.fastga_dotplot import install_hint
+
         raise PafError(
             ".1aln is a binary format and needs FastGA's ALNtoPAF to read.\n\n"
-            "Install FastGA with:  conda install -c bioconda fastga"
-            + (" (in WSL2 on Windows)" if sys.platform == "win32" else "")
+            + install_hint()
         )
     source = path.expanduser().resolve()
     target = out_path or source.with_suffix(".paf")

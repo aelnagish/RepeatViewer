@@ -351,19 +351,30 @@ class MapReferenceDialog(QDialog):
             rcl.addWidget(radio)
         if not any(b.isChecked() for b in self._right_click_buttons.values()):
             self._right_click_buttons[MAP_RIGHT_CLICK_RUN].setChecked(True)
-        process_box, self._show_process_window = make_process_output_box(
-            self, tool_name="the mapping", checked=opts.show_process_window)
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self, tool_name="the mapping", checked=opts.show_process_window,
+                close_when_finished=bool(
+                    getattr(opts, "close_process_window_when_finished", False)
+                ),
+            )
+        )
         self._use_system_path = QCheckBox("Use programs from the system PATH", self)
         self._use_system_path.setChecked(opts.use_system_path)
         self._use_system_path.setToolTip(
-            "Off: RepeatViewer's MAFFT, and minimap2 / Bowtie2 from the conda env set in "
-            "File → Settings → External tools (then PATH). On: all from PATH.")
+            "Off: RepeatViewer's bundled MAFFT and minimap2; Bowtie2 from the conda env "
+            "in File → Settings → External tools (then PATH). On: all from PATH.")
         self._found = _note("", self)
         self._found.setWordWrap(False)
         exe_box = QGroupBox("Programs", self)
         exl = QVBoxLayout(exe_box)
         exl.addWidget(self._use_system_path)
         exl.addWidget(self._found)
+        from repeatviewer.backends.minimap2_tools import MINIMAP2_VERSION
+        exl.addWidget(_note(
+            f"minimap2 {MINIMAP2_VERSION} is included with RepeatViewer "
+            "(Windows / Linux x86_64 / macOS). Bowtie2 still needs conda or PATH.",
+            self))
         options_tab = QWidget(self)
         ol = QVBoxLayout(options_tab)
         ol.setContentsMargins(16, 14, 16, 14)
@@ -464,17 +475,37 @@ class MapReferenceDialog(QDialog):
         self._update_found()
 
     def _update_found(self) -> None:
+        from repeatviewer.backends.minimap2_tools import bundled_minimap2_executable
         from repeatviewer.backends.sequence_aligner import mafft_command
 
         system = self._use_system_path.isChecked()
         lines, paths = [], []
         cmd = mafft_command(use_system_mafft=system)
-        lines.append(f"MAFFT: {'found' if cmd else 'not found'}")
+        if cmd and not system:
+            mafft_label = "bundled"
+        else:
+            mafft_label = "found" if cmd else "not found"
+        lines.append(f"MAFFT: {mafft_label}")
         paths.append(f"MAFFT: {cmd[0][0] if cmd else 'not found'}")
-        for engine in (MAP_ENGINE_MINIMAP2, MAP_ENGINE_BOWTIE2):
-            exe = mr.engine_executable(engine, system_path_only=system)
-            lines.append(f"{mr.ENGINE_NAMES[engine]}: {'found' if exe else 'not found'}")
-            paths.append(f"{mr.ENGINE_NAMES[engine]}: {exe or 'not found'}")
+        if not system and bundled_minimap2_executable():
+            exe = bundled_minimap2_executable()
+            lines.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_MINIMAP2]}: bundled")
+            paths.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_MINIMAP2]}: {exe}")
+        else:
+            exe = mr.engine_executable(MAP_ENGINE_MINIMAP2, system_path_only=system)
+            lines.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_MINIMAP2]}: "
+                         f"{'found' if exe else 'not found'}")
+            paths.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_MINIMAP2]}: {exe or 'not found'}")
+        if system:
+            exe = mr.engine_executable(MAP_ENGINE_BOWTIE2, system_path_only=True)
+            lines.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_BOWTIE2]}: "
+                         f"{'found' if exe else 'not found'}")
+            paths.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_BOWTIE2]}: {exe or 'not found'}")
+        else:
+            # Soft status without conda probe (runtime still searches conda then PATH).
+            lines.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_BOWTIE2]}: conda / PATH")
+            paths.append(f"{mr.ENGINE_NAMES[MAP_ENGINE_BOWTIE2]}: "
+                         + mr.engine_install_hint(MAP_ENGINE_BOWTIE2).replace("\n", " "))
         self._found.setText("\n".join(lines))
         self._found.setToolTip("\n".join(paths))
 
@@ -500,6 +531,7 @@ class MapReferenceDialog(QDialog):
             box.setChecked(value)
         self._right_click_buttons[d.right_click_action].setChecked(True)
         self._show_process_window.setChecked(d.show_process_window)
+        self._close_process_window.setChecked(d.close_process_window_when_finished)
         self._use_system_path.setChecked(d.use_system_path)
         self._sync()
 
@@ -544,5 +576,8 @@ class MapReferenceDialog(QDialog):
             max_display_reads=self._display.value(),
             right_click_action=right_click,
             show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=(
+                self._close_process_window.isChecked()
+            ),
             use_system_path=self._use_system_path.isChecked(),
         )

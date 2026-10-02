@@ -118,6 +118,7 @@ class ProcessMonitorBridge(QObject):
         live: bool,
         title: str,
         cancelled_message: str,
+        close_when_finished: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -126,6 +127,7 @@ class ProcessMonitorBridge(QObject):
         self._live = live
         self._title = title
         self._cancelled_message = cancelled_message
+        self._close_when_finished = bool(close_when_finished)
 
     @Slot(str)
     def on_line(self, text: str) -> None:
@@ -143,6 +145,8 @@ class ProcessMonitorBridge(QObject):
     def on_finished(self) -> None:
         if self._live:
             self._dialog.mark_finished(True)
+            if self._close_when_finished:
+                self._dialog.close()
 
     @Slot(str)
     def on_failed(self, error: str) -> None:

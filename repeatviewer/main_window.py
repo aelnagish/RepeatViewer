@@ -347,13 +347,11 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_BLASTP,
     BLAST_PROGRAM_BLASTX,
     EXTEND_RIGHT_CLICK_DIALOG,
-    FASTGA_RIGHT_CLICK_DIALOG,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     CONSENSUS_RIGHT_CLICK_DIALOG,
     TEAID_RIGHT_CLICK_DIALOG,
     MSA_CLEAN_RIGHT_CLICK_DIALOG,
     TE_ANNOTATION_RIGHT_CLICK_DIALOG,
-    TREE_RIGHT_CLICK_DIALOG,
     load_align_options,
     load_blast_options,
     load_consensus_options,
@@ -612,6 +610,8 @@ def _mafft_option_kwargs(options) -> dict[str, Any]:
         "adjust_direction": options.adjust_direction,
         "muscle_mode": options.muscle_mode,
         "muscle_num_threads": options.muscle_num_threads,
+        "muscle_perm": options.muscle_perm,
+        "muscle_perturb": options.muscle_perturb,
     }
 
 
@@ -4258,12 +4258,6 @@ class MainWindow(QMainWindow):
             self._auto_open_outputs(created)
         self._set_status_message(message, 8000)
 
-    def _populate_fastga_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
-        if not skip_default:
-            menu.addAction("Run FastGA with saved parameters", self._run_fastga_default)
-        menu.addSeparator()
-        menu.addAction("Change FastGA parameters", self._open_fastga_dialog)
-
     def _fastga_candidate_files(self) -> list[Path]:
         """Selected FASTA files suitable for FastGA (0, 1, or 2+). No UI."""
         selected = self._selected_files()
@@ -4272,19 +4266,30 @@ class MainWindow(QMainWindow):
             if p.is_file() and p.suffix.lower() in _FASTA_SUFFIXES
         ]
 
+    def _fastga_query_files(self, options=None, *, panel_files=None) -> list[Path]:
+        """Query genomes from panel selection or saved Define-inputs paths."""
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+        from repeatviewer.job_options import FASTGA_INPUT_DEFINE
+
+        opts = options if options is not None else self._fastga_options
+        if getattr(opts, "input_source", "selected") == FASTGA_INPUT_DEFINE:
+            return expand_fastga_input_paths(getattr(opts, "input_paths", None) or [])
+        if panel_files is not None:
+            return list(panel_files)
+        return self._fastga_candidate_files()
+
     def _selected_files_for_fastga(self, options=None, files=None) -> list[Path]:
-        from repeatviewer.backends.fastga_dotplot import fastga_available, install_hint
+        from repeatviewer.backends.fastga_dotplot import (
+            fastga_available,
+            show_fastga_not_configured_dialog,
+        )
 
         if not fastga_available():
-            QMessageBox.warning(
-                self,
-                "FastGA not found",
-                f"FastGA is not installed or not on PATH.\n\n{install_hint()}",
-            )
+            show_fastga_not_configured_dialog(self)
             return []
         opts = options if options is not None else self._fastga_options
         mode = getattr(opts, "mode", "self")
-        files = list(files) if files else self._fastga_candidate_files()
+        files = self._fastga_query_files(opts, panel_files=files)
         if mode == FASTGA_MODE_REFERENCE:
             from repeatviewer.backends.fastga_dotplot import reference_queries
 
@@ -4293,61 +4298,107 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "FastGA",
-                    "Choose the reference first: Tools → Align → Change alignment "
-                    "parameters → FastGA tab, then click the reference in Files."
+                    "Choose the reference genome first: Tools → Align → FastGA tab, "
+                    "then click it in Files or Browse."
                     if reference is None
-                    else f"The reference was not found:\n{reference}",
+                    else f"The reference genome was not found:\n{reference}",
                 )
                 return []
             if not reference_queries(files, reference):
                 QMessageBox.information(
                     self,
                     "FastGA",
-                    f"Select the FASTA files to compare with {reference.name} "
+                    f"Select the query genomes to compare with {reference.name} "
                     "(the reference itself is skipped).",
                 )
                 return []
             return files
         if not files:
-            QMessageBox.information(
-                self,
-                "FastGA",
-                "Select one or more FASTA files: each is compared against itself. "
-                "For other modes see Tools → Align → Change alignment parameters "
-                "→ FastGA tab.",
-            )
+            from repeatviewer.job_options import FASTGA_INPUT_DEFINE
+
+            if getattr(opts, "input_source", "selected") == FASTGA_INPUT_DEFINE:
+                QMessageBox.information(
+                    self,
+                    "FastGA",
+                    "Define at least one FASTA file or folder in the FastGA Inputs "
+                    "section (click in Files/Folders or Browse).",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "FastGA",
+                    "Select one or more genomes in the Files panel.\n"
+                    "Mode (self / pairwise / against a reference) is set in the FastGA tab.",
+                )
             return []
         if mode == FASTGA_MODE_PAIRS and len(files) < 2:
             QMessageBox.information(
                 self,
                 "FastGA",
-                "Against each other needs two or more selected FASTA files.\n"
+                "Pairwise comparison needs two or more genomes.\n"
                 "Select more files, or choose another mode in the FastGA tab.",
             )
             return []
         return files
 
+    def _project_setting_genome(self) -> Path | None:
+        """Project Define Genome FASTA when it exists on disk."""
+        genome = getattr(self._project, "genome_file", None)
+        if genome is None:
+            return None
+        try:
+            path = Path(genome).expanduser().resolve()
+        except OSError:
+            return None
+        return path if path.is_file() else None
+
+    def _fastga_options_with_default_reference(self, opts=None):
+        """Fill empty/missing FastGA reference from the project setting genome."""
+        from dataclasses import replace
+
+        opts = opts if opts is not None else self._fastga_options
+        if opts.reference_fasta and Path(opts.reference_fasta).is_file():
+            return opts
+        genome = self._project_setting_genome()
+        if genome is None:
+            return opts
+        return replace(opts, reference_fasta=str(genome))
+
+    def _fastga_options_for_next_run(self, opts=None):
+        """Options for opening/running FastGA: always start from Files selection."""
+        from dataclasses import replace
+
+        from repeatviewer.job_options import FASTGA_INPUT_SELECTED
+
+        return replace(
+            self._fastga_options_with_default_reference(opts),
+            input_source=FASTGA_INPUT_SELECTED,
+        )
+
     def _run_fastga_default(self) -> None:
-        opts = self._fastga_options
+        opts = self._fastga_options_for_next_run()
         if getattr(opts, "mode", "self") == FASTGA_MODE_REFERENCE and not (
             opts.reference_fasta and Path(opts.reference_fasta).is_file()
         ):
             # Nothing to run against yet: show the tab where it is chosen.
             self._open_align_dialog(initial_tab=ALIGNER_FASTGA)
             return
+        if (
+            opts.reference_fasta != self._fastga_options.reference_fasta
+            or opts.input_source != self._fastga_options.input_source
+        ):
+            self._fastga_options = opts
+            save_fastga_options(opts)
         files = self._selected_files_for_fastga(opts)
         if files:
             self._start_fastga_job(files, opts)
 
     def _quick_fastga_right_click(self) -> None:
-        """Right-click FastGA: run or reopen dialog per Options tab."""
-        if self._fastga_options.right_click_action == FASTGA_RIGHT_CLICK_DIALOG:
-            self._open_fastga_dialog()
-            return
+        """Right-click FastGA toolbar button: run with saved parameters."""
         self._run_fastga_default()
 
     def _open_fastga_dialog(self) -> None:
-        """FastGA button / Tools → FastGA: the Align window on its FastGA tab."""
+        """FastGA toolbar button: the Align window on its FastGA tab."""
         self._open_align_dialog(initial_tab=ALIGNER_FASTGA)
 
     # ------------------------------------------------------------------ Tree
@@ -4400,23 +4451,23 @@ class MainWindow(QMainWindow):
             self._start_tree_job(files, self._tree_options)
 
     def _quick_tree_right_click(self) -> None:
-        """Right-click Tree: run with saved settings or reopen the dialog (Options tab)."""
-        if self._tree_options.right_click_action == TREE_RIGHT_CLICK_DIALOG:
-            self._open_tree_dialog()
-            return
-        self._run_tree_default()
+        """Right-click Tree: run with the saved settings and the program chosen on the
+        Options tab (like BLAST's right-click program)."""
+        files = self._selected_files_for_tree()
+        if files:
+            self._start_tree_job(
+                files, replace(self._tree_options, engine=self._tree_options.right_click_engine)
+            )
 
-    def _open_tree_dialog(self, *, require_selection: bool = True) -> None:
+    def _open_tree_dialog(self, *, require_selection: bool = False) -> None:
         """Click Tree → parameters dialog (Cancel / Save / Run).
 
-        Without a FASTA selection the toolbar click only shows a message; the
-        Tools → Tree → Change Tree parameters entry still opens the dialog."""
+        Opens even with no FASTA selection so settings can be changed; Run then
+        asks for a selection."""
+        del require_selection  # kept for call-site compatibility; never blocks open
         from repeatviewer.views.tree_dialog import TreeParamsDialog
 
         files = self._tree_candidate_files()
-        if require_selection and not files:
-            self._selected_files_for_tree()  # shows the "select a FASTA file" message
-            return
         dialog = TreeParamsDialog(
             initial=self._tree_options,
             files=files,
@@ -4429,14 +4480,17 @@ class MainWindow(QMainWindow):
             if not d.should_run():
                 self._set_status_message("Tree settings saved", 4000)
                 return
-            # Non-modal: clicking REXdb in Files changes the selection, so the
-            # files chosen when the dialog opened are used.
-            run_files = files or [
-                p for p in self._selected_files_for_tree()
+            # Non-modal: Files clicks can change the selection after open; when
+            # nothing was selected at open, re-read the panel. Prefer the files
+            # chosen when the dialog opened otherwise.
+            run_files = [
+                p for p in (files or self._tree_candidate_files())
                 if str(p) != self._tree_options.rexdb_fasta
             ]
-            if run_files:
-                self._start_tree_job(run_files, self._tree_options)
+            if not run_files:
+                self._selected_files_for_tree()  # warning: select FASTA first
+                return
+            self._start_tree_job(run_files, self._tree_options)
 
         # Non-modal so a click in Files can fill the REXdb path (apply_path_from_panel).
         self._present_te_viz_dialog(dialog, _accepted)
@@ -4451,7 +4505,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "RT-domain tree",
-                "Choose REXdb first: Tree parameters → Alignment tab → REXdb.\n\n"
+                "Choose REXdb first: Tree parameters → REXdb.\n\n"
                 "Download Viridiplantae_v4.0.fasta and Viridiplantae_v4.0.classification "
                 "from github.com/repeatexplorer/rexdb into one folder.",
             )
@@ -4471,6 +4525,9 @@ class MainWindow(QMainWindow):
             enabled=bool(options.show_process_window),
             tool_key="tree",
             mirror_progress=False,
+            close_when_finished=bool(
+                getattr(options, "close_process_window_when_finished", False)
+            ),
         )
         self._start_background_job(
             worker,
@@ -4603,6 +4660,9 @@ class MainWindow(QMainWindow):
             enabled=bool(options.show_process_window),
             tool_key="map_reference",
             mirror_progress=False,
+            close_when_finished=bool(
+                getattr(options, "close_process_window_when_finished", False)
+            ),
         )
         self._start_background_job(
             worker,
@@ -4657,6 +4717,7 @@ class MainWindow(QMainWindow):
         enabled: bool,
         tool_key: str,
         mirror_progress: bool = True,
+        close_when_finished: bool = False,
     ) -> None:
         """Capture command output; show live when enabled, always show on failure."""
         from repeatviewer.widgets.process_monitor_dialog import (
@@ -4690,6 +4751,7 @@ class MainWindow(QMainWindow):
             live=enabled,
             title=title,
             cancelled_message=CANCELLED_MESSAGE,
+            close_when_finished=bool(close_when_finished),
             parent=self,
         )
         setattr(self, bridge_attr, bridge)
@@ -4989,6 +5051,9 @@ class MainWindow(QMainWindow):
             enabled=show_log,
             tool_key="fastga",
             mirror_progress=False,
+            close_when_finished=bool(
+                getattr(options, "close_process_window_when_finished", False)
+            ),
         )
         self._start_background_job(
             worker,
@@ -5301,7 +5366,6 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
         self._populate_align_menu(tools_menu.addMenu("&Align"))
-        self._populate_fastga_menu(tools_menu.addMenu("Fast&GA"))
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Map to Reference"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
@@ -6803,7 +6867,7 @@ class MainWindow(QMainWindow):
                 self._open_fastga_dialog,
                 tooltip=(
                     "Click: the Align window on its FastGA tab.\n"
-                    "Right-click: action chosen in the Options tab."
+                    "Right-click: run FastGA with saved parameters."
                 ),
                 right_click_slot=self._quick_fastga_right_click,
             )
@@ -7007,7 +7071,11 @@ class MainWindow(QMainWindow):
         seq_files: list[Path],
         job_kwargs: dict[str, Any],
     ) -> int:
-        n = len(seq_files)
+        # Sequence Annotation advances one step per FASTA record; BLAST uses files.
+        if func_name == "te_annotation":
+            n = max(1, self._count_sequences_in_fastas(seq_files) or len(seq_files))
+        else:
+            n = len(seq_files)
         blast_opts = job_kwargs.get("blast_options")
         if func_name == "blast" and blast_opts is not None and blast_opts.active_database_name:
             return n
@@ -7023,7 +7091,7 @@ class MainWindow(QMainWindow):
         if func_name in {"blast", "teaid"}:
             return n * pan_n
         if func_name == "flexidot":
-            if n > 1 and job_kwargs.get("flexidot_combined", True):
+            if len(seq_files) > 1 and job_kwargs.get("flexidot_combined", True):
                 return pan_n
             return n * pan_n
         if func_name.startswith("plugin:"):
@@ -9488,18 +9556,19 @@ class MainWindow(QMainWindow):
     def _open_align_dialog(self, *, initial_tab: str | None = None) -> None:
         """Align parameters: Cancel / Save / Run (toolbar and menu use the same dialog).
 
-        Non-modal, so a click in the Files panel can fill the FastGA reference.
-        FastGA compares the FASTA files selected when the window opened (the
-        reference click changes the selection); MAFFT / MUSCLE use the
-        selection at Run, as before.
+        Non-modal, so a click in the Files panel can fill MAFFT/MUSCLE/FastGA Define
+        inputs or the FastGA reference. Inputs default to the Files selection when
+        the window opened.
         """
         fastga_files = self._fastga_candidate_files()
+        setting_genome = self._project_setting_genome()
         dialog = AlignParamsDialog(
             initial=self._align_options,
             use_system_mafft=self._project.use_system_mafft,
             use_system_muscle=self._project.use_system_muscle,
-            fastga_initial=self._fastga_options,
+            fastga_initial=self._fastga_options_for_next_run(),
             fastga_files=fastga_files,
+            fastga_default_reference=setting_genome,
             initial_tab=initial_tab,
             parent=self,
         )
@@ -9508,9 +9577,18 @@ class MainWindow(QMainWindow):
         )
 
         def _accepted(d) -> None:
+            from dataclasses import replace
+
+            from repeatviewer.job_options import FASTGA_INPUT_SELECTED
+
             self._align_options = d.options()
             save_align_options(self._align_options)
-            self._fastga_options = d.fastga_options()
+            run_opts = d.fastga_options()
+            run_files = d.fastga_run_files()
+            # Next open/run always uses the Files selection again.
+            self._fastga_options = replace(
+                run_opts, input_source=FASTGA_INPUT_SELECTED
+            )
             save_fastga_options(self._fastga_options)
             self._project.use_system_mafft = d.use_system_mafft()
             self._project.use_system_muscle = d.use_system_muscle()
@@ -9521,10 +9599,54 @@ class MainWindow(QMainWindow):
             aligner = d.selected_aligner()
             if aligner == ALIGNER_FASTGA:
                 files = self._selected_files_for_fastga(
-                    self._fastga_options, files=fastga_files or None
+                    run_opts, files=run_files or None
                 )
                 if files:
-                    self._start_fastga_job(files, self._fastga_options)
+                    self._start_fastga_job(files, run_opts)
+                return
+            if aligner == ALIGNER_MUSCLE:
+                from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+                if d.muscle_input_source() == ALIGN_INPUT_DEFINE:
+                    muscle_files = d.muscle_run_files()
+                    if not muscle_files:
+                        QMessageBox.information(
+                            self,
+                            "No FASTA inputs",
+                            "Add one or more FASTA files or folders under Define inputs.",
+                        )
+                        return
+                    self._align_sequences(
+                        muscle_files,
+                        engine=aligner,
+                        mode=self._mode_for_aligner(aligner),
+                    )
+                    return
+                self._align_sequences(
+                    engine=aligner, mode=self._mode_for_aligner(aligner)
+                )
+                return
+            if aligner == ALIGNER_MAFFT:
+                from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+                if d.mafft_input_source() == ALIGN_INPUT_DEFINE:
+                    mafft_files = d.mafft_run_files()
+                    if not mafft_files:
+                        QMessageBox.information(
+                            self,
+                            "No FASTA inputs",
+                            "Add one or more FASTA files or folders under Define inputs.",
+                        )
+                        return
+                    self._align_sequences(
+                        mafft_files,
+                        engine=aligner,
+                        mode=self._mode_for_aligner(aligner),
+                    )
+                    return
+                self._align_sequences(
+                    engine=aligner, mode=self._mode_for_aligner(aligner)
+                )
                 return
             self._align_sequences(
                 engine=aligner, mode=self._mode_for_aligner(aligner)
@@ -9606,6 +9728,9 @@ class MainWindow(QMainWindow):
             title = f"{title} (combined)"
         total_steps = 1 if mode == ALIGN_MODE_COMBINED else len(seq_files)
         show_log = bool(getattr(opts, "show_process_window", False))
+        close_when_finished = bool(
+            getattr(opts, "close_process_window_when_finished", False)
+        )
         worker = AlignWorker(
             seq_files,
             options=opts,
@@ -9617,7 +9742,13 @@ class MainWindow(QMainWindow):
             stream_log=show_log,
             cancel=self._job_cancel,
         )
-        self._attach_process_monitor(worker, title=title, enabled=show_log, tool_key="align")
+        self._attach_process_monitor(
+            worker,
+            title=title,
+            enabled=show_log,
+            tool_key="align",
+            close_when_finished=close_when_finished,
+        )
         self._start_background_job(
             worker,
             job_title=title,
@@ -11366,43 +11497,6 @@ class MainWindow(QMainWindow):
             return None
         return valid
 
-    def _confirm_te_annotation_overwrite(self, fastas: list[Path]) -> bool:
-        """Ask before adding onto existing annotation JSON / GFF companions."""
-        from repeatviewer.backends.te_annotation_batch import (
-            existing_annotation_gff_paths,
-            existing_annotation_json_paths,
-        )
-
-        existing = [
-            *existing_annotation_json_paths(fastas),
-            *existing_annotation_gff_paths(fastas),
-        ]
-        # De-dupe by path string while keeping order.
-        seen: set[str] = set()
-        unique: list[Path] = []
-        for path in existing:
-            key = str(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(path)
-        if not unique:
-            return True
-        listing = "\n".join(f"  • {path.name}" for path in unique[:20])
-        if len(unique) > 20:
-            listing += f"\n  … and {len(unique) - 20} more"
-        answer = QMessageBox.question(
-            self,
-            "Add to existing annotations?",
-            "Annotation file(s) already exist for the selected sequence(s):\n\n"
-            f"{listing}\n\n"
-            "New detections will be added to the existing JSON annotations "
-            "(previous features are kept). Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        return answer == QMessageBox.StandardButton.Yes
-
     def _run_te_annotation_saved(self) -> None:
         single = self._te_annotation_fasta_selection()
         if single is None:
@@ -11415,8 +11509,6 @@ class MainWindow(QMainWindow):
                 "No annotation modules are saved. Open Sequence Annotation and choose "
                 "at least one auto-annotation module or similarity database.",
             )
-            return
-        if not self._confirm_te_annotation_overwrite(single):
             return
         self._apply_function(
             "te_annotation",
@@ -11458,8 +11550,6 @@ class MainWindow(QMainWindow):
             return
         single = self._te_annotation_fasta_selection()
         if single is None:
-            return
-        if not self._confirm_te_annotation_overwrite(single):
             return
         self._apply_function(
             "te_annotation",
@@ -13851,12 +13941,19 @@ class MainWindow(QMainWindow):
                 )
                 return
         show_log = False
+        close_when_finished = False
         if func_name == "blast":
             blast_opts = job_kwargs.get("blast_options") or self._blast_options
             show_log = bool(getattr(blast_opts, "show_process_window", False))
+            close_when_finished = bool(
+                getattr(blast_opts, "close_process_window_when_finished", False)
+            )
         elif func_name == "flexidot":
             flex_opts = job_kwargs.get("flexidot_options") or self._flexidot_options
             show_log = bool(getattr(flex_opts, "show_process_window", False))
+            close_when_finished = bool(
+                getattr(flex_opts, "close_process_window_when_finished", False)
+            )
         worker = FunctionWorker(
             self._run_function_job,
             func_name,
@@ -13869,6 +13966,7 @@ class MainWindow(QMainWindow):
             title=func_name,
             enabled=show_log,
             tool_key=func_name,
+            close_when_finished=close_when_finished,
         )
         self._start_background_job(
             worker,

@@ -258,14 +258,24 @@ def revcomp(seq: str) -> str:
 
 
 def engine_executable(engine: str, *, system_path_only: bool = False) -> str | None:
-    """minimap2 / Bowtie2: the conda env from Settings first, then PATH."""
+    """minimap2 / Bowtie2 executable.
+
+    ``system_path_only``: PATH only. Otherwise for minimap2 the bundled binary,
+    then the conda env from Settings, then PATH. Bowtie2 is not bundled.
+    """
+    if engine == MAP_ENGINE_MINIMAP2 and not system_path_only:
+        from repeatviewer.backends.minimap2_tools import bundled_minimap2_executable
+
+        bundled = bundled_minimap2_executable()
+        if bundled:
+            return bundled
     for name in _EXECUTABLES.get(engine, ()):
         if system_path_only:
             found = shutil.which(name)
         else:
             from repeatviewer.conda_tools import which_tool
 
-            found = which_tool(name)
+            found = which_tool(name) or shutil.which(name)
         if found:
             return found
     return None
@@ -286,6 +296,23 @@ def bowtie2_build_executable(bowtie2: str) -> str | None:
 
 
 def engine_install_hint(engine: str) -> str:
+    if engine == MAP_ENGINE_MINIMAP2:
+        from repeatviewer.backends.minimap2_tools import (
+            MINIMAP2_VERSION,
+            bundled_minimap2_executable,
+        )
+
+        if bundled_minimap2_executable():
+            return (
+                f"minimap2 {MINIMAP2_VERSION} is bundled with RepeatViewer. "
+                "Leave \"Use programs from the system PATH\" off to use it, "
+                "or tick that box to use your own install."
+            )
+        return (
+            f"minimap2 {MINIMAP2_VERSION} should be bundled with RepeatViewer but was not found. "
+            "Reinstall the app, or install it yourself:\n"
+            "  conda install -c conda-forge -c bioconda minimap2"
+        )
     pkg = _CONDA_PACKAGE.get(engine, engine)
     return ("Install it into the conda env set in File → Settings → External tools:\n"
             f"  conda install -c conda-forge -c bioconda {pkg}")

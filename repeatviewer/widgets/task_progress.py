@@ -66,7 +66,7 @@ class TaskProgressPanel(QWidget):
             self._bar.setRange(0, self._total)
             self._bar.setValue(0)
             if self._total > 1:
-                self._bar.setFormat(f"0 / {self._total}")
+                self._bar.setFormat("%v / %m")
             else:
                 self._bar.setFormat("")
         self._set_running_label("")
@@ -80,8 +80,7 @@ class TaskProgressPanel(QWidget):
         completed = max(0, min(completed, self._total))
         self._bar.setValue(completed)
         if self._total > 1:
-            remaining = self._total - completed
-            self._bar.setFormat(f"{completed} done, {remaining} left")
+            self._bar.setFormat("%v / %m")
         self._set_running_label(current_file)
 
     def reset(self) -> None:

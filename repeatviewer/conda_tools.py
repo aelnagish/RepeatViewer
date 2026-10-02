@@ -34,6 +34,7 @@ _original_path: str | None = None
 _wsl_bin_cache: str | None | object = object()  # sentinel = unset
 _wsl_resolve_cache: dict[str, str | None] = {}
 _wsl_which_cache: dict[tuple[str, str], str | None] = {}
+_conda_roots_cache: list[Path] | None = None
 
 # Login shells inherit Windows HOME/PATH and conda hook noise. Always start a
 # clean bash and restore the Linux home from passwd (Windows HOME is often
@@ -113,13 +114,19 @@ def _wsl_first_line(result: subprocess.CompletedProcess[str]) -> str | None:
 
 
 def _clear_wsl_caches() -> None:
-    global _wsl_bin_cache
+    global _wsl_bin_cache, _conda_roots_cache
     _wsl_bin_cache = object()
     _wsl_resolve_cache.clear()
     _wsl_which_cache.clear()
+    _conda_roots_cache = None
 
 
 def _candidate_conda_roots() -> list[Path]:
+    """Conda install roots used to resolve env names. Cached (``conda info --base`` is slow)."""
+    global _conda_roots_cache
+    if _conda_roots_cache is not None:
+        return _conda_roots_cache
+
     roots: list[Path] = []
     seen: set[str] = set()
 
@@ -165,7 +172,9 @@ def _candidate_conda_roots() -> list[Path]:
     add(Path("/opt/miniconda3"))
     add(Path("/opt/anaconda3"))
 
-    if conda_exe:
+    # Prefer filesystem guesses first; only shell out if we still have no roots.
+    # ``conda info --base`` can take seconds and was blocking the FastGA tab.
+    if not roots and conda_exe:
         try:
             from repeatviewer.external_process import windows_hidden_process_kwargs
 
@@ -182,6 +191,7 @@ def _candidate_conda_roots() -> list[Path]:
         except (OSError, subprocess.SubprocessError):
             pass
 
+    _conda_roots_cache = roots
     return roots
 
 

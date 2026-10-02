@@ -88,7 +88,9 @@ def test_blast_gff_output_path() -> None:
 
 def test_kept_input_name_used_by_align_and_combine(tmp_path: Path) -> None:
     from repeatviewer.backends.sequence_aligner import (
+        alignment_output_stem,
         combined_alignment_output_stem,
+        _next_available_fasta,
     )
     from repeatviewer.backends.sequence_compose import default_group_name
     from repeatviewer.tool_output_paths import kept_input_name
@@ -98,7 +100,15 @@ def test_kept_input_name_used_by_align_and_combine(tmp_path: Path) -> None:
     a.write_text(">a\nA\n")
     b.write_text(">b\nA\n")
     assert kept_input_name(a) == "reads.fa"
-    assert combined_alignment_output_stem([a, b]) == "reads.fa_msa_multi"
+    assert alignment_output_stem(a, engine="mafft") == "reads.fa_mafft"
+    assert alignment_output_stem(a, engine="muscle") == "reads.fa_muscle"
+    assert combined_alignment_output_stem([a, b], engine="mafft") == "reads.fa_mafft"
+    assert combined_alignment_output_stem([a, b], engine="muscle") == "reads.fa_muscle"
+    first = _next_available_fasta(tmp_path, "reads.fa_mafft")
+    assert first.name == "reads.fa_mafft.fa"
+    first.write_text(">x\nA\n")
+    second = _next_available_fasta(tmp_path, "reads.fa_mafft")
+    assert second.name == "reads.fa_mafft_1.fa"
     assert default_group_name([a, b]) == "reads.fa_and_other.fasta_comb"
 
 

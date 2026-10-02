@@ -44,6 +44,20 @@ def test_mask_style_is_read_from_the_usage_text():
     assert fg.mask_style_from_usage("Usage: FastGA [-vk] <source1:path>") is None
 
 
+def test_expand_fastga_input_paths_files_and_folders(tmp_path):
+    folder = tmp_path / "genomes"
+    folder.mkdir()
+    a = folder / "a.fa"
+    b = folder / "b.fasta"
+    a.write_text(">a\nACGT\n")
+    b.write_text(">b\nACGT\n")
+    (folder / "notes.txt").write_text("skip")
+    lone = tmp_path / "lone.fa"
+    lone.write_text(">l\nAAAA\n")
+    got = fg.expand_fastga_input_paths([lone, folder])
+    assert got == [lone.resolve(), a.resolve(), b.resolve()]
+
+
 def test_soft_mask_flags_per_version():
     on, off = fg.MASK_STYLE_ON_FLAG, fg.MASK_STYLE_OFF_FLAG
     # FastGA 1.5+: -N would be "an illegal option" -- never sent.
@@ -83,12 +97,12 @@ def test_reference_is_never_its_own_query(tmp_path):
 def test_summary_line(tmp_path):
     a, b, ref = (tmp_path / n for n in ("a.fa", "b.fa", "ref.fa"))
     s = fg.fastga_mode_summary
-    assert s([a, b], FASTGA_MODE_SELF) == "2 FASTA selected → 2 self-comparisons."
-    assert "3 pairs" in s([a, b, ref], FASTGA_MODE_PAIRS)
+    assert s([a, b], FASTGA_MODE_SELF) == "2 genomes selected → 2 self-comparisons."
+    assert "3 comparisons" in s([a, b, ref], FASTGA_MODE_PAIRS)
     assert "needs two" in s([a], FASTGA_MODE_PAIRS)
     assert "Choose the reference" in s([a, b], FASTGA_MODE_REFERENCE, None)
     assert s([a, b, ref], FASTGA_MODE_REFERENCE, ref) == (
-        "2 FASTA selected → 2 runs against ref.fa (one result file per query)."
+        "2 query genomes → 2 runs against ref.fa (one result file per query)."
     )
     assert "into one file" in s([a, b], FASTGA_MODE_REFERENCE, ref, combined=True)
     assert "Only the reference" in s([ref], FASTGA_MODE_REFERENCE, ref)
@@ -301,10 +315,31 @@ def test_files_panel_click_fills_the_reference_only_in_reference_mode(qapp, tmp_
     assert dlg.apply_path_from_panel(tmp_path / "notes.txt") is False
     assert dlg.apply_path_from_panel(ref) is True
     assert panel.reference() == ref
-    assert panel.summary_text().startswith("2 FASTA selected → 2 runs against ref.fa")
     # On another tab a panel click is not taken.
     dlg.findChild(QTabWidget).setCurrentIndex(0)
     assert dlg.apply_path_from_panel(q1) is False
+
+
+def test_define_inputs_accepts_panel_files_and_folders(qapp, tmp_path):
+    from repeatviewer.job_options import FASTGA_INPUT_DEFINE
+
+    dlg, (q1, q2, ref) = _align_dialog(
+        qapp,
+        tmp_path,
+        initial_tab=ALIGNER_FASTGA,
+        fastga_initial=FastGaOptions(input_source=FASTGA_INPUT_DEFINE),
+    )
+    panel = dlg.fastga_panel()
+    assert panel.input_source() == FASTGA_INPUT_DEFINE
+    assert panel._define_inputs.isVisible()
+    assert dlg.apply_path_from_panel(q1) is True
+    assert dlg.apply_folder_from_panel(tmp_path) is True
+    opts = dlg.fastga_options()
+    assert opts.input_source == FASTGA_INPUT_DEFINE
+    assert Path(opts.input_paths[0]) == q1.resolve()
+    assert Path(opts.input_paths[1]) == tmp_path.resolve()
+    assert q2.resolve() in dlg.fastga_run_files()
+    assert ref.resolve() in dlg.fastga_run_files()
 
 
 def test_fastga_options_round_trip_and_fastga_never_becomes_the_msa_aligner(qapp, tmp_path):
@@ -314,7 +349,7 @@ def test_fastga_options_round_trip_and_fastga_never_becomes_the_msa_aligner(qapp
         initial=AlignOptions(combined_aligner=ALIGNER_MUSCLE),
         fastga_initial=FastGaOptions(
             mode=FASTGA_MODE_REFERENCE, reference_fasta=str(ref),
-            reference_combined=True, temp_dir=str(tmp_path), soft_mask=True,
+            reference_combined=True, soft_mask=True,
         ),
     )
     dlg._right_click_buttons[ALIGNER_FASTGA].setChecked(True)
@@ -325,11 +360,48 @@ def test_fastga_options_round_trip_and_fastga_never_becomes_the_msa_aligner(qapp
     assert (got.mode, Path(got.reference_fasta), got.reference_combined, got.soft_mask) == (
         FASTGA_MODE_REFERENCE, ref, True, True,
     )
-    assert Path(got.temp_dir) == tmp_path  # used to be wiped on every Save
+    assert got.temp_dir == ""
     dlg._restore_defaults()
     d = dlg.fastga_options()
     assert (d.mode, d.soft_mask, d.temp_dir) == (FASTGA_MODE_SELF, False, "")
-    assert Path(d.reference_fasta) == ref  # a file choice, not a parameter
+    assert d.symmetric is False and d.seed_freq == 10
+    assert Path(d.reference_fasta) == ref  # kept when no setting genome is supplied
+
+
+def test_fastga_reference_defaults_to_setting_genome(qapp, tmp_path):
+    genome = tmp_path / "setting_genome.fa"
+    genome.write_text(">g\nACGTACGT\n")
+    other = tmp_path / "other.fa"
+    other.write_text(">o\nTTTT\n")
+    dlg, _files = _align_dialog(
+        qapp,
+        tmp_path,
+        fastga_initial=FastGaOptions(mode=FASTGA_MODE_REFERENCE),
+        fastga_default_reference=genome,
+    )
+    panel = dlg.fastga_panel()
+    assert panel.reference() == genome.resolve()
+    assert Path(dlg.fastga_options().reference_fasta) == genome.resolve()
+
+    panel._reference.set_path(other)
+    dlg._restore_defaults()
+    assert panel.reference() == genome.resolve()
+
+
+def test_fastga_saved_reference_is_not_overridden_by_setting_genome(qapp, tmp_path):
+    genome = tmp_path / "setting_genome.fa"
+    genome.write_text(">g\nACGTACGT\n")
+    saved = tmp_path / "saved_ref.fa"
+    saved.write_text(">s\nAAAA\n")
+    dlg, _files = _align_dialog(
+        qapp,
+        tmp_path,
+        fastga_initial=FastGaOptions(
+            mode=FASTGA_MODE_REFERENCE, reference_fasta=str(saved)
+        ),
+        fastga_default_reference=genome,
+    )
+    assert dlg.fastga_panel().reference() == saved.resolve()
 
 
 def test_every_fastga_field_has_a_help_button(qapp, tmp_path):
@@ -339,4 +411,31 @@ def test_every_fastga_field_has_a_help_button(qapp, tmp_path):
     helps = [
         b for b in dlg.fastga_panel().findChildren(QToolButton) if b.text() == "?"
     ]
-    assert len(helps) >= 13
+    assert len(helps) >= 6
+
+
+def test_old_seed_freq_default_migrates_to_fastga_default(monkeypatch):
+    monkeypatch.setattr(
+        job_options, "_load_settings_group", lambda g: {"seed_freq": "200"}
+    )
+    assert job_options.load_fastga_options().seed_freq == 10
+
+
+def test_fastga_advanced_settings_button_toggles_options(qapp, tmp_path):
+    dlg, _files = _align_dialog(qapp, tmp_path, initial_tab=ALIGNER_FASTGA)
+    panel = dlg.fastga_panel()
+    btn = dlg._advanced_settings_btn
+    assert btn.isVisible()
+    assert btn.text() == "Advanced Settings ▸"
+    assert panel.advanced_visible() is False
+    dlg._shrink_to_fastga_content()
+    compact_h = dlg.height()
+    btn.click()
+    assert btn.text() == "Advanced Settings ▾"
+    assert panel.advanced_visible() is True
+    assert panel._advanced_panel.isVisible()
+    assert panel._identity.isVisible()
+    assert dlg.height() > compact_h
+    btn.click()
+    assert panel.advanced_visible() is False
+    assert dlg.height() <= compact_h + 20

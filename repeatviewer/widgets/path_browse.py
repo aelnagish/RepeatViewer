@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLineEdit,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QWidget,
@@ -44,7 +45,7 @@ class PathBrowseRow(QWidget):
         browse_handler: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
-        if mode not in ("file", "directory"):
+        if mode not in ("file", "directory", "file_or_directory"):
             raise ValueError(f"Unsupported PathBrowseRow mode: {mode!r}")
         self._mode = mode
         self._browse_title = browse_title
@@ -178,6 +179,25 @@ class PathBrowseRow(QWidget):
                 self._path.setText(chosen)
                 self.path_changed.emit()
             return
+        if self._mode == "file_or_directory":
+            menu = QMenu(self)
+            act_file = menu.addAction("FASTA file…")
+            act_folder = menu.addAction("Folder…")
+            chosen_act = menu.exec(
+                self._browse_btn.mapToGlobal(self._browse_btn.rect().bottomLeft())
+            )
+            if chosen_act is act_folder:
+                chosen = QFileDialog.getExistingDirectory(
+                    self,
+                    "Choose a folder of FASTA files",
+                    start,
+                )
+                if chosen:
+                    self._path.setText(chosen)
+                    self.path_changed.emit()
+                return
+            if chosen_act is not act_file:
+                return
         chosen, _ = QFileDialog.getOpenFileName(
             self,
             self._browse_title,
