@@ -15,6 +15,27 @@ def _count(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
+def _action_phrase(kind: str, count: int, action: str = "") -> str:
+    """What a browser undo/redo step did, e.g. "Delete 3 Files" ("" if unknown)."""
+    if kind == "files":
+        return f"Delete {_count(count, 'File')}"
+    if kind == "delete_folders":
+        return f"Delete {_count(count, 'Folder')}"
+    if kind == "hide_folders":
+        return f"Remove {_count(count, 'Folder')} from List"
+    if kind == "transfer":
+        return f"{action or 'Copy'} {_count(count, 'File')}"
+    if kind == "created_folders":
+        return f"Duplicate {_count(count, 'Folder')}"
+    if kind == "rename_file":
+        return "Rename File"
+    if kind == "rename_folder":
+        return "Rename Folder"
+    if kind == "batch_rename":
+        return f"Rename {_count(count, 'File')}"
+    return ""
+
+
 def browser_undo_label(entry: dict[str, Any] | None) -> str:
     """Menu text for Edit > Undo when the file or folder panel has focus.
 
@@ -23,23 +44,109 @@ def browser_undo_label(entry: dict[str, Any] | None) -> str:
     if not entry:
         return "Undo"
     kind = str(entry.get("kind") or "")
-    if kind == "files":
-        return f"Undo Delete {_count(len(entry.get('items') or []), 'File')}"
-    if kind == "delete_folders":
-        return f"Undo Delete {_count(len(entry.get('items') or []), 'Folder')}"
-    if kind == "hide_folders":
-        n = len(entry.get("folders") or [])
-        return f"Undo Remove {_count(n, 'Folder')} from List"
-    if kind == "transfer":
-        action = str(entry.get("action") or "Copy")
-        return f"Undo {action} {_count(int(entry.get('count') or 0), 'File')}"
-    if kind == "created_folders":
-        return f"Undo Duplicate {_count(len(entry.get('items') or []), 'Folder')}"
-    if kind == "rename_file":
-        return "Undo Rename File"
-    if kind == "rename_folder":
-        return "Undo Rename Folder"
-    return "Undo"
+    if kind in {"files", "delete_folders", "created_folders"}:
+        count = len(entry.get("items") or [])
+    elif kind == "hide_folders":
+        count = len(entry.get("folders") or [])
+    else:
+        count = int(entry.get("count") or 0)
+    phrase = _action_phrase(kind, count, str(entry.get("action") or ""))
+    return f"Undo {phrase}" if phrase else "Undo"
+
+
+def browser_redo_label(entry: dict[str, Any] | None) -> str:
+    """Menu text for Edit > Redo; ``entry`` is the newest item of the redo stack."""
+    if not entry:
+        return "Redo"
+    phrase = _action_phrase(
+        str(entry.get("kind") or ""),
+        int(entry.get("count") or 0),
+        str(entry.get("action") or ""),
+    )
+    return f"Redo {phrase}" if phrase else "Redo"
+
+
+# IUPAC complement; U pairs with A. Gaps and N stay as they are.
+_DNA_COMPLEMENT = str.maketrans(
+    "ACGTURYSWKMBDHVNacgturyswkmbdhvn",
+    "TGCAAYRSWMKVHDBNtgcaayrswmkvhdbn",
+)
+_RNA_COMPLEMENT = str.maketrans(
+    "ACGTURYSWKMBDHVNacgturyswkmbdhvn",
+    "UGCAAYRSWMKVHDBNugcaayrswmkvhdbn",
+)
+_SEQUENCE_LETTERS = frozenset("ACGTURYSWKMBDHVNacgturyswkmbdhvn-.")
+_IGNORED_IN_SEQUENCE = frozenset(" \t\r\n0123456789")
+
+
+def _reverse_complement_block(lines: list[str]) -> tuple[list[str], int] | None:
+    """Sequence lines -> reverse-complemented lines (same line width), base count."""
+    letters = [c for line in lines for c in line if c not in _IGNORED_IN_SEQUENCE]
+    if any(c not in _SEQUENCE_LETTERS for c in letters):
+        return None
+    sequence = "".join(letters)
+    if not sequence:
+        return [], 0
+    upper = sequence.upper()
+    table = _RNA_COMPLEMENT if "U" in upper and "T" not in upper else _DNA_COMPLEMENT
+    rc = sequence.translate(table)[::-1]
+    widths = [
+        len([c for c in line if c not in _IGNORED_IN_SEQUENCE])
+        for line in lines
+    ]
+    widths = [w for w in widths if w]
+    width = widths[0] if len(widths) > 1 else len(rc)
+    width = max(1, width)
+    out = [rc[i : i + width] for i in range(0, len(rc), width)]
+    bases = sum(1 for c in rc if c not in "-.")
+    return out, bases
+
+
+def reverse_complement_text(text: str) -> tuple[str, int] | None:
+    """Reverse complement of pasted sequence text, or None if it is not DNA/RNA.
+
+    Plain sequence: spaces, line breaks and numbers are ignored, and the result
+    keeps the line width of the original (one line stays one line). FASTA:
+    every record is reverse-complemented and its header gets
+    " reverse_complement", as Sequence > Reverse Complement does. IUPAC codes,
+    lower case and gaps are kept; RNA (U, no T) stays RNA. Returns the text and
+    the number of bases.
+    """
+    if not text or not text.strip():
+        return None
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    trailing_newline = text.endswith(("\n", "\r"))
+    if trailing_newline and lines and lines[-1] == "":
+        lines = lines[:-1]
+    if not any(line.lstrip().startswith(">") for line in lines):
+        result = _reverse_complement_block(lines)
+        if result is None or not result[0]:
+            return None
+        out, bases = result
+        return "\n".join(out) + ("\n" if trailing_newline else ""), bases
+
+    blocks: list[tuple[str | None, list[str]]] = []
+    for line in lines:
+        if line.lstrip().startswith(">"):
+            blocks.append((line.strip(), []))
+        elif blocks:
+            blocks[-1][1].append(line)
+        elif line.strip():
+            blocks.append((None, [line]))
+    out_lines: list[str] = []
+    total = 0
+    for header, seq_lines in blocks:
+        result = _reverse_complement_block(seq_lines)
+        if result is None:
+            return None
+        rc_lines, bases = result
+        total += bases
+        if header is not None:
+            out_lines.append(f"{header} reverse_complement")
+        out_lines.extend(rc_lines)
+    if total == 0:
+        return None
+    return "\n".join(out_lines) + ("\n" if trailing_newline else ""), total
 
 
 def path_fingerprint(path: Path) -> str | None:

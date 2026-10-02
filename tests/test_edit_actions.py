@@ -65,3 +65,44 @@ def test_fingerprint_notices_changes_but_not_finder_files(tmp_path):
     os.utime(single, ns=(1, 1))
     assert path_fingerprint(single) != fp
     assert path_fingerprint(tmp_path / "missing") is None
+
+
+def test_batch_rename_and_redo_labels():
+    from repeatviewer.edit_actions import browser_redo_label
+
+    assert browser_undo_label({"kind": "batch_rename", "count": 12}) == "Undo Rename 12 Files"
+    assert browser_redo_label(None) == "Redo"
+    assert browser_redo_label({"kind": "something-new"}) == "Redo"
+    assert browser_redo_label({"kind": "files", "count": 2}) == "Redo Delete 2 Files"
+    assert browser_redo_label({"kind": "transfer", "action": "Paste", "count": 1}) == "Redo Paste 1 File"
+    assert browser_redo_label({"kind": "hide_folders", "count": 1}) == "Redo Remove 1 Folder from List"
+    assert browser_redo_label({"kind": "created_folders", "count": 2}) == "Redo Duplicate 2 Folders"
+    assert browser_redo_label({"kind": "rename_file", "count": 1}) == "Redo Rename File"
+    assert browser_redo_label({"kind": "batch_rename", "count": 3}) == "Redo Rename 3 Files"
+
+
+def test_reverse_complement_text_plain_and_wrapped():
+    from repeatviewer.edit_actions import reverse_complement_text
+
+    assert reverse_complement_text("ACGTN") == ("NACGT", 5)
+    assert reverse_complement_text("acgRY\n") == ("RYcgt\n", 5)
+    # Line width of the original is kept.
+    assert reverse_complement_text("AAAACCCC\nGGGGTT\n") == ("AACCCCGG\nGGTTTT\n", 14)
+    # Numbers and spaces (GenBank style) are ignored, gaps kept.
+    assert reverse_complement_text("  1 acgt acgt\n  9 aa") == ("ttacgtac\ngt", 10)
+    assert reverse_complement_text("AC-GT") == ("AC-GT", 4)
+    # RNA stays RNA.
+    assert reverse_complement_text("UUAG") == ("CUAA", 4)
+
+
+def test_reverse_complement_text_fasta_and_rejects():
+    from repeatviewer.edit_actions import reverse_complement_text
+
+    text = ">s1 desc\nAAAC\nGG\n>s2\nUUAG"
+    assert reverse_complement_text(text) == (
+        ">s1 desc reverse_complement\nCCGT\nTT\n>s2 reverse_complement\nCUAA",
+        10,
+    )
+    assert reverse_complement_text("MKLVE") is None      # protein
+    assert reverse_complement_text("   ") is None
+    assert reverse_complement_text(">only header") is None

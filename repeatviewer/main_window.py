@@ -465,7 +465,7 @@ from repeatviewer.widgets.hidden_folders import (
 )
 from repeatviewer.backends.find_in_file import find_in_fasta, first_index_after, next_index
 from repeatviewer.backends.motif_search import parse_position
-from repeatviewer.edit_actions import browser_undo_label, path_fingerprint
+from repeatviewer.edit_actions import browser_redo_label, browser_undo_label, path_fingerprint
 from repeatviewer.widgets.folder_colors import (
     FOLDER_COLOR_PRESETS,
     apply_folder_item_color,
@@ -2149,6 +2149,9 @@ class MainWindow(QMainWindow):
         # Soft-deleted files / folder actions for Cmd/Ctrl+Z restore.
         # Each entry is a dict with ``kind`` in {files, hide_folders, delete_folders}.
         self._browser_undo_stack: list[dict[str, Any]] = []
+        # Undone file/folder actions for Edit > Redo; cleared by any new action.
+        self._browser_redo_stack: list[dict[str, Any]] = []
+        self._browser_new_action_at = 0.0  # time.monotonic() of the last new action
         self._deleted_files_trash_root = (
             Path(tempfile.gettempdir()) / "RepeatViewerDeletedFiles"
         )
@@ -2273,6 +2276,7 @@ class MainWindow(QMainWindow):
         self._file_list.paste_files_requested.connect(self._paste_files_shortcut)
         self._file_list.duplicate_files_requested.connect(self._duplicate_selected_files)
         self._file_list.rename_file_requested.connect(self._rename_file)
+        self._file_list.batch_rename_requested.connect(self._batch_rename_files)
         self._file_list.extract_sequences_requested.connect(
             self._extract_sequences_from_list
         )
@@ -5449,16 +5453,27 @@ class MainWindow(QMainWindow):
             self._edit_actions[key] = action
 
         add("undo", "Undo", self._edit_undo, std.Undo)
+        add("redo", "Redo", self._edit_redo)
+        # Every platform key for Redo: Cmd+Shift+Z on macOS, Ctrl+Y and
+        # Ctrl+Shift+Z on Windows and Linux.
+        self._edit_actions["redo"].setShortcuts(QKeySequence.keyBindings(std.Redo))
         menu.addSeparator()
         add("cut", "Cut", self._edit_cut, std.Cut)
         add("copy", "Copy", self._edit_copy, std.Copy)
         add("paste", "Paste", self._edit_paste, std.Paste)
+        add(
+            "paste_rc",
+            "Paste Reverse Complement",
+            self._edit_paste_reverse_complement,
+            "Ctrl+Shift+V",
+        )
         # No key on purpose: Del/Backspace keep their panel-scoped shortcuts
         # (file panel, Annotation view), so the destructive key is not rerouted.
         add("delete", "Delete", self._edit_delete)
         add("select_all", "Select All", self._edit_select_all, std.SelectAll)
         menu.addSeparator()
         add("rename", "Rename…", self._edit_rename, Qt.Key.Key_F2)
+        add("batch_rename", "Batch Rename…", self._edit_batch_rename)
         add("duplicate", "Duplicate", self._edit_duplicate)
 
         color_menu = QMenu("File Color", self)
@@ -5589,6 +5604,60 @@ class MainWindow(QMainWindow):
         else:
             self._edit_forward_key("undo", QKeySequence.StandardKey.Undo)
 
+    def _redo_typing_page(self, area: str):
+        """The Preview page whose undone typing Edit > Redo should bring back, or None.
+
+        From the file or folder panel this is only when the typing was undone
+        after the newest file action and after the newest undone file action
+        (Redo takes back the most recent Undo first).
+        """
+        tabs = self._preview_tabs
+        page = tabs.currentWidget() if tabs is not None else None
+        can_redo = getattr(page, "can_redo_text", None)
+        if not callable(can_redo) or not can_redo():
+            return None
+        if area in ("files", "folders"):
+            undone = float(page.text_undone_at())
+            if undone <= self._browser_new_action_at:
+                return None
+            if self._browser_redo_stack:
+                if float(self._browser_redo_stack[-1].get("undone_at", 0.0)) > undone:
+                    return None
+        return page
+
+    def _edit_redo(self) -> None:
+        area, target = self._edit_focus()
+        if area == "tree" and target is not None:
+            redo = getattr(target, "redo", None)
+            if callable(redo):
+                redo()
+            return
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QPlainTextEdit)):
+            # A focused text box redoes its own typing.
+            self._edit_forward_key("redo", QKeySequence.StandardKey.Redo)
+            return
+        page = self._redo_typing_page(area)
+        if page is not None:
+            page.redo_text()
+            return
+        if area in ("files", "folders"):
+            self._redo_browser_action()
+        else:
+            self._edit_forward_key("redo", QKeySequence.StandardKey.Redo)
+
+    def _edit_paste_reverse_complement(self) -> None:
+        from repeatviewer.widgets.paste_reverse_complement import paste_reverse_complement
+
+        _pasted, message = paste_reverse_complement(QApplication.focusWidget())
+        self._set_status_message(message, 5000)
+
+    def _edit_batch_rename(self) -> None:
+        if self._edit_focus()[0] != "files":
+            return
+        paths = self._selected_files()
+        if paths:
+            self._batch_rename_files(paths)
+
     def _edit_cut(self) -> None:
         if self._edit_focus()[0] == "files":
             self._cut_files_shortcut()
@@ -5708,6 +5777,18 @@ class MainWindow(QMainWindow):
             set_state("undo", entry is not None, browser_undo_label(entry))
         else:
             set_state("undo", True, "Undo")
+        if area == "tree":
+            can_redo = getattr(_target, "can_redo", None)
+            set_state("redo", bool(can_redo()) if callable(can_redo) else True, "Redo")
+        elif focus_is_text:
+            set_state("redo", True, "Redo")
+        elif self._redo_typing_page(area) is not None:
+            set_state("redo", True, "Redo Typing")
+        elif browser:
+            entry = self._browser_redo_stack[-1] if self._browser_redo_stack else None
+            set_state("redo", entry is not None, browser_redo_label(entry))
+        else:
+            set_state("redo", True, "Redo")
         copy_ok = bool(files) if area == "files" else area != "folders"
         set_state("cut", copy_ok)
         set_state("copy", copy_ok)
@@ -5717,12 +5798,22 @@ class MainWindow(QMainWindow):
             )
         else:
             set_state("paste", True)
+        from repeatviewer.widgets.paste_reverse_complement import (
+            clipboard_has_text,
+            editable_text_widget,
+        )
+
+        set_state(
+            "paste_rc",
+            editable_text_widget(QApplication.focusWidget()) is not None and clipboard_has_text(),
+        )
         set_state("delete", bool(files))
         set_state(
             "rename",
             (area == "files" and len(files) == 1)
             or (area == "folders" and len(self._edit_selected_folders()) == 1),
         )
+        set_state("batch_rename", bool(files))
         set_state(
             "duplicate",
             bool(files) or (area == "folders" and bool(self._edit_selected_folders())),
@@ -5740,12 +5831,15 @@ class MainWindow(QMainWindow):
         """
         for key in (
             "undo",
+            "redo",
             "cut",
             "copy",
             "paste",
+            "paste_rc",
             "delete",
             "select_all",
             "rename",
+            "batch_rename",
             "duplicate",
             "file_color",
             "clear_highlights",
@@ -11768,16 +11862,19 @@ class MainWindow(QMainWindow):
             self._current_folder = target
             self._on_folder_selected(target)
 
-    def _clear_root_folders(self, folders: list[Path]) -> None:
+    def _clear_root_folders(
+        self, folders: list[Path], *, keep_redo: bool = False
+    ) -> list[Path]:
         if not folders:
-            return
+            return []
         removed_folders: list[Path] = []
         for folder in folders:
             if self._clear_root_folder(folder, show_status=False, record_undo=False):
                 removed_folders.append(folder.expanduser().resolve())
         if removed_folders:
             self._push_browser_undo(
-                {"kind": "hide_folders", "folders": removed_folders}
+                {"kind": "hide_folders", "folders": removed_folders},
+                keep_redo=keep_redo,
             )
             label = "folder" if len(removed_folders) == 1 else "folders"
             self._set_status_message(
@@ -11786,6 +11883,7 @@ class MainWindow(QMainWindow):
                 6000,
             )
             self._persist_workspace()
+        return removed_folders
 
     def _clear_root_folder(
         self,
@@ -11948,15 +12046,48 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        batch_dir = self._new_trash_batch_dir()
-        if batch_dir is None:
+        moved = self._move_folders_to_trash(targets)
+        if moved is None:
             QMessageBox.critical(
                 self,
                 "Delete folder failed",
                 "Could not create a temporary trash folder for undo.",
             )
             return
+        deleted, failed, batch = moved
+        if batch:
+            self._push_browser_undo({"kind": "delete_folders", "items": batch})
 
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Delete partially failed",
+                f"Deleted {deleted} folder(s).\n\nFailed:\n" + "\n".join(failed[:8]),
+            )
+        elif deleted:
+            label = "folder" if deleted == 1 else "folders"
+            self._set_status_message(
+                f"Deleted {deleted} {label} (⌘Z / Ctrl+Z to restore)",
+                6000,
+            )
+        elif failed:
+            QMessageBox.critical(
+                self,
+                "Delete folder failed",
+                "Failed:\n" + "\n".join(failed[:8]),
+            )
+
+    def _move_folders_to_trash(
+        self, targets: list[Path]
+    ) -> tuple[int, list[str], list[tuple[Path, Path]]] | None:
+        """Move folders into the session trash (Cmd+Z puts them back).
+
+        Returns (deleted, failures, (original, trash) pairs), or None when no
+        trash folder could be made. Does not record the Undo step.
+        """
+        batch_dir = self._new_trash_batch_dir()
+        if batch_dir is None:
+            return None
         deleted = 0
         failed: list[str] = []
         batch: list[tuple[Path, Path]] = []
@@ -11986,32 +12117,12 @@ class MainWindow(QMainWindow):
             )
             self._navigate_after_folder_removed(resolved)
 
-        if batch:
-            self._push_browser_undo({"kind": "delete_folders", "items": batch})
-        else:
+        if not batch:
             try:
                 batch_dir.rmdir()
             except OSError:
                 pass
-
-        if failed:
-            QMessageBox.warning(
-                self,
-                "Delete partially failed",
-                f"Deleted {deleted} folder(s).\n\nFailed:\n" + "\n".join(failed[:8]),
-            )
-        elif deleted:
-            label = "folder" if deleted == 1 else "folders"
-            self._set_status_message(
-                f"Deleted {deleted} {label} (⌘Z / Ctrl+Z to restore)",
-                6000,
-            )
-        elif failed:
-            QMessageBox.critical(
-                self,
-                "Delete folder failed",
-                "Failed:\n" + "\n".join(failed[:8]),
-            )
+        return deleted, failed, batch
 
     def _delete_folder(self, folder: Path) -> None:
         self._delete_folders([folder])
@@ -12187,6 +12298,7 @@ class MainWindow(QMainWindow):
         created: list[Path] = []
         failed: list[str] = []
         duplicated = 0
+        main_pairs: list[tuple[Path, Path]] = []  # for Edit > Redo
         for path in paths:
             src = path.expanduser().resolve()
             if not src.is_file():
@@ -12196,6 +12308,7 @@ class MainWindow(QMainWindow):
                 shutil.copy2(src, dest)
                 created.append(dest)
                 duplicated += 1
+                main_pairs.append((src, dest))
             except OSError as exc:
                 failed.append(f"{src.name}: {exc}")
                 continue
@@ -12214,7 +12327,9 @@ class MainWindow(QMainWindow):
                 {
                     "kind": "transfer",
                     "action": "Duplicate",
+                    "mode": "copy",
                     "count": duplicated,
+                    "files": main_pairs,
                     "moved": [],
                     "created": [(p, path_fingerprint(p)) for p in created],
                     "replaced": [],
@@ -12304,6 +12419,14 @@ class MainWindow(QMainWindow):
                 return
 
         pairs = [(folder, unique_folder_copy_path(folder)) for folder in folders]
+        self._start_folder_duplicate(pairs)
+
+    def _start_folder_duplicate(
+        self, pairs: list[tuple[Path, Path]], *, from_redo: bool = False
+    ) -> None:
+        """Copy each (folder, new folder) pair in the background (progress bar, Stop)."""
+        self._duplicate_pairs = list(pairs)
+        self._duplicate_from_redo = from_redo
         self._job_cancel.reset()
         self._show_job_progress("Duplicate Folder", 1)
         if self._task_progress is not None:
@@ -12349,6 +12472,7 @@ class MainWindow(QMainWindow):
         created = [Path(str(path)) for path in info.get("created", [])]
         fingerprints = list(info.get("fingerprints") or [])
         if created:
+            sources = {str(dest): src for src, dest in getattr(self, "_duplicate_pairs", [])}
             self._push_browser_undo(
                 {
                     "kind": "created_folders",
@@ -12356,7 +12480,11 @@ class MainWindow(QMainWindow):
                         (dest, fingerprints[i] if i < len(fingerprints) else None)
                         for i, dest in enumerate(created)
                     ],
-                }
+                    "sources": [
+                        (dest, sources[str(dest)]) for dest in created if str(dest) in sources
+                    ],
+                },
+                keep_redo=bool(getattr(self, "_duplicate_from_redo", False)),
             )
         self._finish_background_job()
         try:
@@ -12405,9 +12533,17 @@ class MainWindow(QMainWindow):
             self._duplicate_thread.deleteLater()
             self._duplicate_thread = None
 
-    def _push_browser_undo(self, entry: dict[str, Any]) -> None:
+    def _push_browser_undo(self, entry: dict[str, Any], *, keep_redo: bool = False) -> None:
+        """Record a file/folder action for Edit > Undo.
+
+        ``keep_redo`` is for actions done by Edit > Redo itself; any other (new)
+        action means what was undone before can no longer be redone.
+        """
         # When it happened: Edit > Undo compares this with unsaved typing in Preview.
         entry.setdefault("time", time.monotonic())
+        if not keep_redo:
+            self._browser_redo_stack.clear()
+            self._browser_new_action_at = float(entry["time"])
         self._browser_undo_stack.append(entry)
         while len(self._browser_undo_stack) > 20:
             old = self._browser_undo_stack.pop(0)
@@ -12477,7 +12613,15 @@ class MainWindow(QMainWindow):
                     expanded.append(candidate)
         return expanded
 
-    def _soft_delete_files(self, paths: list[Path]) -> tuple[int, list[str]]:
+    def _push_browser_redo(self, entry: dict[str, Any]) -> None:
+        """Record what an Undo just took back, for Edit > Redo."""
+        entry["undone_at"] = time.monotonic()
+        self._browser_redo_stack.append(entry)
+        del self._browser_redo_stack[:-20]
+
+    def _soft_delete_files(
+        self, paths: list[Path], *, keep_redo: bool = False
+    ) -> tuple[int, list[str]]:
         """Move files into a session trash folder so Cmd+Z can restore them."""
         if not paths:
             return 0, []
@@ -12505,7 +12649,7 @@ class MainWindow(QMainWindow):
             batch.append((resolved, dest))
 
         if batch:
-            self._push_browser_undo({"kind": "files", "items": batch})
+            self._push_browser_undo({"kind": "files", "items": batch}, keep_redo=keep_redo)
         else:
             try:
                 batch_dir.rmdir()
@@ -12533,6 +12677,8 @@ class MainWindow(QMainWindow):
             self._undo_rename_file(entry)
         elif kind == "rename_folder":
             self._undo_rename_folder(entry)
+        elif kind == "batch_rename":
+            self._undo_batch_rename(entry)
         else:
             self._set_status_message("Nothing to undo", 3000)
 
@@ -12558,6 +12704,7 @@ class MainWindow(QMainWindow):
             return
         problems: list[str] = []
         gone: list[Path] = []
+        put_back: list[Path] = []  # overwritten files restored
         removed = moved_back = restored = 0
         for path, fingerprint in reversed(created):
             if not path.exists():
@@ -12598,6 +12745,7 @@ class MainWindow(QMainWindow):
             try:
                 shutil.move(str(kept), str(original))
                 restored += 1
+                put_back.append(original)
             except OSError as exc:
                 problems.append(f"{original.name}: {exc}")
         trash_dir = entry.get("trash_dir")
@@ -12620,6 +12768,23 @@ class MainWindow(QMainWindow):
         action = str(entry.get("action") or "Copy").lower()
         if parts:
             self._set_status_message(f"Undid {action}: " + ", ".join(parts), 6000)
+        gone_keys = {str(path) for path in gone}
+        redo_pairs = [
+            (Path(src), Path(dest))
+            for src, dest in entry.get("files") or []
+            if str(Path(dest)) in gone_keys
+        ]
+        if redo_pairs:
+            self._push_browser_redo(
+                {
+                    "kind": "transfer",
+                    "action": str(entry.get("action") or "Copy"),
+                    "mode": str(entry.get("mode") or ("cut" if moved else "copy")),
+                    "pairs": redo_pairs,
+                    "overwrite": [str(path) for path in put_back],
+                    "count": len(redo_pairs),
+                }
+            )
         self._report_undo_problems(problems)
 
     def _undo_created_folders(self, entry: dict[str, Any]) -> None:
@@ -12663,6 +12828,12 @@ class MainWindow(QMainWindow):
             self._persist_workspace()
             noun = "copy" if len(removed) == 1 else "copies"
             self._set_status_message(f"Undid duplicate: removed {len(removed)} folder {noun}", 6000)
+            sources = {str(dest): Path(src) for dest, src in entry.get("sources") or []}
+            redo_pairs = [(sources[str(dest)], dest) for dest in removed if str(dest) in sources]
+            if redo_pairs:
+                self._push_browser_redo(
+                    {"kind": "created_folders", "pairs": redo_pairs, "count": len(redo_pairs)}
+                )
         self._report_undo_problems(problems)
 
     def _undo_rename_file(self, entry: dict[str, Any]) -> None:
@@ -12706,6 +12877,14 @@ class MainWindow(QMainWindow):
             self._populate_file_list(self._current_folder)
         self._select_path_in_file_list(old)
         self._set_status_message(f"Renamed back to {old.name}", 5000)
+        self._push_browser_redo(
+            {
+                "kind": "rename_file",
+                "pairs": pairs,
+                "fasta": bool(entry.get("fasta")),
+                "count": 1,
+            }
+        )
 
     def _undo_rename_folder(self, entry: dict[str, Any]) -> None:
         old = Path(str(entry.get("old")))
@@ -12723,9 +12902,11 @@ class MainWindow(QMainWindow):
             return
         self._after_folder_renamed(new, old)
         self._set_status_message(f"Renamed folder back to {old.name}", 5000)
+        self._push_browser_redo({"kind": "rename_folder", "old": old, "new": new, "count": 1})
 
     def _undo_deleted_files_batch(self, batch: list[tuple[Path, Path]]) -> None:
         restored = 0
+        restored_paths: list[Path] = []
         failed: list[str] = []
         for original, trash in batch:
             original = Path(original)
@@ -12740,8 +12921,13 @@ class MainWindow(QMainWindow):
                     continue
                 shutil.move(str(trash), str(original))
                 restored += 1
+                restored_paths.append(original)
             except OSError as exc:
                 failed.append(f"{original.name}: {exc}")
+        if restored_paths:
+            self._push_browser_redo(
+                {"kind": "files", "paths": restored_paths, "count": len(restored_paths)}
+            )
         try:
             parent = Path(batch[0][1]).parent if batch else None
             if parent is not None and parent.is_dir() and not any(parent.iterdir()):
@@ -12769,13 +12955,18 @@ class MainWindow(QMainWindow):
 
     def _undo_hidden_folders(self, folders: list[Path]) -> None:
         restored = 0
+        restored_folders: list[Path] = []
         for folder in folders:
             path = Path(folder)
             if not path.is_dir():
                 continue
             self._add_root_folder(path, unhide=True, select=False)
             restored += 1
+            restored_folders.append(path)
         if restored:
+            self._push_browser_redo(
+                {"kind": "hide_folders", "folders": restored_folders, "count": restored}
+            )
             self._persist_workspace()
             label = "folder" if restored == 1 else "folders"
             self._set_status_message(f"Restored {restored} {label} to the list", 6000)
@@ -12784,6 +12975,7 @@ class MainWindow(QMainWindow):
 
     def _undo_deleted_folders_batch(self, batch: list[tuple[Path, Path]]) -> None:
         restored = 0
+        restored_folders: list[Path] = []
         failed: list[str] = []
         for original, trash in batch:
             original = Path(original)
@@ -12798,6 +12990,7 @@ class MainWindow(QMainWindow):
                 original.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(trash), str(original))
                 restored += 1
+                restored_folders.append(original)
                 parent_item = self._find_tree_item_for_path(original.parent)
                 if parent_item is None:
                     self._add_root_folder(original, unhide=True, select=False)
@@ -12813,6 +13006,10 @@ class MainWindow(QMainWindow):
                 parent.rmdir()
         except OSError:
             pass
+        if restored_folders:
+            self._push_browser_redo(
+                {"kind": "delete_folders", "folders": restored_folders, "count": restored}
+            )
 
         if self._current_folder:
             self._populate_file_list(self._current_folder)
@@ -12832,6 +13029,406 @@ class MainWindow(QMainWindow):
         elif restored:
             label = "folder" if restored == 1 else "folders"
             self._set_status_message(f"Restored {restored} deleted {label}", 6000)
+
+    # ------------------------------------------------------------ Edit > Redo
+
+    def _redo_browser_action(self) -> None:
+        if not self._browser_redo_stack:
+            self._set_status_message("Nothing to redo", 3000)
+            return
+        entry = self._browser_redo_stack.pop()
+        kind = str(entry.get("kind") or "")
+        if kind == "files":
+            self._redo_delete_files(entry)
+        elif kind == "delete_folders":
+            self._redo_delete_folders(entry)
+        elif kind == "hide_folders":
+            self._redo_hide_folders(entry)
+        elif kind == "transfer":
+            self._redo_transfer(entry)
+        elif kind == "created_folders":
+            self._redo_duplicate_folders(entry)
+        elif kind in {"rename_file", "batch_rename"}:
+            self._redo_renames(entry)
+        elif kind == "rename_folder":
+            self._redo_rename_folder(entry)
+        else:
+            self._set_status_message("Nothing to redo", 3000)
+
+    def _report_redo_problems(self, problems: list[str]) -> None:
+        if problems:
+            QMessageBox.information(
+                self,
+                "Redo",
+                "Some items were left as they are:\n\n" + "\n".join(problems[:8]),
+            )
+
+    def _redo_delete_files(self, entry: dict[str, Any]) -> None:
+        paths = [Path(p) for p in entry.get("paths") or []]
+        present = [p for p in paths if p.is_file()]
+        missing = [f"{p.name}: no longer there" for p in paths if not p.is_file()]
+        if not present:
+            self._report_redo_problems(missing or ["Nothing left to delete"])
+            return
+        if not self._confirm_unsaved_text_for(present):
+            self._browser_redo_stack.append(entry)
+            return
+        deleted, failed = self._soft_delete_files(present, keep_redo=True)
+        if self._preview_tabs is not None:
+            self._preview_tabs.close_paths(present)
+        if self._current_folder:
+            self._populate_file_list(self._current_folder)
+        if deleted:
+            self._set_status_message(
+                f"Deleted {deleted} file(s) again (⌘Z / Ctrl+Z to restore)", 6000
+            )
+        self._report_redo_problems(missing + failed)
+
+    def _redo_delete_folders(self, entry: dict[str, Any]) -> None:
+        folders = [Path(f) for f in entry.get("folders") or []]
+        present = [f for f in folders if f.is_dir()]
+        missing = [f"{f.name}: no longer there" for f in folders if not f.is_dir()]
+        if not present:
+            self._report_redo_problems(missing or ["Nothing left to delete"])
+            return
+        tabs = self._preview_tabs
+        if tabs is not None:
+            inside = [
+                page
+                for page in tabs.unsaved_pages()
+                if any(page.path.is_relative_to(folder) for folder in present)
+            ]
+            if not tabs.confirm_close_pages(inside):
+                self._browser_redo_stack.append(entry)
+                return
+        moved = self._move_folders_to_trash(present)
+        if moved is None:
+            QMessageBox.critical(
+                self, "Redo", "Could not create a temporary trash folder for undo."
+            )
+            return
+        deleted, failed, batch = moved
+        if batch:
+            self._push_browser_undo({"kind": "delete_folders", "items": batch}, keep_redo=True)
+            self._persist_workspace()
+        if self._current_folder:
+            self._populate_file_list(self._current_folder)
+        if deleted:
+            label = "folder" if deleted == 1 else "folders"
+            self._set_status_message(
+                f"Deleted {deleted} {label} again (⌘Z / Ctrl+Z to restore)", 6000
+            )
+        self._report_redo_problems(missing + failed)
+
+    def _redo_hide_folders(self, entry: dict[str, Any]) -> None:
+        folders = [Path(f) for f in entry.get("folders") or []]
+        if not self._clear_root_folders(folders, keep_redo=True):
+            self._report_redo_problems(
+                [f"{f.name}: no longer at the top of the folder list" for f in folders]
+            )
+
+    def _redo_transfer(self, entry: dict[str, Any]) -> None:
+        """Paste, move or duplicate the same files to the same names again."""
+        from repeatviewer.widgets.file_colors import replace_file_color_path
+
+        mode = "cut" if str(entry.get("mode")) == "cut" else "copy"
+        action = str(entry.get("action") or ("Move" if mode == "cut" else "Copy"))
+        pairs = [(Path(a), Path(b)) for a, b in entry.get("pairs") or []]
+        overwrite = {str(p) for p in entry.get("overwrite") or []}
+        if mode == "cut" and not self._confirm_unsaved_text_for([src for src, _d in pairs]):
+            self._browser_redo_stack.append(entry)
+            return
+        problems: list[str] = []
+        moved: list[tuple[Path, Path]] = []
+        created: list[tuple[Path, str | None]] = []
+        replaced: list[tuple[Path, Path]] = []
+        files: list[tuple[Path, Path]] = []
+        trash: list[Path | None] = [None]
+
+        def set_aside(existing: Path) -> None:
+            if trash[0] is None:
+                trash[0] = self._new_trash_batch_dir()
+                if trash[0] is None:
+                    raise OSError("could not create a temporary trash folder for undo")
+            kept = trash[0] / f"{len(replaced):04d}_{existing.name}"
+            shutil.move(str(existing), str(kept))
+            replaced.append((existing, kept))
+
+        def place(src: Path, dest: Path) -> None:
+            if mode == "cut":
+                shutil.move(str(src), str(dest))
+                replace_file_color_path(src, dest)
+                moved.append((src, dest))
+            else:
+                shutil.copy2(src, dest)
+                created.append((dest, path_fingerprint(dest)))
+
+        for src, dest in pairs:
+            if not src.is_file():
+                problems.append(f"{src.name}: no longer there")
+                continue
+            if not dest.parent.is_dir():
+                problems.append(f"{dest.parent.name}: folder no longer there")
+                continue
+            companions = companion_annotation_paths_for_fasta(src)
+            try:
+                if dest.exists():
+                    if str(dest) not in overwrite:
+                        problems.append(f"{dest.name}: this name is in use")
+                        continue
+                    set_aside(dest)
+                place(src, dest)
+                files.append((src, dest))
+            except OSError as exc:
+                problems.append(f"{src.name}: {exc}")
+                continue
+            for comp in companions:
+                comp_dest = sidecar_path(dest)
+                if comp_dest == comp:
+                    continue
+                try:
+                    if comp_dest.exists():
+                        if str(comp_dest) not in overwrite:
+                            continue
+                        set_aside(comp_dest)
+                    place(comp, comp_dest)
+                except OSError as exc:
+                    problems.append(f"{comp.name}: {exc}")
+
+        if files:
+            self._push_browser_undo(
+                {
+                    "kind": "transfer",
+                    "action": action,
+                    "mode": mode,
+                    "count": len(files),
+                    "files": files,
+                    "moved": moved,
+                    "created": created,
+                    "replaced": replaced,
+                    "trash_dir": trash[0],
+                },
+                keep_redo=True,
+            )
+        elif trash[0] is not None:
+            try:
+                trash[0].rmdir()
+            except OSError:
+                pass
+        if self._current_folder is not None:
+            current = self._current_folder.resolve()
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=[d for _s, d in files if d.parent.resolve() == current],
+                source_files=[s for s, _d in files if s.parent.resolve() == current],
+                open_preview=False,
+            )
+        if files:
+            self._sync_folder_tree_labels()
+            self._set_status_message(f"Redid {action.lower()}: {len(files)} file(s)", 6000)
+        self._report_redo_problems(problems)
+
+    def _redo_duplicate_folders(self, entry: dict[str, Any]) -> None:
+        from repeatviewer.folder_duplicate import unique_folder_copy_path
+
+        pairs: list[tuple[Path, Path]] = []
+        problems: list[str] = []
+        for src, dest in entry.get("pairs") or []:
+            src, dest = Path(src), Path(dest)
+            if not src.is_dir():
+                problems.append(f"{src.name}: no longer there")
+                continue
+            pairs.append((src, dest if not dest.exists() else unique_folder_copy_path(src)))
+        if not pairs:
+            self._report_redo_problems(problems)
+            return
+        if (
+            self._duplicate_thread is not None
+            or self._extract_thread is not None
+            or self._any_background_job_running()
+        ):
+            self._browser_redo_stack.append(entry)
+            QMessageBox.information(
+                self,
+                "Redo",
+                "Another task is still running. Wait for it to finish, or press Stop, "
+                "then try again.",
+            )
+            return
+        self._start_folder_duplicate(pairs, from_redo=True)
+        self._report_redo_problems(problems)
+
+    def _redo_rename_folder(self, entry: dict[str, Any]) -> None:
+        old = Path(str(entry.get("old")))
+        new = Path(str(entry.get("new")))
+        if not old.is_dir():
+            self._report_redo_problems([f"{old.name}: no longer there, so it was not renamed"])
+            return
+        if new.exists():
+            self._report_redo_problems([f"{new.name}: this name is in use, so it was not renamed"])
+            return
+        try:
+            old.rename(new)
+        except OSError as exc:
+            QMessageBox.critical(self, "Redo rename failed", str(exc))
+            return
+        self._after_folder_renamed(old, new)
+        self._push_browser_undo({"kind": "rename_folder", "old": old, "new": new}, keep_redo=True)
+        self._set_status_message(f"Renamed folder to {new.name} again", 5000)
+
+    # ------------------------------------------------------------ renames (Batch Rename, Redo)
+
+    def _perform_file_renames(
+        self,
+        moves: list[tuple[Path, Path]],
+        fasta_pairs: list[tuple[Path, Path]],
+        *,
+        title: str,
+    ) -> str:
+        """Rename files all at once (paired annotation files included in ``moves``).
+
+        Also moves file colours and cytogenetic image links, and closes Preview
+        tabs of the old names. All or nothing: on any failure every file keeps
+        its old name. Does not record Undo / Redo. Returns "done", "cancelled"
+        (Cancel at the unsaved-changes prompt) or "failed" (already reported).
+        """
+        from repeatviewer.backends.cyto_images import rename_sequences
+        from repeatviewer.batch_rename import apply_moves, check_moves
+        from repeatviewer.widgets.file_colors import replace_file_color_paths
+
+        moves = [(Path(a), Path(b)) for a, b in moves]
+        problems = check_moves(moves)
+        if problems:
+            QMessageBox.warning(
+                self,
+                title,
+                "Nothing was renamed:\n\n" + "\n".join(problems[:8]),
+            )
+            return "failed"
+        if not self._confirm_unsaved_text_for([src for src, _dst in moves]):
+            return "cancelled"
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            error = apply_moves(moves)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if error:
+            QMessageBox.critical(
+                self, title, f"Nothing was renamed (every file kept its name):\n\n{error}"
+            )
+            return "failed"
+        by_folder: dict[Path, dict[str, str]] = {}
+        for old, new in fasta_pairs:
+            old, new = Path(old), Path(new)
+            if old.parent == new.parent:
+                by_folder.setdefault(old.parent, {})[old.name] = new.name
+        for folder, mapping in by_folder.items():
+            try:
+                rename_sequences(folder, mapping)
+            except OSError:
+                logger.exception("Could not move cytogenetic image links in %s", folder)
+        replace_file_color_paths(moves)
+        if self._preview_tabs is not None:
+            self._preview_tabs.close_paths([src for src, _dst in moves])
+        return "done"
+
+    def _show_renamed_files(self, paths: list[Path]) -> None:
+        """Refresh the file list and select the renamed files."""
+        if self._current_folder:
+            self._populate_file_list(self._current_folder, open_preview=False)
+        index = self._file_list._path_row_index()
+        rows = [
+            index[str(Path(p).expanduser().resolve())]
+            for p in paths
+            if str(Path(p).expanduser().resolve()) in index
+        ]
+        if not rows:
+            return
+        first = self._file_list.item(rows[0])
+        if first is not None:
+            self._reveal_file_list_item(first)
+        for row in rows[1:]:
+            self._file_list._set_row_selected(row, True)
+
+    def _batch_rename_files(self, paths: list[Path]) -> None:
+        from repeatviewer.views.batch_rename_dialog import BatchRenameDialog
+
+        paths = [p.expanduser().resolve() for p in paths if p.is_file()]
+        if not paths:
+            return
+        dialog = BatchRenameDialog(paths, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        plan = dialog.plan()
+        if not plan.ok:
+            return
+        fasta_pairs = [
+            (old, new) for old, new in plan.files if old.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        if self._perform_file_renames(plan.moves, fasta_pairs, title="Batch Rename") != "done":
+            return
+        self._push_browser_undo(
+            {
+                "kind": "batch_rename",
+                "moves": plan.moves,
+                "files": plan.files,
+                "fasta": fasta_pairs,
+                "count": len(plan.files),
+            }
+        )
+        self._show_renamed_files([new for _old, new in plan.files])
+        n = len(plan.files)
+        self._set_status_message(
+            f"Renamed {n} file{'s' if n != 1 else ''} (⌘Z / Ctrl+Z to undo)", 6000
+        )
+
+    def _undo_batch_rename(self, entry: dict[str, Any]) -> None:
+        moves = [(Path(b), Path(a)) for a, b in entry.get("moves") or []]
+        fasta = [(Path(b), Path(a)) for a, b in entry.get("fasta") or []]
+        outcome = self._perform_file_renames(moves, fasta, title="Undo Rename")
+        if outcome == "cancelled":
+            self._browser_undo_stack.append(entry)  # kept for later
+        if outcome != "done":
+            return
+        files = [Path(a) for a, _b in entry.get("files") or []]
+        self._show_renamed_files(files)
+        self._set_status_message(f"Renamed {len(files)} file(s) back", 5000)
+        self._push_browser_redo(dict(entry))
+
+    def _redo_renames(self, entry: dict[str, Any]) -> None:
+        """Redo a Rename… or a Batch Rename."""
+        kind = str(entry.get("kind"))
+        if kind == "rename_file":
+            moves = [(Path(a), Path(b)) for a, b in entry.get("pairs") or []]
+            files = moves[:1]
+            fasta = files if entry.get("fasta") else []
+        else:
+            moves = [(Path(a), Path(b)) for a, b in entry.get("moves") or []]
+            files = [(Path(a), Path(b)) for a, b in entry.get("files") or []]
+            fasta = [(Path(a), Path(b)) for a, b in entry.get("fasta") or []]
+        if not moves:
+            return
+        outcome = self._perform_file_renames(moves, fasta, title="Redo Rename")
+        if outcome == "cancelled":
+            self._browser_redo_stack.append(entry)  # kept for later
+        if outcome != "done":
+            return
+        if kind == "rename_file":
+            undo = {"kind": "rename_file", "pairs": moves, "fasta": bool(entry.get("fasta"))}
+        else:
+            undo = {
+                "kind": "batch_rename",
+                "moves": moves,
+                "files": files,
+                "fasta": fasta,
+                "count": len(files),
+            }
+        self._push_browser_undo(undo, keep_redo=True)
+        self._show_renamed_files([new for _old, new in files])
+        if kind == "rename_file":
+            self._set_status_message(f"Renamed to {files[0][1].name} again", 5000)
+        else:
+            self._set_status_message(f"Renamed {len(files)} file(s) again", 5000)
 
     def _delete_selected_files(self, paths: list[Path]) -> None:
         if not paths:
@@ -13108,6 +13705,7 @@ class MainWindow(QMainWindow):
         undo_replaced: list[tuple[Path, Path]] = []
         undo_trash: list[Path | None] = [None]
         undo_count = 0
+        undo_files: list[tuple[Path, Path]] = []  # (source, destination), for Edit > Redo
 
         def set_aside(existing: Path) -> None:
             if undo_trash[0] is None:
@@ -13142,6 +13740,7 @@ class MainWindow(QMainWindow):
                     shutil.copy2(src, dest)
                     undo_created.append((dest, path_fingerprint(dest)))
                 undo_count += 1
+                undo_files.append((src, dest))
                 created.append(dest)
                 sources.append(src)
                 for comp in companion_srcs:
@@ -13169,7 +13768,9 @@ class MainWindow(QMainWindow):
                 {
                     "kind": "transfer",
                     "action": undo_action or ("Move" if mode == "cut" else "Copy"),
+                    "mode": mode,
                     "count": undo_count,
+                    "files": undo_files,
                     "moved": undo_moved,
                     "created": undo_created,
                     "replaced": undo_replaced,

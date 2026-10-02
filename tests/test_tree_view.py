@@ -167,6 +167,41 @@ def test_ctrl_z_in_the_tree_undoes_the_tree_edit(qapp, tree_file):
     assert not panel._undo
 
 
+def test_redo_after_undo_and_new_edit_clears_redo(qapp, tree_file):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtTest import QTest
+
+    panel = _panel(qapp, tree_file)
+    before = te.to_newick(panel.model())
+    panel.reroot_at(("F",))
+    rerooted = te.to_newick(panel.model())
+    panel.undo()
+    assert te.to_newick(panel.model()) == before and panel.can_redo()
+
+    override = QKeyEvent(
+        QEvent.Type.ShortcutOverride,
+        Qt.Key.Key_Z,
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+    )
+    override.ignore()
+    qapp.sendEvent(panel._canvas, override)
+    assert override.isAccepted()
+    QTest.keyClick(
+        panel._canvas,
+        Qt.Key.Key_Z,
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+    )
+    assert te.to_newick(panel.model()) == rerooted
+    assert not panel.can_redo() and panel._undo
+
+    panel.undo()
+    panel.midpoint_root()          # a new edit: the undone reroot is gone for good
+    assert not panel.can_redo()
+    panel.redo()                   # nothing to redo: no change
+    assert panel._undo
+
+
 def test_swap_collapse_expand(qapp, tree_file):
     panel = _panel(qapp, tree_file)
     order = _tip_order(panel)

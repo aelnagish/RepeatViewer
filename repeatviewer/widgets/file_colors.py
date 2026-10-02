@@ -76,6 +76,21 @@ def replace_file_color_path(old: Path, new: Path) -> None:
     save_file_colors(colors)
 
 
+def replace_file_color_paths(moves: list[tuple[Path, Path]]) -> None:
+    """Move stored colors for several renames at once (swaps and chains included)."""
+    colors = load_file_colors()
+    picked: list[tuple[str, str]] = []
+    for old, new in moves:
+        color = colors.pop(_norm(old), None)
+        if color is not None:
+            picked.append((_norm(new), color))
+    if not picked:
+        return
+    for key, color in picked:
+        colors[key] = color
+    save_file_colors(colors)
+
+
 def remove_file_color(path: Path) -> None:
     set_file_color(path, None)
 

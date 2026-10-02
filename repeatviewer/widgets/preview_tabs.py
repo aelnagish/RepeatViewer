@@ -661,6 +661,8 @@ class FilePreviewPage(QWidget):
         self._text_edit_mode = False
         self._text_dirty = False
         self._text_changed_at = 0.0  # time.monotonic() of the last typed change
+        self._text_undone_at = 0.0  # time.monotonic() of the last undo of typing
+        self._text_redo_steps = 0
         self._text = QTextEdit()
         self._text.setReadOnly(True)
         self._text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
@@ -682,6 +684,12 @@ class FilePreviewPage(QWidget):
         self._fasta_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._fasta_text.setMinimumSize(200, 120)
         self._fasta_text.textChanged.connect(self._on_text_editor_changed)
+        # Right-click: the standard text menu plus Paste Reverse Complement.
+        for editor in (self._text, self._fasta_text):
+            editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            editor.customContextMenuRequested.connect(
+                lambda pos, e=editor: self._show_text_context_menu(e, pos)
+            )
         self._fasta_text_scroll = QScrollArea(self)
         self._fasta_text_scroll.setWidgetResizable(True)
         self._fasta_text_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -2168,6 +2176,8 @@ class FilePreviewPage(QWidget):
             return
         self._text_dirty = True
         self._text_changed_at = time.monotonic()
+        # Qt updates the undo/redo counts after this signal: look right after.
+        QTimer.singleShot(0, self._note_text_undo)
         tab_host = self.parent()
         while tab_host is not None and not isinstance(tab_host, PreviewTabWidget):
             tab_host = tab_host.parent()
@@ -2200,9 +2210,52 @@ class FilePreviewPage(QWidget):
         editor = self._active_text_editor()
         editor.undo()
         editor.ensureCursorVisible()
+        self._text_undone_at = time.monotonic()
+        self._text_redo_steps = editor.document().availableRedoSteps()
+
+    def _note_text_undo(self) -> None:
+        """Remember when typing was last undone (by any route: menu, key, right-click)."""
+        try:
+            steps = self._active_text_editor().document().availableRedoSteps()
+        except RuntimeError:
+            return
+        if steps > self._text_redo_steps:
+            self._text_undone_at = time.monotonic()
+        self._text_redo_steps = steps
+
+    def _show_text_context_menu(self, editor: QTextEdit, pos) -> None:
+        from repeatviewer.widgets.paste_reverse_complement import add_to_context_menu
+
+        menu = editor.createStandardContextMenu()
+        status = getattr(self.window(), "_set_status_message", None)
+        add_to_context_menu(
+            menu,
+            editor,
+            on_message=(lambda text: status(text, 5000)) if callable(status) else None,
+        )
+        menu.exec(editor.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    def can_redo_text(self) -> bool:
+        """Undone typing that Edit > Redo can bring back."""
+        if not self._text_edit_mode:
+            return False
+        try:
+            return self._active_text_editor().document().isRedoAvailable()
+        except RuntimeError:
+            return False
+
+    def redo_text(self) -> None:
+        editor = self._active_text_editor()
+        editor.redo()
+        editor.ensureCursorVisible()
+        self._text_redo_steps = editor.document().availableRedoSteps()
 
     def text_changed_at(self) -> float:
         return self._text_changed_at
+
+    def text_undone_at(self) -> float:
+        return self._text_undone_at
 
     def _show_text(self, text: str, *, truncated: bool = False) -> None:
         self._text_truncated = truncated

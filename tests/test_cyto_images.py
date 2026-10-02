@@ -19,6 +19,7 @@ from repeatviewer.backends.cyto_images import (
     load_images,
     remove_image,
     rename_sequence,
+    rename_sequences,
     unlink_target,
 )
 
@@ -91,6 +92,19 @@ def test_rename_sequence_follows_file_rename(tmp_path: Path) -> None:
     assert rename_sequence(tmp_path, fasta.name, new.name) == 1
     assert image_count_for_sequence(new) == 1
     assert image_count_for_sequence(fasta) == 0
+
+
+def test_rename_sequences_swaps_links_at_once(tmp_path: Path) -> None:
+    fasta, other, source = _setup(tmp_path)
+    add_image(tmp_path, source, targets=[ImageTarget(fasta.name)])
+    second = tmp_path / "incoming" / "fish2.png"
+    second.write_bytes(b"\x89PNG fake 2")
+    add_image(tmp_path, second, targets=[ImageTarget(other.name)])
+    # Batch Rename swapped the two names: each link must follow its own file.
+    assert rename_sequences(tmp_path, {fasta.name: other.name, other.name: fasta.name}) == 2
+    files = {img.targets[0].sequence: img.original_name for img in load_images(tmp_path)}
+    assert files == {other.name: "fish.png", fasta.name: "fish2.png"}
+    assert rename_sequences(tmp_path, {}) == 0
 
 
 def test_remove_and_unlink(tmp_path: Path) -> None:
