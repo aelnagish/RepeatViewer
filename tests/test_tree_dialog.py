@@ -114,6 +114,34 @@ def test_buttons_and_tabs(qapp, tmp_path):
     assert dlg._advanced_settings_btn.text() == "Advanced Settings ▾"
 
 
+def test_tree_dialog_reopens_last_tab(qapp, tmp_path):
+    from repeatviewer.job_options import (
+        DIALOG_TAB_OPTIONS,
+        TREE_ENGINE_FASTME,
+        TreeOptions,
+    )
+
+    dlg = _dialog(
+        qapp,
+        tmp_path,
+        initial=TreeOptions(
+            engine=TREE_ENGINE_FASTME,
+            last_dialog_tab=TREE_ENGINE_FASTME,
+        ),
+    )
+    assert dlg._tabs.currentIndex() == dlg._tab_index[TREE_ENGINE_FASTME]
+    assert dlg.current_dialog_tab() == TREE_ENGINE_FASTME
+    assert dlg.options().last_dialog_tab == TREE_ENGINE_FASTME
+
+    dlg2 = _dialog(
+        qapp,
+        tmp_path,
+        initial=TreeOptions(last_dialog_tab=DIALOG_TAB_OPTIONS),
+    )
+    assert dlg2._tabs.currentIndex() == dlg2._options_index
+    assert dlg2.current_dialog_tab() == DIALOG_TAB_OPTIONS
+
+
 def test_shared_rows_always_visible_above_tabs(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path)
     _wait_summary(dlg, qapp)

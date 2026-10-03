@@ -46,10 +46,33 @@ DEFAULT_BLAST_QUERY_COVERAGE = 0.0
 BLAST_PROGRAM_BLASTN = "blastn"
 BLAST_PROGRAM_BLASTP = "blastp"
 BLAST_PROGRAM_BLASTX = "blastx"
-BLAST_PROGRAMS = (BLAST_PROGRAM_BLASTN, BLAST_PROGRAM_BLASTP, BLAST_PROGRAM_BLASTX)
-# blastx translates a nucleotide query and searches a protein database, so it
-# shares blastp's protein-style scoring but takes DNA in.
+BLAST_PROGRAM_TBLASTN = "tblastn"
+BLAST_PROGRAM_TBLASTX = "tblastx"
+BLAST_PROGRAM_ONLINE = "online"
+BLAST_PROGRAMS = (
+    BLAST_PROGRAM_BLASTN,
+    BLAST_PROGRAM_BLASTP,
+    BLAST_PROGRAM_BLASTX,
+    BLAST_PROGRAM_ONLINE,
+)
+# Last-open tab in BLAST parameters (program tabs + Options).
+DIALOG_TAB_OPTIONS = "options"
+BLAST_DIALOG_TABS = BLAST_PROGRAMS + (DIALOG_TAB_OPTIONS,)
+# Local programs that search a protein BLAST database.
 BLAST_PROGRAMS_PROTEIN_DB = (BLAST_PROGRAM_BLASTP, BLAST_PROGRAM_BLASTX)
+# NCBI online BLAST suite (matches NCBI web program tabs).
+BLAST_ONLINE_ALGORITHMS = (
+    BLAST_PROGRAM_BLASTN,
+    BLAST_PROGRAM_BLASTP,
+    BLAST_PROGRAM_BLASTX,
+    BLAST_PROGRAM_TBLASTN,
+    BLAST_PROGRAM_TBLASTX,
+)
+DEFAULT_BLAST_ONLINE_PROGRAM = BLAST_PROGRAM_BLASTN
+DEFAULT_BLAST_ONLINE_DATABASE = "core_nt"
+DEFAULT_BLAST_ONLINE_EVALUE = DEFAULT_BLAST_EVALUE
+DEFAULT_BLAST_ONLINE_HITLIST = 100
+DEFAULT_BLAST_ONLINE_WRITE_TEXT = True
 DEFAULT_BLASTP_EVALUE = DEFAULT_BLAST_EVALUE
 DEFAULT_BLASTP_WORD_SIZE = 3
 DEFAULT_BLASTP_GAP_OPEN = 11
@@ -209,6 +232,7 @@ ALIGNERS = (ALIGNER_MAFFT, ALIGNER_MUSCLE)
 # action, but it is not an MSA aligner: never a combined / workflow aligner.
 ALIGNER_FASTGA = "fastga"
 RIGHT_CLICK_ALIGNERS = (ALIGNER_MAFFT, ALIGNER_MUSCLE, ALIGNER_FASTGA)
+ALIGN_DIALOG_TABS = RIGHT_CLICK_ALIGNERS + (DIALOG_TAB_OPTIONS,)
 MUSCLE_MODE_ALIGN = "align"
 MUSCLE_MODE_SUPER5 = "super5"
 MUSCLE_MODES = (MUSCLE_MODE_ALIGN, MUSCLE_MODE_SUPER5)
@@ -253,6 +277,8 @@ class AlignOptions:
     # Per-aligner "combine all selected files into one MSA" choice.
     mafft_combined: bool = False
     muscle_combined: bool = False
+    # Which Align window tab was open last (mafft / muscle / fastga / options).
+    last_dialog_tab: str = ALIGNER_MAFFT
     # Which aligner a right-click on the Align toolbar button runs.
     right_click_aligner: str = ALIGNER_MAFFT
     show_process_window: bool = False
@@ -453,9 +479,17 @@ class BlastOptions:
     blastx_write_text: bool = DEFAULT_BLASTX_WRITE_TEXT
     blastx_write_gff: bool = DEFAULT_BLASTX_WRITE_GFF
     blastx_num_threads: int = field(default_factory=_default_tool_threads)
+    # NCBI online BLAST (Common URL API) — no local database / genome required.
+    online_program: str = DEFAULT_BLAST_ONLINE_PROGRAM
+    online_database: str = DEFAULT_BLAST_ONLINE_DATABASE
+    online_e_value: float = DEFAULT_BLAST_ONLINE_EVALUE
+    online_hitlist_size: int = DEFAULT_BLAST_ONLINE_HITLIST
+    online_write_text: bool = DEFAULT_BLAST_ONLINE_WRITE_TEXT
     # Query Inputs (Align-style); Define paths are session-only.
     input_source: str = ALIGN_INPUT_SELECTED
     input_paths: list[str] = field(default_factory=list)
+    # Which BLAST window tab was open last (blastn / … / online / options).
+    last_dialog_tab: str = BLAST_PROGRAM_BLASTN
     # Which program a right-click on the BLAST toolbar button runs.
     right_click_program: str = BLAST_PROGRAM_BLASTN
     show_process_window: bool = False
@@ -463,11 +497,17 @@ class BlastOptions:
 
     @property
     def active_database_name(self) -> str | None:
+        if self.program == BLAST_PROGRAM_ONLINE:
+            return None
         if self.program == BLAST_PROGRAM_BLASTP:
             return self.blastp_database_name
         if self.program == BLAST_PROGRAM_BLASTX:
             return self.blastx_database_name
         return self.blast_database_name
+
+    @property
+    def is_online(self) -> bool:
+        return self.program == BLAST_PROGRAM_ONLINE
 
 
 DEFAULT_CONSENSUS_THRESHOLD = 0.8
@@ -974,8 +1014,36 @@ def load_blast_options() -> BlastOptions:
         blastx_num_threads=max(
             1, int(v.get("blastx_num_threads", _default_tool_threads()))
         ),
+        online_program=(
+            str(v.get("online_program", DEFAULT_BLAST_ONLINE_PROGRAM))
+            if str(v.get("online_program", DEFAULT_BLAST_ONLINE_PROGRAM))
+            in BLAST_ONLINE_ALGORITHMS
+            else DEFAULT_BLAST_ONLINE_PROGRAM
+        ),
+        online_database=str(
+            v.get("online_database", DEFAULT_BLAST_ONLINE_DATABASE) or DEFAULT_BLAST_ONLINE_DATABASE
+        ).strip()
+        or DEFAULT_BLAST_ONLINE_DATABASE,
+        online_e_value=normalize_blast_evalue(
+            float(v.get("online_e_value", DEFAULT_BLAST_ONLINE_EVALUE))
+        ),
+        online_hitlist_size=max(
+            1, min(500, int(v.get("online_hitlist_size", DEFAULT_BLAST_ONLINE_HITLIST)))
+        ),
+        online_write_text=bool(
+            v.get("online_write_text", DEFAULT_BLAST_ONLINE_WRITE_TEXT)
+        ),
         input_source=ALIGN_INPUT_SELECTED,
         input_paths=[],
+        last_dialog_tab=(
+            str(v.get("last_dialog_tab", program))
+            if str(v.get("last_dialog_tab", program)) in BLAST_DIALOG_TABS
+            else (
+                program
+                if program in BLAST_DIALOG_TABS
+                else BLAST_PROGRAM_BLASTN
+            )
+        ),
         right_click_program=(
             str(v.get("right_click_program", BLAST_PROGRAM_BLASTN))
             if str(v.get("right_click_program", BLAST_PROGRAM_BLASTN)) in BLAST_PROGRAMS
@@ -1025,6 +1093,16 @@ def save_blast_options(opts: BlastOptions) -> None:
             "blastx_write_text": opts.blastx_write_text,
             "blastx_write_gff": opts.blastx_write_gff,
             "blastx_num_threads": opts.blastx_num_threads,
+            "online_program": opts.online_program,
+            "online_database": opts.online_database,
+            "online_e_value": opts.online_e_value,
+            "online_hitlist_size": opts.online_hitlist_size,
+            "online_write_text": opts.online_write_text,
+            "last_dialog_tab": (
+                opts.last_dialog_tab
+                if opts.last_dialog_tab in BLAST_DIALOG_TABS
+                else opts.program
+            ),
             "right_click_program": opts.right_click_program,
             "show_process_window": opts.show_process_window,
             "close_process_window_when_finished": (
@@ -1258,6 +1336,11 @@ def load_align_options() -> AlignOptions:
         mafft_input_paths=mafft_input_paths,
         mafft_combined=_flag("mafft_combined"),
         muscle_combined=_flag("muscle_combined"),
+        last_dialog_tab=(
+            str(v.get("last_dialog_tab", ALIGNER_MAFFT))
+            if str(v.get("last_dialog_tab", ALIGNER_MAFFT)) in ALIGN_DIALOG_TABS
+            else ALIGNER_MAFFT
+        ),
         right_click_aligner=right_click_aligner,
         show_process_window=_flag("show_process_window"),
         close_process_window_when_finished=_flag("close_process_window_when_finished"),
@@ -1288,6 +1371,11 @@ def save_align_options(opts: AlignOptions) -> None:
             "mafft_input_paths": list(opts.mafft_input_paths or []),
             "mafft_combined": opts.mafft_combined,
             "muscle_combined": opts.muscle_combined,
+            "last_dialog_tab": (
+                opts.last_dialog_tab
+                if opts.last_dialog_tab in ALIGN_DIALOG_TABS
+                else ALIGNER_MAFFT
+            ),
             "right_click_aligner": opts.right_click_aligner,
             "show_process_window": opts.show_process_window,
             "close_process_window_when_finished": (
@@ -1970,6 +2058,7 @@ TREE_ENGINE_IQTREE = "iqtree"
 TREE_ENGINE_FASTME = "fastme"
 TREE_ENGINE_FASTTREE = "fasttree"
 TREE_ENGINES = (TREE_ENGINE_IQTREE, TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE)
+TREE_DIALOG_TABS = TREE_ENGINES + (DIALOG_TAB_OPTIONS,)
 
 TREE_ALIGN_AUTO = "auto"      # align unless the input is already an alignment
 TREE_ALIGN_ALWAYS = "always"
@@ -2021,6 +2110,8 @@ class TreeOptions:
     coverage_reference: str = TREE_COVERAGE_MEDIAN
     # Tree
     engine: str = TREE_ENGINE_IQTREE
+    # Which Tree window tab was open last (iqtree / fastme / fasttree / options).
+    last_dialog_tab: str = TREE_ENGINE_IQTREE
     model: str = TREE_MODEL_FINDER
     runs: int = 5
     seed: int = 12345
@@ -2082,6 +2173,7 @@ def load_tree_options() -> TreeOptions:
         coverage_reference=_pick("coverage_reference", TREE_COVERAGE_REFERENCES,
                                  d.coverage_reference),
         engine=engine,
+        last_dialog_tab=_pick("last_dialog_tab", TREE_DIALOG_TABS, engine),
         model=str(v.get("model", d.model) or d.model).strip(),
         runs=_num("runs", d.runs, int, 1, 100),
         seed=_num("seed", d.seed, int, 1, 2_000_000_000),
@@ -2128,6 +2220,11 @@ def save_tree_options(opts: TreeOptions) -> None:
             "min_coverage": opts.min_coverage,
             "coverage_reference": opts.coverage_reference,
             "engine": opts.engine,
+            "last_dialog_tab": (
+                opts.last_dialog_tab
+                if opts.last_dialog_tab in TREE_DIALOG_TABS
+                else opts.engine
+            ),
             "model": opts.model,
             "runs": opts.runs,
             "seed": opts.seed,
@@ -2164,6 +2261,7 @@ MAP_ENGINE_MINIMAP2 = "minimap2"
 MAP_ENGINE_HISAT2 = "hisat2"
 MAP_ENGINE_BOWTIE2 = "bowtie2"  # legacy; migrated to hisat2 on load
 MAP_ENGINES = (MAP_ENGINE_AUTO, MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2)
+MAP_DIALOG_TABS = (MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2, DIALOG_TAB_OPTIONS)
 
 # Kept for old saved MapOptions; HISAT2 no longer uses Bowtie2 sensitivity presets.
 MAP_SENS_FAST = "fast"
@@ -2278,6 +2376,8 @@ class MapOptions:
 
     reference_fasta: str = ""
     engine: str = MAP_ENGINE_AUTO
+    # Which Map window tab was open last (minimap2 / hisat2 / options).
+    last_dialog_tab: str = MAP_ENGINE_MINIMAP2
     sensitivity: str = MAP_SENS_MEDIUM  # legacy Bowtie2; unused by HISAT2
     multiple_hits: str = MAP_MULTI_BEST
     minimap2_preset: str = "map-ont"
@@ -2340,9 +2440,17 @@ def load_map_options() -> MapOptions:
     mm_preset = v.get("minimap2_preset", d.minimap2_preset)
     if mm_preset == MAP_MINIMAP2_PRESET_AUTO or mm_preset not in MAP_MINIMAP2_PRESETS:
         mm_preset = "map-ont"
+    last_tab = v.get("last_dialog_tab", None)
+    if last_tab not in MAP_DIALOG_TABS:
+        last_tab = (
+            engine
+            if engine in (MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2)
+            else MAP_ENGINE_MINIMAP2
+        )
     return MapOptions(
         reference_fasta=str(v.get("reference_fasta", d.reference_fasta) or ""),
         engine=engine,
+        last_dialog_tab=last_tab,
         sensitivity=_pick("sensitivity", MAP_SENSITIVITIES, d.sensitivity),
         multiple_hits=_pick("multiple_hits", MAP_MULTI_MODES, d.multiple_hits),
         minimap2_preset=mm_preset,
@@ -2394,6 +2502,11 @@ def save_map_options(opts: MapOptions) -> None:
         {
             "reference_fasta": opts.reference_fasta,
             "engine": opts.engine,
+            "last_dialog_tab": (
+                opts.last_dialog_tab
+                if opts.last_dialog_tab in MAP_DIALOG_TABS
+                else MAP_ENGINE_MINIMAP2
+            ),
             "sensitivity": opts.sensitivity,
             "multiple_hits": opts.multiple_hits,
             "minimap2_preset": opts.minimap2_preset,

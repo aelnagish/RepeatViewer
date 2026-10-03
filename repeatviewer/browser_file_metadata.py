@@ -254,7 +254,9 @@ def _molecule_type(path: Path) -> str:
         return "Image" if suffix != ".pdf" else "PDF"
     if suffix in {".out"}:
         return "Table"
-    if suffix in {".txt", ".log", ".md"} or name.endswith(("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt")):
+    if suffix in {".txt", ".log", ".md"} or name.endswith(
+        ("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt", "_ob.txt", "_online.txt")
+    ):
         return "Text"
     if suffix in {".vcf"} or name.endswith(".vcf.gz"):
         return "Variant"

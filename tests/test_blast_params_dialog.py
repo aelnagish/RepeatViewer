@@ -35,6 +35,7 @@ def test_blast_dialog_align_style_sections_and_footer(qapp: QApplication) -> Non
         "BLASTn",
         "BLASTp",
         "BLASTx",
+        "Online BLAST",
         "Options",
     ]
     labels = [lab.text() for lab in dlg.findChildren(QLabel)]
@@ -73,7 +74,11 @@ def test_blast_dialog_align_style_sections_and_footer(qapp: QApplication) -> Non
     dlg._tabs.setCurrentIndex(1)
     assert dlg._inputs_panel.isVisible()
     assert dlg._inputs_radios_box.parent() is dlg._inputs_panel
+    # Online BLAST: Inputs visible, no Advanced Settings.
     dlg._tabs.setCurrentIndex(3)
+    assert dlg._inputs_panel.isVisible()
+    assert dlg._advanced_settings_btn.isHidden()
+    dlg._tabs.setCurrentIndex(4)
     assert dlg._inputs_panel.isHidden()
     assert dlg._advanced_settings_btn.isHidden()
 
@@ -88,7 +93,7 @@ def test_blast_options_process_output_stays_compact_after_program_tab(
     dlg._tabs.setCurrentIndex(0)
     dlg._resize_for_blast_advanced(False)
     qapp.processEvents()
-    dlg._tabs.setCurrentIndex(3)
+    dlg._tabs.setCurrentIndex(4)
     qapp.processEvents()
     show = dlg._show_process_window
     close = dlg._close_process_window
@@ -150,6 +155,77 @@ def test_blast_define_inputs_are_session_only_and_fill_from_panel(
     assert "input_source" not in saved
     assert "input_paths" not in saved
     assert saved["max_msa_lines"] == 250
+
+
+def test_online_blast_tab_options_round_trip(qapp: QApplication, monkeypatch) -> None:
+    from repeatviewer.job_options import (
+        BLAST_PROGRAM_BLASTP,
+        BLAST_PROGRAM_ONLINE,
+        BlastOptions,
+        DIALOG_TAB_OPTIONS,
+    )
+
+    dlg = _blast_dialog(
+        qapp,
+        initial=BlastOptions(
+            program=BLAST_PROGRAM_ONLINE,
+            last_dialog_tab=BLAST_PROGRAM_ONLINE,
+            online_program=BLAST_PROGRAM_BLASTP,
+            online_database="swissprot",
+            online_e_value=0.01,
+            online_hitlist_size=50,
+            online_write_text=False,
+        ),
+    )
+    assert dlg._tabs.currentIndex() == 3
+    assert dlg._advanced_settings_btn.isHidden()
+    assert dlg._inputs_panel.isVisible()
+    opts = dlg.options()
+    assert opts.program == BLAST_PROGRAM_ONLINE
+    assert opts.last_dialog_tab == BLAST_PROGRAM_ONLINE
+    assert opts.online_program == BLAST_PROGRAM_BLASTP
+    assert opts.online_database == "swissprot"
+    assert opts.online_e_value == 0.01
+    assert opts.online_hitlist_size == 50
+    assert opts.online_write_text is False
+    assert opts.active_database_name is None
+    assert opts.is_online is True
+
+    saved: dict = {}
+    monkeypatch.setattr(
+        "repeatviewer.job_options._save_settings_group",
+        lambda _g, values: saved.update(values),
+    )
+    save_blast_options(opts)
+    assert saved["program"] == BLAST_PROGRAM_ONLINE
+    assert saved["online_program"] == BLAST_PROGRAM_BLASTP
+    assert saved["online_database"] == "swissprot"
+    assert saved["last_dialog_tab"] == BLAST_PROGRAM_ONLINE
+
+
+def test_blast_dialog_reopens_last_tab(qapp: QApplication) -> None:
+    from repeatviewer.job_options import (
+        BLAST_PROGRAM_BLASTN,
+        BLAST_PROGRAM_BLASTX,
+        BlastOptions,
+        DIALOG_TAB_OPTIONS,
+    )
+
+    dlg = _blast_dialog(
+        qapp,
+        initial=BlastOptions(
+            program=BLAST_PROGRAM_BLASTN,
+            last_dialog_tab=BLAST_PROGRAM_BLASTX,
+        ),
+    )
+    assert dlg._tabs.currentIndex() == 2
+    assert dlg.current_dialog_tab() == BLAST_PROGRAM_BLASTX
+
+    dlg._tabs.setCurrentIndex(4)
+    assert dlg.current_dialog_tab() == DIALOG_TAB_OPTIONS
+    assert dlg.options().last_dialog_tab == DIALOG_TAB_OPTIONS
+    # Options tab does not change the run program.
+    assert dlg.options().program == BLAST_PROGRAM_BLASTN
 
 
 def test_blast_and_align_share_inputs_indent(qapp: QApplication) -> None:

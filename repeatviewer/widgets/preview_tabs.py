@@ -201,7 +201,9 @@ def _is_text_like_preview(path: Path) -> bool:
     name = path.name.lower()
     if is_bismark_cov_file(path):
         return True
-    return suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith(("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt"))
+    return suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith(
+        ("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt", "_ob.txt", "_online.txt")
+    )
 
 
 def _format_byte_size(num_bytes: int) -> str:
@@ -276,7 +278,9 @@ def is_previewable_file(path: Path) -> bool:
         return False
     if suffix in _HTML_PREVIEW_SUFFIXES | {".pdf"} | _IMAGE_PREVIEW_SUFFIXES:
         return True
-    if suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith(("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt")):
+    if suffix in _TEXT_PREVIEW_SUFFIXES or name.endswith(
+        ("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt", "_ob.txt", "_online.txt")
+    ):
         return True
     return False
 
@@ -297,7 +301,9 @@ def preview_path_priority(path: Path) -> int:
         return 3
     if suffix in _IMAGE_PREVIEW_SUFFIXES:
         return 4
-    if suffix in _FASTA_SUFFIXES or name.endswith(("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt")):
+    if suffix in _FASTA_SUFFIXES or name.endswith(
+        ("_b.txt", "_blast.txt", "_blastp.txt", "_blastx.txt", "_ob.txt", "_online.txt")
+    ):
         return 5
     if is_bismark_cov_file(path):
         return 5

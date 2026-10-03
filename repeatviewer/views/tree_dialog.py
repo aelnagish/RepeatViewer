@@ -41,10 +41,12 @@ from PySide6.QtWidgets import (
 from repeatviewer.backends import tree_builder as tb
 from repeatviewer.backends import tree_portable_tools as tpt
 from repeatviewer.job_options import (
+    DIALOG_TAB_OPTIONS,
     TREE_ALIGN_ALWAYS,
     TREE_ALIGN_NEVER,
     TREE_COVERAGE_LONGEST,
     TREE_COVERAGE_MEDIAN,
+    TREE_DIALOG_TABS,
     TREE_ENGINE_FASTME,
     TREE_ENGINE_FASTTREE,
     TREE_ENGINE_IQTREE,
@@ -311,7 +313,14 @@ class TreeParamsDialog(QDialog):
         self._last_engine = (
             opts.engine if opts.engine in ENGINE_TABS else TREE_ENGINE_IQTREE
         )
-        self._tabs.setCurrentIndex(self._tab_index[self._last_engine])
+        open_tab = getattr(opts, "last_dialog_tab", self._last_engine)
+        if open_tab == DIALOG_TAB_OPTIONS:
+            self._tabs.setCurrentIndex(self._options_index)
+        elif open_tab in self._tab_index:
+            self._last_engine = open_tab
+            self._tabs.setCurrentIndex(self._tab_index[open_tab])
+        else:
+            self._tabs.setCurrentIndex(self._tab_index[self._last_engine])
         self._tabs.currentChanged.connect(self._tab_changed)
 
         restore = QPushButton("Restore Defaults", self)
@@ -720,6 +729,16 @@ class TreeParamsDialog(QDialog):
     def _engine(self) -> str:
         return self._last_engine
 
+    def current_dialog_tab(self) -> str:
+        """Active Tree window tab key (iqtree / fastme / fasttree / options)."""
+        if self._tabs.currentIndex() == self._options_index:
+            return DIALOG_TAB_OPTIONS
+        return (
+            self._last_engine
+            if self._last_engine in TREE_DIALOG_TABS
+            else TREE_ENGINE_IQTREE
+        )
+
     def _tab_changed(self, index: int) -> None:
         for engine, i in self._tab_index.items():
             if i == index:
@@ -1063,6 +1082,7 @@ class TreeParamsDialog(QDialog):
             min_coverage=self._min_cov.value() / 100.0,
             coverage_reference=str(self._cov_ref.currentData()),
             engine=engine,
+            last_dialog_tab=self.current_dialog_tab(),
             model=model,
             runs=self._runs.value(),
             seed=self._seed.value(),

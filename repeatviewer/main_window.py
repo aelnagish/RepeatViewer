@@ -346,6 +346,7 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_BLASTN,
     BLAST_PROGRAM_BLASTP,
     BLAST_PROGRAM_BLASTX,
+    BLAST_PROGRAM_ONLINE,
     EXTEND_RIGHT_CLICK_DIALOG,
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     CONSENSUS_RIGHT_CLICK_DIALOG,
@@ -2144,6 +2145,9 @@ class MainWindow(QMainWindow):
         self._last_job_source_files: list[Path] = []
         self._job_toolbar_actions: list[QAction | QToolButton] = []
         self._cached_folder_files: list[Path] = []
+        # Per-folder: last selected file + Files-list scroll (return restores position).
+        self._last_file_by_folder: dict[str, str] = {}
+        self._last_scroll_by_folder: dict[str, int] = {}
         self._highlight_output_keys: set[str] = set()
         self._highlight_source_keys: set[str] = set()
         # Soft-deleted files / folder actions for Cmd/Ctrl+Z restore.
@@ -5268,6 +5272,10 @@ class MainWindow(QMainWindow):
         menu.addAction(
             "BLASTx",
             lambda checked=False: self._run_blast_program(BLAST_PROGRAM_BLASTX),
+        )
+        menu.addAction(
+            "Online BLAST",
+            lambda checked=False: self._run_blast_program(BLAST_PROGRAM_ONLINE),
         )
         menu.addSeparator()
         menu.addAction("Change BLAST parameters", self._change_blast_parameters)
@@ -8405,6 +8413,85 @@ class MainWindow(QMainWindow):
             0,
         )
 
+    def _folder_memory_key(self, folder: Path | None) -> str | None:
+        if folder is None:
+            return None
+        try:
+            return str(folder.expanduser().resolve())
+        except OSError:
+            return None
+
+    def _remember_file_list_position(self, folder: Path | None = None) -> None:
+        """Store the current Files selection/scroll for ``folder`` (or current)."""
+        target = folder if folder is not None else self._current_folder
+        key = self._folder_memory_key(target)
+        if key is None:
+            return
+        current = self._file_list.currentItem()
+        path = self._preview_path_from_item(current)
+        if path is not None:
+            try:
+                self._last_file_by_folder[key] = str(path.expanduser().resolve())
+            except OSError:
+                pass
+        if self._file_list.rowCount() > 0:
+            self._last_scroll_by_folder[key] = int(
+                self._file_list.verticalScrollBar().value()
+            )
+
+    def _restore_file_list_position(
+        self,
+        folder: Path,
+        *,
+        open_preview: bool = True,
+    ) -> bool:
+        """Select/scroll to the last file remembered for ``folder``. Returns True if restored."""
+        key = self._folder_memory_key(folder)
+        if key is None:
+            return False
+        remembered = self._last_file_by_folder.get(key)
+        match: FileListRow | None = None
+        if remembered:
+            row = self._file_list._path_row_index().get(remembered)
+            if row is not None:
+                match = self._file_list.item(row)
+            if match is None:
+                # Fallback: compare resolved paths (index may use a different form).
+                for index in range(self._file_list.count()):
+                    item = self._file_list.item(index)
+                    path = self._preview_path_from_item(item)
+                    if path is None:
+                        continue
+                    try:
+                        if str(path.expanduser().resolve()) == remembered:
+                            match = item
+                            break
+                    except OSError:
+                        continue
+        if match is not None:
+            self._reveal_file_list_item(
+                match,
+                scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
+            )
+            if open_preview:
+                path = self._preview_path_from_item(match)
+                if path is not None:
+                    self._open_file_in_preview(path)
+        scroll = self._last_scroll_by_folder.get(key)
+        if scroll is not None and match is None:
+            # No file to select (deleted); still restore list scroll if possible.
+            vsb = self._file_list.verticalScrollBar()
+            vsb.setValue(min(int(scroll), vsb.maximum()))
+        elif scroll is not None and match is not None:
+            # Prefer remembered scroll when the row is already on-screen enough;
+            # EnsureVisible above may have moved less than the prior viewport.
+            vsb = self._file_list.verticalScrollBar()
+            vsb.setValue(min(int(scroll), vsb.maximum()))
+            self._file_list.scrollToItem(
+                match, QAbstractItemView.ScrollHint.EnsureVisible
+            )
+        return match is not None
+
     def _populate_file_list(
         self,
         folder: Path,
@@ -8422,6 +8509,9 @@ class MainWindow(QMainWindow):
                 same_folder = prev_folder.expanduser().resolve() == target_folder
             except OSError:
                 same_folder = False
+
+        if prev_folder is not None and not same_folder:
+            self._remember_file_list_position(prev_folder)
 
         highlight_request = bool(new_outputs or source_files)
         large_folder = (
@@ -8687,6 +8777,7 @@ class MainWindow(QMainWindow):
                 len(self._cached_folder_files),
             )
 
+        restored_other_folder = False
         if preserve_ui and not highlight_paths:
             if prev_key:
                 match: FileListRow | None = None
@@ -8702,9 +8793,19 @@ class MainWindow(QMainWindow):
             if prev_scroll is not None:
                 vsb = self._file_list.verticalScrollBar()
                 vsb.setValue(min(prev_scroll, vsb.maximum()))
+        elif not same_folder and not highlight_paths:
+            # Returning to a folder: restore the last selected file position.
+            restored_other_folder = self._restore_file_list_position(
+                target_folder,
+                open_preview=False,
+            )
         self._file_list.blockSignals(False)
         if highlight_paths and open_preview:
             self._open_best_preview_path(highlight_paths)
+        elif restored_other_folder and open_preview:
+            path = self._preview_path_from_item(self._file_list.currentItem())
+            if path is not None:
+                self._open_file_in_preview(path)
         if hasattr(self, "_folder_nav"):
             self._folder_nav.set_folder(self._current_folder, record_history=record_history)
         if same_folder:
@@ -8977,6 +9078,7 @@ class MainWindow(QMainWindow):
             self._preview_selection_timer.stop()
             self._set_status_file_link(None)
             return
+        self._remember_file_list_position(self._current_folder)
         self._pending_preview_selection = path
         self._preview_selection_timer.start()
 
@@ -9232,6 +9334,9 @@ class MainWindow(QMainWindow):
         def _finished(code: int) -> None:
             if self._te_viz_input_dialog is dialog:
                 self._te_viz_input_dialog = None
+            # Remember the open tab even on Cancel so reopen lands there.
+            if code != int(QDialog.DialogCode.Accepted):
+                self._remember_tool_dialog_tab(dialog)
             if code == int(QDialog.DialogCode.Accepted):
                 on_accept(dialog)
             dialog.deleteLater()
@@ -9242,6 +9347,35 @@ class MainWindow(QMainWindow):
         dialog.activateWindow()
         # Do not auto-fill from the currently selected Files-panel item.
         # The user should click a file in the panel to fill inputs.
+
+    def _remember_tool_dialog_tab(self, dialog: QDialog) -> None:
+        """Persist last-selected tab when a multi-tool params dialog is closed."""
+        from dataclasses import replace
+
+        current_tab = getattr(dialog, "current_dialog_tab", None)
+        if not callable(current_tab):
+            return
+        tab = current_tab()
+        # Align / FastGA
+        if isinstance(dialog, AlignParamsDialog):
+            self._align_options = replace(self._align_options, last_dialog_tab=tab)
+            save_align_options(self._align_options)
+            return
+        # Map
+        from repeatviewer.views.map_reference_dialog import MapReferenceDialog
+        from repeatviewer.views.tree_dialog import TreeParamsDialog
+
+        if isinstance(dialog, MapReferenceDialog):
+            self._map_options = replace(self._map_options, last_dialog_tab=tab)
+            save_map_options(self._map_options)
+            return
+        if isinstance(dialog, TreeParamsDialog):
+            self._tree_options = replace(self._tree_options, last_dialog_tab=tab)
+            save_tree_options(self._tree_options)
+            return
+        if isinstance(dialog, BlastParamsDialog):
+            self._blast_options = replace(self._blast_options, last_dialog_tab=tab)
+            save_blast_options(self._blast_options)
 
     def _is_fasta_file(self, path: Path) -> bool:
         return path.suffix.lower() in {".fa", ".fasta", ".fna", ".fas", ".faa"}
@@ -9905,6 +10039,7 @@ class MainWindow(QMainWindow):
         if dialog is None:
             return
         if result != int(QDialog.DialogCode.Accepted):
+            self._remember_tool_dialog_tab(dialog)
             return
         self._blast_options = dialog.options()
         save_blast_options(self._blast_options)
@@ -14026,6 +14161,11 @@ class MainWindow(QMainWindow):
             and blast_opts_for_gate is not None
             and blast_opts_for_gate.active_database_name
         )
+        blast_is_online = (
+            func_name == "blast"
+            and blast_opts_for_gate is not None
+            and blast_opts_for_gate.program == BLAST_PROGRAM_ONLINE
+        )
         if (
             func_name == "blast"
             and blast_opts_for_gate is not None
@@ -14054,6 +14194,7 @@ class MainWindow(QMainWindow):
         if (
             func_name in {"blast", "extend", "teaid", "flexidot"}
             and not uses_saved_blast_database
+            and not blast_is_online
             and not self._project.has_genome_configured()
         ):
             QMessageBox.warning(
@@ -14102,6 +14243,9 @@ class MainWindow(QMainWindow):
         if func_name == "blast":
             blast_opts = job_kwargs.get("blast_options") or self._blast_options
             show_log = bool(getattr(blast_opts, "show_process_window", False))
+            # Online BLAST has multi-minute NCBI submit/poll steps — always show them.
+            if getattr(blast_opts, "program", None) == BLAST_PROGRAM_ONLINE:
+                show_log = True
             close_when_finished = bool(
                 getattr(blast_opts, "close_process_window_when_finished", False)
             )
@@ -14967,12 +15111,30 @@ class MainWindow(QMainWindow):
             extra_folders=extra_folders,
         )
         func_name = result.get("func_name")
+        online_blast_done = func_name == "blast" and any(
+            p.name.endswith(("_ob.txt", "_online.txt", ".seqmap_RV.json"))
+            for p in created_paths
+            if p.is_file()
+        )
         if func_name == "te_annotation":
             fasta_sources = [
                 p for p in source_paths if p.suffix.lower() in _FASTA_SUFFIXES
             ]
             if fasta_sources:
                 self._auto_open_outputs(fasta_sources)
+        elif online_blast_done:
+            fasta_sources = [
+                p for p in source_paths if p.suffix.lower() in _FASTA_SUFFIXES
+            ]
+            if fasta_sources and self._preview_tabs is not None:
+                target = fasta_sources[0]
+                self._preview_tabs.show_annotation_for_path(target)
+                self._ensure_preview_visible()
+                self._select_path_in_file_list(target)
+            elif fasta_sources:
+                self._auto_open_outputs(fasta_sources)
+            else:
+                self._auto_open_outputs(created_paths)
         elif func_name and str(func_name).startswith("plugin:"):
             preview_files = [p for p in created_paths if p.is_file()]
             self._auto_open_outputs(preview_files)

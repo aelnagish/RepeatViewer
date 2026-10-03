@@ -51,12 +51,28 @@ def test_buttons_and_align_style_tabs(qapp, tmp_path):
     assert dlg.width() == dlg._DIALOG_WIDTH
 
 
-def test_opens_on_minimap2_even_when_hisat2_was_saved(qapp, tmp_path):
+def test_reopens_last_map_tab(qapp, tmp_path):
+    from repeatviewer.job_options import DIALOG_TAB_OPTIONS
+
     dlg, _ref, _q = _dialog(
-        qapp, tmp_path, initial=MapOptions(engine=MAP_ENGINE_HISAT2)
+        qapp,
+        tmp_path,
+        initial=MapOptions(
+            engine=MAP_ENGINE_HISAT2,
+            last_dialog_tab=MAP_ENGINE_HISAT2,
+        ),
     )
-    assert dlg._tab_bar.currentIndex() == dlg._TAB_MINIMAP2
-    assert dlg.options().engine == MAP_ENGINE_MINIMAP2
+    assert dlg._tab_bar.currentIndex() == dlg._TAB_HISAT2
+    assert dlg.current_dialog_tab() == MAP_ENGINE_HISAT2
+    assert dlg.options().engine == MAP_ENGINE_HISAT2
+
+    dlg2, _r2, _q2 = _dialog(
+        qapp,
+        tmp_path,
+        initial=MapOptions(last_dialog_tab=DIALOG_TAB_OPTIONS),
+    )
+    assert dlg2._tab_bar.currentIndex() == dlg2._TAB_OPTIONS
+    assert dlg2.current_dialog_tab() == DIALOG_TAB_OPTIONS
 
 
 def test_default_reference_uses_project_genome(qapp, tmp_path):

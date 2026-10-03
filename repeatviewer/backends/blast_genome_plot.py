@@ -4737,11 +4737,14 @@ def _legacy_repeatviewer_dir(query_fasta: Path) -> Path:
 
 
 # BLASTN hit tables use ``_b`` (short); older runs used ``_blast``.
+# Online NCBI BLAST uses ``_ob`` (legacy ``_online``).
 _BLAST_TABLE_SUFFIXES = (
     "_b.txt",
     "_blast.txt",
     "_blastp.txt",
     "_blastx.txt",
+    "_ob.txt",
+    "_online.txt",
 )
 
 
@@ -4767,8 +4770,12 @@ def blast_table_candidates_for_query(query_fasta: Path) -> list[Path]:
     names = (
         f"{query_fasta.name}_b.txt",
         f"{query_fasta.name}_blast.txt",
+        f"{query_fasta.name}_ob.txt",
+        f"{query_fasta.name}_online.txt",
         f"{query_fasta.stem}_b.txt",
         f"{query_fasta.stem}_blast.txt",
+        f"{query_fasta.stem}_ob.txt",
+        f"{query_fasta.stem}_online.txt",
     )
     seen: set[str] = set()
     candidates: list[Path] = []

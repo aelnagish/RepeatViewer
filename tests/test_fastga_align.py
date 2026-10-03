@@ -304,6 +304,22 @@ def test_align_window_has_a_fastga_tab_and_follows_the_rules(qapp, tmp_path):
     assert dlg.selected_aligner() == ALIGNER_MAFFT  # right-click choice
 
 
+def test_align_dialog_reopens_last_tab(qapp, tmp_path):
+    from repeatviewer.job_options import AlignOptions, DIALOG_TAB_OPTIONS
+
+    dlg, _files = _align_dialog(
+        qapp, tmp_path, initial=AlignOptions(last_dialog_tab=ALIGNER_MUSCLE)
+    )
+    assert dlg.current_dialog_tab() == ALIGNER_MUSCLE
+    assert dlg.selected_aligner() == ALIGNER_MUSCLE
+    assert dlg.options().last_dialog_tab == ALIGNER_MUSCLE
+
+    dlg2, _f2 = _align_dialog(
+        qapp, tmp_path, initial=AlignOptions(last_dialog_tab=DIALOG_TAB_OPTIONS)
+    )
+    assert dlg2.current_dialog_tab() == DIALOG_TAB_OPTIONS
+
+
 def test_fastga_reference_path_matches_define_inputs_width(qapp, tmp_path, monkeypatch):
     """Reference genome path box / Browse must match Define-inputs width."""
     from repeatviewer.job_options import FASTGA_INPUT_DEFINE

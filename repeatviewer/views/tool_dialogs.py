@@ -405,6 +405,17 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_BLASTN,
     BLAST_PROGRAM_BLASTP,
     BLAST_PROGRAM_BLASTX,
+    BLAST_PROGRAM_TBLASTN,
+    BLAST_PROGRAM_TBLASTX,
+    BLAST_PROGRAM_ONLINE,
+    BLAST_DIALOG_TABS,
+    BLAST_ONLINE_ALGORITHMS,
+    DIALOG_TAB_OPTIONS,
+    DEFAULT_BLAST_ONLINE_DATABASE,
+    DEFAULT_BLAST_ONLINE_EVALUE,
+    DEFAULT_BLAST_ONLINE_HITLIST,
+    DEFAULT_BLAST_ONLINE_PROGRAM,
+    DEFAULT_BLAST_ONLINE_WRITE_TEXT,
     DEFAULT_CONSENSUS_AMBIGUOUS,
     DEFAULT_CONSENSUS_THRESHOLD,
     CONSENSUS_RIGHT_CLICK_RUN,
@@ -1862,10 +1873,13 @@ class AlignParamsDialog(QDialog):
             ALIGNER_MAFFT: mafft_tab,
             ALIGNER_MUSCLE: muscle_tab,
             ALIGNER_FASTGA: self._fastga_panel,
-            "options": options_tab,
+            DIALOG_TAB_OPTIONS: options_tab,
         }
-        if initial_tab in tab_for:
-            self._aligner_tabs.setCurrentWidget(tab_for[initial_tab])
+        open_tab = initial_tab
+        if open_tab not in tab_for:
+            saved = getattr(opts, "last_dialog_tab", ALIGNER_MAFFT)
+            open_tab = saved if saved in tab_for else ALIGNER_MAFFT
+        self._aligner_tabs.setCurrentWidget(tab_for[open_tab])
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
@@ -1879,7 +1893,6 @@ class AlignParamsDialog(QDialog):
         self._update_advanced_settings_button()
         self._sync_align_field_columns()
         self._update_executable_status()
-        # Always fit the active tab — default open is MAFFT with initial_tab=None.
         QTimer.singleShot(0, self._fit_current_align_tab)
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -2268,6 +2281,17 @@ class AlignParamsDialog(QDialog):
             return ALIGNER_FASTGA
         return self.right_click_aligner()
 
+    def current_dialog_tab(self) -> str:
+        """Active Align window tab key (mafft / muscle / fastga / options)."""
+        current = self._aligner_tabs.currentWidget()
+        if current is self._mafft_tab:
+            return ALIGNER_MAFFT
+        if current is self._muscle_tab:
+            return ALIGNER_MUSCLE
+        if current is self._fastga_tab:
+            return ALIGNER_FASTGA
+        return DIALOG_TAB_OPTIONS
+
     def fastga_panel(self) -> "FastGaPanel":
         return self._fastga_panel
 
@@ -2477,6 +2501,7 @@ class AlignParamsDialog(QDialog):
             mafft_input_paths=[],
             mafft_combined=self._mafft_combine.isChecked(),
             muscle_combined=self._muscle_combine.isChecked(),
+            last_dialog_tab=self.current_dialog_tab(),
             right_click_aligner=self.right_click_aligner(),
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(
@@ -4574,6 +4599,51 @@ _BLAST_DATABASE_HELP = (
     "BLASTp and BLASTx search a protein database chosen under "
     "<b>Manage BLAST databases</b>."
 )
+_BLAST_ONLINE_PROGRAM_HELP = (
+    "NCBI BLAST suite:<br><br>"
+    "<b>blastn</b> (DNA vs DNA)<br><br>"
+    "<b>blastp</b> (protein vs protein)<br><br>"
+    "<b>blastx</b> (translated DNA vs protein)<br><br>"
+    "<b>tblastn</b> (protein vs translated DNA)<br><br>"
+    "<b>tblastx</b> (translated DNA vs translated DNA)"
+)
+_BLAST_ONLINE_DATABASE_HELP = (
+    "Public NCBI database searched on their servers (not a local RepeatViewer "
+    "BLAST database). Choices follow NCBI web BLAST.<br><br>"
+    "<b>Nucleotide (blastn / tblastn / tblastx)</b><br>"
+    "<b>core_nt</b>: Core nucleotide: NCBI’s refined default; faster and more "
+    "relevant than full <code>nt</code> (excludes some large eukaryotic "
+    "chromosomes).<br>"
+    "<b>nt</b>: Nucleotide collection (nr/nt): broad GenBank/EMBL/DDBJ set "
+    "(excluding bulk divisions such as EST/GSS/STS/PAT/HTG/WGS).<br>"
+    "<b>refseq_select_rna</b>: curated RefSeq Select transcripts (human/mouse "
+    "and select prokaryotes); smaller and easier to interpret.<br>"
+    "<b>refseq_rna</b>: NCBI RefSeq transcript (RNA) sequences.<br>"
+    "<b>refseq_reference_genomes</b> / <b>refseq_genomes</b> / "
+    "<b>refseq_genomic</b>: RefSeq genome assemblies at different scopes.<br>"
+    "<b>wgs</b>: whole-genome shotgun contigs/scaffolds.<br>"
+    "<b>est</b>: expressed sequence tags (cDNA fragments).<br>"
+    "<b>tsa</b>: Transcriptome Shotgun Assembly.<br>"
+    "<b>htgs</b>: unfinished high-throughput genomic sequences.<br>"
+    "<b>gss</b>: genomic survey sequences.<br>"
+    "<b>sts</b>: sequence tagged sites (markers).<br>"
+    "<b>patnt</b>: patent nucleotide sequences.<br>"
+    "<b>pdbnt</b>: nucleotide sequences from PDB structures.<br>"
+    "<b>RefSeq_Gene</b>: human RefSeqGene loci.<br>"
+    "<b>tls</b>: targeted loci (barcode / marker genes).<br>"
+    "<b>sra</b>: Sequence Read Archive (very large; often slow or limited).<br><br>"
+    "<b>Protein (blastp / blastx)</b><br>"
+    "<b>nr</b>: non-redundant protein collection (broadest).<br>"
+    "<b>refseq_select_prot</b>: RefSeq Select proteins.<br>"
+    "<b>refseq_protein</b>: NCBI RefSeq proteins.<br>"
+    "<b>swissprot</b>: UniProtKB/Swiss-Prot (highly curated).<br>"
+    "<b>pdbaa</b>: PDB protein sequences.<br>"
+    "<b>landmark</b>: compact model-organism proteomes.<br>"
+    "<b>pataa</b>: patent protein sequences."
+)
+_BLAST_ONLINE_HITS_HELP = (
+    "Maximum number of database hits to keep (NCBI <code>HITLIST_SIZE</code>)."
+)
 _BLAST_EVALUE_HELP = (
     "<b>-evalue</b>: Expectation value (E) threshold for saving hits.<br><br>"
     "Hits with an E-value above this threshold are discarded. Lower values keep "
@@ -4804,6 +4874,53 @@ class BlastParamsDialog(QDialog):
         self._blastx_write_gff = QCheckBox("Export GFF file (*.gff)")
         self._blastx_write_gff.setChecked(opts.blastx_write_gff)
         self._blastx_write_gff.setToolTip(_BLAST_WRITE_GFF_HELP)
+
+        # --- Online BLAST (NCBI web) -----------------------------------------
+        self._online_program = QComboBox()
+        for label, value in (
+            ("blastn", BLAST_PROGRAM_BLASTN),
+            ("blastp", BLAST_PROGRAM_BLASTP),
+            ("blastx", BLAST_PROGRAM_BLASTX),
+            ("tblastn", BLAST_PROGRAM_TBLASTN),
+            ("tblastx", BLAST_PROGRAM_TBLASTX),
+        ):
+            self._online_program.addItem(label, value)
+        online_prog = (
+            opts.online_program
+            if opts.online_program in BLAST_ONLINE_ALGORITHMS
+            else DEFAULT_BLAST_ONLINE_PROGRAM
+        )
+        idx = self._online_program.findData(online_prog)
+        self._online_program.setCurrentIndex(idx if idx >= 0 else 0)
+        self._online_program.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        self._online_program.setToolTip(_BLAST_ONLINE_PROGRAM_HELP)
+
+        self._online_database = QComboBox()
+        self._online_database.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        self._online_database.setToolTip(_BLAST_ONLINE_DATABASE_HELP)
+        # Long NCBI labels: keep the field width, widen the popup list.
+        self._online_database.view().setMinimumWidth(420)
+        self._populate_online_database_combo(opts.online_database)
+
+        self._online_evalue = QDoubleSpinBox()
+        configure_report_evalue_spinbox(self._online_evalue)
+        self._online_evalue.setValue(normalize_blast_evalue(opts.online_e_value))
+        self._online_evalue.setToolTip(_BLAST_EVALUE_HELP)
+        self._online_evalue.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+
+        self._online_hitlist = QSpinBox()
+        self._online_hitlist.setRange(1, 500)
+        self._online_hitlist.setValue(max(1, min(500, int(opts.online_hitlist_size))))
+        self._online_hitlist.setToolTip(_BLAST_ONLINE_HITS_HELP)
+        self._online_hitlist.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+
+        self._online_write_text = QCheckBox("Export BLAST text file (*_ob.txt)")
+        self._online_write_text.setChecked(bool(opts.online_write_text))
+        self._online_write_text.setToolTip(_BLAST_WRITE_TEXT_HELP)
+
+        self._online_program.currentIndexChanged.connect(
+            self._on_online_program_changed
+        )
 
         # Shared post-processing limits: one spinbox set per program page, kept in sync.
         self._max_msa = QSpinBox()
@@ -5088,6 +5205,12 @@ class BlastParamsDialog(QDialog):
             ],
         )
 
+        (
+            self._online_tab,
+            self._online_basic,
+            self._online_advanced,
+        ) = self._build_online_tab()
+
         # --- Options: right-click program + shared executable setting ---
         options_tab = QWidget()
         options_layout = QVBoxLayout(options_tab)
@@ -5109,6 +5232,7 @@ class BlastParamsDialog(QDialog):
             ("BLASTn", BLAST_PROGRAM_BLASTN),
             ("BLASTp", BLAST_PROGRAM_BLASTP),
             ("BLASTx", BLAST_PROGRAM_BLASTX),
+            ("Online BLAST", BLAST_PROGRAM_ONLINE),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_program == value)
@@ -5129,6 +5253,14 @@ class BlastParamsDialog(QDialog):
                 self, self._use_system_blast, self._blast_path_status
             )
         )
+        note = QLabel(
+            "Local BLASTn / BLASTp / BLASTx use these executables. "
+            "Online BLAST uses NCBI servers (no local binary).",
+            self,
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: palette(mid);")
+        exe_box_layout.addWidget(note)
         options_layout.addWidget(exe_box)
 
         process_box, self._show_process_window, self._close_process_window = (
@@ -5156,8 +5288,9 @@ class BlastParamsDialog(QDialog):
         self._tabs.addTab("BLASTn")
         self._tabs.addTab("BLASTp")
         self._tabs.addTab("BLASTx")
+        self._tabs.addTab("Online BLAST")
         self._tabs.addTab("Options")
-        self._options_tab_index = 3
+        self._options_tab_index = 4
 
         self._stack = QStackedWidget(self)
         self._stack.setSizePolicy(
@@ -5166,6 +5299,7 @@ class BlastParamsDialog(QDialog):
         self._stack.addWidget(self._blastn_tab)
         self._stack.addWidget(self._blastp_tab)
         self._stack.addWidget(self._blastx_tab)
+        self._stack.addWidget(self._online_tab)
         self._stack.addWidget(self._options_tab)
 
         self._populate_database_combos(
@@ -5173,10 +5307,18 @@ class BlastParamsDialog(QDialog):
             blastp_name=opts.blastp_database_name,
             blastx_name=opts.blastx_database_name,
         )
+        open_tab = getattr(opts, "last_dialog_tab", None)
+        if open_tab not in BLAST_DIALOG_TABS:
+            open_tab = (
+                opts.program if opts.program in BLAST_DIALOG_TABS else BLAST_PROGRAM_BLASTN
+            )
         program_tab = {
+            BLAST_PROGRAM_BLASTN: 0,
             BLAST_PROGRAM_BLASTP: 1,
             BLAST_PROGRAM_BLASTX: 2,
-        }.get(opts.program, 0)
+            BLAST_PROGRAM_ONLINE: 3,
+            DIALOG_TAB_OPTIONS: 4,
+        }.get(open_tab, 0)
         self._tabs.setCurrentIndex(program_tab)
         self._stack.setCurrentIndex(program_tab)
 
@@ -5354,6 +5496,88 @@ class BlastParamsDialog(QDialog):
         advanced.setMaximumHeight(0)
         return (tab, basic, advanced)
 
+    def _build_online_tab(self) -> tuple[QWidget, QWidget, QWidget]:
+        """Online BLAST Settings page (NCBI web); no Advanced panel."""
+        tab = QWidget()
+        tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        root = QVBoxLayout(tab)
+        root.setContentsMargins(16, 0, 16, 10)
+        root.setSpacing(4)
+        basic = QWidget(tab)
+        basic.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        form = self._parameter_form(basic)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setVerticalSpacing(4)
+
+        form.addRow(self._blast_section("Settings", basic))
+        form.addRow(
+            "Program:",
+            self._field_with_help(
+                self._online_program, "Program", _BLAST_ONLINE_PROGRAM_HELP
+            ),
+        )
+        form.addRow(
+            "Database:",
+            self._field_with_help(
+                self._online_database, "Database", _BLAST_ONLINE_DATABASE_HELP
+            ),
+        )
+        form.addRow(
+            "-evalue:",
+            self._field_with_help(
+                self._online_evalue, "-evalue", _BLAST_EVALUE_HELP
+            ),
+        )
+        form.addRow(
+            "Max hits:",
+            self._field_with_help(
+                self._online_hitlist, "Max hits", _BLAST_ONLINE_HITS_HELP
+            ),
+        )
+        form.addRow(
+            "",
+            self._field_with_help(
+                self._online_write_text,
+                "Export BLAST text file",
+                _BLAST_WRITE_TEXT_HELP,
+            ),
+        )
+        root.addWidget(basic)
+        # Placeholder advanced widget (never shown) so tab shape matches others.
+        advanced = QWidget(tab)
+        advanced.setVisible(False)
+        advanced.setMaximumHeight(0)
+        root.addWidget(advanced)
+        return (tab, basic, advanced)
+
+    def _populate_online_database_combo(self, selected: str | None = None) -> None:
+        from repeatviewer.backends.ncbi_blast_online import (
+            ONLINE_BLAST_DATABASES,
+            default_online_database,
+        )
+
+        program = str(self._online_program.currentData() or DEFAULT_BLAST_ONLINE_PROGRAM)
+        choices = ONLINE_BLAST_DATABASES.get(
+            program, ONLINE_BLAST_DATABASES[BLAST_PROGRAM_BLASTN]
+        )
+        wanted = str(selected or self._online_database.currentData() or "").strip()
+        if not wanted or wanted not in {key for key, _ in choices}:
+            wanted = default_online_database(program)
+        self._online_database.blockSignals(True)
+        self._online_database.clear()
+        for key, label in choices:
+            self._online_database.addItem(label, key)
+        idx = self._online_database.findData(wanted)
+        self._online_database.setCurrentIndex(idx if idx >= 0 else 0)
+        self._online_database.blockSignals(False)
+
+    def _on_online_program_changed(self, *_args) -> None:
+        self._populate_online_database_combo()
+
     def input_source(self) -> str:
         if self._input_define.isChecked():
             return ALIGN_INPUT_DEFINE
@@ -5436,14 +5660,16 @@ class BlastParamsDialog(QDialog):
             return self._blastp_advanced
         if index == 2:
             return self._blastx_advanced
+        # Online BLAST has no Advanced Settings panel.
         return None
 
     def _on_blast_tab_changed(self, tab_index: int) -> None:
         """Switch program tabs like Align: no window flash, resize only when needed."""
-        on_program = tab_index in (0, 1, 2)
+        on_program = tab_index in (0, 1, 2, 3)
         self._stack.setCurrentIndex(tab_index)
         self._inputs_panel.setVisible(on_program)
-        self._advanced_settings_btn.setVisible(on_program)
+        has_advanced = self._current_advanced_panel() is not None
+        self._advanced_settings_btn.setVisible(on_program and has_advanced)
         if not on_program:
             self._update_executable_status()
             if self.isVisible():
@@ -5520,6 +5746,8 @@ class BlastParamsDialog(QDialog):
             return self._blastp_basic
         if index == 2:
             return self._blastx_basic
+        if index == 3:
+            return self._online_basic
         return None
 
     def _blast_stack_page_height(self, *, expanded: bool) -> int:
@@ -5791,6 +6019,12 @@ class BlastParamsDialog(QDialog):
         self._blastx_query_coverage.setValue(defaults.blastx_query_coverage_hsp)
         self._blastx_write_text.setChecked(defaults.blastx_write_text)
         self._blastx_write_gff.setChecked(defaults.blastx_write_gff)
+        online_idx = self._online_program.findData(defaults.online_program)
+        self._online_program.setCurrentIndex(online_idx if online_idx >= 0 else 0)
+        self._populate_online_database_combo(defaults.online_database)
+        self._online_evalue.setValue(defaults.online_e_value)
+        self._online_hitlist.setValue(defaults.online_hitlist_size)
+        self._online_write_text.setChecked(defaults.online_write_text)
         # Canonical copies drive synced values on the other program pages.
         self._max_msa.setValue(defaults.max_msa_lines)
         self._top_msa.setValue(defaults.top_msa_lines)
@@ -5828,12 +6062,24 @@ class BlastParamsDialog(QDialog):
         ):
             QTimer.singleShot(0, self._fit_to_content)
 
-    def options(self) -> BlastOptions:
-        program = {
+    def current_dialog_tab(self) -> str:
+        """Active BLAST window tab key (blastn / blastp / blastx / online / options)."""
+        return {
             0: BLAST_PROGRAM_BLASTN,
             1: BLAST_PROGRAM_BLASTP,
             2: BLAST_PROGRAM_BLASTX,
-        }.get(self._tabs.currentIndex(), self._initial_program)
+            3: BLAST_PROGRAM_ONLINE,
+            4: DIALOG_TAB_OPTIONS,
+        }.get(self._tabs.currentIndex(), BLAST_PROGRAM_BLASTN)
+
+    def options(self) -> BlastOptions:
+        tab = self.current_dialog_tab()
+        program = tab if tab in (
+            BLAST_PROGRAM_BLASTN,
+            BLAST_PROGRAM_BLASTP,
+            BLAST_PROGRAM_BLASTX,
+            BLAST_PROGRAM_ONLINE,
+        ) else self._initial_program
         # Define-input paths are session-only; always reopen on Use selected.
         # Shared limits: read from the blastn (canonical) copies; all pages stay synced.
         return BlastOptions(
@@ -5870,8 +6116,18 @@ class BlastParamsDialog(QDialog):
             blastx_database_name=self._blastx_database.currentData(),
             blastx_write_text=self._blastx_write_text.isChecked(),
             blastx_write_gff=self._blastx_write_gff.isChecked(),
+            online_program=str(
+                self._online_program.currentData() or DEFAULT_BLAST_ONLINE_PROGRAM
+            ),
+            online_database=str(
+                self._online_database.currentData() or DEFAULT_BLAST_ONLINE_DATABASE
+            ),
+            online_e_value=normalize_blast_evalue(self._online_evalue.value()),
+            online_hitlist_size=int(self._online_hitlist.value()),
+            online_write_text=self._online_write_text.isChecked(),
             input_source=ALIGN_INPUT_SELECTED,
             input_paths=[],
+            last_dialog_tab=tab,
             right_click_program=self._selected_right_click_program(),
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(

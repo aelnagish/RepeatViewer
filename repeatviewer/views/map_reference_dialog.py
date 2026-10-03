@@ -32,7 +32,9 @@ from repeatviewer.backends import map_reference as mr
 from repeatviewer.job_options import (
     ALIGN_INPUT_DEFINE,
     ALIGN_INPUT_SELECTED,
+    DIALOG_TAB_OPTIONS,
     MAP_CONSENSUS_THRESHOLDS,
+    MAP_DIALOG_TABS,
     MAP_ENGINE_AUTO,
     MAP_ENGINE_HISAT2,
     MAP_ENGINE_MINIMAP2,
@@ -713,8 +715,20 @@ class MapReferenceDialog(QDialog):
         self._stack.addWidget(engine_page)
         self._stack.addWidget(options_page)
 
-        # Always land on Minimap2; saved HISAT2 settings stay on the HISAT2 tab.
-        self._tab_bar.setCurrentIndex(self._TAB_MINIMAP2)
+        open_tab = getattr(opts, "last_dialog_tab", MAP_ENGINE_MINIMAP2)
+        if open_tab not in MAP_DIALOG_TABS:
+            open_tab = (
+                opts.engine
+                if opts.engine in (MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2)
+                else MAP_ENGINE_MINIMAP2
+            )
+        self._tab_bar.setCurrentIndex(
+            {
+                MAP_ENGINE_MINIMAP2: self._TAB_MINIMAP2,
+                MAP_ENGINE_HISAT2: self._TAB_HISAT2,
+                DIALOG_TAB_OPTIONS: self._TAB_OPTIONS,
+            }.get(open_tab, self._TAB_MINIMAP2)
+        )
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
@@ -782,6 +796,15 @@ class MapReferenceDialog(QDialog):
             return MAP_ENGINE_MINIMAP2
         # Options tab: keep last engine radio / combo
         return str(self._rc_engine.currentData() or MAP_ENGINE_AUTO)
+
+    def current_dialog_tab(self) -> str:
+        """Active Map window tab key (minimap2 / hisat2 / options)."""
+        index = self._tab_bar.currentIndex()
+        if index == self._TAB_HISAT2:
+            return MAP_ENGINE_HISAT2
+        if index == self._TAB_OPTIONS:
+            return DIALOG_TAB_OPTIONS
+        return MAP_ENGINE_MINIMAP2
 
     def _on_tab_changed(self, index: int) -> None:
         on_options = index == self._TAB_OPTIONS
@@ -1136,6 +1159,7 @@ class MapReferenceDialog(QDialog):
         return MapOptions(
             reference_fasta=str(ref) if ref else "",
             engine=engine,
+            last_dialog_tab=self.current_dialog_tab(),
             multiple_hits=str(multi),
             hisat2_library=str(self._hisat2_library.currentData() or MAP_HISAT2_RNA),
             hisat2_reads=str(self._hisat2_reads.currentData() or MAP_HISAT2_READS_SINGLE),

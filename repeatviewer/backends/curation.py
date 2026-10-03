@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 from repeatviewer.backends.thread_budget import analysis_threads_per_job
 from repeatviewer.backends.tsd_search import TSD_identifier
 from repeatviewer.job_options import (
+    BLAST_PROGRAM_ONLINE,
     BlastOptions,
     ConsensusOptions,
     ExtendOptions,
@@ -645,9 +646,48 @@ def run_on_sequence(
     label_suffix = genome_output_suffix(genome_label)
 
     if func_name == "blast":
+        blast_opts = blast_options or BlastOptions()
+        if blast_opts.program == BLAST_PROGRAM_ONLINE:
+            from repeatviewer.backends.ncbi_blast_online import (
+                NcbiBlastOnlineError,
+                run_ncbi_online_blast,
+            )
+
+            try:
+                out_path = run_ncbi_online_blast(
+                    seq_path,
+                    out_dir,
+                    program=blast_opts.online_program,
+                    database=blast_opts.online_database,
+                    evalue=blast_opts.online_e_value,
+                    hitlist_size=blast_opts.online_hitlist_size,
+                    cancel=cancel,
+                    progress=sequence_progress,
+                )
+            except NcbiBlastOnlineError as exc:
+                raise RuntimeError(str(exc)) from exc
+            if blast_opts.online_write_text:
+                created.append(str(out_path.resolve()))
+            try:
+                from repeatviewer.backends.ncbi_blast_online import (
+                    merge_online_blast_into_annotations,
+                )
+
+                for ann in merge_online_blast_into_annotations(
+                    seq_path,
+                    out_path,
+                    max_hits=blast_opts.online_hitlist_size,
+                ):
+                    created.append(str(ann.resolve()))
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"Online BLAST finished but Annotation update failed: {exc}"
+                ) from exc
+            if not blast_opts.online_write_text:
+                out_path.unlink(missing_ok=True)
+            return created
         if genome_db is None:
             raise RuntimeError("BLAST database not prepared.")
-        blast_opts = blast_options or BlastOptions()
         program = blast_opts.program
         # blastp and blastx both search a protein database and give hits in
         # protein coordinates (no strand / BED), differing only in the query.
@@ -1096,7 +1136,13 @@ def run_batch(
     chrom_cache: dict[Path, dict[str, int]] = {}
 
     selected_blast_db_name = blast_options.active_database_name if blast_options else None
-    if func_name == "blast" and selected_blast_db_name:
+    if func_name == "blast" and blast_options and blast_options.program == BLAST_PROGRAM_ONLINE:
+        # NCBI web BLAST — no local genome / database preparation.
+        genome_dependent = False
+        genome_items = []
+        db_cache = {}
+        chrom_cache = {}
+    elif func_name == "blast" and selected_blast_db_name:
         expected_molecule = (
             "prot"
             if blast_options and blast_options.program in ("blastp", "blastx")
@@ -1170,6 +1216,14 @@ def run_batch(
             work_items.append((seq_path, "", None))
 
     per_sequence = func_name in _PER_SEQUENCE_FUNCS
+    # Online BLAST needs phase updates (submit / poll / download) even though
+    # each FASTA file is one work unit.
+    online_blast = (
+        func_name == "blast"
+        and blast_options is not None
+        and blast_options.program == BLAST_PROGRAM_ONLINE
+    )
+    pass_sequence_progress = per_sequence or online_blast
     item_units = [
         _fasta_sequence_units(seq_path) if per_sequence else 1
         for seq_path, _genome_label, _genome_path in work_items
@@ -1179,6 +1233,9 @@ def run_batch(
     workers = 1 if func_name == "te_annotation" else effective_batch_workers(
         max_workers, len(work_items)
     )
+    # NCBI asks clients not to hammer the service with parallel web BLAST jobs.
+    if online_blast:
+        workers = 1
     progress_lock = threading.Lock()
     completed_count = 0
     from repeatviewer.external_process import current_process_log_sink, process_log_sink
@@ -1238,7 +1295,9 @@ def run_batch(
                     tsd_search_options=tsd_search_options,
                     orf_prediction_settings=orf_prediction_settings,
                     cancel=cancel,
-                    sequence_progress=_sequence_progress if per_sequence else None,
+                    sequence_progress=(
+                        _sequence_progress if pass_sequence_progress else None
+                    ),
                 )
             return seq_path, genome_label, outs, None, units, last_reported
         except JobCancelledError:
