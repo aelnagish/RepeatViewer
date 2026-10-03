@@ -280,6 +280,18 @@ _LEGACY_ALIVIEW_ACGT: dict[str, str] = {
 }
 
 
+# Hot path (Annotation color bar) must not reopen QSettings per base.
+_nucleotide_color_map_cache: dict[str, tuple[str, str]] | None = None
+_amino_acid_color_map_cache: dict[str, tuple[str, str]] | None = None
+
+
+def invalidate_residue_color_maps() -> None:
+    """Drop cached nucleotide / amino-acid palettes (call after color settings change)."""
+    global _nucleotide_color_map_cache, _amino_acid_color_map_cache
+    _nucleotide_color_map_cache = None
+    _amino_acid_color_map_cache = None
+
+
 def load_color_blind_nucleotide_scheme() -> bool:
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
@@ -293,6 +305,7 @@ def save_color_blind_nucleotide_scheme(enabled: bool) -> None:
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
     s.setValue("color_blind_nucleotide_scheme", bool(enabled))
     s.endGroup()
+    invalidate_residue_color_maps()
 
 
 def _scheme_base_colors() -> dict[str, tuple[str, str]]:
@@ -311,15 +324,17 @@ def _strip_legacy_aliview_overrides(colors: dict[str, str]) -> dict[str, str]:
 
 
 def load_custom_nucleotide_backgrounds() -> dict[str, str]:
-    """Load custom nucleotide colours (full alphabet JSON)."""
+    """Load custom nucleotide colours (full alphabet JSON).
+
+    Read-only: do not write/remove settings here — the Annotation color bar
+    calls into this path thousands of times when the palette is uncached.
+    Legacy per-base keys are stripped in ``save_custom_nucleotide_backgrounds``.
+    """
     import json
 
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
     raw = s.value("nucleotide_colors_json", "")
-    # Drop legacy per-base keys so old AliView saves do not override MSA Default.
-    for base in ("A", "C", "G", "T"):
-        s.remove(f"nucleotide_{base}_bg")
     s.endGroup()
 
     custom: dict[str, str] = {}
@@ -364,6 +379,7 @@ def save_custom_nucleotide_backgrounds(colors: dict[str, str]) -> None:
     else:
         s.remove("nucleotide_colors_json")
     s.endGroup()
+    invalidate_residue_color_maps()
 
 
 def clear_custom_nucleotide_backgrounds() -> None:
@@ -379,6 +395,10 @@ def default_nucleotide_backgrounds() -> dict[str, str]:
 
 def nucleotide_base_color_map() -> dict[str, tuple[str, str]]:
     """Return bg/fg hex colors for nucleotide letters in the Annotation view."""
+    global _nucleotide_color_map_cache
+    if _nucleotide_color_map_cache is not None:
+        return _nucleotide_color_map_cache
+
     from repeatviewer.backends.msa_plot import (
         DEFAULT_NUCLEOTIDE_COLORS,
         NUCLEOTIDE_COLORS_COLORBLIND,
@@ -393,7 +413,10 @@ def nucleotide_base_color_map() -> dict[str, tuple[str, str]]:
         merged["T"] = merged["U"]
     elif "T" in merged:
         merged["U"] = merged["T"]
-    return {base: (bg, _contrast_fg_for_bg(bg)) for base, bg in merged.items()}
+    _nucleotide_color_map_cache = {
+        base: (bg, _contrast_fg_for_bg(bg)) for base, bg in merged.items()
+    }
+    return _nucleotide_color_map_cache
 
 
 def _contrast_fg_for_bg(bg_hex: str) -> str:
@@ -449,6 +472,7 @@ def save_custom_amino_acid_backgrounds(colors: dict[str, str]) -> None:
     else:
         s.remove("amino_acid_colors_json")
     s.endGroup()
+    invalidate_residue_color_maps()
 
 
 def clear_custom_amino_acid_backgrounds() -> None:
@@ -457,6 +481,12 @@ def clear_custom_amino_acid_backgrounds() -> None:
 
 def amino_acid_color_map() -> dict[str, tuple[str, str]]:
     """Return bg/fg hex colors for amino-acid residues (Annotation protein view)."""
+    global _amino_acid_color_map_cache
+    if _amino_acid_color_map_cache is not None:
+        return _amino_acid_color_map_cache
     merged = default_amino_acid_backgrounds()
     merged.update(load_custom_amino_acid_backgrounds())
-    return {aa: (bg, _contrast_fg_for_bg(bg)) for aa, bg in merged.items()}
+    _amino_acid_color_map_cache = {
+        aa: (bg, _contrast_fg_for_bg(bg)) for aa, bg in merged.items()
+    }
+    return _amino_acid_color_map_cache

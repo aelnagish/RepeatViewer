@@ -629,17 +629,35 @@ def _letter_cell_width_for_pt(point_size: int) -> int:
     return max(1, max(fm.horizontalAdvance(base) for base in "ACGTUNWYF"))
 
 
-def _base_colors(base: str, *, is_protein: bool = False) -> tuple[QColor, QColor]:
-    if is_protein:
-        from repeatviewer.widgets.preview_zoom import amino_acid_color_map
+# QColor objects for the Annotation bar — rebuilt when residue palettes change.
+_base_qcolor_cache: dict[bool, dict[str, tuple[QColor, QColor]]] = {}
 
-        palette = amino_acid_color_map()
-        key = base.upper()
-        bg, fg = palette.get(key, palette.get("X", ("#C8C8C8", "#000000")))
-        return QColor(bg), QColor(fg)
-    palette = nucleotide_base_color_map()
-    bg, fg = palette.get(base.upper(), palette["N"])
-    return QColor(bg), QColor(fg)
+
+def invalidate_base_qcolor_cache() -> None:
+    _base_qcolor_cache.clear()
+
+
+def _base_colors(base: str, *, is_protein: bool = False) -> tuple[QColor, QColor]:
+    """Return (bg, fg) QColors; palette is cached (no QSettings on the paint path)."""
+    cache = _base_qcolor_cache.get(is_protein)
+    if cache is None:
+        if is_protein:
+            from repeatviewer.widgets.preview_zoom import amino_acid_color_map
+
+            palette = amino_acid_color_map()
+        else:
+            palette = nucleotide_base_color_map()
+        cache = {
+            key: (QColor(bg), QColor(fg)) for key, (bg, fg) in palette.items()
+        }
+        _base_qcolor_cache[is_protein] = cache
+    key = (base or ("X" if is_protein else "N")).upper()
+    if key in cache:
+        return cache[key]
+    fallback = "X" if is_protein else "N"
+    if fallback in cache:
+        return cache[fallback]
+    return _NO_COLOR_BG, _NO_COLOR_FG
 
 
 def _draw_directed_feature(
@@ -4008,6 +4026,11 @@ class SequenceMapWidget(QWidget):
         self.fit_window()
 
     def refresh_nucleotide_colors(self) -> None:
+        from repeatviewer.widgets.preview_zoom import invalidate_residue_color_maps
+
+        invalidate_residue_color_maps()
+        invalidate_base_qcolor_cache()
+        self._canvas._invalidate_seq_layer_cache()
         self._canvas.update()
 
     def selection_range(self) -> tuple[int, int] | None:

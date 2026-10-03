@@ -47,7 +47,16 @@ def test_buttons_and_align_style_tabs(qapp, tmp_path):
     ]
     assert tabs.expanding() is False  # BLAST-style compact tabs
     assert tabs.documentMode() is True
+    assert tabs.currentIndex() == dlg._TAB_MINIMAP2
     assert dlg.width() == dlg._DIALOG_WIDTH
+
+
+def test_opens_on_minimap2_even_when_hisat2_was_saved(qapp, tmp_path):
+    dlg, _ref, _q = _dialog(
+        qapp, tmp_path, initial=MapOptions(engine=MAP_ENGINE_HISAT2)
+    )
+    assert dlg._tab_bar.currentIndex() == dlg._TAB_MINIMAP2
+    assert dlg.options().engine == MAP_ENGINE_MINIMAP2
 
 
 def test_default_reference_uses_project_genome(qapp, tmp_path):

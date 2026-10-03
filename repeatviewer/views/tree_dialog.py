@@ -1,9 +1,11 @@
 """Tree dialog (Tools → Tree), Align / BLAST–style function window.
 
-Above the tabs: Alignment, monomer rotation, Root and Skip fragments. Tabs:
-IQ-TREE | FastME | FastTree | Options. Save / Run take the engine from the open
-tab (on Options, from the last engine tab). Input is used as given (DNA or protein);
-RT-domain trees are started from Tools → Tree → RT-domain tree.
+Shared above the tabs: Mode (alignment) and Settings (monomers, root, skip
+fragments). Tabs: IQ-TREE | FastME | FastTree | Options. Each engine tab has
+Settings; IQ-TREE also has Advanced Settings (searches, seed, --bnni, --fast).
+Save / Run take the engine from the open tab (on Options, from the last engine
+tab). Input is used as given (DNA or protein); RT-domain trees are started from
+Tools → Tree → RT-domain tree.
 
 The dialog opens immediately; sequence lengths for Skip fragments / Outgroup are
 loaded in the background so large FASTA files do not block the window.
@@ -59,6 +61,7 @@ from repeatviewer.views.tool_dialogs import (
     TOOL_PARAMS_FIELD_WIDTH,
     QComboBox,
     QSpinBox,
+    _form_section_separator,
     dialog_should_run,
     executable_checkbox_row,
     make_cancel_save_run_bar,
@@ -94,7 +97,8 @@ ROTATE_INFO = (
 IQ_SUPPORT_INFO = (
     "How much to trust each branch.<br>"
     "<b>SH-aLRT + UFBoot</b>: trust a branch at SH-aLRT ≥ 80 and UFBoot ≥ 95 "
-    "(not the classic 70). UFBoot uses -bnni against overestimation."
+    "(not the classic 70). UFBoot uses -B; SH-aLRT uses --alrt. "
+    "UFBoot trees can be refined with --bnni (Advanced Settings)."
 )
 FASTME_SUPPORT_INFO = (
     "How much to trust each branch.<br>"
@@ -110,7 +114,7 @@ ROOT_INFO = (
     "<b>Unrooted</b>: no root; the tree shows relationships only.<br>"
     "<b>Midpoint</b>: root halfway along the longest path; assumes similar rates.<br>"
     "<b>Outgroup</b>: root on sequences known to lie outside the rest (best when one "
-    "exists). Choose them with <b>Outgroup…</b>.<br>"
+    "exists). Choose them with <b>Outgroup…</b> (IQ-TREE -o).<br>"
     "You can also reroot later in the tree viewer."
 )
 FRAG_INFO = (
@@ -119,9 +123,19 @@ FRAG_INFO = (
     "0 = keep all. Left-out sequences are listed in the report."
 )
 SEARCH_INFO = (
-    "<b>Searches</b> (IQ-TREE): independent tree searches; the tree with the best "
-    "likelihood is kept, and the report says how many found the same tree.<br>"
-    "<b>Random seed</b>: recorded in the report so the run can be repeated exactly."
+    "<b>Searches</b> (IQ-TREE --runs equivalent): independent tree searches; the tree "
+    "with the best likelihood is kept, and the report says how many found the same "
+    "tree.<br>"
+    "<b>Random seed</b> (--seed): recorded in the report so the run can be repeated "
+    "exactly."
+)
+BNNI_INFO = (
+    "IQ-TREE <b>--bnni</b>: optimize UFBoot trees by NNI on the bootstrap alignment. "
+    "Reduces overestimation of support; recommended whenever UFBoot is used."
+)
+FAST_INFO = (
+    "IQ-TREE <b>--fast</b>: faster tree search resembling FastTree. Use for a quick "
+    "look; leave off for a publishable tree."
 )
 MASK_INFO = (
     "<b>Methylation check</b>: builds a second tree without the alignment columns where any "
@@ -133,14 +147,14 @@ MASK_INFO = (
     "DNA only. Takes about twice as long."
 )
 MODEL_INFO = (
-    "<b>ModelFinder</b>: tests the models and selects the best by BIC "
-    "(Bayesian information criterion).<br>"
+    "<b>ModelFinder</b> (-m MFP): tests models and selects the best by BIC.<br>"
     "<b>GTR</b>: all six substitution types at their own rate.<br>"
     "<b>TN (TN93)</b>: two transition rates (A↔G, C↔T), one transversion rate.<br>"
     "<b>HKY</b>: one transition and one transversion rate, unequal base frequencies.<br>"
     "<b>K2P (K80)</b>: as HKY, with equal base frequencies.<br>"
-    "<b>LG</b>: protein model.<br>"
-    "<b>+F</b> empirical base frequencies · <b>+G4</b> rate variation among sites "
+    "<b>TIM / JC</b>: further DNA models.<br>"
+    "<b>LG / WAG / JTT</b>: protein models.<br>"
+    "<b>+F</b> empirical frequencies · <b>+G4</b> rate variation among sites "
     "(4 gamma categories)."
 )
 
@@ -176,13 +190,17 @@ def _note(text: str, parent: QWidget) -> QLabel:
     return label
 
 
+def _section(title: str, parent: QWidget | None = None) -> QLabel:
+    return QLabel(f"<b>{title}</b>", parent)
+
+
 def _form(parent: QWidget, *, margins: tuple[int, int, int, int]) -> QFormLayout:
     f = QFormLayout(parent)
     f.setContentsMargins(*margins)
     f.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
     f.setHorizontalSpacing(12)
-    f.setVerticalSpacing(9)
+    f.setVerticalSpacing(4)
     return f
 
 
@@ -251,7 +269,6 @@ class TreeParamsDialog(QDialog):
     """Build a phylogenetic tree from the selected FASTA file(s)."""
 
     _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
-    _SETTINGS_LABEL_REF = "Methylation check:"
 
     def __init__(
         self,
@@ -271,6 +288,7 @@ class TreeParamsDialog(QDialog):
         self._summary = None
         self._summary_loader: _SummaryLoader | None = None
         self._found_timer: QTimer | None = None
+        self._iq_compact_size = None
         # REXdb is configured when running RT-domain tree, not on this form.
         self._rexdb_fasta = str(opts.rexdb_fasta or "")
         self._rexdb_references = int(opts.rexdb_references)
@@ -298,7 +316,14 @@ class TreeParamsDialog(QDialog):
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
-        self._button_box = make_cancel_save_run_bar(self, left_widgets=[restore])
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_toggled)
+        self._button_box = make_cancel_save_run_bar(
+            self, left_widgets=[restore, self._advanced_settings_btn]
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(8)
@@ -311,6 +336,8 @@ class TreeParamsDialog(QDialog):
             w.currentIndexChanged.connect(self._sync)
         self._min_cov.valueChanged.connect(self._update_check)
         self._tabs.currentChanged.connect(self._on_tab_for_found_and_fit)
+        self._set_advanced_visible(False)
+        self._update_advanced_settings_button()
         self._sync_field_columns()
         self._sync()
         QTimer.singleShot(0, self._start_summary_load)
@@ -319,15 +346,26 @@ class TreeParamsDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        self._iq_compact_size = None
         self._sync_field_columns()
         QTimer.singleShot(0, self._fit_to_content)
 
     def _sync_field_columns(self) -> None:
         sync_form_field_column_spacers(
             self,
-            [self._frag_hint_label],
-            [self._top_form, self._iq_form, self._fme_form, self._ft_form],
-            ref_label=self._SETTINGS_LABEL_REF,
+            [
+                self._frag_hint_label,
+                self._bnni_label,
+                self._fast_label,
+                self._ft_support_note_label,
+            ],
+            [
+                self._top_form,
+                self._iq_form,
+                self._iq_adv_form,
+                self._fme_form,
+                self._ft_form,
+            ],
         )
 
     # ------------------------------------------------------------------ building
@@ -375,10 +413,13 @@ class TreeParamsDialog(QDialog):
         )
         f = _form(self._shared, margins=(16, 4, 16, 4))
         self._top_form = f
+        f.addRow(_section("Mode", self._shared))
         f.addRow(
             "Alignment:",
             field_with_help(self._align_mode, "Alignment", ALIGN_INFO),
         )
+        f.addRow(_form_section_separator())
+        f.addRow(_section("Settings", self._shared))
         f.addRow(
             "Monomers:",
             field_with_help(self._rotate, "Rotate monomers", ROTATE_INFO),
@@ -419,7 +460,17 @@ class TreeParamsDialog(QDialog):
         self._model = QComboBox(self)
         self._model.setEditable(True)
         self._model.addItem("ModelFinder, best model by BIC", TREE_MODEL_FINDER)
-        for m in ("GTR+F+G4", "TN+F+G4", "HKY+F+G4", "K2P+G4", "LG+G4"):
+        for m in (
+            "GTR+F+G4",
+            "TIM+F+G4",
+            "TN+F+G4",
+            "HKY+F+G4",
+            "K2P+G4",
+            "JC+G4",
+            "LG+G4",
+            "WAG+G4",
+            "JTT+G4",
+        ):
             self._model.addItem(m, m)
         if opts.model.upper() == TREE_MODEL_FINDER:
             self._model.setCurrentIndex(0)
@@ -433,9 +484,15 @@ class TreeParamsDialog(QDialog):
         self._mask.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
         self._runs = self._number_spin(1, 100, opts.runs)
         self._seed = self._number_spin(1, 2_000_000_000, opts.seed)
+        self._bnni = QCheckBox("Optimize UFBoot trees by NNI (--bnni)", self)
+        self._bnni.setChecked(bool(opts.bnni))
+        self._iqtree_fast = QCheckBox("Fast search (--fast)", self)
+        self._iqtree_fast.setChecked(bool(getattr(opts, "iqtree_fast", False)))
+        self._bnni_label = QLabel("")
+        self._fast_label = QLabel("")
         self._threads = self._number_spin(1, 256, threads)
         self._threads.setToolTip(
-            "Most threads to use. IQ-TREE picks the best number up to this."
+            "Most threads to use. IQ-TREE picks the best number up to this (-T AUTO)."
         )
         self._support_fme = self._support_combo(
             FASTME_SUPPORT,
@@ -451,9 +508,16 @@ class TreeParamsDialog(QDialog):
         for box in self._thread_boxes:
             box.valueChanged.connect(self._threads_changed)
 
-        margins = (16, 10, 16, 10)
+        # --- IQ-TREE tab ----------------------------------------------------
         self._iq_tab = QWidget(self)
-        f = self._iq_form = _form(self._iq_tab, margins=margins)
+        iq_root = QVBoxLayout(self._iq_tab)
+        iq_root.setContentsMargins(16, 10, 16, 10)
+        iq_root.setSpacing(4)
+        iq_root.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        iq_basic = QWidget(self._iq_tab)
+        f = self._iq_form = _form(iq_basic, margins=(0, 0, 0, 0))
+        f.addRow(_section("Settings", iq_basic))
         f.addRow(
             "Branch support:",
             field_with_help(self._support_iq, "Branch support", IQ_SUPPORT_INFO),
@@ -466,35 +530,71 @@ class TreeParamsDialog(QDialog):
             "Methylation check:",
             field_with_help(self._mask, "Methylation check", MASK_INFO),
         )
-        f.addRow(
+        f.addRow("Threads:", self._threads)
+        iq_root.addWidget(iq_basic)
+
+        self._iq_advanced_panel = QWidget(self._iq_tab)
+        self._iq_advanced_panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        af = self._iq_adv_form = _form(self._iq_advanced_panel, margins=(0, 4, 0, 0))
+        af.addRow(_form_section_separator())
+        af.addRow(_section("Advanced Settings", self._iq_advanced_panel))
+        af.addRow(
             "Searches:",
             field_with_help(self._runs, "Searches and seed", SEARCH_INFO),
         )
-        f.addRow("Random seed:", self._seed)
-        f.addRow("Threads:", self._threads)
+        af.addRow("Random seed:", self._seed)
+        af.addRow(
+            self._bnni_label,
+            field_with_help(self._bnni, "UFBoot NNI", BNNI_INFO, stretch=True),
+        )
+        af.addRow(
+            self._fast_label,
+            field_with_help(self._iqtree_fast, "Fast search", FAST_INFO, stretch=True),
+        )
+        iq_root.addWidget(self._iq_advanced_panel)
 
+        # --- FastME tab -----------------------------------------------------
         self._fme_tab = QWidget(self)
-        f = self._fme_form = _form(self._fme_tab, margins=margins)
+        fme_root = QVBoxLayout(self._fme_tab)
+        fme_root.setContentsMargins(16, 10, 16, 10)
+        fme_root.setSpacing(4)
+        fme_root.setAlignment(Qt.AlignmentFlag.AlignTop)
+        fme_basic = QWidget(self._fme_tab)
+        f = self._fme_form = _form(fme_basic, margins=(0, 0, 0, 0))
+        f.addRow(_section("Settings", fme_basic))
         f.addRow(
             "Branch support:",
             field_with_help(self._support_fme, "Branch support", FASTME_SUPPORT_INFO),
         )
         f.addRow("Threads:", self._threads_fme)
+        fme_root.addWidget(fme_basic)
 
+        # --- FastTree tab ---------------------------------------------------
         self._ft_tab = QWidget(self)
-        f = self._ft_form = _form(self._ft_tab, margins=margins)
+        ft_root = QVBoxLayout(self._ft_tab)
+        ft_root.setContentsMargins(16, 10, 16, 10)
+        ft_root.setSpacing(4)
+        ft_root.setAlignment(Qt.AlignmentFlag.AlignTop)
+        ft_basic = QWidget(self._ft_tab)
+        f = self._ft_form = _form(ft_basic, margins=(0, 0, 0, 0))
+        f.addRow(_section("Settings", ft_basic))
         f.addRow(
             "Branch support:",
             field_with_help(self._support_ft, "FastTree", FASTTREE_SUPPORT_INFO),
         )
+        self._ft_support_note_label = QLabel("")
         f.addRow(
-            "",
+            self._ft_support_note_label,
             _note(
                 "Local support values (0 to 1) are built in and always computed.",
                 self._ft_tab,
             ),
         )
         f.addRow("Threads:", self._threads_ft)
+        ft_root.addWidget(ft_basic)
+
         for page in (self._iq_tab, self._fme_tab, self._ft_tab):
             page.setSizePolicy(
                 QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
@@ -626,9 +726,44 @@ class TreeParamsDialog(QDialog):
                 self._last_engine = engine
 
     def _on_tab_for_found_and_fit(self, *_args) -> None:
+        self._update_advanced_settings_button()
         self._schedule_found_update()
         if self.isVisible():
             QTimer.singleShot(0, self._fit_to_content)
+
+    def _update_advanced_settings_button(self) -> None:
+        on_iq = self._tabs.currentIndex() == self._tab_index[TREE_ENGINE_IQTREE]
+        on_options = self._tabs.currentIndex() == self._options_index
+        self._advanced_settings_btn.setVisible(on_iq and not on_options)
+        if not on_iq and self._advanced_settings_btn.isChecked():
+            self._advanced_settings_btn.blockSignals(True)
+            self._advanced_settings_btn.setChecked(False)
+            self._advanced_settings_btn.setText("Advanced Settings ▸")
+            self._advanced_settings_btn.blockSignals(False)
+            self._set_advanced_visible(False)
+
+    def _set_advanced_visible(self, visible: bool) -> None:
+        panel = self._iq_advanced_panel
+        panel.setVisible(visible)
+        if visible:
+            panel.setMaximumHeight(16777215)
+        else:
+            panel.setMaximumHeight(0)
+        panel.updateGeometry()
+        root = self._iq_tab.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self._iq_tab.updateGeometry()
+
+    def _on_advanced_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        if checked:
+            self._iq_compact_size = self.size()
+        self._set_advanced_visible(checked)
+        self._resize_for_iq_advanced(checked)
 
     def _threads_changed(self, value: int) -> None:
         for box in self._thread_boxes:
@@ -778,6 +913,24 @@ class TreeParamsDialog(QDialog):
         # shared + tabs + buttons → two spacings
         return margin_h + shared_h + tab_bar_h + buttons_h + (2 * spacing)
 
+    def _iq_compact_content_height(self) -> int:
+        root = self._iq_tab.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        basic = self._iq_form.parentWidget()
+        basic_h = max(basic.minimumSizeHint().height(), basic.sizeHint().height())
+        return margin_h + basic_h + spacing
+
+    def _resize_for_iq_advanced(self, expanded: bool) -> None:
+        if self._tabs.currentIndex() != self._tab_index[TREE_ENGINE_IQTREE]:
+            return
+        if not expanded and self._iq_compact_size is not None:
+            self.resize(self._iq_compact_size)
+            self._iq_compact_size = None
+            return
+        self._fit_to_content()
+
     def _fit_to_content(self) -> None:
         """Shrink / grow to the active tab’s real height (no blank band)."""
         page = self._tabs.currentWidget()
@@ -801,6 +954,13 @@ class TreeParamsDialog(QDialog):
                 root.totalMinimumSize().height(),
                 root.totalSizeHint().height(),
             )
+        # When IQ Advanced is collapsed, measure basic only (panel maxHeight 0
+        # can still leave a stale hint on some platforms).
+        if (
+            page is self._iq_tab
+            and not self._iq_advanced_panel.isVisible()
+        ):
+            content_h = self._iq_compact_content_height()
         chrome = self._dialog_chrome_height()
         height = chrome + content_h
         width = max(self.width(), self._DIALOG_WIDTH)
@@ -836,6 +996,8 @@ class TreeParamsDialog(QDialog):
         self._model.setCurrentIndex(0)
         self._runs.setValue(d.runs)
         self._seed.setValue(d.seed)
+        self._bnni.setChecked(d.bnni)
+        self._iqtree_fast.setChecked(d.iqtree_fast)
         self._threads.setValue(max(1, d.threads))
         self._set_combo(self._support_iq, f"{d.alrt},{d.ufboot}")
         self._set_combo(self._support_fme, d.distance_bootstrap)
@@ -847,8 +1009,11 @@ class TreeParamsDialog(QDialog):
             box.setChecked(False)
         self._last_engine = d.engine
         self._tabs.setCurrentIndex(self._tab_index[d.engine])
+        if self._advanced_settings_btn.isChecked():
+            self._advanced_settings_btn.setChecked(False)
         self._sync()
         self._update_found()
+        self._update_advanced_settings_button()
         QTimer.singleShot(0, self._fit_to_content)
 
     def should_run(self) -> bool:
@@ -904,7 +1069,8 @@ class TreeParamsDialog(QDialog):
             threads=max(1, threads),
             ufboot=0 if ufboot == 0 else max(1000, ufboot),
             alrt=alrt,
-            bnni=True,
+            bnni=self._bnni.isChecked(),
+            iqtree_fast=self._iqtree_fast.isChecked(),
             distance_bootstrap=int(self._support_fme.currentData()),
             root_mode=str(self._root_mode.currentData()),
             outgroup=list(self._outgroup),

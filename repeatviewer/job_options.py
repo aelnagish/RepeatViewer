@@ -2028,7 +2028,8 @@ class TreeOptions:
     # Support and rooting
     ufboot: int = 1000
     alrt: int = 1000
-    bnni: bool = True
+    bnni: bool = True                   # IQ-TREE --bnni with UFBoot
+    iqtree_fast: bool = False           # IQ-TREE --fast (FastTree-like search)
     distance_bootstrap: int = 100      # FastME bootstrap replicates
     root_mode: str = TREE_ROOT_NONE
     outgroup: list[str] = field(default_factory=list)
@@ -2088,6 +2089,7 @@ def load_tree_options() -> TreeOptions:
         ufboot=_num("ufboot", d.ufboot, int, 0, 100_000),
         alrt=_num("alrt", d.alrt, int, 0, 100_000),
         bnni=_to_bool(v.get("bnni"), d.bnni),
+        iqtree_fast=_to_bool(v.get("iqtree_fast"), d.iqtree_fast),
         distance_bootstrap=_num("distance_bootstrap", d.distance_bootstrap, int, 0, 10_000),
         root_mode=_pick("root_mode", TREE_ROOT_MODES, d.root_mode),
         outgroup=[str(x) for x in outgroup],
@@ -2133,6 +2135,7 @@ def save_tree_options(opts: TreeOptions) -> None:
             "ufboot": opts.ufboot,
             "alrt": opts.alrt,
             "bnni": opts.bnni,
+            "iqtree_fast": opts.iqtree_fast,
             "distance_bootstrap": opts.distance_bootstrap,
             "root_mode": opts.root_mode,
             "outgroup": list(opts.outgroup),

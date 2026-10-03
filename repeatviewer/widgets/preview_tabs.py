@@ -728,6 +728,9 @@ class FilePreviewPage(QWidget):
         # Annotation/overview data is loaded lazily on first Annotation tab open
         # so Text preview of large genomes does not wait on a full FASTA parse.
         self._annotation_data_loaded_for: Path | None = None
+        # When Annotation is the active tab, skip filling the Text editor until
+        # the user opens Text (setPlainText is costly when flipping many files).
+        self._fasta_text_deferred: bool = False
         self._fasta_stack.addWidget(self._fasta_text_scroll)
         self._fasta_stack.addWidget(self._fasta_annotation_holder)
         self._fasta_stack.addWidget(self._fasta_dotplot_holder)
@@ -997,7 +1000,10 @@ class FilePreviewPage(QWidget):
             if index == 0:
                 self._open_text_tab()
             elif index == 1:
-                self._open_annotation_tab()
+                # _load_single_fasta_preview already loaded + scheduled open;
+                # only reopen when that path did not run (e.g. Text→Annotation).
+                if not self._annotation_data_is_current():
+                    self._open_annotation_tab()
             elif index == 2:
                 self._open_dotplot_tab()
             elif index == 3:
@@ -1400,7 +1406,26 @@ class FilePreviewPage(QWidget):
             return
         panel.set_active_sequence(data.sequence_id, data.sequence)
 
+    def _ensure_fasta_text_loaded(self) -> None:
+        """Fill the Text editor if it was deferred while Annotation was shown."""
+        if not self._fasta_text_deferred:
+            return
+        self._fasta_text_deferred = False
+        path = self.path
+        try:
+            text, truncated = _read_text_preview(path, _TEXT_PREVIEW_MAX_CHARS)
+        except OSError as exc:
+            text = f"Could not read file:\n{path}\n{exc}"
+            truncated = False
+        self._text_truncated = truncated
+        self._exit_text_edit_mode(clear_dirty=True)
+        self._fasta_text.setPlainText(text)
+        cursor = self._fasta_text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self._fasta_text.setTextCursor(cursor)
+
     def _open_text_tab(self) -> None:
+        self._ensure_fasta_text_loaded()
         self._refresh_text_view()
         selection = self._current_sequence_selection()
         if selection is not None:
@@ -1890,31 +1915,49 @@ class FilePreviewPage(QWidget):
         if _is_fasta_too_large_for_preview(path):
             self._set_single_fasta_mode(False)
             self._multi_fasta_mode = False
+            self._fasta_text_deferred = False
             self._show_text(_FASTA_TOO_LARGE_MESSAGE)
             return
+        # Stay on Annotation when the user is already flipping files there.
+        stay_on_annotation = (
+            self._single_fasta_mode and self._fasta_stack.currentIndex() == 1
+        )
         show_progress = self._begin_open_progress(path, total=4)
         try:
             self._set_single_fasta_mode(True)
             self._multi_fasta_mode = _is_multi_fasta_file(path)
             self._annotation_data_loaded_for = None
-            if show_progress:
-                self._update_open_progress(0, "Reading text…")
-            try:
-                max_chars = _TEXT_PREVIEW_MAX_CHARS
-                text, truncated = _read_text_preview(path, max_chars)
-            except OSError as exc:
-                text = f"Could not read file:\n{path}\n{exc}"
-                truncated = False
-            if show_progress:
-                self._update_open_progress(1, "Filling preview…")
-            self._text_truncated = truncated
-            self._exit_text_edit_mode(clear_dirty=True)
-            self._fasta_text.setPlainText(text)
-            cursor = self._fasta_text.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.Start)
-            self._fasta_text.setTextCursor(cursor)
+            default_tab = load_default_fasta_preview_tab()
+            if stay_on_annotation:
+                default_tab = DefaultFastaPreviewTab.ANNOTATION
+            if self._multi_fasta_mode and default_tab == DefaultFastaPreviewTab.DOTPLOT:
+                default_tab = DefaultFastaPreviewTab.ANNOTATION
+            open_annotation = default_tab == DefaultFastaPreviewTab.ANNOTATION
             # Selections belong to one sequence; never carry them to the next file.
             self._pending_annotation_selection = None
+            self._exit_text_edit_mode(clear_dirty=True)
+            if open_annotation:
+                # Skip Text setPlainText — Annotation does not need it.
+                self._fasta_text_deferred = True
+                self._text_truncated = False
+                if self._fasta_text.toPlainText():
+                    self._fasta_text.clear()
+            else:
+                self._fasta_text_deferred = False
+                if show_progress:
+                    self._update_open_progress(0, "Reading text…")
+                try:
+                    text, truncated = _read_text_preview(path, _TEXT_PREVIEW_MAX_CHARS)
+                except OSError as exc:
+                    text = f"Could not read file:\n{path}\n{exc}"
+                    truncated = False
+                if show_progress:
+                    self._update_open_progress(1, "Filling preview…")
+                self._text_truncated = truncated
+                self._fasta_text.setPlainText(text)
+                cursor = self._fasta_text.textCursor()
+                cursor.movePosition(QTextCursor.MoveOperation.Start)
+                self._fasta_text.setTextCursor(cursor)
             if self._dotplot_panel is not None:
                 # Must reset path/state — clear_selection alone leaves the
                 # previous file's "too long" prompt and any active sequence.
@@ -1932,11 +1975,8 @@ class FilePreviewPage(QWidget):
             self._show_annotation_content(multi=self._multi_fasta_mode)
             if self._cyto_panel is not None:
                 self._cyto_panel.set_path(path)
-            default_tab = load_default_fasta_preview_tab()
-            if self._multi_fasta_mode and default_tab == DefaultFastaPreviewTab.DOTPLOT:
-                default_tab = DefaultFastaPreviewTab.ANNOTATION
-            # Only pay for Annotation parse when that tab is the default open.
-            if default_tab == DefaultFastaPreviewTab.ANNOTATION:
+            # Only pay for Annotation parse when that tab is the open target.
+            if open_annotation:
                 if show_progress:
                     self._update_open_progress(3, "Loading annotations…")
                 self._ensure_annotation_data_loaded()

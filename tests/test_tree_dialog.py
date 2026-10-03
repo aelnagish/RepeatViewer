@@ -52,7 +52,7 @@ def _normalised(opts: TreeOptions) -> TreeOptions:
     legacy = opts.use_system_path
     return replace(opts, align_mode=TREE_ALIGN_ALWAYS if opts.align_mode == TREE_ALIGN_AUTO
                    else opts.align_mode, mafft_strategy=tb.MAFFT_CHOOSE, adjust_direction=True,
-                   mafft_gap_open=1.53, mafft_offset=0.0, bnni=True,
+                   mafft_gap_open=1.53, mafft_offset=0.0,
                    right_click_action="run",
                    sequence_mode=TREE_SEQ_AS_IS,
                    use_system_iqtree=opts.use_system_iqtree or legacy,
@@ -92,14 +92,26 @@ def test_custom_options_round_trip_keeps_custom_support(qapp, tmp_path):
 def test_buttons_and_tabs(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path)
     labels = [b.text() for b in dlg._button_box.findChildren(QPushButton)]
-    assert labels == ["Restore Defaults", "Cancel", "Save", "Run"] and "OK" not in labels
+    assert labels == [
+        "Restore Defaults", "Advanced Settings ▸", "Cancel", "Save", "Run",
+    ] and "OK" not in labels
     assert _tab_texts(dlg) == ["IQ-TREE", "FastME", "FastTree", "Options"]
-    assert not hasattr(dlg, "_more_toggle")
+    assert _shown(dlg, dlg._advanced_settings_btn)
+    assert not _shown(dlg, dlg._iq_advanced_panel)
     assert dlg._show_process_window is not None
     assert set(dlg._system_boxes) == {"iqtree", "fastme", "fasttree", "mafft"}
     assert set(dlg._found) == {"iqtree", "fastme", "fasttree", "mafft"}
     assert not hasattr(dlg, "_download_btn")
     assert not hasattr(dlg, "_seq_mode")
+    dlg._tabs.setCurrentIndex(dlg._options_index)
+    assert not _shown(dlg, dlg._advanced_settings_btn)
+    dlg._tabs.setCurrentIndex(1)  # FastME: no Advanced panel
+    assert not _shown(dlg, dlg._advanced_settings_btn)
+    dlg._tabs.setCurrentIndex(0)
+    assert _shown(dlg, dlg._advanced_settings_btn)
+    dlg._advanced_settings_btn.setChecked(True)
+    assert _shown(dlg, dlg._iq_advanced_panel)
+    assert dlg._advanced_settings_btn.text() == "Advanced Settings ▾"
 
 
 def test_shared_rows_always_visible_above_tabs(qapp, tmp_path):
@@ -119,8 +131,10 @@ def test_shared_rows_always_visible_above_tabs(qapp, tmp_path):
 def test_engine_specific_options_sit_on_their_tabs(qapp, tmp_path):
     dlg = _dialog(qapp, tmp_path)
     assert dlg._model.parentWidget() is not None
-    for w in (dlg._support_iq, dlg._model, dlg._mask, dlg._runs, dlg._seed, dlg._threads):
+    for w in (dlg._support_iq, dlg._model, dlg._mask, dlg._threads):
         assert dlg._iq_tab.isAncestorOf(w)
+    for w in (dlg._runs, dlg._seed, dlg._bnni, dlg._iqtree_fast):
+        assert dlg._iq_advanced_panel.isAncestorOf(w)
     assert dlg._fme_tab.isAncestorOf(dlg._support_fme) and dlg._fme_tab.isAncestorOf(dlg._threads_fme)
     assert dlg._ft_tab.isAncestorOf(dlg._support_ft) and dlg._ft_tab.isAncestorOf(dlg._threads_ft)
 
@@ -179,6 +193,10 @@ def test_support_choices_write_the_replicates(qapp, tmp_path):
     dlg._support_iq.setCurrentIndex(dlg._support_iq.findData("0,1000"))
     o = dlg.options()
     assert (o.alrt, o.ufboot, o.bnni) == (0, 1000, True)
+    dlg._bnni.setChecked(False)
+    dlg._iqtree_fast.setChecked(True)
+    o = dlg.options()
+    assert o.bnni is False and o.iqtree_fast is True
     dlg._support_iq.setCurrentIndex(dlg._support_iq.findData("0,0"))
     assert (dlg.options().alrt, dlg.options().ufboot) == (0, 0)
     dlg._support_fme.setCurrentIndex(dlg._support_fme.findData(1000))
@@ -223,11 +241,13 @@ def test_question_mark_help(qapp, tmp_path):
     assert not [lab for lab in dlg.findChildren(QLabel) if lab.text() == "ⓘ"]
     helps = [b for b in dlg.findChildren(QToolButton) if b.text() == "?"]
     # shared: Alignment, Monomers, Root, Skip fragments;
-    # IQ-TREE: Branch support, Model, Methylation check, Searches;
+    # IQ-TREE Settings: Branch support, Model, Methylation check;
+    # IQ-TREE Advanced: Searches, bnni, fast;
     # FastME and FastTree: support  (no REXdb on Options)
-    assert len(helps) == 10
+    assert len(helps) == 12
     joined = " ".join(b.toolTip() for b in helps)
-    for piece in ("L-INS-i", "FFT-NS-2", "Align tool", "ModelFinder", "UFBoot", "Midpoint", "CHG"):
+    for piece in ("L-INS-i", "FFT-NS-2", "Align tool", "ModelFinder", "UFBoot",
+                  "Midpoint", "CHG", "--bnni", "--fast"):
         assert piece in joined
 
 

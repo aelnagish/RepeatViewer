@@ -2212,6 +2212,13 @@ class MainWindow(QMainWindow):
         self._preview_host: QWidget | None = None
         self._preview_file_tabs_host: QWidget | None = None
         self._preview_tabs: PreviewTabWidget | None = None
+        # Coalesce rapid Files-list clicks so Annotation preview loads the last
+        # selection instead of blocking on every intermediate file.
+        self._preview_selection_timer = QTimer(self)
+        self._preview_selection_timer.setSingleShot(True)
+        self._preview_selection_timer.setInterval(75)
+        self._preview_selection_timer.timeout.connect(self._open_pending_preview_selection)
+        self._pending_preview_selection: Path | None = None
         self._pending_te_genome_map: TeGenomeMapOptions | None = None
         self._pending_te_genome_map_fastas: list[Path] = []
         self._pending_te_viz: _PendingTeVizBuild | None = None
@@ -2222,6 +2229,8 @@ class MainWindow(QMainWindow):
             | TeDivergencePlotDialog
             | TeAbundancePlotDialog
             | MsaPlotDialog
+            | FlexidotParamsDialog
+            | TeaAidParamsDialog
             | RepeatQuantifyDialog
             | None
         ) = None
@@ -8964,16 +8973,26 @@ class MainWindow(QMainWindow):
 
         path = self._preview_path_from_item(current)
         if path is None:
+            self._pending_preview_selection = None
+            self._preview_selection_timer.stop()
             self._set_status_file_link(None)
             return
-        QTimer.singleShot(0, lambda p=path: self._open_file_in_preview_if_allowed(p))
+        self._pending_preview_selection = path
+        self._preview_selection_timer.start()
+
+    def _open_pending_preview_selection(self) -> None:
+        path = self._pending_preview_selection
+        self._pending_preview_selection = None
+        if path is None:
+            return
+        self._open_file_in_preview_if_allowed(path)
 
     def _open_file_in_preview_if_allowed(self, path: Path) -> None:
         if self._file_list.suppress_selection_preview():
             return
-        # This runs one event-loop turn after the click. If the current file has
-        # moved on since (another click, or Cancel at the unsaved-changes prompt
-        # put the selection back), the request is stale: skip it.
+        # Debounced after the click. If the current file has moved on since
+        # (another click, or Cancel at the unsaved-changes prompt put the
+        # selection back), the request is stale: skip it.
         current = self._preview_path_from_item(self._file_list.currentItem())
         if current is not None:
             try:
@@ -11315,28 +11334,22 @@ class MainWindow(QMainWindow):
         self._apply_function("teaid", teaid_options=self._teaid_options)
 
     def _open_teaid_dialog(self) -> None:
-        """Click TE-Aid: parameters dialog. Run runs; Save (Options tab) stores only."""
-        dialog = TeaAidParamsDialog(
-            initial=self._teaid_options,
-            project=self._project,
-            project_genome=self._genome_path_resolved(),
-            genome_history=load_genome_history(),
-            parent=self,
-        )
-        try:
-            if not dialog.exec():
-                return
+        """Click TE-Aid: parameters dialog. Run runs; Save (Options tab) stores only.
+
+        Non-modal so Files/Folders clicks can fill Define inputs (Align-style).
+        """
+
+        def _accepted(dialog: TeaAidParamsDialog) -> None:
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
             self._teaid_options = dialog.options()
             save_teaid_options(self._teaid_options)
             self._persist_workspace()
-            run_after = dialog.should_run()
+            if not dialog.should_run():
+                self._set_status_message("TE-Aid settings saved", 4000)
+                return
             input_source = dialog.input_source()
-            run_files = dialog.run_files() if run_after else []
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
-        if run_after:
-            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
-
+            run_files = dialog.run_files()
             if input_source == ALIGN_INPUT_DEFINE:
                 if not run_files:
                     QMessageBox.information(
@@ -11352,8 +11365,15 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self._run_teaid()
-        else:
-            self._set_status_message("TE-Aid settings saved", 4000)
+
+        dialog = TeaAidParamsDialog(
+            initial=self._teaid_options,
+            project=self._project,
+            project_genome=self._genome_path_resolved(),
+            genome_history=load_genome_history(),
+            parent=self,
+        )
+        self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_teaid_right_click(self) -> None:
         """Right-click TE-Aid: run with saved settings, or open the dialog."""
@@ -11540,25 +11560,22 @@ class MainWindow(QMainWindow):
         )
 
     def _open_flexidot_dialog(self) -> None:
-        """Click Flexidot: parameters dialog. Run runs; Save (Options tab) stores only."""
-        dialog = FlexidotParamsDialog(
-            initial=self._flexidot_options,
-            parent=self,
-        )
-        try:
-            if not dialog.exec():
-                return
+        """Click Flexidot: parameters dialog. Run runs; Save (Options tab) stores only.
+
+        Non-modal so Files/Folders clicks can fill Define inputs (Align-style).
+        """
+
+        def _accepted(dialog: FlexidotParamsDialog) -> None:
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
             self._flexidot_options = dialog.options()
             save_flexidot_options(self._flexidot_options)
             self._persist_workspace()
-            run_after = dialog.should_run()
+            if not dialog.should_run():
+                self._set_status_message("Flexidot settings saved", 4000)
+                return
             input_source = dialog.input_source()
-            run_files = dialog.run_files() if run_after else []
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
-        if run_after:
-            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
-
+            run_files = dialog.run_files()
             if input_source == ALIGN_INPUT_DEFINE:
                 if not run_files:
                     QMessageBox.information(
@@ -11575,8 +11592,12 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self._run_flexidot_saved()
-        else:
-            self._set_status_message("Flexidot settings saved", 4000)
+
+        dialog = FlexidotParamsDialog(
+            initial=self._flexidot_options,
+            parent=self,
+        )
+        self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_flexidot_right_click(self) -> None:
         """Right-click Flexidot: run with saved settings, or open the dialog."""

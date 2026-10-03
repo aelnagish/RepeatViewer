@@ -1,0 +1,250 @@
+---
+description: >-
+  Function window design — unify tool params dialogs (tabs, Mode/Inputs/Settings,
+  Options, Executables, Process output, 608 width). Trigger phrases: function window,
+  tool params dialog, Align-style dialog, follow the layout rule, tool-params-dialog-layout.
+globs: repeatviewer/views/tool_dialogs.py,repeatviewer/views/map_reference_dialog.py,repeatviewer/views/tree_dialog.py
+alwaysApply: false
+---
+
+# Function window design (unified style)
+
+**Purpose:** every Tools parameter dialog looks and behaves the same
+(BLAST / Align / Mapping / Flexidot / TE-Aid / MSA plot / Tree, and new tools).
+
+**Canonical code:** `TOOL_PARAMS_*` and helpers in
+`repeatviewer/views/tool_dialogs.py`. Prefer those helpers — do not reinvent layouts.
+
+---
+
+## How to invoke this rule (keywords)
+
+Say any of these in the chat when designing or editing a tool dialog:
+
+- **function window** / **function windows**
+- **tool params dialog** / **Align-style dialog** / **BLAST-style dialog**
+- **follow the layout rule** / **tool-params-dialog-layout**
+- **Options tab** + **Executables** / **Process output** / **Advanced Settings**
+- **dialog width 608** / **field width 260**
+
+Also auto-applies when editing files matching the globs above.
+
+---
+
+## Shared constants (exact numbers)
+
+| Constant | Value | Use |
+|---|---|---|
+| `TOOL_PARAMS_DIALOG_WIDTH` | **608** | Dialog width (minimum + fit/resize) |
+| `TOOL_PARAMS_FIELD_WIDTH` | **260** | Settings / Advanced combo & spinbox width |
+| `TOOL_PARAMS_LABEL_COLUMN_REF` | `"Minimum alignment length:"` | Shared label-column width (font metrics) |
+
+Other fixed spacings used everywhere:
+
+| Element | Value |
+|---|---|
+| Root dialog margins | **22, 18, 22, 16** (L, T, R, B) |
+| Root dialog spacing | **8** |
+| Parameters page margins | **16, 10, 16, 10** |
+| Parameters page spacing | **4** |
+| Form label ↔ field (horizontal) | **12** |
+| Form row spacing (vertical) | **4** |
+| Section separator host height | **7** (1 px mid line, margins 0,2,0,2) |
+| Mode / Inputs radio spacing | **2** |
+| Options page margins | **16, 14, 16, 14** |
+| Options group-box spacing | **14** |
+| Options Right-click radio spacing | **6** |
+| Executables group margins | **10, 8, 10, 8** |
+| Executables row spacing | **8** |
+| PATH status under checkbox | spacing **2**; flush left (no 24 px indent) |
+| Process output inner margins | **12, 10, 12, 10** |
+| Process output checkbox spacing | **6** |
+| Footer button spacing | **8** |
+| Checkbox tick ↔ label (stylesheet) | **6 px** |
+
+---
+
+## 1. Tabs (always on top)
+
+Like BLAST: **BLASTn | BLASTp | BLASTx | Options**.
+
+Rules:
+
+1. Function / engine / program tabs first (e.g. Minimap2 | HISAT2, MAFFT | MUSCLE | FastGA).
+2. Last tab is always **Options**.
+3. `QTabBar` (or `QTabWidget` tab bar): `setExpanding(False)`, `setDocumentMode(True)`.
+4. Hide the **Advanced Settings** footer button on the Options tab.
+5. Non-modal open when Define inputs must accept Files-panel clicks
+   (`_present_te_viz_dialog` / same pattern as Align).
+
+---
+
+## 2. Normal tabs (not Options) — page body
+
+**Order of sections** (omit any that the tool does not need; do not invent extra
+top-level section names):
+
+1. **Mode** — combine / separate / plot mode / …  
+2. **Inputs** — Use selected sequences / Define inputs (+ path rows)  
+3. **Outputs** — format, write flags, …  
+4. **Settings** — primary run parameters  
+5. **Advanced Settings** — *not* a permanent section on the page; content lives in a
+   collapsible panel revealed by the footer **Advanced Settings ▸** button
+
+Between major sections: bold title `QLabel("<b>Inputs</b>")` +
+`_form_section_separator()`.
+
+**Distance between sections** (Mode → Inputs → Outputs → Settings): the separator
+block is **7 px** tall; page `spacing` is **4**; form vertical spacing is **4**.
+Keep these — do not add large custom spacers that make one tool look looser than
+another.
+
+### Page + form metrics
+
+| Layout | Margins | Spacing |
+|---|---|---|
+| Page `QVBoxLayout` | **16, 10, 16, 10** | **4** |
+| `QFormLayout` | **0, 0, 0, 0** | H **12**, V **4** |
+
+- Label alignment: `AlignRight | AlignVCenter`
+- Option fields: `FieldsStayAtSizeHint` + fixed width **260**
+- Path / Reference / Define-inputs rows may use `ExpandingFieldsGrow` so Browse lines up
+
+### Label column (mandatory — same across all tools)
+
+Field column must start on the **same vertical line** in every function window:
+
+1. Width = `fontMetrics().horizontalAdvance(TOOL_PARAMS_LABEL_COLUMN_REF)`.
+2. Call **`sync_form_field_column_spacers(...)`** after build, on `showEvent`, and when
+   Define inputs toggles.
+3. Mode / Inputs radios and lone checkboxes use spacer `QLabel("")` — never bare
+   `addRow("", widget)`.
+4. Colon labels (`"Threads:"`) are right-aligned inside that width.
+5. Do not use a per-dialog longer `ref_label` that widens one window.
+
+### Controls
+
+- Combos / spins: **`NoWheelComboBox` / `NoWheelSpinBox`** (no mouse-wheel value change)
+  at width **260**. Same width in Advanced as in Settings.
+- Shorten long combo *display* text; put detail in `?` (`field_with_help` /
+  `label_with_help`).
+- Define inputs: `TeMultiInputFilesWidget`; placeholder
+  `Click in Files/Folders or Browse…`.
+- Help `?`: after the control by default; on the **label** when Browse must stay
+  flush (path rows). Database/Genome + Manage: `?` on the combo row only.
+
+Exception: TE-Aid hit % rows stay compact (~100 px + swatch), not 260.
+
+### Advanced Settings (footer, not a page section)
+
+- Footer left: **Restore Defaults** then **Advanced Settings ▸** (checkable;
+  **▸** collapsed / **▾** expanded; pointing-hand cursor).
+- Panel starts hidden (`maximumHeight 0`); expand grows the dialog; collapse
+  shrinks to compact content.
+- Advanced form top margin **0, 4, 0, 0**.
+- Hide this button on Options.
+
+---
+
+## 3. Options tab (always)
+
+**Group order** (include only what applies; order is fixed):
+
+1. **Right-click action** — **always** present  
+2. **Executables** — if the tool uses external binaries  
+3. **Process output** — if the tool runs a subprocess worth monitoring  
+
+| Layout | Value |
+|---|---|
+| Page margins | **16, 14, 16, 14** |
+| Spacing between groups | **14** |
+| Page policy | `Preferred, Maximum` + `AlignTop` |
+| After last group | **`addStretch(1)`** |
+| Each `QGroupBox` | vertical **`Maximum`** |
+
+### Right-click action (always)
+
+- Intro sentence + radios for what right-click / Save default engine does.
+- Radio spacing **6**.
+
+### Executables (when applicable)
+
+- Bundled tools: checkbox  
+  `Use {Tool} from the system PATH or defined Conda environment`  
+  via `system_path_executable_label("Tool")`.
+- Build with **`executable_checkbox_row`**: checkbox, then status line under it
+  (flush with tick, spacing **2**).
+- When **checked**: show resolved PATH/conda path in **grey**, or grey  
+  `not found on PATH — using the built-in one` (if a bundle exists).
+- When **unchecked**: **hide** the status line (no empty gap).
+- Tools **without** a bundled binary (FastGA, HISAT2, …): named status always  
+  **`Name`: /path** or grey **`Name`: not configured**  
+  (`set_named_executable_status`).
+- Long paths: **middle-elide**; full path in tooltip.
+- Resolve via `resolve_system_executable` / tool helpers; refresh on Options show,
+  checkbox toggle, Restore Defaults.
+- Toggling PATH status must **grow/shrink the window** — never squeeze groups above
+  (clear height pins before measuring).
+
+### Process output (when applicable)
+
+Always **`make_process_output_box(...)`**:
+
+1. `Show process window while {tool} runs`
+2. `Close process window when finished` (enabled only when 1 is on)
+
+---
+
+## 4. Footer
+
+**`make_cancel_save_run_bar(dialog, left_widgets=[restore, advanced])`**
+
+| Side | Buttons |
+|---|---|
+| Left | Restore Defaults, Advanced Settings ▸ (Parameters tabs only) |
+| Right | **Cancel** \| **Save** \| **Run** |
+
+- No **OK**. Spacing **8**.  
+- `should_run()` ↔ `_close_action == "run"`.  
+- Restore Defaults: reset fields; PATH checkboxes **off** (bundled); refresh status.
+
+---
+
+## 5. Height behaviour
+
+- Width stays **608**; height follows **active tab content**.
+- On show and tab change: fit to content (no blank band above the footer).
+- Options after a tall Parameters tab: shrink (do not keep Parameters height).
+- Advanced expand/collapse: grow/shrink; remember compact size.
+- Stack/pages: vertical `Maximum` so inactive tall pages do not inflate the dialog.
+- Clear pinned `maximumHeight` before re-measuring after PATH status appears.
+
+---
+
+## 6. Anti-patterns
+
+- Width other than **608**, or one Settings combo wider than **260**.
+- Skipping **Options**, or putting Executables / Process output above Right-click.
+- Options without trailing stretch → Process output checkboxes spread apart.
+- Modal `exec()` when Define inputs must accept Files clicks.
+- Stock `QSpinBox`/`QComboBox` that change value on mouse wheel.
+- `addRow("", radios)` without a spacer label.
+- Per-dialog label width that makes one tool wider than BLAST/Align.
+- Leaving Parameters height when switching to Options.
+- Hand-rolled Process output or Cancel/OK footers.
+
+---
+
+## 7. Checklist (new function window)
+
+- [ ] Width **608**; root margins **22/18/22/16**; root spacing **8**
+- [ ] Tabs on top; compact bar; **Options** last
+- [ ] Normal tab sections as needed: Mode → Inputs → Outputs → Settings
+- [ ] Section separators **7** px; form H **12** / V **4**
+- [ ] Fields **260**; shared label column via `sync_form_field_column_spacers`
+- [ ] No-wheel spin/combo; `?` help on non-obvious rows
+- [ ] Footer: Restore Defaults + Advanced Settings ▸ | Cancel Save Run
+- [ ] Options: Right-click (always) → Executables? → Process output?
+- [ ] PATH / named executable status (grey, elide, fit height on toggle)
+- [ ] Fit-to-content on show, tab change, Advanced, PATH toggle
+- [ ] Non-modal if Define inputs fills from Files panel

@@ -417,11 +417,21 @@ def test_independent_searches_are_separate_processes(tmp_path, monkeypatch):
     assert "-m MFP" in calls[0] and "-m TN+F+G4" in calls[1] and "-m TN+F+G4" in calls[2]
     assert all("--runs" not in c for c in calls)
     assert all("-T AUTO --threads-max 4" in c for c in calls)
+    assert all("-bnni" in c for c in calls)
+    assert all("--fast" not in c for c in calls)
     assert [c.split("--seed ")[1].split()[0] for c in calls] == ["10", "11", "12"]
     html = report.read_text()
     assert "of 3 found the same topology" in html
     assert (run_dir / "aln.fa_tree.iqtree").is_file()
     assert report.parent == tmp_path / "aln.fa_tree_details"   # report in the details folder
+
+
+def test_iqtree_fast_and_bnni_flags(tmp_path, monkeypatch):
+    fa, log = _fake_iqtree(tmp_path, monkeypatch)
+    opts = TreeOptions(use_system_path=True, threads=1, runs=1, bnni=False, iqtree_fast=True)
+    tb.build_tree_run([fa], opts, stamp="t")
+    call = next(c for c in log.read_text().splitlines() if "--prefix" in c)
+    assert "--fast" in call and "-bnni" not in call
 
 
 def test_failed_run_writes_log_next_to_input(tmp_path, monkeypatch):

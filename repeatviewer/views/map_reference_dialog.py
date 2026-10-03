@@ -14,7 +14,6 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
-    QComboBox,
     QDialog,
     QFormLayout,
     QGroupBox,
@@ -23,7 +22,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSizePolicy,
-    QSpinBox,
     QStackedWidget,
     QTabBar,
     QVBoxLayout,
@@ -78,8 +76,10 @@ from repeatviewer.views.tool_dialogs import (
     sync_form_field_column_spacers,
     system_path_executable_label,
 )
+from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
 from repeatviewer.widgets.help_button import field_with_help
 from repeatviewer.widgets.path_browse import PathBrowseRow
+from repeatviewer.widgets.spin_boxes import NoWheelSpinBox as QSpinBox
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".faa", ".fsa", ".ffn", ".seq"}
 
@@ -713,10 +713,8 @@ class MapReferenceDialog(QDialog):
         self._stack.addWidget(engine_page)
         self._stack.addWidget(options_page)
 
-        if opts.engine == MAP_ENGINE_HISAT2:
-            self._tab_bar.setCurrentIndex(self._TAB_HISAT2)
-        else:
-            self._tab_bar.setCurrentIndex(self._TAB_MINIMAP2)
+        # Always land on Minimap2; saved HISAT2 settings stay on the HISAT2 tab.
+        self._tab_bar.setCurrentIndex(self._TAB_MINIMAP2)
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)

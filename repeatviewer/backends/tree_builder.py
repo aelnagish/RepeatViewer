@@ -1207,6 +1207,8 @@ def _infer(exe, opts, safe_aln, aln_pairs, dna, safe_outgroup, work, commands, s
             cmd = [exe, "-s", str(safe_aln), "-m", run_model, "--seed", str(opts.seed + i),
                    "--prefix", str(prefix), "-redo"]
             cmd += iqtree_thread_args(opts.threads)
+            if getattr(opts, "iqtree_fast", False):
+                cmd.append("--fast")
             if opts.ufboot:
                 cmd += ["-B", str(max(1000, opts.ufboot))]
                 if opts.bnni:

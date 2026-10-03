@@ -607,20 +607,42 @@ def fasta_record_lengths(path: Path) -> dict[str, int]:
     Duplicate headers are uniquified (``name#2``, …) so later records are not
     dropped when building annotation maps.
     """
+    lengths, _single_seq = _fasta_lengths_and_single_sequence(path)
+    return lengths
+
+
+def _fasta_lengths_and_single_sequence(
+    path: Path,
+) -> tuple[dict[str, int], str | None]:
+    """One SeqIO pass: lengths for every record; sequence only when there is one.
+
+    Multi-record files return ``None`` for the sequence so callers load only the
+    chosen record afterward (avoids holding every sequence in memory).
+    """
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
         raise FileNotFoundError(resolved)
     raw_ids: list[str] = []
     raw_lens: list[int] = []
+    first_seq: str | None = None
+    multi = False
     for record in SeqIO.parse(str(resolved), "fasta"):
         rid = str(record.id).strip()
-        if rid:
-            raw_ids.append(rid)
-            raw_lens.append(len(record.seq))
+        if not rid:
+            continue
+        seq = str(record.seq).upper()
+        raw_ids.append(rid)
+        raw_lens.append(len(seq))
+        if len(raw_ids) == 1:
+            first_seq = seq
+        else:
+            multi = True
+            first_seq = None
     if not raw_ids:
         raise ValueError(f"No sequences in {resolved.name}")
     unique = uniquify_record_ids(raw_ids)
-    return {uid: length for uid, length in zip(unique, raw_lens, strict=True)}
+    lengths = {uid: length for uid, length in zip(unique, raw_lens, strict=True)}
+    return lengths, None if multi else first_seq
 
 
 def load_fasta_record(path: Path, seq_id: str) -> tuple[str, str]:
@@ -796,9 +818,12 @@ def load_sequence_map_data(
     Only the active sequence string is held in memory. Annotations prefer the
     JSON sidecar (canonical store); a companion GFF3 is used when JSON is
     absent (import / legacy).
+
+    Single-record FASTA files are parsed once (lengths + sequence together);
+    multi-record files still load only the chosen sequence afterward.
     """
     resolved = path.expanduser().resolve()
-    lengths = fasta_record_lengths(resolved)
+    lengths, single_sequence = _fasta_lengths_and_single_sequence(resolved)
     record_ids = list(lengths.keys())
 
     json_by_id = load_features_by_id_from_json(resolved, record_ids)
@@ -835,15 +860,18 @@ def load_sequence_map_data(
             (rid for rid in record_ids if features_by_id.get(rid)),
             record_ids[0],
         )
-    # load_fasta_record matches soft ids; strip duplicate #N uniquifier for lookup.
-    lookup_id = strip_duplicate_uniquifier(seq_id, sibling_ids=record_ids)
-    try:
-        loaded_id, sequence = load_fasta_record(resolved, lookup_id)
-    except ValueError:
-        # Ambiguous duplicates: load by index order via SeqIO.
-        loaded_id, sequence = _load_fasta_record_by_index(
-            resolved, record_ids.index(seq_id) if seq_id in record_ids else 0
-        )
+    if single_sequence is not None and seq_id == record_ids[0]:
+        sequence = single_sequence
+    else:
+        # load_fasta_record matches soft ids; strip duplicate #N uniquifier for lookup.
+        lookup_id = strip_duplicate_uniquifier(seq_id, sibling_ids=record_ids)
+        try:
+            _loaded_id, sequence = load_fasta_record(resolved, lookup_id)
+        except ValueError:
+            # Ambiguous duplicates: load by index order via SeqIO.
+            _loaded_id, sequence = _load_fasta_record_by_index(
+                resolved, record_ids.index(seq_id) if seq_id in record_ids else 0
+            )
     features = list(features_by_id.get(seq_id, []))
     return SequenceMapData(
         fasta_path=resolved,
