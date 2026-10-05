@@ -1,4 +1,4 @@
-"""Paint folder-tree selection/hover from the icon onward (not the indent gutter)."""
+"""Paint folder-tree selection/hover on the full row without shifting labels."""
 
 from __future__ import annotations
 
@@ -13,6 +13,17 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QTreeWidget,
 )
+
+
+_FOLDER_HOVER_BG_LIGHT = QColor(220, 235, 255)
+_FOLDER_HOVER_BG_DARK = QColor(45, 65, 95)
+
+
+def _folder_hover_background(palette: QPalette) -> QColor:
+    window = palette.color(QPalette.ColorRole.Window)
+    if window.isValid() and window.lightness() < 128:
+        return _FOLDER_HOVER_BG_DARK
+    return _FOLDER_HOVER_BG_LIGHT
 
 
 def _contrasting_on(background: QColor) -> QColor:
@@ -122,7 +133,7 @@ def paint_folder_indent_guides(
 
 
 class FolderTreeItemDelegate(QStyledItemDelegate):
-    """Clip row highlight so indented subfolders do not show blue before the chevron."""
+    """Row highlight for select/hover; label position stays aligned with siblings."""
 
     def _tree_widget(self, widget) -> QTreeWidget | None:
         if isinstance(widget, QTreeWidget):
@@ -142,9 +153,9 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
         return opt.rect.left()
 
     def _highlight_rect(self, opt: QStyleOptionViewItem, widget) -> QRect:
-        rect = opt.rect
-        rect.setLeft(self._icon_left(opt, widget))
-        return rect
+        """Full row width so select/hover does not shift label vs siblings."""
+        del widget
+        return opt.rect.adjusted(1, 1, -1, -1)
 
     def _current_index(self, widget, index: QModelIndex) -> bool:
         tree = self._tree_widget(widget)
@@ -193,11 +204,11 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
         is_hover = bool(opt.state & QStyle.StateFlag.State_MouseOver)
         is_drop_target = self._is_drop_target(widget, index)
 
-        # Draw our own clipped highlight (icon → text), not the full-row macOS
-        # selection chrome — but still honor ExtendedSelection multi-select.
+        # Custom row background only — do not let Qt shift text/decoration on select.
         opt.state &= ~QStyle.StateFlag.State_Selected
         opt.state &= ~QStyle.StateFlag.State_HasFocus
         opt.state &= ~QStyle.StateFlag.State_MouseOver
+        opt.showDecorationSelected = False
 
         tree = self._tree_widget(widget)
         if tree is not None:
@@ -250,11 +261,8 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
                 opt.palette.setBrush(QPalette.ColorRole.Text, sel_text)
                 opt.palette.setBrush(QPalette.ColorRole.WindowText, sel_text)
                 opt.palette.setBrush(QPalette.ColorRole.HighlightedText, sel_text)
-                # Re-enable Selected so folder chevrons use the white Selected
-                # icon pixmap (Normal is dark grey and disappears on blue).
-                opt.state |= QStyle.StateFlag.State_Selected
             else:
-                painter.setBrush(opt.palette.color(QPalette.ColorRole.AlternateBase))
+                painter.setBrush(_folder_hover_background(opt.palette))
                 painter.drawRoundedRect(bg_rect, 4, 4)
                 text = self._readable_text_brush(opt)
                 opt.palette.setBrush(QPalette.ColorRole.Text, text)

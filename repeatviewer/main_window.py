@@ -8963,9 +8963,6 @@ class MainWindow(QMainWindow):
             bg, fg = _NEW_OUTPUT_BG_LIGHT, _NEW_OUTPUT_FG_LIGHT
         item.setBackground(QBrush(bg))
         item.setForeground(QBrush(fg))
-        font = item.font()
-        font.setBold(True)
-        item.setFont(font)
         item.setToolTip("Newly generated file from the last job")
 
     def _style_source_file_item(self, item: FileListRow) -> None:
@@ -8975,9 +8972,6 @@ class MainWindow(QMainWindow):
             bg, fg = _SOURCE_BG_LIGHT, _SOURCE_FG_LIGHT
         item.setBackground(QBrush(bg))
         item.setForeground(QBrush(fg))
-        font = item.font()
-        font.setBold(True)
-        item.setFont(font)
         item.setToolTip("Input file used for the last job")
 
     def _reveal_file_list_item(
@@ -12266,15 +12260,12 @@ class MainWindow(QMainWindow):
         closed = [path, *[src for src, _dst in companion_renames]]
         if self._preview_tabs is not None:
             self._preview_tabs.close_paths(closed)
-        if self._current_folder:
-            self._populate_file_list(
-                self._current_folder,
-                new_outputs=[target],
-                source_files=[dst for _src, dst in companion_renames],
-                open_preview=True,
-            )
-        else:
-            self._select_path_in_file_list(target)
+        moves = [(path, target), *companion_renames]
+        self._apply_renamed_paths_in_list(
+            moves,
+            select=target,
+            open_preview=True,
+        )
         if companion_renames:
             extras = ", ".join(dst.name for _src, dst in companion_renames)
             self._set_status_message(
@@ -12283,6 +12274,73 @@ class MainWindow(QMainWindow):
             )
         else:
             self._set_status_message(f"Renamed to {target.name}", 5000)
+
+    def _apply_renamed_paths_in_list(
+        self,
+        moves: list[tuple[Path, Path]],
+        *,
+        select: Path | None = None,
+        open_preview: bool = False,
+    ) -> None:
+        """Update Files rows and folder cache after on-disk renames (in place)."""
+        moves = [
+            (Path(src).expanduser().resolve(), Path(dst).expanduser().resolve())
+            for src, dst in moves
+        ]
+        if not moves:
+            return
+
+        # Keep the folder file cache aligned with disk without a full scandir.
+        if self._cached_folder_files:
+            by_old = {str(src): dst for src, dst in moves}
+            updated: list[Path] = []
+            seen: set[str] = set()
+            for cached in self._cached_folder_files:
+                key = str(cached.expanduser().resolve())
+                replacement = by_old.get(key)
+                if replacement is not None:
+                    new_key = str(replacement)
+                    if new_key not in seen:
+                        updated.append(replacement)
+                        seen.add(new_key)
+                    continue
+                if key not in seen:
+                    updated.append(cached)
+                    seen.add(key)
+            self._cached_folder_files = updated
+
+        # Job highlight keys track absolute paths — retarget them.
+        for src, dst in moves:
+            old_key, new_key = str(src), str(dst)
+            if old_key in self._highlight_output_keys:
+                self._highlight_output_keys.discard(old_key)
+                self._highlight_output_keys.add(new_key)
+            if old_key in self._highlight_source_keys:
+                self._highlight_source_keys.discard(old_key)
+                self._highlight_source_keys.add(new_key)
+
+        # Remembered selection for this folder.
+        if self._current_folder is not None:
+            folder_key = str(self._current_folder.expanduser().resolve())
+            remembered = self._last_file_by_folder.get(folder_key)
+            if remembered:
+                for src, dst in moves:
+                    if remembered == str(src):
+                        self._last_file_by_folder[folder_key] = str(dst)
+                        break
+
+        if self._file_list is not None:
+            for src, dst in moves:
+                self._file_list.rename_listed_path(src, dst)
+            self._file_list.apply_default_sort()
+
+        focus = select.expanduser().resolve() if select is not None else moves[0][1]
+        self._select_path_in_file_list(focus)
+        if open_preview:
+            self._open_file_in_preview(focus)
+        if self._current_folder is not None:
+            visible = self._file_list.rowCount() if self._file_list is not None else 0
+            self._sync_files_status(visible, len(self._cached_folder_files))
 
     def _rename_folder(self, folder: Path) -> None:
         folder = folder.expanduser().resolve()
@@ -13331,9 +13389,12 @@ class MainWindow(QMainWindow):
             replace_file_color_path(dst, src)
         if self._preview_tabs is not None:
             self._preview_tabs.close_paths([dst for _src, dst in pairs])
-        if self._current_folder:
-            self._populate_file_list(self._current_folder)
-        self._select_path_in_file_list(old)
+        undo_moves = [(dst, src) for src, dst in pairs]
+        self._apply_renamed_paths_in_list(
+            undo_moves,
+            select=old,
+            open_preview=False,
+        )
         self._set_status_message(f"Renamed back to {old.name}", 5000)
         self._push_browser_redo(
             {
@@ -13790,8 +13851,29 @@ class MainWindow(QMainWindow):
             self._preview_tabs.close_paths([src for src, _dst in moves])
         return "done"
 
-    def _show_renamed_files(self, paths: list[Path]) -> None:
-        """Refresh the file list and select the renamed files."""
+    def _show_renamed_files(
+        self,
+        paths: list[Path],
+        *,
+        moves: list[tuple[Path, Path]] | None = None,
+    ) -> None:
+        """Update renamed rows in place (or rebuild if moves are unknown)."""
+        if moves:
+            select = Path(paths[0]).expanduser().resolve() if paths else moves[0][1]
+            self._apply_renamed_paths_in_list(
+                moves,
+                select=select,
+                open_preview=False,
+            )
+            index = self._file_list._path_row_index()
+            rows = [
+                index[str(Path(p).expanduser().resolve())]
+                for p in paths[1:]
+                if str(Path(p).expanduser().resolve()) in index
+            ]
+            for row in rows:
+                self._file_list._set_row_selected(row, True)
+            return
         if self._current_folder:
             self._populate_file_list(self._current_folder, open_preview=False)
         index = self._file_list._path_row_index()
@@ -13834,7 +13916,10 @@ class MainWindow(QMainWindow):
                 "count": len(plan.files),
             }
         )
-        self._show_renamed_files([new for _old, new in plan.files])
+        self._show_renamed_files(
+            [new for _old, new in plan.files],
+            moves=plan.moves,
+        )
         n = len(plan.files)
         self._set_status_message(
             f"Renamed {n} file{'s' if n != 1 else ''} (⌘Z / Ctrl+Z to undo)", 6000
@@ -13849,7 +13934,7 @@ class MainWindow(QMainWindow):
         if outcome != "done":
             return
         files = [Path(a) for a, _b in entry.get("files") or []]
-        self._show_renamed_files(files)
+        self._show_renamed_files(files, moves=moves)
         self._set_status_message(f"Renamed {len(files)} file(s) back", 5000)
         self._push_browser_redo(dict(entry))
 
@@ -13882,7 +13967,7 @@ class MainWindow(QMainWindow):
                 "count": len(files),
             }
         self._push_browser_undo(undo, keep_redo=True)
-        self._show_renamed_files([new for _old, new in files])
+        self._show_renamed_files([new for _old, new in files], moves=moves)
         if kind == "rename_file":
             self._set_status_message(f"Renamed to {files[0][1].name} again", 5000)
         else:

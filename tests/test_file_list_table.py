@@ -15,6 +15,26 @@ from repeatviewer.widgets.file_list_table import (
 )
 
 
+def test_rename_listed_path_updates_row_in_place(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    table = FileListTableWidget()
+    old = tmp_path / "old_name.fa"
+    new = tmp_path / "new_name.fa"
+    old.write_text(">a\nACGT\n")
+    table.add_file_row(old, fill_metadata_columns=True)
+    assert table.rowCount() == 1
+    assert table.item(0, _COL_NAME).text() == "old_name.fa"
+
+    old.rename(new)
+    assert table.rename_listed_path(old, new) is True
+    assert table.rowCount() == 1
+    assert table.item(0, _COL_NAME).text() == "new_name.fa"
+    assert str(table.item(0, _COL_NAME).data(Qt.ItemDataRole.UserRole)) == str(
+        new.resolve()
+    )
+    assert table.listed_paths() == [new.resolve()]
+
+
 def test_clear_rows_preserves_headers_and_refills(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
     table = FileListTableWidget()

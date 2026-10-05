@@ -746,6 +746,60 @@ class FileListTableWidget(QTableWidget):
             return True
         return False
 
+    def rename_listed_path(
+        self,
+        old_path: Path,
+        new_path: Path,
+        *,
+        metadata: BrowserFileMetadata | None = None,
+        fill_metadata_columns: bool | None = None,
+    ) -> bool:
+        """Update an existing row after a same-folder rename (no remove/add).
+
+        Returns True when a matching row was found and updated.
+        """
+        old_key = str(old_path.expanduser().resolve())
+        new_resolved = new_path.expanduser().resolve()
+        new_key = str(new_resolved)
+        row_index = self._path_row_index()
+        row = row_index.get(old_key)
+        if row is None:
+            return False
+
+        was_sorting = self.isSortingEnabled()
+        if was_sorting:
+            self.setSortingEnabled(False)
+        try:
+            for column in range(self.columnCount()):
+                cell = self.item(row, column)
+                if cell is not None:
+                    cell.setData(_ROLE_PATH, new_key)
+
+            name_item = self.item(row, _COL_NAME)
+            if name_item is not None:
+                name_item.setText(new_resolved.name)
+                name_item.setData(_ROLE_SORT, new_resolved.name.lower())
+                name_item.setIcon(browser_file_icon(self, new_resolved))
+                name_item.setToolTip(new_resolved.name)
+
+            self._apply_file_color_cells(row, new_resolved, resolved=True)
+            self._apply_cyto_cell(row, new_resolved)
+
+            if fill_metadata_columns is None:
+                from repeatviewer.widgets.file_list_columns import metadata_columns_visible
+
+                fill_metadata_columns = metadata_columns_visible()
+            if fill_metadata_columns:
+                if metadata is None:
+                    from repeatviewer.browser_file_metadata import quick_metadata_for_file
+
+                    metadata = quick_metadata_for_file(new_resolved)
+                self._apply_metadata_cells(row, new_key, metadata)
+        finally:
+            if was_sorting:
+                self.setSortingEnabled(True)
+        return True
+
     def update_rows_metadata(
         self,
         items: list[tuple[Path, BrowserFileMetadata]],
