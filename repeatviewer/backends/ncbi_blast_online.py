@@ -380,6 +380,13 @@ def run_ncbi_online_blast(
     check_cancelled(cancel)
     _emit(0, 1, f"{query_path.name}: connecting to NCBI BLAST…")
     query_text, seq_count, seq_chars = _read_query_fasta(query_path)
+    if seq_count > 1:
+        raise NcbiBlastOnlineError(
+            f"{query_path.name} contains {seq_count} sequences.\n\n"
+            "Online BLAST only accepts a FASTA file with one sequence. "
+            "Please separate it first (right-click the file → Separate FASTA), "
+            "then run Online BLAST on each sequence."
+        )
     _emit(
         0,
         1,

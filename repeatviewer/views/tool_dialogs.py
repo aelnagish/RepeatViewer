@@ -1922,8 +1922,7 @@ class AlignParamsDialog(QDialog):
     def _fit_options_content(self) -> None:
         page = self._options_tab
         # Clear any prior height pin so newly shown PATH status can grow sizeHint.
-        self._aligner_tabs.setMaximumHeight(16777215)
-        page.setMaximumHeight(16777215)
+        self._pin_aligner_tab_height(None)
         page.ensurePolished()
         page.adjustSize()
         root = page.layout()
@@ -1942,8 +1941,7 @@ class AlignParamsDialog(QDialog):
         height = chrome + content_h
         width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
         self.setMinimumHeight(0)
-        self._aligner_tabs.setMinimumHeight(0)
-        page.setMinimumHeight(0)
+        self._pin_aligner_tab_height(content_h)
         self.setMaximumHeight(height)
         self.resize(width, height)
         self.setMaximumHeight(16777215)
@@ -2053,6 +2051,24 @@ class AlignParamsDialog(QDialog):
         buttons_h = self._button_box.sizeHint().height()
         return margin_h + spacing + tab_bar_h + buttons_h
 
+    def _pin_aligner_tab_height(self, page_h: int | None) -> None:
+        """Constrain the tab widget to the active page so other tabs cannot gap."""
+        page = self._aligner_tabs.currentWidget()
+        if page_h is None:
+            self._aligner_tabs.setMinimumHeight(0)
+            self._aligner_tabs.setMaximumHeight(16777215)
+            if page is not None:
+                page.setMinimumHeight(0)
+                page.setMaximumHeight(16777215)
+            return
+        tab_bar_h = self._aligner_tabs.tabBar().sizeHint().height() + 10
+        tabs_h = max(1, int(page_h) + tab_bar_h)
+        self._aligner_tabs.setMinimumHeight(0)
+        self._aligner_tabs.setMaximumHeight(tabs_h)
+        if page is not None:
+            page.setMinimumHeight(0)
+            page.setMaximumHeight(max(1, int(page_h)))
+
     def _fastga_dialog_chrome_height(self) -> int:
         return self._dialog_chrome_height()
 
@@ -2115,11 +2131,13 @@ class AlignParamsDialog(QDialog):
         width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
 
         if not expanded:
-            height = chrome + panel.compact_content_height()
+            content_h = panel.compact_content_height()
+            height = chrome + content_h
             height = min(max(height, 220), max_h)
             self.setMinimumHeight(0)
             self._aligner_tabs.setMinimumHeight(0)
             panel.setMinimumHeight(0)
+            self._pin_aligner_tab_height(content_h)
             self.setMaximumHeight(height)
             self.resize(width, height)
             self.setMaximumHeight(16777215)
@@ -2127,11 +2145,13 @@ class AlignParamsDialog(QDialog):
             return
 
         extra = max(0, adv.sizeHint().height())
+        content_h = panel.compact_content_height() + extra
+        self._pin_aligner_tab_height(content_h)
         base = self._fastga_compact_size or self.size()
         height = min(base.height() + extra + 12, max_h)
         height = max(
             height,
-            min(chrome + panel.compact_content_height() + extra, max_h),
+            min(chrome + content_h, max_h),
         )
         self.resize(width, height)
 
@@ -2151,11 +2171,13 @@ class AlignParamsDialog(QDialog):
         width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
 
         if not expanded:
-            height = chrome + self._muscle_compact_content_height()
+            content_h = self._muscle_compact_content_height()
+            height = chrome + content_h
             height = min(max(height, 220), max_h)
             self.setMinimumHeight(0)
             self._aligner_tabs.setMinimumHeight(0)
             panel.setMinimumHeight(0)
+            self._pin_aligner_tab_height(content_h)
             self.setMaximumHeight(height)
             self.resize(width, height)
             self.setMaximumHeight(16777215)
@@ -2163,11 +2185,13 @@ class AlignParamsDialog(QDialog):
             return
 
         extra = max(0, adv.sizeHint().height())
+        content_h = self._muscle_compact_content_height() + extra
+        self._pin_aligner_tab_height(content_h)
         base = self._muscle_compact_size or self.size()
         height = min(base.height() + extra + 12, max_h)
         height = max(
             height,
-            min(chrome + self._muscle_compact_content_height() + extra, max_h),
+            min(chrome + content_h, max_h),
         )
         self.resize(width, height)
 
@@ -2199,6 +2223,7 @@ class AlignParamsDialog(QDialog):
         margins = root.contentsMargins() if root is not None else None
         margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
         spacing = root.spacing() if root is not None else 4
+        self._mafft_basic.ensurePolished()
         basic_h = max(
             self._mafft_basic.minimumSizeHint().height(),
             self._mafft_basic.sizeHint().height(),
@@ -2221,11 +2246,13 @@ class AlignParamsDialog(QDialog):
         width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
 
         if not expanded:
-            height = chrome + self._mafft_compact_content_height()
+            content_h = self._mafft_compact_content_height()
+            height = chrome + content_h
             height = min(max(height, 220), max_h)
             self.setMinimumHeight(0)
             self._aligner_tabs.setMinimumHeight(0)
             panel.setMinimumHeight(0)
+            self._pin_aligner_tab_height(content_h)
             self.setMaximumHeight(height)
             self.resize(width, height)
             self.setMaximumHeight(16777215)
@@ -2233,11 +2260,13 @@ class AlignParamsDialog(QDialog):
             return
 
         extra = max(0, adv.sizeHint().height())
+        content_h = self._mafft_compact_content_height() + extra
+        self._pin_aligner_tab_height(content_h)
         base = self._mafft_compact_size or self.size()
         height = min(base.height() + extra + 12, max_h)
         height = max(
             height,
-            min(chrome + self._mafft_compact_content_height() + extra, max_h),
+            min(chrome + content_h, max_h),
         )
         self.resize(width, height)
 
@@ -2330,11 +2359,31 @@ class AlignParamsDialog(QDialog):
             return expand_fastga_input_paths(self._mafft_define_inputs.paths())
         return [Path(p) for p in (panel_files or [])]
 
-    def _sync_mafft_inputs(self) -> None:
+    def _sync_mafft_inputs(self, *, resize: bool = True) -> None:
         define = self.mafft_input_source() == ALIGN_INPUT_DEFINE
+        form = self._mafft_basic.layout()
+        # Collapse the form row fully — a hidden TeMultiInputFilesWidget still
+        # reports a large sizeHint and leaves a blank gap under Settings.
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._mafft_define_inputs, define)
         self._mafft_define_inputs.setVisible(define)
+        if define:
+            self._mafft_define_inputs.setMinimumHeight(0)
+            self._mafft_define_inputs.setMaximumHeight(16777215)
+        else:
+            self._mafft_define_inputs.setFixedHeight(0)
+        self._mafft_define_inputs.updateGeometry()
+        self._mafft_basic.updateGeometry()
         if hasattr(self, "_muscle_mode_label"):
             self._sync_align_field_columns()
+        if (
+            resize
+            and self.isVisible()
+            and hasattr(self, "_advanced_settings_btn")
+            and not self._mafft_advanced_visible()
+        ):
+            self._mafft_compact_size = None
+            self._resize_for_mafft_advanced(False)
 
     def _apply_mafft_path_from_panel(self, path: Path) -> bool:
         if self.mafft_input_source() != ALIGN_INPUT_DEFINE:
@@ -2369,11 +2418,29 @@ class AlignParamsDialog(QDialog):
             return expand_fastga_input_paths(self._muscle_define_inputs.paths())
         return [Path(p) for p in (panel_files or [])]
 
-    def _sync_muscle_inputs(self) -> None:
+    def _sync_muscle_inputs(self, *, resize: bool = True) -> None:
         define = self.muscle_input_source() == ALIGN_INPUT_DEFINE
+        form = self._muscle_basic.layout()
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._muscle_define_inputs, define)
         self._muscle_define_inputs.setVisible(define)
+        if define:
+            self._muscle_define_inputs.setMinimumHeight(0)
+            self._muscle_define_inputs.setMaximumHeight(16777215)
+        else:
+            self._muscle_define_inputs.setFixedHeight(0)
+        self._muscle_define_inputs.updateGeometry()
+        self._muscle_basic.updateGeometry()
         if hasattr(self, "_muscle_mode_label"):
             self._sync_align_field_columns()
+        if (
+            resize
+            and self.isVisible()
+            and hasattr(self, "_advanced_settings_btn")
+            and not self._muscle_advanced_visible()
+        ):
+            self._muscle_compact_size = None
+            self._resize_for_muscle_advanced(False)
 
     def _apply_muscle_path_from_panel(self, path: Path) -> bool:
         if self.muscle_input_source() != ALIGN_INPUT_DEFINE:
@@ -4094,7 +4161,18 @@ class FastGaPanel(QWidget):
                 widget.setVisible(reference_mode)
 
         define = self.input_source() == FASTGA_INPUT_DEFINE
+        form = getattr(self, "_basic_form", None)
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._define_inputs, define)
         self._define_inputs.setVisible(define)
+        if define:
+            self._define_inputs.setMinimumHeight(0)
+            self._define_inputs.setMaximumHeight(16777215)
+        else:
+            self._define_inputs.setFixedHeight(0)
+        self._define_inputs.updateGeometry()
+        if hasattr(self, "_basic_panel"):
+            self._basic_panel.updateGeometry()
         self._sync_field_column()
 
         self.changed.emit()
@@ -4606,8 +4684,10 @@ _BLAST_ONLINE_PROGRAM_HELP = (
     "<b>blastx</b> (translated DNA vs protein)<br><br>"
     "<b>tblastn</b> (protein vs translated DNA)<br><br>"
     "<b>tblastx</b> (translated DNA vs translated DNA)<br><br>"
+    "Each query FASTA must contain <b>only one sequence</b>. "
+    "Separate multi-sequence files first (right-click → Separate FASTA).<br><br>"
     "Results are written as an HTML report (<code>*_ob.html</code>) with "
-    "Descriptions, Graphic Summary, Alignments, and Taxonomy tabs."
+    "Descriptions, Graphic Summary, and Lineage tabs."
 )
 _BLAST_ONLINE_WRITE_TEXT_HELP = (
     "Also keep the tabular hit table (<code>*_ob.txt</code>) next to the query. "
@@ -5243,14 +5323,6 @@ class BlastParamsDialog(QDialog):
                 self, self._use_system_blast, self._blast_path_status
             )
         )
-        note = QLabel(
-            "Local BLASTn / BLASTp / BLASTx use these executables. "
-            "Online BLAST uses NCBI servers (no local binary).",
-            self,
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: palette(mid);")
-        exe_box_layout.addWidget(note)
         options_layout.addWidget(exe_box)
 
         process_box, self._show_process_window, self._close_process_window = (

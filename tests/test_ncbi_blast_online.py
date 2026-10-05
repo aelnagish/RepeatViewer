@@ -514,6 +514,13 @@ def test_run_ncbi_online_blast_rejects_bad_program(tmp_path: Path) -> None:
         run_ncbi_online_blast(query, tmp_path, program="notablast")
 
 
+def test_run_ncbi_online_blast_rejects_multi_sequence_fasta(tmp_path: Path) -> None:
+    query = tmp_path / "two.fa"
+    query.write_text(">a\nACGTACGT\n>b\nTGCATGCA\n")
+    with pytest.raises(NcbiBlastOnlineError, match="only accepts a FASTA file with one sequence"):
+        run_ncbi_online_blast(query, tmp_path, program="blastn")
+
+
 def test_online_blast_databases_cover_ncbi_suite() -> None:
     from repeatviewer.backends.ncbi_blast_online import (
         ONLINE_BLAST_DATABASES,

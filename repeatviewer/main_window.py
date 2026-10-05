@@ -14188,6 +14188,49 @@ class MainWindow(QMainWindow):
             and blast_opts_for_gate is not None
             and blast_opts_for_gate.program == BLAST_PROGRAM_ONLINE
         )
+        if blast_is_online:
+            has_multi = False
+            for path in seq_files:
+                try:
+                    n_seq = count_fasta_sequences(path)
+                except Exception:  # noqa: BLE001 — gate best-effort; backend rechecks
+                    continue
+                if n_seq > 1:
+                    has_multi = True
+                    break
+            if has_multi:
+                box = QDialog(self)
+                box.setWindowTitle("Online BLAST — one sequence only")
+                box.setModal(True)
+                lay = QVBoxLayout(box)
+                lay.setContentsMargins(20, 16, 20, 16)
+                lay.setSpacing(12)
+                row = QHBoxLayout()
+                row.setSpacing(12)
+                icon = QLabel(box)
+                icon.setPixmap(
+                    box.style()
+                    .standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
+                    .pixmap(48, 48)
+                )
+                row.addWidget(icon, alignment=Qt.AlignmentFlag.AlignTop)
+                body = QLabel(box)
+                body.setTextFormat(Qt.TextFormat.RichText)
+                body.setWordWrap(True)
+                body.setText(
+                    "Online BLAST can only take a file that contains one sequence. "
+                    "Please separate multi-sequence FASTA files first, then run "
+                    "Online BLAST again."
+                    "<br><br><b>Tip:</b> right-click the file → Separate FASTA."
+                )
+                body.setMinimumWidth(360)
+                row.addWidget(body, stretch=1)
+                lay.addLayout(row)
+                buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, box)
+                buttons.accepted.connect(box.accept)
+                lay.addWidget(buttons, alignment=Qt.AlignmentFlag.AlignRight)
+                box.exec()
+                return
         if (
             func_name == "blast"
             and blast_opts_for_gate is not None

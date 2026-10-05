@@ -161,6 +161,74 @@ def _configure_web_settings(settings) -> None:
         settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, False)
 
 
+def _is_external_http_url(url: QUrl) -> bool:
+    return bool(url.isValid()) and (url.scheme() or "").lower() in {"http", "https"}
+
+
+class _OpenExternalWebPage:
+    """Factory for a QWebEnginePage that opens http(s) links in the system browser.
+
+    Built lazily so importing this module does not load QtWebEngine at startup.
+    """
+
+    _page_cls = None
+
+    @classmethod
+    def build(cls, profile, parent=None):
+        from PySide6.QtWebEngineCore import QWebEnginePage
+
+        if cls._page_cls is None:
+
+            class _ExternalLinkPage(QWebEnginePage):
+                def acceptNavigationRequest(  # noqa: N802 — Qt API
+                    self, url, _nav_type, _is_main_frame
+                ) -> bool:
+                    if _is_external_http_url(url):
+                        QDesktopServices.openUrl(url)
+                    return False
+
+            cls._page_cls = _ExternalLinkPage
+        return cls._page_cls(profile, parent)
+
+
+class _HtmlPreviewWebPage:
+    """Factory for the main preview page (external links → system browser)."""
+
+    _page_cls = None
+
+    @classmethod
+    def build(cls, profile, parent=None):
+        from PySide6.QtWebEngineCore import QWebEnginePage
+
+        if cls._page_cls is None:
+
+            class _PreviewPage(QWebEnginePage):
+                def __init__(self, profile, parent=None) -> None:
+                    super().__init__(profile, parent)
+                    self._popup_page = None
+
+                def acceptNavigationRequest(  # noqa: N802 — Qt API
+                    self, url, nav_type, is_main_frame
+                ) -> bool:
+                    # Accession / NCBI links must leave the embedded file:// view.
+                    if _is_external_http_url(url):
+                        QDesktopServices.openUrl(url)
+                        return False
+                    return super().acceptNavigationRequest(
+                        url, nav_type, is_main_frame
+                    )
+
+                def createWindow(self, _window_type):  # noqa: N802 — Qt API
+                    # target="_blank" (as in Online BLAST reports) uses this path.
+                    self._popup_page = _OpenExternalWebPage.build(
+                        self.profile(), self
+                    )
+                    return self._popup_page
+
+            cls._page_cls = _PreviewPage
+        return cls._page_cls(profile, parent)
+
+
 class LazyHtmlPreview(QWidget):
     """Defers Qt WebEngine creation until the first HTML file is opened."""
 
@@ -377,6 +445,11 @@ class HtmlWebEnginePreview(QWidget):
         self._view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._view, stretch=1)
 
+        # Open http(s) links (e.g. NCBI accessions in Online BLAST reports) in
+        # the system browser — target=_blank does nothing useful inside Qt WebEngine.
+        self._view.setPage(
+            _HtmlPreviewWebPage.build(self._view.page().profile(), self._view)
+        )
         _configure_web_settings(self._view.settings())
         self._view.loadFinished.connect(self._on_load_finished)
         self._view.page().printRequested.connect(self._save_print_as_pdf)
