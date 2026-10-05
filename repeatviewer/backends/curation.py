@@ -514,14 +514,15 @@ def finalize_flexidot_outputs(
     _remove_flexidot_extra_outputs(output_dir, base, ext)
 
     src = new_files[0]
-    dest = output_dir / f"{base}.{ext}"
-    if dest.exists():
-        dest.unlink()
+    from repeatviewer.backends.output_paths import next_numbered_path
+
+    dest = next_numbered_path(output_dir / f"{base}.{ext}")
     if not src.is_file():
         cleanup_flexidot_intermediates(output_dir, [])
         return []
 
-    src.rename(dest)
+    if src.resolve() != dest.resolve():
+        src.rename(dest)
     for extra in new_files[1:]:
         try:
             if extra.is_file():
@@ -835,8 +836,12 @@ def run_on_sequence(
         created.append(str(ext_fa))
 
     elif func_name == "teaid":
+        from repeatviewer.backends.output_paths import next_numbered_path
+
         teaid_opts = teaid_options or TeaAidOptions()
-        html_path = out_dir / f"{seq_path.name}{label_suffix}_TEAid.html"
+        html_path = next_numbered_path(
+            out_dir / f"{seq_path.name}{label_suffix}_TEAid.html"
+        )
         teaid_work_dir = out_dir
         scratch_dir: Path | None = None
         pan_genome_run = bool(
@@ -846,7 +851,7 @@ def run_on_sequence(
             scratch_dir = out_dir / f"_teaid_{seq_path.stem}_pan"
             scratch_dir.mkdir(parents=True, exist_ok=True)
             teaid_work_dir = scratch_dir
-            html_path = out_dir / f"{seq_path.name}_TEAid.html"
+            html_path = next_numbered_path(out_dir / f"{seq_path.name}_TEAid.html")
         elif genome_label:
             scratch_dir = out_dir / f"_teaid_{seq_path.stem}{label_suffix}"
             scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -921,9 +926,11 @@ def run_on_sequence(
         created.append(str(html_path.resolve()))
 
     elif func_name == "msa_clean_gappy":
+        from repeatviewer.backends.output_paths import next_numbered_path
+
         msa_opts = msa_clean_options or MsaCleanOptions()
         g = msa_opts.gappy
-        gcol_out = f"{seq_path}_gap.fa"
+        gcol_out = str(next_numbered_path(Path(f"{seq_path}_gap.fa")))
         remove_gaps_with_similarity_check(
             str(seq_path),
             gcol_out,
@@ -935,6 +942,8 @@ def run_on_sequence(
         created.append(gcol_out)
 
     elif func_name == "msa_clean":
+        from repeatviewer.backends.output_paths import next_numbered_path
+
         msa_opts = msa_clean_options or MsaCleanOptions()
         div = msa_opts.divergence
         gap = msa_opts.gap_row
@@ -956,7 +965,11 @@ def run_on_sequence(
             "msa_clean_div": "crowdiv",
             "msa_clean_gap": "crowgap",
         }
-        final_output = f"{seq_path}_{combined_suffix[enabled_methods[-1]]}.fa"
+        final_output = str(
+            next_numbered_path(
+                Path(f"{seq_path}_{combined_suffix[enabled_methods[-1]]}.fa")
+            )
+        )
         with tempfile.TemporaryDirectory(prefix="repeatviewer_msa_clean_") as temp_dir:
             current = str(seq_path)
             for index, method in enumerate(enabled_methods):
@@ -993,11 +1006,13 @@ def run_on_sequence(
         created.append(final_output)
 
     elif func_name in {"msa_clean_div", "msa_clean_gap"}:
+        from repeatviewer.backends.output_paths import next_numbered_path
+
         msa_opts = msa_clean_options or MsaCleanOptions()
         div = msa_opts.divergence
         gap = msa_opts.gap_row
-        div_out = f"{seq_path}_rowdiv.fa"
-        gap_out = f"{seq_path}_rowgap.fa"
+        div_out = str(next_numbered_path(Path(f"{seq_path}_rowdiv.fa")))
+        gap_out = str(next_numbered_path(Path(f"{seq_path}_rowgap.fa")))
         if func_name == "msa_clean_div":
             crop_end_div(
                 str(seq_path),

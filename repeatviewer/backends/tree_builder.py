@@ -79,6 +79,12 @@ _CONDA_PACKAGE = {
     TREE_ENGINE_FASTME: "fastme",
     TREE_ENGINE_FASTTREE: "fasttree",
 }
+# Sibling-file tag before ``.treefile`` (IQ-TREE / FastME / FastTree).
+OUTPUT_ENGINE_TAG = {
+    TREE_ENGINE_IQTREE: "iqtree",
+    TREE_ENGINE_FASTME: "fastme",
+    TREE_ENGINE_FASTTREE: "fasttree",
+}
 
 MAFFT_STRATEGY_LABELS = (
     ("L-INS-i (accurate, up to ~200 sequences)", "linsi"),
@@ -599,7 +605,7 @@ MAIN_SUFFIXES = (".treefile", "_masked.treefile")
 @dataclass
 class OutputLayout:
     parent: Path    # folder of the (first) input: main results go here
-    base: str       # "<input>_tree" or "<input>_tree_2", …
+    base: str       # "<input>_iqtree" or "<input>_fastme_2", …
     details: Path   # "<base>_details" folder for supporting files
 
     def path(self, suffix: str) -> Path:
@@ -621,11 +627,21 @@ def run_tag(opts: TreeOptions, *, dna: bool = True) -> str:
     return tag
 
 
-def plan_outputs(inputs: list[Path], tag: str = "") -> OutputLayout:
-    """Pick ``<input>_tree<tag>`` (or ``…_2``, ``…_3`` when a previous run's
-    results exist) and create its details folder. Never overwrites."""
+def plan_outputs(
+    inputs: list[Path],
+    tag: str = "",
+    *,
+    engine: str | None = None,
+) -> OutputLayout:
+    """Pick ``<input>_<engine><tag>`` (or ``…_2``, ``…_3`` when a previous run's
+    results exist) and create its details folder. Never overwrites.
+
+    ``engine`` defaults to IQ-TREE. Tags are ``iqtree`` / ``fastme`` / ``fasttree``.
+    """
     parent = Path(inputs[0]).expanduser().resolve().parent
-    stem = f"{output_base_name(inputs)}_tree{tag}"
+    engine_key = engine or TREE_ENGINE_IQTREE
+    engine_tag = OUTPUT_ENGINE_TAG.get(engine_key, "iqtree")
+    stem = f"{output_base_name(inputs)}_{engine_tag}{tag}"
     n = 1
     while True:
         base = stem if n == 1 else f"{stem}_{n}"
@@ -1005,13 +1021,20 @@ def _add_command(work: Path, commands: list[str], text: str) -> None:
         pass
 
 
-def failure_log_path(inputs: list[Path]) -> Path:
-    """``<input>_tree_failed.log`` next to the (first) input."""
+def failure_log_path(inputs: list[Path], *, engine: str | None = None) -> Path:
+    """``<input>_<engine>_failed.log`` next to the (first) input."""
     first = Path(inputs[0]).expanduser().resolve()
-    return first.parent / f"{output_base_name(inputs)}_tree_failed.log"
+    tag = OUTPUT_ENGINE_TAG.get(engine or TREE_ENGINE_IQTREE, "iqtree")
+    return first.parent / f"{output_base_name(inputs)}_{tag}_failed.log"
 
 
-def _write_failure_log(inputs: list[Path], run_dir: Path, error: str) -> Path | None:
+def _write_failure_log(
+    inputs: list[Path],
+    run_dir: Path,
+    error: str,
+    *,
+    engine: str | None = None,
+) -> Path | None:
     parts = [f"RepeatViewer tree builder — failed run ({datetime.now():%Y-%m-%d %H:%M})",
              "", "Reason:", error, ""]
     work = run_dir / ".work"
@@ -1022,7 +1045,7 @@ def _write_failure_log(inputs: list[Path], run_dir: Path, error: str) -> Path | 
     for log in sorted(work.rglob("*.log")) if work.is_dir() else []:
         parts += [f"== {log.relative_to(work)} ==",
                   log.read_text(encoding="utf-8", errors="replace"), ""]
-    path = failure_log_path(inputs)
+    path = failure_log_path(inputs, engine=engine)
     try:
         path.write_text("\n".join(parts), encoding="utf-8")
         return path
@@ -1127,7 +1150,7 @@ def build_tree_run(
             warnings.append("Outgroup rooting was selected, but no outgroup was chosen.")
 
     stamp = stamp or run_stamp()
-    layout = plan_outputs(inputs, run_tag(opts, dna=dna))
+    layout = plan_outputs(inputs, run_tag(opts, dna=dna), engine=opts.engine)
     created: list[Path] = []
     from repeatviewer.backends.job_cancel import JobCancelledError
 
@@ -1146,7 +1169,7 @@ def build_tree_run(
         raise
     except Exception as exc:  # noqa: BLE001 - reported with a saved log
         message = str(exc) if isinstance(exc, TreeBuildError) else f"{type(exc).__name__}: {exc}"
-        log = _write_failure_log(inputs, layout.details, message)
+        log = _write_failure_log(inputs, layout.details, message, engine=opts.engine)
         _cleanup()
         suffix = f"\n\nFull log: {log}" if log else ""
         raise TreeBuildError(message + suffix) from exc

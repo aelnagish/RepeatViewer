@@ -496,16 +496,23 @@ def reference_output_path(query: Path, reference: Path, fmt: str) -> Path:
 
     Rule 1 (keep the full input name, then a suffix). "_vs_<reference>" keeps
     it apart from the self-comparison result ``<query name>_FastGA<ext>``.
+    Numbers ``_2``, ``_3``… when the path already exists.
     """
-    return query.parent / (
-        f"{query.name}_FastGA_vs_{reference.name}{output_suffix_for_format(fmt)}"
+    from repeatviewer.backends.output_paths import next_numbered_path
+
+    return next_numbered_path(
+        query.parent
+        / f"{query.name}_FastGA_vs_{reference.name}{output_suffix_for_format(fmt)}"
     )
 
 
 def reference_combined_output_path(first_query: Path, reference: Path) -> Path:
     """One file for all queries (always PAF text: .1aln cannot be joined)."""
-    return first_query.parent / (
-        f"{first_query.name}_multi_FastGA_vs_{reference.name}.paf"
+    from repeatviewer.backends.output_paths import next_numbered_path
+
+    return next_numbered_path(
+        first_query.parent
+        / f"{first_query.name}_multi_FastGA_vs_{reference.name}.paf"
     )
 
 
@@ -1224,8 +1231,11 @@ def run_fastga_batch(
             raise FastgaError("No pairwise comparisons are checked.")
         first = files[0]
         combine_fmt = FORMAT_PAF if fmt == FORMAT_ALN else fmt
-        out_path = first.parent / (
-            f"{first.name}_multi_FastGA{output_suffix_for_format(combine_fmt)}"
+        from repeatviewer.backends.output_paths import next_numbered_path
+
+        out_path = next_numbered_path(
+            first.parent
+            / f"{first.name}_multi_FastGA{output_suffix_for_format(combine_fmt)}"
         )
         _run_into_combined(
             pairs, out_path, keep_index=options.keep_index, first_step=1,
@@ -1282,11 +1292,15 @@ def run_fastga_batch(
             return created
 
     # Self: each file against itself.
+    from repeatviewer.backends.output_paths import next_numbered_path
+
     created = []
     suffix = output_suffix_for_format(fmt)
     for index, source in enumerate(files, start=1):
         _step(index)
-        out_path = source.parent / f"{source.name}_FastGA{suffix}"
+        out_path = next_numbered_path(
+            source.parent / f"{source.name}_FastGA{suffix}"
+        )
         if len(files) > 1:
             _log(f"Job {index}/{len(files)}: {out_path.name}")
         created.append(_run(source, None, out_path, fmt,

@@ -245,11 +245,11 @@ def test_plan_outputs_keeps_full_name_and_never_overwrites(tmp_path):
     q = tmp_path / "variant2.fa"
     q.write_text(">a\nACGT\n")
     first = mr.plan_outputs([q])
-    assert first.rvmap.name == "variant2.fa_map.rvmap"
-    assert first.details.name == "variant2.fa_map_details"
+    assert first.rvmap.name == "variant2.fa_minimap.rvmap"
+    assert first.details.name == "variant2.fa_minimap_details"
     first.rvmap.write_text("{}")
     second = mr.plan_outputs([q])
-    assert second.base == "variant2.fa_map_2"
+    assert second.base == "variant2.fa_minimap_2"
 
 
 def test_pair_hisat2_queries_illumina_names(tmp_path):
@@ -404,7 +404,7 @@ def test_minimap2_satellite_end_to_end(tmp_path):
     if opts is None:
         pytest.skip("minimap2 not available")
     rvmap, files, report = mr.run_mapping([variants], opts)
-    assert rvmap.name == "variants.fa_map.rvmap" and rvmap.parent == tmp_path
+    assert rvmap.name == "variants.fa_minimap.rvmap" and rvmap.parent == tmp_path
     data = mr.load_rvmap(rvmap)
     assert data["engine"] == MAP_ENGINE_MINIMAP2
     assert data["summary"]["n_placed"] == 3 and data["summary"]["n_reversed"] == 1

@@ -168,13 +168,13 @@ def test_outputs_next_to_input_keep_full_name_and_never_overwrite(tmp_path):
     fa = tmp_path / "CroSat3_monomers.fa"
     fa.write_text(">a\nA\n")
     l1 = tb.plan_outputs([fa])
-    assert l1.base == "CroSat3_monomers.fa_tree"
-    assert l1.path(".treefile") == tmp_path / "CroSat3_monomers.fa_tree.treefile"
-    assert l1.path("_report.html").parent == tmp_path / "CroSat3_monomers.fa_tree_details"
-    assert l1.path(".iqtree") == tmp_path / "CroSat3_monomers.fa_tree_details" / "CroSat3_monomers.fa_tree.iqtree"
+    assert l1.base == "CroSat3_monomers.fa_iqtree"
+    assert l1.path(".treefile") == tmp_path / "CroSat3_monomers.fa_iqtree.treefile"
+    assert l1.path("_report.html").parent == tmp_path / "CroSat3_monomers.fa_iqtree_details"
+    assert l1.path(".iqtree") == tmp_path / "CroSat3_monomers.fa_iqtree_details" / "CroSat3_monomers.fa_iqtree.iqtree"
     l1.path(".treefile").write_text("(a);")
     l2 = tb.plan_outputs([fa])
-    assert l2.base == "CroSat3_monomers.fa_tree_2"
+    assert l2.base == "CroSat3_monomers.fa_iqtree_2"
     assert tb.output_base_name([fa, tmp_path / "b.fa"]) == "CroSat3_monomers.fa_multi"
 
 
@@ -248,18 +248,18 @@ def test_build_tree_run_end_to_end_with_fake_fastme(tmp_path, monkeypatch):
     opts = TreeOptions(engine=TREE_ENGINE_FASTME, use_system_path=True, threads=1,
                        distance_bootstrap=4, root_mode=TREE_ROOT_MIDPOINT)
     details, files, report = tb.build_tree_run([fa], opts, stamp="t")
-    assert details == tmp_path / "aln.fa_tree_details"
-    assert (tmp_path / "aln.fa_tree.treefile") in files      # only the tree next to the input
-    assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == ["aln.fa", "aln.fa_tree.treefile"]
+    assert details == tmp_path / "aln.fa_fastme_details"
+    assert (tmp_path / "aln.fa_fastme.treefile") in files      # only the tree next to the input
+    assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == ["aln.fa", "aln.fa_fastme.treefile"]
     for suffix in (".aln.fa", "_report.html", "_methods.txt", "_commands.txt", ".names.tsv"):
-        assert (details / f"aln.fa_tree{suffix}") in files
-    assert report == details / "aln.fa_tree_report.html"
+        assert (details / f"aln.fa_fastme{suffix}") in files
+    assert report == details / "aln.fa_fastme_report.html"
     assert not list(details.glob("*.png")) and not list(details.glob("*.pdf"))
-    tree_text = (tmp_path / "aln.fa_tree.treefile").read_text()
+    tree_text = (tmp_path / "aln.fa_fastme.treefile").read_text()
     assert "s1" in tree_text and "S00001" not in tree_text  # safe IDs mapped back
     assert "100" in tree_text  # bootstrap support computed from the replicate file
     html = report.read_text()
-    assert "provided alignment" in (details / "aln.fa_tree_methods.txt").read_text()
+    assert "provided alignment" in (details / "aln.fa_fastme_methods.txt").read_text()
     assert "<svg" in html and "Midpoint-rooted" in html
     assert not (details / ".work").exists()
 
@@ -273,7 +273,7 @@ def test_missing_engine_is_an_error_not_a_downgrade(tmp_path, monkeypatch):
         match="Use IQ-TREE from the system PATH or defined Conda environment",
     ):
         tb.build_tree_run([fa], TreeOptions(use_system_path=True), stamp="t")
-    assert not any(tmp_path.glob("a.fa_tree*"))
+    assert not any(tmp_path.glob("a.fa_iqtree*"))
 
 
 def test_too_few_sequences(tmp_path, monkeypatch):
@@ -308,7 +308,7 @@ def test_build_tree_run_real_iqtree(tmp_path):
     opts = TreeOptions(use_system_path=True, use_system_mafft=True, threads=1, runs=2,
                        root_mode=TREE_ROOT_OUTGROUP, outgroup=["m7"])
     details, files, report = tb.build_tree_run([fa], opts, stamp="t")
-    assert (details / "sat.fa_tree.iqtree").is_file()
+    assert (details / "sat.fa_iqtree.iqtree").is_file()
     assert "of 2 found the same topology" in report.read_text()
 
 
@@ -422,8 +422,8 @@ def test_independent_searches_are_separate_processes(tmp_path, monkeypatch):
     assert [c.split("--seed ")[1].split()[0] for c in calls] == ["10", "11", "12"]
     html = report.read_text()
     assert "of 3 found the same topology" in html
-    assert (run_dir / "aln.fa_tree.iqtree").is_file()
-    assert report.parent == tmp_path / "aln.fa_tree_details"   # report in the details folder
+    assert (run_dir / "aln.fa_iqtree.iqtree").is_file()
+    assert report.parent == tmp_path / "aln.fa_iqtree_details"   # report in the details folder
 
 
 def test_iqtree_fast_and_bnni_flags(tmp_path, monkeypatch):
@@ -441,11 +441,11 @@ def test_failed_run_writes_log_next_to_input(tmp_path, monkeypatch):
         tb.build_tree_run([fa], opts, stamp="t")
     msg = str(err.value)
     assert "could not create more threads" in msg
-    failed = tmp_path / "aln.fa_tree_failed.log"
+    failed = tmp_path / "aln.fa_iqtree_failed.log"
     assert failed.is_file() and f"Full log: {failed}" in msg
     text = failed.read_text()
     assert "iqtree3" in text and "Reason:" in text
-    assert not any(tmp_path.glob("aln.fa_tree.*")) and not any(tmp_path.glob("aln.fa_tree_*[!g]"))
+    assert not any(tmp_path.glob("aln.fa_iqtree.*")) and not any(tmp_path.glob("aln.fa_iqtree_*[!g]"))
 
 
 def test_one_failed_search_is_skipped_with_warning(tmp_path, monkeypatch):
@@ -517,15 +517,15 @@ def test_masked_sensitivity_run_with_fake_fastme(tmp_path, monkeypatch):
     opts = TreeOptions(engine=TREE_ENGINE_FASTME, use_system_path=True, threads=1,
                        distance_bootstrap=4, methylation_mask="CG_CHG")
     details, files, report = tb.build_tree_run([fa], opts, stamp="t")
-    assert details == tmp_path / "aln.fa_tree_cgchg_details"          # run tagged by what it did
-    assert (tmp_path / "aln.fa_tree_cgchg.treefile") in files
-    assert (tmp_path / "aln.fa_tree_cgchg_masked.treefile") in files  # next to the main tree
-    assert (details / "aln.fa_tree_cgchg_masked.aln.fa") in files
-    masked_len = len((details / "aln.fa_tree_cgchg_masked.aln.fa").read_text().splitlines()[1])
+    assert details == tmp_path / "aln.fa_fastme_cgchg_details"          # run tagged by what it did
+    assert (tmp_path / "aln.fa_fastme_cgchg.treefile") in files
+    assert (tmp_path / "aln.fa_fastme_cgchg_masked.treefile") in files  # next to the main tree
+    assert (details / "aln.fa_fastme_cgchg_masked.aln.fa") in files
+    masked_len = len((details / "aln.fa_fastme_cgchg_masked.aln.fa").read_text().splitlines()[1])
     assert 0 < masked_len < 150
     html = report.read_text()
     assert "Methylation-masked sensitivity run" in html
-    assert "Robinson" in (details / "aln.fa_tree_cgchg_methods.txt").read_text()
+    assert "Robinson" in (details / "aln.fa_fastme_cgchg_methods.txt").read_text()
 
 
 def test_rotation_is_skipped_for_input_used_as_alignment(tmp_path, monkeypatch):
@@ -540,7 +540,7 @@ def test_rotation_is_skipped_for_input_used_as_alignment(tmp_path, monkeypatch):
                        rotate_monomers=True, align_mode="never")
     details, files, report = tb.build_tree_run([fa], opts, stamp="t")
     assert "Monomer rotation was skipped" in report.read_text()
-    assert not (details / "aln.fa_tree.rotation.tsv").exists()
+    assert not (details / "aln.fa_fastme.rotation.tsv").exists()
 
 
 def test_methods_paragraph_mentions_rotation_and_masking():
@@ -581,7 +581,7 @@ def test_rotation_recovers_subfamilies_real_run(tmp_path):
     opts = TreeOptions(use_system_path=True, use_system_mafft=True, threads=1, runs=1,
                        mafft_strategy="ginsi", rotate_monomers=True)
     tb.build_tree_run([fa], opts, stamp="t")
-    tree = tb.read_newick((tmp_path / "sat.fa_tree_rot.treefile").read_text())
+    tree = tb.read_newick((tmp_path / "sat.fa_iqtree_rot.treefile").read_text())
     taxa = frozenset(t.name for t in tree.get_terminals())
     found = tb.splits(tree)
     for fam in ("F1", "F2", "F3"):
@@ -615,7 +615,7 @@ def test_run_tag_names_runs_by_what_they_did(tmp_path):
     fa = tmp_path / "sat.fa"
     fa.write_text(">a\nACGT\n")
     plain, rot = tb.plan_outputs([fa]), tb.plan_outputs([fa], "_rot")
-    assert plain.base == "sat.fa_tree" and rot.base == "sat.fa_tree_rot"
+    assert plain.base == "sat.fa_iqtree" and rot.base == "sat.fa_iqtree_rot"
 
 
 # --------------------------------------------------------------------------

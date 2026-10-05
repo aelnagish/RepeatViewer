@@ -91,9 +91,17 @@ _TOOL_OUTPUT_SUFFIXES: tuple[str, ...] = (
     ".tsd_search.txt",
     ".seqmap_RV.json",
     "_hmmer.txt",
-    # Map / tree primary
+    # Map / tree primary (engine tags + legacy `_map` / `_tree`)
+    "_minimap.rvmap",
+    "_hisat.rvmap",
     "_map.rvmap",
+    "_iqtree.treefile",
+    "_fastme.treefile",
+    "_fasttree.treefile",
     "_tree.treefile",
+    "_iqtree_masked.treefile",
+    "_fastme_masked.treefile",
+    "_fasttree_masked.treefile",
     "_tree_masked.treefile",
     "_masked.treefile",
 )
@@ -105,10 +113,14 @@ _NUMBERED_ALIGN_RE = re.compile(
 )
 _NUMBERED_HMMER_RE = re.compile(r"_hmmer\d+\.txt$", re.IGNORECASE)
 _NUMBERED_TREE_RE = re.compile(
-    r"_tree(?:_rt|_rot|_cgchg|_cg)?(?:_\d+)?(?:_masked)?\.treefile$",
+    r"_(?:iqtree|fastme|fasttree|tree)"
+    r"(?:_rt|_rot|_cgchg|_cg)?(?:_\d+)?(?:_masked)?\.treefile$",
     re.IGNORECASE,
 )
-_NUMBERED_MAP_RE = re.compile(r"_map(?:_\d+)?\.rvmap$", re.IGNORECASE)
+_NUMBERED_MAP_RE = re.compile(
+    r"_(?:minimap|hisat|map)(?:_\d+)?\.rvmap$",
+    re.IGNORECASE,
+)
 _NUMBERED_TEAID_RE = re.compile(r"_TEAid(?:_\d+)?\.html$", re.IGNORECASE)
 _NUMBERED_FLEXIDOT_RE = re.compile(
     r"_flexidot(?:_multi)?(?:_\d+)?\.(?:png|html)$",
@@ -117,7 +129,12 @@ _NUMBERED_FLEXIDOT_RE = re.compile(
 _EXTEND_RE = re.compile(r"_L\d+_R\d+(?:_\d+)?\.fa$", re.IGNORECASE)
 _CONSENSUS_RE = re.compile(r"_\d+(?:\.\d+)?_co(?:_\d+)?\.fa$", re.IGNORECASE)
 _FASTGA_RE = re.compile(
-    r"_multi_FastGA(?:_vs_.+)?\.(?:paf|psl|1aln)$|_FastGA(?:_vs_.+)?\.(?:paf|psl|1aln)$",
+    r"_FastGA(?:_vs_.+?)?(?:_\d+)?\.(?:paf|psl|1aln)$"
+    r"|_multi_FastGA(?:_vs_.+?)?(?:_\d+)?\.(?:paf|psl|1aln)$",
+    re.IGNORECASE,
+)
+_MSA_CLEAN_RE = re.compile(
+    r"_(?:cgap|crowdiv|crowgap|gap|rowdiv|rowgap)(?:_\d+)?\.fa$",
     re.IGNORECASE,
 )
 _PLOT_TAG_RE = re.compile(
@@ -130,6 +147,7 @@ _COMBINE_RE = re.compile(r"_and_(?:\d+|.+)_comb(?:_\d+)?\.fa$", re.IGNORECASE)
 _REGEX_STRIPPERS: tuple[re.Pattern[str], ...] = (
     _PLOT_TAG_RE,
     _FASTGA_RE,
+    _MSA_CLEAN_RE,
     _NUMBERED_FLEXIDOT_RE,
     _NUMBERED_TEAID_RE,
     _NUMBERED_TREE_RE,

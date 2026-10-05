@@ -16,10 +16,11 @@ like Geneious Prime's "Map to Reference", with additions for repeat work:
   written with the lifted annotations, so they open annotated in the viewer.
 
 Results follow the RepeatViewer naming rule (full input name, then a suffix):
-``<input>_map.rvmap`` next to the input (opens in the contig view) and a
-``<input>_map_details/`` folder with the report, consensus, mapped and unused
-sequences, variant / feature / read tables and the raw aligner output.
-A second run becomes ``<input>_map_2…``; nothing is overwritten.
+``<input>_minimap.rvmap`` / ``<input>_hisat.rvmap`` next to the input (opens in
+the contig view) and a matching ``_details/`` folder with the report, consensus,
+mapped and unused sequences, variant / feature / read tables and the raw
+aligner output. A second run becomes ``…_minimap_2…`` / ``…_hisat_2…``; nothing
+is overwritten.
 
 Pure functions (parsers, projection, consensus, variants, lift-over) have no Qt
 dependency and are tested in ``tests/test_map_reference.py``.
@@ -98,6 +99,11 @@ _EXECUTABLES = {
     MAP_ENGINE_HISAT2: ("hisat2",),
 }
 _CONDA_PACKAGE = {MAP_ENGINE_MINIMAP2: "minimap2", MAP_ENGINE_HISAT2: "hisat2"}
+# Sibling-file tag before ``.rvmap`` (minimap2 → minimap, HISAT2 → hisat).
+OUTPUT_ENGINE_TAG = {
+    MAP_ENGINE_MINIMAP2: "minimap",
+    MAP_ENGINE_HISAT2: "hisat",
+}
 
 STATUS_INTACT = "intact"
 STATUS_CHANGED = "changed"
@@ -1219,10 +1225,12 @@ class OutputLayout:
         return self.details / f"{self.base}{suffix}"
 
 
-def plan_outputs(inputs: list[Path]) -> OutputLayout:
-    """``<input>_map`` (or ``_map_2``, ``_map_3`` …) and its details folder."""
+def plan_outputs(inputs: list[Path], *, engine: str | None = None) -> OutputLayout:
+    """``<input>_minimap`` / ``_hisat`` (or ``_2``, ``_3`` …) and details folder."""
     parent = Path(inputs[0]).expanduser().resolve().parent
-    stem = f"{output_base_name(inputs)}_map"
+    engine_key = engine or MAP_ENGINE_MINIMAP2
+    engine_tag = OUTPUT_ENGINE_TAG.get(engine_key, "minimap")
+    stem = f"{output_base_name(inputs)}_{engine_tag}"
     n = 1
     while True:
         base = stem if n == 1 else f"{stem}_{n}"
@@ -1720,7 +1728,7 @@ def run_mapping(
     features_by_id = (load_reference_features(reference, ref_lengths)
                       if opts.lift_annotations else {})
     stamp = stamp or run_stamp()
-    layout = plan_outputs(queries)
+    layout = plan_outputs(queries, engine=engine)
     created: list[Path] = []
     from repeatviewer.backends.job_cancel import JobCancelledError
 
