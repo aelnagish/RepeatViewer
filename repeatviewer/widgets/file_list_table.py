@@ -34,6 +34,7 @@ from repeatviewer.widgets.browser_icons import browser_file_icon
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fas", ".faa"}
 _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_SORT = Qt.ItemDataRole.UserRole + 1
+_ROLE_FAMILY_BAND = Qt.ItemDataRole.UserRole + 2  # True = tinted name-group band
 
 _COL_CHECK = 0
 _COL_NAME = 1
@@ -191,6 +192,15 @@ class FileListTableWidget(QTableWidget):
         self._sort_column = _COL_NAME
         self._sort_ascending = True
         self._suppress_selection_preview = False
+        # Name sort: tint source + tool-output families. Other sorts: even/odd rows.
+        self._family_banding_enabled = False
+        self._row_zebra_enabled = False
+        # While True, metadata chunk updates must not re-enable sorting (avoids
+        # scroll jumps when Type/Length values change mid-fill on large folders).
+        self._metadata_sort_frozen = False
+        self._metadata_saved_scroll: int | None = None
+        # When set, skip per-row QSettings reads during bulk listing.
+        self._bulk_file_colors: dict[str, str] | None = None
         self._ensure_headers()
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -460,6 +470,15 @@ class FileListTableWidget(QTableWidget):
         if cell is not None:
             super().scrollToItem(cell, hint)
 
+    def begin_bulk_file_insert(self) -> None:
+        """Cache file colors once for a large folder rebuild."""
+        from repeatviewer.widgets.file_colors import load_file_colors
+
+        self._bulk_file_colors = load_file_colors()
+
+    def end_bulk_file_insert(self) -> None:
+        self._bulk_file_colors = None
+
     def add_file_row(
         self,
         path: Path,
@@ -467,7 +486,14 @@ class FileListTableWidget(QTableWidget):
         metadata: BrowserFileMetadata | None = None,
         fill_metadata_columns: bool | None = None,
     ) -> FileListRow:
-        path = path.expanduser().resolve()
+        path = path.expanduser()
+        # During bulk folder rebuild paths are already absolute from scandir —
+        # skip resolve() (N syscalls) so ROLE_PATH matches cached stats keys.
+        if self._bulk_file_colors is None or not path.is_absolute():
+            try:
+                path = path.resolve()
+            except OSError:
+                pass
         # Caller may already have sorting disabled for a bulk insert; avoid
         # toggling it per row (expensive when adding hundreds of files).
         was_sorting = self.isSortingEnabled()
@@ -483,7 +509,7 @@ class FileListTableWidget(QTableWidget):
             if fill_metadata_columns:
                 from repeatviewer.browser_file_metadata import quick_metadata_for_file
 
-                meta = quick_metadata_for_file(path)
+                meta = quick_metadata_for_file(path, resolve_path=False)
             else:
                 from repeatviewer.browser_file_metadata import minimal_name_metadata
 
@@ -511,6 +537,8 @@ class FileListTableWidget(QTableWidget):
         self.setItem(row, _COL_NAME, name_item)
 
         self._apply_file_color_cells(row, path)
+        # Small folders: fill metadata now. Large folders: name only here;
+        # deferred fill creates Modified/Type/Size (and later Length/GC).
         if fill_metadata_columns:
             self._apply_metadata_cells(row, path_text, meta)
         self._apply_cyto_cell(row, path)
@@ -541,9 +569,15 @@ class FileListTableWidget(QTableWidget):
         if not resolved:
             path = path.expanduser().resolve()
         path_text = str(path)
-        color = get_file_color(path)
+        if self._bulk_file_colors is not None:
+            color = self._bulk_file_colors.get(path_text)
+        else:
+            color = get_file_color(path)
         brush = QBrush(QColor(color)) if color else QBrush()
-        clear_bg = QBrush()
+        if color:
+            clear_bg = QBrush()
+        else:
+            clear_bg = self._family_band_brush(row)
 
         label = color_label(color) if color else "—"
         # Empty colors sort last when ascending.
@@ -569,6 +603,154 @@ class FileListTableWidget(QTableWidget):
         name_item = self.item(row, _COL_NAME)
         if name_item is not None:
             name_item.setToolTip("")
+
+    def set_family_banding_enabled(self, enabled: bool) -> None:
+        """Enable/disable name-family zebra banding (online-BLAST style)."""
+        enabled = bool(enabled)
+        if enabled == self._family_banding_enabled:
+            if enabled:
+                self.apply_family_group_banding()
+            return
+        self._family_banding_enabled = enabled
+        if enabled:
+            self._row_zebra_enabled = False
+            self.apply_family_group_banding()
+            return
+        self._clear_family_band_flags()
+        # Only clear band tints — do not reload every row's file color (slow on
+        # large folders and raced with deferred metadata fill).
+        self._clear_band_backgrounds()
+
+    def family_banding_enabled(self) -> bool:
+        return self._family_banding_enabled
+
+    def row_zebra_enabled(self) -> bool:
+        return self._row_zebra_enabled
+
+    def set_list_banding(self, *, family: bool, row_zebra: bool) -> None:
+        """Choose name-family banding, simple row zebra, or neither."""
+        family = bool(family)
+        row_zebra = bool(row_zebra) and not family
+        changed = (
+            family != self._family_banding_enabled
+            or row_zebra != self._row_zebra_enabled
+        )
+        self._family_banding_enabled = family
+        self._row_zebra_enabled = row_zebra
+        if not family:
+            self._clear_family_band_flags()
+        if not family and not row_zebra:
+            if changed:
+                self._clear_band_backgrounds()
+            return
+        self.apply_list_banding()
+
+    def apply_list_banding(self) -> None:
+        if self._family_banding_enabled:
+            self.apply_family_group_banding()
+        elif self._row_zebra_enabled:
+            self.apply_row_zebra_banding()
+
+    def _clear_family_band_flags(self) -> None:
+        for row in range(self.rowCount()):
+            name_item = self.item(row, _COL_NAME)
+            if name_item is not None:
+                name_item.setData(_ROLE_FAMILY_BAND, None)
+
+    def _clear_band_backgrounds(self) -> None:
+        clear = QBrush()
+        for row in range(self.rowCount()):
+            for column in range(self.columnCount()):
+                cell = self.item(row, column)
+                if cell is not None:
+                    cell.setBackground(clear)
+
+    def _band_tint_hex(self, *, family: bool) -> str:
+        from PySide6.QtGui import QPalette
+        from repeatviewer.browser_file_groups import (
+            FAMILY_BAND_DARK,
+            FAMILY_BAND_LIGHT,
+            ROW_ZEBRA_DARK,
+            ROW_ZEBRA_LIGHT,
+        )
+
+        window = self.palette().color(QPalette.ColorRole.Window)
+        dark = window.lightness() < 128
+        if family:
+            return FAMILY_BAND_DARK if dark else FAMILY_BAND_LIGHT
+        return ROW_ZEBRA_DARK if dark else ROW_ZEBRA_LIGHT
+
+    def _family_band_brush(self, row: int) -> QBrush:
+        if self._family_banding_enabled:
+            name_item = self.item(row, _COL_NAME)
+            if name_item is None or not name_item.data(_ROLE_FAMILY_BAND):
+                return QBrush()
+            return QBrush(QColor(self._band_tint_hex(family=True)))
+        if self._row_zebra_enabled and row % 2 == 1:
+            return QBrush(QColor(self._band_tint_hex(family=False)))
+        return QBrush()
+
+    def apply_family_group_banding(self) -> None:
+        """Tint alternating source+output families when name banding is on."""
+        if not self._family_banding_enabled:
+            return
+        from repeatviewer.browser_file_groups import family_band_flags
+        from repeatviewer.widgets.file_colors import load_file_colors
+
+        colors = self._bulk_file_colors
+        if colors is None:
+            colors = load_file_colors()
+        names: list[str] = []
+        rows: list[int] = []
+        for row in range(self.rowCount()):
+            name_item = self.item(row, _COL_NAME)
+            if name_item is None:
+                continue
+            text = name_item.text()
+            if not text or text.startswith("("):
+                continue
+            names.append(text)
+            rows.append(row)
+        flags = family_band_flags(names)
+        for row, tinted in zip(rows, flags):
+            name_item = self.item(row, _COL_NAME)
+            if name_item is not None:
+                name_item.setData(_ROLE_FAMILY_BAND, bool(tinted))
+            raw = self._path_for_row(row)
+            if raw and colors.get(raw):
+                # User color owns the row; leave job/user styling alone.
+                continue
+            brush = self._family_band_brush(row)
+            for column in range(self.columnCount()):
+                cell = self.item(row, column)
+                if cell is None:
+                    continue
+                cell.setBackground(brush)
+
+    def apply_row_zebra_banding(self) -> None:
+        """Tint every other row when the list is not sorted by Name."""
+        if not self._row_zebra_enabled:
+            return
+        from repeatviewer.widgets.file_colors import load_file_colors
+
+        colors = self._bulk_file_colors
+        if colors is None:
+            colors = load_file_colors()
+        for row in range(self.rowCount()):
+            name_item = self.item(row, _COL_NAME)
+            if name_item is None:
+                continue
+            text = name_item.text()
+            if not text or text.startswith("("):
+                continue
+            raw = self._path_for_row(row)
+            if raw and colors.get(raw):
+                continue
+            brush = self._family_band_brush(row)
+            for column in range(self.columnCount()):
+                cell = self.item(row, column)
+                if cell is not None:
+                    cell.setBackground(brush)
 
     def reapply_file_colors(self) -> None:
         """Refresh Name/Color styling from stored colors for every row."""
@@ -725,26 +907,64 @@ class FileListTableWidget(QTableWidget):
             (_COL_MODIFIED, meta.modified_text, meta.sort_modified),
             (_COL_SIZE, meta.size_text, meta.sort_size),
         ):
-            cell = _SortableTableItem(text, sort_key=sort_key)
-            cell.setData(_ROLE_PATH, path_text)
-            cell.setTextAlignment(_LEFT_ALIGN)
+            cell = self.item(row, column)
+            if cell is None:
+                cell = _SortableTableItem(text, sort_key=sort_key)
+                cell.setData(_ROLE_PATH, path_text)
+                cell.setTextAlignment(_LEFT_ALIGN)
+                self.setItem(row, column, cell)
+            else:
+                cell.setText(text)
+                cell.setData(_ROLE_SORT, sort_key)
+                cell.setData(_ROLE_PATH, path_text)
             if bg is not None:
                 cell.setBackground(bg)
             if fg is not None:
                 cell.setForeground(fg)
             if font is not None:
                 cell.setFont(font)
-            self.setItem(row, column, cell)
+
+    def update_rows_metadata(
+        self,
+        items: list[tuple[Path, BrowserFileMetadata]],
+    ) -> None:
+        """Apply several metadata updates without re-sorting between rows."""
+        if not items:
+            return
+        row_index = self._path_row_index()
+        frozen = self._metadata_sort_frozen
+        was_sorting = self.isSortingEnabled()
+        if not frozen:
+            self.setSortingEnabled(False)
+        self.setUpdatesEnabled(False)
+        try:
+            for path, meta in items:
+                # listed_paths / ROLE_PATH are already absolute — avoid resolve().
+                key = str(path)
+                row = row_index.get(key)
+                if row is None:
+                    try:
+                        key = str(path.expanduser().resolve())
+                    except OSError:
+                        continue
+                    row = row_index.get(key)
+                if row is None:
+                    continue
+                self._apply_metadata_cells(row, key, meta)
+        finally:
+            self.setUpdatesEnabled(True)
+            # Keep sorting off while a large-folder fill is in progress.
+            if not frozen:
+                self.setSortingEnabled(was_sorting)
 
     def update_row_metadata(self, path: Path, meta: BrowserFileMetadata) -> bool:
         """Refresh metadata columns for an existing row. Returns True if found."""
         key = str(path.expanduser().resolve())
-        for row in range(self.rowCount()):
-            if self._path_for_row(row) != key:
-                continue
-            self._apply_metadata_cells(row, key, meta)
-            return True
-        return False
+        row = self._path_row_index().get(key)
+        if row is None:
+            return False
+        self._apply_metadata_cells(row, key, meta)
+        return True
 
     def rename_listed_path(
         self,
@@ -800,6 +1020,30 @@ class FileListTableWidget(QTableWidget):
                 self.setSortingEnabled(True)
         return True
 
+    def begin_metadata_fill(self) -> None:
+        """Freeze sorting for the duration of deferred metadata updates."""
+        if self._metadata_sort_frozen:
+            return
+        self._metadata_sort_frozen = True
+        self._metadata_saved_scroll = int(self.verticalScrollBar().value())
+        self.setSortingEnabled(False)
+
+    def end_metadata_fill(self, *, resort: bool = True) -> None:
+        """Unfreeze sorting; optionally sort once and restore scroll."""
+        if not self._metadata_sort_frozen:
+            return
+        self._metadata_sort_frozen = False
+        scroll = self._metadata_saved_scroll
+        self._metadata_saved_scroll = None
+        if resort and self.rowCount() > 0:
+            self.setSortingEnabled(True)
+            self.apply_default_sort()
+        else:
+            self.setSortingEnabled(True)
+        if scroll is not None:
+            vsb = self.verticalScrollBar()
+            vsb.setValue(min(int(scroll), vsb.maximum()))
+
     def update_rows_metadata(
         self,
         items: list[tuple[Path, BrowserFileMetadata]],
@@ -808,8 +1052,10 @@ class FileListTableWidget(QTableWidget):
         if not items:
             return
         row_index = self._path_row_index()
+        frozen = self._metadata_sort_frozen
         was_sorting = self.isSortingEnabled()
-        self.setSortingEnabled(False)
+        if not frozen:
+            self.setSortingEnabled(False)
         self.setUpdatesEnabled(False)
         try:
             for path, meta in items:
@@ -820,7 +1066,9 @@ class FileListTableWidget(QTableWidget):
                 self._apply_metadata_cells(row, key, meta)
         finally:
             self.setUpdatesEnabled(True)
-            self.setSortingEnabled(was_sorting)
+            # Keep sorting off while a large-folder fill is in progress.
+            if not frozen:
+                self.setSortingEnabled(was_sorting)
 
     def _path_row_index(self) -> dict[str, int]:
         index: dict[str, int] = {}
@@ -833,6 +1081,7 @@ class FileListTableWidget(QTableWidget):
     def apply_default_sort(self) -> None:
         order = Qt.SortOrder.AscendingOrder if self._sort_ascending else Qt.SortOrder.DescendingOrder
         self.sortItems(self._sort_column, order)
+        self.apply_list_banding()
 
     def add_placeholder_row(self, text: str) -> None:
         was_sorting = self.isSortingEnabled()
@@ -953,7 +1202,17 @@ class FileListTableWidget(QTableWidget):
         else:
             self._sort_column = column
             self._sort_ascending = True
+        # Family banding only when Name order groups related files; otherwise
+        # use simple even/odd row zebra.
+        want_family = column == _COL_NAME
+        self.set_list_banding(family=want_family, row_zebra=not want_family)
         self.apply_default_sort()
+        window = self.window()
+        if hasattr(window, "_refresh_file_list_highlights"):
+            window._refresh_file_list_highlights()
+        # Keep deferred metadata moving after a large-folder sort.
+        if hasattr(window, "_ensure_file_list_metadata_fill"):
+            window._ensure_file_list_metadata_fill()
 
     def _on_cell_clicked(self, row: int, column: int) -> None:
         if column == _COL_CHECK:

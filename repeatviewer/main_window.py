@@ -491,7 +491,11 @@ from repeatviewer.widgets.file_sort import (
     load_file_sort_mode,
     sort_file_paths,
 )
-from repeatviewer.widgets.file_list_table import FileListRow, FileListTableWidget
+from repeatviewer.widgets.file_list_table import (
+    COL_NAME,
+    FileListRow,
+    FileListTableWidget,
+)
 from repeatviewer.widgets.preview_tabs import PreviewTabWidget, is_previewable_file, preview_path_priority
 from repeatviewer.widgets.task_progress import TaskProgressPanel
 from repeatviewer.widgets.database_index_runner import DatabaseIndexRunner
@@ -2024,8 +2028,8 @@ class _PendingTeVizBuild:
     map_options: TeGenomeMapOptions
 
 
-_METADATA_UI_CHUNK = 24
-_METADATA_STAT_CHUNK = 48
+_METADATA_UI_CHUNK = 128
+_METADATA_STAT_CHUNK = 200
 # Above this, avoid sync metadata/stat and O(n) preview/is_file scans on the GUI thread.
 _LARGE_FILE_LIST = 400
 _LARGE_JOB_OUTPUT_BATCH = 200
@@ -2162,9 +2166,13 @@ class MainWindow(QMainWindow):
         self._last_job_source_files: list[Path] = []
         self._job_toolbar_actions: list[QAction | QToolButton] = []
         self._cached_folder_files: list[Path] = []
+        # mtime/size from the last scandir — reuse for cheap metadata (no re-stat).
+        self._folder_file_stats: dict[str, tuple[float, int]] = {}
         # Per-folder: last selected file + Files-list scroll (return restores position).
         self._last_file_by_folder: dict[str, str] = {}
         self._last_scroll_by_folder: dict[str, int] = {}
+        # Restore selection after Type/Modified/… sort once cheap metadata exists.
+        self._pending_folder_file_restore = False
         self._highlight_output_keys: set[str] = set()
         self._highlight_source_keys: set[str] = set()
         # Soft-deleted files / folder actions for Cmd/Ctrl+Z restore.
@@ -2532,32 +2540,91 @@ class MainWindow(QMainWindow):
     def _fill_visible_file_metadata(self) -> None:
         """Populate metadata columns after they are turned on or for stale rows.
 
-        Always fills cheap fields (Modified, Size, Type) for every file via
-        ``stat``. FASTA Length / # Sequences / % GC are enriched afterward.
+        Cheap fields (Modified, Size, Type) are filled in one burst using
+        scandir-cached stats when available. FASTA Length / # Sequences / % GC
+        are enriched afterward on a worker thread.
         """
         from repeatviewer.browser_file_metadata import is_fasta_path
 
         paths = self._file_list.listed_paths()
         if not paths:
             return
-        # Queue every path for quick Modified/Size/Type first. Enriching FASTA
-        # before that left non-FASTA (and cancelled FASTA) stuck on "—".
-        self._metadata_stat_queue = list(paths)
+        self._file_list.begin_metadata_fill()
         self._pending_fasta_enrichment = [
             path for path in paths if is_fasta_path(path)
         ]
-        self._schedule_metadata_ui_drain()
+        # One-shot cheap fill — timer chunking made large folders feel ~0.5s
+        # slower because each tick rebuilt the path index and repainted.
+        updates = self._quick_metadata_updates_for_paths(paths)
+        if updates:
+            self._file_list.update_rows_metadata(updates)
+        pending_fasta = self._pending_fasta_enrichment
+        self._pending_fasta_enrichment = []
+        self._finish_cheap_metadata_fill()
+        if pending_fasta and not self._any_background_job_running():
+            self._file_list.begin_metadata_fill()
+            self._start_metadata_enrichment(pending_fasta)
+
+    def _quick_metadata_updates_for_paths(
+        self,
+        paths: list[Path],
+    ) -> list[tuple[Path, object]]:
+        from repeatviewer.browser_file_metadata import quick_metadata_for_file
+
+        stats = self._folder_file_stats
+        updates: list[tuple[Path, object]] = []
+        for path in paths:
+            key = str(path)
+            cached = stats.get(key)
+            if cached is not None:
+                mtime, size = cached
+                updates.append(
+                    (
+                        path,
+                        quick_metadata_for_file(
+                            path,
+                            size=size,
+                            mtime=mtime,
+                            resolve_path=False,
+                        ),
+                    )
+                )
+            else:
+                updates.append(
+                    (
+                        path,
+                        quick_metadata_for_file(path, resolve_path=False),
+                    )
+                )
+        return updates
+
+    def _finish_cheap_metadata_fill(self) -> None:
+        """One sort after cheap metadata; re-highlight last file if needed."""
+        if self._file_list is None:
+            return
+        self._file_list.end_metadata_fill(resort=True)
+        self._file_list.apply_list_banding()
+        if self._pending_folder_file_restore and self._current_folder is not None:
+            self._pending_folder_file_restore = False
+            self._file_list.set_suppress_selection_preview(True)
+            try:
+                self._restore_file_list_position(
+                    self._current_folder,
+                    open_preview=False,
+                )
+            finally:
+                self._file_list.clear_suppress_selection_preview()
+        if self._highlight_output_keys or self._highlight_source_keys:
+            self._refresh_file_list_highlights()
 
     def _schedule_metadata_ui_drain(self) -> None:
         if not self._metadata_ui_timer.isActive():
             self._metadata_ui_timer.start(0)
 
     def _collect_metadata_stat_chunk(self) -> list[tuple[Path, object]]:
-        from repeatviewer.browser_file_metadata import quick_metadata_for_file
-
         chunk = self._metadata_stat_queue[:_METADATA_STAT_CHUNK]
         del self._metadata_stat_queue[:_METADATA_STAT_CHUNK]
-        return [(path, quick_metadata_for_file(path)) for path in chunk]
+        return self._quick_metadata_updates_for_paths(chunk)
 
     def _sync_folder_tree_label_for_folder(self, folder: Path) -> None:
         item = self._find_tree_item_for_path(folder.expanduser().resolve())
@@ -7801,6 +7868,7 @@ class MainWindow(QMainWindow):
 
     def _files_for_folder(self, folder: Path) -> list[Path]:
         files: list[Path] = []
+        stats: dict[str, tuple[float, int]] = {}
         try:
             with os.scandir(folder) as entries:
                 for entry in entries:
@@ -7818,9 +7886,16 @@ class MainWindow(QMainWindow):
                         or is_flexidot_extra_plot_file(path)
                     ):
                         continue
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                        stats[entry.path] = (float(st.st_mtime), int(st.st_size))
+                    except OSError:
+                        pass
                     files.append(path)
         except OSError:
+            self._folder_file_stats = {}
             return []
+        self._folder_file_stats = stats
         return files
 
     def _folder_panel_counts(self, folder: Path) -> tuple[int, int]:
@@ -8088,7 +8163,9 @@ class MainWindow(QMainWindow):
         self._sync_blast_params_dialog_from_folder(folder)
         self._sync_hmmer_params_dialog_from_folder(folder)
         self._sync_create_folder_dialog_from_folder(folder)
-        self._populate_file_list(folder, record_history=True)
+        # Restore last selection highlight/scroll only — do not load Preview until
+        # the user clicks a file (keeps folder switching fast for large files).
+        self._populate_file_list(folder, record_history=True, open_preview=False)
         self._update_directory_watchers()
         self._persist_workspace()
         self._folder_tree.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -8303,6 +8380,9 @@ class MainWindow(QMainWindow):
             return
         from repeatviewer.widgets.file_list_columns import metadata_columns_visible
 
+        # Drop in-flight metadata work for the previous listing before rebuild.
+        self._stop_metadata_enrichment(wait_ms=0)
+
         query = self._file_filter.text().strip().lower()
         self._file_list.clear_rows()
         visible: list[Path] = []
@@ -8317,9 +8397,12 @@ class MainWindow(QMainWindow):
         # Large folders: skip sync stat/metadata on the GUI thread; fill later.
         fill_metadata = want_metadata and len(visible) <= _LARGE_FILE_LIST
         defer_metadata = want_metadata and not fill_metadata
+        large_listing = len(visible) > _LARGE_FILE_LIST
         was_sorting = self._file_list.isSortingEnabled()
         self._file_list.setSortingEnabled(False)
         self._file_list.setUpdatesEnabled(False)
+        if large_listing:
+            self._file_list.begin_bulk_file_insert()
         try:
             need_style = bool(self._highlight_output_keys or self._highlight_source_keys)
             for file_path in visible:
@@ -8334,6 +8417,8 @@ class MainWindow(QMainWindow):
                     elif key in self._highlight_source_keys:
                         self._style_source_file_item(row_item)
         finally:
+            if large_listing:
+                self._file_list.end_bulk_file_insert()
             self._file_list.setUpdatesEnabled(True)
             self._file_list.setSortingEnabled(was_sorting)
 
@@ -8342,8 +8427,22 @@ class MainWindow(QMainWindow):
         elif not self._cached_folder_files:
             self._file_list.add_placeholder_row("(empty folder)")
 
-        self._file_list.apply_default_sort()
-        self._file_list.repair_chrome()
+        # Large folders: rows are already ordered by sort_file_paths (Name) or
+        # will be sorted once after cheap metadata (Type/Modified/…). Avoid a
+        # full Qt re-sort of 1000+ rows before the first paint.
+        if not large_listing:
+            self._file_list.apply_default_sort()
+        want_family = self._file_list._sort_column == COL_NAME
+        # Defer painting bands so names appear first on large folders.
+        self._file_list._family_banding_enabled = want_family
+        self._file_list._row_zebra_enabled = not want_family and bool(visible)
+        if not want_family:
+            self._file_list._clear_family_band_flags()
+        if large_listing:
+            # Skip window-wide orphan-header scan; headers stay valid across rebuilds.
+            self._file_list._ensure_headers()
+        else:
+            self._file_list.repair_chrome()
 
         self._sync_files_status(
             len(visible),
@@ -8353,12 +8452,60 @@ class MainWindow(QMainWindow):
             self._start_metadata_enrichment(visible)
         elif defer_metadata and not self._any_background_job_running():
             QTimer.singleShot(0, self._fill_visible_file_metadata)
+        if want_family or self._file_list.row_zebra_enabled():
+            QTimer.singleShot(0, self._apply_deferred_list_banding)
 
-    def _stop_metadata_enrichment(self, *, wait_ms: int = 1000) -> None:
+    def _apply_deferred_list_banding(self) -> None:
+        if self._file_list is None:
+            return
+        self._file_list.apply_list_banding()
+        if self._highlight_output_keys or self._highlight_source_keys:
+            self._refresh_file_list_highlights()
+
+    def _apply_deferred_family_banding(self) -> None:
+        # Back-compat alias used by older call sites / tests.
+        self._apply_deferred_list_banding()
+
+    def _ensure_file_list_metadata_fill(self) -> None:
+        """Restart deferred metadata fill if columns look unpopulated."""
+        from repeatviewer.widgets.file_list_columns import metadata_columns_visible
+
+        if not metadata_columns_visible() or self._file_list is None:
+            return
+        if self._file_list.rowCount() <= 0:
+            return
+        if self._any_background_job_running():
+            return
+        if (
+            self._metadata_stat_queue
+            or self._pending_metadata_ui
+            or self._pending_fasta_enrichment
+            or self._metadata_enrich_worker is not None
+        ):
+            if not self._metadata_ui_timer.isActive() and self._metadata_stat_queue:
+                self._schedule_metadata_ui_drain()
+            return
+        # No fill in progress — refresh cheap Modified/Size/Type (and FASTA later).
+        QTimer.singleShot(0, self._fill_visible_file_metadata)
+
+    def _stop_metadata_enrichment(
+        self,
+        *,
+        wait_ms: int = 1000,
+        thaw_sort: bool = True,
+    ) -> None:
+        """Cancel background metadata work and clear pending UI queues."""
         self._pending_metadata_ui.clear()
         self._metadata_stat_queue.clear()
         self._pending_fasta_enrichment.clear()
         self._metadata_ui_timer.stop()
+        if (
+            thaw_sort
+            and self._file_list is not None
+            and self._file_list._metadata_sort_frozen
+        ):
+            # Do not resort here — the listing is being rebuilt or torn down.
+            self._file_list.end_metadata_fill(resort=False)
         worker = self._metadata_enrich_worker
         thread = self._metadata_enrich_thread
         self._metadata_enrich_worker = None
@@ -8377,9 +8524,12 @@ class MainWindow(QMainWindow):
 
         if not metadata_columns_visible():
             return
-        self._stop_metadata_enrichment()
+        # Keep sort freeze if cheap fill already froze the table for Length/GC.
+        self._stop_metadata_enrichment(thaw_sort=False)
         fasta_paths = [p.expanduser().resolve() for p in paths if is_fasta_path(p)]
         if not fasta_paths:
+            if self._file_list is not None and self._file_list._metadata_sort_frozen:
+                self._file_list.end_metadata_fill(resort=True)
             return
         self._metadata_enrich_generation += 1
         generation = self._metadata_enrich_generation
@@ -8405,6 +8555,15 @@ class MainWindow(QMainWindow):
     def _on_metadata_enrich_thread_finished(self) -> None:
         self._metadata_enrich_thread = None
         self._metadata_enrich_worker = None
+        # Final Length/GC batches may still be queued for the UI drain.
+        if self._pending_metadata_ui:
+            self._schedule_metadata_ui_drain()
+            return
+        if self._file_list is not None and self._file_list._metadata_sort_frozen:
+            self._file_list.end_metadata_fill(resort=True)
+            self._file_list.apply_list_banding()
+            if self._highlight_output_keys or self._highlight_source_keys:
+                self._refresh_file_list_highlights()
 
     @Slot(list, int)
     def _on_metadata_enrich_batch(self, batch: list, generation: int) -> None:
@@ -8437,19 +8596,27 @@ class MainWindow(QMainWindow):
         del self._pending_metadata_ui[:_METADATA_UI_CHUNK]
         if chunk:
             self._file_list.update_rows_metadata(chunk)
-            self._refresh_metadata_row_highlights(chunk)
+            # Only re-tint when a job highlight set exists (skip O(n) per chunk).
+            if self._highlight_output_keys or self._highlight_source_keys:
+                self._refresh_metadata_row_highlights(chunk)
         if self._metadata_stat_queue or self._pending_metadata_ui:
             self._metadata_ui_timer.start(0)
             return
-        # Cheap Modified/Size/Type fill finished — now scan FASTA for Length/GC.
-        pending_fasta = self._pending_fasta_enrichment
-        self._pending_fasta_enrichment = []
-        if pending_fasta and not self._any_background_job_running():
-            self._start_metadata_enrichment(pending_fasta)
+        # Queues empty.
+        if self._pending_fasta_enrichment:
+            # Cheap Modified/Size/Type done — sort once, then enrich Length/GC.
+            pending_fasta = self._pending_fasta_enrichment
+            self._pending_fasta_enrichment = []
+            self._finish_cheap_metadata_fill()
+            if pending_fasta and not self._any_background_job_running():
+                self._file_list.begin_metadata_fill()
+                self._start_metadata_enrichment(pending_fasta)
             return
+        # Length/GC batches finished (or no FASTA to enrich).
+        if self._file_list._metadata_sort_frozen:
+            self._file_list.end_metadata_fill(resort=True)
+            self._file_list.apply_list_banding()
         if self._highlight_output_keys or self._highlight_source_keys:
-            # Chunks already re-tint touched rows; only restyle when highlights
-            # exist, and prefer the keyed path for large folders.
             self._refresh_file_list_highlights()
 
     def _refresh_metadata_row_highlights(
@@ -8459,10 +8626,18 @@ class MainWindow(QMainWindow):
         """Re-tint only rows touched by a metadata chunk (cheap during scroll)."""
         if self._file_list is None or not updates:
             return
+        if not (self._highlight_output_keys or self._highlight_source_keys):
+            return
         row_index = self._file_list._path_row_index()
         for path, _meta in updates:
-            key = str(path.expanduser().resolve())
+            key = str(path)
             row = row_index.get(key)
+            if row is None:
+                try:
+                    key = str(path.expanduser().resolve())
+                except OSError:
+                    continue
+                row = row_index.get(key)
             if row is None:
                 continue
             item = self._file_list.item(row)
@@ -8530,9 +8705,13 @@ class MainWindow(QMainWindow):
         self,
         folder: Path,
         *,
-        open_preview: bool = True,
+        open_preview: bool = False,
     ) -> bool:
-        """Select/scroll to the last file remembered for ``folder``. Returns True if restored."""
+        """Select/scroll to the last file for ``folder`` (highlight only by default).
+
+        Does not open Preview unless ``open_preview=True``. Returns True if a
+        remembered file was found and selected.
+        """
         key = self._folder_memory_key(folder)
         if key is None:
             return False
@@ -8555,25 +8734,21 @@ class MainWindow(QMainWindow):
                             break
                     except OSError:
                         continue
-        if match is not None:
-            self._reveal_file_list_item(
-                match,
-                scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,
-            )
-            if open_preview:
-                path = self._preview_path_from_item(match)
-                if path is not None:
-                    self._open_file_in_preview(path)
         scroll = self._last_scroll_by_folder.get(key)
-        if scroll is not None and match is None:
-            # No file to select (deleted); still restore list scroll if possible.
+        if match is not None:
+            # Select so the row shows the normal selection background highlight.
+            match.setSelected(True)
+            self._file_list.setCurrentItem(match)
+            path = self._preview_path_from_item(match)
+            if path is not None:
+                if open_preview:
+                    self._open_file_in_preview(path)
+                else:
+                    self._set_status_file_link(path)
+        if scroll is not None:
             vsb = self._file_list.verticalScrollBar()
             vsb.setValue(min(int(scroll), vsb.maximum()))
-        elif scroll is not None and match is not None:
-            # Prefer remembered scroll when the row is already on-screen enough;
-            # EnsureVisible above may have moved less than the prior viewport.
-            vsb = self._file_list.verticalScrollBar()
-            vsb.setValue(min(int(scroll), vsb.maximum()))
+        elif match is not None:
             self._file_list.scrollToItem(
                 match, QAbstractItemView.ScrollHint.EnsureVisible
             )
@@ -8599,6 +8774,9 @@ class MainWindow(QMainWindow):
 
         if prev_folder is not None and not same_folder:
             self._remember_file_list_position(prev_folder)
+            # Cancel a pending Preview open from the previous folder's selection.
+            self._pending_preview_selection = None
+            self._preview_selection_timer.stop()
 
         highlight_request = bool(new_outputs or source_files)
         large_folder = (
@@ -8709,6 +8887,7 @@ class MainWindow(QMainWindow):
             self._cached_folder_files = self._files_for_folder(self._current_folder)
         except OSError as exc:
             self._cached_folder_files = []
+            self._folder_file_stats = {}
             self._file_list.clear_rows()
             self._set_status_message(f"Cannot read folder: {exc}", 6000)
             return
@@ -8864,7 +9043,6 @@ class MainWindow(QMainWindow):
                 len(self._cached_folder_files),
             )
 
-        restored_other_folder = False
         if preserve_ui and not highlight_paths:
             if prev_key:
                 match: FileListRow | None = None
@@ -8881,18 +9059,24 @@ class MainWindow(QMainWindow):
                 vsb = self._file_list.verticalScrollBar()
                 vsb.setValue(min(prev_scroll, vsb.maximum()))
         elif not same_folder and not highlight_paths:
-            # Returning to a folder: restore the last selected file position.
-            restored_other_folder = self._restore_file_list_position(
-                target_folder,
-                open_preview=False,
-            )
+            # Always select/scroll the last file immediately (background highlight
+            # only — never open Preview). Path lookup is O(1); keep it off the
+            # critical path of metadata. If Type/Modified will re-sort after
+            # cheap metadata, re-select once then so the highlight follows.
+            self._file_list.set_suppress_selection_preview(True)
+            try:
+                self._restore_file_list_position(
+                    target_folder,
+                    open_preview=False,
+                )
+            finally:
+                self._file_list.clear_suppress_selection_preview()
+            sort_needs_meta = self._file_list._sort_column != COL_NAME
+            large = len(self._cached_folder_files) > _LARGE_FILE_LIST
+            self._pending_folder_file_restore = bool(large and sort_needs_meta)
         self._file_list.blockSignals(False)
         if highlight_paths and open_preview:
             self._open_best_preview_path(highlight_paths)
-        elif restored_other_folder and open_preview:
-            path = self._preview_path_from_item(self._file_list.currentItem())
-            if path is not None:
-                self._open_file_in_preview(path)
         if hasattr(self, "_folder_nav"):
             self._folder_nav.set_folder(self._current_folder, record_history=record_history)
         if same_folder:
@@ -9144,26 +9328,13 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self._preview_tabs is not None:
             self._preview_tabs.persist_session_view_state()
-        if self._file_list.suppress_selection_preview():
-            return
-        if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
-            return
-        if self._te_viz_input_dialog is not None and self._te_viz_input_dialog.isVisible():
-            return
-        if self._plugin_run_dialog is not None and self._plugin_run_dialog.isVisible():
-            return
-        if self._tree_trait_dialog_open():
-            return  # a click fills the trait dialog; keep the tree in Preview
-
         path = self._preview_path_from_item(current)
         if path is None:
             self._pending_preview_selection = None
             self._preview_selection_timer.stop()
             self._set_status_file_link(None)
             return
-        self._remember_file_list_position(self._current_folder)
-        self._pending_preview_selection = path
-        self._preview_selection_timer.start()
+        self._schedule_preview_for_selection(path)
 
     def _open_pending_preview_selection(self) -> None:
         path = self._pending_preview_selection
@@ -9709,6 +9880,27 @@ class MainWindow(QMainWindow):
             self._sync_blast_params_dialog_from_files(panel_path)
             self._sync_hmmer_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
+            # Folder restore selects a row without opening Preview; a click on
+            # that same row does not fire currentItemChanged, so open here.
+            self._schedule_preview_for_selection(panel_path)
+
+    def _schedule_preview_for_selection(self, path: Path) -> None:
+        """Debounced Preview open used by selection-change and explicit click."""
+        if self._file_list.suppress_selection_preview():
+            return
+        if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
+            return
+        if self._te_viz_input_dialog is not None and self._te_viz_input_dialog.isVisible():
+            return
+        if self._plugin_run_dialog is not None and self._plugin_run_dialog.isVisible():
+            return
+        if self._tree_trait_dialog_open():
+            return
+        if not path.is_file():
+            return
+        self._remember_file_list_position(self._current_folder)
+        self._pending_preview_selection = path
+        self._preview_selection_timer.start()
 
     def _open_tree_panels(self):
         from repeatviewer.widgets.preview_tabs import FilePreviewPage

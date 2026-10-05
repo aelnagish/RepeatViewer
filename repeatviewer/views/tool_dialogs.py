@@ -5488,12 +5488,6 @@ _BLAST_TOP_LONGEST_HELP = (
     "Max sequence number is reached.<br><br>"
     "Default: <b>100</b>."
 )
-_BLAST_MIN_BIT_HELP = (
-    "Minimum bit score for hits written to the GFF export. Hits below this score "
-    "are omitted from the GFF; the tabular hit table is not filtered by this value."
-)
-
-
 class BlastParamsDialog(QDialog):
     # Same default outer width as AlignParamsDialog.
     _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
@@ -5705,12 +5699,6 @@ class BlastParamsDialog(QDialog):
         self._top_msa.setMaximum(self._max_msa.value())
         self._top_msa.setValue(opts.top_msa_lines)
         self._top_msa.setToolTip(_BLAST_TOP_LONGEST_HELP)
-        self._min_bit_score = QDoubleSpinBox()
-        self._min_bit_score.setRange(0.0, 1_000_000.0)
-        self._min_bit_score.setDecimals(1)
-        self._min_bit_score.setSingleStep(1.0)
-        self._min_bit_score.setValue(opts.minimum_bit_score)
-        self._min_bit_score.setToolTip(_BLAST_MIN_BIT_HELP)
 
         self._blastp_max_msa = QSpinBox()
         self._blastp_max_msa.setRange(10, 5000)
@@ -5721,12 +5709,6 @@ class BlastParamsDialog(QDialog):
         self._blastp_top_msa.setMaximum(self._blastp_max_msa.value())
         self._blastp_top_msa.setValue(opts.top_msa_lines)
         self._blastp_top_msa.setToolTip(_BLAST_TOP_LONGEST_HELP)
-        self._blastp_min_bit_score = QDoubleSpinBox()
-        self._blastp_min_bit_score.setRange(0.0, 1_000_000.0)
-        self._blastp_min_bit_score.setDecimals(1)
-        self._blastp_min_bit_score.setSingleStep(1.0)
-        self._blastp_min_bit_score.setValue(opts.minimum_bit_score)
-        self._blastp_min_bit_score.setToolTip(_BLAST_MIN_BIT_HELP)
 
         self._blastx_max_msa = QSpinBox()
         self._blastx_max_msa.setRange(10, 5000)
@@ -5737,25 +5719,13 @@ class BlastParamsDialog(QDialog):
         self._blastx_top_msa.setMaximum(self._blastx_max_msa.value())
         self._blastx_top_msa.setValue(opts.top_msa_lines)
         self._blastx_top_msa.setToolTip(_BLAST_TOP_LONGEST_HELP)
-        self._blastx_min_bit_score = QDoubleSpinBox()
-        self._blastx_min_bit_score.setRange(0.0, 1_000_000.0)
-        self._blastx_min_bit_score.setDecimals(1)
-        self._blastx_min_bit_score.setSingleStep(1.0)
-        self._blastx_min_bit_score.setValue(opts.minimum_bit_score)
-        self._blastx_min_bit_score.setToolTip(_BLAST_MIN_BIT_HELP)
 
         self._max_msa_spins = (self._max_msa, self._blastp_max_msa, self._blastx_max_msa)
         self._top_msa_spins = (self._top_msa, self._blastp_top_msa, self._blastx_top_msa)
-        self._min_bit_spins = (
-            self._min_bit_score,
-            self._blastp_min_bit_score,
-            self._blastx_min_bit_score,
-        )
         for max_spin, top_spin in zip(self._max_msa_spins, self._top_msa_spins):
             max_spin.valueChanged.connect(top_spin.setMaximum)
         self._wire_synced_spins(self._max_msa_spins)
         self._wire_synced_spins(self._top_msa_spins)
-        self._wire_synced_spins(self._min_bit_spins)
 
         # Uniform field size so the inputs line up symmetrically.
         for field in (
@@ -5781,7 +5751,6 @@ class BlastParamsDialog(QDialog):
             self._blastx_query_coverage,
             *self._max_msa_spins,
             *self._top_msa_spins,
-            *self._min_bit_spins,
         ):
             field.setFixedWidth(260)
             field.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -5866,7 +5835,6 @@ class BlastParamsDialog(QDialog):
             max_msa=self._max_msa,
             top_msa=self._top_msa,
             write_text=self._blastn_write_text,
-            min_bit_score=self._min_bit_score,
             advanced_rows=[
                 (
                     "-gapopen:",
@@ -5914,7 +5882,6 @@ class BlastParamsDialog(QDialog):
             max_msa=self._blastp_max_msa,
             top_msa=self._blastp_top_msa,
             write_text=self._blastp_write_text,
-            min_bit_score=self._blastp_min_bit_score,
             advanced_rows=[
                 (
                     "-gapopen:",
@@ -5950,7 +5917,6 @@ class BlastParamsDialog(QDialog):
             max_msa=self._blastx_max_msa,
             top_msa=self._blastx_top_msa,
             write_text=self._blastx_write_text,
-            min_bit_score=self._blastx_min_bit_score,
             advanced_rows=[
                 (
                     "-gapopen:",
@@ -6172,7 +6138,6 @@ class BlastParamsDialog(QDialog):
         max_msa: QSpinBox,
         top_msa: QSpinBox,
         write_text: QCheckBox,
-        min_bit_score: QDoubleSpinBox,
         advanced_rows: list[tuple[str, QWidget]],
     ) -> tuple[QWidget, QWidget, QWidget]:
         tab = QWidget()
@@ -6242,12 +6207,6 @@ class BlastParamsDialog(QDialog):
         advanced_form.addRow(self._blast_section("Advanced Settings", advanced))
         for label, widget in advanced_rows:
             advanced_form.addRow(label, widget)
-        advanced_form.addRow(
-            "Minimum bit score (GFF):",
-            self._field_with_help(
-                min_bit_score, "Minimum bit score (GFF)", _BLAST_MIN_BIT_HELP
-            ),
-        )
         root.addWidget(advanced)
         advanced.setVisible(False)
         advanced.setMaximumHeight(0)
@@ -6782,7 +6741,6 @@ class BlastParamsDialog(QDialog):
         # Canonical copies drive synced values on the other program pages.
         self._max_msa.setValue(defaults.max_msa_lines)
         self._top_msa.setValue(defaults.top_msa_lines)
-        self._min_bit_score.setValue(defaults.minimum_bit_score)
         self._blastn_database.setCurrentIndex(0)
         self._blastp_database.setCurrentIndex(0)
         self._blastx_database.setCurrentIndex(0)
@@ -6850,7 +6808,7 @@ class BlastParamsDialog(QDialog):
             top_msa_lines=self._top_msa.value(),
             write_text=self._blastn_write_text.isChecked(),
             write_gff=False,
-            minimum_bit_score=self._min_bit_score.value(),
+            minimum_bit_score=DEFAULT_BLAST_MINIMUM_BIT_SCORE,
             blast_database_name=self._blastn_database.currentData(),
             blastp_e_value=normalize_blast_evalue(self._blastp_evalue.value()),
             blastp_num_threads=self._blastp_threads.value(),

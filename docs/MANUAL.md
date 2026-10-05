@@ -446,7 +446,6 @@ right-click program, system BLAST+, and the process window.
 | `-penalty` | Advanced: mismatch penalty (BLASTn) |
 | `-perc_identity` | Advanced: minimum percent identity (BLASTn) |
 | `-qcov_hsp_perc` | Advanced: minimum query coverage per HSP |
-| Minimum bit score (GFF) | Advanced: score floor for hits written to GFF |
 
 **Outputs:**
 

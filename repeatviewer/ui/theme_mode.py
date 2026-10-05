@@ -150,6 +150,7 @@ def _apply_fusion_palette(app: QApplication, concrete: str) -> None:
         highlighted_text = QColor(255, 255, 255)
         button = QColor(53, 53, 53)
         link = accent.lighter(120)
+        placeholder = QColor(255, 255, 255)
     else:
         window = QColor(240, 240, 240)
         base = QColor(255, 255, 255)
@@ -161,6 +162,7 @@ def _apply_fusion_palette(app: QApplication, concrete: str) -> None:
         highlighted_text = QColor(255, 255, 255)
         button = QColor(240, 240, 240)
         link = accent.darker(110)
+        placeholder = QColor(140, 140, 140)
 
     palette.setColor(QPalette.ColorRole.Window, window)
     palette.setColor(QPalette.ColorRole.WindowText, text)
@@ -175,6 +177,7 @@ def _apply_fusion_palette(app: QApplication, concrete: str) -> None:
     palette.setColor(QPalette.ColorRole.Link, link)
     palette.setColor(QPalette.ColorRole.Highlight, highlight)
     palette.setColor(QPalette.ColorRole.HighlightedText, highlighted_text)
+    palette.setColor(QPalette.ColorRole.PlaceholderText, placeholder)
     palette.setColor(QPalette.ColorRole.Mid, mid)
     palette.setColor(QPalette.ColorRole.Midlight, alt)
     palette.setColor(QPalette.ColorRole.Dark, mid)

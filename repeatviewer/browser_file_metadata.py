@@ -254,9 +254,7 @@ def _molecule_type(path: Path) -> str:
         return "Image" if suffix != ".pdf" else "PDF"
     if suffix in {".out"}:
         return "Table"
-    from repeatviewer.backends.blast_output_names import is_blast_table_filename
-
-    if suffix in {".txt", ".log", ".md"} or is_blast_table_filename(name):
+    if suffix in {".txt", ".log", ".md"}:
         return "Text"
     if suffix in {".vcf"} or name.endswith(".vcf.gz"):
         return "Variant"
@@ -267,12 +265,7 @@ def _molecule_type(path: Path) -> str:
 
 def minimal_name_metadata(path: Path) -> BrowserFileMetadata:
     """Cheapest row metadata: filename only (no stat or file reads)."""
-    resolved = path.expanduser()
-    try:
-        resolved = resolved.resolve()
-    except OSError:
-        pass
-    name = resolved.name
+    name = path.name
     return BrowserFileMetadata(
         modified_text="—",
         description_text="—",
@@ -291,24 +284,41 @@ def minimal_name_metadata(path: Path) -> BrowserFileMetadata:
     )
 
 
-def quick_metadata_for_file(path: Path) -> BrowserFileMetadata:
+def quick_metadata_for_file(
+    path: Path,
+    *,
+    size: int | None = None,
+    mtime: float | None = None,
+    resolve_path: bool = True,
+) -> BrowserFileMetadata:
     """Cheap metadata from ``stat`` + suffix only (no file reads).
 
     Used to populate large folders quickly; FASTA columns are filled later by
     :func:`enrich_fasta_metadata`.
+
+    Pass ``size`` / ``mtime`` from an earlier ``scandir`` to skip a second
+    ``stat``. Set ``resolve_path=False`` when ``path`` is already absolute.
     """
-    resolved = path.expanduser()
-    try:
-        resolved = resolved.resolve()
-    except OSError:
-        pass
-    try:
-        st = resolved.stat()
-        size = int(st.st_size)
-        mtime = float(st.st_mtime)
-    except OSError:
-        size = 0
-        mtime = 0.0
+    if resolve_path:
+        resolved = path.expanduser()
+        try:
+            resolved = resolved.resolve()
+        except OSError:
+            pass
+    else:
+        resolved = path
+    if size is None or mtime is None:
+        try:
+            st = resolved.stat()
+            if size is None:
+                size = int(st.st_size)
+            if mtime is None:
+                mtime = float(st.st_mtime)
+        except OSError:
+            if size is None:
+                size = 0
+            if mtime is None:
+                mtime = 0.0
 
     molecule = _molecule_type(resolved)
     pending = is_fasta_path(resolved)
@@ -325,7 +335,7 @@ def quick_metadata_for_file(path: Path) -> BrowserFileMetadata:
         sort_modified=mtime,
         sort_length=-1.0,
         sort_size=float(size),
-        sort_sequence_count=-1 if pending else -1,
+        sort_sequence_count=-1,
         sort_gc=-1.0,
     )
 

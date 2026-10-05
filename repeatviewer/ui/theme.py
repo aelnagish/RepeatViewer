@@ -143,6 +143,7 @@ def application_stylesheet(
         padding: 0px 6px;
         border-radius: {radius_sm}px;
         background: palette(base);
+        color: palette(text);
     }}
     QToolButton#FileColumnsButton {{
         border: 1px solid palette(mid);
