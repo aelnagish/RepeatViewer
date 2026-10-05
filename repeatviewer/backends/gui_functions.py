@@ -315,7 +315,9 @@ def blast(
     if _blast_path_has_unsafe_chars(os.path.abspath(blast_run_out_dir)):
         blast_run_out_dir = _blast_safe_db_parent(str(blast_out_dir))
 
-    output_tag = {"blastn": "b", "blastp": "blastp", "blastx": "blastx"}[program]
+    from repeatviewer.backends.blast_output_names import local_blast_run_tag
+
+    output_tag = local_blast_run_tag(program)
     # Define BLAST output without header.
     blast_out_file = os.path.join(
         blast_run_out_dir, f'{base_name}{label_suffix}_{output_tag}_no_header.b'

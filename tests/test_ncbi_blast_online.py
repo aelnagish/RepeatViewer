@@ -144,8 +144,8 @@ def test_run_ncbi_online_blast_writes_hits(tmp_path: Path, monkeypatch) -> None:
     )
     assert len(out_paths) == 2
     html_path, txt_path = out_paths
-    assert html_path.name == "q.fa_ob.html"
-    assert txt_path.name == "q.fa_ob.txt"
+    assert html_path.name == "q.fa_obn.html"
+    assert txt_path.name == "q.fa_obn.txt"
     html = html_path.read_text()
     assert "Descriptions" in html
     assert "Graphic Summary" in html
@@ -598,7 +598,7 @@ def test_run_batch_online_blast_stop_keeps_finished(tmp_path: Path, monkeypatch)
         calls["n"] += 1
         cancel = kwargs.get("cancel")
         if calls["n"] == 1:
-            out = seq_path.parent / f"{seq_path.name}_ob.html"
+            out = seq_path.parent / f"{seq_path.name}_obn.html"
             out.write_text("<html>ok</html>")
             return [str(out)]
         if cancel is not None:
@@ -617,8 +617,8 @@ def test_run_batch_online_blast_stop_keeps_finished(tmp_path: Path, monkeypatch)
     )
     assert result.get("cancelled") is True
     assert len(result["created_outputs"]) == 1
-    assert Path(result["created_outputs"][0]).name == "q0.fa_ob.html"
-    assert ready and Path(ready[0]).name == "q0.fa_ob.html"
+    assert Path(result["created_outputs"][0]).name == "q0.fa_obn.html"
+    assert ready and Path(ready[0]).name == "q0.fa_obn.html"
 
 
 def test_lineage_merges_shallow_beta_under_eukaryota() -> None:

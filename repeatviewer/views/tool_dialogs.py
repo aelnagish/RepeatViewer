@@ -5384,12 +5384,13 @@ _BLAST_ONLINE_PROGRAM_HELP = (
     "<b>tblastx</b> (translated DNA vs translated DNA)<br><br>"
     "Each query FASTA must contain <b>only one sequence</b>. "
     "Separate multi-sequence files first (right-click → Separate FASTA).<br><br>"
-    "Results are written as an HTML report (<code>*_ob.html</code>) with "
+    "Results are written as an HTML report (<code>*_obn.html</code>, "
+    "<code>*_obp.html</code>, <code>*_obx.html</code>, …) with "
     "Descriptions, Graphic Summary, and Lineage tabs."
 )
 _BLAST_ONLINE_WRITE_TEXT_HELP = (
-    "Also keep the tabular hit table (<code>*_ob.txt</code>) next to the query. "
-    "The HTML report (<code>*_ob.html</code>) is always written."
+    "Also keep the tabular hit table (<code>*_obn.txt</code>, …) next to the query. "
+    "The HTML report is always written."
 )
 _BLAST_ONLINE_DATABASE_HELP = (
     "Public NCBI database searched on their servers (not a local RepeatViewer "
@@ -5466,7 +5467,8 @@ _BLAST_QCOV_HELP = (
     "discarded. Use 0 to disable the filter."
 )
 _BLAST_WRITE_TEXT_HELP = (
-    "Keep the BLAST hits table (<code>*_b.txt</code>) next to the query. "
+    "Keep the BLAST hits table (<code>*_bn.txt</code>, <code>*_bp.txt</code>, "
+    "<code>*_bx.txt</code>) next to the query. "
     "When unchecked, the table is removed after BLAST."
 )
 _BLAST_MAX_SEQ_HELP = (

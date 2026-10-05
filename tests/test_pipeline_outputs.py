@@ -63,9 +63,11 @@ def test_flexidot_sidecar_paths_use_output_stem_once(tmp_path: Path) -> None:
 def test_blast_paths_next_to_query(tmp_path: Path) -> None:
     fasta = tmp_path / "reads.fasta"
     fasta.write_text(">a\nA\n")
-    assert blast_txt_path_for_query(fasta) == tmp_path / "reads.fasta_b.txt"
+    assert blast_txt_path_for_query(fasta) == tmp_path / "reads.fasta_bn.txt"
+    assert blast_txt_path_for_query(fasta, "blastp") == tmp_path / "reads.fasta_bp.txt"
     candidates = blast_table_candidates_for_query(fasta)
-    assert candidates[0] == tmp_path / "reads.fasta_b.txt"
+    assert candidates[0] == tmp_path / "reads.fasta_bn.txt"
+    assert tmp_path / "reads.fasta_b.txt" in candidates
     assert tmp_path / "reads.fasta_blast.txt" in candidates
 
 
@@ -129,9 +131,9 @@ def test_cleanup_flexidot_intermediates(tmp_path: Path) -> None:
 def test_cleanup_blast_scratch_files(tmp_path: Path) -> None:
     fasta = tmp_path / "reads.fasta"
     fasta.write_text(">a\nA\n")
-    scratch = tmp_path / "reads.fasta_b_no_header.b"
+    scratch = tmp_path / "reads.fasta_bn_no_header.b"
     scratch.write_text("x")
-    legacy = tmp_path / "reads.fasta_blast_no_header.b"
+    legacy = tmp_path / "reads.fasta_b_no_header.b"
     legacy.write_text("x")
     cleanup_blast_scratch_files(tmp_path, fasta)
     assert not scratch.exists()
@@ -141,6 +143,8 @@ def test_cleanup_blast_scratch_files(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "name",
     [
+        "reads.fasta_bn.txt",
+        "reads.fasta_bn.gff",
         "reads.fasta_b.txt",
         "reads.fasta_b.gff",
         "reads.fasta_flexidot.png",

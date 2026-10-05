@@ -1,8 +1,9 @@
 """NCBI online BLAST (Common URL API / QBlast).
 
 Submit a FASTA query to NCBI, poll until ready, download XML results, write a
-self-contained HTML report (``*_ob.html``), and optionally a tabular hit table
-(``*_ob.txt``). Online BLAST no longer paints hits on the Annotation track.
+self-contained HTML report (``*_obn.html``, ``*_obp.html``, …), and optionally a
+tabular hit table (``*_obn.txt``, …). Online BLAST no longer paints hits on the
+Annotation track.
 
 Note: NCBI's web API ``FORMAT_TYPE=Tabular`` currently returns an empty READY
 stub, so results are fetched as classic BlastOutput XML and converted.
@@ -351,9 +352,9 @@ def run_ncbi_online_blast(
     cancel: JobCancellation | None = None,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> list[Path]:
-    """Submit one FASTA to NCBI BLAST; always write ``*_ob.html``.
+    """Submit one FASTA to NCBI BLAST; always write program-tagged HTML (``*_obn.html``, …).
 
-    Optionally also writes the tabular ``*_ob.txt`` hit table when
+    Optionally also writes the tabular hit table (``*_obn.txt``, …) when
     ``write_text`` is True. Returns the list of created output paths
     (HTML first).
     """
@@ -509,14 +510,20 @@ def run_ncbi_online_blast(
         program=program,
         database=database,
     )
-    html_path = out_dir / f"{query_path.name}_ob.html"
+    from repeatviewer.backends.blast_output_names import (
+        online_blast_html_basename,
+        online_blast_run_tag,
+        online_blast_table_basename,
+    )
+
+    html_path = out_dir / online_blast_html_basename(query_path.name, program)
     write_online_blast_html(parsed, html_path)
     created: list[Path] = [html_path.resolve()]
 
     table, n_hits = blast_xml_to_tabular(raw)
     if write_text:
         _emit(0, 1, f"{query_path.name}: converting NCBI XML to hit table…")
-        out_path = out_dir / f"{query_path.name}_ob.txt"
+        out_path = out_dir / online_blast_table_basename(query_path.name, program)
         header_lines = [
             f"# NCBI online BLAST ({program} vs {database}); RID={rid}",
             f"# query={query_path.name}",
@@ -538,8 +545,9 @@ def run_ncbi_online_blast(
         )
     else:
         # Drop a stale table from a previous run when the user opted out.
-        stale = out_dir / f"{query_path.name}_ob.txt"
-        stale.unlink(missing_ok=True)
+        for tag in (online_blast_run_tag(program), "ob"):
+            stale = out_dir / f"{query_path.name}_{tag}.txt"
+            stale.unlink(missing_ok=True)
 
     if n_hits == 0:
         _emit(
@@ -568,17 +576,36 @@ ONLINE_BLAST_COLOR = "#1F77B4"  # distinct track colour for NCBI online hits
 ONLINE_BLAST_LABEL = "NCBI"
 
 
-def online_blast_output_path(query_fasta: Path) -> Path:
-    """Canonical ``{fasta_basename}_ob.txt`` next to the query."""
+def online_blast_output_path(query_fasta: Path, program: str | None = None) -> Path:
+    """Tabular online BLAST path next to the query (finds existing or defaults to obn)."""
+    from repeatviewer.backends.blast_output_names import (
+        find_online_blast_table_path,
+        online_blast_txt_path,
+    )
+
     query_fasta = Path(query_fasta).expanduser().resolve()
-    return query_fasta.parent / f"{query_fasta.name}_ob.txt"
+    if program is not None:
+        return online_blast_txt_path(query_fasta, program)
+    found = find_online_blast_table_path(query_fasta)
+    if found is not None:
+        return found
+    return online_blast_txt_path(query_fasta, "blastn")
 
 
-def online_blast_html_output_path(query_fasta: Path) -> Path:
-    """Canonical ``{fasta_basename}_ob.html`` next to the query."""
-    from repeatviewer.backends.online_blast_report import online_blast_html_path
+def online_blast_html_output_path(query_fasta: Path, program: str | None = None) -> Path:
+    """HTML online BLAST path next to the query (finds existing or defaults to obn)."""
+    from repeatviewer.backends.blast_output_names import (
+        find_online_blast_html_path,
+        online_blast_html_path,
+    )
 
-    return online_blast_html_path(query_fasta)
+    query_fasta = Path(query_fasta).expanduser().resolve()
+    if program is not None:
+        return online_blast_html_path(query_fasta, program)
+    found = find_online_blast_html_path(query_fasta)
+    if found is not None:
+        return found
+    return online_blast_html_path(query_fasta, "blastn")
 
 
 def _parse_online_blast_rows(ob_txt: Path) -> list[dict[str, str]]:

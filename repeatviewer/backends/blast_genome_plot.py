@@ -56,6 +56,12 @@ from repeatviewer.backends.bismark_cov import (
     _methylation_cov_cache_path,
     _save_methylation_bins_cache,
 )
+from repeatviewer.backends.blast_output_names import (
+    blast_table_candidate_names,
+    blast_table_source_tag,
+    local_blast_txt_path,
+    strip_blast_table_suffix as _strip_blast_table_suffix,
+)
 from repeatviewer.backends.genome_map_binning import bin_chromosome_tracks_worker
 from repeatviewer.backends.job_cancel import JobCancellation, JobCancelledError, check_cancelled
 from repeatviewer.plot_preferences import (
@@ -4724,10 +4730,9 @@ def _inject_plotly_controls(
     return html + controls
 
 
-def blast_txt_path_for_query(query_fasta: Path) -> Path:
-    """Path to ``{fasta_basename}_b.txt`` next to the query FASTA."""
-    query_fasta = query_fasta.expanduser().resolve()
-    return query_fasta.parent / f"{query_fasta.name}_b.txt"
+def blast_txt_path_for_query(query_fasta: Path, program: str = "blastn") -> Path:
+    """Path to ``{fasta_basename}_{bn|bp|bx}.txt`` next to the query FASTA."""
+    return local_blast_txt_path(query_fasta, program)
 
 
 def _legacy_repeatviewer_dir(query_fasta: Path) -> Path:
@@ -4736,47 +4741,24 @@ def _legacy_repeatviewer_dir(query_fasta: Path) -> Path:
     return query_fasta.parent / f"{query_fasta.stem}.repeatviewer"
 
 
-# BLASTN hit tables use ``_b`` (short); older runs used ``_blast``.
-# Online NCBI BLAST uses ``_ob`` (legacy ``_online``).
-_BLAST_TABLE_SUFFIXES = (
-    "_b.txt",
-    "_blast.txt",
-    "_blastp.txt",
-    "_blastx.txt",
-    "_ob.txt",
-    "_online.txt",
-)
-
-
 def blast_table_name_suffixes() -> tuple[str, ...]:
     """Filename endings recognized as BLAST hit tables (canonical first)."""
-    return _BLAST_TABLE_SUFFIXES
+    from repeatviewer.backends.blast_output_names import all_blast_table_txt_suffixes
+
+    return all_blast_table_txt_suffixes()
 
 
 def strip_blast_table_suffix(name: str) -> str | None:
     """If ``name`` is a BLAST table, return the query basename; else ``None``."""
-    lower = name.lower()
-    for suffix in _BLAST_TABLE_SUFFIXES:
-        if lower.endswith(suffix):
-            return name[: -len(suffix)]
-    return None
+    return _strip_blast_table_suffix(name)
 
 
 def blast_table_candidates_for_query(query_fasta: Path) -> list[Path]:
-    """Possible BLAST table paths for a query FASTA (canonical ``_b`` name first)."""
+    """Possible BLAST table paths for a query FASTA (canonical tags first)."""
     query_fasta = query_fasta.expanduser().resolve()
     parent = query_fasta.parent
     legacy = _legacy_repeatviewer_dir(query_fasta)
-    names = (
-        f"{query_fasta.name}_b.txt",
-        f"{query_fasta.name}_blast.txt",
-        f"{query_fasta.name}_ob.txt",
-        f"{query_fasta.name}_online.txt",
-        f"{query_fasta.stem}_b.txt",
-        f"{query_fasta.stem}_blast.txt",
-        f"{query_fasta.stem}_ob.txt",
-        f"{query_fasta.stem}_online.txt",
-    )
+    names = blast_table_candidate_names(query_fasta.name, stem_only=True)
     seen: set[str] = set()
     candidates: list[Path] = []
     for base in (parent, legacy):
@@ -4810,16 +4792,11 @@ _LEGACY_GENOME_MAP_SUFFIXES = (
 
 
 def te_hit_source_tag(path: Path) -> str:
-    """Return ``RM`` or ``b`` for TE hit-table naming.
-
-    Naming uses the file extension so plot outputs stay consistent even when the
-    path is only being predicted. Content validation still happens at read time.
-    Older outputs used ``blast`` instead of ``b``; preview still recognizes both.
-    """
+    """Return ``RM`` or a BLAST tag (``bn``, ``b``, …) for TE hit-table naming."""
     name = path.name.lower()
     if name.endswith(".out") and strip_blast_table_suffix(path.name) is None:
         return "RM"
-    return "b"
+    return blast_table_source_tag(path.name)
 
 
 def te_plot_output_suffix(

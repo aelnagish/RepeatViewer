@@ -396,8 +396,10 @@ def cleanup_blast_scratch_files(
     output_dir = output_dir.expanduser().resolve()
     label_suffix = genome_output_suffix(genome_label)
     base_name = seq_path.name
-    # Current blastn tag is ``b``; keep legacy ``blast`` and protein program tags.
-    for tag in ("b", "blast", "blastp", "blastx"):
+    from repeatviewer.backends.blast_output_names import LOCAL_BLAST_PROGRAM_TAGS
+
+    legacy_tags = ("b", "blast", "blastp", "blastx")
+    for tag in (*LOCAL_BLAST_PROGRAM_TAGS.values(), *legacy_tags):
         for name in (
             f"{base_name}{label_suffix}_{tag}_no_header.b",
             f"{base_name}{label_suffix}_{tag}_no_header.b.bed",

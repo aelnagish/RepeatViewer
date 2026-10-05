@@ -370,7 +370,9 @@ def _run_cancellable_self_blastn(
     script_dir = Path(get_original_file_path())
     blast_dir = script_dir / "blast"
     blast_raw = work_dir / f"{fasta_path.name}_no_header.b"
-    blast_header = work_dir / f"{fasta_path.name}_b.txt"
+    from repeatviewer.backends.blast_output_names import local_blast_table_basename
+
+    blast_header = work_dir / local_blast_table_basename(fasta_path.name, "blastn")
     blastn = _blastn_executable(blast_dir, os_type, use_system_blast=use_system_blast)
     effective_ws = max(MIN_TERMINAL_REPEAT_WORD_SIZE, int(word_size))
     cmd = [

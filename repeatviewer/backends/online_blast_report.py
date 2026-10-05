@@ -1360,9 +1360,10 @@ def build_online_blast_html(
 """
 
 
-def online_blast_html_path(query_fasta: Path) -> Path:
-    query_fasta = Path(query_fasta).expanduser().resolve()
-    return query_fasta.parent / f"{query_fasta.name}_ob.html"
+def online_blast_html_path(query_fasta: Path, program: str = "blastn") -> Path:
+    from repeatviewer.backends.blast_output_names import online_blast_html_path as _path
+
+    return _path(query_fasta, program)
 
 
 def write_online_blast_html(

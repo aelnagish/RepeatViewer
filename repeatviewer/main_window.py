@@ -249,6 +249,10 @@ class _ToolbarPopup(QWidget):
 from repeatviewer import __version__
 from repeatviewer.branding import APP_DISPLAY_NAME
 from repeatviewer.backends.genome_prepare import ensure_genome_artifacts
+from repeatviewer.backends.blast_output_names import (
+    is_online_blast_html_filename,
+    is_online_blast_table_filename,
+)
 from repeatviewer.backends.blast_genome_plot import (
     _map_chromosome_filter_to_genome,
     blast_genome_map_html_path_for_blast_table,
@@ -3555,7 +3559,7 @@ class MainWindow(QMainWindow):
         if not name:
             return
         include_ann = dialog.include_annotations()
-        out_path = files[0].parent / f"{safe_file_stem(name)}.fasta"
+        out_path = files[0].parent / f"{safe_file_stem(name)}.fa"
         try:
             written, count = group_sequences(files, out_path)
         except SequenceComposeError as exc:
@@ -9556,12 +9560,9 @@ class MainWindow(QMainWindow):
         if not created_paths:
             return None
         fasta = fasta.expanduser().resolve()
-        expected_names = {
-            f"{fasta.name}_b.txt",
-            f"{fasta.name}_blast.txt",
-            f"{fasta.stem}_b.txt",
-            f"{fasta.stem}_blast.txt",
-        }
+        from repeatviewer.backends.blast_output_names import blast_table_candidate_names
+
+        expected_names = set(blast_table_candidate_names(fasta.name, stem_only=True))
         for path in created_paths:
             resolved = path.expanduser().resolve()
             if not resolved.is_file():
@@ -15459,10 +15460,11 @@ class MainWindow(QMainWindow):
         online_html = [
             p
             for p in created_paths
-            if p.is_file() and p.name.endswith("_ob.html")
+            if p.is_file() and is_online_blast_html_filename(p.name)
         ]
         online_blast_legacy = func_name == "blast" and any(
-            p.name.endswith(("_ob.txt", "_online.txt", ".seqmap_RV.json"))
+            is_online_blast_table_filename(p.name)
+            or p.name.endswith(".seqmap_RV.json")
             for p in created_paths
             if p.is_file()
         )
