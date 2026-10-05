@@ -4606,9 +4606,12 @@ _BLAST_ONLINE_PROGRAM_HELP = (
     "<b>blastx</b> (translated DNA vs protein)<br><br>"
     "<b>tblastn</b> (protein vs translated DNA)<br><br>"
     "<b>tblastx</b> (translated DNA vs translated DNA)<br><br>"
-    "Hits are saved to the Annotation NCBI layer "
-    "(<b>Show Online BLAST</b> to hide). Bars are colored by "
-    "<b>% identity</b>; arcs link HSPs from the same accession."
+    "Results are written as an HTML report (<code>*_ob.html</code>) with "
+    "Descriptions, Graphic Summary, Alignments, and Taxonomy tabs."
+)
+_BLAST_ONLINE_WRITE_TEXT_HELP = (
+    "Also keep the tabular hit table (<code>*_ob.txt</code>) next to the query. "
+    "The HTML report (<code>*_ob.html</code>) is always written."
 )
 _BLAST_ONLINE_DATABASE_HELP = (
     "Public NCBI database searched on their servers (not a local RepeatViewer "
@@ -4904,9 +4907,9 @@ class BlastParamsDialog(QDialog):
         self._online_hitlist.setToolTip(_BLAST_ONLINE_HITS_HELP)
         self._online_hitlist.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
 
-        self._online_write_text = QCheckBox("Export BLAST text file (*_ob.txt)")
+        self._online_write_text = QCheckBox("Export BLAST hits table")
         self._online_write_text.setChecked(bool(opts.online_write_text))
-        self._online_write_text.setToolTip(_BLAST_WRITE_TEXT_HELP)
+        self._online_write_text.setToolTip(_BLAST_ONLINE_WRITE_TEXT_HELP)
 
         self._online_program.currentIndexChanged.connect(
             self._on_online_program_changed
@@ -5524,8 +5527,8 @@ class BlastParamsDialog(QDialog):
             "",
             self._field_with_help(
                 self._online_write_text,
-                "Export BLAST text file",
-                _BLAST_WRITE_TEXT_HELP,
+                "Export BLAST hits table",
+                _BLAST_ONLINE_WRITE_TEXT_HELP,
             ),
         )
         root.addWidget(basic)

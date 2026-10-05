@@ -1,7 +1,8 @@
 """NCBI online BLAST (Common URL API / QBlast).
 
-Submit a FASTA query to NCBI, poll until ready, download XML results, and write
-a tabular hit table compatible with RepeatViewer's local BLAST ``*.txt`` outputs.
+Submit a FASTA query to NCBI, poll until ready, download XML results, write a
+self-contained HTML report (``*_ob.html``), and optionally a tabular hit table
+(``*_ob.txt``). Online BLAST no longer paints hits on the Annotation track.
 
 Note: NCBI's web API ``FORMAT_TYPE=Tabular`` currently returns an empty READY
 stub, so results are fetched as classic BlastOutput XML and converted.
@@ -346,13 +347,15 @@ def run_ncbi_online_blast(
     database: str = "nt",
     evalue: float = 0.0001,
     hitlist_size: int = 100,
+    write_text: bool = True,
     cancel: JobCancellation | None = None,
     progress: Callable[[int, int, str], None] | None = None,
-) -> Path:
-    """Submit one FASTA to NCBI BLAST and write a tabular ``*_ob.txt`` table.
+) -> list[Path]:
+    """Submit one FASTA to NCBI BLAST; always write ``*_ob.html``.
 
-    Returns the path of the written hit table (may contain only header comments
-    when NCBI returns no significant hits).
+    Optionally also writes the tabular ``*_ob.txt`` hit table when
+    ``write_text`` is True. Returns the list of created output paths
+    (HTML first).
     """
     program = str(program or "blastn").lower()
     if program not in ONLINE_BLAST_DATABASES:
@@ -485,19 +488,53 @@ def run_ncbi_online_blast(
             f"NCBI BLAST returned no BlastOutput XML (RID {rid}).\n"
             f"Response starts with:\n{raw[:400]}"
         )
-    _emit(0, 1, f"{query_path.name}: converting NCBI XML to hit table…")
+
+    from repeatviewer.backends.online_blast_report import (
+        parse_blast_output_xml,
+        write_online_blast_html,
+    )
+
+    _emit(0, 1, f"{query_path.name}: building NCBI HTML report…")
+    parsed = parse_blast_output_xml(
+        raw,
+        rid=rid,
+        query_name=query_path.name,
+        program=program,
+        database=database,
+    )
+    html_path = out_dir / f"{query_path.name}_ob.html"
+    write_online_blast_html(parsed, html_path)
+    created: list[Path] = [html_path.resolve()]
+
     table, n_hits = blast_xml_to_tabular(raw)
-    out_path = out_dir / f"{query_path.name}_ob.txt"
-    header_lines = [
-        f"# NCBI online BLAST ({program} vs {database}); RID={rid}",
-        f"# query={query_path.name}",
-        f"# columns={','.join(_TABULAR_COLUMNS)}",
-    ]
-    if n_hits == 0:
-        header_lines.append(
-            "# No significant hits returned "
-            "(try a higher -evalue, another database, or local BLAST)."
+    if write_text:
+        _emit(0, 1, f"{query_path.name}: converting NCBI XML to hit table…")
+        out_path = out_dir / f"{query_path.name}_ob.txt"
+        header_lines = [
+            f"# NCBI online BLAST ({program} vs {database}); RID={rid}",
+            f"# query={query_path.name}",
+            f"# columns={','.join(_TABULAR_COLUMNS)}",
+        ]
+        if n_hits == 0:
+            header_lines.append(
+                "# No significant hits returned "
+                "(try a higher -evalue, another database, or local BLAST)."
+            )
+        out_path.write_text(
+            "\n".join(header_lines) + "\n" + table, encoding="utf-8"
         )
+        created.append(out_path.resolve())
+        _emit(
+            0,
+            1,
+            f"{query_path.name}: wrote {out_path.name} ({n_hits} hit row(s))",
+        )
+    else:
+        # Drop a stale table from a previous run when the user opted out.
+        stale = out_dir / f"{query_path.name}_ob.txt"
+        stale.unlink(missing_ok=True)
+
+    if n_hits == 0:
         _emit(
             0,
             1,
@@ -510,15 +547,12 @@ def run_ncbi_online_blast(
             1,
             f"{query_path.name}: NCBI returned {n_hits} hit row(s) (RID {rid})",
         )
-    out_path.write_text(
-        "\n".join(header_lines) + "\n" + table, encoding="utf-8"
-    )
-    _emit(1, 1, f"{query_path.name}: wrote {out_path.name}")
-    return out_path
+    _emit(1, 1, f"{query_path.name}: wrote {html_path.name}")
+    return created
 
 
 # ---------------------------------------------------------------------------
-# Annotation-tab plotting (query coordinates → SequenceFeature)
+# Annotation cleanup (legacy Online BLAST track features)
 # ---------------------------------------------------------------------------
 
 ONLINE_BLAST_SOURCE = "ncbi_online_blast"
@@ -531,6 +565,13 @@ def online_blast_output_path(query_fasta: Path) -> Path:
     """Canonical ``{fasta_basename}_ob.txt`` next to the query."""
     query_fasta = Path(query_fasta).expanduser().resolve()
     return query_fasta.parent / f"{query_fasta.name}_ob.txt"
+
+
+def online_blast_html_output_path(query_fasta: Path) -> Path:
+    """Canonical ``{fasta_basename}_ob.html`` next to the query."""
+    from repeatviewer.backends.online_blast_report import online_blast_html_path
+
+    return online_blast_html_path(query_fasta)
 
 
 def _parse_online_blast_rows(ob_txt: Path) -> list[dict[str, str]]:
@@ -758,10 +799,19 @@ def merge_online_blast_into_annotations(
     *,
     max_hits: int | None = None,
 ) -> list[Path]:
-    """Plot online BLAST hits onto the Annotation tab (seqmap JSON).
+    """Deprecated: Online BLAST no longer paints the Annotation track.
 
-    Replaces any previous NCBI-online features, keeps other annotations.
-    Returns paths of written annotation sidecars (usually one JSON).
+    Kept for compatibility; strips prior NCBI online features and ignores
+    ``ob_txt`` / ``max_hits``. Prefer :func:`strip_online_blast_from_annotations`.
+    """
+    del ob_txt, max_hits
+    return strip_online_blast_from_annotations(fasta_path)
+
+
+def strip_online_blast_from_annotations(fasta_path: Path) -> list[Path]:
+    """Remove legacy NCBI Online BLAST features from seqmap JSON / GFF.
+
+    Returns paths of rewritten annotation sidecars (empty if none existed).
     """
     from repeatviewer.backends.sequence_features import (
         SequenceFeature,
@@ -771,86 +821,35 @@ def merge_online_blast_into_annotations(
     )
 
     fasta = Path(fasta_path).expanduser().resolve()
-    table = Path(ob_txt).expanduser().resolve()
     if not fasta.is_file():
         raise NcbiBlastOnlineError(f"Query FASTA not found: {fasta}")
-    if not table.is_file():
-        raise NcbiBlastOnlineError(f"Online BLAST table not found: {table}")
 
     data = load_sequence_map_data(fasta)
     record_ids = list(data.record_ids)
     lengths = dict(data.lengths_by_id)
     if not record_ids:
-        raise NcbiBlastOnlineError(f"No sequences in {fasta.name}")
+        return []
 
     json_feats = load_features_by_id_from_json(fasta, record_ids)
     features_by_id: dict[str, list[SequenceFeature]] = {
         rid: list(json_feats.get(rid) or data.features_by_id.get(rid) or [])
         for rid in record_ids
     }
-    # Drop previous online-BLAST track(s) before adding the new ones.
+    changed = False
     for rid in record_ids:
-        features_by_id[rid] = [
+        before = features_by_id[rid]
+        filtered = [
             feat
-            for feat in features_by_id[rid]
+            for feat in before
             if str(feat.source or "") != ONLINE_BLAST_SOURCE
             and not str(feat.name or "").startswith(f"{ONLINE_BLAST_LABEL}:")
         ]
+        if len(filtered) != len(before):
+            changed = True
+        features_by_id[rid] = filtered
 
-    by_query = online_blast_features_by_query(table, max_hits=max_hits)
-    if not by_query and not any(features_by_id.values()):
-        # Still fine — zero hits; annotations unchanged aside from removals.
-        pass
-
-    def _next_track(feats: list[SequenceFeature]) -> int:
-        if not feats:
-            return 0
-        return max(int(f.track) for f in feats) + 1
-
-    for qid, new_feats in by_query.items():
-        rid = _match_record_id(qid, record_ids)
-        if rid is None:
-            continue
-        existing = features_by_id.get(rid) or []
-        base_track = _next_track(existing)
-        seq_len = max(1, int(lengths.get(rid) or data.lengths_by_id.get(rid) or 10**9))
-        by_subject: dict[str, list] = {}
-        for feat in new_feats:
-            sk = str(getattr(feat, "subject_id", "") or "").strip()
-            if not sk:
-                sk = str(feat.parent or feat.name or "subject")
-            by_subject.setdefault(sk, []).append(feat)
-        sorted_subjects = sorted(
-            by_subject.keys(),
-            key=lambda sk: max(
-                float(getattr(f, "pident", 0.0) or 0.0) for f in by_subject[sk]
-            ),
-            reverse=True,
-        )
-        stamped: list[SequenceFeature] = []
-        for subj_idx, sk in enumerate(sorted_subjects):
-            track = base_track + subj_idx
-            for feat in sorted(by_subject[sk], key=lambda f: int(f.start)):
-                start = max(1, min(seq_len, int(feat.start)))
-                end = max(1, min(seq_len, int(feat.end)))
-                if start > end:
-                    start, end = end, start
-                stamped.append(
-                    SequenceFeature(
-                        start=start,
-                        end=end,
-                        name=feat.name,
-                        feature_type=ONLINE_BLAST_FEATURE_TYPE,
-                        color=ONLINE_BLAST_COLOR,
-                        strand=feat.strand,
-                        track=track,
-                        parent=feat.parent,
-                        source=ONLINE_BLAST_SOURCE,
-                        pident=float(getattr(feat, "pident", 0.0) or 0.0),
-                        subject_id=str(getattr(feat, "subject_id", "") or ""),
-                    )
-                )
-        features_by_id[rid] = existing + stamped
+    if not changed:
+        return []
 
     json_path, gff_path = save_annotations_multi(
         fasta,

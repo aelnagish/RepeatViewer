@@ -182,16 +182,13 @@ def _save_split_tracks_by_source(enabled: bool) -> None:
 
 
 def _load_show_online_blast() -> bool:
-    value = QSettings().value(_SHOW_ONLINE_BLAST_KEY, True)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower() in ("1", "true", "yes", "on")
-    return bool(value)
+    """Online BLAST overlay is retired; always hide legacy track features."""
+    return False
 
 
 def _save_show_online_blast(enabled: bool) -> None:
-    QSettings().setValue(_SHOW_ONLINE_BLAST_KEY, bool(enabled))
+    del enabled
+    QSettings().setValue(_SHOW_ONLINE_BLAST_KEY, False)
 
 
 def filter_features_for_online_blast_display(
@@ -5473,17 +5470,6 @@ class SequenceMapPanel(QWidget):
         )
         self._fit_btn.clicked.connect(self._map.fit_window)
         action_row.addWidget(self._fit_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._show_online_blast_check = QCheckBox(
-            "Show Online BLAST", self._action_row_container
-        )
-        self._show_online_blast_check.setChecked(self._map.show_online_blast())
-        self._show_online_blast_check.setToolTip(
-            "Show or hide NCBI Online BLAST hits on the Annotation track. "
-            "Hits stay saved in the seqmap JSON; colors use % identity and "
-            "arcs link HSPs from the same accession."
-        )
-        self._show_online_blast_check.toggled.connect(self._on_show_online_blast_toggled)
-        action_row.addWidget(self._show_online_blast_check, 0, Qt.AlignmentFlag.AlignVCenter)
         del_btn = QPushButton("Delete", self._action_row_container)
         del_btn.setToolTip(
             "Delete selected feature(s). Select on the track below, then press Delete or Backspace."
@@ -5763,9 +5749,7 @@ class SequenceMapPanel(QWidget):
         self._refresh_similarity_database_rows()
 
     def _on_show_online_blast_toggled(self, checked: bool) -> None:
-        self._map.set_show_online_blast(bool(checked))
-        state = "shown" if checked else "hidden"
-        self.statusMessage.emit(f"Online BLAST hits {state}.")
+        del checked
 
     def _open_annotation_settings_dialog(self) -> None:
         dialog = AnnotationElementColorsDialog(
@@ -6417,10 +6401,7 @@ class SequenceMapPanel(QWidget):
             self._similarity_ann_settings.show_database_name_on_track
         )
         self._map.reload_split_tracks_by_source_pref()
-        self._map.reload_show_online_blast_pref()
-        self._show_online_blast_check.blockSignals(True)
-        self._show_online_blast_check.setChecked(self._map.show_online_blast())
-        self._show_online_blast_check.blockSignals(False)
+        self._map.set_show_online_blast(False)
         self._rebuild_add_feature_buttons()
         self.refresh_similarity_databases()
         self.refresh_nucleotide_colors()

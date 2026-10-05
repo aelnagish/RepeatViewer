@@ -651,40 +651,32 @@ def run_on_sequence(
             from repeatviewer.backends.ncbi_blast_online import (
                 NcbiBlastOnlineError,
                 run_ncbi_online_blast,
+                strip_online_blast_from_annotations,
             )
 
             try:
-                out_path = run_ncbi_online_blast(
+                outputs = run_ncbi_online_blast(
                     seq_path,
                     out_dir,
                     program=blast_opts.online_program,
                     database=blast_opts.online_database,
                     evalue=blast_opts.online_e_value,
                     hitlist_size=blast_opts.online_hitlist_size,
+                    write_text=bool(blast_opts.online_write_text),
                     cancel=cancel,
                     progress=sequence_progress,
                 )
             except NcbiBlastOnlineError as exc:
                 raise RuntimeError(str(exc)) from exc
-            if blast_opts.online_write_text:
-                created.append(str(out_path.resolve()))
+            for path in outputs:
+                created.append(str(Path(path).resolve()))
             try:
-                from repeatviewer.backends.ncbi_blast_online import (
-                    merge_online_blast_into_annotations,
-                )
-
-                for ann in merge_online_blast_into_annotations(
-                    seq_path,
-                    out_path,
-                    max_hits=blast_opts.online_hitlist_size,
-                ):
+                for ann in strip_online_blast_from_annotations(seq_path):
                     created.append(str(ann.resolve()))
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(
-                    f"Online BLAST finished but Annotation update failed: {exc}"
+                    f"Online BLAST finished but clearing Annotation overlay failed: {exc}"
                 ) from exc
-            if not blast_opts.online_write_text:
-                out_path.unlink(missing_ok=True)
             return created
         if genome_db is None:
             raise RuntimeError("BLAST database not prepared.")
@@ -1123,6 +1115,7 @@ def run_batch(
     max_workers: int = 4,
     flexidot_combined: bool = True,
     cancel: JobCancellation | None = None,
+    on_outputs_ready: Callable[[list[str]], None] | None = None,
 ) -> dict:
     seq_list = list(seq_files)
     failures: list[str] = []
@@ -1331,37 +1324,57 @@ def run_batch(
         else:
             created_outputs.extend(outs)
             source_files.append(str(seq_path.resolve()))
-
-    if workers == 1:
-        for (seq_path, genome_label, genome_path), units in zip(
-            work_items, item_units, strict=True
-        ):
-            check_cancelled(cancel)
-            label = f" ({genome_label})" if genome_label else ""
-            progress_cb(
-                completed_count,
-                f"{display_name}: {seq_path.name}{label}",
-            )
-            path, glabel, outs, error, units_out, reported = _run_single(
-                seq_path, genome_label, genome_path, units
-            )
-            _record_finished(path, glabel, outs, error, units_out, reported)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [
-                pool.submit(_run_single, seq_path, genome_label, genome_path, units)
-                for (seq_path, genome_label, genome_path), units in zip(
-                    work_items, item_units, strict=True
-                )
-            ]
-            for future in as_completed(futures):
+            if on_outputs_ready is not None and outs:
                 try:
-                    path, label, outs, error, units_out, reported = future.result()
-                except JobCancelledError:
-                    for pending in futures:
-                        pending.cancel()
-                    raise
-                _record_finished(path, label, outs, error, units_out, reported)
+                    on_outputs_ready(list(outs))
+                except Exception:  # noqa: BLE001 — UI refresh must not abort the batch
+                    pass
+
+    def _cancelled_result() -> dict:
+        return {
+            "func_name": func_name,
+            "total": total_units,
+            "failures": failures,
+            "created_outputs": created_outputs,
+            "source_files": source_files,
+            "cancelled": True,
+        }
+
+    try:
+        if workers == 1:
+            for (seq_path, genome_label, genome_path), units in zip(
+                work_items, item_units, strict=True
+            ):
+                check_cancelled(cancel)
+                label = f" ({genome_label})" if genome_label else ""
+                progress_cb(
+                    completed_count,
+                    f"{display_name}: {seq_path.name}{label}",
+                )
+                path, glabel, outs, error, units_out, reported = _run_single(
+                    seq_path, genome_label, genome_path, units
+                )
+                _record_finished(path, glabel, outs, error, units_out, reported)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(_run_single, seq_path, genome_label, genome_path, units)
+                    for (seq_path, genome_label, genome_path), units in zip(
+                        work_items, item_units, strict=True
+                    )
+                ]
+                for future in as_completed(futures):
+                    try:
+                        path, label, outs, error, units_out, reported = future.result()
+                    except JobCancelledError:
+                        for pending in futures:
+                            pending.cancel()
+                        # Keep outputs from work items that already finished.
+                        raise
+                    _record_finished(path, label, outs, error, units_out, reported)
+    except JobCancelledError:
+        # Return whatever finished so the UI can show partial Online BLAST (etc.).
+        return _cancelled_result()
 
     progress_cb(total_units, f"{display_name}: finished")
 

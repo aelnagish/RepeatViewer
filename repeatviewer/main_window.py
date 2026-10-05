@@ -1356,6 +1356,7 @@ class TeLibraryBenchmarkWorker(QObject):
 class FunctionWorker(QObject):
     progress = Signal(int, str)
     log_line = Signal(str)
+    outputs_ready = Signal(list)
     finished = Signal(dict)
     failed = Signal(str)
 
@@ -1382,12 +1383,16 @@ class FunctionWorker(QObject):
         def _log(message: str) -> None:
             self.log_line.emit(str(message))
 
+        def _on_outputs_ready(paths: list[str]) -> None:
+            self.outputs_ready.emit([str(p) for p in paths])
+
         try:
             with process_log_sink(_log):
                 result = self._run_func(
                     self._func_name,
                     self._seq_files,
                     self.progress.emit,
+                    on_outputs_ready=_on_outputs_ready,
                     **self._job_kwargs,
                 )
             self.finished.emit(result)
@@ -14920,6 +14925,8 @@ class MainWindow(QMainWindow):
         **job_kwargs: Any,
     ) -> dict:
         plugin_id = func_name[len("plugin:") :]
+        # FunctionWorker may inject on_outputs_ready; plugins ignore it for now.
+        job_kwargs.pop("on_outputs_ready", None)
         return self._plugin_registry.run_plugin(
             plugin_id,
             seq_files,
@@ -14999,6 +15006,8 @@ class MainWindow(QMainWindow):
         self._worker.progress.connect(self._on_job_progress, queued)
         # Bound MainWindow slots only — bare lambdas/closures have no receiver
         # QObject and can run on the worker thread (QBasicTimer / segfault).
+        if hasattr(self._worker, "outputs_ready"):
+            self._worker.outputs_ready.connect(self._on_job_outputs_ready, queued)
         self._worker.finished.connect(self._on_background_job_finished, queued)
         self._worker.failed.connect(self._on_background_job_failed, queued)
         self._worker.finished.connect(self._worker_thread.quit)
@@ -15006,6 +15015,18 @@ class MainWindow(QMainWindow):
         self._worker_thread.finished.connect(self._cleanup_worker)
         self._worker_thread.finished.connect(self._update_status)
         self._worker_thread.start()
+
+    @Slot(list)
+    def _on_job_outputs_ready(self, paths: list) -> None:
+        """Refresh the file list as soon as each sequence writes outputs."""
+        created = []
+        for raw in paths or []:
+            path = Path(str(raw)).expanduser()
+            if path.is_file() or path.is_dir():
+                created.append(path.resolve())
+        if not created:
+            return
+        self._refresh_folders_after_job(created, [])
 
     @Slot(int, str)
     def _on_job_progress(self, value: int, label: str) -> None:
@@ -15128,7 +15149,13 @@ class MainWindow(QMainWindow):
             extra_folders=extra_folders,
         )
         func_name = result.get("func_name")
-        online_blast_done = func_name == "blast" and any(
+        cancelled = bool(result.get("cancelled"))
+        online_html = [
+            p
+            for p in created_paths
+            if p.is_file() and p.name.endswith("_ob.html")
+        ]
+        online_blast_legacy = func_name == "blast" and any(
             p.name.endswith(("_ob.txt", "_online.txt", ".seqmap_RV.json"))
             for p in created_paths
             if p.is_file()
@@ -15139,7 +15166,10 @@ class MainWindow(QMainWindow):
             ]
             if fasta_sources:
                 self._auto_open_outputs(fasta_sources)
-        elif online_blast_done:
+        elif online_html:
+            # Prefer NCBI HTML reports over annotation / tabular sidecars.
+            self._auto_open_outputs(online_html)
+        elif online_blast_legacy:
             fasta_sources = [
                 p for p in source_paths if p.suffix.lower() in _FASTA_SUFFIXES
             ]
@@ -15161,7 +15191,7 @@ class MainWindow(QMainWindow):
         pending_viz = self._pending_te_viz
         pending_fastas = self._pending_te_genome_map_fastas
         pending_map_opts = self._pending_te_genome_map
-        if pending_viz and result.get("func_name") == "blast":
+        if pending_viz and result.get("func_name") == "blast" and not cancelled:
             self._pending_te_viz = None
             self._pending_te_genome_map_fastas = []
             self._pending_te_genome_map = None
@@ -15192,20 +15222,34 @@ class MainWindow(QMainWindow):
                     te_input_kinds=te_kinds,
                     map_options=pending_viz.map_options,
                 )
-        elif pending_fastas and result.get("func_name") == "blast":
+        elif pending_fastas and result.get("func_name") == "blast" and not cancelled:
             self._pending_te_genome_map_fastas = []
             self._pending_te_genome_map = None
             self._open_te_genome_map_after_blast(pending_fastas, pending_map_opts, result)
 
         failures = result.get("failures", [])
-        done_n = max(0, result["total"] - len(failures))
+        if cancelled:
+            done_n = len(result.get("source_files") or [])
+        else:
+            done_n = max(0, int(result.get("total", 0)) - len(failures))
         if result.get("workflow_name"):
             title = f"Workflow {result['workflow_name']}"
             unit = "step(s)"
         else:
             title = MainWindow._job_display_title(func_name or "")
             unit = "sequence(s)"
-        summary = f"{title} finished — {done_n}/{result['total']} {unit}"
+        finished_files = [p for p in created_paths if p.is_file()]
+        if cancelled:
+            self._job_handled_cancel_result = True
+            if finished_files:
+                summary = (
+                    f"{title} stopped — showing {len(finished_files)} finished file(s) "
+                    f"({done_n}/{result['total']} {unit})"
+                )
+            else:
+                summary = f"{title} stopped — 0/{result['total']} {unit} finished"
+        else:
+            summary = f"{title} finished — {done_n}/{result['total']} {unit}"
         if created_paths:
             names = ", ".join(p.name for p in created_paths[:4])
             if len(created_paths) > 4:
@@ -15216,7 +15260,7 @@ class MainWindow(QMainWindow):
         if func_name != "teaid":
             self._set_status_message(summary, 12000, override_file_link=True)
 
-        if failures:
+        if failures and not cancelled:
             msg = summary + "\n\nFailures:\n" + "\n".join(failures[:8])
             if len(failures) > 8:
                 msg += "\n..."
@@ -15235,6 +15279,8 @@ class MainWindow(QMainWindow):
 
     def _cleanup_worker(self) -> None:
         cancelled = self._job_cancel.requested
+        handled_cancel = bool(getattr(self, "_job_handled_cancel_result", False))
+        self._job_handled_cancel_result = False
         if cancelled:
             self._job_cancel.reset()
         if self._worker:
@@ -15243,7 +15289,7 @@ class MainWindow(QMainWindow):
         if self._worker_thread:
             self._worker_thread.deleteLater()
             self._worker_thread = None
-        if cancelled:
+        if cancelled and not handled_cancel:
             self._set_status_message("Stopped", 6000)
         self._update_status()
 
