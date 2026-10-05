@@ -114,12 +114,18 @@ def _read_digital_queries(query_path: Path, *, alphabet: object | None = None) -
         return list(seq_file)
 
 
-def _scan_kwargs(report_e: float) -> dict[str, float | str]:
+def _scan_kwargs(
+    report_e: float,
+    *,
+    domain_e: float | None = None,
+) -> dict[str, float | str]:
+    seq_e = float(report_e)
+    dom_e = float(domain_e) if domain_e is not None else seq_e
     return {
-        "E": report_e,
-        "domE": report_e,
-        "incE": report_e,
-        "incdomE": report_e,
+        "E": seq_e,
+        "domE": dom_e,
+        "incE": seq_e,
+        "incdomE": dom_e,
     }
 
 
@@ -161,11 +167,19 @@ def _append_domain_hits(
         )
 
 
+def _log_scan(message: str) -> None:
+    from repeatviewer.external_process import emit_process_log
+
+    emit_process_log(message)
+
+
 def _collect_with_modern_pyhmmer(
     hmm_path: Path,
     query_path: Path,
     *,
     report_e: float,
+    domain_e: float | None = None,
+    cpus: int = 1,
 ) -> list[tuple[float, float | None, str, str, int, int]]:
     import pyhmmer  # type: ignore[import-untyped]
 
@@ -182,15 +196,26 @@ def _collect_with_modern_pyhmmer(
         # Fall back to pyhmmer's auto-detection.
         queries = _read_digital_queries(query_path)
     if not queries:
+        _log_scan("No sequences in query file.")
         return []
 
     raw_hits: list[tuple[float, float | None, str, str, int, int]] = []
+    thread_count = max(1, int(cpus))
+    _log_scan(f"Loaded {len(queries)} query sequence(s) from {query_path.name}")
     with HMMFile(str(hmm_path)) as hmm_file:
         profiles = hmm_file.optimized_profiles()
-        for top_hits in hmmscan(queries, profiles, cpus=1, **_scan_kwargs(report_e)):
+        for top_hits in hmmscan(
+            queries,
+            profiles,
+            cpus=thread_count,
+            **_scan_kwargs(report_e, domain_e=domain_e),
+        ):
             qname = _query_name_from_top_hits(top_hits)
+            before = len(raw_hits)
             for hit in top_hits:
                 _append_domain_hits(raw_hits, qname=qname, hit=hit)
+            added = len(raw_hits) - before
+            _log_scan(f"  {qname}: {added} domain hit(s)")
     return raw_hits
 
 
@@ -199,17 +224,24 @@ def _collect_with_legacy_pyhmmer(
     query_path: Path,
     *,
     report_e: float,
+    domain_e: float | None = None,
+    cpus: int = 1,
 ) -> list[tuple[float, float | None, str, str, int, int]]:
     import pyhmmer  # type: ignore[import-untyped]
 
+    del cpus  # legacy easy API does not expose a cpus kwarg
     raw_hits: list[tuple[float, float | None, str, str, int, int]] = []
+    _log_scan("Using pyhmmer easy API (single-threaded scan)")
     with pyhmmer.easy.HMMFile(str(hmm_path)) as hmm_db:
         with pyhmmer.easy.SeqFile(str(query_path)) as seq_file:
-            scan_kwargs = _scan_kwargs(report_e)
+            scan_kwargs = _scan_kwargs(report_e, domain_e=domain_e)
             for top_hits in pyhmmer.hmmscan(hmm_db, seq_file, **scan_kwargs):
                 qname = _query_name_from_top_hits(top_hits)
+                before = len(raw_hits)
                 for hit in top_hits:
                     _append_domain_hits(raw_hits, qname=qname, hit=hit)
+                added = len(raw_hits) - before
+                _log_scan(f"  {qname}: {added} domain hit(s)")
     return raw_hits
 
 
@@ -218,13 +250,32 @@ def collect_pyhmmer_domain_hits(
     query_path: Path,
     *,
     report_e: float,
+    domain_e: float | None = None,
+    cpus: int = 1,
 ) -> list[tuple[float, float | None, str, str, int, int]]:
-    """Return (score, evalue, query_id, hmm_name, seq_from, seq_to) for each domain hit."""
+    """Return (score, evalue, query_id, hmm_name, seq_from, seq_to) for each domain hit.
+
+    ``report_e`` sets sequence-level ``E`` / ``incE``. ``domain_e`` (default same
+    as ``report_e``) sets ``domE`` / ``incdomE``. ``cpus`` is honored on modern
+    pyhmmer; the legacy easy API always runs single-threaded.
+    """
     import pyhmmer  # type: ignore[import-untyped]  # noqa: F401
 
     if hasattr(pyhmmer, "easy"):
-        return _collect_with_legacy_pyhmmer(hmm_path, query_path, report_e=report_e)
-    return _collect_with_modern_pyhmmer(hmm_path, query_path, report_e=report_e)
+        return _collect_with_legacy_pyhmmer(
+            hmm_path,
+            query_path,
+            report_e=report_e,
+            domain_e=domain_e,
+            cpus=cpus,
+        )
+    return _collect_with_modern_pyhmmer(
+        hmm_path,
+        query_path,
+        report_e=report_e,
+        domain_e=domain_e,
+        cpus=cpus,
+    )
 
 
 def validate_hmm_search(hmm_path: Path, query_path: Path | None = None) -> None:

@@ -459,6 +459,16 @@ from repeatviewer.job_options import (
     DEFAULT_DIV_WINDOW_SIZE,
     DEFAULT_GAP_COL_GAP_THRESHOLD,
     DEFAULT_BLAST_EVALUE,
+    DEFAULT_HMMER_EVALUE,
+    DEFAULT_HMMER_DOMAIN_EVALUE,
+    DEFAULT_HMMER_MAX_HITS,
+    DEFAULT_HMMER_MINIMUM_BIT_SCORE,
+    DEFAULT_HMMER_MAX_ORFS,
+    DEFAULT_HMMER_WRITE_TEXT,
+    HMMER_DIALOG_TAB_PARAMETERS,
+    HMMER_DIALOG_TABS,
+    HMMER_RIGHT_CLICK_RUN,
+    HMMER_RIGHT_CLICK_DIALOG,
     DEFAULT_GAP_COL_MIN_NUCLEOTIDE,
     DEFAULT_GAP_COL_SIMI_GAP_THR,
     DEFAULT_GAP_COL_SIMILARITY_THR,
@@ -487,6 +497,7 @@ from repeatviewer.job_options import (
     clamp_teaid_hit_len_pct,
     clamp_teaid_hit_line_transparency,
     BlastOptions,
+    HmmerOptions,
     ConsensusOptions,
     normalize_consensus_ambiguous,
     normalize_consensus_sequence_type,
@@ -1848,6 +1859,7 @@ class AlignParamsDialog(QDialog):
         self._fastga_compact_size: QSize | None = None
         self._muscle_compact_size: QSize | None = None
         self._mafft_compact_size: QSize | None = None
+        self._fastga_panel.layout_changed.connect(self._on_fastga_panel_changed)
         self._aligner_tabs.addTab(mafft_tab, "MAFFT")
         self._aligner_tabs.addTab(muscle_tab, "MUSCLE")
         self._aligner_tabs.addTab(self._fastga_panel, "FastGA")
@@ -1884,6 +1896,7 @@ class AlignParamsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(14)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._aligner_tabs, stretch=0)
         layout.addWidget(self._button_box, stretch=0)
 
@@ -1910,8 +1923,7 @@ class AlignParamsDialog(QDialog):
         if current is self._options_tab:
             self._fit_options_content()
         elif current is self._fastga_tab:
-            if not self._fastga_panel.advanced_visible():
-                self._resize_for_fastga_advanced(False)
+            self._refit_fastga_after_content_change()
         elif current is self._muscle_tab:
             if not self._muscle_advanced_visible():
                 self._resize_for_muscle_advanced(False)
@@ -2072,6 +2084,38 @@ class AlignParamsDialog(QDialog):
     def _fastga_dialog_chrome_height(self) -> int:
         return self._dialog_chrome_height()
 
+    def _on_fastga_panel_changed(self) -> None:
+        """Grow/shrink when FastGA Mode or Inputs reveal extra rows."""
+        if not self.isVisible():
+            return
+        if self._aligner_tabs.currentWidget() is not self._fastga_tab:
+            return
+        self._fastga_compact_size = None
+        QTimer.singleShot(0, self._refit_fastga_after_content_change)
+
+    def _refit_fastga_after_content_change(self) -> None:
+        """Refit height after Mode/Inputs rows change.
+
+        Measure the compact (no-Advanced) size first so a leftover Advanced
+        height cannot leave a blank band under Settings. Restore Advanced only
+        when the footer toggle is still checked.
+        """
+        if not self.isVisible():
+            return
+        if self._aligner_tabs.currentWidget() is not self._fastga_tab:
+            return
+        want_advanced = bool(self._advanced_settings_btn.isChecked())
+        # Hide Advanced while measuring so its sizeHint cannot inflate the pin
+        # or leave an empty gap when the panel is collapsed.
+        self._fastga_panel.set_advanced_visible(False)
+        self._fastga_compact_size = None
+        self._resize_for_fastga_advanced(False)
+        self._fastga_compact_size = self.size()
+        if want_advanced:
+            self._fastga_panel.set_advanced_visible(True)
+            self._resize_for_fastga_advanced(True)
+        self._update_advanced_settings_button()
+
     def _shrink_to_fastga_content(self) -> None:
         """Fit the dialog to the current FastGA form (no unused blank height)."""
         if self._aligner_tabs.currentWidget() is not self._fastga_tab:
@@ -2118,6 +2162,14 @@ class AlignParamsDialog(QDialog):
         """Grow the dialog for Advanced Settings; shrink back when collapsed."""
         panel = self._fastga_panel
         adv = panel._advanced_panel
+        # Keep panel visibility aligned with the requested state so a collapsed
+        # Advanced block cannot keep dialog height while showing a blank gap.
+        if expanded and not panel.advanced_visible():
+            panel.set_advanced_visible(True)
+        elif not expanded and panel.advanced_visible():
+            # Caller may be measuring compact height; leave visibility alone when
+            # the footer toggle still wants Advanced (handled by refit).
+            pass
         root = panel.layout()
         if root is not None:
             root.invalidate()
@@ -2138,6 +2190,7 @@ class AlignParamsDialog(QDialog):
             self._aligner_tabs.setMinimumHeight(0)
             panel.setMinimumHeight(0)
             self._pin_aligner_tab_height(content_h)
+            # Cap then resize so macOS actually shrinks leftover Advanced height.
             self.setMaximumHeight(height)
             self.resize(width, height)
             self.setMaximumHeight(16777215)
@@ -2153,7 +2206,10 @@ class AlignParamsDialog(QDialog):
             height,
             min(chrome + content_h, max_h),
         )
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
         self.resize(width, height)
+        self.setMaximumHeight(16777215)
 
     def _resize_for_muscle_advanced(self, expanded: bool) -> None:
         panel = self._muscle_tab
@@ -3726,6 +3782,8 @@ class FastGaPanel(QWidget):
     """
 
     changed = Signal()
+    # Emitted when Mode / Inputs rows show or hide (dialog should refit height).
+    layout_changed = Signal()
 
     def __init__(
         self,
@@ -3859,6 +3917,7 @@ class FastGaPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 10, 16, 10)
         root.setSpacing(4)
+        root.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         basic = QWidget(self)
         self._basic_panel = basic
@@ -4046,11 +4105,30 @@ class FastGaPanel(QWidget):
         margins = root.contentsMargins() if root is not None else None
         margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
         spacing = root.spacing() if root is not None else 4
-        basic_h = max(
-            self._basic_panel.minimumSizeHint().height(),
-            self._basic_panel.sizeHint().height(),
-        )
+        form = getattr(self, "_basic_form", None)
+        if isinstance(form, QFormLayout):
+            form.activate()
+            basic_h = max(form.totalMinimumSize().height(), form.totalSizeHint().height())
+        else:
+            basic_h = max(
+                self._basic_panel.minimumSizeHint().height(),
+                self._basic_panel.sizeHint().height(),
+            )
+        # Root keeps one spacing slot between basic and the collapsed Advanced panel.
         return margin_h + basic_h + spacing
+
+    def _set_form_row_expanded(self, widget: QWidget, expanded: bool) -> None:
+        """Show or fully collapse a QFormLayout field row (no leftover blank)."""
+        form = getattr(self, "_basic_form", None)
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(widget, expanded)
+        widget.setVisible(expanded)
+        if expanded:
+            widget.setMinimumHeight(0)
+            widget.setMaximumHeight(16777215)
+        else:
+            widget.setFixedHeight(0)
+        widget.updateGeometry()
 
     def _apply_saved_output_format(self, fmt: str) -> None:
         fmt = str(fmt)
@@ -4151,31 +4229,37 @@ class FastGaPanel(QWidget):
     def _sync(self) -> None:
         mode = self.mode()
         reference_mode = mode == FASTGA_MODE_REFERENCE
+        define = self.input_source() == FASTGA_INPUT_DEFINE
+        prev_ref = bool(getattr(self, "_layout_reference_mode", False))
+        prev_define = bool(getattr(self, "_layout_define_mode", False))
+        # Collapse reference / Define rows fully — setVisible alone leaves blank
+        # gaps in the Mode section and an oversized dialog height.
+        self._set_form_row_expanded(self._reference_field, reference_mode)
+        self._set_form_row_expanded(self._combined_field, reference_mode)
         for widget in (
             self._reference_label,
-            self._reference_field,
             self._combined_label,
-            self._combined_field,
+            self._combined_spacer,
         ):
             if widget is not None:
                 widget.setVisible(reference_mode)
+        self._set_form_row_expanded(self._define_inputs, define)
+        self._inputs_define_label.setVisible(define)
 
-        define = self.input_source() == FASTGA_INPUT_DEFINE
-        form = getattr(self, "_basic_form", None)
-        if isinstance(form, QFormLayout):
-            form.setRowVisible(self._define_inputs, define)
-        self._define_inputs.setVisible(define)
-        if define:
-            self._define_inputs.setMinimumHeight(0)
-            self._define_inputs.setMaximumHeight(16777215)
-        else:
-            self._define_inputs.setFixedHeight(0)
-        self._define_inputs.updateGeometry()
         if hasattr(self, "_basic_panel"):
             self._basic_panel.updateGeometry()
+        root = self.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self.updateGeometry()
         self._sync_field_column()
 
         self.changed.emit()
+        self._layout_reference_mode = reference_mode
+        self._layout_define_mode = define
+        if reference_mode != prev_ref or define != prev_define:
+            self.layout_changed.emit()
 
     def _sync_field_column(self) -> None:
         if not hasattr(self, "_inputs_radios_label"):
@@ -4443,6 +4527,620 @@ class GenomeBlastDatabaseRow(QWidget):
     def _on_manager_finished(self, _result: int = 0) -> None:
         self._blast_manager_dialog = None
         self.refresh(selected_path=self._combo.currentData())
+
+
+_HMMER_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): HMMER uses the FASTA files that "
+    "were selected in the Files panel when this window opened.<br><br>"
+    "<b>Define inputs</b>: choose different FASTA files or folders. Paths are "
+    "for this run only and are not remembered next time."
+)
+_HMMER_DATABASE_HELP = (
+    "Profile HMM database from <b>File → Define database</b> (HMM checkbox). "
+    "Protein HMMs search translated ORFs from nucleotide queries; DNA HMMs "
+    "search nucleotide sequences directly."
+)
+_HMMER_EVALUE_HELP = (
+    "Reporting sequence E-value threshold for pyhmmer <code>hmmscan</code> "
+    "(<code>E</code> / <code>incE</code>)."
+)
+_HMMER_DOMAIN_EVALUE_HELP = (
+    "Domain E-value threshold (<code>domE</code> / <code>incdomE</code>). "
+    "Defaults to the same value as the sequence E-value."
+)
+_HMMER_THREADS_HELP = (
+    "Number of CPU threads for pyhmmer <code>hmmscan</code> (modern API)."
+)
+_HMMER_MAX_HITS_HELP = (
+    "Keep at most this many domain hits per query file, ranked by bit score."
+)
+_HMMER_WRITE_TEXT_HELP = (
+    "Write a tab-separated hits table (<code>*_hmmer.txt</code>, "
+    "<code>*_hmmer1.txt</code>, …) next to each query."
+)
+_HMMER_BIT_SCORE_HELP = (
+    "Drop domain hits with bit score below this value (0 = no filter)."
+)
+_HMMER_MAX_ORFS_HELP = (
+    "For protein HMMs on nucleotide queries: keep at most this many longest "
+    "translated ORFs per sequence (0 = no limit)."
+)
+
+
+class HmmerParamsDialog(QDialog):
+    """HMMER parameters (BLAST-style Inputs / Settings / Advanced / Options)."""
+
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+    _SETTINGS_LABEL_REF = "Domain E-value:"
+
+    def __init__(
+        self,
+        *,
+        initial: HmmerOptions | None = None,
+        for_run: bool = True,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("HMMER parameters")
+        self.setMinimumWidth(self._DIALOG_WIDTH)
+        opts = initial or HmmerOptions()
+        self._for_run = for_run
+        self._hmmer_compact_size: QSize | None = None
+        self._define_database_dialog = None
+
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        self._input_selected.setChecked(True)
+        self._define_inputs = TeMultiInputFilesWidget(
+            self,
+            initial=None,
+            start_empty=False,
+            placeholder="Click in Files/Folders or Browse…",
+            browse_title="Choose a FASTA file",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file or folder path. Click a file or folder in "
+                "the panel to fill a row, or use Browse."
+            ),
+            path_mode="file_or_directory",
+        )
+        self._input_selected.toggled.connect(self._sync_hmmer_inputs)
+        self._input_define.toggled.connect(self._sync_hmmer_inputs)
+        self._define_inputs.paths_changed.connect(self._sync_hmmer_inputs)
+
+        self._database = QComboBox(self)
+        self._database.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        self._populate_database_combo(selected_name=opts.database_name)
+
+        self._evalue = QDoubleSpinBox(self)
+        configure_report_evalue_spinbox(self._evalue)
+        self._evalue.setValue(normalize_blast_evalue(opts.e_value))
+        self._evalue.setToolTip(_HMMER_EVALUE_HELP)
+
+        self._threads = QSpinBox(self)
+        self._threads.setRange(1, 128)
+        self._threads.setValue(max(1, opts.num_threads))
+        self._threads.setToolTip(_HMMER_THREADS_HELP)
+
+        self._max_hits = QSpinBox(self)
+        self._max_hits.setRange(1, 100_000)
+        self._max_hits.setValue(max(1, opts.max_hits))
+        self._max_hits.setToolTip(_HMMER_MAX_HITS_HELP)
+
+        self._write_text = QCheckBox("Export hits table", self)
+        self._write_text.setChecked(bool(opts.write_text))
+        self._write_text.setToolTip(_HMMER_WRITE_TEXT_HELP)
+
+        self._domain_evalue = QDoubleSpinBox(self)
+        configure_report_evalue_spinbox(self._domain_evalue)
+        self._domain_evalue.setValue(normalize_blast_evalue(opts.domain_e_value))
+        self._domain_evalue.setToolTip(_HMMER_DOMAIN_EVALUE_HELP)
+
+        self._min_bit = QDoubleSpinBox(self)
+        self._min_bit.setRange(0.0, 10_000.0)
+        self._min_bit.setDecimals(1)
+        self._min_bit.setValue(max(0.0, opts.minimum_bit_score))
+        self._min_bit.setToolTip(_HMMER_BIT_SCORE_HELP)
+
+        self._max_orfs = QSpinBox(self)
+        self._max_orfs.setRange(0, 100_000)
+        self._max_orfs.setSpecialValueText("No limit")
+        self._max_orfs.setValue(max(0, opts.max_orfs_per_sequence))
+        self._max_orfs.setToolTip(_HMMER_MAX_ORFS_HELP)
+
+        for field in (
+            self._evalue,
+            self._threads,
+            self._max_hits,
+            self._domain_evalue,
+            self._min_bit,
+            self._max_orfs,
+        ):
+            field.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+
+        params_tab = QWidget(self)
+        params_root = QVBoxLayout(params_tab)
+        params_root.setContentsMargins(16, 10, 16, 10)
+        params_root.setSpacing(4)
+        params_root.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        basic = QWidget(params_tab)
+        self._hmmer_basic = basic
+        basic.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        form = QFormLayout(basic)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+        self._hmmer_basic_form = form
+
+        def _section(title: str) -> QLabel:
+            return QLabel(f"<b>{title}</b>", params_tab)
+
+        form.addRow(_section("Inputs"))
+        inputs_box = QWidget(basic)
+        inputs_layout = QVBoxLayout(inputs_box)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(2)
+        inputs_layout.addWidget(
+            field_with_help(
+                self._input_selected,
+                "HMMER inputs",
+                _HMMER_INPUTS_HELP,
+                stretch=True,
+            )
+        )
+        inputs_layout.addWidget(self._input_define)
+        self._inputs_radios_label = QLabel("")
+        self._inputs_define_label = QLabel("")
+        form.addRow(self._inputs_radios_label, inputs_box)
+        form.addRow(self._inputs_define_label, self._define_inputs)
+
+        form.addRow(_form_section_separator())
+        form.addRow(_section("Settings"))
+        db_field = QWidget(basic)
+        db_layout = QVBoxLayout(db_field)
+        db_layout.setContentsMargins(0, 0, 0, 0)
+        db_layout.setSpacing(4)
+        db_layout.addWidget(
+            field_with_help(self._database, "HMM database", _HMMER_DATABASE_HELP)
+        )
+        manage = QPushButton("Manage databases…", db_field)
+        manage.setCursor(Qt.CursorShape.PointingHandCursor)
+        manage.clicked.connect(self._open_define_database)
+        db_layout.addWidget(manage, 0, Qt.AlignmentFlag.AlignLeft)
+        form.addRow("Database:", db_field)
+        form.addRow(
+            "E-value:",
+            field_with_help(self._evalue, "E-value", _HMMER_EVALUE_HELP),
+        )
+        form.addRow(
+            "Threads:",
+            field_with_help(self._threads, "Threads", _HMMER_THREADS_HELP),
+        )
+        form.addRow(
+            "Max hits:",
+            field_with_help(self._max_hits, "Max hits", _HMMER_MAX_HITS_HELP),
+        )
+        form.addRow("", self._write_text)
+        params_root.addWidget(basic)
+
+        advanced = QWidget(params_tab)
+        self._hmmer_advanced_panel = advanced
+        advanced.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        advanced_form = QFormLayout(advanced)
+        advanced_form.setContentsMargins(0, 4, 0, 0)
+        advanced_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        advanced_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        advanced_form.setHorizontalSpacing(12)
+        advanced_form.setVerticalSpacing(4)
+        advanced_form.addRow(_form_section_separator())
+        advanced_form.addRow(QLabel("<b>Advanced Settings</b>", advanced))
+        advanced_form.addRow(
+            "Domain E-value:",
+            field_with_help(
+                self._domain_evalue, "Domain E-value", _HMMER_DOMAIN_EVALUE_HELP
+            ),
+        )
+        advanced_form.addRow(
+            "Minimum bit score:",
+            field_with_help(
+                self._min_bit, "Minimum bit score", _HMMER_BIT_SCORE_HELP
+            ),
+        )
+        advanced_form.addRow(
+            "Max ORFs per sequence:",
+            field_with_help(
+                self._max_orfs, "Max ORFs per sequence", _HMMER_MAX_ORFS_HELP
+            ),
+        )
+        self._hmmer_advanced_form = advanced_form
+        params_root.addWidget(advanced)
+        self._params_tab = params_tab
+
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Run HMMER with saved parameters", HMMER_RIGHT_CLICK_RUN),
+            ("Open this dialog", HMMER_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_action == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[HMMER_RIGHT_CLICK_RUN].setChecked(True)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(QLabel("Right-clicking the HMMER button does:", self))
+        for radio in self._right_click_buttons.values():
+            rc_box_layout.addWidget(radio)
+
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="HMMER",
+                checked=bool(opts.show_process_window),
+                close_when_finished=bool(opts.close_process_window_when_finished),
+            )
+        )
+
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+        options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        options_layout.addWidget(rc_box)
+        options_layout.addWidget(process_box)
+        options_layout.addStretch(1)
+        self._options_tab = options_tab
+
+        self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        self._tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
+        self._tabs.addTab(params_tab, "Parameters")
+        self._tabs.addTab(options_tab, "Options")
+        self._tabs.currentChanged.connect(self._on_hmmer_tab_changed)
+
+        restore = QPushButton("Restore Defaults", self)
+        restore.clicked.connect(self._restore_defaults)
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_settings_toggled)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore, self._advanced_settings_btn],
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(14)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tabs, 0)
+        layout.addWidget(self._button_box, 0)
+
+        open_tab = opts.last_dialog_tab
+        if open_tab == DIALOG_TAB_OPTIONS:
+            self._tabs.setCurrentWidget(options_tab)
+        else:
+            self._tabs.setCurrentWidget(params_tab)
+
+        self._sync_hmmer_inputs(resize=False)
+        self._set_hmmer_advanced_visible(False)
+        self._sync_field_column()
+        self.resize(self._DIALOG_WIDTH, 420)
+        QTimer.singleShot(0, lambda: self._resize_for_hmmer_advanced(False))
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._hmmer_compact_size = None
+        self._populate_database_combo(
+            selected_name=self._database.currentData()
+            if self._database.currentIndex() >= 0
+            else None
+        )
+        self._sync_field_column()
+        QTimer.singleShot(0, lambda: self._resize_for_hmmer_advanced(False))
+
+    def should_run(self) -> bool:
+        return dialog_should_run(self)
+
+    def current_dialog_tab(self) -> str:
+        if self._tabs.currentWidget() is self._options_tab:
+            return DIALOG_TAB_OPTIONS
+        return HMMER_DIALOG_TAB_PARAMETERS
+
+    def input_source(self) -> str:
+        if self._input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+
+        if self.input_source() == ALIGN_INPUT_DEFINE:
+            return expand_fastga_input_paths(self._define_inputs.paths())
+        return list(panel_files or [])
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        return self._define_inputs.accept_path(Path(path))
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        return self._define_inputs.accept_path(Path(folder))
+
+    def _populate_database_combo(self, *, selected_name: str | None = None) -> None:
+        from repeatviewer.database_settings import load_user_databases_from_settings
+
+        current = selected_name
+        if current is None and self._database.count():
+            current = self._database.currentData()
+        self._database.clear()
+        self._database.addItem("Select an HMM database…", "")
+        for db in load_user_databases_from_settings():
+            if not db.is_hmm:
+                continue
+            label = f"{db.name} ({db.display_type_label})"
+            self._database.addItem(label, db.name)
+        if current:
+            idx = self._database.findData(current)
+            if idx >= 0:
+                self._database.setCurrentIndex(idx)
+
+    def _open_define_database(self) -> None:
+        from repeatviewer.views.define_database_dialog import DefineDatabaseDialog
+
+        if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
+            self._define_database_dialog.raise_()
+            self._define_database_dialog.activateWindow()
+            return
+        host: QWidget = self
+        parent = self.parentWidget()
+        project = None
+        while parent is not None:
+            if isinstance(parent, QDialog):
+                host = parent
+            project = getattr(parent, "_project", project)
+            parent = parent.parentWidget()
+        if project is None:
+            project = getattr(self.parent(), "_project", None)
+        if project is None:
+            from repeatviewer.project import RepeatViewerProject
+
+            project = RepeatViewerProject()
+        dialog = DefineDatabaseDialog(project, host)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        self._define_database_dialog = dialog
+        dialog.finished.connect(self._on_define_database_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_define_database_finished(self, _result: int = 0) -> None:
+        self._define_database_dialog = None
+        self._populate_database_combo(
+            selected_name=self._database.currentData()
+            if self._database.currentIndex() >= 0
+            else None
+        )
+
+    def _sync_hmmer_inputs(self, *, resize: bool = True) -> None:
+        define = self.input_source() == ALIGN_INPUT_DEFINE
+        form = self._hmmer_basic.layout()
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._define_inputs, define)
+        self._define_inputs.setVisible(define)
+        self._inputs_define_label.setVisible(define)
+        if define:
+            self._define_inputs.setMinimumHeight(0)
+            self._define_inputs.setMaximumHeight(16777215)
+        else:
+            self._define_inputs.setFixedHeight(0)
+        self._define_inputs.updateGeometry()
+        self._hmmer_basic.updateGeometry()
+        self._sync_field_column()
+        if resize and self.isVisible() and not self._advanced_settings_btn.isChecked():
+            self._hmmer_compact_size = None
+            self._resize_for_hmmer_advanced(False)
+
+    def _sync_field_column(self) -> None:
+        sync_form_field_column_spacers(
+            self,
+            [self._inputs_radios_label, self._inputs_define_label],
+            [
+                getattr(self, "_hmmer_basic_form", None),
+                getattr(self, "_hmmer_advanced_form", None),
+            ],
+            ref_label=self._SETTINGS_LABEL_REF,
+        )
+
+    def _set_hmmer_advanced_visible(self, visible: bool) -> None:
+        self._hmmer_advanced_panel.setVisible(visible)
+        if visible:
+            self._hmmer_advanced_panel.setMaximumHeight(16777215)
+        else:
+            self._hmmer_advanced_panel.setMaximumHeight(0)
+        self._hmmer_advanced_panel.updateGeometry()
+        root = self._params_tab.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self._params_tab.updateGeometry()
+
+    def _on_advanced_settings_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        if self._tabs.currentWidget() is not self._params_tab:
+            return
+        if checked:
+            self._hmmer_compact_size = self.size()
+        self._set_hmmer_advanced_visible(checked)
+        self._resize_for_hmmer_advanced(checked)
+
+    def _on_hmmer_tab_changed(self, _index: int) -> None:
+        on_params = self._tabs.currentWidget() is self._params_tab
+        self._advanced_settings_btn.setVisible(on_params)
+        if not on_params:
+            if self._advanced_settings_btn.isChecked():
+                self._advanced_settings_btn.blockSignals(True)
+                self._advanced_settings_btn.setChecked(False)
+                self._advanced_settings_btn.setText("Advanced Settings ▸")
+                self._advanced_settings_btn.blockSignals(False)
+                self._set_hmmer_advanced_visible(False)
+            self._fit_options_content()
+        else:
+            self._resize_for_hmmer_advanced(self._advanced_settings_btn.isChecked())
+
+    def _dialog_chrome_height(self) -> int:
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 14
+        tab_bar_h = self._tabs.tabBar().sizeHint().height() + 10
+        buttons_h = self._button_box.sizeHint().height()
+        return margin_h + spacing + tab_bar_h + buttons_h
+
+    def _hmmer_compact_content_height(self) -> int:
+        root = self._params_tab.layout()
+        margins = root.contentsMargins() if root is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
+        spacing = root.spacing() if root is not None else 4
+        basic_h = max(
+            self._hmmer_basic.minimumSizeHint().height(),
+            self._hmmer_basic.sizeHint().height(),
+        )
+        return margin_h + basic_h + spacing
+
+    def _resize_for_hmmer_advanced(self, expanded: bool) -> None:
+        if self._tabs.currentWidget() is not self._params_tab:
+            self._fit_options_content()
+            return
+        panel = self._params_tab
+        adv = self._hmmer_advanced_panel
+        root = panel.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        panel.updateGeometry()
+        self._tabs.updateGeometry()
+
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._dialog_chrome_height()
+        width = self._DIALOG_WIDTH
+
+        if not expanded:
+            height = chrome + self._hmmer_compact_content_height()
+            height = min(max(height, 220), max_h)
+            self.setMinimumHeight(0)
+            self._tabs.setMinimumHeight(0)
+            panel.setMinimumHeight(0)
+            self.setMaximumHeight(height)
+            self.resize(width, height)
+            self.setMaximumHeight(16777215)
+            self._hmmer_compact_size = QSize(width, height)
+            return
+
+        extra = max(0, adv.sizeHint().height())
+        base = self._hmmer_compact_size or self.size()
+        height = min(base.height() + extra + 12, max_h)
+        height = max(
+            height,
+            min(chrome + self._hmmer_compact_content_height() + extra, max_h),
+        )
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
+
+    def _fit_options_content(self) -> None:
+        page = self._options_tab
+        page.ensurePolished()
+        page.adjustSize()
+        root = page.layout()
+        if root is not None:
+            root.activate()
+        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
+        content_h = page_hint.height()
+        if root is not None:
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        chrome = self._dialog_chrome_height()
+        height = chrome + content_h
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(self._DIALOG_WIDTH, height)
+        self.setMaximumHeight(16777215)
+
+    def _restore_defaults(self) -> None:
+        defaults = HmmerOptions()
+        self._input_selected.setChecked(True)
+        self._define_inputs.clear_paths()
+        self._sync_hmmer_inputs()
+        self._populate_database_combo(selected_name="")
+        self._evalue.setValue(DEFAULT_HMMER_EVALUE)
+        self._threads.setValue(defaults.num_threads)
+        self._max_hits.setValue(DEFAULT_HMMER_MAX_HITS)
+        self._write_text.setChecked(DEFAULT_HMMER_WRITE_TEXT)
+        self._domain_evalue.setValue(DEFAULT_HMMER_DOMAIN_EVALUE)
+        self._min_bit.setValue(DEFAULT_HMMER_MINIMUM_BIT_SCORE)
+        self._max_orfs.setValue(DEFAULT_HMMER_MAX_ORFS)
+        self._show_process_window.setChecked(False)
+        self._close_process_window.setChecked(False)
+        self._right_click_buttons[HMMER_RIGHT_CLICK_RUN].setChecked(True)
+
+    def options(self) -> HmmerOptions:
+        right_click_action = HMMER_RIGHT_CLICK_RUN
+        for value, radio in self._right_click_buttons.items():
+            if radio.isChecked():
+                right_click_action = value
+                break
+        db_name = self._database.currentData()
+        return HmmerOptions(
+            database_name=str(db_name or "").strip(),
+            e_value=normalize_blast_evalue(self._evalue.value()),
+            domain_e_value=normalize_blast_evalue(self._domain_evalue.value()),
+            num_threads=max(1, self._threads.value()),
+            max_hits=max(1, self._max_hits.value()),
+            write_text=self._write_text.isChecked(),
+            minimum_bit_score=max(0.0, float(self._min_bit.value())),
+            max_orfs_per_sequence=max(0, self._max_orfs.value()),
+            input_source=ALIGN_INPUT_SELECTED,
+            input_paths=[],
+            last_dialog_tab=self.current_dialog_tab(),
+            show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=self._close_process_window.isChecked(),
+            right_click_action=right_click_action,
+        )
 
 
 class ExtendParamsDialog(QDialog):
@@ -7815,6 +8513,12 @@ _TEAID_INPUTS_HELP = (
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are "
     "for this run only and are not remembered next time."
 )
+_TEAID_MODE_HELP = (
+    "<b>Single genome</b>: BLAST the consensus against one subject genome "
+    "(project genome or a saved nucleotide BLAST database).<br><br>"
+    "<b>Pangenome</b>: BLAST against several named genomes and combine the "
+    "results in one TE-Aid report (at least two genomes)."
+)
 _TEAID_GENOME_HELP = (
     "Subject genome for the genome BLAST step. Use the project genome or a "
     "saved nucleotide BLAST database under <b>Manage BLAST databases</b>."
@@ -7918,6 +8622,16 @@ class TeaAidParamsDialog(QDialog):
         self._input_define.toggled.connect(self._sync_teaid_inputs)
         self._define_inputs.paths_changed.connect(self._sync_teaid_inputs)
 
+        self._mode_group = QButtonGroup(self)
+        self._mode_single = QRadioButton("Single genome", self)
+        self._mode_pan = QRadioButton("Pangenome", self)
+        self._mode_group.addButton(self._mode_single)
+        self._mode_group.addButton(self._mode_pan)
+        if opts.use_pan_genome:
+            self._mode_pan.setChecked(True)
+        else:
+            self._mode_single.setChecked(True)
+
         self._genome_row = GenomeBlastDatabaseRow(
             self,
             project=project,
@@ -7927,6 +8641,23 @@ class TeaAidParamsDialog(QDialog):
             help_title="Genome",
             help_text=_TEAID_GENOME_HELP,
         )
+        from repeatviewer.views.genome_dialog import PanGenomeListWidget
+        from repeatviewer.pan_genome import PanGenomeEntry
+
+        self._pan_list = PanGenomeListWidget(self)
+        if opts.pan_genomes:
+            entries = [
+                PanGenomeEntry(name=name, path=Path(path))
+                for name, path in opts.pan_genomes
+                if str(name).strip() and str(path).strip()
+            ]
+            if entries:
+                self._pan_list.set_entries(entries)
+        elif project is not None and project.pan_genomes:
+            self._pan_list.set_entries(list(project.pan_genomes))
+        self._pan_list.size_changed.connect(self._on_teaid_pan_list_resized)
+        self._mode_single.toggled.connect(self._sync_teaid_mode)
+        self._mode_pan.toggled.connect(self._sync_teaid_mode)
 
         self._evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._evalue)
@@ -8041,6 +8772,28 @@ class TeaAidParamsDialog(QDialog):
         def _section(title: str) -> QLabel:
             return QLabel(f"<b>{title}</b>", params_tab)
 
+        form.addRow(_section("Mode"))
+        mode_box = QWidget(basic)
+        mode_layout = QVBoxLayout(mode_box)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(2)
+        mode_layout.addWidget(
+            field_with_help(
+                self._mode_single,
+                "TE-Aid mode",
+                _TEAID_MODE_HELP,
+                stretch=True,
+            )
+        )
+        mode_layout.addWidget(self._mode_pan)
+        self._mode_radios_label = QLabel("")
+        self._mode_single_genome_label = QLabel("")
+        self._mode_pan_list_label = QLabel("")
+        form.addRow(self._mode_radios_label, mode_box)
+        form.addRow(self._mode_single_genome_label, self._genome_row)
+        form.addRow(self._mode_pan_list_label, self._pan_list)
+
+        form.addRow(_form_section_separator())
         form.addRow(_section("Inputs"))
         inputs_box = QWidget(basic)
         inputs_layout = QVBoxLayout(inputs_box)
@@ -8062,7 +8815,6 @@ class TeaAidParamsDialog(QDialog):
 
         form.addRow(_form_section_separator())
         form.addRow(_section("Settings"))
-        form.addRow("Genome:", self._genome_row)
         form.addRow(
             "Genome BLAST E-value:",
             field_with_help(
@@ -8196,6 +8948,7 @@ class TeaAidParamsDialog(QDialog):
         layout.addWidget(self._button_box, 0)
 
         self._sync_teaid_inputs(resize=False)
+        self._sync_teaid_mode(resize=False)
         self._set_teaid_advanced_visible(False)
         self.resize(self._DIALOG_WIDTH, 420)
         QTimer.singleShot(0, lambda: self._resize_for_teaid_advanced(False))
@@ -8208,6 +8961,35 @@ class TeaAidParamsDialog(QDialog):
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
+
+    def _on_teaid_pan_list_resized(self) -> None:
+        if self.isVisible() and self._mode_pan.isChecked():
+            self._teaid_compact_size = None
+            self._resize_for_teaid_advanced(self._advanced_settings_btn.isChecked())
+
+    def _sync_teaid_mode(self, *, resize: bool = True) -> None:
+        pan = self._mode_pan.isChecked()
+        form = self._teaid_basic.layout()
+        if isinstance(form, QFormLayout):
+            form.setRowVisible(self._genome_row, not pan)
+            form.setRowVisible(self._pan_list, pan)
+        self._genome_row.setVisible(not pan)
+        self._pan_list.setVisible(pan)
+        if pan:
+            self._pan_list.setMinimumHeight(0)
+            self._pan_list.setMaximumHeight(16777215)
+            self._genome_row.setFixedHeight(0)
+        else:
+            self._genome_row.setMinimumHeight(0)
+            self._genome_row.setMaximumHeight(16777215)
+            self._pan_list.setFixedHeight(0)
+        self._genome_row.updateGeometry()
+        self._pan_list.updateGeometry()
+        self._teaid_basic.updateGeometry()
+        self._sync_field_column()
+        if resize and self.isVisible() and not self._advanced_settings_btn.isChecked():
+            self._teaid_compact_size = None
+            self._resize_for_teaid_advanced(False)
 
     def input_source(self) -> str:
         if self._input_define.isChecked():
@@ -8278,7 +9060,17 @@ class TeaAidParamsDialog(QDialog):
         )
         sync_form_field_column_spacers(
             self,
-            [self._inputs_radios_label, self._inputs_define_label],
+            [
+                lab
+                for lab in (
+                    getattr(self, "_mode_radios_label", None),
+                    getattr(self, "_mode_single_genome_label", None),
+                    getattr(self, "_mode_pan_list_label", None),
+                    self._inputs_radios_label,
+                    self._inputs_define_label,
+                )
+                if lab is not None
+            ],
             [
                 getattr(self, "_teaid_basic_form", None),
                 adv if isinstance(adv, QFormLayout) else None,
@@ -8455,9 +9247,11 @@ class TeaAidParamsDialog(QDialog):
 
     def _restore_defaults(self) -> None:
         defaults = TeaAidOptions()
+        self._mode_single.setChecked(True)
         self._input_selected.setChecked(True)
         self._define_inputs.clear_paths()
         self._sync_teaid_inputs()
+        self._sync_teaid_mode()
         self._genome_row.reset_to_default()
         self._evalue.setValue(DEFAULT_TEAID_EVALUE)
         self._word_size.setValue(DEFAULT_TEAID_SELF_BLAST_WORD_SIZE)
@@ -8506,6 +9300,14 @@ class TeaAidParamsDialog(QDialog):
             ),
             right_click_action=right_click_action,
             genome_path=self._genome_row.selected_path(),
+            use_pan_genome=self._mode_pan.isChecked(),
+            pan_genomes=[
+                (name.strip(), path.strip())
+                for name, path in self._pan_list.snapshot_rows()
+                if name.strip() and path.strip()
+            ]
+            if self._mode_pan.isChecked()
+            else [],
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(
                 self._close_process_window.isChecked()

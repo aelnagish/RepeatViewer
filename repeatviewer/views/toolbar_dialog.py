@@ -57,6 +57,7 @@ SEQUENCE_TOOLBAR_IDS: tuple[str, ...] = (
 TOOLS_TOOLBAR_IDS: tuple[str, ...] = (
     "aliview",
     "blast",
+    "hmmer",
     "align",
     "fastga",
     "tree",
@@ -107,6 +108,7 @@ TOOLBAR_LABELS: dict[str, str] = {
     "map_reference": "Mapping",
     "repeat_quantify": "Repeat Quantify",
     "blast": "BLAST",
+    "hmmer": "HMMER",
     "extend": "MSA Extend",
     "teaid": "TE-Aid",
     "msa_clean": "MSA Clean",

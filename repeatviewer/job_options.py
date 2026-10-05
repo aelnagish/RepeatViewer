@@ -510,6 +510,40 @@ class BlastOptions:
         return self.program == BLAST_PROGRAM_ONLINE
 
 
+DEFAULT_HMMER_EVALUE = DEFAULT_REPORT_EVALUE
+DEFAULT_HMMER_DOMAIN_EVALUE = DEFAULT_REPORT_EVALUE
+DEFAULT_HMMER_MAX_HITS = 100
+DEFAULT_HMMER_MINIMUM_BIT_SCORE = 0.0
+DEFAULT_HMMER_WRITE_TEXT = True
+# 0 = no per-sequence ORF cap (protein HMM path).
+DEFAULT_HMMER_MAX_ORFS = 0
+HMMER_DIALOG_TAB_PARAMETERS = "parameters"
+HMMER_DIALOG_TABS = (HMMER_DIALOG_TAB_PARAMETERS, DIALOG_TAB_OPTIONS)
+HMMER_RIGHT_CLICK_RUN = "run"
+HMMER_RIGHT_CLICK_DIALOG = "dialog"
+HMMER_RIGHT_CLICK_ACTIONS = (HMMER_RIGHT_CLICK_RUN, HMMER_RIGHT_CLICK_DIALOG)
+
+
+@dataclass
+class HmmerOptions:
+    """Tools → HMMER search against a project HMM database (pyhmmer)."""
+
+    database_name: str = ""
+    e_value: float = DEFAULT_HMMER_EVALUE
+    domain_e_value: float = DEFAULT_HMMER_DOMAIN_EVALUE
+    num_threads: int = field(default_factory=_default_tool_threads)
+    max_hits: int = DEFAULT_HMMER_MAX_HITS
+    write_text: bool = DEFAULT_HMMER_WRITE_TEXT
+    minimum_bit_score: float = DEFAULT_HMMER_MINIMUM_BIT_SCORE
+    max_orfs_per_sequence: int = DEFAULT_HMMER_MAX_ORFS
+    input_source: str = ALIGN_INPUT_SELECTED
+    input_paths: list[str] = field(default_factory=list)
+    last_dialog_tab: str = HMMER_DIALOG_TAB_PARAMETERS
+    show_process_window: bool = False
+    close_process_window_when_finished: bool = False
+    right_click_action: str = HMMER_RIGHT_CLICK_RUN
+
+
 DEFAULT_CONSENSUS_THRESHOLD = 0.8
 DEFAULT_CONSENSUS_AMBIGUOUS = "N"
 CONSENSUS_AMBIGUOUS_CHOICES = ("N", "X")
@@ -736,6 +770,9 @@ class TeaAidOptions:
     right_click_action: str = TEAID_RIGHT_CLICK_RUN
     # Single-genome mode: empty means use the project genome from Define Genome.
     genome_path: str | None = None
+    # TE-Aid Mode: pan-genome run uses pan_genomes (name, path) list.
+    use_pan_genome: bool = False
+    pan_genomes: list[tuple[str, str]] = field(default_factory=list)
     show_process_window: bool = False
     close_process_window_when_finished: bool = False
 
@@ -1056,6 +1093,80 @@ def load_blast_options() -> BlastOptions:
     )
 
 
+def load_hmmer_options() -> HmmerOptions:
+    v = _load_settings_group("hmmer")
+    tab = str(v.get("last_dialog_tab", HMMER_DIALOG_TAB_PARAMETERS))
+    if tab not in HMMER_DIALOG_TABS:
+        tab = HMMER_DIALOG_TAB_PARAMETERS
+    return HmmerOptions(
+        database_name=str(v.get("database_name", "") or "").strip(),
+        e_value=normalize_blast_evalue(
+            float(v.get("e_value", DEFAULT_HMMER_EVALUE)),
+            default=DEFAULT_HMMER_EVALUE,
+        ),
+        domain_e_value=normalize_blast_evalue(
+            float(v.get("domain_e_value", DEFAULT_HMMER_DOMAIN_EVALUE)),
+            default=DEFAULT_HMMER_DOMAIN_EVALUE,
+        ),
+        num_threads=max(1, int(v.get("num_threads", _default_tool_threads()))),
+        max_hits=max(1, int(v.get("max_hits", DEFAULT_HMMER_MAX_HITS))),
+        write_text=_to_bool(v.get("write_text"), DEFAULT_HMMER_WRITE_TEXT),
+        minimum_bit_score=max(
+            0.0, float(v.get("minimum_bit_score", DEFAULT_HMMER_MINIMUM_BIT_SCORE))
+        ),
+        max_orfs_per_sequence=max(
+            0, int(v.get("max_orfs_per_sequence", DEFAULT_HMMER_MAX_ORFS))
+        ),
+        input_source=ALIGN_INPUT_SELECTED,
+        input_paths=[],
+        last_dialog_tab=tab,
+        show_process_window=_to_bool(v.get("show_process_window"), False),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"), False
+        ),
+        right_click_action=_normalize_hmmer_right_click(
+            v.get("right_click_action", HMMER_RIGHT_CLICK_RUN)
+        ),
+    )
+
+
+def _normalize_hmmer_right_click(raw: object) -> str:
+    value = str(raw or HMMER_RIGHT_CLICK_RUN).strip()
+    if value in HMMER_RIGHT_CLICK_ACTIONS:
+        return value
+    return HMMER_RIGHT_CLICK_RUN
+
+
+def save_hmmer_options(opts: HmmerOptions) -> None:
+    _save_settings_group(
+        "hmmer",
+        {
+            "database_name": opts.database_name or "",
+            "e_value": opts.e_value,
+            "domain_e_value": opts.domain_e_value,
+            "num_threads": opts.num_threads,
+            "max_hits": opts.max_hits,
+            "write_text": opts.write_text,
+            "minimum_bit_score": opts.minimum_bit_score,
+            "max_orfs_per_sequence": opts.max_orfs_per_sequence,
+            "last_dialog_tab": (
+                opts.last_dialog_tab
+                if opts.last_dialog_tab in HMMER_DIALOG_TABS
+                else HMMER_DIALOG_TAB_PARAMETERS
+            ),
+            "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": (
+                opts.close_process_window_when_finished
+            ),
+            "right_click_action": (
+                opts.right_click_action
+                if opts.right_click_action in HMMER_RIGHT_CLICK_ACTIONS
+                else HMMER_RIGHT_CLICK_RUN
+            ),
+        },
+    )
+
+
 def save_blast_options(opts: BlastOptions) -> None:
     _save_settings_group(
         "blast",
@@ -1184,6 +1295,20 @@ def load_teaid_options() -> TeaAidOptions:
     if right_click_action not in TEAID_RIGHT_CLICK_ACTIONS:
         right_click_action = TEAID_RIGHT_CLICK_RUN
     genome_path = v.get("genome_path")
+    pan_raw = v.get("pan_genomes", [])
+    pan_genomes: list[tuple[str, str]] = []
+    if isinstance(pan_raw, list):
+        for item in pan_raw:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                name = str(item[0]).strip()
+                path = str(item[1]).strip()
+            elif isinstance(item, dict):
+                name = str(item.get("name", "")).strip()
+                path = str(item.get("path", "")).strip()
+            else:
+                continue
+            if name and path:
+                pan_genomes.append((name, path))
     return TeaAidOptions(
         e_value=normalize_blast_evalue(
             float(v.get("e_value", DEFAULT_TEAID_EVALUE)),
@@ -1208,6 +1333,8 @@ def load_teaid_options() -> TeaAidOptions:
         hit_line_transparency=_load_teaid_line_transparency(v),
         right_click_action=right_click_action,
         genome_path=str(genome_path).strip() if genome_path else None,
+        use_pan_genome=_to_bool(v.get("use_pan_genome"), False),
+        pan_genomes=pan_genomes,
         show_process_window=_to_bool(v.get("show_process_window"), False),
         close_process_window_when_finished=_to_bool(
             v.get("close_process_window_when_finished"), False
@@ -1263,6 +1390,12 @@ def save_teaid_options(opts: TeaAidOptions) -> None:
                 else TEAID_RIGHT_CLICK_RUN
             ),
             "genome_path": opts.genome_path or "",
+            "use_pan_genome": bool(opts.use_pan_genome),
+            "pan_genomes": [
+                {"name": name, "path": path}
+                for name, path in (opts.pan_genomes or [])
+                if str(name).strip() and str(path).strip()
+            ],
             "show_process_window": opts.show_process_window,
             "close_process_window_when_finished": (
                 opts.close_process_window_when_finished

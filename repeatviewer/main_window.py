@@ -351,10 +351,12 @@ from repeatviewer.job_options import (
     FLEXIDOT_RIGHT_CLICK_DIALOG,
     CONSENSUS_RIGHT_CLICK_DIALOG,
     TEAID_RIGHT_CLICK_DIALOG,
+    HMMER_RIGHT_CLICK_DIALOG,
     MSA_CLEAN_RIGHT_CLICK_DIALOG,
     TE_ANNOTATION_RIGHT_CLICK_DIALOG,
     load_align_options,
     load_blast_options,
+    load_hmmer_options,
     load_consensus_options,
     load_extend_options,
     load_fastga_options,
@@ -374,6 +376,7 @@ from repeatviewer.job_options import (
     msa_clean_method_description,
     save_align_options,
     save_blast_options,
+    save_hmmer_options,
     save_consensus_options,
     save_extend_options,
     save_fastga_options,
@@ -401,6 +404,7 @@ from repeatviewer.job_options import (
 from repeatviewer.views.tool_dialogs import (
     AlignParamsDialog,
     BlastParamsDialog,
+    HmmerParamsDialog,
     ConsensusParamsDialog,
     ExtendParamsDialog,
     FlexidotParamsDialog,
@@ -559,6 +563,7 @@ _TOOLBAR_TOOLTIPS = {
     "tree": "Phylogenetic tree from the selected FASTA (MAFFT + IQ-TREE / FastME / FastTree)",
     "map_reference": "Map the selected sequences or reads to a reference (minimap2 / HISAT2)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
+    "hmmer": "HMMER (pyhmmer) search of selected FASTA against a project HMM database",
     "te_genome_map": "TE density plot using default parameters",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
     "extend": "Extend MSA ends using default parameters",
@@ -572,6 +577,7 @@ _TOOLBAR_TOOLTIPS = {
 _JOB_DISPLAY_TITLES = {
     "teaid": "TE-Aid",
     "blast": "BLAST",
+    "hmmer": "HMMER",
     "extend": "MSA Extend",
     "msa_clean": "MSA Clean",
     "msa_clean_gappy": "MSA remove gappy columns",
@@ -2140,6 +2146,8 @@ class MainWindow(QMainWindow):
         self._metadata_enrich_generation = 0
         self._pending_metadata_ui: list[tuple[Path, object]] = []
         self._metadata_stat_queue: list[Path] = []
+        # FASTA paths waiting for Length/GC enrichment after cheap Modified/Size fill.
+        self._pending_fasta_enrichment: list[Path] = []
         self._metadata_ui_timer = QTimer(self)
         self._metadata_ui_timer.setSingleShot(True)
         self._metadata_ui_timer.timeout.connect(self._drain_metadata_ui_queue)
@@ -2170,11 +2178,13 @@ class MainWindow(QMainWindow):
         self._create_folder_dialog: CreateFolderDialog | None = None
         self._create_folder_copy_files: list[Path] = []
         self._blast_params_dialog = None
+        self._hmmer_params_dialog = None
         self._add_blast_database_dialog = None
         self._command_plugin_dialog: CommandPluginDesignerDialog | None = None
         self._plugin_run_dialog: UserCommandRunDialog | None = None
         self._msa_clean_options = load_msa_clean_options()
         self._blast_options = load_blast_options()
+        self._hmmer_options = load_hmmer_options()
         self._fastga_options = load_fastga_options()
         self._tree_options = load_tree_options()
         self._map_options = load_map_options()
@@ -2516,18 +2526,23 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._fill_visible_file_metadata)
 
     def _fill_visible_file_metadata(self) -> None:
-        """Populate metadata columns after they are turned on or for stale rows."""
+        """Populate metadata columns after they are turned on or for stale rows.
+
+        Always fills cheap fields (Modified, Size, Type) for every file via
+        ``stat``. FASTA Length / # Sequences / % GC are enriched afterward.
+        """
         from repeatviewer.browser_file_metadata import is_fasta_path
 
         paths = self._file_list.listed_paths()
         if not paths:
             return
-        self._metadata_stat_queue = [path for path in paths if not is_fasta_path(path)]
-        fasta_paths = [path for path in paths if is_fasta_path(path)]
-        if fasta_paths:
-            self._start_metadata_enrichment(fasta_paths)
-        if self._metadata_stat_queue:
-            self._schedule_metadata_ui_drain()
+        # Queue every path for quick Modified/Size/Type first. Enriching FASTA
+        # before that left non-FASTA (and cancelled FASTA) stuck on "—".
+        self._metadata_stat_queue = list(paths)
+        self._pending_fasta_enrichment = [
+            path for path in paths if is_fasta_path(path)
+        ]
+        self._schedule_metadata_ui_drain()
 
     def _schedule_metadata_ui_drain(self) -> None:
         if not self._metadata_ui_timer.isActive():
@@ -2549,6 +2564,9 @@ class MainWindow(QMainWindow):
         """Append new rows without rebuilding the whole table."""
         if not paths:
             return
+        from repeatviewer.browser_file_metadata import is_fasta_path
+        from repeatviewer.widgets.file_list_columns import metadata_columns_visible
+
         query = self._file_filter.text().strip().lower()
         visible_paths: list[Path] = []
         for path in paths:
@@ -2558,6 +2576,7 @@ class MainWindow(QMainWindow):
         if not visible_paths:
             return
 
+        fill_metadata = metadata_columns_visible()
         was_sorting = self._file_list.isSortingEnabled()
         self._file_list.setSortingEnabled(False)
         self._file_list.setUpdatesEnabled(False)
@@ -2565,7 +2584,7 @@ class MainWindow(QMainWindow):
             for path in visible_paths:
                 row_item = self._file_list.add_file_row(
                     path,
-                    fill_metadata_columns=False,
+                    fill_metadata_columns=fill_metadata,
                 )
                 key = str(path.expanduser().resolve())
                 if key in self._highlight_output_keys:
@@ -2576,6 +2595,21 @@ class MainWindow(QMainWindow):
             self._file_list.setUpdatesEnabled(True)
             self._file_list.setSortingEnabled(was_sorting)
         self._file_list.apply_default_sort()
+        if fill_metadata and not self._any_background_job_running():
+            fasta_paths = [path for path in visible_paths if is_fasta_path(path)]
+            if not fasta_paths:
+                return
+            # Avoid cancelling an in-flight folder enrich for a few new rows.
+            if (
+                self._metadata_enrich_worker is None
+                and not self._metadata_stat_queue
+                and not self._pending_metadata_ui
+                and not self._pending_fasta_enrichment
+            ):
+                self._start_metadata_enrichment(fasta_paths)
+            else:
+                self._pending_fasta_enrichment.extend(fasta_paths)
+                self._schedule_metadata_ui_drain()
 
     def _restore_window_layout(self) -> None:
         import os
@@ -2866,13 +2900,14 @@ class MainWindow(QMainWindow):
             total = max(1, int(self._task_progress._total))
             self._task_progress.update(total, "Done")
         self._hide_job_progress()
-        # Large folders skipped sync metadata during the finish refresh.
+        # Job finish may have skipped or interrupted metadata fill (new outputs
+        # or large folders). Always backfill Modified/Size and FASTA stats.
         from repeatviewer.widgets.file_list_columns import metadata_columns_visible
 
         if (
             metadata_columns_visible()
             and self._file_list is not None
-            and self._file_list.rowCount() > _LARGE_FILE_LIST
+            and self._file_list.rowCount() > 0
             and not self._any_background_job_running()
         ):
             QTimer.singleShot(0, self._fill_visible_file_metadata)
@@ -5286,6 +5321,12 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Change BLAST parameters", self._change_blast_parameters)
 
+    def _populate_hmmer_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
+        del skip_default
+        menu.addAction("HMMER with default parameters", self._run_hmmer)
+        menu.addSeparator()
+        menu.addAction("Change HMMER parameters", self._change_hmmer_parameters)
+
     def _populate_te_visualization_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
             menu.addAction("TE density plot", self._open_te_density_plot_dialog)
@@ -5385,7 +5426,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         genome_action = file_menu.addAction("Define &genome", self._open_set_genome)
         genome_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
-        genome_action.setStatusTip("Set reference or pan-genome FASTA files")
+        genome_action.setStatusTip("Set the reference genome FASTA")
         define_db_action = file_menu.addAction("Define &database", self._open_define_database)
         define_db_action.setStatusTip("Configure CDD and similarity annotation databases")
         file_menu.addAction("Restore deleted &files", self._restore_removed_folders)
@@ -5433,6 +5474,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("Open in &AliView", self._open_selected_in_aliview)
         tools_menu.addSeparator()
         self._populate_blast_menu(tools_menu.addMenu("&BLAST"))
+        self._populate_hmmer_menu(tools_menu.addMenu("&HMMER"))
         self._populate_align_menu(tools_menu.addMenu("&Align"))
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
@@ -6982,6 +7024,17 @@ class MainWindow(QMainWindow):
                 ),
                 right_click_slot=self._quick_blast_right_click,
             )
+        elif tool_id == "hmmer":
+            self._add_toolbar_action_button(
+                bar,
+                "HMMER",
+                self._open_hmmer_dialog,
+                tooltip=(
+                    "Click: set parameters and run.\n"
+                    "Right-click: run with saved settings (set in the Options tab)."
+                ),
+                right_click_slot=self._quick_hmmer_right_click,
+            )
         elif tool_id == "te_genome_map":
             self._add_toolbar_text_menu_button(
                 bar,
@@ -8029,6 +8082,7 @@ class MainWindow(QMainWindow):
         self._sync_define_database_dialog_from_folder(folder)
         self._sync_te_viz_dialog_from_folder(folder)
         self._sync_blast_params_dialog_from_folder(folder)
+        self._sync_hmmer_params_dialog_from_folder(folder)
         self._sync_create_folder_dialog_from_folder(folder)
         self._populate_file_list(folder, record_history=True)
         self._update_directory_watchers()
@@ -8299,6 +8353,7 @@ class MainWindow(QMainWindow):
     def _stop_metadata_enrichment(self, *, wait_ms: int = 1000) -> None:
         self._pending_metadata_ui.clear()
         self._metadata_stat_queue.clear()
+        self._pending_fasta_enrichment.clear()
         self._metadata_ui_timer.stop()
         worker = self._metadata_enrich_worker
         thread = self._metadata_enrich_thread
@@ -8370,6 +8425,7 @@ class MainWindow(QMainWindow):
         if self._file_list is None:
             self._pending_metadata_ui.clear()
             self._metadata_stat_queue.clear()
+            self._pending_fasta_enrichment.clear()
             return
         if self._metadata_stat_queue:
             self._pending_metadata_ui.extend(self._collect_metadata_stat_chunk())
@@ -8380,7 +8436,14 @@ class MainWindow(QMainWindow):
             self._refresh_metadata_row_highlights(chunk)
         if self._metadata_stat_queue or self._pending_metadata_ui:
             self._metadata_ui_timer.start(0)
-        elif self._highlight_output_keys or self._highlight_source_keys:
+            return
+        # Cheap Modified/Size/Type fill finished — now scan FASTA for Length/GC.
+        pending_fasta = self._pending_fasta_enrichment
+        self._pending_fasta_enrichment = []
+        if pending_fasta and not self._any_background_job_running():
+            self._start_metadata_enrichment(pending_fasta)
+            return
+        if self._highlight_output_keys or self._highlight_source_keys:
             # Chunks already re-tint touched rows; only restyle when highlights
             # exist, and prefer the keyed path for large folders.
             self._refresh_file_list_highlights()
@@ -9398,6 +9461,10 @@ class MainWindow(QMainWindow):
         if isinstance(dialog, BlastParamsDialog):
             self._blast_options = replace(self._blast_options, last_dialog_tab=tab)
             save_blast_options(self._blast_options)
+            return
+        if isinstance(dialog, HmmerParamsDialog):
+            self._hmmer_options = replace(self._hmmer_options, last_dialog_tab=tab)
+            save_hmmer_options(self._hmmer_options)
 
     def _is_fasta_file(self, path: Path) -> bool:
         return path.suffix.lower() in {".fa", ".fasta", ".fna", ".fas", ".faa"}
@@ -9645,6 +9712,7 @@ class MainWindow(QMainWindow):
             self._sync_add_annotation_dialog_from_files(panel_path)
             self._sync_add_blast_database_dialog_from_files(panel_path)
             self._sync_blast_params_dialog_from_files(panel_path)
+            self._sync_hmmer_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
 
     def _open_tree_panels(self):
@@ -10108,6 +10176,75 @@ class MainWindow(QMainWindow):
     def _change_blast_parameters(self) -> None:
         """Menu: same Cancel / Save / Run dialog as the BLAST toolbar button."""
         self._open_blast_dialog()
+
+    def _run_hmmer(self) -> None:
+        self._apply_function("hmmer", hmmer_options=self._hmmer_options)
+
+    def _change_hmmer_parameters(self) -> None:
+        self._open_hmmer_dialog()
+
+    def _open_hmmer_dialog(self) -> None:
+        """Non-modal HMMER parameters (Define inputs can take Files/Folders clicks)."""
+        if self._hmmer_params_dialog is not None and self._hmmer_params_dialog.isVisible():
+            self._hmmer_params_dialog.raise_()
+            self._hmmer_params_dialog.activateWindow()
+            return
+        dialog = HmmerParamsDialog(initial=self._hmmer_options, parent=self)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self._hmmer_params_dialog = dialog
+        dialog.finished.connect(self._on_hmmer_params_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_hmmer_params_dialog_finished(self, result: int) -> None:
+        dialog = self._hmmer_params_dialog
+        self._hmmer_params_dialog = None
+        QTimer.singleShot(0, self._repair_browser_chrome)
+        if dialog is None:
+            return
+        if result != int(QDialog.DialogCode.Accepted):
+            self._remember_tool_dialog_tab(dialog)
+            return
+        self._hmmer_options = dialog.options()
+        save_hmmer_options(self._hmmer_options)
+        if dialog.should_run():
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+            if dialog.input_source() == ALIGN_INPUT_DEFINE:
+                run_files = dialog.run_files()
+                if not run_files:
+                    QMessageBox.information(
+                        self,
+                        "No FASTA inputs",
+                        "Add one or more FASTA files or folders under Define inputs.",
+                    )
+                    return
+                self._apply_function(
+                    "hmmer",
+                    hmmer_options=self._hmmer_options,
+                    preselected=run_files,
+                )
+            else:
+                self._apply_function("hmmer", hmmer_options=self._hmmer_options)
+        else:
+            self._set_status_message("HMMER settings saved", 4000)
+
+    def _sync_hmmer_params_dialog_from_files(
+        self, clicked_path: Path | None = None
+    ) -> None:
+        dialog = self._hmmer_params_dialog
+        if dialog is None or not dialog.isVisible() or clicked_path is None:
+            return
+        dialog.apply_path_from_panel(clicked_path)
+
+    def _sync_hmmer_params_dialog_from_folder(self, folder: Path) -> None:
+        dialog = self._hmmer_params_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        dialog.apply_folder_from_panel(folder)
 
     def _sync_add_blast_database_dialog_from_files(
         self, clicked_path: Path | None = None
@@ -11538,6 +11675,13 @@ class MainWindow(QMainWindow):
             self._open_teaid_dialog()
         else:
             self._run_teaid()
+
+    def _quick_hmmer_right_click(self) -> None:
+        """Right-click HMMER: run with saved settings, or open the dialog."""
+        if self._hmmer_options.right_click_action == HMMER_RIGHT_CLICK_DIALOG:
+            self._open_hmmer_dialog()
+        else:
+            self._run_hmmer()
 
     def _modify_teaid_parameters(self) -> None:
         """Menu: same Cancel / Save / Run dialog as the TE-Aid toolbar button."""
@@ -14188,6 +14332,12 @@ class MainWindow(QMainWindow):
             and blast_opts_for_gate is not None
             and blast_opts_for_gate.program == BLAST_PROGRAM_ONLINE
         )
+        teaid_opts_for_gate = job_kwargs.get("teaid_options") or self._teaid_options
+        teaid_is_pan = (
+            func_name == "teaid"
+            and teaid_opts_for_gate is not None
+            and bool(getattr(teaid_opts_for_gate, "use_pan_genome", False))
+        )
         if blast_is_online:
             has_multi = False
             for path in seq_files:
@@ -14256,10 +14406,32 @@ class MainWindow(QMainWindow):
                 "under BLAST parameters.",
             )
             return
+        if func_name == "hmmer":
+            hmmer_opts_for_gate = job_kwargs.get("hmmer_options") or self._hmmer_options
+            if not str(getattr(hmmer_opts_for_gate, "database_name", "") or "").strip():
+                QMessageBox.warning(
+                    self,
+                    "HMM database required",
+                    "Select an HMM database under Tools → HMMER → Change HMMER parameters.\n\n"
+                    "Add HMM profiles via File → Define database (enable the HMM checkbox).",
+                )
+                return
+            try:
+                import pyhmmer  # type: ignore[import-untyped]  # noqa: F401
+            except ImportError:
+                from repeatviewer.backends.database_prepare import pyhmmer_install_hint
+
+                QMessageBox.warning(
+                    self,
+                    "pyhmmer not installed",
+                    f"HMMER search needs pyhmmer.\n\n{pyhmmer_install_hint()}",
+                )
+                return
         if (
             func_name in {"blast", "extend", "teaid", "flexidot"}
             and not uses_saved_blast_database
             and not blast_is_online
+            and not teaid_is_pan
             and not self._project.has_genome_configured()
         ):
             QMessageBox.warning(
@@ -14313,6 +14485,12 @@ class MainWindow(QMainWindow):
                 show_log = True
             close_when_finished = bool(
                 getattr(blast_opts, "close_process_window_when_finished", False)
+            )
+        elif func_name == "hmmer":
+            hmmer_opts = job_kwargs.get("hmmer_options") or self._hmmer_options
+            show_log = bool(getattr(hmmer_opts, "show_process_window", False))
+            close_when_finished = bool(
+                getattr(hmmer_opts, "close_process_window_when_finished", False)
             )
         elif func_name == "flexidot":
             flex_opts = job_kwargs.get("flexidot_options") or self._flexidot_options

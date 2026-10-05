@@ -59,3 +59,15 @@ def test_non_fasta_metadata(tmp_path: Path) -> None:
     assert meta.gc_text == "—"
     assert meta.length_text == "—"
     assert meta.size_text.endswith("B")
+    assert meta.modified_text != "—"
+
+
+def test_quick_metadata_fills_size_for_gff(tmp_path: Path) -> None:
+    path = tmp_path / "features.gff"
+    path.write_text("##gff-version 3\n")
+    meta = quick_metadata_for_file(path)
+    assert meta.molecule_type == "Annotation"
+    assert meta.size_text.endswith("B")
+    assert meta.modified_text != "—"
+    assert meta.length_text == "—"
+    assert meta.sequence_count_text == "—"

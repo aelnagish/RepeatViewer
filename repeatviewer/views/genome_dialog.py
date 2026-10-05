@@ -17,19 +17,15 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QRadioButton,
     QScrollArea,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from repeatviewer.pan_genome import (
-    GENOME_MODE_PAN,
     GENOME_MODE_SINGLE,
     MAX_PAN_GENOME_NAME_LEN,
     PanGenomeEntry,
-    normalize_pan_genome_name_strict,
 )
 from repeatviewer.project import RepeatViewerProject
 from repeatviewer.views.settings_dialog import (
@@ -370,7 +366,7 @@ class PanGenomeListWidget(QWidget):
 
 
 class GenomeDialog(QDialog):
-    """Select single or pan-genome mode for Blast, Extend, TE-Aid, and Flexidot."""
+    """Select the project reference genome FASTA (single genome)."""
 
     def __init__(
         self,
@@ -386,16 +382,6 @@ class GenomeDialog(QDialog):
         self.setAcceptDrops(True)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
 
-        self._mode_single = QRadioButton("Single genome mode")
-        self._mode_pan = QRadioButton("Pan-genome mode (Beta)")
-        self._mode_single.setToolTip(
-            "One reference genome for Blast, MSA Extend, TE-Aid, Flexidot, and Visualization."
-        )
-        self._mode_pan.setToolTip(
-            "Several genomes with short names (max 10 characters). "
-            "Blast, TE-Aid, and Flexidot run against each genome; Extend uses the genome you pick."
-        )
-
         self._genome = QComboBox()
         self._genome.setEditable(True)
         self._genome.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -410,37 +396,11 @@ class GenomeDialog(QDialog):
         self._genome.activated.connect(self._on_genome_history_selected)
         self._genome.installEventFilter(self)
 
-        self._pan_list = PanGenomeListWidget()
-        self._pan_list.size_changed.connect(self._adjust_dialog_size)
         self._single_genome_path_focused = False
+        if project.genome_file is not None:
+            self._genome.lineEdit().setText(self._path_str(project.genome_file))
 
-        self._pan_snapshot: list[tuple[str, str]] = [
-            (entry.name, str(entry.path)) for entry in project.pan_genomes
-        ]
-        self._single_genome_snapshot = (
-            self._path_str(project.genome_file) if project.genome_file is not None else ''
-        )
-
-        if project.genome_mode == GENOME_MODE_PAN:
-            self._mode_pan.setChecked(True)
-        else:
-            self._mode_single.setChecked(True)
-
-        self._pan_list.restore_snapshot(self._pan_snapshot)
-        if self._single_genome_snapshot:
-            self._genome.lineEdit().setText(self._single_genome_snapshot)
-
-        mode_row = QHBoxLayout()
-        mode_row.setContentsMargins(0, 0, 0, 0)
-        mode_row.setSpacing(16)
-        mode_row.addWidget(self._mode_single)
-        mode_row.addWidget(self._mode_pan)
-        mode_row.addStretch(1)
-        self._mode_bar = QWidget()
-        self._mode_bar.setLayout(mode_row)
-
-        single_page = QWidget()
-        single_line = QHBoxLayout(single_page)
+        single_line = QHBoxLayout()
         single_line.setContentsMargins(0, 0, 0, 0)
         single_line.setSpacing(8)
         single_line.addWidget(QLabel("Genome FASTA:"))
@@ -449,37 +409,17 @@ class GenomeDialog(QDialog):
         browse_btn.clicked.connect(self._browse_single_genome)
         single_line.addWidget(browse_btn)
 
-        pan_page = QWidget()
-        pan_layout = QVBoxLayout(pan_page)
-        pan_layout.setContentsMargins(0, 0, 0, 0)
-        pan_layout.addWidget(self._pan_list)
-
-        self._content_stack = QStackedWidget()
-        self._content_stack.addWidget(single_page)
-        self._content_stack.addWidget(pan_page)
-
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
 
-        self._hint = QLabel()
-        self._hint.setWordWrap(True)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
-        layout.addWidget(
-            self._mode_bar,
-            alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
-        )
-        layout.addWidget(self._content_stack)
-        layout.addWidget(self._hint)
+        layout.addLayout(single_line)
         layout.addWidget(buttons)
-
-        self._mode_single.toggled.connect(self._sync_mode_widgets)
-        self._sync_mode_widgets()
 
         if selected_paths and not self._project.has_genome_configured():
             self._apply_initial_paths(selected_paths)
@@ -488,40 +428,23 @@ class GenomeDialog(QDialog):
         super().showEvent(event)
         self.raise_()
         self.activateWindow()
-        self._adjust_dialog_size()
+        self.adjustSize()
         self._activate_panel_path_pick()
 
     def _activate_panel_path_pick(self) -> None:
-        """Focus the active path field so the next Files-panel click can fill it."""
-        if self._mode_pan.isChecked():
-            self._pan_list.activate_panel_path_pick()
-        else:
-            self._single_genome_path_focused = True
-            line = self._genome.lineEdit()
-            if line is not None:
-                line.setFocus(Qt.FocusReason.OtherFocusReason)
-
-    def _adjust_dialog_size(self) -> None:
-        if self._mode_pan.isChecked():
-            pan_h = self._pan_list.sizeHint().height()
-            self._content_stack.setMinimumHeight(pan_h)
-            self._content_stack.setMaximumHeight(_PAN_SCROLL_MAX_HEIGHT + _PAN_LIST_EXTRA_HEIGHT)
-        else:
-            self._content_stack.setMinimumHeight(_SINGLE_STACK_HEIGHT)
-            self._content_stack.setMaximumHeight(_SINGLE_STACK_HEIGHT)
-        self.adjustSize()
-        hint = self.sizeHint()
-        self.resize(max(self.minimumWidth(), self.width()), hint.height())
+        """Focus the path field so the next Files-panel click can fill it."""
+        self._single_genome_path_focused = True
+        line = self._genome.lineEdit()
+        if line is not None:
+            line.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def apply_file_from_panel(self, path: Path) -> bool:
-        """Fill the focused genome path field from a Files panel click."""
+        """Fill the genome path field from a Files panel click."""
         if not is_genome_fasta(path):
             return False
-        resolved = path.expanduser().resolve()
-        if self._mode_pan.isChecked():
-            return self._pan_list.apply_path(resolved)
         if not self._single_genome_path_focused:
             return False
+        resolved = path.expanduser().resolve()
         line = self._genome.lineEdit()
         if line is None:
             return False
@@ -530,51 +453,8 @@ class GenomeDialog(QDialog):
 
     def _apply_initial_paths(self, paths: list[Path]) -> None:
         genomes = [p.expanduser().resolve() for p in paths if is_genome_fasta(p)]
-        if not genomes:
-            return
-        if self._mode_pan.isChecked() or len(genomes) > 1:
-            self._mode_pan.setChecked(True)
-            entries = [
-                PanGenomeEntry(name=_default_genome_name(path), path=path)
-                for path in genomes
-            ]
-            self._pan_list.set_entries(entries)
-            self._pan_snapshot = self._pan_list.snapshot_rows()
-            self._adjust_dialog_size()
-        else:
-            self._mode_single.setChecked(True)
+        if genomes:
             self._genome.lineEdit().setText(str(genomes[0]))
-
-    def _sync_mode_widgets(self) -> None:
-        if self._mode_pan.isChecked():
-            self._content_stack.setCurrentIndex(1)
-            self._pan_list.restore_snapshot(self._pan_snapshot)
-        else:
-            self._pan_snapshot = self._pan_list.snapshot_rows()
-            self._single_genome_snapshot = self._genome.lineEdit().text()
-            self._content_stack.setCurrentIndex(0)
-            if self._single_genome_snapshot:
-                self._genome.lineEdit().setText(self._single_genome_snapshot)
-        self._update_hint()
-        self._adjust_dialog_size()
-        if self.isVisible():
-            self._activate_panel_path_pick()
-
-    def _update_hint(self) -> None:
-        if self._mode_pan.isChecked():
-            self._hint.setText(
-                "Pan-genome mode: at least two genomes, each with a unique name (≤10 characters). "
-                "Click in a Genome FASTA field, then click a file in the Files panel, or drag "
-                "FASTA files onto a path field or browse. "
-                "Blast, TE-Aid, and Flexidot run against every genome; Extend uses the genome you pick. "
-                "Visualization is available only in single-genome mode."
-            )
-        else:
-            self._hint.setText(
-                "Single-genome mode: click in the path field, then click a file in the Files panel, "
-                "or drag a FASTA onto the path field or browse. Chromosome sizes and the BLAST "
-                "index are prepared after you choose a genome."
-            )
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if _paths_from_mime(event.mimeData()):
@@ -593,10 +473,7 @@ class GenomeDialog(QDialog):
         if not paths:
             event.ignore()
             return
-        if self._mode_pan.isChecked():
-            self._pan_list.apply_paths(paths)
-        else:
-            self._genome.lineEdit().setText(str(paths[0]))
+        self._genome.lineEdit().setText(str(paths[0]))
         event.acceptProposedAction()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
@@ -676,48 +553,20 @@ class GenomeDialog(QDialog):
 
     def _accept(self) -> None:
         try:
-            if self._mode_pan.isChecked():
-                entries = self._pan_list.entries()
-                if len(entries) < MIN_PAN_GENOMES:
-                    raise ValueError(f"Pan-genome mode requires at least {MIN_PAN_GENOMES} genomes.")
-                for entry in entries:
-                    # Strict validation only for the definition dialog.
-                    normalize_pan_genome_name_strict(entry.name)
-            else:
-                genome = self._current_genome_path()
-                if genome is None or not genome.is_file():
-                    raise ValueError("Choose a valid genome FASTA file.")
+            genome = self._current_genome_path()
+            if genome is None or not genome.is_file():
+                raise ValueError("Choose a valid genome FASTA file.")
         except ValueError as exc:
             QMessageBox.warning(self, "Define genome", str(exc))
             return
         self.accept()
 
     def apply_to_project(self) -> RepeatViewerProject:
-        if self._mode_pan.isChecked():
-            entries = self._pan_list.entries()
-            self._project.genome_mode = GENOME_MODE_PAN
-            self._project.pan_genomes = entries
-            self._project.genome_file = entries[0].path if entries else None
-            for entry in entries:
-                add_genome_to_history(entry.path)
-        else:
-            genome = self._current_genome_path()
-            self._project.genome_mode = GENOME_MODE_SINGLE
-            self._project.genome_file = genome
-            self._pan_snapshot = self._pan_list.snapshot_rows()
-            complete_pan: list[PanGenomeEntry] = []
-            for name, path_text in self._pan_snapshot:
-                name = name.strip()
-                path_text = path_text.strip()
-                if not name or not path_text:
-                    continue
-                try:
-                    complete_pan.append(PanGenomeEntry(name=name, path=Path(path_text)))
-                except ValueError:
-                    continue
-            if complete_pan:
-                self._project.pan_genomes = complete_pan
-            if genome is not None and genome.is_file():
-                add_genome_to_history(genome)
+        genome = self._current_genome_path()
+        self._project.genome_mode = GENOME_MODE_SINGLE
+        self._project.genome_file = genome
+        # Pan-genome lists are configured in TE-Aid, not Define genome.
+        if genome is not None and genome.is_file():
+            add_genome_to_history(genome)
         save_workspace(self._project)
         return self._project

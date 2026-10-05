@@ -63,6 +63,7 @@ from repeatviewer.job_options import (
     ConsensusOptions,
     ExtendOptions,
     FlexidotOptions,
+    HmmerOptions,
     MsaCleanOptions,
     TeaAidOptions,
     TsdSearchOptions,
@@ -91,6 +92,7 @@ def _fasta_sequence_units(path: Path) -> int:
 _DISPLAY_NAMES = {
     "teaid": "TE-Aid",
     "blast": "BLAST",
+    "hmmer": "HMMER",
     "extend": "MSA Extend",
     "msa_clean": "MSA Clean",
     "msa_clean_gappy": "MSA remove gappy columns",
@@ -233,6 +235,24 @@ def _genome_work_items(
     teaid: TeaAidOptions | None = None,
 ) -> list[tuple[str, Path]]:
     """Return ``(label, fasta_path)`` pairs for one batch job."""
+    if func_name == "teaid" and teaid is not None and teaid.use_pan_genome:
+        entries = [
+            (str(name).strip(), Path(path).expanduser().resolve())
+            for name, path in (teaid.pan_genomes or [])
+            if str(name).strip() and str(path).strip()
+        ]
+        if len(entries) < 2:
+            raise RuntimeError(
+                "TE-Aid pangenome mode needs at least two genomes "
+                "(Mode → Pangenome)."
+            )
+        missing = [name for name, path in entries if not path.is_file()]
+        if missing:
+            raise RuntimeError(
+                "TE-Aid pangenome genome file not found: " + ", ".join(missing)
+            )
+        return entries
+
     if not project.is_pan_genome_mode:
         override_path = None
         if func_name == "extend" and extend and extend.genome_path:
@@ -626,6 +646,7 @@ def run_on_sequence(
     flexidot_mode: str = "0",
     extend: ExtendOptions | None = None,
     blast_options: BlastOptions | None = None,
+    hmmer_options: HmmerOptions | None = None,
     teaid_options: TeaAidOptions | None = None,
     msa_clean_options: MsaCleanOptions | None = None,
     consensus_options: ConsensusOptions | None = None,
@@ -816,7 +837,9 @@ def run_on_sequence(
         html_path = out_dir / f"{seq_path.name}{label_suffix}_TEAid.html"
         teaid_work_dir = out_dir
         scratch_dir: Path | None = None
-        pan_genome_run = project.is_pan_genome_mode and len(project.pan_genomes) >= 2
+        pan_genome_run = bool(
+            teaid_opts.use_pan_genome and len(teaid_opts.pan_genomes or []) >= 2
+        )
         if pan_genome_run:
             scratch_dir = out_dir / f"_teaid_{seq_path.stem}_pan"
             scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -830,8 +853,9 @@ def run_on_sequence(
         try:
             if pan_genome_run:
                 genome_targets = [
-                    (entry.name, str(entry.path.expanduser().resolve()))
-                    for entry in project.pan_genomes
+                    (str(name).strip(), str(Path(path).expanduser().resolve()))
+                    for name, path in teaid_opts.pan_genomes
+                    if str(name).strip() and str(path).strip()
                 ]
                 run_ok = teaid_pan_genome_plotter(
                     str(seq_path),
@@ -1090,6 +1114,18 @@ def run_on_sequence(
         )
         created.append(str(out_file.resolve()))
 
+    elif func_name == "hmmer":
+        from repeatviewer.backends.hmmer_tool import resolve_hmm_database, run_hmmer_search
+        from repeatviewer.database_settings import load_user_databases_from_settings
+
+        hmmer_opts = hmmer_options or HmmerOptions()
+        db = resolve_hmm_database(
+            load_user_databases_from_settings(),
+            hmmer_opts.database_name,
+        )
+        outs = run_hmmer_search(seq_path, db, options=hmmer_opts, cancel=cancel)
+        created.extend(str(p) for p in outs)
+
     else:
         raise ValueError(f"Unknown function: {func_name}")
 
@@ -1106,6 +1142,7 @@ def run_batch(
     flexidot_mode: str = "0",
     extend: ExtendOptions | None = None,
     blast_options: BlastOptions | None = None,
+    hmmer_options: HmmerOptions | None = None,
     teaid_options: TeaAidOptions | None = None,
     msa_clean_options: MsaCleanOptions | None = None,
     consensus_options: ConsensusOptions | None = None,
@@ -1151,7 +1188,12 @@ def run_batch(
     elif func_name == "blast" and blast_options and blast_options.program == "blastp":
         raise RuntimeError("Select a protein database in the blastp parameter tab.")
     elif genome_dependent:
-        if not project.has_genome_configured():
+        teaid_pan = (
+            func_name == "teaid"
+            and teaid_options is not None
+            and bool(teaid_options.use_pan_genome)
+        )
+        if not teaid_pan and not project.has_genome_configured():
             raise RuntimeError("Genome FASTA is required for this tool.")
         genome_items = _genome_work_items(
             project, func_name, extend, teaid=teaid_options
@@ -1197,7 +1239,12 @@ def run_batch(
 
     work_items: list[tuple[Path, str, Path | None]] = []
     if genome_dependent and genome_items:
-        if func_name == "teaid" and project.is_pan_genome_mode:
+        teaid_pan = (
+            func_name == "teaid"
+            and teaid_options is not None
+            and teaid_options.use_pan_genome
+        )
+        if teaid_pan:
             for seq_path in seq_list:
                 work_items.append((seq_path, "", None))
         else:
@@ -1281,6 +1328,7 @@ def run_batch(
                     ),
                     extend=extend,
                     blast_options=blast_options,
+                    hmmer_options=hmmer_options,
                     teaid_options=teaid_options,
                     msa_clean_options=msa_clean_options,
                     consensus_options=consensus_options,

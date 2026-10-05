@@ -287,6 +287,14 @@ def _align_dialog(qapp, tmp_path, **kw):
     return AlignParamsDialog(**kw), files
 
 
+@pytest.fixture(autouse=True)
+def _silence_fastga_reminder(monkeypatch):
+    """FastGA tab open schedules an install reminder; keep tests non-interactive."""
+    monkeypatch.setattr(
+        "repeatviewer.views.tool_dialogs.AlignParamsDialog._remind_fastga_if_needed",
+        lambda self: None,
+    )
+
 def test_align_window_has_a_fastga_tab_and_follows_the_rules(qapp, tmp_path):
     dlg, _files = _align_dialog(qapp, tmp_path)
     tabs = dlg.findChild(QTabWidget)
@@ -320,14 +328,10 @@ def test_align_dialog_reopens_last_tab(qapp, tmp_path):
     assert dlg2.current_dialog_tab() == DIALOG_TAB_OPTIONS
 
 
-def test_fastga_reference_path_matches_define_inputs_width(qapp, tmp_path, monkeypatch):
+def test_fastga_reference_path_matches_define_inputs_width(qapp, tmp_path):
     """Reference genome path box / Browse must match Define-inputs width."""
     from repeatviewer.job_options import FASTGA_INPUT_DEFINE
 
-    monkeypatch.setattr(
-        "repeatviewer.views.tool_dialogs.AlignParamsDialog._remind_fastga_if_needed",
-        lambda self: None,
-    )
     ref = tmp_path / "ref.fa"
     ref.write_text(">x\nACGT\n")
     dlg, _files = _align_dialog(
@@ -389,8 +393,10 @@ def test_define_inputs_accepts_panel_files_and_folders(qapp, tmp_path):
     assert panel.input_source() != FASTGA_INPUT_DEFINE
     panel._input_define.setChecked(True)
     assert panel.input_source() == FASTGA_INPUT_DEFINE
-    assert panel._define_inputs.isVisible()
+    assert not panel._define_inputs.isHidden()
     assert dlg.apply_path_from_panel(q1) is True
+    # Next folder click should fill a new row, not overwrite the focused file row.
+    panel._define_inputs.add_row(focus=True)
     assert dlg.apply_folder_from_panel(tmp_path) is True
     opts = dlg.fastga_options()
     assert opts.input_source == FASTGA_INPUT_DEFINE
@@ -481,19 +487,51 @@ def test_old_seed_freq_default_migrates_to_fastga_default(monkeypatch):
 
 def test_fastga_advanced_settings_button_toggles_options(qapp, tmp_path):
     dlg, _files = _align_dialog(qapp, tmp_path, initial_tab=ALIGNER_FASTGA)
+    dlg.show()
+    qapp.processEvents()
     panel = dlg.fastga_panel()
     btn = dlg._advanced_settings_btn
-    assert btn.isVisible()
+    assert not btn.isHidden()
     assert btn.text() == "Advanced Settings ▸"
     assert panel.advanced_visible() is False
     dlg._shrink_to_fastga_content()
     compact_h = dlg.height()
     btn.click()
+    qapp.processEvents()
     assert btn.text() == "Advanced Settings ▾"
     assert panel.advanced_visible() is True
     assert panel._advanced_panel.isVisible()
     assert panel._identity.isVisible()
     assert dlg.height() > compact_h
     btn.click()
+    qapp.processEvents()
     assert panel.advanced_visible() is False
     assert dlg.height() <= compact_h + 20
+    dlg.close()
+
+
+def test_fastga_reference_mode_refits_dialog_height(qapp, tmp_path):
+    """Compare-against-reference must grow for the reference rows, without a blank gap."""
+    dlg, _files = _align_dialog(
+        qapp,
+        tmp_path,
+        initial_tab=ALIGNER_FASTGA,
+        fastga_initial=FastGaOptions(mode=FASTGA_MODE_SELF),
+    )
+    dlg.show()
+    qapp.processEvents()
+    dlg._fit_current_align_tab()
+    qapp.processEvents()
+    panel = dlg.fastga_panel()
+    h_self = dlg.height()
+    panel._mode_buttons[FASTGA_MODE_REFERENCE].click()
+    qapp.processEvents()
+    qapp.processEvents()
+    h_ref = dlg.height()
+    assert h_ref > h_self
+    assert panel._reference_field.isVisible()
+    assert not panel.advanced_visible()
+    # No leftover Advanced-sized blank under Settings.
+    gap = dlg.height() - dlg._dialog_chrome_height() - panel._basic_panel.height()
+    assert gap < 40
+    dlg.close()

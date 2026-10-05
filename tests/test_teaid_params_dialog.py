@@ -35,9 +35,10 @@ def _teaid_dialog(qapp: QApplication, **kw) -> TeaAidParamsDialog:
 def test_teaid_dialog_blast_style_sections(qapp: QApplication) -> None:
     dlg = _teaid_dialog(qapp)
     labels = [lab.text() for lab in dlg.findChildren(QLabel)]
+    assert "<b>Mode</b>" in labels
     assert "<b>Inputs</b>" in labels
     assert "<b>Settings</b>" in labels
-    assert any(lab.text() == "Genome:" for lab in dlg.findChildren(QLabel))
+    assert not any(lab.text() == "Genome:" for lab in dlg.findChildren(QLabel))
     assert any(lab.text() == "Threads:" for lab in dlg.findChildren(QLabel))
     assert any(lab.text() == "Line transparency:" for lab in dlg.findChildren(QLabel))
     assert any(lab.text() == "Full-length hits (≥):" for lab in dlg.findChildren(QLabel))
@@ -47,6 +48,10 @@ def test_teaid_dialog_blast_style_sections(qapp: QApplication) -> None:
     assert not any(g.title() == "Plot labels" for g in dlg.findChildren(QGroupBox))
     assert not any(g.title() == "Genome BLAST hit colors" for g in dlg.findChildren(QGroupBox))
     texts = [b.text() for b in dlg.findChildren(QPushButton)]
+    radios = [r.text() for r in dlg.findChildren(QRadioButton)]
+    assert "Single genome" in radios
+    assert "Pangenome" in radios
+    assert "Use selected sequences" in radios
     assert "Manage BLAST databases" in texts
     assert "Add/Manage databases" not in texts
     assert any(t.startswith("Advanced Settings") for t in texts)
@@ -56,6 +61,9 @@ def test_teaid_dialog_blast_style_sections(qapp: QApplication) -> None:
     assert dlg._hit_mid_pct.width() == 100
     assert dlg._teaid_advanced_panel.isHidden()
     assert dlg.input_source() == ALIGN_INPUT_SELECTED
+    assert dlg._mode_single.isChecked()
+    assert dlg._genome_row.isVisible()
+    assert not dlg._pan_list.isVisible()
     # Genome "?" sits on the combo row, not mid-stack with Manage.
     combo = dlg._genome_row._combo
     help_btn = None
@@ -69,12 +77,18 @@ def test_teaid_dialog_blast_style_sections(qapp: QApplication) -> None:
     help_y = help_btn.mapTo(dlg, help_btn.rect().center()).y()
     assert abs(combo_y - help_y) <= 8
 
+    dlg._mode_pan.setChecked(True)
+    qapp.processEvents()
+    assert dlg._pan_list.isVisible()
+    assert not dlg._genome_row.isVisible()
+    opts = dlg.options()
+    assert opts.use_pan_genome is True
+
     dlg._advanced_settings_btn.setChecked(True)
     qapp.processEvents()
     assert dlg._teaid_advanced_panel.isVisible()
     assert dlg._hit_high_pct.x() < dlg._hit_color_high_btn.x()
     assert dlg._hit_mid_pct.x() < dlg._hit_color_mid_btn.x()
-
 
 def test_teaid_options_has_process_output(qapp: QApplication) -> None:
     dlg = _teaid_dialog(qapp)
