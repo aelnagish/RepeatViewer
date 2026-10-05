@@ -578,14 +578,15 @@ def online_blast_features_by_query(
     """Build ``SequenceFeature`` lists keyed by query id from an ``*_ob.txt``.
 
     Coordinates are query (consensus) positions — for the Annotation tab, not
-    genome maps.
+    genome maps. Hits are grouped by subject accession; ``max_hits`` caps the
+    number of **subjects** (all HSPs for a kept subject are retained).
     """
     from repeatviewer.backends.sequence_features import SequenceFeature
     from repeatviewer.backends.similarity_annotation import similarity_feature_name
 
     limit = None if max_hits is None else max(1, int(max_hits))
-    by_query: dict[str, list] = {}
-    ranked: list[tuple[float, str, object]] = []
+    # (qid, accession) -> {best_bitscore, feats}
+    groups: dict[tuple[str, str], dict] = {}
     for hit in _parse_online_blast_rows(ob_txt):
         try:
             qstart = int(float(hit["qstart"]))
@@ -605,11 +606,17 @@ def online_blast_features_by_query(
             bitscore = float(hit.get("bitscore") or 0.0)
         except (TypeError, ValueError):
             bitscore = 0.0
+        try:
+            pident = float(hit.get("pident") or 0.0)
+        except (TypeError, ValueError):
+            pident = 0.0
         qid = str(hit.get("qseqid") or "query").split()[0]
+        accession = str(hit.get("sseqid") or "").strip().split()[0] or "subject"
         target = _annotation_target_label(
-            str(hit.get("sseqid") or ""),
+            accession,
             str(hit.get("stitle") or ""),
         )
+        parent = f"{ONLINE_BLAST_LABEL}:{accession}"
         feat = SequenceFeature(
             start=qstart,
             end=qend,
@@ -623,14 +630,106 @@ def online_blast_features_by_query(
             color=ONLINE_BLAST_COLOR,
             strand=strand,
             source=ONLINE_BLAST_SOURCE,
+            parent=parent,
+            pident=pident,
+            subject_id=accession,
         )
-        ranked.append((bitscore, qid, feat))
-    ranked.sort(key=lambda row: row[0], reverse=True)
+        key = (qid, accession)
+        bucket = groups.get(key)
+        if bucket is None:
+            groups[key] = {"best_bitscore": bitscore, "feats": [feat]}
+        else:
+            bucket["feats"].append(feat)
+            if bitscore > float(bucket["best_bitscore"]):
+                bucket["best_bitscore"] = bitscore
+
+    # Rank subject groups by best HSP bitscore; keep top ``limit`` subjects.
+    ranked_groups = sorted(
+        groups.items(),
+        key=lambda item: float(item[1]["best_bitscore"]),
+        reverse=True,
+    )
     if limit is not None:
-        ranked = ranked[:limit]
-    for _score, qid, feat in ranked:
-        by_query.setdefault(qid, []).append(feat)
+        ranked_groups = ranked_groups[:limit]
+
+    by_query: dict[str, list] = {}
+    for (qid, _acc), bucket in ranked_groups:
+        by_query.setdefault(qid, []).extend(bucket["feats"])
     return by_query
+
+
+def enrich_online_blast_features_from_ob(
+    features: list,
+    ob_txt: Path,
+) -> list:
+    """Patch legacy online features missing pident/parent from ``*_ob.txt``.
+
+    Matches by query coordinates + subject accession when possible. Returns a
+    new list (unchanged entries when no match). Does not write to disk.
+    """
+    from repeatviewer.backends.sequence_features import SequenceFeature
+
+    online = [
+        f
+        for f in features
+        if str(getattr(f, "source", "") or "") == ONLINE_BLAST_SOURCE
+        or str(getattr(f, "name", "") or "").startswith(f"{ONLINE_BLAST_LABEL}:")
+    ]
+    if not online:
+        return list(features)
+    if all(float(getattr(f, "pident", 0) or 0) > 0 for f in online):
+        return list(features)
+    table = Path(ob_txt)
+    if not table.is_file():
+        return list(features)
+
+    # Index rows by (start, end) and by accession for fuzzy match.
+    by_coords: dict[tuple[int, int], list[dict[str, str]]] = {}
+    for hit in _parse_online_blast_rows(table):
+        try:
+            qstart = int(float(hit["qstart"]))
+            qend = int(float(hit["qend"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if qstart > qend:
+            qstart, qend = qend, qstart
+        by_coords.setdefault((qstart, qend), []).append(hit)
+
+    updated: list = []
+    for feat in features:
+        is_online = (
+            str(feat.source or "") == ONLINE_BLAST_SOURCE
+            or str(feat.name or "").startswith(f"{ONLINE_BLAST_LABEL}:")
+        )
+        if not is_online or float(getattr(feat, "pident", 0) or 0) > 0:
+            updated.append(feat)
+            continue
+        candidates = by_coords.get((int(feat.start), int(feat.end))) or []
+        hit = candidates[0] if candidates else None
+        if hit is None:
+            updated.append(feat)
+            continue
+        accession = str(hit.get("sseqid") or "").strip().split()[0]
+        try:
+            pident = float(hit.get("pident") or 0.0)
+        except (TypeError, ValueError):
+            pident = 0.0
+        updated.append(
+            SequenceFeature(
+                start=feat.start,
+                end=feat.end,
+                name=feat.name,
+                feature_type=feat.feature_type,
+                color=feat.color or ONLINE_BLAST_COLOR,
+                strand=feat.strand,
+                track=feat.track,
+                parent=feat.parent or (f"{ONLINE_BLAST_LABEL}:{accession}" if accession else ""),
+                source=ONLINE_BLAST_SOURCE,
+                pident=pident,
+                subject_id=feat.subject_id or accession,
+            )
+        )
+    return updated
 
 
 def _match_record_id(qseqid: str, record_ids: list[str]) -> str | None:
@@ -713,26 +812,44 @@ def merge_online_blast_into_annotations(
         if rid is None:
             continue
         existing = features_by_id.get(rid) or []
-        track = _next_track(existing)
+        base_track = _next_track(existing)
         seq_len = max(1, int(lengths.get(rid) or data.lengths_by_id.get(rid) or 10**9))
-        stamped: list[SequenceFeature] = []
+        by_subject: dict[str, list] = {}
         for feat in new_feats:
-            start = max(1, min(seq_len, int(feat.start)))
-            end = max(1, min(seq_len, int(feat.end)))
-            if start > end:
-                start, end = end, start
-            stamped.append(
-                SequenceFeature(
-                    start=start,
-                    end=end,
-                    name=feat.name,
-                    feature_type=ONLINE_BLAST_FEATURE_TYPE,
-                    color=ONLINE_BLAST_COLOR,
-                    strand=feat.strand,
-                    track=track,
-                    source=ONLINE_BLAST_SOURCE,
+            sk = str(getattr(feat, "subject_id", "") or "").strip()
+            if not sk:
+                sk = str(feat.parent or feat.name or "subject")
+            by_subject.setdefault(sk, []).append(feat)
+        sorted_subjects = sorted(
+            by_subject.keys(),
+            key=lambda sk: max(
+                float(getattr(f, "pident", 0.0) or 0.0) for f in by_subject[sk]
+            ),
+            reverse=True,
+        )
+        stamped: list[SequenceFeature] = []
+        for subj_idx, sk in enumerate(sorted_subjects):
+            track = base_track + subj_idx
+            for feat in sorted(by_subject[sk], key=lambda f: int(f.start)):
+                start = max(1, min(seq_len, int(feat.start)))
+                end = max(1, min(seq_len, int(feat.end)))
+                if start > end:
+                    start, end = end, start
+                stamped.append(
+                    SequenceFeature(
+                        start=start,
+                        end=end,
+                        name=feat.name,
+                        feature_type=ONLINE_BLAST_FEATURE_TYPE,
+                        color=ONLINE_BLAST_COLOR,
+                        strand=feat.strand,
+                        track=track,
+                        parent=feat.parent,
+                        source=ONLINE_BLAST_SOURCE,
+                        pident=float(getattr(feat, "pident", 0.0) or 0.0),
+                        subject_id=str(getattr(feat, "subject_id", "") or ""),
+                    )
                 )
-            )
         features_by_id[rid] = existing + stamped
 
     json_path, gff_path = save_annotations_multi(

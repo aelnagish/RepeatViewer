@@ -4605,7 +4605,10 @@ _BLAST_ONLINE_PROGRAM_HELP = (
     "<b>blastp</b> (protein vs protein)<br><br>"
     "<b>blastx</b> (translated DNA vs protein)<br><br>"
     "<b>tblastn</b> (protein vs translated DNA)<br><br>"
-    "<b>tblastx</b> (translated DNA vs translated DNA)"
+    "<b>tblastx</b> (translated DNA vs translated DNA)<br><br>"
+    "Hits are saved to the Annotation NCBI layer "
+    "(<b>Show Online BLAST</b> to hide). Bars are colored by "
+    "<b>% identity</b>; arcs link HSPs from the same accession."
 )
 _BLAST_ONLINE_DATABASE_HELP = (
     "Public NCBI database searched on their servers (not a local RepeatViewer "
@@ -4682,12 +4685,8 @@ _BLAST_QCOV_HELP = (
     "discarded. Use 0 to disable the filter."
 )
 _BLAST_WRITE_TEXT_HELP = (
-    "Keep the tabular hit table (<code>*_b.txt</code>) next to the query. "
+    "Keep the BLAST hits table (<code>*_b.txt</code>) next to the query. "
     "When unchecked, the table is removed after BLAST."
-)
-_BLAST_WRITE_GFF_HELP = (
-    "Write a GFF next to the query (<code>*_b.gff</code>). "
-    "When unchecked, any previous <code>*_b.gff</code> for this query is removed."
 )
 _BLAST_MAX_SEQ_HELP = (
     "<b>Max sequence number</b><br><br>"
@@ -4788,12 +4787,9 @@ class BlastParamsDialog(QDialog):
         self._query_coverage.setValue(opts.query_coverage_hsp)
         self._query_coverage.setToolTip(_BLAST_QCOV_HELP)
 
-        self._blastn_write_text = QCheckBox("Export BLAST text file (*.txt)")
+        self._blastn_write_text = QCheckBox("Export BLAST hits table")
         self._blastn_write_text.setChecked(opts.write_text)
         self._blastn_write_text.setToolTip(_BLAST_WRITE_TEXT_HELP)
-        self._blastn_write_gff = QCheckBox("Export GFF file (*.gff)")
-        self._blastn_write_gff.setChecked(opts.write_gff)
-        self._blastn_write_gff.setToolTip(_BLAST_WRITE_GFF_HELP)
 
         self._blastp_evalue = QDoubleSpinBox()
         configure_report_evalue_spinbox(self._blastp_evalue)
@@ -4826,12 +4822,9 @@ class BlastParamsDialog(QDialog):
         self._blastp_query_coverage.setSuffix(" %")
         self._blastp_query_coverage.setValue(opts.blastp_query_coverage_hsp)
         self._blastp_query_coverage.setToolTip(_BLAST_QCOV_HELP)
-        self._blastp_write_text = QCheckBox("Export BLAST text file (*.txt)")
+        self._blastp_write_text = QCheckBox("Export BLAST hits table")
         self._blastp_write_text.setChecked(opts.blastp_write_text)
         self._blastp_write_text.setToolTip(_BLAST_WRITE_TEXT_HELP)
-        self._blastp_write_gff = QCheckBox("Export GFF file (*.gff)")
-        self._blastp_write_gff.setChecked(opts.blastp_write_gff)
-        self._blastp_write_gff.setToolTip(_BLAST_WRITE_GFF_HELP)
 
         # --- blastx: nucleotide query translated against a protein database ---
         self._blastx_database = QComboBox()
@@ -4868,12 +4861,9 @@ class BlastParamsDialog(QDialog):
         self._blastx_query_coverage.setSuffix(" %")
         self._blastx_query_coverage.setValue(opts.blastx_query_coverage_hsp)
         self._blastx_query_coverage.setToolTip(_BLAST_QCOV_HELP)
-        self._blastx_write_text = QCheckBox("Export BLAST text file (*.txt)")
+        self._blastx_write_text = QCheckBox("Export BLAST hits table")
         self._blastx_write_text.setChecked(opts.blastx_write_text)
         self._blastx_write_text.setToolTip(_BLAST_WRITE_TEXT_HELP)
-        self._blastx_write_gff = QCheckBox("Export GFF file (*.gff)")
-        self._blastx_write_gff.setChecked(opts.blastx_write_gff)
-        self._blastx_write_gff.setToolTip(_BLAST_WRITE_GFF_HELP)
 
         # --- Online BLAST (NCBI web) -----------------------------------------
         self._online_program = QComboBox()
@@ -5093,7 +5083,6 @@ class BlastParamsDialog(QDialog):
             max_msa=self._max_msa,
             top_msa=self._top_msa,
             write_text=self._blastn_write_text,
-            write_gff=self._blastn_write_gff,
             min_bit_score=self._min_bit_score,
             advanced_rows=[
                 (
@@ -5142,7 +5131,6 @@ class BlastParamsDialog(QDialog):
             max_msa=self._blastp_max_msa,
             top_msa=self._blastp_top_msa,
             write_text=self._blastp_write_text,
-            write_gff=self._blastp_write_gff,
             min_bit_score=self._blastp_min_bit_score,
             advanced_rows=[
                 (
@@ -5179,7 +5167,6 @@ class BlastParamsDialog(QDialog):
             max_msa=self._blastx_max_msa,
             top_msa=self._blastx_top_msa,
             write_text=self._blastx_write_text,
-            write_gff=self._blastx_write_gff,
             min_bit_score=self._blastx_min_bit_score,
             advanced_rows=[
                 (
@@ -5410,7 +5397,6 @@ class BlastParamsDialog(QDialog):
         max_msa: QSpinBox,
         top_msa: QSpinBox,
         write_text: QCheckBox,
-        write_gff: QCheckBox,
         min_bit_score: QDoubleSpinBox,
         advanced_rows: list[tuple[str, QWidget]],
     ) -> tuple[QWidget, QWidget, QWidget]:
@@ -5458,12 +5444,8 @@ class BlastParamsDialog(QDialog):
         form.addRow(
             "",
             self._field_with_help(
-                write_text, "Export BLAST text file", _BLAST_WRITE_TEXT_HELP
+                write_text, "Export BLAST hits table", _BLAST_WRITE_TEXT_HELP
             ),
-        )
-        form.addRow(
-            "",
-            self._field_with_help(write_gff, "Export GFF file", _BLAST_WRITE_GFF_HELP),
         )
         root.addWidget(basic)
 
@@ -6002,7 +5984,6 @@ class BlastParamsDialog(QDialog):
         self._percent_identity.setValue(defaults.percent_identity)
         self._query_coverage.setValue(defaults.query_coverage_hsp)
         self._blastn_write_text.setChecked(defaults.write_text)
-        self._blastn_write_gff.setChecked(defaults.write_gff)
         self._blastp_evalue.setValue(defaults.blastp_e_value)
         self._blastp_threads.setValue(defaults.blastp_num_threads)
         self._blastp_word_size.setValue(defaults.blastp_word_size)
@@ -6010,7 +5991,6 @@ class BlastParamsDialog(QDialog):
         self._blastp_gap_extend.setValue(defaults.blastp_gap_extend)
         self._blastp_query_coverage.setValue(defaults.blastp_query_coverage_hsp)
         self._blastp_write_text.setChecked(defaults.blastp_write_text)
-        self._blastp_write_gff.setChecked(defaults.blastp_write_gff)
         self._blastx_evalue.setValue(defaults.blastx_e_value)
         self._blastx_threads.setValue(defaults.blastx_num_threads)
         self._blastx_word_size.setValue(defaults.blastx_word_size)
@@ -6018,7 +5998,6 @@ class BlastParamsDialog(QDialog):
         self._blastx_gap_extend.setValue(defaults.blastx_gap_extend)
         self._blastx_query_coverage.setValue(defaults.blastx_query_coverage_hsp)
         self._blastx_write_text.setChecked(defaults.blastx_write_text)
-        self._blastx_write_gff.setChecked(defaults.blastx_write_gff)
         online_idx = self._online_program.findData(defaults.online_program)
         self._online_program.setCurrentIndex(online_idx if online_idx >= 0 else 0)
         self._populate_online_database_combo(defaults.online_database)
@@ -6095,7 +6074,7 @@ class BlastParamsDialog(QDialog):
             max_msa_lines=self._max_msa.value(),
             top_msa_lines=self._top_msa.value(),
             write_text=self._blastn_write_text.isChecked(),
-            write_gff=self._blastn_write_gff.isChecked(),
+            write_gff=False,
             minimum_bit_score=self._min_bit_score.value(),
             blast_database_name=self._blastn_database.currentData(),
             blastp_e_value=normalize_blast_evalue(self._blastp_evalue.value()),
@@ -6106,7 +6085,7 @@ class BlastParamsDialog(QDialog):
             blastp_query_coverage_hsp=self._blastp_query_coverage.value(),
             blastp_database_name=self._blastp_database.currentData(),
             blastp_write_text=self._blastp_write_text.isChecked(),
-            blastp_write_gff=self._blastp_write_gff.isChecked(),
+            blastp_write_gff=False,
             blastx_e_value=normalize_blast_evalue(self._blastx_evalue.value()),
             blastx_num_threads=self._blastx_threads.value(),
             blastx_word_size=self._blastx_word_size.value(),
@@ -6115,7 +6094,7 @@ class BlastParamsDialog(QDialog):
             blastx_query_coverage_hsp=self._blastx_query_coverage.value(),
             blastx_database_name=self._blastx_database.currentData(),
             blastx_write_text=self._blastx_write_text.isChecked(),
-            blastx_write_gff=self._blastx_write_gff.isChecked(),
+            blastx_write_gff=False,
             online_program=str(
                 self._online_program.currentData() or DEFAULT_BLAST_ONLINE_PROGRAM
             ),

@@ -2693,6 +2693,7 @@ class MainWindow(QMainWindow):
             self._shutdown_background_threads()
         if self._preview_tabs is not None:
             self._preview_tabs.teardown_all_html_previews()
+        self._remember_file_list_position(self._current_folder)
         self._persist_workspace()
         # Detached docks can outlive the main window (independent tool windows).
         # Redock/close them before saving layout so they vanish on quit.
@@ -7497,6 +7498,15 @@ class MainWindow(QMainWindow):
             walk(self._folder_tree.topLevelItem(index))
 
     def _persist_workspace(self) -> None:
+        self._remember_file_list_position(self._current_folder)
+        from repeatviewer.session_restore import save_folder_file_memory
+
+        save_folder_file_memory(
+            self._last_file_by_folder,
+            self._last_scroll_by_folder,
+        )
+        if self._preview_tabs is not None:
+            self._preview_tabs.persist_session_view_state()
         roots = self._collect_root_folders()
         if roots and self._project.input_dir is None:
             self._project.input_dir = roots[0]
@@ -7515,6 +7525,11 @@ class MainWindow(QMainWindow):
             roots = [self._project.input_dir.resolve()]
         saved_last = load_last_folder()
         saved_expanded = load_expanded_folders()
+        from repeatviewer.session_restore import load_folder_file_memory
+
+        files_mem, scroll_mem = load_folder_file_memory()
+        self._last_file_by_folder.update(files_mem)
+        self._last_scroll_by_folder.update(scroll_mem)
         for folder in roots:
             self._add_root_folder(
                 folder,
@@ -9061,6 +9076,8 @@ class MainWindow(QMainWindow):
         current: FileListRow | None,
         _previous: FileListRow | None,
     ) -> None:
+        if self._preview_tabs is not None:
+            self._preview_tabs.persist_session_view_state()
         if self._file_list.suppress_selection_preview():
             return
         if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
@@ -9522,7 +9539,7 @@ class MainWindow(QMainWindow):
             self._pending_te_genome_map_fastas = list(need_blast)
             self._set_status_message("Running Blast on TE consensus, then TE genome map…", 0)
             # Density plot needs the *_b.txt table even if the user turned off
-            # "Export BLAST text file" for ordinary Blast runs.
+            # "Export BLAST hits table" for ordinary Blast runs.
             self._apply_function(
                 "blast",
                 preselected=need_blast,

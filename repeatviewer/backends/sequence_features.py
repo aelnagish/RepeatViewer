@@ -94,6 +94,10 @@ class SequenceFeature:
     parent: str = ""
     # Where the feature came from (import filename, or repeatviewer_internal).
     source: str = ""
+    # BLAST percent identity (0 = unset / legacy). Used for Online BLAST coloring.
+    pident: float = 0.0
+    # Normalized subject accession for multi-HSP grouping (Online BLAST).
+    subject_id: str = ""
 
     def __post_init__(self) -> None:
         self.start = int(self.start)
@@ -114,6 +118,11 @@ class SequenceFeature:
         self.track = max(0, int(self.track))
         self.parent = str(self.parent or "").strip()
         self.source = str(self.source or "").strip()
+        try:
+            self.pident = float(self.pident or 0.0)
+        except (TypeError, ValueError):
+            self.pident = 0.0
+        self.subject_id = str(self.subject_id or "").strip()
 
     @staticmethod
     def _normalize_strand(strand: str) -> str:
@@ -134,6 +143,10 @@ class SequenceFeature:
 
     @classmethod
     def from_dict(cls, data: dict) -> SequenceFeature:
+        try:
+            pident = float(data.get("pident", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            pident = 0.0
         return cls(
             start=int(data.get("start", 1)),
             end=int(data.get("end", 1)),
@@ -144,6 +157,8 @@ class SequenceFeature:
             track=int(data.get("track", 0)),
             parent=str(data.get("parent", "") or ""),
             source=str(data.get("source", "") or ""),
+            pident=pident,
+            subject_id=str(data.get("subject_id", "") or ""),
         )
 
 
@@ -174,6 +189,8 @@ def remount_parent_ids(
                 track=feat.track,
                 parent=new,
                 source=feat.source,
+                pident=feat.pident,
+                subject_id=feat.subject_id,
             )
         )
     return updated
@@ -227,6 +244,8 @@ def with_feature_source(
         track=feat.track,
         parent=feat.parent,
         source=label,
+        pident=feat.pident,
+        subject_id=feat.subject_id,
     )
 
 
@@ -248,7 +267,7 @@ def _pack_feature_row_group(features: list[SequenceFeature]) -> tuple[list[int],
     return row_for_index, max(0, len(row_ends))
 
 
-def pack_feature_display_rows(
+def _pack_feature_display_rows_internal(
     features: list[SequenceFeature],
     *,
     split_by_source: bool = True,
@@ -270,6 +289,63 @@ def pack_feature_display_rows(
         for local_idx, global_idx in enumerate(indices):
             row_for_index[global_idx] = group_rows[local_idx] + row_offset
         row_offset += group_count
+    return row_for_index, row_offset
+
+
+def _online_blast_subject_key(feat: SequenceFeature) -> str:
+    sid = str(getattr(feat, "subject_id", "") or "").strip()
+    if sid:
+        return sid
+    parent = str(getattr(feat, "parent", "") or "").strip()
+    if parent:
+        return parent
+    return str(feat.name or feat.feature_type or "subject")
+
+
+def pack_feature_display_rows(
+    features: list[SequenceFeature],
+    *,
+    split_by_source: bool = True,
+) -> tuple[list[int], int]:
+    """Assign display rows; Online BLAST uses one row per subject (NCBI graphic style)."""
+    if not features:
+        return [], 0
+    from repeatviewer.backends.ncbi_blast_online import ONLINE_BLAST_SOURCE
+
+    non_online_idx = [
+        i for i, f in enumerate(features) if str(f.source or "") != ONLINE_BLAST_SOURCE
+    ]
+    online_idx = [
+        i for i, f in enumerate(features) if str(f.source or "") == ONLINE_BLAST_SOURCE
+    ]
+    row_for_index = [0] * len(features)
+    row_offset = 0
+    if non_online_idx:
+        subset = [features[i] for i in non_online_idx]
+        sub_rows, count = _pack_feature_display_rows_internal(
+            subset, split_by_source=split_by_source
+        )
+        for local, global_idx in enumerate(non_online_idx):
+            row_for_index[global_idx] = sub_rows[local]
+        row_offset = count
+    if online_idx:
+        groups: dict[str, list[int]] = {}
+        for idx in online_idx:
+            key = _online_blast_subject_key(features[idx])
+            groups.setdefault(key, []).append(idx)
+
+        def _group_score(key: str) -> float:
+            return max(float(features[i].pident or 0) for i in groups[key])
+
+        # One subject band, but pack overlapping HSPs into sub-lanes so they
+        # do not paint on top of each other (common for TE / multi-domain hits).
+        for key in sorted(groups.keys(), key=_group_score, reverse=True):
+            members = groups[key]
+            member_feats = [features[i] for i in members]
+            local_rows, local_count = _pack_feature_row_group(member_feats)
+            for local_i, global_idx in enumerate(members):
+                row_for_index[global_idx] = row_offset + local_rows[local_i]
+            row_offset += max(1, local_count)
     return row_for_index, row_offset
 
 
@@ -803,6 +879,8 @@ def _merge_feature_colors_from_json(
                 track=feat.track,
                 parent=feat.parent,
                 source=feat.source,
+                pident=feat.pident,
+                subject_id=feat.subject_id,
             )
         )
     return merged
@@ -1053,6 +1131,10 @@ def load_features_from_gff(path: Path, *, expected_id: str) -> list[SequenceFeat
         raw_color = str(row.attributes.get("color", "")).strip()
         color = raw_color or _infer_feature_color(name, feat_type)
         parent = str(row.attributes.get("Parent", "") or "").strip()
+        try:
+            pident = float(row.attributes.get("pident", 0) or 0)
+        except (TypeError, ValueError):
+            pident = 0.0
         features.append(
             SequenceFeature(
                 start=row.start,
@@ -1064,6 +1146,8 @@ def load_features_from_gff(path: Path, *, expected_id: str) -> list[SequenceFeat
                 track=int(row.attributes.get("track", 0) or 0),
                 parent=parent,
                 source=str(row.attributes.get("source", "") or "").strip(),
+                pident=pident,
+                subject_id=str(row.attributes.get("subject_id", "") or "").strip(),
             )
         )
     return sorted(features, key=lambda f: (f.start, f.end))
@@ -1154,6 +1238,11 @@ def _gff_feature_line(sequence_id: str, feat: SequenceFeature, sequence_length: 
     if feat.source:
         safe_source = feat.source.replace("\t", " ").replace("\n", " ").replace(";", ",")
         attrs += f";source={safe_source}"
+    if feat.pident > 0:
+        attrs += f";pident={feat.pident:.3f}"
+    if feat.subject_id:
+        safe_subject = feat.subject_id.replace("\t", " ").replace("\n", " ").replace(";", ",")
+        attrs += f";subject_id={safe_subject}"
     return f"{sequence_id}\tRepeatViewer\t{safe_type}\t{start}\t{end}\t.\t{strand}\t.\t{attrs}"
 
 
@@ -1356,6 +1445,10 @@ def _gff_rows_to_sequence_features(
         except (TypeError, ValueError):
             track = 0
         parent = str(row.attributes.get("Parent", "") or "").strip()
+        try:
+            pident = float(row.attributes.get("pident", 0) or 0)
+        except (TypeError, ValueError):
+            pident = 0.0
         features.append(
             SequenceFeature(
                 start=start,
@@ -1367,6 +1460,8 @@ def _gff_rows_to_sequence_features(
                 track=track,
                 parent=parent,
                 source=str(row.attributes.get("source", "") or "").strip(),
+                pident=pident,
+                subject_id=str(row.attributes.get("subject_id", "") or "").strip(),
             )
         )
     return sorted(features, key=lambda f: (f.start, f.end))

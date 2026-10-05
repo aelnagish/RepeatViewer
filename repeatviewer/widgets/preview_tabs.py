@@ -864,6 +864,24 @@ class FilePreviewPage(QWidget):
     def is_annotation_preview_active(self) -> bool:
         return self._single_fasta_mode and self._fasta_stack.currentIndex() == 1
 
+    def persist_annotation_view_for_session(self) -> None:
+        """Write the current annotation viewport to QSettings for restart restore."""
+        if not _is_sequence_map_fasta(self.path):
+            return
+        panel = self._annotation_panel
+        if panel is None:
+            return
+        state = panel._map.view_state_for_session()
+        if not state:
+            return
+        from repeatviewer.session_restore import save_annotation_view
+
+        save_annotation_view(
+            self.path,
+            state,
+            sequence_id=str(state.get("sequence_id") or ""),
+        )
+
     def show_annotation_tab(self) -> None:
         """Switch this FASTA preview to the Annotation (or Overview) sub-tab."""
         if not self._single_fasta_mode:
@@ -2417,6 +2435,12 @@ class PreviewTabWidget(QTabWidget):
         self._apply_zoom_to_current_tab()
         self._install_annotation_delete_shortcuts()
         self._sync_tab_bar_visible()
+
+    def persist_session_view_state(self) -> None:
+        """Save annotation viewport for the active preview tab (session restore)."""
+        widget = self.currentWidget()
+        if isinstance(widget, FilePreviewPage):
+            widget.persist_annotation_view_for_session()
 
     def mount_file_tab_bar(self, host: QWidget) -> None:
         """Show open-file tabs in an external host (Preview dock title bar).

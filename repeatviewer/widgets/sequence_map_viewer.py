@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QNativeGestureEvent,
     QPainter,
+    QPainterPath,
     QImage,
     QPalette,
     QPen,
@@ -164,6 +165,7 @@ def _annotation_panel_separator(parent: QWidget | None = None) -> QFrame:
 
 
 _SPLIT_TRACKS_BY_SOURCE_KEY = "annotation/split_tracks_by_source"
+_SHOW_ONLINE_BLAST_KEY = "annotation/show_online_blast"
 
 
 def _load_split_tracks_by_source() -> bool:
@@ -177,6 +179,39 @@ def _load_split_tracks_by_source() -> bool:
 
 def _save_split_tracks_by_source(enabled: bool) -> None:
     QSettings().setValue(_SPLIT_TRACKS_BY_SOURCE_KEY, bool(enabled))
+
+
+def _load_show_online_blast() -> bool:
+    value = QSettings().value(_SHOW_ONLINE_BLAST_KEY, True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _save_show_online_blast(enabled: bool) -> None:
+    QSettings().setValue(_SHOW_ONLINE_BLAST_KEY, bool(enabled))
+
+
+def filter_features_for_online_blast_display(
+    features: list[SequenceFeature],
+    *,
+    show_online_blast: bool,
+) -> tuple[list[SequenceFeature], list[int]]:
+    """Return (display_features, full_index_for_each_display_row)."""
+    from repeatviewer.backends.ncbi_blast_online import ONLINE_BLAST_SOURCE
+
+    if show_online_blast:
+        return list(features), list(range(len(features)))
+    display: list[SequenceFeature] = []
+    mapping: list[int] = []
+    for index, feat in enumerate(features):
+        if str(feat.source or "") == ONLINE_BLAST_SOURCE:
+            continue
+        display.append(feat)
+        mapping.append(index)
+    return display, mapping
 
 
 def _configure_annotation_controls_panel(panel: QWidget) -> None:
@@ -1059,6 +1094,8 @@ def _feature_with_track(feat: SequenceFeature, track: int) -> SequenceFeature:
         track=max(0, int(track)),
         parent=feat.parent,
         source=feat.source,
+        pident=feat.pident,
+        subject_id=feat.subject_id,
     )
 
 
@@ -1073,6 +1110,8 @@ def _feature_with_color(feat: SequenceFeature, color: str) -> SequenceFeature:
         track=feat.track,
         parent=feat.parent,
         source=feat.source,
+        pident=feat.pident,
+        subject_id=feat.subject_id,
     )
 
 
@@ -1616,6 +1655,21 @@ class AnnotationTrackWidget(QWidget):
         row_h = self._row_height()
         painter.setPen(Qt.PenStyle.NoPen)
 
+        from repeatviewer.backends.annotation_colors import (
+            pident_color_hex,
+            pident_scale_bounds,
+        )
+        from repeatviewer.backends.ncbi_blast_online import ONLINE_BLAST_SOURCE
+
+        online_pidents = [
+            float(feat.pident)
+            for feat in self._features
+            if str(feat.source or "") == ONLINE_BLAST_SOURCE and float(feat.pident or 0) > 0
+        ]
+        zmin, zmax = pident_scale_bounds(online_pidents)
+
+        # Precompute feature rects for arc connectors.
+        rects: list[QRectF | None] = [None] * len(self._features)
         for idx, feat in enumerate(self._features):
             x1 = _bp_view_x(feat.start, scroll, ppb)
             x2 = _bp_view_x(feat.end + 1, scroll, ppb)
@@ -1623,17 +1677,86 @@ class AnnotationTrackWidget(QWidget):
                 continue
             row = self._feature_rows[idx] if idx < len(self._feature_rows) else 0
             y = _ANNOT_TRACK_VPAD + row * row_h + 0.5
-            color = QColor(feat.color or feature_type_color(feat.feature_type))
-            rect = QRectF(x1, y, max(2.0, x2 - x1), max(2.0, float(_ANNOT_FEATURE_HEIGHT) - 1.0))
-            label = self._feature_track_label(feat, rect.width(), 28.0)
-            selected = idx in self._selected_indices
-            _draw_directed_feature(
-                painter,
-                rect,
-                color,
-                forward=feat.is_forward(),
-                label=label,
+            rects[idx] = QRectF(
+                x1, y, max(2.0, x2 - x1), max(2.0, float(_ANNOT_FEATURE_HEIGHT) - 1.0)
             )
+
+        online_bar_h = 10.0
+        for idx, feat in enumerate(self._features):
+            if str(feat.source or "") != ONLINE_BLAST_SOURCE:
+                continue
+            row = self._feature_rows[idx] if idx < len(self._feature_rows) else 0
+            x1 = _bp_view_x(feat.start, scroll, ppb)
+            x2 = _bp_view_x(feat.end + 1, scroll, ppb)
+            if x2 < _LEFT_MARGIN or x1 > vw:
+                continue
+            y_row = _ANNOT_TRACK_VPAD + row * row_h
+            y_off = (float(_ANNOT_FEATURE_HEIGHT) - online_bar_h) / 2.0
+            rects[idx] = QRectF(
+                x1, y_row + y_off, max(2.0, x2 - x1), max(2.0, online_bar_h)
+            )
+
+        # NCBI graphic summary: thin horizontal connectors between HSPs on one row.
+        groups: dict[str, list[int]] = {}
+        for idx, feat in enumerate(self._features):
+            if str(feat.source or "") != ONLINE_BLAST_SOURCE:
+                continue
+            key = str(feat.subject_id or feat.parent or "").strip()
+            if not key:
+                continue
+            groups.setdefault(key, []).append(idx)
+        painter.save()
+        conn_pen = QPen(QColor("#444444"))
+        conn_pen.setWidthF(1.0)
+        painter.setPen(conn_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for _key, members in groups.items():
+            if len(members) < 2:
+                continue
+            ordered = sorted(members, key=lambda i: self._features[i].start)
+            row0 = self._feature_rows[ordered[0]] if ordered else 0
+            y_line = _ANNOT_TRACK_VPAD + row0 * row_h + float(_ANNOT_FEATURE_HEIGHT) / 2.0
+            for left_i, right_i in zip(ordered, ordered[1:]):
+                if self._feature_rows[left_i] != self._feature_rows[right_i]:
+                    continue
+                left = rects[left_i]
+                right = rects[right_i]
+                if left is None or right is None:
+                    continue
+                x1 = left.right()
+                x2 = right.left()
+                if x2 > x1 + 0.5:
+                    painter.drawLine(QPointF(x1, y_line), QPointF(x2, y_line))
+        painter.restore()
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        for idx, feat in enumerate(self._features):
+            rect = rects[idx]
+            if rect is None:
+                continue
+            is_online = str(feat.source or "") == ONLINE_BLAST_SOURCE
+            if is_online and float(feat.pident or 0) > 0:
+                color = QColor(pident_color_hex(float(feat.pident), zmin, zmax))
+            else:
+                color = QColor(feat.color or feature_type_color(feat.feature_type))
+            if is_online:
+                label = ""
+            else:
+                label = self._feature_track_label(feat, rect.width(), 28.0)
+            selected = idx in self._selected_indices
+            if is_online:
+                # NCBI graphic summary style: plain bars (arrows make overlaps look messy).
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(color)
+                painter.drawRect(rect)
+            else:
+                _draw_directed_feature(
+                    painter,
+                    rect,
+                    color,
+                    forward=feat.is_forward(),
+                    label=label,
+                )
             if selected:
                 _draw_feature_selection_chrome(painter, rect)
             if idx == self._drop_hover_idx:
@@ -1663,15 +1786,26 @@ class AnnotationTrackWidget(QWidget):
                     max(2.0, x2 - x1),
                     max(2.0, float(_ANNOT_FEATURE_HEIGHT) - 1.0),
                 )
-                color = QColor(feat.color or feature_type_color(feat.feature_type))
+                if (
+                    str(feat.source or "") == ONLINE_BLAST_SOURCE
+                    and float(feat.pident or 0) > 0
+                ):
+                    color = QColor(pident_color_hex(float(feat.pident), zmin, zmax))
+                else:
+                    color = QColor(feat.color or feature_type_color(feat.feature_type))
                 color.setAlpha(110)
-                _draw_directed_feature(
-                    painter,
-                    rect,
-                    color,
-                    forward=feat.is_forward(),
-                    label="",
-                )
+                if str(feat.source or "") == ONLINE_BLAST_SOURCE:
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(color)
+                    painter.drawRect(rect)
+                else:
+                    _draw_directed_feature(
+                        painter,
+                        rect,
+                        color,
+                        forward=feat.is_forward(),
+                        label="",
+                    )
                 painter.setPen(QPen(_FEATURE_SELECTION_BORDER, 1, Qt.PenStyle.DashLine))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(rect)
@@ -1686,6 +1820,14 @@ class AnnotationTrackWidget(QWidget):
             feat = self._features[hover_idx]
             rect = self._feature_rect(hover_idx)
             full_label = self._feature_full_label(feat)
+            if str(getattr(feat, "source", "") or "") == "ncbi_online_blast":
+                extras: list[str] = []
+                if float(getattr(feat, "pident", 0) or 0) > 0:
+                    extras.append(f"{float(feat.pident):.1f}% id")
+                if str(getattr(feat, "subject_id", "") or "").strip():
+                    extras.append(str(feat.subject_id).strip())
+                if extras:
+                    full_label = f"{full_label} ({', '.join(extras)})" if full_label else ", ".join(extras)
             if full_label and self._label_overflows(feat, rect):
                 tip_font = QFont(painter.font())
                 tip_font.setPointSize(8)
@@ -1887,8 +2029,16 @@ class AnnotationTrackWidget(QWidget):
         extract_action = menu.addAction("Extract Sequence")
         extract_action.triggered.connect(self.extractSequenceRequested.emit)
         if len(self._selected_indices) > 1:
-            color_action = menu.addAction("Change color")
-            color_action.triggered.connect(self.changeColorRequested.emit)
+            from repeatviewer.backends.ncbi_blast_online import ONLINE_BLAST_SOURCE
+
+            has_online = any(
+                0 <= i < len(self._features)
+                and str(self._features[i].source or "") == ONLINE_BLAST_SOURCE
+                for i in self._selected_indices
+            )
+            if not has_online:
+                color_action = menu.addAction("Change color")
+                color_action.triggered.connect(self.changeColorRequested.emit)
         else:
             modify_action = menu.addAction("Modify")
             modify_action.triggered.connect(
@@ -3126,6 +3276,9 @@ class SequenceMapWidget(QWidget):
         self._layout_intent_generation = 0
         self._show_similarity_database_name = True
         self._split_tracks_by_source = _load_split_tracks_by_source()
+        self._show_online_blast = _load_show_online_blast()
+        # Maps AnnotationTrackWidget indices → full ``_data.features`` indices.
+        self._annot_display_to_full: list[int] = []
         if embedded:
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         else:
@@ -3331,8 +3484,8 @@ class SequenceMapWidget(QWidget):
         self._annot_track.changeColorRequested.connect(self._request_change_feature_color)
         self._annot_track.tracksMoved.connect(self._on_annot_tracks_moved)
         self._annot_track.attachImageRequested.connect(self._request_attach_feature_image)
-        self._annot_track.openImagesRequested.connect(self.openFeatureImagesRequested.emit)
-        self._annot_track.imagesDropped.connect(self.featureImagesDropped.emit)
+        self._annot_track.openImagesRequested.connect(self._on_annot_open_images)
+        self._annot_track.imagesDropped.connect(self._on_annot_images_dropped)
         self._overview = OverviewWidget(self)
         self._overview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._overview.viewportChanged.connect(self._scroll_to_fraction)
@@ -3574,12 +3727,13 @@ class SequenceMapWidget(QWidget):
         else:
             start_bp = 1
             end_bp = seq_len
+        display_features, _mapping, display_selected = self._annotation_display_bundle()
         self._overview.set_data(
             seq_len,
-            self._data.features,
+            display_features,
             view_start_bp=start_bp,
             view_end_bp=end_bp,
-            selected_indices=self._selected_feature_indices,
+            selected_indices=display_selected,
         )
 
         self._ruler.set_view(
@@ -3590,18 +3744,64 @@ class SequenceMapWidget(QWidget):
         )
 
         feature_rows, _ = _pack_feature_rows(
-            self._data.features,
+            display_features,
             split_by_source=self._split_tracks_by_source,
         )
         self._annot_track.set_view(
-            features=self._data.features,
+            features=display_features,
             feature_rows=feature_rows,
             scroll_px=scroll_val,
             ppb=cell_w,
             viewport_w=vw,
-            selected_indices=self._selected_feature_indices,
+            selected_indices=display_selected,
         )
         self._sync_sequence_block_layout()
+
+    def _annotation_display_bundle(
+        self,
+    ) -> tuple[list[SequenceFeature], list[int], set[int]]:
+        """Visible features, display→full index map, and selected display indices."""
+        full = list(self._data.features) if self._data is not None else []
+        display, mapping = filter_features_for_online_blast_display(
+            full,
+            show_online_blast=self._show_online_blast,
+        )
+        self._annot_display_to_full = mapping
+        full_to_display = {
+            full_idx: display_idx for display_idx, full_idx in enumerate(mapping)
+        }
+        display_selected = {
+            full_to_display[i]
+            for i in self._selected_feature_indices
+            if i in full_to_display
+        }
+        return display, mapping, display_selected
+
+    def _map_annot_indices_to_full(self, indices: set[int]) -> set[int]:
+        mapping = self._annot_display_to_full
+        full: set[int] = set()
+        for index in indices:
+            if 0 <= int(index) < len(mapping):
+                full.add(int(mapping[int(index)]))
+        return full
+
+    def _merge_display_features_into_full(
+        self,
+        display_features: list[SequenceFeature],
+    ) -> list[SequenceFeature]:
+        """Recombine a track-edited display list with hidden Online BLAST features."""
+        from repeatviewer.backends.ncbi_blast_online import ONLINE_BLAST_SOURCE
+
+        if self._data is None:
+            return list(display_features)
+        if self._show_online_blast:
+            return list(display_features)
+        online = [
+            feat
+            for feat in self._data.features
+            if str(feat.source or "") == ONLINE_BLAST_SOURCE
+        ]
+        return list(display_features) + online
 
     def _sync_sequence_block_layout(self) -> None:
         canvas_h = max(1, self._canvas.height())
@@ -3850,9 +4050,13 @@ class SequenceMapWidget(QWidget):
         if self._data is None:
             return
         self._data.features = list(features)
+        display, _mapping = filter_features_for_online_blast_display(
+            self._data.features,
+            show_online_blast=self._show_online_blast,
+        )
         self._canvas.set_sequence(
             self._data.sequence,
-            self._data.features,
+            display,
             is_protein=self._data.is_protein,
         )
         valid = set(range(len(self._data.features)))
@@ -3860,6 +4064,30 @@ class SequenceMapWidget(QWidget):
         self._dirty = True
         self.featuresChanged.emit()
         self._sync_overview()
+
+    def set_show_online_blast(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._show_online_blast:
+            return
+        self._show_online_blast = enabled
+        _save_show_online_blast(enabled)
+        if self._data is not None:
+            display, _mapping = filter_features_for_online_blast_display(
+                self._data.features,
+                show_online_blast=self._show_online_blast,
+            )
+            self._canvas.set_sequence(
+                self._data.sequence,
+                display,
+                is_protein=self._data.is_protein,
+            )
+        self._sync_overview()
+
+    def show_online_blast(self) -> bool:
+        return bool(self._show_online_blast)
+
+    def reload_show_online_blast_pref(self) -> None:
+        self.set_show_online_blast(_load_show_online_blast())
 
     def bind_annotation_zoom_bar(self, bar) -> None:
         """Attach header zoom controls when embedded in the preview panel.
@@ -4036,6 +4264,64 @@ class SequenceMapWidget(QWidget):
     def selection_range(self) -> tuple[int, int] | None:
         return self._canvas.selection_range()
 
+    def view_state_for_session(self) -> dict | None:
+        """Snapshot scroll/zoom/selection for session restore."""
+        if self._data is None or self.is_too_long_for_display():
+            return None
+        sel = self.selection_range()
+        if sel is not None:
+            start, end = int(sel[0]), int(sel[1])
+        else:
+            start, end = int(self._pos_start.value()), int(self._pos_end.value())
+        return {
+            "start": start,
+            "end": end,
+            "ppb": float(self._canvas.pixels_per_bp()),
+            "scroll_px": float(self._canvas.scroll_px()),
+            "sequence_id": str(self._data.sequence_id or ""),
+        }
+
+    def restore_view_state_for_session(self, state: dict) -> None:
+        """Reapply a snapshot from ``view_state_for_session`` (defers until visible)."""
+        if self._data is None or self.is_too_long_for_display() or not state:
+            return
+        try:
+            start = int(state.get("start", 1))
+            end = int(state.get("end", 1))
+        except (TypeError, ValueError):
+            start, end = 1, 1
+        seq_len = max(1, len(self._data.sequence))
+        start = max(1, min(seq_len, start))
+        end = max(1, min(seq_len, end))
+        if end < start:
+            start, end = end, start
+        span = end - start + 1
+        if span > 1 or (start == end and start > 1):
+            self.select_by_position(start, end)
+            return
+        try:
+            ppb = float(state.get("ppb") or 0.0)
+        except (TypeError, ValueError):
+            ppb = 0.0
+        if ppb <= 0:
+            return
+        try:
+            scroll_px = float(state.get("scroll_px") or 0.0)
+        except (TypeError, ValueError):
+            scroll_px = 0.0
+        self._apply_zoom_ppb(
+            max(_FIT_MIN_PPB, min(self._canvas.zoom_ppb_max(), ppb)),
+            sync_slider=True,
+            reset_scroll=False,
+        )
+        self._update_horizontal_scroll()
+        max_scroll = max(0, int(self._hbar.maximum()))
+        scroll_px = max(0.0, min(float(max_scroll), scroll_px))
+        self._hbar.setValue(int(scroll_px))
+        self._canvas.set_scroll_px(scroll_px)
+        self._sync_header_views()
+        self.refresh_layout()
+
     def selected_feature_index(self) -> int | None:
         return self._canvas.selected_feature_index()
 
@@ -4182,7 +4468,9 @@ class SequenceMapWidget(QWidget):
     def set_selected_features(self, indices: set[int] | frozenset[int] | None) -> None:
         self._selected_feature_indices = set(indices or [])
         self._canvas.set_selected_features(self._selected_feature_indices)
-        self._annot_track._selected_indices = set(self._selected_feature_indices)
+        # Annot track may be showing a filtered list — map full → display indices.
+        _display, _mapping, display_selected = self._annotation_display_bundle()
+        self._annot_track._selected_indices = set(display_selected)
         self._annot_track.update()
         self._sync_overview()
 
@@ -4197,6 +4485,7 @@ class SequenceMapWidget(QWidget):
             selected = set(indices)
         else:
             selected = set()
+        selected = self._map_annot_indices_to_full(selected)
         self._selected_feature_indices = selected
         self._canvas.set_selected_features(selected)
         self._sync_overview()
@@ -4227,14 +4516,16 @@ class SequenceMapWidget(QWidget):
         """Prefer annot-track selection; keep existing map selection if track is empty."""
         annot_sel = self._annot_track.selected_indices()
         if annot_sel:
-            if annot_sel != self._selected_feature_indices:
-                self._selected_feature_indices = set(annot_sel)
-                self._canvas.set_selected_features(annot_sel)
+            mapped = self._map_annot_indices_to_full(annot_sel)
+            if mapped != self._selected_feature_indices:
+                self._selected_feature_indices = mapped
+                self._canvas.set_selected_features(mapped)
                 self._sync_overview()
             return
         # Annot track empty — keep canvas/map selection and mirror it onto the track.
         if self._selected_feature_indices:
-            self._annot_track._selected_indices = set(self._selected_feature_indices)
+            _display, _mapping, display_selected = self._annotation_display_bundle()
+            self._annot_track._selected_indices = set(display_selected)
 
     def _request_delete_features(self) -> None:
         self._sync_feature_selection_from_annot_track()
@@ -4261,11 +4552,23 @@ class SequenceMapWidget(QWidget):
         if len(self._selected_feature_indices) > 1:
             self.changeFeatureColorRequested.emit()
 
+    def _on_annot_open_images(self, display_index: int) -> None:
+        mapped = self._map_annot_indices_to_full({int(display_index)})
+        if mapped:
+            self.openFeatureImagesRequested.emit(next(iter(mapped)))
+
+    def _on_annot_images_dropped(self, display_index: int, paths: list) -> None:
+        mapped = self._map_annot_indices_to_full({int(display_index)})
+        if mapped:
+            self.featureImagesDropped.emit(next(iter(mapped)), paths)
+
     def _on_annot_tracks_moved(self, features: object) -> None:
         updated = list(features or [])
         if not updated:
             return
-        self.annotationTracksMoveRequested.emit(updated)
+        self.annotationTracksMoveRequested.emit(
+            self._merge_display_features_into_full(updated)
+        )
 
     def _on_canvas_feature_action(self, action: str) -> None:
         kind = str(action or "").strip().lower()
@@ -4473,6 +4776,8 @@ class ModifyFeatureDialog(QDialog):
             self._source = REPEATVIEWER_INTERNAL_SOURCE
         else:
             self._source = raw_source
+        self._pident = float(getattr(feature, "pident", 0.0) or 0.0)
+        self._subject_id = str(getattr(feature, "subject_id", "") or "").strip()
 
         start_pos, end_pos = sorted((int(feature.start), int(feature.end)))
 
@@ -4579,6 +4884,8 @@ class ModifyFeatureDialog(QDialog):
             parent=self._parent.text().strip(),
             track=self._track,
             source=self._source,
+            pident=self._pident,
+            subject_id=self._subject_id,
         )
 
 
@@ -5166,6 +5473,17 @@ class SequenceMapPanel(QWidget):
         )
         self._fit_btn.clicked.connect(self._map.fit_window)
         action_row.addWidget(self._fit_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._show_online_blast_check = QCheckBox(
+            "Show Online BLAST", self._action_row_container
+        )
+        self._show_online_blast_check.setChecked(self._map.show_online_blast())
+        self._show_online_blast_check.setToolTip(
+            "Show or hide NCBI Online BLAST hits on the Annotation track. "
+            "Hits stay saved in the seqmap JSON; colors use % identity and "
+            "arcs link HSPs from the same accession."
+        )
+        self._show_online_blast_check.toggled.connect(self._on_show_online_blast_toggled)
+        action_row.addWidget(self._show_online_blast_check, 0, Qt.AlignmentFlag.AlignVCenter)
         del_btn = QPushButton("Delete", self._action_row_container)
         del_btn.setToolTip(
             "Delete selected feature(s). Select on the track below, then press Delete or Backspace."
@@ -5444,6 +5762,11 @@ class SequenceMapPanel(QWidget):
     def refresh_similarity_databases(self) -> None:
         self._refresh_similarity_database_rows()
 
+    def _on_show_online_blast_toggled(self, checked: bool) -> None:
+        self._map.set_show_online_blast(bool(checked))
+        state = "shown" if checked else "hidden"
+        self.statusMessage.emit(f"Online BLAST hits {state}.")
+
     def _open_annotation_settings_dialog(self) -> None:
         dialog = AnnotationElementColorsDialog(
             parent=self,
@@ -5511,6 +5834,8 @@ class SequenceMapPanel(QWidget):
                     track=feat.track,
                     parent=feat.parent,
                     source=feat.source,
+                    pident=feat.pident,
+                    subject_id=feat.subject_id,
                 )
             )
         if changed:
@@ -5740,7 +6065,32 @@ class SequenceMapPanel(QWidget):
             return
         self._loaded_data = data
         self._populate_sequence_combo(data)
-        self._map.load(data, fit_after_load=fit_after_load)
+        # Patch legacy Online BLAST features missing pident from *_ob.txt.
+        try:
+            from repeatviewer.backends.ncbi_blast_online import (
+                enrich_online_blast_features_from_ob,
+                online_blast_output_path,
+            )
+
+            ob_path = online_blast_output_path(self._path)
+            if ob_path.is_file() and data.features:
+                enriched = enrich_online_blast_features_from_ob(list(data.features), ob_path)
+                data.features = enriched
+                rid = str(data.sequence_id or "")
+                if rid and data.features_by_id is not None:
+                    data.features_by_id[rid] = list(enriched)
+        except Exception:  # noqa: BLE001
+            pass
+        from repeatviewer.session_restore import lookup_annotation_view
+
+        saved_view = lookup_annotation_view(
+            self._path,
+            sequence_id=str(data.sequence_id or ""),
+        )
+        fit = fit_after_load and saved_view is None
+        self._map.load(data, fit_after_load=fit)
+        if saved_view is not None:
+            self._map.restore_view_state_for_session(saved_view)
         self._feature_undo_stack.clear()
         self._sync_too_long_controls()
         if not self._map.is_too_long_for_display():
@@ -6067,6 +6417,10 @@ class SequenceMapPanel(QWidget):
             self._similarity_ann_settings.show_database_name_on_track
         )
         self._map.reload_split_tracks_by_source_pref()
+        self._map.reload_show_online_blast_pref()
+        self._show_online_blast_check.blockSignals(True)
+        self._show_online_blast_check.setChecked(self._map.show_online_blast())
+        self._show_online_blast_check.blockSignals(False)
         self._rebuild_add_feature_buttons()
         self.refresh_similarity_databases()
         self.refresh_nucleotide_colors()

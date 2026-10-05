@@ -215,3 +215,35 @@ def snapshot_similarity_database_colors(database_names: list[str]) -> dict[str, 
         name: similarity_database_color(name, index)
         for index, name in enumerate(database_names)
     }
+
+
+def pident_color_hex(pident: float, zmin: float = 50.0, zmax: float = 100.0) -> str:
+    """Map percent identity to a NCBI-style low→high hex color.
+
+    Low identity: cooler/redder; high identity: greener (matches genome-map
+    ``_pident_colorscale``).
+    """
+    try:
+        value = float(pident)
+    except (TypeError, ValueError):
+        value = zmin
+    span = max(float(zmax) - float(zmin), 1.0)
+    t = (value - float(zmin)) / span
+    t = max(0.0, min(1.0, t))
+    r = int(230 - 90 * t)
+    g = int(90 + 140 * t)
+    b = int(60 + 120 * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def pident_scale_bounds(pidents: list[float]) -> tuple[float, float]:
+    """Return (zmin, zmax) for coloring; ignore zeros (unset). Fallback 50–100."""
+    values = [float(v) for v in pidents if v and float(v) > 0]
+    if not values:
+        return 50.0, 100.0
+    zmin = min(values)
+    zmax = max(values)
+    if zmax - zmin < 1.0:
+        zmin = max(0.0, zmin - 5.0)
+        zmax = min(100.0, zmax + 5.0)
+    return zmin, zmax
