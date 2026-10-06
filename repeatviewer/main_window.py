@@ -11442,6 +11442,7 @@ class MainWindow(QMainWindow):
         *,
         options: MsaPlotJobOptions,
         output_path: Path | None = None,
+        on_outputs_ready=None,
     ) -> dict:
         progress(0, "Building MSA plot…")
         if self._job_cancel.requested:
@@ -11524,6 +11525,7 @@ class MainWindow(QMainWindow):
         metric: str,
         top_n: int,
         output_html: Path | None = None,
+        on_outputs_ready=None,
     ) -> dict:
         progress(0, "Building TE abundance plot…")
         if self._job_cancel.requested:
@@ -14992,6 +14994,18 @@ class MainWindow(QMainWindow):
             show_log = bool(getattr(teaid_opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))
             close_when_finished = bool(
                 getattr(teaid_opts, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
+            )
+        elif func_name == "te_annotation":
+            te_ann_opts = self._te_annotation_options
+            show_log = bool(
+                getattr(te_ann_opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW)
+            )
+            close_when_finished = bool(
+                getattr(
+                    te_ann_opts,
+                    "close_process_window_when_finished",
+                    DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+                )
             )
         worker = FunctionWorker(
             self._run_function_job,

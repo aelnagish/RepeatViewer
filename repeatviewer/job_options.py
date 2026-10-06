@@ -722,6 +722,8 @@ class TeAnnotationJobOptions:
     # Selected similarity database names. None means “all currently defined”.
     similarity_database_names: tuple[str, ...] | None = None
     right_click_action: str = TE_ANNOTATION_RIGHT_CLICK_RUN
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
 
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
@@ -2104,6 +2106,13 @@ def load_te_annotation_options() -> TeAnnotationJobOptions:
         auto_modes=auto_modes,
         similarity_database_names=similarity_database_names,
         right_click_action=right_click_action,
+        show_process_window=_to_bool(
+            v.get("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW
+        ),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"),
+            DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+        ),
     )
 
 
@@ -2128,6 +2137,11 @@ def save_te_annotation_options(opts: TeAnnotationJobOptions) -> None:
             "similarity_database_names",
             ",".join(opts.similarity_database_names),
         )
+    s.setValue("show_process_window", opts.show_process_window)
+    s.setValue(
+        "close_process_window_when_finished",
+        opts.close_process_window_when_finished,
+    )
     s.endGroup()
 
 

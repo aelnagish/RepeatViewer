@@ -8094,7 +8094,8 @@ class FlexidotParamsDialog(QDialog):
 
 
 _TE_ANNOTATION_PARAMS_WIDTH = 580
-_TE_ANNOTATION_OPTIONS_SIZE = (640, 560)
+# Cap Advanced Settings scroll so Element colors stay reachable on short screens.
+_TE_ANNOTATION_ADVANCED_SCROLL_MAX_HEIGHT = 420
 
 
 def _section_title_label(text: str, parent: QWidget | None = None) -> QLabel:
@@ -8220,7 +8221,7 @@ class _CheckboxFlowWidget(QWidget):
 
 
 class TeAnnotationDialog(QDialog):
-    """Batch TE annotation: Parameters select modules; Options holds settings/colors."""
+    """Batch TE annotation: Parameters select modules; Advanced holds settings/colors."""
 
     def __init__(
         self,
@@ -8253,6 +8254,7 @@ class TeAnnotationDialog(QDialog):
         opts = initial or TeAnnotationJobOptions()
         self._for_run = for_run
         self._run_after = False
+        self._te_ann_compact_size: QSize | None = None
 
         self._TeAnnotationOptions = TeAnnotationOptions
         self._SimilarityDatabaseRun = SimilarityDatabaseRun
@@ -8333,35 +8335,6 @@ class TeAnnotationDialog(QDialog):
             sim_outer.addWidget(self._db_flow)
         self._sync_similarity_all_check()
 
-        params_tab = QWidget(self)
-        params_layout = QVBoxLayout(params_tab)
-        params_layout.setContentsMargins(12, 10, 12, 10)
-        params_layout.setSpacing(12)
-        params_layout.addWidget(auto_section)
-        params_layout.addWidget(sim_section)
-
-        self._right_click_group = QButtonGroup(self)
-        self._right_click_buttons: dict[str, QRadioButton] = {}
-        for label, value in (
-            ("Run Sequence annotation with saved selection", TE_ANNOTATION_RIGHT_CLICK_RUN),
-            ("Open this dialog", TE_ANNOTATION_RIGHT_CLICK_DIALOG),
-        ):
-            radio = QRadioButton(label, self)
-            radio.setChecked(opts.right_click_action == value)
-            self._right_click_group.addButton(radio)
-            self._right_click_buttons[value] = radio
-        if not any(b.isChecked() for b in self._right_click_buttons.values()):
-            self._right_click_buttons[TE_ANNOTATION_RIGHT_CLICK_RUN].setChecked(True)
-
-        rc_box = QGroupBox("Right-click action", self)
-        rc_box_layout = QVBoxLayout(rc_box)
-        rc_box_layout.setSpacing(6)
-        rc_box_layout.addWidget(
-            QLabel("Right-clicking the Sequence Annotation button does:", self)
-        )
-        for radio in self._right_click_buttons.values():
-            rc_box_layout.addWidget(radio)
-
         self._auto_settings_panel = AutoAnnotationSettingsPanel(
             load_auto_annotation_settings(), self
         )
@@ -8382,86 +8355,258 @@ class TeAnnotationDialog(QDialog):
         color_box_layout = QVBoxLayout(color_box)
         color_box_layout.addWidget(self._colors_panel)
 
-        options_body = QWidget(self)
-        options_layout = QVBoxLayout(options_body)
-        options_layout.setContentsMargins(12, 10, 12, 10)
-        options_layout.setSpacing(12)
-        options_layout.addWidget(rc_box)
-        options_layout.addWidget(auto_box)
-        options_layout.addWidget(sim_box)
-        options_layout.addWidget(color_box)
-        options_layout.addStretch(1)
+        advanced_body = QWidget(self)
+        advanced_body_layout = QVBoxLayout(advanced_body)
+        advanced_body_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_body_layout.setSpacing(10)
+        advanced_body_layout.addWidget(auto_box)
+        advanced_body_layout.addWidget(sim_box)
+        advanced_body_layout.addWidget(color_box)
 
-        options_scroll = QScrollArea(self)
-        options_scroll.setWidgetResizable(True)
-        options_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        options_scroll.setWidget(options_body)
+        advanced_scroll = QScrollArea(self)
+        advanced_scroll.setWidgetResizable(True)
+        advanced_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        advanced_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        advanced_scroll.setWidget(advanced_body)
+        advanced_scroll.setMaximumHeight(_TE_ANNOTATION_ADVANCED_SCROLL_MAX_HEIGHT)
+        self._advanced_scroll = advanced_scroll
+
+        advanced = QWidget(self)
+        advanced_layout = QVBoxLayout(advanced)
+        advanced_layout.setContentsMargins(0, 8, 0, 0)
+        advanced_layout.setSpacing(8)
+        advanced_layout.addWidget(_section_title_label("Advanced Settings", advanced))
+        advanced_layout.addWidget(advanced_scroll)
+        advanced.setVisible(False)
+        advanced.setMaximumHeight(0)
+        self._advanced_panel = advanced
+
+        params_tab = QWidget(self)
+        params_layout = QVBoxLayout(params_tab)
+        params_layout.setContentsMargins(16, 10, 16, 10)
+        params_layout.setSpacing(12)
+        params_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        params_layout.addWidget(auto_section)
+        params_layout.addWidget(sim_section)
+        params_layout.addWidget(advanced)
+        params_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._params_tab = params_tab
+
+        self._right_click_group = QButtonGroup(self)
+        self._right_click_buttons: dict[str, QRadioButton] = {}
+        for label, value in (
+            ("Run Sequence annotation with saved selection", TE_ANNOTATION_RIGHT_CLICK_RUN),
+            ("Open this dialog", TE_ANNOTATION_RIGHT_CLICK_DIALOG),
+        ):
+            radio = QRadioButton(label, self)
+            radio.setChecked(opts.right_click_action == value)
+            self._right_click_group.addButton(radio)
+            self._right_click_buttons[value] = radio
+        if not any(b.isChecked() for b in self._right_click_buttons.values()):
+            self._right_click_buttons[TE_ANNOTATION_RIGHT_CLICK_RUN].setChecked(True)
+
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel("Right-clicking the Sequence Annotation button does:", self)
+        )
+        for radio in self._right_click_buttons.values():
+            rc_box_layout.addWidget(radio)
+
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="Sequence Annotation",
+                checked=bool(getattr(opts, "show_process_window", True)),
+                close_when_finished=bool(
+                    getattr(opts, "close_process_window_when_finished", True)
+                ),
+            )
+        )
+
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+        options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        options_layout.addWidget(rc_box)
+        options_layout.addWidget(process_box)
+        options_layout.addStretch(1)
+        options_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._options_tab = options_tab
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
+        self._tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
         self._tabs.addTab(params_tab, "Parameters")
-        self._tabs.addTab(options_scroll, "Options")
-        self._params_tab = params_tab
+        self._tabs.addTab(options_tab, "Options")
+        self._options_tab_index = 1
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_settings_toggled)
         self._button_box = make_cancel_save_run_bar(
             self,
-            left_widgets=[restore],
+            left_widgets=[restore, self._advanced_settings_btn],
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(8)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._button_box)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tabs, 0)
+        layout.addWidget(self._button_box, 0)
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._on_tab_changed(self._tabs.currentIndex())
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        QTimer.singleShot(0, self._fit_to_current_tab)
+        self._te_ann_compact_size = None
+        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
 
     def _on_tab_changed(self, tab_index: int) -> None:
-        self._fit_to_current_tab()
+        on_params = tab_index == 0
+        self._advanced_settings_btn.setVisible(on_params)
+        if not on_params:
+            self._advanced_settings_btn.blockSignals(True)
+            self._advanced_settings_btn.setChecked(False)
+            self._advanced_settings_btn.blockSignals(False)
+            self._advanced_settings_btn.setText("Advanced Settings ▸")
+            self._advanced_panel.setVisible(False)
+            self._advanced_panel.setMaximumHeight(0)
+        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
 
-    def _fit_to_current_tab(self) -> None:
-        """Size the dialog to the active tab (Parameters compact; Options scrollable)."""
-        margins = self.layout().contentsMargins()
-        spacing = self.layout().spacing()
-        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
-        tab_chrome = tab_bar_h + 8
-        buttons_h = self._button_box.sizeHint().height()
-        chrome = (
-            tab_chrome
-            + buttons_h
-            + margins.top()
-            + margins.bottom()
-            + spacing
-            + 4
+    def _on_advanced_settings_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
         )
-        if self._tabs.currentIndex() == 0:
-            page = self._params_tab
-            page.ensurePolished()
-            if hasattr(self, "_db_flow") and self._db_flow.isVisible():
-                self._db_flow._last_flow_width = -1
-                self._db_flow.setFixedWidth(
-                    max(200, _TE_ANNOTATION_PARAMS_WIDTH - 40)
-                )
-                self._db_flow._reflow()
-            page.adjustSize()
-            hint = page.sizeHint()
-            width = max(
-                _TE_ANNOTATION_PARAMS_WIDTH,
-                hint.width() + margins.left() + margins.right() + 24,
-                self._button_box.sizeHint().width() + margins.left() + margins.right(),
-            )
-            height = hint.height() + chrome
-            self.setFixedSize(width, height)
+        self._resize_for_advanced(checked)
+
+    def _te_ann_dialog_chrome_height(self) -> int:
+        margins = self.layout().contentsMargins() if self.layout() else None
+        chrome = (
+            (margins.top() + margins.bottom()) if margins is not None else 34
+        ) + 8
+        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height()) + 8
+        buttons_h = self._button_box.sizeHint().height()
+        return chrome + tab_bar_h + buttons_h
+
+    def _te_ann_dialog_width(self) -> int:
+        margins = self.layout().contentsMargins() if self.layout() else None
+        return max(
+            _TE_ANNOTATION_PARAMS_WIDTH,
+            self._button_box.sizeHint().width()
+            + (margins.left() + margins.right() if margins else 44),
+        )
+
+    def _te_ann_compact_page_height(self) -> int:
+        """Parameters content height with Advanced collapsed."""
+        was_visible = self._advanced_panel.isVisible()
+        was_max = self._advanced_panel.maximumHeight()
+        self._advanced_panel.setVisible(False)
+        self._advanced_panel.setMaximumHeight(0)
+        root = self._params_tab.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        height = max(
+            self._params_tab.minimumSizeHint().height(),
+            self._params_tab.sizeHint().height(),
+        )
+        self._advanced_panel.setVisible(was_visible)
+        self._advanced_panel.setMaximumHeight(was_max)
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        return height
+
+    def _te_ann_advanced_extra_height(self) -> int:
+        """Header + scroll viewport — not the full unwrapped settings/colors."""
+        scroll_h = min(
+            _TE_ANNOTATION_ADVANCED_SCROLL_MAX_HEIGHT,
+            max(220, self._advanced_scroll.maximumHeight()),
+        )
+        return 36 + scroll_h + 12
+
+    def _resize_for_advanced(self, expanded: bool) -> None:
+        """Grow for Advanced Settings; shrink when collapsed (BLAST-style)."""
+        if self._tabs.currentIndex() != 0:
+            self._fit_options_tab()
             return
-        opt_w, opt_h = _TE_ANNOTATION_OPTIONS_SIZE
-        self.setFixedSize(opt_w, opt_h)
+        if hasattr(self, "_db_flow") and self._db_flow.isVisible():
+            self._db_flow._last_flow_width = -1
+            self._db_flow.setFixedWidth(max(200, _TE_ANNOTATION_PARAMS_WIDTH - 40))
+            self._db_flow._reflow()
+
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._te_ann_dialog_chrome_height()
+        width = self._te_ann_dialog_width()
+        compact_page_h = self._te_ann_compact_page_height()
+
+        self._advanced_panel.setVisible(expanded)
+        if expanded:
+            self._advanced_scroll.setMaximumHeight(
+                _TE_ANNOTATION_ADVANCED_SCROLL_MAX_HEIGHT
+            )
+            self._advanced_panel.setMaximumHeight(16777215)
+        else:
+            self._advanced_panel.setMaximumHeight(0)
+
+        root = self._params_tab.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        self._params_tab.updateGeometry()
+        self._tabs.updateGeometry()
+
+        if not expanded:
+            height = chrome + compact_page_h
+            height = min(max(height, 220), max_h)
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(height)
+            self.resize(width, height)
+            self.setMaximumHeight(16777215)
+            self._te_ann_compact_size = QSize(width, height)
+            return
+
+        extra = self._te_ann_advanced_extra_height()
+        base = self._te_ann_compact_size or self.size()
+        height = min(base.height() + extra + 12, max_h)
+        height = max(
+            height,
+            min(chrome + compact_page_h + extra, max_h),
+        )
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
+
+    def _fit_options_tab(self) -> None:
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        chrome = self._te_ann_dialog_chrome_height()
+        width = self._te_ann_dialog_width()
+        self._options_tab.adjustSize()
+        page_h = self._options_tab.sizeHint().height()
+        height = min(max(chrome + page_h, 220), max_h)
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -8581,9 +8726,17 @@ class TeAnnotationDialog(QDialog):
         self._similarity_settings_panel = new_sim
         self._colors_panel.restore_defaults()
         self._right_click_buttons[TE_ANNOTATION_RIGHT_CLICK_RUN].setChecked(True)
+        self._show_process_window.setChecked(defaults.show_process_window)
+        self._close_process_window.setChecked(
+            defaults.close_process_window_when_finished
+        )
+        if self._advanced_settings_btn.isChecked():
+            self._advanced_settings_btn.setChecked(False)
+        else:
+            self._resize_for_advanced(False)
 
     def apply_settings_panels(self) -> None:
-        """Persist Options-tab auto/similarity settings and colors."""
+        """Persist Advanced-tab auto/similarity settings and colors."""
         from repeatviewer.backends.auto_annotation_settings import (
             save_auto_annotation_settings,
         )
@@ -8623,6 +8776,10 @@ class TeAnnotationDialog(QDialog):
             auto_modes=auto_modes,
             similarity_database_names=similarity_database_names,
             right_click_action=right_click_action,
+            show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=(
+                self._close_process_window.isChecked()
+            ),
         )
 
     def options(self):
