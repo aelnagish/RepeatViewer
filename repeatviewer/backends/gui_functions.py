@@ -404,13 +404,20 @@ def blast(
             cancel=cancel,
         )
 
+    single_seq_phases = False
     try:
         records = list(SeqIO.parse(query_path, "fasta"))
         total_seq = max(1, len(records))
         if len(records) <= 1:
-            _emit_progress(0, total_seq, f"{base_name}")
+            from repeatviewer.backends.job_phases import BLAST_PHASES, emit_phase
+
+            single_seq_phases = True
+            emit_phase(progress, 0, BLAST_PHASES, f"{base_name}: preparing BLAST…")
+            emit_phase(progress, 1, BLAST_PHASES, f"{base_name}: running BLAST…")
             _run_blast_query(query_path, blast_out_file)
-            _emit_progress(1, total_seq, f"{base_name}")
+            emit_phase(
+                progress, 2, BLAST_PHASES, f"{base_name}: writing BLAST outputs…"
+            )
         else:
             # One BLAST run per sequence so the progress bar can advance by seq.
             with tempfile.TemporaryDirectory(prefix="repeatviewer_blast_") as tmp:
@@ -475,6 +482,15 @@ def blast(
         logging.error(f"BLAST produced no output file: {blast_out_file}")
         return ('blastn_got_error' if program == 'blastn' else 'blastp_got_error'), False
 
+    def _finish_single_seq_phases() -> None:
+        if not single_seq_phases:
+            return
+        from repeatviewer.backends.job_phases import BLAST_PHASES, emit_phase
+
+        emit_phase(
+            progress, BLAST_PHASES, BLAST_PHASES, f"{base_name}: BLAST finished"
+        )
+
     try:
         # Always produce one canonical BLAST table with header.
         header = [
@@ -506,6 +522,7 @@ def blast(
                 os.remove(blast_out_file)
             except OSError:
                 pass
+            _finish_single_seq_phases()
             return blast_out_teaid_file, False
 
         blast_out_file_df = pd.read_csv(
@@ -518,6 +535,7 @@ def blast(
                 os.remove(blast_out_file)
             except OSError:
                 pass
+            _finish_single_seq_phases()
             return False, blast_out_file_header
 
         blast_out_bed_file = f'{blast_out_file}.bed'
@@ -549,6 +567,7 @@ def blast(
             os.remove(blast_out_file)
         except OSError:
             pass
+        _finish_single_seq_phases()
         return blast_out_bed_file, blast_out_file_header
 
     except Exception:

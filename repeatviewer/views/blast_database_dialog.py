@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QProgressDialog,
     QVBoxLayout,
     QWidget,
@@ -36,6 +37,22 @@ from repeatviewer.project import (
     BlastDatabase,
 )
 from repeatviewer.widgets.path_browse import PathBrowseRow
+
+
+def style_blast_db_progress(progress: QProgressDialog) -> None:
+    """Make the makeblastdb busy bar wider (3/2) and shorter (1/2)."""
+    progress.ensurePolished()
+    base_w = max(progress.sizeHint().width(), 240)
+    progress.setMinimumWidth(int(base_w * 3 / 2))
+    bar = progress.findChild(QProgressBar)
+    if bar is not None:
+        hint_h = bar.sizeHint().height()
+        if hint_h <= 0:
+            hint_h = 16
+        bar.setFixedHeight(max(6, hint_h // 2))
+        hint_w = max(bar.sizeHint().width(), bar.minimumWidth(), 160)
+        bar.setMinimumWidth(int(hint_w * 3 / 2))
+
 
 # Re-export for callers that import from this module.
 from repeatviewer.views.manage_references_dialog import (  # noqa: E402
@@ -266,6 +283,7 @@ class AddBlastDatabaseDialog(QDialog):
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
+        style_blast_db_progress(progress)
         progress.show()
         self._progress = progress
 

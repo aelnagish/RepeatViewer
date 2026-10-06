@@ -676,11 +676,16 @@ class AlignWorker(QObject):
 
         if self._mode == ALIGN_MODE_COMBINED:
             try:
+                from repeatviewer.backends.job_phases import ALIGN_PHASES
+
                 with process_log_sink(sink):
                     if cancel is not None:
                         cancel.check()
-                    self.progress.emit(0, "Aligning combined MSA…")
-                    _log("Aligning combined MSA…")
+                    engine = (self._engine or "mafft").upper()
+                    self.progress.emit(0, f"Preparing combined {engine}…")
+                    _log(f"Preparing combined {engine}…")
+                    self.progress.emit(1, f"Aligning combined MSA ({engine})…")
+                    _log(f"Aligning combined MSA ({engine})…")
                     output = run_alignment_combined(
                         self._seq_files,
                         **_mafft_option_kwargs(self._options),
@@ -689,7 +694,8 @@ class AlignWorker(QObject):
                         engine=self._engine,
                         cancel=cancel,
                     )
-                    self.progress.emit(1, "Alignment finished.")
+                    self.progress.emit(2, "Writing alignment…")
+                    self.progress.emit(ALIGN_PHASES, "Alignment finished.")
                     _log("Alignment finished.")
                 self.finished.emit([str(output)])
             except JobCancelledError:
@@ -698,10 +704,12 @@ class AlignWorker(QObject):
                 self.failed.emit(_format_cli_failure(exc))
             return
 
-        total = len(self._seq_files)
+        from repeatviewer.backends.job_phases import ALIGN_PHASES
+
+        total = len(self._seq_files) * ALIGN_PHASES
         created: list[str] = []
         failures: list[str] = []
-        workers = effective_batch_workers(self._max_workers, total)
+        workers = effective_batch_workers(self._max_workers, len(self._seq_files))
         completed = 0
 
         def _align_one(seq_path: Path) -> tuple[Path, str | None, str | None]:
@@ -728,38 +736,47 @@ class AlignWorker(QObject):
                 for seq_path in self._seq_files:
                     if cancel is not None:
                         cancel.check()
-                    self.progress.emit(completed, f"Aligning {seq_path.name}…")
-                    _log(f"—— Aligning {seq_path.name} ——")
-                    _, out_path, err = _align_one(seq_path)
-                    completed += 1
-                    if err:
-                        failures.append(f"{seq_path.name}: {err}")
-                    elif out_path:
-                        created.append(out_path)
+                    self.progress.emit(completed, f"Preparing {seq_path.name}…")
+                    self.progress.emit(
+                        completed + 1, f"Aligning {seq_path.name}…"
+                    )
+                    seq_path, output, error = _align_one(seq_path)
+                    if error:
+                        failures.append(f"{seq_path.name}: {error}")
+                    elif output:
+                        created.append(output)
+                    self.progress.emit(
+                        completed + 2, f"Finished {seq_path.name}"
+                    )
+                    completed += ALIGN_PHASES
             else:
+                # Parallel: advance by ALIGN_PHASES when each file completes.
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = [pool.submit(_align_one, p) for p in self._seq_files]
+                    futures = {
+                        pool.submit(_align_one, path): path
+                        for path in self._seq_files
+                    }
                     for future in as_completed(futures):
-                        if cancel is not None and cancel.requested:
-                            for pending in futures:
-                                pending.cancel()
-                            raise JobCancelledError("Job stopped by user")
-                        seq_path, out_path, err = future.result()
-                        self.progress.emit(completed, f"Aligning {seq_path.name}…")
-                        _log(f"Finished {seq_path.name}")
-                        completed += 1
-                        if err:
-                            failures.append(f"{seq_path.name}: {err}")
-                        elif out_path:
-                            created.append(out_path)
+                        if cancel is not None:
+                            cancel.check()
+                        seq_path, output, error = future.result()
+                        self.progress.emit(
+                            completed, f"Aligning {seq_path.name}…"
+                        )
+                        if error:
+                            failures.append(f"{seq_path.name}: {error}")
+                        elif output:
+                            created.append(output)
+                        completed += ALIGN_PHASES
+                        self.progress.emit(
+                            completed, f"Finished {seq_path.name}"
+                        )
             self.progress.emit(total, "Alignment finished.")
-            _log("Alignment finished.")
             if failures and not created:
-                self.failed.emit("\n".join(failures[:8]))
+                self.failed.emit("\n".join(failures))
                 return
             if failures:
-                self.finished.emit(created)
-                return
+                _log("Some alignments failed:\n" + "\n".join(failures))
             self.finished.emit(created)
         except JobCancelledError:
             self.failed.emit(CANCELLED_MESSAGE)
@@ -893,8 +910,16 @@ class MapReferenceWorker(QObject):
         def _log(message: str) -> None:
             self.log_line.emit(str(message))
 
-        steps = {"Reading": 1, "Indexing": 1, "Placing": 2, "Mapping": 2, "Collecting": 3,
-                 "Consensus": 3, "Writing": 4}
+        steps = {
+            "Starting": 0,
+            "Reading": 1,
+            "Indexing": 1,
+            "Placing": 2,
+            "Mapping": 2,
+            "Collecting": 3,
+            "Consensus": 3,
+            "Writing": 4,
+        }
 
         def _progress(message: str) -> None:
             step = next((v for k, v in steps.items() if message.startswith(k)), 1)
@@ -903,9 +928,11 @@ class MapReferenceWorker(QObject):
 
         try:
             with process_log_sink(_log):
+                self.progress.emit(0, "Starting mapping…")
                 rvmap, files, report = run_mapping(
                     self._seq_files, self._options, progress=_progress, cancel=self._cancel
                 )
+            self.progress.emit(5, "Mapping finished.")
             self.finished.emit({"rvmap": str(rvmap), "files": [str(f) for f in files],
                                 "report": str(report)})
         except JobCancelledError:
@@ -4840,7 +4867,7 @@ class MainWindow(QMainWindow):
         self._start_background_job(
             worker,
             job_title=title,
-            total_steps=4,
+            total_steps=5,
             source_files=files,
             on_finished=self._on_map_finished,
             on_failed=self._on_map_failed,
@@ -7284,35 +7311,68 @@ class MainWindow(QMainWindow):
         seq_files: list[Path],
         job_kwargs: dict[str, Any],
     ) -> int:
-        # Sequence Annotation advances one step per FASTA record; BLAST uses files.
+        from repeatviewer.backends.job_phases import (
+            FLEXIDOT_PHASES,
+            TEAID_PHASES,
+            blast_units_for_fasta,
+            tool_units_for_fasta,
+        )
+
+        # Sequence Annotation advances one step per FASTA record; BLAST uses
+        # phase or per-sequence units depending on the query.
         if func_name == "te_annotation":
             n = max(1, self._count_sequences_in_fastas(seq_files) or len(seq_files))
-        else:
-            n = len(seq_files)
-        blast_opts = job_kwargs.get("blast_options")
-        if func_name == "blast" and blast_opts is not None and blast_opts.active_database_name:
             return n
+
+        blast_opts = job_kwargs.get("blast_options")
+        online_blast = (
+            func_name == "blast"
+            and blast_opts is not None
+            and getattr(blast_opts, "program", None) == BLAST_PROGRAM_ONLINE
+        )
+
+        def _units_for(path: Path) -> int:
+            if func_name == "blast":
+                return blast_units_for_fasta(path, online=online_blast)
+            if func_name in {"flexidot", "teaid"}:
+                return tool_units_for_fasta(
+                    func_name, path, online_blast=online_blast
+                )
+            return 1
+
+        file_units = sum(_units_for(path) for path in seq_files) or 1
+
+        if func_name == "blast" and blast_opts is not None and blast_opts.active_database_name:
+            return file_units
         if not self._project.is_pan_genome_mode:
-            if func_name == "flexidot" and n > 1 and job_kwargs.get("flexidot_combined", True):
-                return 1
+            if func_name == "flexidot" and len(seq_files) > 1 and job_kwargs.get(
+                "flexidot_combined", True
+            ):
+                return FLEXIDOT_PHASES
             if func_name.startswith("plugin:"):
                 plugin = self._plugin_registry.get(func_name[len("plugin:") :])
                 if plugin is not None and not plugin.supports_parallel:
-                    return n
-            return n
-        pan_n = len(self._project.pan_genomes)
-        if func_name in {"blast", "teaid"}:
-            return n * pan_n
+                    return len(seq_files) or 1
+            return file_units
+        pan_n = max(1, len(self._project.pan_genomes))
+        if func_name == "blast":
+            return file_units * pan_n
+        if func_name == "teaid":
+            # Pan-genome TE-Aid is one multi-genome run per file (TEAID_PHASES).
+            teaid_opts = job_kwargs.get("teaid_options")
+            if teaid_opts is not None and getattr(teaid_opts, "use_pan_genome", False):
+                return (len(seq_files) or 1) * TEAID_PHASES
+            return file_units * pan_n
         if func_name == "flexidot":
             if len(seq_files) > 1 and job_kwargs.get("flexidot_combined", True):
-                return pan_n
-            return n * pan_n
+                return pan_n * FLEXIDOT_PHASES
+            return file_units * pan_n
         if func_name.startswith("plugin:"):
             plugin = self._plugin_registry.get(func_name[len("plugin:") :])
             if plugin is not None and not plugin.supports_parallel:
-                return n
-            return n
-        return n
+                return len(seq_files) or 1
+            return len(seq_files) or 1
+        return file_units
 
     def _prepare_configured_genomes(self) -> None:
         targets = self._project.genome_targets()
@@ -9679,9 +9739,30 @@ class MainWindow(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
 
+    def _dismiss_open_tool_dialogs(self, *, keep: QDialog | None = None) -> None:
+        """Close any other tool params window so only one stays open.
+
+        Align / FastGA / Mapping / Tree / Flexidot / TE-Aid share
+        ``_te_viz_input_dialog``; BLAST and HMMER keep their own refs.
+        Opening any of them should dismiss the others (same as Mapping → FastGA).
+        """
+        for attr in (
+            "_te_viz_input_dialog",
+            "_blast_params_dialog",
+            "_hmmer_params_dialog",
+        ):
+            dialog = getattr(self, attr, None)
+            if dialog is None or dialog is keep:
+                continue
+            try:
+                dialog.close()
+            except RuntimeError:
+                setattr(self, attr, None)
+
     def _present_te_viz_dialog(self, dialog: QDialog, on_accept) -> None:
         """Show a non-modal TE settings dialog so the Files panel stays clickable."""
-        if self._te_viz_input_dialog is not None:
+        self._dismiss_open_tool_dialogs()
+        if self._te_viz_input_dialog is not None and self._te_viz_input_dialog is not dialog:
             self._te_viz_input_dialog.close()
         self._te_viz_input_dialog = dialog
         dialog.setModal(False)
@@ -10328,7 +10409,13 @@ class MainWindow(QMainWindow):
         title = f"Align ({engine.upper()})"
         if mode == ALIGN_MODE_COMBINED:
             title = f"{title} (combined)"
-        total_steps = 1 if mode == ALIGN_MODE_COMBINED else len(seq_files)
+        from repeatviewer.backends.job_phases import ALIGN_PHASES
+
+        total_steps = (
+            ALIGN_PHASES
+            if mode == ALIGN_MODE_COMBINED
+            else max(1, len(seq_files)) * ALIGN_PHASES
+        )
         show_log = bool(getattr(opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))
         close_when_finished = bool(
             getattr(opts, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
@@ -10412,10 +10499,12 @@ class MainWindow(QMainWindow):
         from repeatviewer.database_settings import reload_blast_databases_into_project
 
         if self._blast_params_dialog is not None and self._blast_params_dialog.isVisible():
+            self._dismiss_open_tool_dialogs(keep=self._blast_params_dialog)
             self._blast_params_dialog.raise_()
             self._blast_params_dialog.activateWindow()
             return
 
+        self._dismiss_open_tool_dialogs()
         reload_blast_databases_into_project(self._project)
         dialog = BlastParamsDialog(
             project=self._project, initial=self._blast_options, parent=self
@@ -10493,9 +10582,11 @@ class MainWindow(QMainWindow):
     def _open_hmmer_dialog(self) -> None:
         """Non-modal HMMER parameters (Define inputs can take Files/Folders clicks)."""
         if self._hmmer_params_dialog is not None and self._hmmer_params_dialog.isVisible():
+            self._dismiss_open_tool_dialogs(keep=self._hmmer_params_dialog)
             self._hmmer_params_dialog.raise_()
             self._hmmer_params_dialog.activateWindow()
             return
+        self._dismiss_open_tool_dialogs()
         dialog = HmmerParamsDialog(initial=self._hmmer_options, parent=self)
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
@@ -15659,10 +15750,12 @@ class MainWindow(QMainWindow):
             # Never fill the last slot here — reserved until results are shown.
             work = getattr(self, "_job_work_steps", self._task_progress._total)
             capped = min(max(0, int(value)), max(0, int(work)))
-            # One-file jobs: keep the status as "Running BLAST…" without a name.
-            detail = ""
-            if int(work) > 1:
-                detail = self._parse_progress_filename(label)
+            # Prefer a filename when present; otherwise show the phase label
+            # (e.g. "running BLAST…") so single-file jobs are not stuck blank.
+            detail = self._parse_progress_filename(label)
+            if not detail and label:
+                detail = label.split(": ", 1)[-1].strip() if ": " in label else label
+                detail = detail.removesuffix("…").strip()
             self._task_progress.update(capped, detail)
 
     def _log_job_finished(self, job_title: str, result) -> None:

@@ -6349,11 +6349,14 @@ class BlastParamsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 16)
-        layout.setSpacing(8)
+        # Match Align (MAFFT→Mode): no extra gap under the tab underline; the
+        # Inputs form's top margin (10) mirrors mafft_root's content padding.
+        layout.setSpacing(0)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._tabs, 0)
         layout.addWidget(self._inputs_panel, 0)
         layout.addWidget(self._stack, 0)
+        layout.addSpacing(8)
         layout.addWidget(self._button_box, 0)
         self._tabs.currentChanged.connect(self._on_blast_tab_changed)
         self._on_blast_tab_changed(self._tabs.currentIndex())

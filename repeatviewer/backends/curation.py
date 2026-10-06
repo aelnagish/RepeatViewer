@@ -878,6 +878,7 @@ def run_on_sequence(
                     hit_color_high=teaid_opts.hit_color_high,
                     hit_color_mid=teaid_opts.hit_color_mid,
                     hit_line_transparency=teaid_opts.hit_line_transparency,
+                    progress=sequence_progress,
                 )
             else:
                 run_ok = teaid_plotter(
@@ -897,6 +898,7 @@ def run_on_sequence(
                     hit_color_mid=teaid_opts.hit_color_mid,
                     hit_line_transparency=teaid_opts.hit_line_transparency,
                     cancel=cancel,
+                    progress=sequence_progress,
                 )
         except TeaidInputError as exc:
             if scratch_dir is not None:
@@ -1042,6 +1044,8 @@ def run_on_sequence(
         created.append(cons_out)
 
     elif func_name == "flexidot":
+        from repeatviewer.backends.job_phases import FLEXIDOT_PHASES, emit_phase
+
         flex_opts = flexidot_options or FlexidotOptions()
         seq_count = sum(1 for _ in SeqIO.parse(str(seq_path), "fasta"))
         if seq_count < 1:
@@ -1052,8 +1056,17 @@ def run_on_sequence(
             mode: str | list[str] = list(flex_opts.modes)
         else:
             mode = auto_flexidot_mode(seq_count)
+        emit_phase(
+            sequence_progress, 0, FLEXIDOT_PHASES, f"{seq_path.name}: preparing Flexidot…"
+        )
         with _flexidot_dir_lock(out_path):
             before = _output_paths_in_dir(out_path, flexidot_filetype)
+            emit_phase(
+                sequence_progress,
+                1,
+                FLEXIDOT_PHASES,
+                f"{seq_path.name}: running Flexidot…",
+            )
             run_flexidot(
                 str(seq_path),
                 str(out_path),
@@ -1074,6 +1087,12 @@ def run_on_sequence(
                 gff_output_stem=flexidot_output_stem([seq_path.resolve()], genome_label),
                 cancel=cancel,
             )
+            emit_phase(
+                sequence_progress,
+                2,
+                FLEXIDOT_PHASES,
+                f"{seq_path.name}: writing Flexidot outputs…",
+            )
             created.extend(
                 finalize_flexidot_outputs(
                     out_path,
@@ -1084,6 +1103,9 @@ def run_on_sequence(
                     gff_source_fastas=[seq_path.resolve()],
                 )
             )
+        emit_phase(
+            sequence_progress, FLEXIDOT_PHASES, FLEXIDOT_PHASES, f"{seq_path.name}: finished"
+        )
 
     elif func_name == "te_annotation":
         te_opts = te_annotation_options or TeAnnotationOptions()
@@ -1222,19 +1244,34 @@ def run_batch(
     display_name = _DISPLAY_NAMES.get(func_name, func_name)
 
     if func_name == "flexidot" and len(seq_list) > 1 and flexidot_combined:
-        total_steps = len(genome_items) if genome_items else 1
+        from repeatviewer.backends.job_phases import FLEXIDOT_PHASES
+
+        targets = genome_items or [("", Path(project.genome_file or ""))]
+        total_steps = max(1, len(targets) * FLEXIDOT_PHASES)
         progress_cb(0, f"{display_name}: {len(seq_list)} sequences (comparison)")
         check_cancelled(cancel)
         completed = 0
-        targets = genome_items or [("", Path(project.genome_file or ""))]
         for genome_label, genome_path in targets:
             check_cancelled(cancel)
+            label = f" ({genome_label})" if genome_label else ""
             try:
+                progress_cb(
+                    completed,
+                    f"{display_name}: preparing comparison{label}",
+                )
+                progress_cb(
+                    completed + 1,
+                    f"{display_name}: running Flexidot{label}",
+                )
                 outs = run_flexidot_combined(
                     seq_list,
                     flexidot_options=flexidot_options,
                     cancel=cancel,
                     genome_label=genome_label,
+                )
+                progress_cb(
+                    completed + 2,
+                    f"{display_name}: writing outputs{label}",
                 )
                 created_outputs.extend(outs)
                 for seq_path in seq_list:
@@ -1242,10 +1279,9 @@ def run_batch(
             except JobCancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                label = f" ({genome_label})" if genome_label else ""
                 failures.append(f"batch{label}: {exc}")
-            completed += 1
-            progress_cb(completed, f"{display_name}: finished")
+            completed += FLEXIDOT_PHASES
+            progress_cb(completed, f"{display_name}: finished{label}")
         return {
             "func_name": func_name,
             "total": total_steps,
@@ -1280,9 +1316,18 @@ def run_batch(
         and blast_options is not None
         and blast_options.program == BLAST_PROGRAM_ONLINE
     )
-    pass_sequence_progress = per_sequence or online_blast
+    from repeatviewer.backends.job_phases import tool_units_for_fasta
+
+    phased_tools = {"blast", "flexidot", "teaid"}
+    pass_sequence_progress = per_sequence or online_blast or func_name in phased_tools
     item_units = [
-        _fasta_sequence_units(seq_path) if per_sequence else 1
+        (
+            _fasta_sequence_units(seq_path)
+            if per_sequence
+            else tool_units_for_fasta(
+                func_name, seq_path, online_blast=online_blast
+            )
+        )
         for seq_path, _genome_label, _genome_path in work_items
     ]
     total_units = max(1, sum(item_units))
@@ -1374,7 +1419,9 @@ def run_batch(
         nonlocal completed_count
         label = f" ({genome_label})" if genome_label else ""
         with progress_lock:
-            if per_sequence:
+            # Phase / per-sequence progress already advanced completed_count;
+            # only add any remaining units for this work item.
+            if pass_sequence_progress:
                 remaining = max(0, int(units) - int(reported))
                 if remaining:
                     completed_count += remaining

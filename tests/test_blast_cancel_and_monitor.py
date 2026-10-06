@@ -126,6 +126,32 @@ def test_close_other_process_monitors_keeps_current_tool(qapp) -> None:
     host._blast_process_dialog.deleteLater()
 
 
+def test_dismiss_open_tool_dialogs_closes_others(qapp) -> None:
+    from PySide6.QtWidgets import QDialog
+
+    from repeatviewer.main_window import MainWindow
+
+    class Host:
+        def __init__(self) -> None:
+            self._te_viz_input_dialog = QDialog()
+            self._blast_params_dialog = QDialog()
+            self._hmmer_params_dialog = QDialog()
+            self._te_viz_input_dialog.show()
+            self._blast_params_dialog.show()
+            self._hmmer_params_dialog.show()
+
+    host = Host()
+    keep = host._blast_params_dialog
+    MainWindow._dismiss_open_tool_dialogs(host, keep=keep)
+    assert not host._te_viz_input_dialog.isVisible()
+    assert not host._hmmer_params_dialog.isVisible()
+    assert host._blast_params_dialog.isVisible()
+    host._blast_params_dialog.close()
+    host._te_viz_input_dialog.deleteLater()
+    host._blast_params_dialog.deleteLater()
+    host._hmmer_params_dialog.deleteLater()
+
+
 def test_process_window_defaults_are_show_and_close() -> None:
     from repeatviewer.job_options import (
         BlastOptions,

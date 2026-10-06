@@ -42,7 +42,7 @@ Developer: Jiangzhao Qian
 os_type = platform.system()
 
 TEAID_DIVERGENCE_HIST_MAX = 0.6
-DEFAULT_TEAID_X_AXIS_LABEL = "TE consensus (bp)"
+DEFAULT_TEAID_X_AXIS_LABEL = "Input sequence (bp)"
 TEAID_PAN_PANEL_PX_MIN = 260
 TEAID_PAN_PANEL_PX_MAX = 380
 TEAID_PAN_X_TICKANGLE = -45
@@ -527,7 +527,7 @@ def blast_plot(
     # Update the layout to add titles and labels with adjusted axis ranges
     fig.update_layout(
         title=plot_title,
-        xaxis_title='TE consensus (bp)',
+        xaxis_title=DEFAULT_TEAID_X_AXIS_LABEL,
         yaxis_title='Divergence to consensus (%)',
         xaxis={
             'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
@@ -593,7 +593,7 @@ def coverage_plot(df, cons_len):
     # Update layout to add titles and labels
     fig.update_layout(
         title='TE Consensus Genomic Coverage Plot',
-        xaxis_title='Position along TE consensus (bp)',
+        xaxis_title=DEFAULT_TEAID_X_AXIS_LABEL,
         yaxis_title='Coverage (bp)',
         xaxis={
             'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
@@ -800,8 +800,8 @@ def dot_plot(df):
     axis_ticks = _consensus_axis_tick_kwargs(axis_max)
     fig.update_layout(
         title='Self dot plot',
-        xaxis_title='TE consensus self dotplot (bp)',
-        yaxis_title='TE consensus self dotplot (bp)',
+        xaxis_title=DEFAULT_TEAID_X_AXIS_LABEL,
+        yaxis_title=DEFAULT_TEAID_X_AXIS_LABEL,
         xaxis={
             'title_font': {'size': 16, 'family': 'Arial, sans-serif', 'color': 'black'},
             'showgrid': False,
@@ -878,8 +878,8 @@ def render_self_dotplot_png(
     ax.set_ylim(1, axis_max)
     ax.set_aspect("equal", adjustable="box")
     ax.set_title(title)
-    ax.set_xlabel("TE consensus self dotplot (bp)")
-    ax.set_ylabel("TE consensus self dotplot (bp)")
+    ax.set_xlabel(DEFAULT_TEAID_X_AXIS_LABEL)
+    ax.set_ylabel(DEFAULT_TEAID_X_AXIS_LABEL)
     ax.tick_params(direction="out")
     for spine in ax.spines.values():
         spine.set_visible(True)
@@ -1594,19 +1594,24 @@ def teaid_pan_genome_plotter(
     hit_color_high='red',
     hit_color_mid='#1f77b4',
     hit_line_transparency=0.0,
+    progress=None,
 ):
     """
     Combined TE-Aid report for pan-genome mode.
 
     ``genome_targets`` is a list of ``(short_name, genome_fasta_path)`` pairs.
     """
+    from repeatviewer.backends.job_phases import TEAID_PHASES, emit_phase
+
+    base = os.path.basename(input_file)
     logging.info(
         'TE-Aid pan-genome is running for:%s (%d genomes)',
-        os.path.basename(input_file),
+        base,
         len(genome_targets),
     )
 
     try:
+        emit_phase(progress, 0, TEAID_PHASES, f"{base}: preparing consensus…")
         con_seq, cons_len = con_generater(input_file, output_dir, threshold=0.3)
     except TeaidInputError:
         raise
@@ -1619,6 +1624,7 @@ def teaid_pan_genome_plotter(
 
     plot_main_title = f'TE: {os.path.basename(input_file)} | {cons_len} bp'
 
+    emit_phase(progress, 1, TEAID_PHASES, f"{base}: genome BLAST panels…")
     genome_panels = []
     for name, genome_file in genome_targets:
         panels = _build_genome_teaid_panels(
@@ -1638,6 +1644,7 @@ def teaid_pan_genome_plotter(
         )
         genome_panels.append((name, panels))
 
+    emit_phase(progress, 2, TEAID_PHASES, f"{base}: self-dotplot…")
     fig_dot = _build_self_dot_figure(
         con_seq,
         output_dir,
@@ -1645,6 +1652,7 @@ def teaid_pan_genome_plotter(
         use_system_blast=use_system_blast,
         self_blast_word_size=self_blast_word_size,
     )
+    emit_phase(progress, 3, TEAID_PHASES, f"{base}: assembling TE-Aid figure…")
     fig = _assemble_teaid_pan_genome_figure(
         plot_main_title,
         cons_len,
@@ -1652,7 +1660,9 @@ def teaid_pan_genome_plotter(
         fig_dot,
         x_axis_label=x_axis_label,
     )
+    emit_phase(progress, 4, TEAID_PHASES, f"{base}: writing HTML…")
     _write_teaid_html(fig, output_dir, input_file)
+    emit_phase(progress, TEAID_PHASES, TEAID_PHASES, f"{base}: finished")
     logging.info('TE-Aid pan-genome finished: %s.', os.path.basename(input_file))
     return True
 
@@ -1676,16 +1686,21 @@ def teaid_plotter(
     hit_color_mid='#1f77b4',
     hit_line_transparency=0.0,
     cancel=None,
+    progress=None,
 ):
     # Used global variable: os_type
 
     # output_dir refers to the temp folders
 
-    run_succeed = True
+    from repeatviewer.backends.job_phases import TEAID_PHASES, emit_phase
 
-    logging.info(f'TE-Aid is running for:{os.path.basename(input_file)}')
+    run_succeed = True
+    base = os.path.basename(input_file)
+
+    logging.info(f'TE-Aid is running for:{base}')
 
     try:
+        emit_phase(progress, 0, TEAID_PHASES, f"{base}: preparing consensus…")
         # Generate consensus sequence
         con_seq, cons_len = con_generater(input_file, output_dir, threshold=0.3)
 
@@ -1705,6 +1720,7 @@ def teaid_plotter(
     # Define main plot title
     plot_main_title = f'TE: {os.path.basename(input_file)} | {cons_len} bp'
 
+    emit_phase(progress, 1, TEAID_PHASES, f"{base}: genome BLAST panels…")
     panels = _build_genome_teaid_panels(
         con_seq,
         cons_len,
@@ -1721,6 +1737,7 @@ def teaid_plotter(
         hit_line_transparency=hit_line_transparency,
         cancel=cancel,
     )
+    emit_phase(progress, 2, TEAID_PHASES, f"{base}: self-dotplot…")
     fig_dot = _build_self_dot_figure(
         con_seq,
         output_dir,
@@ -1729,10 +1746,13 @@ def teaid_plotter(
         self_blast_word_size=self_blast_word_size,
         cancel=cancel,
     )
+    emit_phase(progress, 3, TEAID_PHASES, f"{base}: assembling TE-Aid figure…")
     fig = _assemble_teaid_2x2_figure(
         plot_main_title, cons_len, panels, fig_dot, x_axis_label=x_axis_label
     )
+    emit_phase(progress, 4, TEAID_PHASES, f"{base}: writing HTML…")
     _write_teaid_html(fig, output_dir, input_file, output_name_tag=output_name_tag)
+    emit_phase(progress, TEAID_PHASES, TEAID_PHASES, f"{base}: finished")
 
     logging.info(f'TE-Aid finished: {os.path.basename(input_file)}.')
     # fig.show()

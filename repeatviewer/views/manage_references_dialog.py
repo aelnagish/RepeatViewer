@@ -676,6 +676,9 @@ class AddDatabaseDialog(QDialog):
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
+        from repeatviewer.views.blast_database_dialog import style_blast_db_progress
+
+        style_blast_db_progress(progress)
         progress.show()
         self._progress = progress
         self._pending_blast_name = name

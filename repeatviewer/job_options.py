@@ -729,7 +729,7 @@ DEFAULT_TEAID_THREADS = 1
 DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 6
 # Text written on the consensus (x-)axis of the TE-Aid panels. Configurable so
 # non-TE users (e.g. tandem repeats) can relabel it.
-DEFAULT_TEAID_X_AXIS_LABEL = "TE consensus (bp)"
+DEFAULT_TEAID_X_AXIS_LABEL = "Input sequence (bp)"
 MIN_TEAID_SELF_BLAST_WORD_SIZE = 4
 MAX_TEAID_SELF_BLAST_WORD_SIZE = 25
 # Genome-BLAST hit length bands (% of consensus / input length).

@@ -373,13 +373,17 @@ def run_ncbi_online_blast(
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    def _emit(done: int, total: int, detail: str) -> None:
+    from repeatviewer.backends.job_phases import ONLINE_BLAST_PHASES
+
+    total = ONLINE_BLAST_PHASES
+
+    def _emit(done: int, detail: str) -> None:
         # Wired to the job progress bar and (when enabled) the process window.
         if progress is not None:
-            progress(done, total, detail)
+            progress(max(0, min(int(done), total)), total, detail)
 
     check_cancelled(cancel)
-    _emit(0, 1, f"{query_path.name}: connecting to NCBI BLAST…")
+    _emit(0, f"{query_path.name}: connecting to NCBI BLAST…")
     query_text, seq_count, seq_chars = _read_query_fasta(query_path)
     if seq_count > 1:
         raise NcbiBlastOnlineError(
@@ -390,12 +394,11 @@ def run_ncbi_online_blast(
         )
     _emit(
         0,
-        1,
         f"{query_path.name}: prepared query "
         f"({seq_count} sequence(s), {seq_chars:,} letters); "
         f"program={program}, database={database}, evalue={evalue}",
     )
-    _emit(0, 1, f"{query_path.name}: submitting search to NCBI servers…")
+    _emit(0, f"{query_path.name}: submitting search to NCBI servers…")
 
     # Do not set FORMAT_TYPE on Put — choose format on Get (XML).
     put_params = {
@@ -415,7 +418,6 @@ def run_ncbi_online_blast(
     check_cancelled(cancel)
     rid, rtoe = _parse_rid(put_body)
     _emit(
-        0,
         1,
         f"{query_path.name}: submitted — NCBI RID {rid} "
         f"(estimated wait ~{rtoe}s)",
@@ -430,7 +432,6 @@ def run_ncbi_online_blast(
         remaining = int(wait_first - elapsed)
         if remaining == int(wait_first) or remaining % 5 == 0:
             _emit(
-                0,
                 1,
                 f"{query_path.name}: waiting for NCBI queue "
                 f"(RID {rid}; ~{max(remaining, 0)}s)…",
@@ -445,7 +446,6 @@ def run_ncbi_online_blast(
         check_cancelled(cancel)
         poll += 1
         _emit(
-            0,
             1,
             f"{query_path.name}: checking NCBI status "
             f"(RID {rid}; poll {poll})…",
@@ -459,7 +459,7 @@ def run_ncbi_online_blast(
         )
         status = _parse_status(info)
         if status == "READY":
-            _emit(0, 1, f"{query_path.name}: NCBI search finished (RID {rid})")
+            _emit(2, f"{query_path.name}: NCBI search finished (RID {rid})")
             break
         if status == "FAILED" or (
             status == "UNKNOWN" and "FAILED" in info.upper()
@@ -468,7 +468,6 @@ def run_ncbi_online_blast(
                 f"NCBI BLAST search failed (RID {rid}).\n{info[:400]}"
             )
         _emit(
-            0,
             1,
             f"{query_path.name}: NCBI still searching "
             f"(RID {rid}; status={status})…",
@@ -481,7 +480,7 @@ def run_ncbi_online_blast(
         )
 
     check_cancelled(cancel)
-    _emit(0, 1, f"{query_path.name}: downloading NCBI XML results…")
+    _emit(2, f"{query_path.name}: downloading NCBI XML results…")
     raw = _ncbi_get(
         {
             "CMD": "Get",
@@ -502,7 +501,7 @@ def run_ncbi_online_blast(
         write_online_blast_html,
     )
 
-    _emit(0, 1, f"{query_path.name}: building NCBI HTML report…")
+    _emit(3, f"{query_path.name}: building NCBI HTML report…")
     parsed = parse_blast_output_xml(
         raw,
         rid=rid,
@@ -522,7 +521,7 @@ def run_ncbi_online_blast(
 
     table, n_hits = blast_xml_to_tabular(raw)
     if write_text:
-        _emit(0, 1, f"{query_path.name}: converting NCBI XML to hit table…")
+        _emit(4, f"{query_path.name}: converting NCBI XML to hit table…")
         out_path = out_dir / online_blast_table_basename(query_path.name, program)
         header_lines = [
             f"# NCBI online BLAST ({program} vs {database}); RID={rid}",
@@ -539,8 +538,7 @@ def run_ncbi_online_blast(
         )
         created.append(out_path.resolve())
         _emit(
-            0,
-            1,
+            4,
             f"{query_path.name}: wrote {out_path.name} ({n_hits} hit row(s))",
         )
     else:
@@ -551,18 +549,16 @@ def run_ncbi_online_blast(
 
     if n_hits == 0:
         _emit(
-            0,
-            1,
+            4,
             f"{query_path.name}: NCBI returned 0 hits "
             f"(RID {rid}; evalue={evalue}, database={database})",
         )
     else:
         _emit(
-            0,
-            1,
+            4,
             f"{query_path.name}: NCBI returned {n_hits} hit row(s) (RID {rid})",
         )
-    _emit(1, 1, f"{query_path.name}: wrote {html_path.name}")
+    _emit(total, f"{query_path.name}: wrote {html_path.name}")
     return created
 
 
