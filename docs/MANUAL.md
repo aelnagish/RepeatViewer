@@ -1,6 +1,6 @@
 # RepeatViewer User Manual
 
-**Version 1.0.0**
+**Version 1.1.0**
 
 RepeatViewer is a desktop application for the manual curation of transposable
 element (TE) consensus sequences. It gives you a file browser, a preview pane,
