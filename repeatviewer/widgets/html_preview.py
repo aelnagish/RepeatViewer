@@ -63,12 +63,25 @@ def _qobject_alive(obj) -> bool:
 TEAID_NOMINAL_WIDTH = 1600
 TEAID_NOMINAL_HEIGHT = 900
 
+# Include Flexidot's info box (Go to buttons + sequence) below the plot when
+# fitting the preview. Measuring only `.plotly-graph-div` clips that footer.
 _CONTENT_SIZE_JS = """
 (() => {
   const plot = document.querySelector('.plotly-graph-div');
+  const info = document.getElementById('flexidot-dotplot-infobox');
   if (plot) {
-    const r = plot.getBoundingClientRect();
-    return [Math.ceil(r.width || plot.scrollWidth || 0), Math.ceil(r.height || plot.scrollHeight || 0)];
+    // Prefer layout sizes (offset*) over getBoundingClientRect so Preview
+    // zoom does not feed back into fit math / Plotly responsive shrinking.
+    let w = Math.ceil(plot.offsetWidth || plot.scrollWidth || 0);
+    let h = Math.ceil(plot.offsetHeight || plot.scrollHeight || 0);
+    if (info) {
+      const infoH = Math.ceil(info.offsetHeight || info.scrollHeight || 0);
+      const style = window.getComputedStyle(info);
+      const mt = parseFloat(style.marginTop) || 0;
+      h = Math.ceil(h + mt + infoH + 12);
+      w = Math.max(w, Math.ceil(info.offsetWidth || info.scrollWidth || 0));
+    }
+    return [w, h];
   }
   const de = document.documentElement;
   if (!de) {
@@ -76,6 +89,46 @@ _CONTENT_SIZE_JS = """
   }
   return [de.scrollWidth || 0, de.scrollHeight || 0];
 })()
+"""
+
+_FLEXIDOT_INFOBOX_LAYOUT_JS = """
+(function() {
+  var box = document.getElementById('flexidot-dotplot-infobox');
+  if (!box) { return; }
+  // Reserve room for Go-to buttons + two sequence lines so fit-to-window
+  // does not clip them when a match is selected.
+  box.style.minHeight = '104px';
+  box.style.boxSizing = 'border-box';
+  box.style.overflow = 'visible';
+})();
+"""
+
+# Preview zoom uses QWebEngine setZoomFactor. Plotly's responsive layout then
+# shrinks the graph to the smaller CSS viewport, so higher zoom % looks like a
+# tiny plot with a huge title. Lock the graph to a fixed pixel size instead.
+_FLEXIDOT_LOCK_PLOT_SIZE_JS = """
+(function() {
+  var plot = document.getElementById('flexidot-dotplot')
+    || document.querySelector('.plotly-graph-div');
+  if (!plot) { return; }
+  if (!plot.__repeatviewerLockedW || !plot.__repeatviewerLockedH) {
+    var w0 = Math.round(plot.offsetWidth || plot.clientWidth || 0);
+    var h0 = Math.round(plot.offsetHeight || plot.clientHeight || 0);
+    if (w0 < 80 || h0 < 80) { return; }
+    plot.__repeatviewerLockedW = w0;
+    plot.__repeatviewerLockedH = h0;
+  }
+  var w = plot.__repeatviewerLockedW;
+  var h = plot.__repeatviewerLockedH;
+  plot.style.width = w + 'px';
+  plot.style.height = h + 'px';
+  plot.style.maxWidth = 'none';
+  if (window.Plotly && typeof Plotly.relayout === 'function') {
+    try {
+      Plotly.relayout(plot, {autosize: false, width: w, height: h});
+    } catch (e) {}
+  }
+})();
 """
 
 # Do not import QWebEngineView at module load — it can block or crash app startup on macOS.
@@ -654,6 +707,9 @@ class HtmlWebEnginePreview(QWidget):
             self._view.setZoomFactor(factor)
         except RuntimeError:
             return
+        # Keep Flexidot Plotly from shrinking after zoom changes the CSS viewport.
+        if self._current_path is not None and is_flexidot_html_file(self._current_path):
+            self._view.page().runJavaScript(_FLEXIDOT_LOCK_PLOT_SIZE_JS)
 
     def _query_content_size(self) -> None:
         if not self._view_active():
@@ -883,6 +939,11 @@ class HtmlWebEnginePreview(QWidget):
             return
         logger.debug("Flexidot Go-to bridge: starting poll timer for %s", self._current_path)
         self._view.page().runJavaScript(FLEXIDOT_GO_TO_BRIDGE_JS)
+        self._view.page().runJavaScript(_FLEXIDOT_LOCK_PLOT_SIZE_JS)
+        self._view.page().runJavaScript(_FLEXIDOT_INFOBOX_LAYOUT_JS)
+        self._defer(80, self._query_content_size)
+        self._defer(200, lambda: self._view.page().runJavaScript(_FLEXIDOT_LOCK_PLOT_SIZE_JS) if self._view_active() else None)
+        self._defer(250, self._query_content_size)
         if self._dotplot_click_timer is None:
             self._dotplot_click_timer = QTimer(self)
             self._dotplot_click_timer.setInterval(200)
@@ -906,6 +967,19 @@ class HtmlWebEnginePreview(QWidget):
             if isinstance(payload, dict):
                 self._emit_dotplot_payload(payload)
 
+        def _on_content_dirty(raw) -> None:
+            if not self._view_active():
+                return
+            try:
+                dirty_ts = int(raw or 0)
+            except (TypeError, ValueError):
+                return
+            last = getattr(self, "_last_flexidot_content_dirty", 0)
+            if dirty_ts <= last:
+                return
+            self._last_flexidot_content_dirty = dirty_ts
+            self._query_content_size()
+
         self._view.page().runJavaScript(
             """
 (() => {
@@ -919,6 +993,11 @@ class HtmlWebEnginePreview(QWidget):
 """,
             0,
             _on_payload,
+        )
+        self._view.page().runJavaScript(
+            "window.__repeatviewerFlexidotContentDirty || 0",
+            0,
+            _on_content_dirty,
         )
 
     def _open_in_browser(self) -> None:

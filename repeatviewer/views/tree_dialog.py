@@ -57,6 +57,8 @@ from repeatviewer.job_options import (
     TREE_ROOT_OUTGROUP,
     TREE_SEQ_AS_IS,
     TreeOptions,
+    opening_dialog_tab,
+    persistable_dialog_tab,
 )
 from repeatviewer.views.tool_dialogs import (
     TOOL_PARAMS_DIALOG_WIDTH,
@@ -313,10 +315,20 @@ class TreeParamsDialog(QDialog):
         self._last_engine = (
             opts.engine if opts.engine in ENGINE_TABS else TREE_ENGINE_IQTREE
         )
-        open_tab = getattr(opts, "last_dialog_tab", self._last_engine)
-        if open_tab == DIALOG_TAB_OPTIONS:
-            self._tabs.setCurrentIndex(self._options_index)
-        elif open_tab in self._tab_index:
+        saved_tab = opts.last_dialog_tab
+        # Dataclass default last_dialog_tab is IQ-TREE; if only engine= was set,
+        # open on that engine rather than the default tab key.
+        if (
+            saved_tab == TreeOptions().last_dialog_tab
+            and self._last_engine != saved_tab
+        ):
+            saved_tab = DIALOG_TAB_OPTIONS
+        open_tab = opening_dialog_tab(
+            saved_tab,
+            allowed=TREE_DIALOG_TABS,
+            first_tab=self._last_engine,
+        )
+        if open_tab in self._tab_index:
             self._last_engine = open_tab
             self._tabs.setCurrentIndex(self._tab_index[open_tab])
         else:
@@ -637,7 +649,7 @@ class TreeParamsDialog(QDialog):
                 tool_name="the tree build",
                 checked=opts.show_process_window,
                 close_when_finished=bool(
-                    getattr(opts, "close_process_window_when_finished", False)
+                    getattr(opts, "close_process_window_when_finished", True)
                 ),
             )
         )
@@ -1082,7 +1094,12 @@ class TreeParamsDialog(QDialog):
             min_coverage=self._min_cov.value() / 100.0,
             coverage_reference=str(self._cov_ref.currentData()),
             engine=engine,
-            last_dialog_tab=self.current_dialog_tab(),
+            last_dialog_tab=persistable_dialog_tab(
+                self.current_dialog_tab(),
+                first_tab=self._last_engine
+                if self._last_engine in ENGINE_TABS
+                else TREE_ENGINE_IQTREE,
+            ),
             model=model,
             runs=self._runs.value(),
             seed=self._seed.value(),

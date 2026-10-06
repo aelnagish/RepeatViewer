@@ -53,7 +53,7 @@ def test_blast_dialog_align_style_sections_and_footer(qapp: QApplication) -> Non
     assert any("Top longest sequences" in lab.text() for lab in dlg.findChildren(QLabel))
     assert not any("Max MSA lines" in lab.text() for lab in dlg.findChildren(QLabel))
     assert not any("Top longest lines" in lab.text() for lab in dlg.findChildren(QLabel))
-    assert any(t == "Manage BLAST databases" for t in texts)
+    assert any(t == "Manage Database" for t in texts)
     assert dlg.width() == BlastParamsDialog._DIALOG_WIDTH
     assert dlg.width() == 608
     # Inputs radio dots share the Settings field column (Database combo).
@@ -223,7 +223,7 @@ def test_blast_dialog_reopens_last_tab(qapp: QApplication) -> None:
 
     dlg._tabs.setCurrentIndex(4)
     assert dlg.current_dialog_tab() == DIALOG_TAB_OPTIONS
-    assert dlg.options().last_dialog_tab == DIALOG_TAB_OPTIONS
+    assert dlg.options().last_dialog_tab == BLAST_PROGRAM_BLASTN
     # Options tab does not change the run program.
     assert dlg.options().program == BLAST_PROGRAM_BLASTN
 

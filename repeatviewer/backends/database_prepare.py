@@ -80,6 +80,37 @@ def blast_index_file(seq_path: Path, *, protein: bool) -> Path:
     return Path(f"{seq_path.expanduser().resolve()}{suffix}")
 
 
+def annotation_blast_prefix_for(seq_path: Path) -> Path:
+    """Central index prefix under Documents/RepeatViewer/blast_databases/<name>/<name>.
+
+    Annotation DNA/Protein prep uses this instead of writing .nin/.pin beside the FASTA.
+    """
+    from repeatviewer.app_preferences import load_blast_db_base_dir
+    from repeatviewer.backends.gui_functions import sanitize_name
+
+    safe = sanitize_name(Path(seq_path).stem) or "database"
+    return load_blast_db_base_dir().expanduser().resolve() / safe / safe
+
+
+def blast_search_db_path(seq_path: Path, *, protein: bool) -> Path:
+    """Path passed to BLAST ``-db``: prefer central named index, else legacy beside FASTA."""
+    seq_path = seq_path.expanduser().resolve()
+    named = annotation_blast_prefix_for(seq_path)
+    if named_blast_index_exists(named, protein=protein):
+        return named
+    return seq_path
+
+
+def _fasta_blast_index_ready(seq_path: Path, *, protein: bool) -> bool:
+    seq_path = seq_path.expanduser().resolve()
+    if not seq_path.is_file():
+        return False
+    named = annotation_blast_prefix_for(seq_path)
+    if named_blast_index_exists(named, protein=protein):
+        return True
+    return blast_index_file(seq_path, protein=protein).is_file()
+
+
 def hmm_index_files(hmm_path: Path) -> tuple[Path, Path, Path, Path]:
     # hmmpress appends .h3m/.h3f/.h3i/.h3p to the full profile path (e.g. Pfam-A.hmm.h3m).
     base = str(hmm_path.expanduser().resolve())
@@ -118,23 +149,23 @@ def database_search_readiness(db: UserDatabase) -> str | None:
     if problem:
         return problem.replace("\n", " ")
     if kind == "protein":
-        if not blast_index_file(path, protein=True).is_file():
-            return "Protein database is not indexed. Use File → Define database."
+        if not _fasta_blast_index_ready(path, protein=True):
+            return "Protein database is not indexed. Use File → Manage Database."
     elif kind == "dna":
-        if not blast_index_file(path, protein=False).is_file():
-            return "DNA database is not indexed. Use File → Define database."
+        if not _fasta_blast_index_ready(path, protein=False):
+            return "DNA database is not indexed. Use File → Manage Database."
     elif kind == "cdd":
         if not check_cdd_index_files(str(path)):
-            return "CDD database is not indexed. Use File → Define database."
+            return "CDD database is not indexed. Use File → Manage Database."
     elif kind == "hmm":
         if not _hmm_prepare_ready(path):
             if not hmm_indexing_available():
                 return (
                     "HMM database is not prepared. Install hmmpress or "
-                    f"pyhmmer ({pyhmmer_install_hint()}), then use File → Define database."
+                    f"pyhmmer ({pyhmmer_install_hint()}), then use File → Manage Database."
                 )
             return (
-                "HMM database is not prepared. Use File → Define database to index it "
+                "HMM database is not prepared. Use File → Manage Database to index it "
                 "(required for large databases such as Dfam)."
             )
     return None
@@ -173,9 +204,9 @@ def prepare_index_is_ready(kind: str, path: Path) -> bool:
     if kind == "cdd":
         return path.is_dir() and check_cdd_index_files(str(path))
     if kind == "protein":
-        return path.is_file() and blast_index_file(path, protein=True).is_file()
+        return _fasta_blast_index_ready(path, protein=True)
     if kind == "dna":
-        return path.is_file() and blast_index_file(path, protein=False).is_file()
+        return _fasta_blast_index_ready(path, protein=False)
     if kind == "hmm":
         return _hmm_prepare_ready(path)
     return False
@@ -186,9 +217,9 @@ def index_is_ready(kind: str, path: Path) -> bool:
     if kind == "cdd":
         return path.is_dir() and check_cdd_index_files(str(path))
     if kind == "protein":
-        return path.is_file() and blast_index_file(path, protein=True).is_file()
+        return _fasta_blast_index_ready(path, protein=True)
     if kind == "dna":
-        return path.is_file() and blast_index_file(path, protein=False).is_file()
+        return _fasta_blast_index_ready(path, protein=False)
     if kind == "hmm":
         if not path.is_file():
             return False
@@ -295,30 +326,29 @@ def build_blast_index(
     protein: bool,
     use_system_blast: bool,
 ) -> Path:
+    """Build a BLAST index under the central blast_databases folder (not beside the FASTA).
+
+    Returns the ``-db`` prefix path. Legacy in-place indexes beside the FASTA are
+    still recognized by :func:`blast_search_db_path` until rebuilt.
+    """
+    from repeatviewer.app_preferences import load_blast_db_base_dir
+
     seq_path = seq_path.expanduser().resolve()
     kind = "protein" if protein else "dna"
     problem = describe_database_problem(kind, seq_path)
     if problem:
         raise FileNotFoundError(problem)
-    if index_is_ready(kind, seq_path):
-        return seq_path
+    if _fasta_blast_index_ready(seq_path, protein=protein):
+        return blast_search_db_path(seq_path, protein=protein)
 
-    makeblastdb = _bundled_or_system("makeblastdb", use_system_blast=use_system_blast)
-    dbtype = "prot" if protein else "nucl"
-    cmd = [
-        makeblastdb,
-        "-in",
-        str(seq_path),
-        "-dbtype",
-        dbtype,
-        "-out",
-        str(seq_path),
-    ]
-    logger.info("Building BLAST index: %s", " ".join(cmd))
-    _run_logged(cmd, inputs=[seq_path], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if not index_is_ready(kind, seq_path):
-        raise RuntimeError(f"BLAST index generation failed for {seq_path.name}.")
-    return seq_path
+    molecule_type = "prot" if protein else "nucl"
+    return build_named_blast_database(
+        seq_path,
+        load_blast_db_base_dir(),
+        seq_path.stem,
+        molecule_type=molecule_type,
+        use_system_blast=use_system_blast,
+    )
 
 
 def _named_blast_index_marker(db_prefix: Path, *, protein: bool) -> Path:
@@ -591,13 +621,13 @@ def prepare_database_target(
     if target.kind == "cdd":
         build_cdd_profile_index(target.path, use_system_blast=use_system_blast)
     elif target.kind == "protein":
-        build_blast_index(target.path, protein=True, use_system_blast=use_system_blast)
+        prefix = build_blast_index(target.path, protein=True, use_system_blast=use_system_blast)
         if validate_search:
-            _run_blastp_test(target.path, use_system_blast=use_system_blast)
+            _run_blastp_test(prefix, use_system_blast=use_system_blast)
     elif target.kind == "dna":
-        build_blast_index(target.path, protein=False, use_system_blast=use_system_blast)
+        prefix = build_blast_index(target.path, protein=False, use_system_blast=use_system_blast)
         if validate_search:
-            _run_blastn_test(target.path, use_system_blast=use_system_blast)
+            _run_blastn_test(prefix, use_system_blast=use_system_blast)
     elif target.kind == "hmm":
         build_hmm_index(target.path)
         if validate_search:

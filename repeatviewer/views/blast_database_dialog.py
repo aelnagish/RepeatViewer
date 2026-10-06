@@ -1,27 +1,25 @@
-"""Manage saved BLAST databases (Blast tool's "Database:" dropdown, Geneious-style)."""
+"""Manage saved BLAST databases (Blast tool's "Database:" dropdown, Geneious-style).
+
+The list UI now lives in :mod:`manage_references_dialog`. This module keeps
+``AddBlastDatabaseDialog`` (used when auto-saving a genome index) and re-exports
+``BlastDatabaseManagerDialog`` for existing call sites.
+"""
 
 from __future__ import annotations
 
-import shutil
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
-    QHBoxLayout,
-    QHeaderView,
     QLineEdit,
     QMessageBox,
     QProgressDialog,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -32,14 +30,18 @@ from repeatviewer.backends.database_prepare import (
     format_prepare_error,
 )
 from repeatviewer.backends.gui_functions import sanitize_name
-from repeatviewer.database_settings import save_blast_databases_to_settings
 from repeatviewer.project import (
     BLAST_MOLECULE_NUCL,
     BLAST_MOLECULE_PROT,
     BlastDatabase,
-    RepeatViewerProject,
 )
 from repeatviewer.widgets.path_browse import PathBrowseRow
+
+# Re-export for callers that import from this module.
+from repeatviewer.views.manage_references_dialog import (  # noqa: E402
+    BlastDatabaseManagerDialog,
+    ManageReferencesDialog,
+)
 
 _MOLECULE_LABELS = {
     BLAST_MOLECULE_NUCL: "Nucleotide",
@@ -47,24 +49,6 @@ _MOLECULE_LABELS = {
 }
 
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".faa"}
-
-_COL_NAME = 0
-_COL_TYPE = 1
-_COL_SOURCE = 2
-_COL_CREATED = 3
-_NAME_COLUMN_DEFAULT_WIDTH = 280
-
-
-def _format_created_date(value: str) -> str:
-    """Show YYYY-MM-DD only (drop ``T`` and time)."""
-    text = (value or "").strip()
-    if not text:
-        return ""
-    if "T" in text:
-        return text.split("T", 1)[0]
-    if " " in text:
-        return text.split(" ", 1)[0]
-    return text[:10] if len(text) >= 10 else text
 
 
 class _BuildDatabaseWorker(QObject):
@@ -335,162 +319,8 @@ class AddBlastDatabaseDialog(QDialog):
         QMessageBox.critical(self, "Add BLAST database", message)
 
 
-class BlastDatabaseManagerDialog(QDialog):
-    """File → manage saved BLAST databases (Blast tool's Database dropdown)."""
-
-    def __init__(self, project: RepeatViewerProject, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Manage BLAST databases")
-        self.setMinimumWidth(720)
-        self.setMinimumHeight(360)
-        # Non-modal so Add Database can receive Files-panel clicks underneath.
-        self.setModal(False)
-        self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self._project = project
-        self._add_dialog: AddBlastDatabaseDialog | None = None
-
-        self._table = QTableWidget(0, 4, self)
-        self._table.setHorizontalHeaderLabels(
-            ["Name", "Type", "Source FASTA", "Created"]
-        )
-        header = self._table.horizontalHeader()
-        header.setSectionResizeMode(_COL_NAME, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(_COL_NAME, _NAME_COLUMN_DEFAULT_WIDTH)
-        header.setSectionResizeMode(_COL_TYPE, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(_COL_SOURCE, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(_COL_CREATED, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.verticalHeader().setVisible(False)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.itemSelectionChanged.connect(self._update_buttons)
-
-        self._add_btn = QPushButton("Add Database…", self)
-        self._remove_btn = QPushButton("Remove", self)
-        self._add_btn.clicked.connect(self._add_database)
-        self._remove_btn.clicked.connect(self._remove_database)
-
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(self._add_btn)
-        btn_row.addWidget(self._remove_btn)
-        btn_row.addStretch(1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        close_btn = buttons.button(QDialogButtonBox.StandardButton.Close)
-        if close_btn is not None:
-            close_btn.clicked.connect(self.accept)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._table, 1)
-        layout.addLayout(btn_row)
-        layout.addWidget(buttons)
-
-        self._populate()
-        self._update_buttons()
-
-    def apply_path_from_panel(self, path: Path) -> bool:
-        """Forward Files-panel clicks to an open Add dialog."""
-        dialog = self._add_dialog
-        if dialog is None or not dialog.isVisible():
-            return False
-        if not dialog.apply_path_from_panel(path):
-            return False
-        # Always re-assert Add on top (manage window must not cover it).
-        dialog.raise_()
-        dialog.activateWindow()
-        QTimer.singleShot(0, dialog._keep_in_front)
-        return True
-
-    def _populate(self) -> None:
-        self._table.setRowCount(0)
-        for db in self._project.blast_databases:
-            row = self._table.rowCount()
-            self._table.insertRow(row)
-            self._table.setItem(row, _COL_NAME, QTableWidgetItem(db.name))
-            self._table.setItem(
-                row,
-                _COL_TYPE,
-                QTableWidgetItem(_MOLECULE_LABELS.get(db.molecule_type, db.molecule_type)),
-            )
-            self._table.setItem(row, _COL_SOURCE, QTableWidgetItem(str(db.source_fasta)))
-            self._table.setItem(
-                row, _COL_CREATED, QTableWidgetItem(_format_created_date(db.created_at))
-            )
-
-    def _selected_indices(self) -> list[int]:
-        rows = {idx.row() for idx in self._table.selectedIndexes()}
-        return sorted(rows)
-
-    def _update_buttons(self) -> None:
-        self._remove_btn.setEnabled(len(self._selected_indices()) > 0)
-
-    def _persist(self) -> None:
-        save_blast_databases_to_settings(self._project.blast_databases)
-
-    def _add_database(self) -> None:
-        if self._add_dialog is not None and self._add_dialog.isVisible():
-            self._add_dialog.raise_()
-            self._add_dialog.activateWindow()
-            self._add_dialog._focus_fasta_field()
-            return
-        existing_names = {db.name for db in self._project.blast_databases}
-        dialog = AddBlastDatabaseDialog(
-            existing_names=existing_names,
-            use_system_blast=self._project.use_system_blast,
-            parent=self,
-        )
-        self._add_dialog = dialog
-        dialog.finished.connect(self._on_add_dialog_finished)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-        dialog._focus_fasta_field()
-
-    def _on_add_dialog_finished(self, result: int) -> None:
-        dialog = self._add_dialog
-        self._add_dialog = None
-        if dialog is None:
-            return
-        if result != int(QDialog.DialogCode.Accepted):
-            return
-        db = dialog.result_database()
-        if db is None:
-            return
-        self._project.blast_databases.append(db)
-        self._persist()
-        self._populate()
-        self._update_buttons()
-
-    def _remove_database(self) -> None:
-        indices = self._selected_indices()
-        if not indices:
-            return
-        # Remove rows from back to front to avoid shifting indices.
-        selected_dbs = [self._project.blast_databases[i] for i in indices]
-        answer = QMessageBox.question(
-            self,
-            "Manage BLAST databases",
-            self._remove_prompt_body(selected_dbs),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-
-        for i in reversed(indices):
-            db = self._project.blast_databases[i]
-            shutil.rmtree(db.db_prefix_path.parent, ignore_errors=True)
-            del self._project.blast_databases[i]
-        self._persist()
-        self._populate()
-        self._update_buttons()
-
-    @staticmethod
-    def _remove_prompt_body(dbs: list[BlastDatabase]) -> str:
-        if len(dbs) == 1:
-            return f"Remove “{dbs[0].name}” and delete its index files?"
-        names = ", ".join(d.name for d in dbs[:3])
-        more = "" if len(dbs) <= 3 else f" (+{len(dbs) - 3} more)"
-        return f"Remove {len(dbs)} BLAST databases: {names}{more} and delete their index files?"
+__all__ = [
+    "AddBlastDatabaseDialog",
+    "BlastDatabaseManagerDialog",
+    "ManageReferencesDialog",
+]

@@ -835,7 +835,11 @@ def _annotate_protein_database(
     blast_threads: int = 1,
     cancel: JobCancellation | None = None,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
-    db_path = database.path.expanduser().resolve()
+    from repeatviewer.backends.database_prepare import blast_search_db_path
+
+    db_path = blast_search_db_path(
+        database.path.expanduser().resolve(), protein=True
+    )
     readiness = database_search_readiness(database)
     if readiness is not None:
         return (), f"{database.name}: {readiness}"
@@ -934,7 +938,11 @@ def _annotate_dna_database(
     blast_threads: int = 1,
     cancel: JobCancellation | None = None,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
-    db_path = database.path.expanduser().resolve()
+    from repeatviewer.backends.database_prepare import blast_search_db_path
+
+    db_path = blast_search_db_path(
+        database.path.expanduser().resolve(), protein=False
+    )
     readiness = database_search_readiness(database)
     if readiness is not None:
         return (), f"{database.name}: {readiness}"

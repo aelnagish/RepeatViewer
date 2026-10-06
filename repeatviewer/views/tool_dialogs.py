@@ -217,8 +217,8 @@ def make_process_output_box(
     parent: QWidget,
     *,
     tool_name: str,
-    checked: bool = False,
-    close_when_finished: bool = False,
+    checked: bool = True,
+    close_when_finished: bool = True,
 ) -> tuple[QGroupBox, QCheckBox, QCheckBox]:
     """Options-tab group for the live process monitor window.
 
@@ -408,9 +408,12 @@ from repeatviewer.job_options import (
     BLAST_PROGRAM_TBLASTN,
     BLAST_PROGRAM_TBLASTX,
     BLAST_PROGRAM_ONLINE,
+    BLAST_PROGRAMS,
     BLAST_DIALOG_TABS,
     BLAST_ONLINE_ALGORITHMS,
     DIALOG_TAB_OPTIONS,
+    opening_dialog_tab,
+    persistable_dialog_tab,
     DEFAULT_BLAST_ONLINE_DATABASE,
     DEFAULT_BLAST_ONLINE_EVALUE,
     DEFAULT_BLAST_ONLINE_HITLIST,
@@ -1828,13 +1831,13 @@ class AlignParamsDialog(QDialog):
                 self,
                 tool_name="the aligner",
                 checked=bool(
-                    getattr(opts, "show_process_window", False)
-                    or getattr(fastga_opts, "show_process_window", False)
+                    getattr(opts, "show_process_window", True)
+                    or getattr(fastga_opts, "show_process_window", True)
                 ),
                 close_when_finished=bool(
-                    getattr(opts, "close_process_window_when_finished", False)
+                    getattr(opts, "close_process_window_when_finished", True)
                     or getattr(
-                        fastga_opts, "close_process_window_when_finished", False
+                        fastga_opts, "close_process_window_when_finished", True
                     )
                 ),
             )
@@ -1887,10 +1890,13 @@ class AlignParamsDialog(QDialog):
             ALIGNER_FASTGA: self._fastga_panel,
             DIALOG_TAB_OPTIONS: options_tab,
         }
-        open_tab = initial_tab
-        if open_tab not in tab_for:
-            saved = getattr(opts, "last_dialog_tab", ALIGNER_MAFFT)
-            open_tab = saved if saved in tab_for else ALIGNER_MAFFT
+        open_tab = opening_dialog_tab(
+            initial_tab
+            if initial_tab in tab_for
+            else getattr(opts, "last_dialog_tab", ALIGNER_MAFFT),
+            allowed=tuple(tab_for.keys()),
+            first_tab=ALIGNER_MAFFT,
+        )
         self._aligner_tabs.setCurrentWidget(tab_for[open_tab])
 
         layout = QVBoxLayout(self)
@@ -2624,7 +2630,9 @@ class AlignParamsDialog(QDialog):
             mafft_input_paths=[],
             mafft_combined=self._mafft_combine.isChecked(),
             muscle_combined=self._muscle_combine.isChecked(),
-            last_dialog_tab=self.current_dialog_tab(),
+            last_dialog_tab=persistable_dialog_tab(
+                self.current_dialog_tab(), first_tab=ALIGNER_MAFFT
+            ),
             right_click_aligner=self.right_click_aligner(),
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(
@@ -3826,8 +3834,12 @@ class FastGaPanel(QWidget):
                 "FASTA (*.fa *.fasta *.fna *.fa.gz *.fasta.gz *.fna.gz);;"
                 "All files (*)"
             ),
+            minimum_width=280,
         )
-        self._reference.setFixedWidth(360)
+        # Match Threads spin width (path field only; Browse stays beside it).
+        ref_edit = self._reference.line_edit()
+        ref_edit.setFixedWidth(280)
+        ref_edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._combined = QCheckBox("Write all into one file", self)
         self._combined.setChecked(bool(opts.reference_combined))
 
@@ -3933,22 +3945,27 @@ class FastGaPanel(QWidget):
         mode_layout = QVBoxLayout(mode_box)
         mode_layout.setContentsMargins(0, 0, 0, 0)
         mode_layout.setSpacing(2)
-        for index, radio in enumerate(self._mode_buttons.values()):
-            if index == 0:
+        for value, radio in self._mode_buttons.items():
+            if value == FASTGA_MODE_SELF:
                 mode_layout.addWidget(
-                    field_with_help(radio, "FastGA mode", _FASTGA_MODE_HELP, stretch=True)
+                    field_with_help(
+                        radio, "FastGA mode", _FASTGA_MODE_HELP, stretch=True
+                    )
+                )
+            elif value == FASTGA_MODE_REFERENCE:
+                mode_layout.addWidget(
+                    field_with_help(
+                        radio,
+                        "Compare against a reference",
+                        _FASTGA_REFERENCE_HELP,
+                        stretch=True,
+                    )
                 )
             else:
                 mode_layout.addWidget(radio)
         self._mode_label = QLabel("")
         form.addRow(self._mode_label, mode_box)
-        # Help on the label so Reference Browse / path width match Define inputs.
-        self._reference_label = label_with_help(
-            "Reference genome:",
-            "Reference genome",
-            _FASTGA_REFERENCE_HELP,
-            parent=basic,
-        )
+        self._reference_label = QLabel("Reference genome:", basic)
         self._reference_field = self._reference
         form.addRow(self._reference_label, self._reference_field)
         self._combined_field = field_with_help(
@@ -4365,7 +4382,7 @@ class FastGaPanel(QWidget):
         self._sync()
 
     def options(self, *, right_click_action: str, show_process_window: bool,
-                close_process_window_when_finished: bool = False):
+                close_process_window_when_finished: bool = True):
         from dataclasses import replace
 
         ref = self._reference.path()
@@ -4406,9 +4423,10 @@ class GenomeBlastDatabaseRow(QWidget):
         project: RepeatViewerProject | None = None,
         project_genome: Path | None = None,
         selected_path: str | None = None,
-        manage_title: str = "Manage BLAST databases",
+        manage_title: str = "Manage Database",
         help_title: str | None = None,
         help_text: str | None = None,
+        show_manage: bool = True,
     ) -> None:
         super().__init__(parent)
         self._project = project
@@ -4423,9 +4441,6 @@ class GenomeBlastDatabaseRow(QWidget):
         self._combo = QComboBox(self)
         self._combo.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
 
-        manage = QPushButton("Manage BLAST databases", self)
-        manage.clicked.connect(self._manage_databases)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -4434,12 +4449,33 @@ class GenomeBlastDatabaseRow(QWidget):
             layout.addWidget(field_with_help(self._combo, help_title, help_text))
         else:
             layout.addWidget(self._combo)
-        layout.addWidget(manage, 0, Qt.AlignmentFlag.AlignLeft)
+        if show_manage:
+            manage = QPushButton("Manage Database", self)
+            manage.clicked.connect(self._manage_databases)
+            layout.addWidget(manage, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.refresh(selected_path=selected_path)
 
     def selected_path(self) -> str | None:
-        return self._combo.currentData() or None
+        """Return the selected FASTA path, or None if Current genome is not configured."""
+        data = self._combo.currentData()
+        if data:
+            return str(data)
+        if self._project_genome is not None:
+            return str(self._project_genome)
+        return None
+
+    def selected_label(self) -> str:
+        """Short display name for the current combo choice (DB name or genome stem)."""
+        data = self._combo.currentData()
+        if not data:
+            if self._project_genome is not None:
+                return self._project_genome.stem
+            return "genome"
+        text = self._combo.currentText().strip()
+        if " (unavailable" in text:
+            text = text.split(" (unavailable", 1)[0].strip()
+        return text or Path(str(data)).stem
 
     def reset_to_default(self) -> None:
         if self._combo.count() > 0:
@@ -4449,9 +4485,20 @@ class GenomeBlastDatabaseRow(QWidget):
         """Fill combo like Blast Database (current genome + nucleotide DBs)."""
         from repeatviewer.database_settings import reload_blast_databases_into_project
 
+        # Preserve Current-genome selection (combo data is None) across refresh.
+        prefer_current = False
         target = selected_path
-        if target is None and self._combo.count() > 0:
+        if self._combo.count() > 0 and selected_path is None:
+            prefer_current = self._combo.currentData() is None
             target = self._combo.currentData()
+        elif selected_path is not None and self._project_genome is not None:
+            try:
+                prefer_current = (
+                    str(Path(str(selected_path)).expanduser().resolve())
+                    == str(self._project_genome)
+                )
+            except OSError:
+                prefer_current = False
 
         if self._project is not None:
             reload_blast_databases_into_project(self._project)
@@ -4481,18 +4528,19 @@ class GenomeBlastDatabaseRow(QWidget):
                 if item is not None:
                     item.setEnabled(False)
 
-        if target:
-            resolved = str(Path(str(target)).expanduser().resolve())
-            index = self._combo.findData(resolved)
-            if index < 0 and self._project_genome is not None:
-                if resolved == str(self._project_genome):
-                    index = 0
-            if index < 0:
-                self._combo.addItem(Path(resolved).name, resolved)
-                index = self._combo.count() - 1
-            self._combo.setCurrentIndex(index)
-        else:
+        if prefer_current or not target:
             self._combo.setCurrentIndex(0)
+            return
+
+        resolved = str(Path(str(target)).expanduser().resolve())
+        index = self._combo.findData(resolved)
+        if index < 0 and self._project_genome is not None:
+            if resolved == str(self._project_genome):
+                index = 0
+        if index < 0:
+            self._combo.addItem(Path(resolved).name, resolved)
+            index = self._combo.count() - 1
+        self._combo.setCurrentIndex(index)
 
     def _manage_databases(self) -> None:
         from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
@@ -4519,6 +4567,9 @@ class GenomeBlastDatabaseRow(QWidget):
             parent = parent.parentWidget()
         dialog = BlastDatabaseManagerDialog(self._project, parent=host)
         self._blast_manager_dialog = dialog
+        dialog.references_changed.connect(
+            lambda: self.refresh(selected_path=self._combo.currentData())
+        )
         dialog.finished.connect(self._on_manager_finished)
         dialog.show()
         dialog.raise_()
@@ -4529,6 +4580,221 @@ class GenomeBlastDatabaseRow(QWidget):
         self.refresh(selected_path=self._combo.currentData())
 
 
+class PanGenomeBlastListWidget(QWidget):
+    """TE-Aid pangenome: stacked genome dropdowns + Manage Database + Add another."""
+
+    size_changed = Signal()
+    _MIN_GENOMES = 2
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        project: RepeatViewerProject | None = None,
+        project_genome: Path | None = None,
+        initial_paths: list[str] | None = None,
+        help_title: str = "Genome",
+        help_text: str | None = None,
+        manage_title: str = "Manage Database",
+    ) -> None:
+        super().__init__(parent)
+        self._project = project
+        self._project_genome = (
+            project_genome.expanduser().resolve()
+            if project_genome is not None and project_genome.is_file()
+            else None
+        )
+        self._help_title = help_title
+        self._help_text = help_text
+        self._manage_title = manage_title
+        self._blast_manager_dialog = None
+        self._rows: list[tuple[QWidget, GenomeBlastDatabaseRow, QPushButton]] = []
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+
+        self._rows_host = QWidget(self)
+        self._rows_layout = QVBoxLayout(self._rows_host)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(4)
+        outer.addWidget(self._rows_host)
+
+        manage = QPushButton("Manage Database", self)
+        manage.clicked.connect(self._manage_databases)
+        outer.addWidget(manage, 0, Qt.AlignmentFlag.AlignLeft)
+
+        add_btn = QPushButton("Add another genome", self)
+        add_btn.setToolTip("Add another genome BLAST subject from Manage Database.")
+        add_btn.clicked.connect(self._on_add_genome)
+        outer.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignLeft)
+
+        paths = [p for p in (initial_paths or []) if str(p).strip()]
+        while len(paths) < self._MIN_GENOMES:
+            paths.append("")
+        for index, path in enumerate(paths):
+            selected = path or None
+            if not selected and index > 0:
+                selected = self._default_path_for_index(index)
+            self._add_row(
+                selected_path=selected,
+                with_help=index == 0,
+                emit_resize=False,
+            )
+        self._sync_remove_buttons()
+
+    def _default_path_for_index(self, index: int) -> str | None:
+        """Prefer a distinct nucleotide DB for row 2+ when available."""
+        if self._project is None:
+            return None
+        databases = [
+            db
+            for db in self._project.blast_databases
+            if db.molecule_type == BLAST_MOLECULE_NUCL and blast_database_is_ready(db)
+        ]
+        if not databases:
+            return None
+        pick = databases[min(index - 1, len(databases) - 1)]
+        try:
+            return str(Path(pick.source_fasta).expanduser().resolve())
+        except OSError:
+            return None
+
+    def _add_row(
+        self,
+        *,
+        selected_path: str | None = None,
+        with_help: bool = False,
+        emit_resize: bool = True,
+    ) -> GenomeBlastDatabaseRow:
+        wrap = QWidget(self._rows_host)
+        row_layout = QHBoxLayout(wrap)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+        genome = GenomeBlastDatabaseRow(
+            wrap,
+            project=self._project,
+            project_genome=self._project_genome,
+            selected_path=selected_path,
+            manage_title=self._manage_title,
+            help_title=self._help_title if with_help else None,
+            help_text=self._help_text if with_help else None,
+            show_manage=False,
+        )
+        remove = QPushButton("Remove", wrap)
+        remove.setToolTip("Remove this genome from the list")
+        remove.clicked.connect(lambda: self._remove_row(wrap))
+        row_layout.addWidget(genome, 0, Qt.AlignmentFlag.AlignLeft)
+        row_layout.addWidget(remove, 0, Qt.AlignmentFlag.AlignLeft)
+        row_layout.addStretch(1)
+        self._rows.append((wrap, genome, remove))
+        self._rows_layout.addWidget(wrap)
+        self._sync_remove_buttons()
+        if emit_resize:
+            self.size_changed.emit()
+        return genome
+
+    def _on_add_genome(self) -> None:
+        self._add_row(with_help=False, emit_resize=True)
+
+    def _remove_row(self, wrap: QWidget) -> None:
+        if len(self._rows) <= self._MIN_GENOMES:
+            return
+        for index, (row_wrap, _genome, _remove) in enumerate(self._rows):
+            if row_wrap is wrap:
+                self._rows.pop(index)
+                self._rows_layout.removeWidget(row_wrap)
+                row_wrap.deleteLater()
+                break
+        self._sync_remove_buttons()
+        self.size_changed.emit()
+
+    def _sync_remove_buttons(self) -> None:
+        can_remove = len(self._rows) > self._MIN_GENOMES
+        for _wrap, _genome, remove in self._rows:
+            remove.setEnabled(can_remove)
+            remove.setVisible(can_remove)
+
+    def refresh_all(self) -> None:
+        for _wrap, genome, _remove in self._rows:
+            genome.refresh(selected_path=genome.selected_path())
+
+    def reset_to_defaults(self) -> None:
+        while len(self._rows) > self._MIN_GENOMES:
+            wrap, _genome, _remove = self._rows[-1]
+            self._rows.pop()
+            self._rows_layout.removeWidget(wrap)
+            wrap.deleteLater()
+        for _wrap, genome, _remove in self._rows:
+            genome.reset_to_default()
+        self._sync_remove_buttons()
+        self.size_changed.emit()
+
+    def snapshot_rows(self) -> list[tuple[str, str]]:
+        """Return ``(name, path)`` pairs for filled genome rows."""
+        from repeatviewer.pan_genome import normalize_pan_genome_name_loose
+
+        out: list[tuple[str, str]] = []
+        seen_names: set[str] = set()
+        seen_paths: set[str] = set()
+        for _wrap, genome, _remove in self._rows:
+            path = genome.selected_path()
+            if not path:
+                continue
+            try:
+                resolved = str(Path(path).expanduser().resolve())
+            except OSError:
+                continue
+            if resolved in seen_paths:
+                continue
+            base = normalize_pan_genome_name_loose(genome.selected_label())
+            name = base
+            suffix = 2
+            while name in seen_names:
+                # Keep within 10-char pan-genome name limit.
+                trimmed = base[: max(1, 10 - len(str(suffix)))]
+                name = normalize_pan_genome_name_loose(f"{trimmed}{suffix}")
+                suffix += 1
+            seen_names.add(name)
+            seen_paths.add(resolved)
+            out.append((name, resolved))
+        return out
+
+    def _manage_databases(self) -> None:
+        from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
+
+        if self._project is None:
+            QMessageBox.information(
+                self,
+                self._manage_title,
+                "No project is available to manage BLAST databases.",
+            )
+            return
+        existing = self._blast_manager_dialog
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        host: QWidget = self
+        parent = self.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QDialog):
+                host = parent
+                break
+            parent = parent.parentWidget()
+        dialog = BlastDatabaseManagerDialog(self._project, parent=host)
+        self._blast_manager_dialog = dialog
+        dialog.references_changed.connect(self.refresh_all)
+        dialog.finished.connect(self._on_manager_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_manager_finished(self, _result: int = 0) -> None:
+        self._blast_manager_dialog = None
+        self.refresh_all()
+
+
 _HMMER_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): HMMER uses the FASTA files that "
     "were selected in the Files panel when this window opened.<br><br>"
@@ -4536,9 +4802,9 @@ _HMMER_INPUTS_HELP = (
     "for this run only and are not remembered next time."
 )
 _HMMER_DATABASE_HELP = (
-    "Profile HMM database from <b>File → Define database</b> (HMM checkbox). "
-    "Protein HMMs search translated ORFs from nucleotide queries; DNA HMMs "
-    "search nucleotide sequences directly."
+    "Profile HMM database from <b>File → Manage Database</b> (HMM DNA / HMM Protein). "
+    "Protein HMMs search translated ORFs from nucleotide queries; "
+    "DNA HMMs search nucleotide sequences directly."
 )
 _HMMER_EVALUE_HELP = (
     "Reporting sequence E-value threshold for pyhmmer <code>hmmscan</code> "
@@ -4714,7 +4980,7 @@ class HmmerParamsDialog(QDialog):
         db_layout.addWidget(
             field_with_help(self._database, "HMM database", _HMMER_DATABASE_HELP)
         )
-        manage = QPushButton("Manage databases…", db_field)
+        manage = QPushButton("Manage Database…", db_field)
         manage.setCursor(Qt.CursorShape.PointingHandCursor)
         manage.clicked.connect(self._open_define_database)
         db_layout.addWidget(manage, 0, Qt.AlignmentFlag.AlignLeft)
@@ -4841,11 +5107,14 @@ class HmmerParamsDialog(QDialog):
         layout.addWidget(self._tabs, 0)
         layout.addWidget(self._button_box, 0)
 
-        open_tab = opts.last_dialog_tab
-        if open_tab == DIALOG_TAB_OPTIONS:
-            self._tabs.setCurrentWidget(options_tab)
-        else:
-            self._tabs.setCurrentWidget(params_tab)
+        open_tab = opening_dialog_tab(
+            opts.last_dialog_tab,
+            allowed=HMMER_DIALOG_TABS,
+            first_tab=HMMER_DIALOG_TAB_PARAMETERS,
+        )
+        self._tabs.setCurrentWidget(
+            options_tab if open_tab == DIALOG_TAB_OPTIONS else params_tab
+        )
 
         self._sync_hmmer_inputs(resize=False)
         self._set_hmmer_advanced_visible(False)
@@ -4913,7 +5182,7 @@ class HmmerParamsDialog(QDialog):
                 self._database.setCurrentIndex(idx)
 
     def _open_define_database(self) -> None:
-        from repeatviewer.views.define_database_dialog import DefineDatabaseDialog
+        from repeatviewer.views.manage_references_dialog import ManageReferencesDialog
 
         if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
             self._define_database_dialog.raise_()
@@ -4933,10 +5202,17 @@ class HmmerParamsDialog(QDialog):
             from repeatviewer.project import RepeatViewerProject
 
             project = RepeatViewerProject()
-        dialog = DefineDatabaseDialog(project, host)
+        dialog = ManageReferencesDialog(project, host, role_filter="annotation")
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         self._define_database_dialog = dialog
+        dialog.references_changed.connect(
+            lambda: self._populate_database_combo(
+                selected_name=self._database.currentData()
+                if self._database.currentIndex() >= 0
+                else None
+            )
+        )
         dialog.finished.connect(self._on_define_database_finished)
         dialog.show()
         dialog.raise_()
@@ -5114,8 +5390,10 @@ class HmmerParamsDialog(QDialog):
         self._domain_evalue.setValue(DEFAULT_HMMER_DOMAIN_EVALUE)
         self._min_bit.setValue(DEFAULT_HMMER_MINIMUM_BIT_SCORE)
         self._max_orfs.setValue(DEFAULT_HMMER_MAX_ORFS)
-        self._show_process_window.setChecked(False)
-        self._close_process_window.setChecked(False)
+        self._show_process_window.setChecked(defaults.show_process_window)
+        self._close_process_window.setChecked(
+            defaults.close_process_window_when_finished
+        )
         self._right_click_buttons[HMMER_RIGHT_CLICK_RUN].setChecked(True)
 
     def options(self) -> HmmerOptions:
@@ -5136,7 +5414,10 @@ class HmmerParamsDialog(QDialog):
             max_orfs_per_sequence=max(0, self._max_orfs.value()),
             input_source=ALIGN_INPUT_SELECTED,
             input_paths=[],
-            last_dialog_tab=self.current_dialog_tab(),
+            last_dialog_tab=persistable_dialog_tab(
+                self.current_dialog_tab(),
+                first_tab=HMMER_DIALOG_TAB_PARAMETERS,
+            ),
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=self._close_process_window.isChecked(),
             right_click_action=right_click_action,
@@ -5373,7 +5654,7 @@ _BLAST_DATABASE_HELP = (
     "Subject database for the search.<br><br>"
     "BLASTn can use the project genome or a saved nucleotide BLAST database. "
     "BLASTp and BLASTx search a protein database chosen under "
-    "<b>Manage BLAST databases</b>."
+    "<b>Manage Database</b>."
 )
 _BLAST_ONLINE_PROGRAM_HELP = (
     "NCBI BLAST suite:<br><br>"
@@ -5995,9 +6276,9 @@ class BlastParamsDialog(QDialog):
             make_process_output_box(
                 self,
                 tool_name="BLAST",
-                checked=bool(getattr(opts, "show_process_window", False)),
+                checked=bool(getattr(opts, "show_process_window", True)),
                 close_when_finished=bool(
-                    getattr(opts, "close_process_window_when_finished", False)
+                    getattr(opts, "close_process_window_when_finished", True)
                 ),
             )
         )
@@ -6013,6 +6294,7 @@ class BlastParamsDialog(QDialog):
         self._tabs = QTabBar(self)
         self._tabs.setExpanding(False)
         self._tabs.setDocumentMode(True)
+        self._tabs.setDrawBase(False)
         self._tabs.addTab("BLASTn")
         self._tabs.addTab("BLASTp")
         self._tabs.addTab("BLASTx")
@@ -6035,17 +6317,20 @@ class BlastParamsDialog(QDialog):
             blastp_name=opts.blastp_database_name,
             blastx_name=opts.blastx_database_name,
         )
-        open_tab = getattr(opts, "last_dialog_tab", None)
-        if open_tab not in BLAST_DIALOG_TABS:
-            open_tab = (
-                opts.program if opts.program in BLAST_DIALOG_TABS else BLAST_PROGRAM_BLASTN
-            )
+        open_tab = opening_dialog_tab(
+            getattr(opts, "last_dialog_tab", None),
+            allowed=BLAST_DIALOG_TABS,
+            first_tab=(
+                opts.program
+                if opts.program in BLAST_PROGRAMS
+                else BLAST_PROGRAM_BLASTN
+            ),
+        )
         program_tab = {
             BLAST_PROGRAM_BLASTN: 0,
             BLAST_PROGRAM_BLASTP: 1,
             BLAST_PROGRAM_BLASTX: 2,
             BLAST_PROGRAM_ONLINE: 3,
-            DIALOG_TAB_OPTIONS: 4,
         }.get(open_tab, 0)
         self._tabs.setCurrentIndex(program_tab)
         self._stack.setCurrentIndex(program_tab)
@@ -6571,7 +6856,7 @@ class BlastParamsDialog(QDialog):
 
     def _database_field(self, combo: QComboBox) -> QWidget:
         """Database combo with Manage BLAST databases on the next line."""
-        manage = QPushButton("Manage BLAST databases")
+        manage = QPushButton("Manage Database")
         manage.clicked.connect(self._manage_databases)
         box = QWidget()
         layout = QVBoxLayout(box)
@@ -6698,6 +6983,7 @@ class BlastParamsDialog(QDialog):
             return
         dialog = BlastDatabaseManagerDialog(self._project, parent=self.window())
         self._blast_manager_dialog = dialog
+        dialog.references_changed.connect(self._refresh_database_combos)
         dialog.finished.connect(self._on_blast_manager_finished)
         dialog.show()
         dialog.raise_()
@@ -6839,7 +7125,9 @@ class BlastParamsDialog(QDialog):
             online_write_text=self._online_write_text.isChecked(),
             input_source=ALIGN_INPUT_SELECTED,
             input_paths=[],
-            last_dialog_tab=tab,
+            last_dialog_tab=persistable_dialog_tab(
+                tab, first_tab=BLAST_PROGRAM_BLASTN
+            ),
             right_click_program=self._selected_right_click_program(),
             show_process_window=self._show_process_window.isChecked(),
             close_process_window_when_finished=(
@@ -7464,9 +7752,9 @@ class FlexidotParamsDialog(QDialog):
             make_process_output_box(
                 self,
                 tool_name="Flexidot",
-                checked=bool(getattr(opts, "show_process_window", False)),
+                checked=bool(getattr(opts, "show_process_window", True)),
                 close_when_finished=bool(
-                    getattr(opts, "close_process_window_when_finished", False)
+                    getattr(opts, "close_process_window_when_finished", True)
                 ),
             )
         )
@@ -8019,7 +8307,7 @@ class TeAnnotationDialog(QDialog):
         selected_dbs = set(opts.similarity_database_names or ())
         if not databases:
             empty = QLabel(
-                "No databases defined. Add them in File → Define database.",
+                "No databases defined. Add them in File → Manage Database.",
                 sim_section,
             )
             empty.setWordWrap(True)
@@ -8476,12 +8764,12 @@ _TEAID_INPUTS_HELP = (
 _TEAID_MODE_HELP = (
     "<b>Single genome</b>: BLAST the consensus against one subject genome "
     "(project genome or a saved nucleotide BLAST database).<br><br>"
-    "<b>Pangenome</b>: BLAST against several named genomes and combine the "
-    "results in one TE-Aid report (at least two genomes)."
+    "<b>Pangenome</b>: run TE-Aid on each provided genome and compare the "
+    "results in one report (at least two genomes)."
 )
-_TEAID_GENOME_HELP = (
-    "Subject genome for the genome BLAST step. Use the project genome or a "
-    "saved nucleotide BLAST database under <b>Manage BLAST databases</b>."
+_TEAID_PANGENOME_HELP = (
+    "Run TE-Aid on each provided genome and compare them in one report "
+    "(at least two genomes from the project genome or Manage Database)."
 )
 _TEAID_EVALUE_HELP = (
     "Reporting E-value for the genome BLAST search. TE-Aid BLAST-searches the "
@@ -8597,24 +8885,24 @@ class TeaAidParamsDialog(QDialog):
             project=project,
             project_genome=project_genome,
             selected_path=opts.genome_path,
-            manage_title="Manage BLAST databases",
-            help_title="Genome",
-            help_text=_TEAID_GENOME_HELP,
+            manage_title="Manage Database",
         )
-        from repeatviewer.views.genome_dialog import PanGenomeListWidget
-        from repeatviewer.pan_genome import PanGenomeEntry
-
-        self._pan_list = PanGenomeListWidget(self)
+        pan_paths: list[str] = []
         if opts.pan_genomes:
-            entries = [
-                PanGenomeEntry(name=name, path=Path(path))
-                for name, path in opts.pan_genomes
-                if str(name).strip() and str(path).strip()
+            pan_paths = [
+                str(path).strip()
+                for _name, path in opts.pan_genomes
+                if str(path).strip()
             ]
-            if entries:
-                self._pan_list.set_entries(entries)
         elif project is not None and project.pan_genomes:
-            self._pan_list.set_entries(list(project.pan_genomes))
+            pan_paths = [str(entry.path) for entry in project.pan_genomes]
+        self._pan_list = PanGenomeBlastListWidget(
+            self,
+            project=project,
+            project_genome=project_genome,
+            initial_paths=pan_paths,
+            manage_title="Manage Database",
+        )
         self._pan_list.size_changed.connect(self._on_teaid_pan_list_resized)
         self._mode_single.toggled.connect(self._sync_teaid_mode)
         self._mode_pan.toggled.connect(self._sync_teaid_mode)
@@ -8745,7 +9033,14 @@ class TeaAidParamsDialog(QDialog):
                 stretch=True,
             )
         )
-        mode_layout.addWidget(self._mode_pan)
+        mode_layout.addWidget(
+            field_with_help(
+                self._mode_pan,
+                "Pangenome",
+                _TEAID_PANGENOME_HELP,
+                stretch=True,
+            )
+        )
         self._mode_radios_label = QLabel("")
         self._mode_single_genome_label = QLabel("")
         self._mode_pan_list_label = QLabel("")
@@ -8858,9 +9153,9 @@ class TeaAidParamsDialog(QDialog):
             make_process_output_box(
                 self,
                 tool_name="TE-Aid",
-                checked=bool(getattr(opts, "show_process_window", False)),
+                checked=bool(getattr(opts, "show_process_window", True)),
                 close_when_finished=bool(
-                    getattr(opts, "close_process_window_when_finished", False)
+                    getattr(opts, "close_process_window_when_finished", True)
                 ),
             )
         )
@@ -9213,6 +9508,7 @@ class TeaAidParamsDialog(QDialog):
         self._sync_teaid_inputs()
         self._sync_teaid_mode()
         self._genome_row.reset_to_default()
+        self._pan_list.reset_to_defaults()
         self._evalue.setValue(DEFAULT_TEAID_EVALUE)
         self._word_size.setValue(DEFAULT_TEAID_SELF_BLAST_WORD_SIZE)
         self._threads.setValue(DEFAULT_TEAID_THREADS)

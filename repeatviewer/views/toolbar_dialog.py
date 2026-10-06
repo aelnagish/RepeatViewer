@@ -93,7 +93,7 @@ DEFAULT_TOOLBAR_ORDER: list[str] = [
 ]
 
 TOOLBAR_LABELS: dict[str, str] = {
-    "define_genome": "Define genome",
+    "define_genome": "Manage Database",
     "new_sequence": "New Sequence",
     "group_sequences": "Combine Sequences to One File",
     "extract_sequences": "Extract Sequences from File",

@@ -220,7 +220,7 @@ class AnnotationElementColorsPanel(QWidget):
         else:
             self._database_grid = None
             body_layout.addWidget(
-                QLabel("No databases defined. Add them in File → Define database.", self)
+                QLabel("No databases defined. Add them in File → Manage Database.", self)
             )
 
         self._old_feature_colors = load_feature_type_colors()
@@ -434,7 +434,7 @@ class SimilarityDatabaseColorsDialog(QDialog):
                 database_form.addRow(row)
         else:
             database_form.addRow(
-                QLabel("No databases defined. Add them in File → Define database.", body)
+                QLabel("No databases defined. Add them in File → Manage Database.", body)
             )
         body_layout.addLayout(database_form)
         body_layout.addStretch(1)

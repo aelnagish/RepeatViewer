@@ -23,19 +23,127 @@ USER_DATABASE_TYPES = (
 )
 SIMILARITY_DATABASE_TYPES = USER_DATABASE_TYPES + (DATABASE_TYPE_CDD,)
 
+# Public vs user-defined scope (legacy; kept for settings compatibility).
+DATABASE_SCOPE_PUBLIC = "public"
+DATABASE_SCOPE_USER = "user"
+DATABASE_SCOPES = (DATABASE_SCOPE_PUBLIC, DATABASE_SCOPE_USER)
+
+# Unified display / tool kinds (Manage Database).
+DB_KIND_FASTA_DNA = "fasta_dna"
+DB_KIND_FASTA_PROTEIN = "fasta_protein"
+DB_KIND_HMM_DNA = "hmm_dna"
+DB_KIND_HMM_PROTEIN = "hmm_protein"
+DB_KIND_CDD = "cdd"
+DB_KINDS = (
+    DB_KIND_FASTA_DNA,
+    DB_KIND_FASTA_PROTEIN,
+    DB_KIND_HMM_DNA,
+    DB_KIND_HMM_PROTEIN,
+    DB_KIND_CDD,
+)
+DB_KIND_LABELS = {
+    DB_KIND_FASTA_DNA: "FASTA DNA",
+    DB_KIND_FASTA_PROTEIN: "FASTA Protein",
+    DB_KIND_HMM_DNA: "HMM DNA",
+    DB_KIND_HMM_PROTEIN: "HMM Protein",
+    DB_KIND_CDD: "CDD",
+}
+
+# Display name on the Annotation tab (optional unless show_in_annotation).
+ANNOTATION_NAME_MAX_LENGTH = 15
+
+REFERENCE_ROLE_GENOME = "genome"
+REFERENCE_ROLE_ANNOTATION = "annotation"
+REFERENCE_ROLE_BLAST = "blast"
+REFERENCE_ROLES = (
+    REFERENCE_ROLE_GENOME,
+    REFERENCE_ROLE_ANNOTATION,
+    REFERENCE_ROLE_BLAST,
+)
+
+
+def normalize_database_scope(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"public", "pub"}:
+        return DATABASE_SCOPE_PUBLIC
+    return DATABASE_SCOPE_USER
+
+
+def normalize_db_kind(value: object) -> str:
+    text = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "fasta_dna": DB_KIND_FASTA_DNA,
+        "dna_fasta": DB_KIND_FASTA_DNA,
+        "nucleotide": DB_KIND_FASTA_DNA,
+        "nucl": DB_KIND_FASTA_DNA,
+        "fasta_protein": DB_KIND_FASTA_PROTEIN,
+        "protein_fasta": DB_KIND_FASTA_PROTEIN,
+        "prot": DB_KIND_FASTA_PROTEIN,
+        "protein": DB_KIND_FASTA_PROTEIN,
+        "hmm_dna": DB_KIND_HMM_DNA,
+        "dna_hmm": DB_KIND_HMM_DNA,
+        "hmm_protein": DB_KIND_HMM_PROTEIN,
+        "protein_hmm": DB_KIND_HMM_PROTEIN,
+        "hmm": DB_KIND_HMM_PROTEIN,
+        "cdd": DB_KIND_CDD,
+    }
+    return aliases.get(text, "")
+
+
+def kind_from_user_database(db_type: str, *, is_hmm: bool) -> str:
+    if db_type == DATABASE_TYPE_CDD:
+        return DB_KIND_CDD
+    if is_hmm:
+        return DB_KIND_HMM_DNA if db_type == DATABASE_TYPE_DNA else DB_KIND_HMM_PROTEIN
+    return DB_KIND_FASTA_DNA if db_type == DATABASE_TYPE_DNA else DB_KIND_FASTA_PROTEIN
+
+
+def user_fields_from_kind(kind: str) -> tuple[str, bool]:
+    """Return (db_type, is_hmm) for a Manage Database kind."""
+    normalized = normalize_db_kind(kind) or str(kind)
+    if normalized == DB_KIND_CDD:
+        return DATABASE_TYPE_CDD, False
+    if normalized == DB_KIND_HMM_DNA:
+        return DATABASE_TYPE_DNA, True
+    if normalized == DB_KIND_HMM_PROTEIN:
+        return DATABASE_TYPE_PROTEIN, True
+    if normalized == DB_KIND_FASTA_DNA:
+        return DATABASE_TYPE_DNA, False
+    return DATABASE_TYPE_PROTEIN, False
+
+
+def kind_label(kind: str) -> str:
+    normalized = normalize_db_kind(kind) or str(kind)
+    return DB_KIND_LABELS.get(normalized, str(kind) or "Unknown")
+
+
+def normalize_annotation_name(value: object, *, max_length: int = ANNOTATION_NAME_MAX_LENGTH) -> str:
+    text = str(value or "").strip()
+    if len(text) > max_length:
+        return text[:max_length]
+    return text
+
 
 @dataclass
 class UserDatabase:
-    """User-defined sequence/HMM database from Preferences."""
+    """User-defined sequence/HMM/CDD database (annotation + HMMER)."""
 
     name: str
     path: Path
     db_type: str = DATABASE_TYPE_PROTEIN
     is_hmm: bool = False
+    scope: str = DATABASE_SCOPE_USER
+    created_at: str = ""
+    show_in_annotation: bool = True
+    annotation_name: str = ""
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
         self.is_hmm = bool(self.is_hmm)
+        self.scope = normalize_database_scope(self.scope)
+        self.created_at = str(self.created_at or "")
+        self.show_in_annotation = bool(self.show_in_annotation)
+        self.annotation_name = normalize_annotation_name(self.annotation_name)
         self.db_type = str(self.db_type).strip() or DATABASE_TYPE_PROTEIN
         if self.db_type == DATABASE_TYPE_HMM:
             self.db_type = DATABASE_TYPE_PROTEIN
@@ -48,12 +156,17 @@ class UserDatabase:
         self.path = resolved if resolved is not None else Path(str(self.path))
 
     @property
+    def kind(self) -> str:
+        return kind_from_user_database(self.db_type, is_hmm=self.is_hmm)
+
+    @property
     def display_type_label(self) -> str:
-        if self.db_type == DATABASE_TYPE_CDD:
-            return DATABASE_TYPE_CDD
-        if self.is_hmm:
-            return f"{self.db_type} HMM"
-        return self.db_type
+        return kind_label(self.kind)
+
+    @property
+    def annotation_label(self) -> str:
+        """Name shown on the Annotation tab (falls back to file name)."""
+        return self.annotation_name or self.name
 
     @property
     def prepare_kind(self) -> str:
@@ -80,6 +193,9 @@ class BlastDatabase:
     db_prefix_path: Path
     molecule_type: str = BLAST_MOLECULE_NUCL
     created_at: str = ""
+    scope: str = DATABASE_SCOPE_USER
+    show_in_annotation: bool = False
+    annotation_name: str = ""
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -87,10 +203,54 @@ class BlastDatabase:
             self.molecule_type if self.molecule_type in BLAST_MOLECULE_TYPES else BLAST_MOLECULE_NUCL
         )
         self.created_at = str(self.created_at or "")
+        self.scope = normalize_database_scope(self.scope)
+        self.show_in_annotation = bool(self.show_in_annotation)
+        self.annotation_name = normalize_annotation_name(self.annotation_name)
         resolved_fasta = _to_path(self.source_fasta)
         self.source_fasta = resolved_fasta if resolved_fasta is not None else Path(str(self.source_fasta))
         resolved_prefix = _to_path(self.db_prefix_path)
         self.db_prefix_path = resolved_prefix if resolved_prefix is not None else Path(str(self.db_prefix_path))
+
+    @property
+    def kind(self) -> str:
+        return (
+            DB_KIND_FASTA_DNA
+            if self.molecule_type == BLAST_MOLECULE_NUCL
+            else DB_KIND_FASTA_PROTEIN
+        )
+
+    @property
+    def display_type_label(self) -> str:
+        return kind_label(self.kind)
+
+    @property
+    def annotation_label(self) -> str:
+        return self.annotation_name or self.name
+
+
+@dataclass
+class ManagedGenome:
+    """A genome FASTA tracked in Manage Database (main reference candidate)."""
+
+    name: str
+    path: Path
+    scope: str = DATABASE_SCOPE_USER
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        self.name = str(self.name).strip() or "Genome"
+        self.scope = normalize_database_scope(self.scope)
+        self.created_at = str(self.created_at or "")
+        resolved = _to_path(self.path)
+        self.path = resolved if resolved is not None else Path(str(self.path))
+
+    @property
+    def kind(self) -> str:
+        return DB_KIND_FASTA_DNA
+
+    @property
+    def display_type_label(self) -> str:
+        return kind_label(self.kind)
 
 
 @dataclass
@@ -104,6 +264,7 @@ class RepeatViewerProject:
     cdd_dirs: list[Path] = field(default_factory=list)
     user_databases: list[UserDatabase] = field(default_factory=list)
     blast_databases: list[BlastDatabase] = field(default_factory=list)
+    managed_genomes: list[ManagedGenome] = field(default_factory=list)
 
     # Optional tool flags (mirror TEtrimmerGUI CLI)
     use_system_blast: bool = False
@@ -157,6 +318,10 @@ class RepeatViewerProject:
                         path=Path(str(raw_path)),
                         db_type=str(entry.get("db_type", DATABASE_TYPE_PROTEIN)),
                         is_hmm=bool(entry.get("is_hmm", False)),
+                        scope=str(entry.get("scope", DATABASE_SCOPE_USER)),
+                        created_at=str(entry.get("created_at", "")),
+                        show_in_annotation=bool(entry.get("show_in_annotation", True)),
+                        annotation_name=str(entry.get("annotation_name", "")),
                     )
                 )
         self.user_databases = normalized_dbs
@@ -178,9 +343,39 @@ class RepeatViewerProject:
                         db_prefix_path=Path(str(raw_prefix)),
                         molecule_type=str(entry.get("molecule_type", BLAST_MOLECULE_NUCL)),
                         created_at=str(entry.get("created_at", "")),
+                        scope=str(entry.get("scope", DATABASE_SCOPE_USER)),
+                        show_in_annotation=bool(entry.get("show_in_annotation", False)),
+                        annotation_name=str(entry.get("annotation_name", "")),
                     )
                 )
         self.blast_databases = normalized_blast_dbs
+        normalized_genomes: list[ManagedGenome] = []
+        seen_genome_paths: set[str] = set()
+        for entry in self.managed_genomes:
+            if isinstance(entry, ManagedGenome):
+                item = entry
+            elif isinstance(entry, dict):
+                name = str(entry.get("name", "")).strip()
+                raw_path = entry.get("path")
+                if not raw_path:
+                    continue
+                item = ManagedGenome(
+                    name=name or Path(str(raw_path)).stem,
+                    path=Path(str(raw_path)),
+                    scope=str(entry.get("scope", DATABASE_SCOPE_USER)),
+                    created_at=str(entry.get("created_at", "")),
+                )
+            else:
+                continue
+            try:
+                key = str(item.path.expanduser().resolve())
+            except OSError:
+                key = str(item.path)
+            if key in seen_genome_paths:
+                continue
+            seen_genome_paths.add(key)
+            normalized_genomes.append(item)
+        self.managed_genomes = normalized_genomes
 
     @property
     def cdd_dir(self) -> Optional[Path]:

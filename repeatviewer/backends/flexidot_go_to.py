@@ -87,6 +87,14 @@ FLEXIDOT_GO_TO_BRIDGE_JS = """
   if (window.__repeatviewerFlexidotBridgeInstalled) { return; }
   window.__repeatviewerFlexidotBridgeInstalled = true;
   window.__repeatviewerFlexidotLastTs = 0;
+  window.__repeatviewerFlexidotContentDirty = 0;
+  function ensureInfoBoxLayout() {
+    var box = document.getElementById('flexidot-dotplot-infobox');
+    if (!box) { return; }
+    box.style.minHeight = '104px';
+    box.style.boxSizing = 'border-box';
+    box.style.overflow = 'visible';
+  }
   function notify(payload) {
     if (!payload || typeof payload.ts !== 'number') { return; }
     if (payload.ts <= window.__repeatviewerFlexidotLastTs) { return; }
@@ -95,6 +103,7 @@ FLEXIDOT_GO_TO_BRIDGE_JS = """
       window.__repeatviewerFlexidotNotifyJson = JSON.stringify(payload);
     } catch (e) {}
   }
+  ensureInfoBoxLayout();
   setInterval(function() {
     if (window.__flexidotLastClick) {
       notify(window.__flexidotLastClick);
@@ -103,7 +112,11 @@ FLEXIDOT_GO_TO_BRIDGE_JS = """
   var plotDiv = document.getElementById('flexidot-dotplot');
   if (plotDiv) {
     plotDiv.on('plotly_click', function() {
+      ensureInfoBoxLayout();
+      window.__repeatviewerFlexidotContentDirty = Date.now();
       setTimeout(function() {
+        ensureInfoBoxLayout();
+        window.__repeatviewerFlexidotContentDirty = Date.now();
         var box = document.getElementById('flexidot-dotplot-infobox');
         if (box && box.scrollIntoView) {
           box.scrollIntoView({block: 'nearest', behavior: 'smooth'});

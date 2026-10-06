@@ -58,6 +58,35 @@ BLAST_PROGRAMS = (
 # Last-open tab in BLAST parameters (program tabs + Options).
 DIALOG_TAB_OPTIONS = "options"
 BLAST_DIALOG_TABS = BLAST_PROGRAMS + (DIALOG_TAB_OPTIONS,)
+
+# Process monitor: show while the tool runs; auto-close on success by default.
+DEFAULT_SHOW_PROCESS_WINDOW = True
+DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED = True
+
+
+def opening_dialog_tab(
+    saved: str | None,
+    *,
+    allowed: tuple[str, ...],
+    first_tab: str,
+) -> str:
+    """Tab to select when opening a params dialog.
+
+    Never reopen on Options — always land on a tool/Parameters tab. ``first_tab``
+    is used when the saved value is Options or unknown.
+    """
+    if saved and saved != DIALOG_TAB_OPTIONS and saved in allowed:
+        return saved
+    return first_tab
+
+
+def persistable_dialog_tab(current: str, *, first_tab: str) -> str:
+    """Value to store for ``last_dialog_tab`` (never Options)."""
+    if current == DIALOG_TAB_OPTIONS:
+        return first_tab
+    return current
+
+
 # Local programs that search a protein BLAST database.
 BLAST_PROGRAMS_PROTEIN_DB = (BLAST_PROGRAM_BLASTP, BLAST_PROGRAM_BLASTX)
 # NCBI online BLAST suite (matches NCBI web program tabs).
@@ -281,8 +310,8 @@ class AlignOptions:
     last_dialog_tab: str = ALIGNER_MAFFT
     # Which aligner a right-click on the Align toolbar button runs.
     right_click_aligner: str = ALIGNER_MAFFT
-    show_process_window: bool = False
-    close_process_window_when_finished: bool = False
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
 
 # FastGA output formats (CLI streaming flags, except 1aln which uses -1:file).
@@ -315,7 +344,7 @@ DEFAULT_FASTGA_CHAIN_GAP = 1000
 DEFAULT_FASTGA_SYMMETRIC = False  # FastGA default: off; enable in Advanced for repeats
 DEFAULT_FASTGA_KEEP_INDEX = True
 DEFAULT_FASTGA_SOFT_MASK = False
-DEFAULT_FASTGA_SHOW_PROCESS_WINDOW = False
+DEFAULT_FASTGA_SHOW_PROCESS_WINDOW = DEFAULT_SHOW_PROCESS_WINDOW
 
 # What FastGA compares (FastGA tab → Mode).
 FASTGA_MODE_SELF = "self"            # each selected file against itself
@@ -356,7 +385,7 @@ class FastGaOptions:
     input_paths: list[str] = field(default_factory=list)
     right_click_action: str = FASTGA_RIGHT_CLICK_RUN
     show_process_window: bool = DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
-    close_process_window_when_finished: bool = False
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
     # Ephemeral: absolute path pairs chosen in the UI (None = every pair). Not saved.
     selected_pairs: list[tuple[str, str]] | None = None
 
@@ -410,7 +439,7 @@ def load_fastga_options() -> FastGaOptions:
             v.get("show_process_window"), DEFAULT_FASTGA_SHOW_PROCESS_WINDOW
         ),
         close_process_window_when_finished=_to_bool(
-            v.get("close_process_window_when_finished"), False
+            v.get("close_process_window_when_finished"), DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
         ),
     )
 
@@ -492,8 +521,8 @@ class BlastOptions:
     last_dialog_tab: str = BLAST_PROGRAM_BLASTN
     # Which program a right-click on the BLAST toolbar button runs.
     right_click_program: str = BLAST_PROGRAM_BLASTN
-    show_process_window: bool = False
-    close_process_window_when_finished: bool = False
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
     @property
     def active_database_name(self) -> str | None:
@@ -539,8 +568,8 @@ class HmmerOptions:
     input_source: str = ALIGN_INPUT_SELECTED
     input_paths: list[str] = field(default_factory=list)
     last_dialog_tab: str = HMMER_DIALOG_TAB_PARAMETERS
-    show_process_window: bool = False
-    close_process_window_when_finished: bool = False
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
     right_click_action: str = HMMER_RIGHT_CLICK_RUN
 
 
@@ -671,8 +700,8 @@ class FlexidotOptions:
     # Explicit flexidot comparison modes (-m); empty tuple = auto (see above).
     modes: tuple[str, ...] = DEFAULT_FLEXIDOT_MODES
     right_click_action: str = FLEXIDOT_RIGHT_CLICK_RUN
-    show_process_window: bool = False
-    close_process_window_when_finished: bool = False
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
 
 TE_ANNOTATION_RIGHT_CLICK_RUN = "run"
@@ -773,8 +802,8 @@ class TeaAidOptions:
     # TE-Aid Mode: pan-genome run uses pan_genomes (name, path) list.
     use_pan_genome: bool = False
     pan_genomes: list[tuple[str, str]] = field(default_factory=list)
-    show_process_window: bool = False
-    close_process_window_when_finished: bool = False
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
 
 # remove_gaps_with_similarity_check defaults (TEtrimmerGUI)
@@ -1086,9 +1115,9 @@ def load_blast_options() -> BlastOptions:
             if str(v.get("right_click_program", BLAST_PROGRAM_BLASTN)) in BLAST_PROGRAMS
             else BLAST_PROGRAM_BLASTN
         ),
-        show_process_window=_to_bool(v.get("show_process_window"), False),
+        show_process_window=_to_bool(v.get("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW),
         close_process_window_when_finished=_to_bool(
-            v.get("close_process_window_when_finished"), False
+            v.get("close_process_window_when_finished"), DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
         ),
     )
 
@@ -1120,9 +1149,9 @@ def load_hmmer_options() -> HmmerOptions:
         input_source=ALIGN_INPUT_SELECTED,
         input_paths=[],
         last_dialog_tab=tab,
-        show_process_window=_to_bool(v.get("show_process_window"), False),
+        show_process_window=_to_bool(v.get("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW),
         close_process_window_when_finished=_to_bool(
-            v.get("close_process_window_when_finished"), False
+            v.get("close_process_window_when_finished"), DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
         ),
         right_click_action=_normalize_hmmer_right_click(
             v.get("right_click_action", HMMER_RIGHT_CLICK_RUN)
@@ -1335,9 +1364,9 @@ def load_teaid_options() -> TeaAidOptions:
         genome_path=str(genome_path).strip() if genome_path else None,
         use_pan_genome=_to_bool(v.get("use_pan_genome"), False),
         pan_genomes=pan_genomes,
-        show_process_window=_to_bool(v.get("show_process_window"), False),
+        show_process_window=_to_bool(v.get("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW),
         close_process_window_when_finished=_to_bool(
-            v.get("close_process_window_when_finished"), False
+            v.get("close_process_window_when_finished"), DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
         ),
     )
 
@@ -1475,8 +1504,13 @@ def load_align_options() -> AlignOptions:
             else ALIGNER_MAFFT
         ),
         right_click_aligner=right_click_aligner,
-        show_process_window=_flag("show_process_window"),
-        close_process_window_when_finished=_flag("close_process_window_when_finished"),
+        show_process_window=_to_bool(
+            v.get("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW
+        ),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"),
+            DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+        ),
     )
 
 
@@ -2007,10 +2041,10 @@ def load_flexidot_options() -> FlexidotOptions:
         # Comparison mode is always automatic (not exposed in the dialog).
         modes=DEFAULT_FLEXIDOT_MODES,
         right_click_action=right_click_action,
-        show_process_window=str(v.get("show_process_window", "false")).lower()
+        show_process_window=str(v.get("show_process_window", "true" if DEFAULT_SHOW_PROCESS_WINDOW else "false")).lower()
         in {"1", "true", "yes"},
         close_process_window_when_finished=str(
-            v.get("close_process_window_when_finished", "false")
+            v.get("close_process_window_when_finished", "true" if DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED else "false")
         ).lower()
         in {"1", "true", "yes"},
     )
@@ -2259,8 +2293,8 @@ class TreeOptions:
     outgroup: list[str] = field(default_factory=list)
     # Options tab
     right_click_action: str = TREE_RIGHT_CLICK_RUN
-    show_process_window: bool = False
-    close_process_window_when_finished: bool = False
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
     right_click_engine: str = TREE_ENGINE_IQTREE   # program run by right-click
     use_system_mafft: bool = False
     use_system_iqtree: bool = False    # per program: system PATH only
@@ -2545,8 +2579,8 @@ class MapOptions:
     max_display_reads: int = 2000
     # Options tab
     right_click_action: str = MAP_RIGHT_CLICK_RUN
-    show_process_window: bool = False
-    close_process_window_when_finished: bool = False
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
     use_system_path: bool = False
 
 

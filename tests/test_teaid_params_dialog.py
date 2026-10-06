@@ -52,7 +52,7 @@ def test_teaid_dialog_blast_style_sections(qapp: QApplication) -> None:
     assert "Single genome" in radios
     assert "Pangenome" in radios
     assert "Use selected sequences" in radios
-    assert "Manage BLAST databases" in texts
+    assert "Manage Database" in texts
     assert "Add/Manage databases" not in texts
     assert any(t.startswith("Advanced Settings") for t in texts)
     assert dlg.width() == TeaAidParamsDialog._DIALOG_WIDTH
@@ -64,23 +64,33 @@ def test_teaid_dialog_blast_style_sections(qapp: QApplication) -> None:
     assert dlg._mode_single.isChecked()
     assert dlg._genome_row.isVisible()
     assert not dlg._pan_list.isVisible()
-    # Genome "?" sits on the combo row, not mid-stack with Manage.
-    combo = dlg._genome_row._combo
-    help_btn = None
-    for child in dlg._genome_row.findChildren(QToolButton):
-        if child.text() == "?":
-            help_btn = child
+    # No "?" on the Current genome combo; mode help is on the radios.
+    assert not any(
+        child.text() == "?" for child in dlg._genome_row.findChildren(QToolButton)
+    )
+    pan_help = None
+    for child in dlg.findChildren(QToolButton):
+        if child.text() != "?":
+            continue
+        # Help next to the Pangenome radio.
+        if child.parentWidget() is not None and dlg._mode_pan in child.parentWidget().findChildren(
+            QRadioButton
+        ):
+            pan_help = child
             break
-    assert help_btn is not None
-    qapp.processEvents()
-    combo_y = combo.mapTo(dlg, combo.rect().center()).y()
-    help_y = help_btn.mapTo(dlg, help_btn.rect().center()).y()
-    assert abs(combo_y - help_y) <= 8
+    assert pan_help is not None
 
     dlg._mode_pan.setChecked(True)
     qapp.processEvents()
     assert dlg._pan_list.isVisible()
     assert not dlg._genome_row.isVisible()
+    assert "Add another genome" in texts or any(
+        b.text() == "Add another genome" for b in dlg.findChildren(QPushButton)
+    )
+    # Pangenome uses genome dropdowns (not Name / Genome FASTA path rows).
+    assert not any(lab.text() == "Name:" for lab in dlg.findChildren(QLabel))
+    assert not any(lab.text() == "Genome FASTA:" for lab in dlg.findChildren(QLabel))
+    assert len(dlg._pan_list._rows) >= 2
     opts = dlg.options()
     assert opts.use_pan_genome is True
 

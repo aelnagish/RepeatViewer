@@ -234,14 +234,12 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
             )
 
         if is_drop_target:
-            # Distinct from selection blue: green fill + border = copy target.
+            # Same light-blue hover as mouse-over (not selection / not green).
             bg_rect = self._highlight_rect(opt, widget)
-            fill = QColor(46, 160, 67, 70)
-            border = QColor(26, 127, 55)
-            painter.setPen(QPen(border, 2))
-            painter.setBrush(fill)
-            painter.drawRoundedRect(bg_rect.adjusted(1, 1, -1, -1), 4, 4)
-            text = _contrasting_on(QColor(200, 235, 205))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_folder_hover_background(opt.palette))
+            painter.drawRoundedRect(bg_rect, 4, 4)
+            text = self._readable_text_brush(opt)
             opt.palette.setBrush(QPalette.ColorRole.Text, text)
             opt.palette.setBrush(QPalette.ColorRole.WindowText, text)
         elif is_selected or is_current or is_hover:

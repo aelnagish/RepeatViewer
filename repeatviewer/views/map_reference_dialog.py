@@ -61,6 +61,8 @@ from repeatviewer.job_options import (
     MAP_RIGHT_CLICK_DIALOG,
     MAP_RIGHT_CLICK_RUN,
     MapOptions,
+    opening_dialog_tab,
+    persistable_dialog_tab,
 )
 from repeatviewer.views.tool_dialogs import (
     TOOL_PARAMS_DIALOG_WIDTH,
@@ -667,7 +669,7 @@ class MapReferenceDialog(QDialog):
                 tool_name="the mapping",
                 checked=opts.show_process_window,
                 close_when_finished=bool(
-                    getattr(opts, "close_process_window_when_finished", False)
+                    getattr(opts, "close_process_window_when_finished", True)
                 ),
             )
         )
@@ -715,13 +717,15 @@ class MapReferenceDialog(QDialog):
         self._stack.addWidget(engine_page)
         self._stack.addWidget(options_page)
 
-        open_tab = getattr(opts, "last_dialog_tab", MAP_ENGINE_MINIMAP2)
-        if open_tab not in MAP_DIALOG_TABS:
-            open_tab = (
+        open_tab = opening_dialog_tab(
+            getattr(opts, "last_dialog_tab", MAP_ENGINE_MINIMAP2),
+            allowed=MAP_DIALOG_TABS,
+            first_tab=(
                 opts.engine
                 if opts.engine in (MAP_ENGINE_MINIMAP2, MAP_ENGINE_HISAT2)
                 else MAP_ENGINE_MINIMAP2
-            )
+            ),
+        )
         self._tab_bar.setCurrentIndex(
             {
                 MAP_ENGINE_MINIMAP2: self._TAB_MINIMAP2,
@@ -1159,7 +1163,10 @@ class MapReferenceDialog(QDialog):
         return MapOptions(
             reference_fasta=str(ref) if ref else "",
             engine=engine,
-            last_dialog_tab=self.current_dialog_tab(),
+            last_dialog_tab=persistable_dialog_tab(
+                self.current_dialog_tab(),
+                first_tab=MAP_ENGINE_MINIMAP2,
+            ),
             multiple_hits=str(multi),
             hisat2_library=str(self._hisat2_library.currentData() or MAP_HISAT2_RNA),
             hisat2_reads=str(self._hisat2_reads.currentData() or MAP_HISAT2_READS_SINGLE),

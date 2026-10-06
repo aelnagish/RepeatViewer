@@ -118,7 +118,7 @@ class ProcessMonitorBridge(QObject):
         live: bool,
         title: str,
         cancelled_message: str,
-        close_when_finished: bool = False,
+        close_when_finished: bool = True,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)

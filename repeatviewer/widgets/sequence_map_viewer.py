@@ -6937,7 +6937,7 @@ class SequenceMapPanel(QWidget):
         databases = load_similarity_annotation_databases()
         if not databases:
             self._similarity_db_empty = QLabel(
-                "No databases defined. Add them in File → Define database.",
+                "No databases defined. Add them in File → Manage Database.",
                 self._similarity_db_flow,
             )
             self._similarity_db_empty.setWordWrap(False)

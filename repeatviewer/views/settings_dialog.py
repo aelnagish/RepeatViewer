@@ -115,9 +115,11 @@ from repeatviewer.database_settings import (
     SETTINGS_GROUP,
     load_blast_databases_from_settings,
     load_cdd_dirs_from_settings,
+    load_managed_genomes_from_settings,
     load_user_databases_from_settings,
     save_blast_databases_to_settings,
     save_database_settings,
+    save_managed_genomes_to_settings,
 )
 
 MAX_GENOME_HISTORY = 10
@@ -175,6 +177,7 @@ def save_workspace(
         s=s,
     )
     save_blast_databases_to_settings(project.blast_databases, s=s)
+    save_managed_genomes_to_settings(project.managed_genomes, s=s)
     s.setValue("use_system_blast", project.use_system_blast)
     s.setValue("use_system_mafft", project.use_system_mafft)
     s.setValue("use_system_muscle", project.use_system_muscle)
@@ -309,6 +312,21 @@ def add_genome_to_history(path: Path | None) -> list[Path]:
     history = [p for p in load_genome_history() if p != resolved]
     history.insert(0, resolved)
     save_genome_history(history)
+    # Keep Manage references genome list in sync.
+    from repeatviewer.project import DATABASE_SCOPE_USER, ManagedGenome
+
+    genomes = load_managed_genomes_from_settings()
+    key = str(resolved)
+    genomes = [
+        g
+        for g in genomes
+        if str(g.path.expanduser().resolve()) != key
+    ]
+    genomes.insert(
+        0,
+        ManagedGenome(name=resolved.stem, path=resolved, scope=DATABASE_SCOPE_USER),
+    )
+    save_managed_genomes_to_settings(genomes)
     return history
 
 
@@ -556,9 +574,9 @@ class SettingsDialog(QDialog):
             "  Documents/RepeatViewer/blast_databases\n"
             "Existing databases keep their stored paths; this folder is used for new ones."
         )
-        self._open_blast_db_btn = QPushButton("Manage BLAST database")
+        self._open_blast_db_btn = QPushButton("Manage Database")
         self._open_blast_db_btn.setToolTip(
-            "Open the Manage BLAST databases window to add or remove named databases.\n"
+            "Open Manage Database to add or remove named BLAST databases.\n"
             "New indexes are written to the Base folder above."
         )
         self._open_blast_db_btn.clicked.connect(self._manage_blast_databases)
@@ -976,17 +994,23 @@ class SettingsDialog(QDialog):
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         self._blast_manager_dialog = dialog
 
-        def _on_finished(_result: int = 0) -> None:
-            self._blast_manager_dialog = None
+        def _refresh_open_blast() -> None:
             save_blast_databases_to_settings(self._project.blast_databases)
-            # Refresh BLAST params dropdown if that dialog is open under the same project.
             main = self.parentWidget()
             params = getattr(main, "_blast_params_dialog", None) if main is not None else None
             if params is not None and params.isVisible():
                 refresh = getattr(params, "_refresh_database_combos", None)
                 if callable(refresh):
                     refresh()
+            refresh_main = getattr(main, "_refresh_open_tool_database_lists", None)
+            if callable(refresh_main):
+                refresh_main()
 
+        def _on_finished(_result: int = 0) -> None:
+            self._blast_manager_dialog = None
+            _refresh_open_blast()
+
+        dialog.references_changed.connect(_refresh_open_blast)
         dialog.finished.connect(_on_finished)
         dialog.show()
         dialog.raise_()
@@ -1152,6 +1176,7 @@ class SettingsDialog(QDialog):
             cdd_dirs=load_cdd_dirs_from_settings(s),
             user_databases=load_user_databases_from_settings(),
             blast_databases=load_blast_databases_from_settings(),
+            managed_genomes=load_managed_genomes_from_settings(),
             use_system_blast=_bool_from_settings(s.value("use_system_blast", False)),
             use_system_mafft=_bool_from_settings(s.value("use_system_mafft", False)),
             use_system_muscle=_bool_from_settings(s.value("use_system_muscle", False)),

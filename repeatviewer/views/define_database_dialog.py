@@ -1,4 +1,4 @@
-"""Define CDD and user similarity-search databases (File → Define database)."""
+"""Define CDD and user similarity-search databases (File → Manage Database)."""
 
 from __future__ import annotations
 

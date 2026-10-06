@@ -325,7 +325,7 @@ def test_align_dialog_reopens_last_tab(qapp, tmp_path):
     dlg2, _f2 = _align_dialog(
         qapp, tmp_path, initial=AlignOptions(last_dialog_tab=DIALOG_TAB_OPTIONS)
     )
-    assert dlg2.current_dialog_tab() == DIALOG_TAB_OPTIONS
+    assert dlg2.current_dialog_tab() == ALIGNER_MAFFT
 
 
 def test_fastga_reference_path_matches_define_inputs_width(qapp, tmp_path):

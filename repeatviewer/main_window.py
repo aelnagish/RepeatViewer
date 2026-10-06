@@ -377,6 +377,8 @@ from repeatviewer.job_options import (
     load_tsd_search_options,
     load_tree_options,
     load_map_options,
+    DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+    DEFAULT_SHOW_PROCESS_WINDOW,
     msa_clean_method_description,
     save_align_options,
     save_blast_options,
@@ -2186,6 +2188,7 @@ class MainWindow(QMainWindow):
         )
         self._genome_dialog: GenomeDialog | None = None
         self._define_database_dialog: DefineDatabaseDialog | None = None
+        self._manage_references_dialog = None
         self._add_annotation_dialog = None
         self._create_folder_dialog: CreateFolderDialog | None = None
         self._create_folder_copy_files: list[Path] = []
@@ -3546,7 +3549,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _genome_menu_hint() -> str:
-        return "File → Define genome"
+        return "File → Manage Database"
 
     def _populate_align_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         del skip_default
@@ -4666,7 +4669,7 @@ class MainWindow(QMainWindow):
             tool_key="tree",
             mirror_progress=False,
             close_when_finished=bool(
-                getattr(options, "close_process_window_when_finished", False)
+                getattr(options, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
             ),
         )
         self._start_background_job(
@@ -4831,7 +4834,7 @@ class MainWindow(QMainWindow):
             tool_key="map_reference",
             mirror_progress=False,
             close_when_finished=bool(
-                getattr(options, "close_process_window_when_finished", False)
+                getattr(options, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
             ),
         )
         self._start_background_job(
@@ -4879,6 +4882,19 @@ class MainWindow(QMainWindow):
         else:
             self._open_preview_tab(path, replace=False)
 
+    def _close_other_process_monitors(self, keep_tool_key: str) -> None:
+        """Close progress windows from other tools when a new job starts."""
+        keep_attr = f"_{keep_tool_key}_process_dialog"
+        for name, value in list(vars(self).items()):
+            if not name.endswith("_process_dialog") or name == keep_attr:
+                continue
+            if value is None:
+                continue
+            try:
+                value.close()
+            except RuntimeError:
+                setattr(self, name, None)
+
     def _attach_process_monitor(
         self,
         worker,
@@ -4887,7 +4903,7 @@ class MainWindow(QMainWindow):
         enabled: bool,
         tool_key: str,
         mirror_progress: bool = True,
-        close_when_finished: bool = False,
+        close_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
     ) -> None:
         """Capture command output; show live when enabled, always show on failure."""
         from repeatviewer.widgets.process_monitor_dialog import (
@@ -4895,10 +4911,13 @@ class MainWindow(QMainWindow):
             ProcessMonitorDialog,
         )
 
+        self._close_other_process_monitors(tool_key)
+
         attr = f"_{tool_key}_process_dialog"
         dialog = getattr(self, attr, None)
+        display_title = self._job_display_title(title)
         if dialog is None:
-            short = title.split("(")[0].strip() or tool_key
+            short = display_title.split("(")[0].strip() or tool_key
             dialog = ProcessMonitorDialog(short, parent=self)
             setattr(self, attr, dialog)
 
@@ -4906,7 +4925,7 @@ class MainWindow(QMainWindow):
         setattr(self, f"_{tool_key}_process_log", buffer)
 
         if enabled:
-            dialog.prepare(title)
+            dialog.prepare(display_title)
 
         # Bound methods on a main-thread QObject + QueuedConnection — never
         # lambdas — so dialog.show()/append never run on the worker QThread
@@ -4919,7 +4938,7 @@ class MainWindow(QMainWindow):
             dialog,
             buffer,
             live=enabled,
-            title=title,
+            title=display_title,
             cancelled_message=CANCELLED_MESSAGE,
             close_when_finished=bool(close_when_finished),
             parent=self,
@@ -5208,7 +5227,7 @@ class MainWindow(QMainWindow):
             title = f"FastGA ({files[0].name} self)"
         else:
             title = f"FastGA ({len(files)} self-comparisons)"
-        show_log = bool(getattr(options, "show_process_window", False))
+        show_log = bool(getattr(options, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))
         worker = FastGaWorker(
             files,
             options,
@@ -5222,7 +5241,7 @@ class MainWindow(QMainWindow):
             tool_key="fastga",
             mirror_progress=False,
             close_when_finished=bool(
-                getattr(options, "close_process_window_when_finished", False)
+                getattr(options, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
             ),
         )
         self._start_background_job(
@@ -5495,11 +5514,13 @@ class MainWindow(QMainWindow):
         new_folder_action.setShortcut(QKeySequence("Ctrl+Shift+N"))
         new_folder_action.setStatusTip("Create a folder inside the current workspace folder")
         file_menu.addSeparator()
-        genome_action = file_menu.addAction("Define &genome", self._open_set_genome)
-        genome_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
-        genome_action.setStatusTip("Set the reference genome FASTA")
-        define_db_action = file_menu.addAction("Define &database", self._open_define_database)
-        define_db_action.setStatusTip("Configure CDD and similarity annotation databases")
+        refs_action = file_menu.addAction(
+            "Manage &Database…", self._open_manage_references
+        )
+        refs_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
+        refs_action.setStatusTip(
+            "Manage genomes, annotation databases, and BLAST databases"
+        )
         file_menu.addAction("Restore deleted &files", self._restore_removed_folders)
         file_menu.addSeparator()
         settings_action = QAction("&Setting", self)
@@ -6965,8 +6986,8 @@ class MainWindow(QMainWindow):
         elif tool_id == "define_genome":
             self._add_toolbar_plain_button(
                 bar,
-                "Define genome",
-                self._open_set_genome,
+                "Manage Database",
+                self._open_manage_references,
                 job_action=False,
                 tooltip=tip,
             )
@@ -7368,25 +7389,94 @@ class MainWindow(QMainWindow):
             self._prepare_configured_genomes()
         self._update_status()
 
-    def _open_set_genome(self) -> None:
-        if self._genome_dialog is not None:
-            self._genome_dialog.raise_()
-            self._genome_dialog.activateWindow()
+    def _open_manage_references(self, *, role_filter: str = "all") -> None:
+        from repeatviewer.views.manage_references_dialog import ManageReferencesDialog
+
+        existing = self._manage_references_dialog
+        if existing is not None and existing.isVisible():
+            if role_filter != "all":
+                existing.apply_role_filter(role_filter)
+            existing.raise_()
+            existing.activateWindow()
             return
         self._persist_workspace()
-        genome_before = self._genome_path_resolved()
-        dialog = GenomeDialog(
-            self._project,
-            self,
-            selected_paths=self._selected_genome_fastas(),
+        self._manage_refs_genome_snapshot = self._genome_path_resolved()
+        dialog = ManageReferencesDialog(
+            self._project, self, role_filter=role_filter  # type: ignore[arg-type]
         )
-        self._genome_dialog = dialog
-        dialog.setModal(False)
-        dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.finished.connect(self._on_genome_dialog_finished)
+        self._manage_references_dialog = dialog
+        dialog.references_changed.connect(self._on_manage_references_changed)
+        dialog.finished.connect(self._on_manage_references_finished)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _on_manage_references_changed(self) -> None:
+        genome_before = getattr(self, "_manage_refs_genome_snapshot", None)
+        genome_after = self._genome_path_resolved()
+        if genome_before != genome_after:
+            self._on_genome_changed(genome_before, genome_after)
+            self._manage_refs_genome_snapshot = genome_after
+        self._persist_workspace()
+        if self._preview_tabs is not None:
+            self._preview_tabs.refresh_similarity_databases()
+        self._refresh_open_tool_database_lists()
+
+    def _on_manage_references_finished(self, result: int) -> None:
+        del result
+        dialog = self._manage_references_dialog
+        self._manage_references_dialog = None
+        if dialog is None:
+            return
+        self._project = dialog.project()
+        genome_before = getattr(self, "_manage_refs_genome_snapshot", None)
+        genome_after = self._genome_path_resolved()
+        if genome_before != genome_after:
+            self._on_genome_changed(genome_before, genome_after)
+        self._persist_workspace()
+        if self._preview_tabs is not None:
+            self._preview_tabs.refresh_similarity_databases()
+        self._refresh_open_tool_database_lists()
+        if self._project.has_genome_configured() and genome_after is not None:
+            self._set_status_message(f"Genome: {genome_after.name}", 8000)
+        dialog.deleteLater()
+
+    def _refresh_open_tool_database_lists(self) -> None:
+        """Reload BLAST / HMMER dropdowns after Manage Database changes."""
+        from repeatviewer.database_settings import reload_blast_databases_into_project
+
+        reload_blast_databases_into_project(self._project)
+        params = getattr(self, "_blast_params_dialog", None)
+        if params is not None and params.isVisible():
+            refresh = getattr(params, "_refresh_database_combos", None)
+            if callable(refresh):
+                refresh()
+        hmmer = getattr(self, "_hmmer_params_dialog", None)
+        if hmmer is not None and hmmer.isVisible():
+            populate = getattr(hmmer, "_populate_database_combo", None)
+            if callable(populate):
+                populate()
+        # Genome / map pickers that list nucleotide BLAST DBs.
+        for attr in ("_genome_blast_picker", "_map_params_dialog"):
+            widget = getattr(self, attr, None)
+            if widget is None or not getattr(widget, "isVisible", lambda: False)():
+                continue
+            refresh = getattr(widget, "refresh", None) or getattr(
+                widget, "_refresh_database_combos", None
+            )
+            if callable(refresh):
+                try:
+                    refresh()
+                except TypeError:
+                    refresh(selected_path=None)
+
+    def _open_set_genome(self) -> None:
+        """Toolbar / legacy entry: open Manage references filtered to genomes."""
+        self._open_manage_references(role_filter="genome")
+
+    def _open_define_database(self) -> None:
+        """Legacy entry: open Manage references filtered to annotation DBs."""
+        self._open_manage_references(role_filter="annotation")
 
     def _selected_genome_fastas(self) -> list[Path]:
         return [
@@ -7415,23 +7505,6 @@ class MainWindow(QMainWindow):
             self._set_status_message(f"Genome: {genome_after.name}", 8000)
         else:
             self._set_status_message("Genome cleared", 5000)
-
-    def _open_define_database(self) -> None:
-        if self._define_database_dialog is not None:
-            self._define_database_dialog.raise_()
-            self._define_database_dialog.activateWindow()
-            return
-        dialog = DefineDatabaseDialog(self._project, self)
-        self._define_database_dialog = dialog
-        dialog.setModal(False)
-        dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        dialog.finished.connect(self._on_define_database_finished)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-        # Do not auto-fill from the currently selected Files-panel item.
-        # The dialog should only fill paths on an explicit Files-panel click.
 
     def _on_define_database_finished(self, result: int) -> None:
         dialog = self._define_database_dialog
@@ -7866,6 +7939,21 @@ class MainWindow(QMainWindow):
             return False
         return False
 
+    def _is_blast_index_sidecar(self, path: Path) -> bool:
+        """Hide makeblastdb sidecars (.phr/.pin/…, .nhr/.nin/…) from the Files panel.
+
+        New indexes are stored under Documents/RepeatViewer/blast_databases; legacy
+        in-place indexes beside a FASTA should not clutter the file list.
+        """
+        suffix = path.suffix.lower()
+        return suffix in {
+            ".nhr", ".nin", ".nsq", ".nog", ".nos", ".nod", ".not", ".ndb", ".nto",
+            ".ntf", ".nni", ".nal",
+            ".phr", ".pin", ".psq", ".pog", ".pos", ".pod", ".pot", ".pdb", ".pto",
+            ".ptf", ".pni", ".pal",
+            ".pjs",  # BLAST+ metadata
+        }
+
     def _files_for_folder(self, folder: Path) -> list[Path]:
         files: list[Path] = []
         stats: dict[str, tuple[float, int]] = {}
@@ -7884,6 +7972,7 @@ class MainWindow(QMainWindow):
                         is_repeatviewer_hits_cache_file(path)
                         or is_sequence_map_hidden_file(path)
                         or is_flexidot_extra_plot_file(path)
+                        or self._is_blast_index_sidecar(path)
                     ):
                         continue
                     try:
@@ -7926,6 +8015,7 @@ class MainWindow(QMainWindow):
                         is_repeatviewer_hits_cache_file(path)
                         or is_sequence_map_hidden_file(path)
                         or is_flexidot_extra_plot_file(path)
+                        or self._is_blast_index_sidecar(path)
                     ):
                         continue
                     n_files += 1
@@ -8159,6 +8249,7 @@ class MainWindow(QMainWindow):
 
     def _on_folder_selected(self, folder: Path) -> None:
         self._sync_define_database_dialog_from_folder(folder)
+        self._sync_manage_references_from_folder(folder)
         self._sync_te_viz_dialog_from_folder(folder)
         self._sync_blast_params_dialog_from_folder(folder)
         self._sync_hmmer_params_dialog_from_folder(folder)
@@ -9500,6 +9591,18 @@ class MainWindow(QMainWindow):
             return
         dialog.apply_file_from_panel(clicked_path)
 
+    def _sync_manage_references_from_files(self, clicked_path: Path | None = None) -> None:
+        dialog = self._manage_references_dialog
+        if dialog is None or not dialog.isVisible() or clicked_path is None:
+            return
+        dialog.apply_path_from_panel(clicked_path)
+
+    def _sync_manage_references_from_folder(self, folder: Path) -> None:
+        dialog = self._manage_references_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        dialog.apply_folder_from_panel(folder)
+
     def _sync_define_database_dialog_from_files(self, clicked_path: Path | None = None) -> None:
         dialog = self._define_database_dialog
         if dialog is None or not dialog.isVisible() or clicked_path is None:
@@ -9606,12 +9709,22 @@ class MainWindow(QMainWindow):
         """Persist last-selected tab when a multi-tool params dialog is closed."""
         from dataclasses import replace
 
+        from repeatviewer.job_options import (
+            ALIGNER_MAFFT,
+            BLAST_PROGRAM_BLASTN,
+            HMMER_DIALOG_TAB_PARAMETERS,
+            MAP_ENGINE_MINIMAP2,
+            TREE_ENGINE_IQTREE,
+            persistable_dialog_tab,
+        )
+
         current_tab = getattr(dialog, "current_dialog_tab", None)
         if not callable(current_tab):
             return
         tab = current_tab()
         # Align / FastGA
         if isinstance(dialog, AlignParamsDialog):
+            tab = persistable_dialog_tab(tab, first_tab=ALIGNER_MAFFT)
             self._align_options = replace(self._align_options, last_dialog_tab=tab)
             save_align_options(self._align_options)
             return
@@ -9620,18 +9733,22 @@ class MainWindow(QMainWindow):
         from repeatviewer.views.tree_dialog import TreeParamsDialog
 
         if isinstance(dialog, MapReferenceDialog):
+            tab = persistable_dialog_tab(tab, first_tab=MAP_ENGINE_MINIMAP2)
             self._map_options = replace(self._map_options, last_dialog_tab=tab)
             save_map_options(self._map_options)
             return
         if isinstance(dialog, TreeParamsDialog):
+            tab = persistable_dialog_tab(tab, first_tab=TREE_ENGINE_IQTREE)
             self._tree_options = replace(self._tree_options, last_dialog_tab=tab)
             save_tree_options(self._tree_options)
             return
         if isinstance(dialog, BlastParamsDialog):
+            tab = persistable_dialog_tab(tab, first_tab=BLAST_PROGRAM_BLASTN)
             self._blast_options = replace(self._blast_options, last_dialog_tab=tab)
             save_blast_options(self._blast_options)
             return
         if isinstance(dialog, HmmerParamsDialog):
+            tab = persistable_dialog_tab(tab, first_tab=HMMER_DIALOG_TAB_PARAMETERS)
             self._hmmer_options = replace(self._hmmer_options, last_dialog_tab=tab)
             save_hmmer_options(self._hmmer_options)
 
@@ -9872,6 +9989,7 @@ class MainWindow(QMainWindow):
                 panel_path = candidate.resolve()
         if panel_path is not None:
             self._sync_genome_dialog_from_files(panel_path)
+            self._sync_manage_references_from_files(panel_path)
             self._sync_plugin_run_dialog_from_files(panel_path)
             self._sync_te_viz_dialog_input_from_files(panel_path)
             self._sync_define_database_dialog_from_files(panel_path)
@@ -9889,6 +10007,8 @@ class MainWindow(QMainWindow):
         if self._file_list.suppress_selection_preview():
             return
         if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
+            return
+        if self._manage_references_dialog is not None and self._manage_references_dialog.isVisible():
             return
         if self._te_viz_input_dialog is not None and self._te_viz_input_dialog.isVisible():
             return
@@ -10209,9 +10329,9 @@ class MainWindow(QMainWindow):
         if mode == ALIGN_MODE_COMBINED:
             title = f"{title} (combined)"
         total_steps = 1 if mode == ALIGN_MODE_COMBINED else len(seq_files)
-        show_log = bool(getattr(opts, "show_process_window", False))
+        show_log = bool(getattr(opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))
         close_when_finished = bool(
-            getattr(opts, "close_process_window_when_finished", False)
+            getattr(opts, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
         )
         worker = AlignWorker(
             seq_files,
@@ -14691,7 +14811,7 @@ class MainWindow(QMainWindow):
                     self,
                     "HMM database required",
                     "Select an HMM database under Tools → HMMER → Change HMMER parameters.\n\n"
-                    "Add HMM profiles via File → Define database (enable the HMM checkbox).",
+                    "Add HMM profiles via File → Manage Database (HMM DNA / HMM Protein).",
                 )
                 return
             try:
@@ -14753,34 +14873,34 @@ class MainWindow(QMainWindow):
                     "Left boundary must be less than the right boundary.",
                 )
                 return
-        show_log = False
-        close_when_finished = False
+        show_log = DEFAULT_SHOW_PROCESS_WINDOW
+        close_when_finished = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
         if func_name == "blast":
             blast_opts = job_kwargs.get("blast_options") or self._blast_options
-            show_log = bool(getattr(blast_opts, "show_process_window", False))
+            show_log = bool(getattr(blast_opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))
             # Online BLAST has multi-minute NCBI submit/poll steps — always show them.
             if getattr(blast_opts, "program", None) == BLAST_PROGRAM_ONLINE:
                 show_log = True
             close_when_finished = bool(
-                getattr(blast_opts, "close_process_window_when_finished", False)
+                getattr(blast_opts, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
             )
         elif func_name == "hmmer":
             hmmer_opts = job_kwargs.get("hmmer_options") or self._hmmer_options
-            show_log = bool(getattr(hmmer_opts, "show_process_window", False))
+            show_log = bool(getattr(hmmer_opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))
             close_when_finished = bool(
-                getattr(hmmer_opts, "close_process_window_when_finished", False)
+                getattr(hmmer_opts, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
             )
         elif func_name == "flexidot":
             flex_opts = job_kwargs.get("flexidot_options") or self._flexidot_options
-            show_log = bool(getattr(flex_opts, "show_process_window", False))
+            show_log = bool(getattr(flex_opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))
             close_when_finished = bool(
-                getattr(flex_opts, "close_process_window_when_finished", False)
+                getattr(flex_opts, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
             )
         elif func_name == "teaid":
             teaid_opts = job_kwargs.get("teaid_options") or self._teaid_options
-            show_log = bool(getattr(teaid_opts, "show_process_window", False))
+            show_log = bool(getattr(teaid_opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))
             close_when_finished = bool(
-                getattr(teaid_opts, "close_process_window_when_finished", False)
+                getattr(teaid_opts, "close_process_window_when_finished", DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED)
             )
         worker = FunctionWorker(
             self._run_function_job,
@@ -14989,7 +15109,7 @@ class MainWindow(QMainWindow):
         source_files: list[Path],
     ) -> None:
         job_options = getattr(plugin, "_job_options", {}) or {}
-        show_log = bool(job_options.get("show_process_window", False))
+        show_log = bool(job_options.get("show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))
         worker = FunctionWorker(
             self._run_plugin_job,
             func_name,

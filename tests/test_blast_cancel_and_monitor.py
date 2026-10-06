@@ -65,3 +65,81 @@ def test_process_monitor_bridge_cancelled_is_quiet(qapp) -> None:
     dialog.close()
     bridge.deleteLater()
     dialog.deleteLater()
+
+
+def test_process_monitor_bridge_closes_when_finished(qapp) -> None:
+    dialog = ProcessMonitorDialog("Flexidot")
+    buffer: list[str] = []
+    bridge = ProcessMonitorBridge(
+        dialog,
+        buffer,
+        live=True,
+        title="Flexidot",
+        cancelled_message="__CANCELLED__",
+        close_when_finished=True,
+    )
+    dialog.prepare("Flexidot")
+    assert dialog.isVisible()
+    bridge.on_finished()
+    assert not dialog.isVisible()
+    bridge.deleteLater()
+    dialog.deleteLater()
+
+
+def test_process_monitor_bridge_keeps_window_on_failure(qapp) -> None:
+    dialog = ProcessMonitorDialog("BLAST")
+    buffer: list[str] = []
+    bridge = ProcessMonitorBridge(
+        dialog,
+        buffer,
+        live=True,
+        title="BLAST",
+        cancelled_message="__CANCELLED__",
+        close_when_finished=True,
+    )
+    dialog.prepare("BLAST")
+    bridge.on_failed("boom")
+    assert dialog.isVisible()
+    dialog.close()
+    bridge.deleteLater()
+    dialog.deleteLater()
+
+
+def test_close_other_process_monitors_keeps_current_tool(qapp) -> None:
+    from repeatviewer.main_window import MainWindow
+
+    class Host:
+        def __init__(self) -> None:
+            self._flexidot_process_dialog = ProcessMonitorDialog("Flexidot")
+            self._blast_process_dialog = ProcessMonitorDialog("BLAST")
+            self._flexidot_process_dialog.prepare("Flexidot")
+            self._blast_process_dialog.prepare("BLAST")
+
+    host = Host()
+    assert host._flexidot_process_dialog.isVisible()
+    assert host._blast_process_dialog.isVisible()
+    MainWindow._close_other_process_monitors(host, "blast")
+    assert not host._flexidot_process_dialog.isVisible()
+    assert host._blast_process_dialog.isVisible()
+    host._blast_process_dialog.close()
+    host._flexidot_process_dialog.deleteLater()
+    host._blast_process_dialog.deleteLater()
+
+
+def test_process_window_defaults_are_show_and_close() -> None:
+    from repeatviewer.job_options import (
+        BlastOptions,
+        DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+        DEFAULT_SHOW_PROCESS_WINDOW,
+        FlexidotOptions,
+        HmmerOptions,
+    )
+
+    assert DEFAULT_SHOW_PROCESS_WINDOW is True
+    assert DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED is True
+    assert BlastOptions().show_process_window is True
+    assert BlastOptions().close_process_window_when_finished is True
+    assert FlexidotOptions().show_process_window is True
+    assert FlexidotOptions().close_process_window_when_finished is True
+    assert HmmerOptions().show_process_window is True
+    assert HmmerOptions().close_process_window_when_finished is True

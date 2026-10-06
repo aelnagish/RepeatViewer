@@ -158,16 +158,24 @@ Pick the folder holding your candidate FASTA files — a TEtrimmer output
 directory, or any folder you have organised yourself. It becomes a *workspace
 root* and is remembered between sessions.
 
-### Step 2 — Define the genome
+### Step 2 — Manage Database
 
-**File → Define genome** (⇧⌘G / Ctrl+Shift+G).
+**File → Manage Database…** (⇧⌘G / Ctrl+Shift+G).
 
-Select the reference genome FASTA these TEs came from. Several tools refuse to
-run without it — BLAST against the genome, MSA Extend, genome maps, and the
-genome tracks in TE-Aid — because they need somewhere to look the copies up.
+Three tabs:
 
-You can define a **pan-genome** instead: a list of several genome FASTAs,
-searched together.
+- **BLAST database** — FASTA DNA / FASTA Protein (indexes under
+  `Documents/RepeatViewer/blast_databases`). FASTA DNA can be set as the main
+  reference genome; a `.chrom.sizes` sidecar is written for every FASTA DNA
+  BLAST database.
+- **HMM database** — HMM DNA / HMM Protein for pyhmmer / HMMER
+- **Others** — CDD (RPS-BLAST)
+
+Each entry has a **Name** (defaults to the file name) and an optional
+**Annotation name** (max 15 characters; shown as `-` when empty). Check
+**Annotation** to show it on the Annotation tab. Click column headers to sort.
+**Add…** from any tab lists all types; the chosen Type decides which tab stores
+the entry.
 
 ### Step 3 — Look at a candidate
 
@@ -310,33 +318,45 @@ own windows — useful on a second monitor. **View** toggles each panel;
 
 ## 5. Setting up a project
 
-### Define genome
+### Manage Database
 
-**File → Define genome** (⇧⌘G / Ctrl+Shift+G)
+**File → Manage Database…** (⇧⌘G / Ctrl+Shift+G)
 
-Sets the reference genome. Two modes:
+One window with three tabs:
 
-- **Single genome** — one FASTA.
-- **Pan-genome** — several FASTAs treated as one search space.
+- **BLAST database** — FASTA DNA / FASTA Protein indexes under
+  `Documents/RepeatViewer/blast_databases` (Name defaults to the FASTA file
+  name). FASTA DNA entries can be **Set as main reference**; a chromosome
+  sizes file (`.chrom.sizes`) is generated for every FASTA DNA BLAST database.
+- **HMM database** — HMM DNA / HMM Protein profiles
+- **Others** — CDD directories for RPS-BLAST
 
-RepeatViewer prepares an index and reads chromosome names and sizes the first
-time; this takes a moment on a large assembly and is then cached.
+**Columns:** Name, Annotation name (max 15; `-` when empty), Type,
+Path / source (middle-elided like the Files panel), Time (YYYY-MM-DD),
+Annotation checkbox. Entries that are not ready are hidden (no Status column).
+Click a column header to sort. The current main reference is shown below the
+table (not as a column).
 
-Tools that require a genome will tell you to set one rather than failing
-silently.
+**Types**
 
-### Define database
+| Type | Tab | Used by |
+|------|-----|---------|
+| FASTA DNA | BLAST | blastn; Set as main reference; optional Annotation |
+| FASTA Protein | BLAST | blastp, blastx |
+| HMM DNA / HMM Protein | HMM | HMMER / pyhmmer |
+| CDD | Others | RPS-BLAST (Annotation tab) |
 
-**File → Define database**
+- **Add…** — all types are available from every tab; Type decides where the
+  entry is stored. Name and Annotation name have `?` help. Path field matches
+  other fields in width. For FASTA DNA optionally Set as main reference.
+- **Remove** — delete selected entries.
+- **Set as main reference** — marks a FASTA DNA BLAST (or legacy genome) as
+  the current genome.
+- **Annotation** column — toggle which databases appear on the Annotation tab
+  (fills Annotation name from Name if empty, capped at 15 characters).
+  FASTA DNA reference genomes can be enabled for annotation the same way.
 
-Configures the annotation databases used by TE annotation:
-
-- **CDD** — conserved domain database, for protein domain annotation
-- **Similarity databases** — reference libraries for classification
-
-Saved BLAST databases are also managed here. Any FASTA in the Files panel can
-be turned into one with **Add as BLAST database…** from its right-click menu,
-after which it appears in the **Database** dropdown in the BLAST dialog.
+The same window opens from BLAST / HMMER / Preferences **Manage** buttons.
 
 ---
 
@@ -430,7 +450,8 @@ Three programs, each on its own tab: **BLASTn** (nucleotide), **BLASTp** and
 **BLASTx** (protein). Each program tab uses **Inputs** / **Settings** /
 collapsible **Advanced Settings** (same pattern as Align). There is no Mode —
 each selected query file is blasted separately. The **Options** tab sets the
-right-click program, system BLAST+, and the process window.
+right-click program, system BLAST+, and the process window (shown while the
+tool runs and closed automatically on success by default).
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -1207,7 +1228,7 @@ everyday use.
 |-----|--------|
 | ⇧⌘O / Ctrl+Shift+O | Add Folder |
 | ⇧⌘N / Ctrl+Shift+N | New Folder |
-| ⇧⌘G / Ctrl+Shift+G | Define genome |
+| ⇧⌘G / Ctrl+Shift+G | Manage Database |
 | ⌘F / Ctrl+F | Focus the file or folder filter, depending on the active panel |
 | F5 | Refresh the current folder |
 | Delete | Delete selected files, with confirmation |
@@ -1261,7 +1282,7 @@ as BLAST), e.g. `reads.fa` → `reads.fa_mafft.fa`, `reads.fa_flexidot.html`.
 
 ## 16. Troubleshooting
 
-**A tool says the genome is not set.** **File → Define genome**. BLAST, MSA
+**A tool says the genome is not set.** **File → Manage Database…**. BLAST, MSA
 Extend, genome maps and genome-aware TE-Aid all need it.
 
 **RepeatMasker or FastGA is not found.** They are not bundled. Clicking the

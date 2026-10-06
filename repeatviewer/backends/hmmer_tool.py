@@ -72,7 +72,7 @@ def resolve_hmm_database(
     if not wanted:
         if not hmm_dbs:
             raise RuntimeError(
-                "No HMM database is configured. Use File → Define database "
+                "No HMM database is configured. Use File → Manage Database "
                 "and enable the HMM checkbox for a .hmm / Dfam profile."
             )
         raise RuntimeError(

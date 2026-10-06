@@ -55,6 +55,10 @@ def _normalised(opts: TreeOptions) -> TreeOptions:
                    mafft_gap_open=1.53, mafft_offset=0.0,
                    right_click_action="run",
                    sequence_mode=TREE_SEQ_AS_IS,
+                   # Dialog never reopens on Options; visible engine tab is persisted.
+                   last_dialog_tab=opts.engine if opts.engine in (
+                       TREE_ENGINE_IQTREE, TREE_ENGINE_FASTME, TREE_ENGINE_FASTTREE
+                   ) else TREE_ENGINE_IQTREE,
                    use_system_iqtree=opts.use_system_iqtree or legacy,
                    use_system_fastme=opts.use_system_fastme or legacy,
                    use_system_fasttree=opts.use_system_fasttree or legacy,
@@ -138,8 +142,8 @@ def test_tree_dialog_reopens_last_tab(qapp, tmp_path):
         tmp_path,
         initial=TreeOptions(last_dialog_tab=DIALOG_TAB_OPTIONS),
     )
-    assert dlg2._tabs.currentIndex() == dlg2._options_index
-    assert dlg2.current_dialog_tab() == DIALOG_TAB_OPTIONS
+    assert dlg2._tabs.currentIndex() == dlg2._tab_index[TREE_ENGINE_IQTREE]
+    assert dlg2.current_dialog_tab() == TREE_ENGINE_IQTREE
 
 
 def test_shared_rows_always_visible_above_tabs(qapp, tmp_path):

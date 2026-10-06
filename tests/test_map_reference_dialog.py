@@ -71,8 +71,8 @@ def test_reopens_last_map_tab(qapp, tmp_path):
         tmp_path,
         initial=MapOptions(last_dialog_tab=DIALOG_TAB_OPTIONS),
     )
-    assert dlg2._tab_bar.currentIndex() == dlg2._TAB_OPTIONS
-    assert dlg2.current_dialog_tab() == DIALOG_TAB_OPTIONS
+    assert dlg2._tab_bar.currentIndex() == dlg2._TAB_MINIMAP2
+    assert dlg2.current_dialog_tab() == MAP_ENGINE_MINIMAP2
 
 
 def test_default_reference_uses_project_genome(qapp, tmp_path):
