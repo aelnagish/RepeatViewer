@@ -320,6 +320,7 @@ def test_mafft_and_muscle_define_inputs_rows_keep_height_after_add(qapp, tmp_pat
     dlg.show()
     qapp.processEvents()
     tabs = dlg.findChild(QTabWidget)
+    fastga = dlg.fastga_panel()
 
     for tab_index, define_radio, widget, resize in (
         (
@@ -334,6 +335,12 @@ def test_mafft_and_muscle_define_inputs_rows_keep_height_after_add(qapp, tmp_pat
             dlg._muscle_define_inputs,
             dlg._resize_for_muscle_advanced,
         ),
+        (
+            2,
+            fastga._input_define,
+            fastga._define_inputs,
+            dlg._resize_for_fastga_advanced,
+        ),
     ):
         tabs.setCurrentIndex(tab_index)
         define_radio.setChecked(True)
@@ -343,6 +350,7 @@ def test_mafft_and_muscle_define_inputs_rows_keep_height_after_add(qapp, tmp_pat
         assert len(widget._rows) == 1
         before = widget._rows[0]._path.height()
         assert before >= 20
+        height_before = dlg.height()
         widget.add_row(focus=True)
         # Drain deferred refit (paths_changed → QTimer.singleShot(0, …)).
         loop = QEventLoop()
@@ -355,6 +363,7 @@ def test_mafft_and_muscle_define_inputs_rows_keep_height_after_add(qapp, tmp_pat
         assert h0 >= before - 2, (tab_index, h0, before)
         assert h1 >= before - 2, (tab_index, h1, before)
         assert abs(h0 - h1) <= 2
+        assert dlg.height() >= height_before, (tab_index, dlg.height(), height_before)
 
 
 def test_align_dialog_reopens_last_tab(qapp, tmp_path):

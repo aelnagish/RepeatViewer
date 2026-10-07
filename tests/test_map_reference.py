@@ -349,9 +349,26 @@ def test_hisat2_uses_path_not_bundle(monkeypatch):
         mr.shutil, "which", lambda name, path=None: f"/usr/bin/{name}"
     )
     assert mr.engine_executable(MAP_ENGINE_HISAT2) == "/usr/bin/hisat2"
-    assert "conda" in mr.engine_install_hint(MAP_ENGINE_HISAT2).lower()
-    assert "hisat2" in mr.engine_install_hint(MAP_ENGINE_HISAT2).lower()
-    assert "bundled" not in mr.engine_install_hint(MAP_ENGINE_HISAT2).lower()
+    hint = mr.engine_install_hint(MAP_ENGINE_HISAT2)
+    assert "conda" in hint.lower()
+    assert "hisat2" in hint.lower()
+    assert "not bundled" in hint.lower()
+    assert "rv_env" in hint
+    assert "External tools" in hint
+
+
+def test_hisat2_configuration_message_matches_fastga_style():
+    rich = mr.hisat2_configuration_message(rich=True)
+    plain = mr.hisat2_configuration_message(rich=False)
+    assert "not bundled with RepeatViewer" in rich
+    assert "<b>If</b>" in rich
+    assert "<b>else:</b>" in rich
+    assert "<b>Then</b>, in RepeatViewer:" in rich
+    assert "rv_env" in rich
+    assert "conda install -n rv_env" in rich
+    assert "External tools" in rich
+    assert "not bundled with RepeatViewer" in plain
+    assert "rv_env" in plain
 
 
 # --- real runs ----------------------------------------------------------------

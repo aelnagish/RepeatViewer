@@ -78,6 +78,10 @@ from repeatviewer.widgets.spin_boxes import (
     NoWheelDoubleSpinBox as QDoubleSpinBox,
     NoWheelSpinBox as QSpinBox,
 )
+from repeatviewer.widgets.help_button import field_with_help
+
+# Match TOOL_PARAMS_FIELD_WIDTH (BLAST / Align Settings).
+_SETTINGS_FIELD_WIDTH = 260
 
 from repeatviewer.backends.auto_annotation import (
     AutoAnnotationMode,
@@ -4938,25 +4942,24 @@ class AutoAnnotationSettingsPanel(QWidget):
         title.setFont(font)
         return title
 
-    def _bp_spin_row(self, spin: QSpinBox) -> QWidget:
-        row = QWidget(self)
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(spin)
-        layout.addWidget(QLabel("bp", row))
-        layout.addStretch()
-        return row
+    def _sized_spin(self, spin: QSpinBox | QDoubleSpinBox) -> QSpinBox | QDoubleSpinBox:
+        spin.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        return spin
+
+    def _field_help(self, field: QWidget, title: str, help_text: str) -> QWidget:
+        """``?`` after the value control (BLAST Settings style)."""
+        return field_with_help(field, title, help_text, parent=self)
 
     def _terminal_repeat_form(self, cfg: TerminalRepeatSettings, repeat_kind: str) -> QFormLayout:
         form = QFormLayout()
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
         min_len = QSpinBox(self)
         min_len.setRange(1, 1_000_000)
         min_len.setValue(cfg.min_length)
-        min_len.setToolTip(
-            "Minimum repeat length (bp). Values below 11 also set the self-BLAST "
-            "word size for this repeat type only (minimum word size 4; default 11)."
-        )
         max_len = QSpinBox(self)
         max_len.setRange(1, 1_000_000)
         max_len.setValue(cfg.max_length)
@@ -4968,10 +4971,44 @@ class AutoAnnotationSettingsPanel(QWidget):
         similarity.setDecimals(2)
         similarity.setSingleStep(0.05)
         similarity.setValue(cfg.similarity_threshold)
-        form.addRow("Min length:", self._bp_spin_row(min_len))
-        form.addRow("Max length:", self._bp_spin_row(max_len))
-        form.addRow(f"Min distance between {repeat_kind}:", self._bp_spin_row(min_distance))
-        form.addRow("Similarity threshold:", similarity)
+        form.addRow(
+            "Min length (bp):",
+            self._field_help(
+                self._sized_spin(min_len),
+                f"{repeat_kind} min length",
+                "Minimum repeat length (bp). Values below 11 also set the "
+                "self-BLAST word size for this repeat type only (minimum word "
+                "size 4; default 11).",
+            ),
+        )
+        form.addRow(
+            "Max length (bp):",
+            self._field_help(
+                self._sized_spin(max_len),
+                f"{repeat_kind} max length",
+                f"Maximum accepted {repeat_kind} length in bp. Longer candidate "
+                "pairs are discarded.",
+            ),
+        )
+        form.addRow(
+            f"Min distance between {repeat_kind} (bp):",
+            self._field_help(
+                self._sized_spin(min_distance),
+                f"Min distance between {repeat_kind}",
+                f"Minimum spacer between the two {repeat_kind} copies (bp). "
+                "Pairs closer than this are ignored.",
+            ),
+        )
+        form.addRow(
+            "Similarity threshold:",
+            self._field_help(
+                self._sized_spin(similarity),
+                f"{repeat_kind} similarity threshold",
+                "Minimum fraction identity (0–1) between the two terminal "
+                f"repeats for a {repeat_kind} pair to be kept "
+                "(e.g. 0.60 = 60%).",
+            ),
+        )
         if not hasattr(self, "_terminal_fields"):
             self._terminal_fields = []
         self._terminal_fields.append((min_len, max_len, min_distance, similarity))
@@ -4979,28 +5016,57 @@ class AutoAnnotationSettingsPanel(QWidget):
 
     def _tandem_repeat_form(self, cfg: TandemRepeatSettings) -> QFormLayout:
         form = QFormLayout()
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
 
         fields: list[QSpinBox] = []
         for motif_size in (2, 3, 4, 5):
             spin = QSpinBox(self)
             spin.setRange(1, 1000)
             spin.setValue(getattr(cfg, f"min_repeat_{motif_size}"))
-            form.addRow(f"Min repeat number ({motif_size}-motif):", spin)
+            form.addRow(
+                f"Min repeat number ({motif_size}-motif):",
+                self._field_help(
+                    self._sized_spin(spin),
+                    f"Min repeat number ({motif_size}-motif)",
+                    f"Minimum copy count for exact tandem repeats whose motif "
+                    f"is {motif_size} bp long.",
+                ),
+            )
             fields.append(spin)
         spin_6 = QSpinBox(self)
         spin_6.setRange(1, 1000)
         spin_6.setValue(cfg.min_repeat_6)
-        form.addRow("Min repeat number (≥ 6-motif):", spin_6)
+        form.addRow(
+            "Min repeat number (≥ 6-motif):",
+            self._field_help(
+                self._sized_spin(spin_6),
+                "Min repeat number (≥ 6-motif)",
+                "Minimum copy count for exact tandem repeats with motif length "
+                "of 6 bp or more.",
+            ),
+        )
         fields.append(spin_6)
         self._tandem_field_list = fields
 
         approximate_cb = QCheckBox("Enable approximate tandem repeat", self)
         approximate_cb.setChecked(cfg.enable_approximate)
-        approximate_cb.setToolTip(
-            "Run pytrf ATRFinder to detect imperfect repeats with mismatches. "
-            "ATR runs before exact STR/GTR so long approximate blocks are kept."
+        # Tick aligns with field column (left edge of number boxes); text to the right.
+        form.addRow(
+            "",
+            field_with_help(
+                approximate_cb,
+                "Approximate tandem repeat",
+                "Run pytrf ATRFinder to detect imperfect repeats with "
+                "mismatches. ATR runs before exact STR/GTR so long approximate "
+                "blocks are kept.",
+                parent=self,
+                stretch=True,
+            ),
         )
-        form.addRow(approximate_cb)
         self._tandem_approximate_cb = approximate_cb
 
         atr_identity = QDoubleSpinBox(self)
@@ -5008,23 +5074,39 @@ class AutoAnnotationSettingsPanel(QWidget):
         atr_identity.setDecimals(2)
         atr_identity.setSingleStep(0.05)
         atr_identity.setValue(cfg.atr_min_identity)
-        atr_identity.setToolTip(
-            "Minimum alignment identity (0–1). 0.75 = 75% similarity required while extending."
-        )
         atr_min_motif = QSpinBox(self)
         atr_min_motif.setRange(1, 100)
         atr_min_motif.setValue(cfg.atr_min_motif)
-        atr_min_motif.setToolTip("Minimum motif length for approximate repeat seeds.")
         atr_max_errors = QSpinBox(self)
         atr_max_errors.setRange(0, 50)
         atr_max_errors.setValue(cfg.atr_max_errors)
-        atr_max_errors.setToolTip(
-            "Maximum consecutive mismatches allowed while extending an imperfect repeat."
-        )
 
-        form.addRow("Approx. min identity:", atr_identity)
-        form.addRow("Approx. min motif:", self._bp_spin_row(atr_min_motif))
-        form.addRow("Approx. max errors:", atr_max_errors)
+        form.addRow(
+            "Approx. min identity:",
+            self._field_help(
+                self._sized_spin(atr_identity),
+                "Approx. min identity",
+                "Minimum alignment identity (0–1) while extending an imperfect "
+                "repeat. 0.75 = 75% similarity required.",
+            ),
+        )
+        form.addRow(
+            "Approx. min motif (bp):",
+            self._field_help(
+                self._sized_spin(atr_min_motif),
+                "Approx. min motif",
+                "Minimum motif length (bp) for approximate repeat seeds.",
+            ),
+        )
+        form.addRow(
+            "Approx. max errors:",
+            self._field_help(
+                self._sized_spin(atr_max_errors),
+                "Approx. max errors",
+                "Maximum consecutive mismatches allowed while extending an "
+                "imperfect repeat.",
+            ),
+        )
         self._tandem_approximate_fields = (atr_identity, atr_min_motif, atr_max_errors)
         approximate_cb.toggled.connect(self._sync_tandem_approximate_fields)
         self._sync_tandem_approximate_fields(cfg.enable_approximate)
@@ -5037,6 +5119,11 @@ class AutoAnnotationSettingsPanel(QWidget):
 
     def _orf_form(self, cfg: OrfSettings) -> QFormLayout:
         form = QFormLayout()
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
         min_len = QSpinBox(self)
         min_len.setRange(3, 1_000_000)
         min_len.setValue(cfg.min_length)
@@ -5046,10 +5133,33 @@ class AutoAnnotationSettingsPanel(QWidget):
         alt_starts = QLineEdit(self)
         alt_starts.setPlaceholderText("e.g. TTG, CTG")
         alt_starts.setText(cfg.alternative_start_codons)
-        alt_starts.setToolTip("Optional extra start codons (comma- or space-separated).")
-        form.addRow("Min ORF length:", self._bp_spin_row(min_len))
-        form.addRow("Max ORF length:", self._bp_spin_row(max_len))
-        form.addRow("Add other start codons:", alt_starts)
+        alt_starts.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow(
+            "Min ORF length (bp):",
+            self._field_help(
+                self._sized_spin(min_len),
+                "Min ORF length",
+                "Minimum open reading frame length in bp (must be a multiple "
+                "of 3 after translation rules).",
+            ),
+        )
+        form.addRow(
+            "Max ORF length (bp):",
+            self._field_help(
+                self._sized_spin(max_len),
+                "Max ORF length",
+                "Maximum open reading frame length in bp.",
+            ),
+        )
+        form.addRow(
+            "Add other start codons:",
+            self._field_help(
+                alt_starts,
+                "Other start codons",
+                "Optional extra start codons (comma- or space-separated), "
+                "e.g. <b>TTG, CTG</b>, in addition to ATG.",
+            ),
+        )
         self._orf_field_list = (min_len, max_len, alt_starts)
         return form
 
@@ -5103,7 +5213,7 @@ class AutoAnnotationSettingsDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Auto annotation settings")
+        self.setWindowTitle("Feature detection settings")
         self._panel = AutoAnnotationSettingsPanel(settings, self)
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -5142,64 +5252,133 @@ class SimilarityAnnotationSettingsPanel(QWidget):
         layout.addWidget(_settings_separator())
 
         form = QFormLayout()
-        self._blast_evalue = QDoubleSpinBox(self)
-        configure_report_evalue_spinbox(self._blast_evalue)
-        self._blast_evalue.setValue(settings.blast_evalue)
-        self._blast_evalue.setToolTip(
-            "Reporting E-value for BLASTP and BLASTN similarity searches."
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        form.addRow("BLAST E-value (BLASTP & BLASTN):", self._blast_evalue)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+
+        self._blastn_evalue = QDoubleSpinBox(self)
+        configure_report_evalue_spinbox(self._blastn_evalue)
+        self._blastn_evalue.setValue(settings.blastn_evalue)
+        self._blastn_evalue.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow(
+            "BLASTN E-value:",
+            field_with_help(
+                self._blastn_evalue,
+                "BLASTN E-value",
+                "Reporting E-value for BLASTN (DNA) similarity searches.",
+                parent=self,
+            ),
+        )
+
+        self._blastp_evalue = QDoubleSpinBox(self)
+        configure_report_evalue_spinbox(self._blastp_evalue)
+        self._blastp_evalue.setValue(settings.blastp_evalue)
+        self._blastp_evalue.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow(
+            "BLASTP E-value:",
+            field_with_help(
+                self._blastp_evalue,
+                "BLASTP E-value",
+                "Reporting E-value for BLASTP (protein) similarity searches.",
+                parent=self,
+            ),
+        )
 
         self._cdd_evalue = QDoubleSpinBox(self)
         configure_report_evalue_spinbox(self._cdd_evalue)
         self._cdd_evalue.setValue(settings.cdd_evalue)
-        self._cdd_evalue.setToolTip("E-value cutoff for CDD rpstblastn similarity searches.")
-        form.addRow("CDD E-value (rpstblastn):", self._cdd_evalue)
+        self._cdd_evalue.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow(
+            "CDD E-value (rpstblastn):",
+            field_with_help(
+                self._cdd_evalue,
+                "CDD E-value",
+                "E-value cutoff for CDD rpstblastn similarity searches.",
+                parent=self,
+            ),
+        )
 
         self._hmm_evalue = QDoubleSpinBox(self)
         configure_report_evalue_spinbox(self._hmm_evalue)
         self._hmm_evalue.setValue(settings.hmm_evalue)
-        self._hmm_evalue.setToolTip("Reporting E-value for pyhmmer HMM similarity searches.")
-        form.addRow("HMM E-value (pyhmmer):", self._hmm_evalue)
+        self._hmm_evalue.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow(
+            "HMM E-value (pyhmmer):",
+            field_with_help(
+                self._hmm_evalue,
+                "HMM E-value",
+                "Reporting E-value for pyhmmer HMM similarity searches.",
+                parent=self,
+            ),
+        )
 
         self._max_hits = QSpinBox(self)
         self._max_hits.setRange(1, 100)
         self._max_hits.setValue(settings.max_hits_per_database)
-        self._max_hits.setToolTip(
-            "Maximum total hits shown per database. When more hits pass filtering, "
-            f"{APP_DISPLAY_NAME} first removes shorter fully nested overlaps when their E-value "
-            "is not better than the covering hit (including equal E=0), then merges "
-            "partially overlapping groups (keeping the highest score in each group), "
-            "then keeps the top hits by score. Protein and DNA searches use the same rule."
+        self._max_hits.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow(
+            "Maximum hits per database:",
+            field_with_help(
+                self._max_hits,
+                "Maximum hits per database",
+                "Maximum total hits shown per database. When more hits pass "
+                f"filtering, {APP_DISPLAY_NAME} first removes shorter fully "
+                "nested overlaps when their E-value is not better than the "
+                "covering hit (including equal E=0), then merges partially "
+                "overlapping groups (keeping the highest score in each group), "
+                "then keeps the top hits by score. Protein and DNA searches "
+                "use the same rule.",
+                parent=self,
+            ),
         )
-        form.addRow("Maximum hits per database:", self._max_hits)
 
-        self._show_db_name = QCheckBox(self)
+        # Tick aligns with field column (left edge of number boxes); text to the right.
+        self._show_db_name = QCheckBox("Show database name on feature track", self)
         self._show_db_name.setChecked(settings.show_database_name_on_track)
-        self._show_db_name.setToolTip(
-            "When checked, similarity hits are labeled as “Database: target”. "
-            "When unchecked, only the target or domain name is shown."
+        form.addRow(
+            "",
+            field_with_help(
+                self._show_db_name,
+                "Show database name",
+                "When checked, similarity hits are labeled as "
+                "“Database: target”. When unchecked, only the target or "
+                "domain name is shown.",
+                parent=self,
+                stretch=True,
+            ),
         )
-        form.addRow("Show database name on feature track:", self._show_db_name)
 
-        self._show_info_dialog = QCheckBox(self)
+        self._show_info_dialog = QCheckBox("Show info window after run", self)
         self._show_info_dialog.setChecked(settings.show_info_window_after_run)
-        self._show_info_dialog.setToolTip(
-            f"When checked, {APP_DISPLAY_NAME} shows an information dialog with the similarity search summary "
-            "(e.g. hits/no hits or database-readiness problems)."
+        form.addRow(
+            "",
+            field_with_help(
+                self._show_info_dialog,
+                "Show info window after run",
+                f"When checked, {APP_DISPLAY_NAME} shows an information dialog "
+                "with the similarity search summary (e.g. hits/no hits or "
+                "database-readiness problems).",
+                parent=self,
+                stretch=True,
+            ),
         )
-        form.addRow("Show info window after run:", self._show_info_dialog)
         layout.addLayout(form)
 
     def settings(self) -> SimilarityAnnotationSettings:
         return SimilarityAnnotationSettings(
-            blast_evalue=self._blast_evalue.value(),
+            blastn_evalue=self._blastn_evalue.value(),
+            blastp_evalue=self._blastp_evalue.value(),
             hmm_evalue=self._hmm_evalue.value(),
             cdd_evalue=self._cdd_evalue.value(),
             max_hits_per_database=self._max_hits.value(),
             show_database_name_on_track=self._show_db_name.isChecked(),
             show_info_window_after_run=self._show_info_dialog.isChecked(),
         )
+
+
+
 
 
 class SimilarityAnnotationSettingsDialog(QDialog):

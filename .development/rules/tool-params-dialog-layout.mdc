@@ -135,11 +135,35 @@ Field column must start on the **same vertical line** in every function window:
 ### Controls
 
 - Combos / spins: **`NoWheelComboBox` / `NoWheelSpinBox`** (no mouse-wheel value change)
-  at width **260**. Same width in Advanced as in Settings.
+  at width **260** (`TOOL_PARAMS_FIELD_WIDTH`). Same width in Advanced as in Settings
+  (including Sequence Annotation Feature detection / Similarity advanced panels).
 - Shorten long combo *display* text; put detail in `?` (`field_with_help` /
   `label_with_help`).
-- Help `?`: after the control by default; on the **label** when Browse must stay
-  flush (path rows). Database/Genome + Manage: `?` on the combo row only.
+
+**Help `?` after the value control (mandatory for number / combo / line-edit rows)**
+
+- Place `?` **behind the number box / combo / line edit** with `field_with_help(...)`
+  — never `label_with_help` on “Min length:”, “Max length:”, E-value, etc.
+- Put length units in the **label** (`"Min length (bp):"`), not as a separate
+  `"bp"` widget beside the spin: `[spin 260][?]`.
+- Exception — `label_with_help` only when Browse must stay flush (path / Reference
+  rows). Database/Genome + Manage: `?` on the combo row only.
+
+**Parameter labels — right + vertical center**
+
+- Colon labels (`"Min length:"`, `"Max length:"`, `"Threads:"`, …) use
+  `form.setLabelAlignment(AlignRight | AlignVCenter)` so every label is
+  **right-aligned** in the label column and vertically centered with its field.
+
+**Tick / checkbox rows (BLAST style — mandatory)**
+
+- Tick box sits on the **left edge of the field column** (same vertical line as
+  the left edge of the 260-wide number boxes).
+- Checkbox **text is to the right of the tick** (`QCheckBox("Enable …")`), not a
+  separate form label with an empty tick in the field.
+- Use `form.addRow(spacer_or_empty, field_with_help(checkbox, …, stretch=True))`.
+- Do **not** put the descriptive sentence in the label column with a bare
+  checkbox in the field column.
 
 Exception: TE-Aid hit % rows stay compact (~100 px + swatch), not 260.
 
@@ -182,6 +206,18 @@ Settings                        ← bold section title only (no ? on the title)
 - **Do not** put a lone `?` only behind **Define inputs** when Use selected
   already carries the Inputs help (prefer one Inputs help on Use selected).
 
+**Help dialog / tooltip wording**
+
+- Do **not** use dashes (`-`, `–`, or `—`) between a bold term and its
+  explanation. Prefer a colon: `<b>LTR</b>: long terminal repeats…`
+  (not `<b>LTR</b> — long terminal repeats…`).
+
+**Help dialog / tooltip wording**
+
+- Do **not** use dashes (`-`, `–`, or `—`) between a bold term and its
+  explanation. Prefer a colon: `<b>LTR</b>: long terminal repeats…`
+  (not `<b>LTR</b> — long terminal repeats…`).
+
 **One widget per engine/program tab — never share across tabs**
 
 - Minimap2 and HISAT2 each get their own list; BLASTn / BLASTp / BLASTx / Online
@@ -206,32 +242,39 @@ Settings                        ← bold section title only (no ? on the title)
 
 **Height — auto-fit content; no empty gap; no squeezed rows (critical)**
 
-Dialog **height must follow the active tab’s content** (tab switch, Define
-inputs on/off, Add another input). Never leave a tall blank band under Settings
-because `QTabWidget` kept the previous (taller) tab’s height.
+Dialog **height must follow the active tab’s content** (tab switch, Advanced
+expand/collapse, Define inputs on/off, Add another input). Never leave a tall
+blank band under the last section / above the footer — classic failure on
+**Sequence Annotation**, MSA Clean, Flexidot, TE-Aid, HMMER, Genome density,
+Consensus.
 
 Adding a Define-input row must **grow the dialog**, never compress path/Browse
 rows. Classic bugs:
 - Tab/stack `maximumHeight` pin stays from the previous fit; `sizeHint` is
   measured while still pinned → crushed height is re-pinned (MAFFT / MUSCLE).
 - Pins cleared but tab stack not re-pinned to the **current** page → empty gap
-  (MSA Clean).
+  (MSA Clean, Sequence Annotation).
+- Tabs use vertical `Preferred` / `Expanding` → tab stack eats leftover dialog
+  height even after a correct `resize`.
 
-Required pattern (Align MAFFT/MUSCLE, Mapping, BLAST, FastGA, MSA Clean, …):
+Required pattern (all function windows — Align, BLAST, Mapping, FastGA, MSA
+Clean, **Sequence Annotation**, Flexidot, TE-Aid, HMMER, Genome density,
+Consensus, …):
 
-1. Connect `paths_changed` / tab change → **deferred** refit:
+1. Tabs: vertical size policy **`Maximum`** (never `Preferred` / `Expanding`).
+2. Connect `paths_changed` / tab change / Advanced toggle → **deferred** refit:
    `QTimer.singleShot(0, …)`.
-2. **Before** measuring: clear dialog + tab/stack/page pins
-   (`_pin_*_height(None)` / `setMaximumHeight(16777215)`), unlock the
-   multi-input widget height, then `ensurePolished` / `adjustSize` / layout
+3. **Before** measuring: clear dialog + tab pins via
+   **`pin_tool_tabs_height(tabs, None)`** (or `_pin_*_height(None)`), unlock
+   multi-input height, then `ensurePolished` / `adjustSize` / layout
    `invalidate`+`activate`.
-3. Measure the **active page only** (not the tallest tab). Prefer the inner
+4. Measure the **active page only** (not the tallest tab). Prefer the inner
    form page inside a wrap layout.
-4. `resize` dialog to chrome + that height; **re-pin** tab/page
-   `maximumHeight` to the new content so unused space cannot reappear.
-5. **Do not** `setFixedSize` (blocks drag-resize). Use `setMinimumWidth` +
+5. `resize` dialog to chrome + that height; **re-pin** with
+   **`pin_tool_tabs_height(tabs, page_h)`** so unused space cannot reappear.
+6. **Do not** `setFixedSize` (blocks drag-resize). Use `setMinimumWidth` +
    `resize`; keep width freely expandable.
-6. Hide Define rows with `setRowVisible` + `setFixedHeight(0)` when Use selected;
+7. Hide Define rows with `setRowVisible` + `setFixedHeight(0)` when Use selected;
    unlock height when Define is on.
 
 Never call resize/pin synchronously inside `add_row` / `paths_changed` without
@@ -315,11 +358,13 @@ Always **`make_process_output_box(...)`**:
 ## 5. Height behaviour
 
 - Width stays **608** (or **720** with `TOOL_PARAMS_DIALOG_WIDTH_WIDE` when a longer window is required); height follows **active tab content**.
+- Helper: **`pin_tool_tabs_height(tabs, page_h | None)`** in `tool_dialogs.py`.
 - On show and tab change: fit to content (no blank band above the footer).
 - Options after a tall Parameters tab: shrink (do not keep Parameters height).
 - Advanced expand/collapse: grow/shrink; remember compact size.
-- Stack/pages: vertical `Maximum` so inactive tall pages do not inflate the dialog.
-- Clear pinned `maximumHeight` before re-measuring after PATH status appears.
+- `QTabWidget` + pages: vertical **`Maximum`**; pin after every fit.
+- Clear pinned `maximumHeight` before re-measuring after PATH status / Advanced /
+  checkbox-flow reflow (Sequence Annotation databases).
 
 ---
 
@@ -334,6 +379,9 @@ Always **`make_process_output_box(...)`**:
 - `addRow("", radios)` without a spacer label.
 - Per-dialog label width that makes one tool wider than BLAST/Align.
 - Leaving Parameters height when switching to Options.
+- Tall blank band under Parameters (tabs `Preferred` vertical, or fit without
+  `pin_tool_tabs_height`) — Sequence Annotation / Flexidot / TE-Aid class of bug.
+- `setFixedSize` on a function window (blocks user drag-resize).
 - Hand-rolled Process output or Cancel/OK footers.
 - **One shared `TeMultiInputFilesWidget` for multiple engine/program tabs**
   (Minimap2↔HISAT2, BLASTn↔BLASTp, …) — lists must be independent.
@@ -361,6 +409,7 @@ Always **`make_process_output_box(...)`**:
 - [ ] Options: Right-click (always) → Executables? → Process output?
 - [ ] PATH / named executable status (grey, elide, fit height on toggle)
 - [ ] Fit-to-content on show, tab change, Advanced, PATH toggle, Define-inputs add/remove
+- [ ] Tabs vertical `Maximum` + `pin_tool_tabs_height` (no empty gap; no `setFixedSize`)
 - [ ] Non-modal if Define inputs fills from Files panel
 - [ ] Per-tab Define-inputs widgets (not shared across engines/programs)
 - [ ] Add button **Add another input**; path rows Expanding; width **720** when Define on

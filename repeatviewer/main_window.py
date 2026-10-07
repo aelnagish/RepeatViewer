@@ -4852,6 +4852,17 @@ class MainWindow(QMainWindow):
         self._present_te_viz_dialog(dialog, _accepted)
 
     def _start_map_job(self, files: list[Path], options) -> None:
+        from repeatviewer.backends import map_reference as mr
+        from repeatviewer.job_options import MAP_ENGINE_HISAT2
+
+        # Pre-check HISAT2 like FastGA: remind with the rich install dialog
+        # instead of a native warning after the job fails.
+        if getattr(options, "engine", None) == MAP_ENGINE_HISAT2 and not mr.engine_available(
+            MAP_ENGINE_HISAT2,
+            system_path_only=bool(getattr(options, "use_system_path", False)),
+        ):
+            mr.show_hisat2_not_configured_dialog(self)
+            return
         ref = Path(options.reference_fasta).name if options.reference_fasta else "reference"
         title = (f"Map {files[0].name} to {ref}" if len(files) == 1
                  else f"Map {len(files)} files to {ref}")
@@ -4900,7 +4911,18 @@ class MainWindow(QMainWindow):
     def _on_map_failed(self, error: str) -> None:
         if error.strip() == CANCELLED_MESSAGE:
             return
-        QMessageBox.warning(self, "Mapping failed", error.strip() or "Unknown error.")
+        text = error.strip() or "Unknown error."
+        # Prefer the FastGA-style HISAT2 reminder over a native warning dialog.
+        if text.startswith("HISAT2 is not configured") or text.startswith(
+            "HISAT2 was not found"
+        ):
+            from repeatviewer.backends.map_reference import (
+                show_hisat2_not_configured_dialog,
+            )
+
+            show_hisat2_not_configured_dialog(self)
+            return
+        QMessageBox.warning(self, "Mapping failed", text)
 
     def _on_preview_open_requested(self, path: object) -> None:
         """A result file asked for from a preview (contig view → Results menu)."""
@@ -12497,7 +12519,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Nothing selected",
                 "No annotation modules are saved. Open Sequence Annotation and choose "
-                "at least one auto-annotation module or similarity database.",
+                "at least one Feature Detection module or similarity database.",
             )
             return
         self._apply_function(
@@ -12507,45 +12529,56 @@ class MainWindow(QMainWindow):
         )
 
     def _open_te_annotation_dialog(self) -> None:
-        """Click TE annotation: dialog. Run runs; Save (Options tab) stores only."""
-        dialog = TeAnnotationDialog(
-            initial=self._te_annotation_options,
-            parent=self,
-        )
-        run_after = False
-        opts = None
-        try:
-            if not exec_modal_dialog(dialog):
-                return
+        """Click TE annotation: dialog. Run runs; Save (Options tab) stores only.
+
+        Non-modal so Files/Folders clicks can fill Define inputs (Align-style).
+        """
+
+        def _accepted(dialog: TeAnnotationDialog) -> None:
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
             dialog.apply_settings_panels()
             self._te_annotation_options = dialog.job_options()
             save_te_annotation_options(self._te_annotation_options)
             self._persist_workspace()
             self._reload_shared_annotation_settings()
-            run_after = dialog.should_run()
+            if not dialog.should_run():
+                self._set_status_message("Sequence Annotation settings saved", 4000)
+                return
             opts = dialog.options()
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
-        if not run_after:
-            self._set_status_message("Sequence Annotation settings saved", 4000)
-            return
-        if opts is None:
-            return
-        if not opts.auto_modes and not opts.similarity_databases:
-            QMessageBox.information(
-                self,
-                "Nothing selected",
-                "Select at least one auto-annotation module or similarity database.",
+            if not opts.auto_modes and not opts.similarity_databases:
+                QMessageBox.information(
+                    self,
+                    "Nothing selected",
+                    "Select at least one Feature Detection module or "
+                    "similarity database.",
+                )
+                return
+            if dialog.input_source() == ALIGN_INPUT_DEFINE:
+                files = dialog.run_files()
+                if not files:
+                    QMessageBox.information(
+                        self,
+                        "No FASTA inputs",
+                        "Add one or more readable FASTA files or folders under "
+                        "Define inputs.",
+                    )
+                    return
+            else:
+                files = self._te_annotation_fasta_selection()
+                if files is None:
+                    return
+            self._apply_function(
+                "te_annotation",
+                preselected=files,
+                te_annotation_options=opts,
             )
-            return
-        single = self._te_annotation_fasta_selection()
-        if single is None:
-            return
-        self._apply_function(
-            "te_annotation",
-            preselected=single,
-            te_annotation_options=opts,
+
+        dialog = TeAnnotationDialog(
+            initial=self._te_annotation_options,
+            parent=self,
         )
+        self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_te_annotation_right_click(self) -> None:
         """Right-click TE annotation: run with saved selection, or open the dialog."""

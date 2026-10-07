@@ -333,6 +333,32 @@ def tool_params_dialog_width(*, define_inputs: bool = False) -> int:
     return TOOL_PARAMS_DIALOG_WIDTH
 
 
+def pin_tool_tabs_height(tabs: QTabWidget, page_h: int | None) -> None:
+    """Pin ``QTabWidget`` height to the active page so unused space cannot reappear.
+
+    Pass ``None`` to clear pins **before** measuring. After ``resize``, call again
+    with the measured active-page height. Required for Sequence Annotation,
+    Flexidot, TE-Aid, HMMER, Genome density, MSA Clean, Consensus, etc.
+    """
+    if page_h is None:
+        tabs.setMinimumHeight(0)
+        tabs.setMaximumHeight(16777215)
+        for i in range(tabs.count()):
+            page = tabs.widget(i)
+            if page is not None:
+                page.setMinimumHeight(0)
+                page.setMaximumHeight(16777215)
+        return
+    tab_bar_h = max(24, tabs.tabBar().sizeHint().height())
+    tabs_h = tab_bar_h + max(1, int(page_h)) + 8
+    tabs.setMinimumHeight(0)
+    tabs.setMaximumHeight(tabs_h)
+    current = tabs.currentWidget()
+    if current is not None:
+        current.setMinimumHeight(0)
+        current.setMaximumHeight(max(1, int(page_h)))
+
+
 def settings_form_label_column_width(
     host: QWidget,
     forms: list[QFormLayout | None] | None = None,
@@ -2242,7 +2268,17 @@ class AlignParamsDialog(QDialog):
             # the footer toggle still wants Advanced (handled by refit).
             pass
         # Unlock prior height pins before measuring (Add Define-input rows).
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
         self._pin_aligner_tab_height(None)
+        define = panel._define_inputs
+        define.setMinimumHeight(0)
+        define.setMaximumHeight(16777215)
+        basic = panel._basic_panel
+        basic.setMinimumHeight(0)
+        basic.setMaximumHeight(16777215)
+        basic.ensurePolished()
+        basic.adjustSize()
         root = panel.layout()
         if root is not None:
             root.invalidate()
@@ -2254,14 +2290,12 @@ class AlignParamsDialog(QDialog):
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
         width = self._align_content_width()
+        self.setMinimumWidth(width)
 
         if not expanded:
             content_h = panel.compact_content_height()
             height = chrome + content_h
             height = min(max(height, 220), max_h)
-            self.setMinimumHeight(0)
-            self._aligner_tabs.setMinimumHeight(0)
-            panel.setMinimumHeight(0)
             self._pin_aligner_tab_height(content_h)
             # Cap then resize so macOS actually shrinks leftover Advanced height.
             self.setMaximumHeight(height)
@@ -2279,7 +2313,6 @@ class AlignParamsDialog(QDialog):
             height,
             min(chrome + content_h, max_h),
         )
-        self.setMinimumHeight(0)
         self.setMaximumHeight(height)
         self.resize(width, height)
         self.setMaximumHeight(16777215)
@@ -4186,7 +4219,7 @@ class FastGaPanel(QWidget):
             radio.toggled.connect(self._sync)
         self._input_selected.toggled.connect(self._sync)
         self._input_define.toggled.connect(self._sync)
-        self._define_inputs.paths_changed.connect(self._sync)
+        self._define_inputs.paths_changed.connect(self._on_define_paths_changed)
         self._define_inputs.field_activated.connect(
             lambda: setattr(self, "_path_target", "input")
         )
@@ -4354,6 +4387,13 @@ class FastGaPanel(QWidget):
 
             return expand_fastga_input_paths(self.defined_input_paths())
         return list(self._files)
+
+    def _on_define_paths_changed(self) -> None:
+        """Row add/remove must grow the dialog — mode toggle alone is not enough."""
+        self._sync()
+        if self.input_source() == FASTGA_INPUT_DEFINE:
+            # Always emit: _sync only fires layout_changed on Define on/off.
+            self.layout_changed.emit()
 
     def _sync(self) -> None:
         mode = self.mode()
@@ -5232,7 +5272,7 @@ class HmmerParamsDialog(QDialog):
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
         self._tabs.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
@@ -5470,6 +5510,9 @@ class HmmerParamsDialog(QDialog):
             return
         panel = self._params_tab
         adv = self._hmmer_advanced_panel
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
         root = panel.layout()
         if root is not None:
             root.invalidate()
@@ -5484,13 +5527,12 @@ class HmmerParamsDialog(QDialog):
             define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
         )
         self.setMinimumWidth(width)
+        compact_h = self._hmmer_compact_content_height()
 
         if not expanded:
-            height = chrome + self._hmmer_compact_content_height()
+            height = chrome + compact_h
             height = min(max(height, 220), max_h)
-            self.setMinimumHeight(0)
-            self._tabs.setMinimumHeight(0)
-            panel.setMinimumHeight(0)
+            pin_tool_tabs_height(self._tabs, compact_h)
             self.setMaximumHeight(height)
             self.resize(width, height)
             self.setMaximumHeight(16777215)
@@ -5498,18 +5540,20 @@ class HmmerParamsDialog(QDialog):
             return
 
         extra = max(0, adv.sizeHint().height())
+        page_h = compact_h + extra
         base = self._hmmer_compact_size or self.size()
         height = min(base.height() + extra + 12, max_h)
-        height = max(
-            height,
-            min(chrome + self._hmmer_compact_content_height() + extra, max_h),
-        )
+        height = max(height, min(chrome + page_h, max_h))
+        pin_tool_tabs_height(self._tabs, page_h)
         self.setMaximumHeight(height)
         self.resize(width, height)
         self.setMaximumHeight(16777215)
 
     def _fit_options_content(self) -> None:
         page = self._options_tab
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
         page.ensurePolished()
         page.adjustSize()
         root = page.layout()
@@ -5525,7 +5569,7 @@ class HmmerParamsDialog(QDialog):
             )
         chrome = self._dialog_chrome_height()
         height = chrome + content_h
-        self.setMinimumHeight(0)
+        pin_tool_tabs_height(self._tabs, content_h)
         self.setMaximumHeight(height)
         self.resize(self._DIALOG_WIDTH, height)
         self.setMaximumHeight(16777215)
@@ -7470,6 +7514,9 @@ class ConsensusParamsDialog(QDialog):
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
+        self._tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         params_tab = QWidget(self)
         params_form = QFormLayout(params_tab)
         params_form.setContentsMargins(12, 10, 12, 10)
@@ -7532,18 +7579,31 @@ class ConsensusParamsDialog(QDialog):
         page = self._tabs.currentWidget()
         if page is None:
             return
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
         page.ensurePolished()
         page.adjustSize()
-        page_hint = page.sizeHint()
+        root = page.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
+        content_h = page_hint.height()
+        if root is not None:
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        pin_tool_tabs_height(self._tabs, content_h)
         tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
-        # Frame/padding around the page inside QTabWidget.
-        tab_chrome = tab_bar_h + 8
+        tabs_h = tab_bar_h + content_h + 8
         buttons_h = self._button_box.sizeHint().height()
         margins = self.layout().contentsMargins()
         spacing = self.layout().spacing()
         height = (
-            page_hint.height()
-            + tab_chrome
+            tabs_h
             + buttons_h
             + margins.top()
             + margins.bottom()
@@ -7555,7 +7615,10 @@ class ConsensusParamsDialog(QDialog):
             page_hint.width() + margins.left() + margins.right() + 24,
             self._button_box.sizeHint().width() + margins.left() + margins.right(),
         )
-        self.setFixedSize(width, height)
+        self.setMinimumWidth(width)
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
@@ -8006,7 +8069,7 @@ class FlexidotParamsDialog(QDialog):
 
         self._tabs = QTabWidget(self)
         self._tabs.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
@@ -8191,6 +8254,9 @@ class FlexidotParamsDialog(QDialog):
             return
         panel = self._params_tab
         adv = self._flexidot_advanced_panel
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
         root = panel.layout()
         if root is not None:
             root.invalidate()
@@ -8205,13 +8271,12 @@ class FlexidotParamsDialog(QDialog):
             define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
         )
         self.setMinimumWidth(width)
+        compact_h = self._flexidot_compact_content_height()
 
         if not expanded:
-            height = chrome + self._flexidot_compact_content_height()
+            height = chrome + compact_h
             height = min(max(height, 220), max_h)
-            self.setMinimumHeight(0)
-            self._tabs.setMinimumHeight(0)
-            panel.setMinimumHeight(0)
+            pin_tool_tabs_height(self._tabs, compact_h)
             self.setMaximumHeight(height)
             self.resize(width, height)
             self.setMaximumHeight(16777215)
@@ -8219,16 +8284,20 @@ class FlexidotParamsDialog(QDialog):
             return
 
         extra = max(0, adv.sizeHint().height())
+        page_h = compact_h + extra
         base = self._flexidot_compact_size or self.size()
         height = min(base.height() + extra + 12, max_h)
-        height = max(
-            height,
-            min(chrome + self._flexidot_compact_content_height() + extra, max_h),
-        )
+        height = max(height, min(chrome + page_h, max_h))
+        pin_tool_tabs_height(self._tabs, page_h)
+        self.setMaximumHeight(height)
         self.resize(width, height)
+        self.setMaximumHeight(16777215)
 
     def _fit_options_content(self) -> None:
         page = self._options_tab
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
         page.ensurePolished()
         page.adjustSize()
         root = page.layout()
@@ -8244,7 +8313,7 @@ class FlexidotParamsDialog(QDialog):
             )
         chrome = self._dialog_chrome_height()
         height = chrome + content_h
-        self.setMinimumHeight(0)
+        pin_tool_tabs_height(self._tabs, content_h)
         self.setMaximumHeight(height)
         self.resize(self._DIALOG_WIDTH, height)
         self.setMaximumHeight(16777215)
@@ -8325,9 +8394,35 @@ class FlexidotParamsDialog(QDialog):
         )
 
 
-_TE_ANNOTATION_PARAMS_WIDTH = 580
-# Cap Advanced Settings scroll so Element colors stay reachable on short screens.
+_TE_ANNOTATION_PARAMS_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+# Cap Advanced Settings scroll height on short screens.
 _TE_ANNOTATION_ADVANCED_SCROLL_MAX_HEIGHT = 420
+
+_TE_ANN_INPUTS_HELP = (
+    "<b>Use selected sequences</b> (default): Sequence Annotation uses the FASTA "
+    "files that were selected in the Files panel when you click Run.<br><br>"
+    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are "
+    "for this run only and are not remembered next time."
+)
+_TE_ANN_FEATURE_DETECTION_HELP = (
+    "Detect sequence features without an external database:<br><br>"
+    "<b>LTR</b>: long terminal repeats (direct repeats typical of LTR "
+    "retrotransposons).<br>"
+    "<b>TIR</b>: terminal inverted repeats (typical of DNA transposons).<br>"
+    "<b>Tandem</b>: tandem / satellite-style repeats.<br>"
+    "<b>ORF</b>: open reading frames.<br>"
+    "<b>All</b>: select or clear every detector above.<br><br>"
+    "Thresholds (lengths, similarity, …) are under <b>Advanced Settings</b> → "
+    "Feature detection settings."
+)
+_TE_ANN_SIMILARITY_HELP = (
+    "Search selected protein / DNA / HMM / CDD databases for similarity hits "
+    "on each sequence. Coloured names match the feature-track colours.<br><br>"
+    "Add or edit databases in <b>File → Manage Database</b>. "
+    "<b>All</b> selects or clears every listed database.<br><br>"
+    "E-value and hit limits are under <b>Advanced Settings</b> → "
+    "Similarity annotation settings."
+)
 
 
 def _section_title_label(text: str, parent: QWidget | None = None) -> QLabel:
@@ -8336,6 +8431,23 @@ def _section_title_label(text: str, parent: QWidget | None = None) -> QLabel:
     font.setBold(True)
     label.setFont(font)
     return label
+
+
+def _section_title_with_help(
+    text: str,
+    help_title: str,
+    help_text: str,
+    parent: QWidget | None = None,
+) -> QWidget:
+    """Bold section title with a trailing ``?`` (Inputs / Feature detection style)."""
+    row = QWidget(parent)
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(6)
+    layout.addWidget(_section_title_label(text, row))
+    layout.addWidget(make_help_button(row, help_title, help_text))
+    layout.addStretch(1)
+    return row
 
 
 class _CheckboxFlowWidget(QWidget):
@@ -8483,6 +8595,7 @@ class TeAnnotationDialog(QDialog):
 
         super().__init__(parent)
         self.setWindowTitle("Sequence Annotation")
+        self.setMinimumWidth(_TE_ANNOTATION_PARAMS_WIDTH)
         opts = initial or TeAnnotationJobOptions()
         self._for_run = for_run
         self._run_after = False
@@ -8497,11 +8610,43 @@ class TeAnnotationDialog(QDialog):
 
         selected_modes = set(opts.auto_modes)
 
-        auto_section = QWidget(self)
-        auto_outer = QVBoxLayout(auto_section)
-        auto_outer.setContentsMargins(0, 0, 0, 0)
-        auto_outer.setSpacing(6)
-        auto_outer.addWidget(_section_title_label("Auto annotation", auto_section))
+        # --- Inputs (BLAST / Align figure-2 style) -------------------------
+        self._input_group = QButtonGroup(self)
+        self._input_selected = QRadioButton("Use selected sequences", self)
+        self._input_define = QRadioButton("Define inputs", self)
+        self._input_group.addButton(self._input_selected)
+        self._input_group.addButton(self._input_define)
+        self._input_selected.setChecked(True)
+        self._define_inputs = TeMultiInputFilesWidget(
+            self,
+            initial=None,
+            start_empty=False,
+            placeholder="Click in Files/Folders or Browse…",
+            browse_title="Choose a FASTA file",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            add_button_label="Add another input",
+            add_button_tooltip=(
+                "Add another FASTA file or folder path. Click a file or folder in "
+                "the panel to fill a row, or use Browse."
+            ),
+            path_mode="file_or_directory",
+        )
+
+        # --- Feature detection (formerly Auto annotation) -----------------
+        feature_section = QWidget(self)
+        feature_outer = QVBoxLayout(feature_section)
+        feature_outer.setContentsMargins(0, 0, 0, 0)
+        feature_outer.setSpacing(6)
+        feature_outer.addWidget(
+            _section_title_with_help(
+                "Feature detection",
+                "Feature detection",
+                _TE_ANN_FEATURE_DETECTION_HELP,
+                feature_section,
+            )
+        )
 
         auto_checks_row = QHBoxLayout()
         auto_checks_row.setSpacing(10)
@@ -8512,28 +8657,40 @@ class TeAnnotationDialog(QDialog):
             ("Tandem", AutoAnnotationMode.TANDEM),
             ("ORF", AutoAnnotationMode.ORF),
         ):
-            check = QCheckBox(label, auto_section)
+            check = QCheckBox(label, feature_section)
             check.setChecked(mode.value in selected_modes)
             check.toggled.connect(self._on_auto_check_toggled)
             self._auto_ann_checks[mode] = check
             auto_checks_row.addWidget(check)
 
-        self._auto_ann_all_check = QCheckBox("All", auto_section)
-        self._auto_ann_all_check.setToolTip("Select or clear all auto-annotation detectors")
+        self._auto_ann_all_check = QCheckBox("All", feature_section)
+        self._auto_ann_all_check.setToolTip(
+            "Select or clear all Feature detection modules"
+        )
         self._auto_ann_all_check.toggled.connect(self._on_auto_all_toggled)
         auto_checks_row.addWidget(self._auto_ann_all_check)
         auto_checks_row.addStretch(1)
-        auto_outer.addLayout(auto_checks_row)
+        feature_outer.addLayout(auto_checks_row)
         self._sync_auto_all_check()
 
+        # --- Similarity annotation ----------------------------------------
         sim_section = QWidget(self)
         sim_outer = QVBoxLayout(sim_section)
         sim_outer.setContentsMargins(0, 0, 0, 0)
         sim_outer.setSpacing(6)
-        sim_outer.addWidget(_section_title_label("Similarity annotation", sim_section))
+        sim_outer.addWidget(
+            _section_title_with_help(
+                "Similarity annotation",
+                "Similarity annotation",
+                _TE_ANN_SIMILARITY_HELP,
+                sim_section,
+            )
+        )
 
         self._similarity_ann_all_check = QCheckBox("All", sim_section)
-        self._similarity_ann_all_check.setToolTip("Select or clear all similarity databases")
+        self._similarity_ann_all_check.setToolTip(
+            "Select or clear all similarity databases"
+        )
         self._similarity_ann_all_check.toggled.connect(self._on_similarity_all_toggled)
 
         self._similarity_db_rows: list[tuple] = []
@@ -8573,9 +8730,12 @@ class TeAnnotationDialog(QDialog):
         self._similarity_settings_panel = SimilarityAnnotationSettingsPanel(
             load_similarity_annotation_settings(), self
         )
-        self._colors_panel = AnnotationElementColorsPanel(self)
+        # Feature types + databases only (no nucleotide / amino-acid palettes).
+        self._colors_panel = AnnotationElementColorsPanel(
+            self, show_residue_colors=False
+        )
 
-        auto_box = QGroupBox("Auto annotation settings", self)
+        auto_box = QGroupBox("Feature detection settings", self)
         auto_box_layout = QVBoxLayout(auto_box)
         auto_box_layout.addWidget(self._auto_settings_panel)
 
@@ -8616,17 +8776,69 @@ class TeAnnotationDialog(QDialog):
         self._advanced_panel = advanced
 
         params_tab = QWidget(self)
-        params_layout = QVBoxLayout(params_tab)
-        params_layout.setContentsMargins(16, 10, 16, 10)
-        params_layout.setSpacing(12)
-        params_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        params_layout.addWidget(auto_section)
-        params_layout.addWidget(sim_section)
-        params_layout.addWidget(advanced)
+        params_root = QVBoxLayout(params_tab)
+        params_root.setContentsMargins(16, 10, 16, 10)
+        params_root.setSpacing(4)
+        params_root.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        basic = QWidget(params_tab)
+        self._te_ann_basic = basic
+        basic.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        form = QFormLayout(basic)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+        self._te_ann_basic_form = form
+
+        # Inputs: title + radios flush-left (same rhythm as Feature detection /
+        # BLAST title→control distance). Avoid the wide Settings label-column
+        # indent — this page has no Settings colon fields to align to.
+        inputs_section = QWidget(basic)
+        inputs_outer = QVBoxLayout(inputs_section)
+        inputs_outer.setContentsMargins(0, 0, 0, 0)
+        inputs_outer.setSpacing(6)
+        inputs_outer.addWidget(_section_title_label("Inputs", inputs_section))
+        inputs_box = QWidget(inputs_section)
+        inputs_layout = QVBoxLayout(inputs_box)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.setSpacing(2)
+        inputs_layout.addWidget(
+            field_with_help(
+                self._input_selected,
+                "Sequence Annotation inputs",
+                _TE_ANN_INPUTS_HELP,
+                stretch=True,
+            )
+        )
+        inputs_layout.addWidget(self._input_define)
+        inputs_outer.addWidget(inputs_box)
+        inputs_outer.addWidget(self._define_inputs)
+        form.addRow(inputs_section)
+
+        form.addRow(_form_section_separator())
+        form.addRow(feature_section)
+        form.addRow(_form_section_separator())
+        form.addRow(sim_section)
+
+        params_root.addWidget(basic)
+        params_root.addWidget(advanced)
         params_tab.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         self._params_tab = params_tab
+
+        self._input_selected.toggled.connect(self._sync_te_ann_inputs)
+        self._input_define.toggled.connect(self._sync_te_ann_inputs)
+        self._define_inputs.paths_changed.connect(self._on_te_ann_define_paths_changed)
+        self._sync_te_ann_inputs(resize=False)
 
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
@@ -8678,7 +8890,7 @@ class TeAnnotationDialog(QDialog):
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
         self._tabs.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
@@ -8739,11 +8951,75 @@ class TeAnnotationDialog(QDialog):
 
     def _te_ann_dialog_width(self) -> int:
         margins = self.layout().contentsMargins() if self.layout() else None
+        width = tool_params_dialog_width(
+            define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
+        )
         return max(
-            _TE_ANNOTATION_PARAMS_WIDTH,
+            width,
             self._button_box.sizeHint().width()
             + (margins.left() + margins.right() if margins else 44),
         )
+
+    def input_source(self) -> str:
+        if self._input_define.isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
+        from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
+        from repeatviewer.backends.te_annotation_batch import is_annotatable_fasta
+
+        if self.input_source() == ALIGN_INPUT_DEFINE:
+            expanded = expand_fastga_input_paths(self._define_inputs.paths())
+            return [p for p in expanded if is_annotatable_fasta(p)]
+        return [Path(p) for p in (panel_files or [])]
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        if self._tabs.currentWidget() is self._options_tab:
+            return False
+        try:
+            candidate = Path(path).expanduser().resolve()
+        except OSError:
+            return False
+        return bool(self._define_inputs.accept_path(candidate))
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        if self._tabs.currentWidget() is self._options_tab:
+            return False
+        try:
+            candidate = Path(folder).expanduser().resolve()
+        except OSError:
+            return False
+        if not candidate.is_dir():
+            return False
+        return bool(self._define_inputs.accept_path(candidate))
+
+    def _on_te_ann_define_paths_changed(self) -> None:
+        self._sync_te_ann_inputs(resize=True)
+
+    def _sync_te_ann_inputs(self, *, resize: bool = True) -> None:
+        define = self.input_source() == ALIGN_INPUT_DEFINE
+        self._define_inputs.setVisible(define)
+        if define:
+            self._define_inputs.setMinimumHeight(0)
+            self._define_inputs.setMaximumHeight(16777215)
+        else:
+            self._define_inputs.setFixedHeight(0)
+        self._define_inputs.updateGeometry()
+        if hasattr(self, "_te_ann_basic"):
+            self._te_ann_basic.updateGeometry()
+        if (
+            resize
+            and self.isVisible()
+            and not self._advanced_settings_btn.isChecked()
+            and self._tabs.currentWidget() is self._params_tab
+        ):
+            self._te_ann_compact_size = None
+            QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
 
     def _te_ann_compact_page_height(self) -> int:
         """Parameters content height with Advanced collapsed."""
@@ -8779,15 +9055,23 @@ class TeAnnotationDialog(QDialog):
         if self._tabs.currentIndex() != 0:
             self._fit_options_tab()
             return
+        width = self._te_ann_dialog_width()
         if hasattr(self, "_db_flow") and self._db_flow.isVisible():
             self._db_flow._last_flow_width = -1
-            self._db_flow.setFixedWidth(max(200, _TE_ANNOTATION_PARAMS_WIDTH - 40))
+            self._db_flow.setFixedWidth(max(200, width - 80))
             self._db_flow._reflow()
 
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._te_ann_dialog_chrome_height()
-        width = self._te_ann_dialog_width()
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
+        self._define_inputs.setMinimumHeight(0)
+        self._define_inputs.setMaximumHeight(16777215)
+        if hasattr(self, "_te_ann_basic"):
+            self._te_ann_basic.setMinimumHeight(0)
+            self._te_ann_basic.setMaximumHeight(16777215)
         compact_page_h = self._te_ann_compact_page_height()
 
         self._advanced_panel.setVisible(expanded)
@@ -8805,11 +9089,12 @@ class TeAnnotationDialog(QDialog):
             root.activate()
         self._params_tab.updateGeometry()
         self._tabs.updateGeometry()
+        self.setMinimumWidth(width)
 
         if not expanded:
             height = chrome + compact_page_h
             height = min(max(height, 220), max_h)
-            self.setMinimumHeight(0)
+            pin_tool_tabs_height(self._tabs, compact_page_h)
             self.setMaximumHeight(height)
             self.resize(width, height)
             self.setMaximumHeight(16777215)
@@ -8817,12 +9102,14 @@ class TeAnnotationDialog(QDialog):
             return
 
         extra = self._te_ann_advanced_extra_height()
+        page_h = compact_page_h + extra
         base = self._te_ann_compact_size or self.size()
         height = min(base.height() + extra + 12, max_h)
         height = max(
             height,
-            min(chrome + compact_page_h + extra, max_h),
+            min(chrome + page_h, max_h),
         )
+        pin_tool_tabs_height(self._tabs, page_h)
         self.setMaximumHeight(height)
         self.resize(width, height)
         self.setMaximumHeight(16777215)
@@ -8832,10 +9119,27 @@ class TeAnnotationDialog(QDialog):
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._te_ann_dialog_chrome_height()
         width = self._te_ann_dialog_width()
-        self._options_tab.adjustSize()
-        page_h = self._options_tab.sizeHint().height()
-        height = min(max(chrome + page_h, 220), max_h)
         self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
+        self._options_tab.ensurePolished()
+        self._options_tab.adjustSize()
+        root = self._options_tab.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        page_h = max(
+            self._options_tab.minimumSizeHint().height(),
+            self._options_tab.sizeHint().height(),
+        )
+        if root is not None:
+            page_h = max(
+                page_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        height = min(max(chrome + page_h, 220), max_h)
+        pin_tool_tabs_height(self._tabs, page_h)
         self.setMaximumHeight(height)
         self.resize(width, height)
         self.setMaximumHeight(16777215)
@@ -8919,6 +9223,9 @@ class TeAnnotationDialog(QDialog):
         )
 
         defaults = TeAnnotationJobOptions()
+        self._input_selected.setChecked(True)
+        self._define_inputs.clear_paths()
+        self._sync_te_ann_inputs(resize=False)
         selected = set(defaults.auto_modes)
         self._auto_all_updating = True
         for mode, check in self._auto_ann_checks.items():
@@ -8968,7 +9275,7 @@ class TeAnnotationDialog(QDialog):
             self._resize_for_advanced(False)
 
     def apply_settings_panels(self) -> None:
-        """Persist Advanced-tab auto/similarity settings and colors."""
+        """Persist Advanced-tab feature-detection, similarity, and element colors."""
         from repeatviewer.backends.auto_annotation_settings import (
             save_auto_annotation_settings,
         )
@@ -9571,7 +9878,7 @@ class TeaAidParamsDialog(QDialog):
         self._tabs.setDocumentMode(True)
         self._tabs.tabBar().setDrawBase(False)
         self._tabs.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         self._tabs.addTab(params_tab, "Parameters")
         self._tabs.addTab(options_tab, "Options")
@@ -9793,6 +10100,9 @@ class TeaAidParamsDialog(QDialog):
             return
         panel = self._params_tab
         adv = self._teaid_advanced_panel
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
         root = panel.layout()
         if root is not None:
             root.invalidate()
@@ -9807,13 +10117,12 @@ class TeaAidParamsDialog(QDialog):
             define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
         )
         self.setMinimumWidth(width)
+        compact_h = self._teaid_compact_content_height()
 
         if not expanded:
-            height = chrome + self._teaid_compact_content_height()
+            height = chrome + compact_h
             height = min(max(height, 220), max_h)
-            self.setMinimumHeight(0)
-            self._tabs.setMinimumHeight(0)
-            panel.setMinimumHeight(0)
+            pin_tool_tabs_height(self._tabs, compact_h)
             self.setMaximumHeight(height)
             self.resize(width, height)
             self.setMaximumHeight(16777215)
@@ -9821,16 +10130,20 @@ class TeaAidParamsDialog(QDialog):
             return
 
         extra = max(0, adv.sizeHint().height())
+        page_h = compact_h + extra
         base = self._teaid_compact_size or self.size()
         height = min(base.height() + extra + 12, max_h)
-        height = max(
-            height,
-            min(chrome + self._teaid_compact_content_height() + extra, max_h),
-        )
+        height = max(height, min(chrome + page_h, max_h))
+        pin_tool_tabs_height(self._tabs, page_h)
+        self.setMaximumHeight(height)
         self.resize(width, height)
+        self.setMaximumHeight(16777215)
 
     def _fit_options_content(self) -> None:
         page = self._options_tab
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
         page.ensurePolished()
         page.adjustSize()
         root = page.layout()
@@ -9846,7 +10159,7 @@ class TeaAidParamsDialog(QDialog):
             )
         chrome = self._dialog_chrome_height()
         height = chrome + content_h
-        self.setMinimumHeight(0)
+        pin_tool_tabs_height(self._tabs, content_h)
         self.setMaximumHeight(height)
         self.resize(self._DIALOG_WIDTH, height)
         self.setMaximumHeight(16777215)
@@ -10568,23 +10881,7 @@ class MsaCleanParamsDialog(QDialog):
 
     def _pin_msa_tab_height(self, page_h: int | None) -> None:
         """Pin tab stack to current page height so unused tabs cannot leave a gap."""
-        if page_h is None:
-            self._tabs.setMinimumHeight(0)
-            self._tabs.setMaximumHeight(16777215)
-            for i in range(self._tabs.count()):
-                page = self._tabs.widget(i)
-                if page is not None:
-                    page.setMinimumHeight(0)
-                    page.setMaximumHeight(16777215)
-            return
-        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
-        tabs_h = tab_bar_h + max(1, int(page_h)) + 8
-        self._tabs.setMinimumHeight(0)
-        self._tabs.setMaximumHeight(tabs_h)
-        current = self._tabs.currentWidget()
-        if current is not None:
-            current.setMinimumHeight(0)
-            current.setMaximumHeight(max(1, int(page_h)))
+        pin_tool_tabs_height(self._tabs, page_h)
 
     def _fit_to_current_tab(self) -> None:
         """Shrink/grow the dialog height to the active tab’s content (BLAST-style)."""
@@ -12274,7 +12571,7 @@ class TeDensityPlotDialog(QDialog):
         self._tabs.setDocumentMode(True)
         self._tabs.tabBar().setDrawBase(False)
         self._tabs.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         self._tabs.addTab(self._te_wrap, "TE")
         self._tabs.addTab(self._ann_wrap, "Gene")
@@ -12548,6 +12845,7 @@ class TeDensityPlotDialog(QDialog):
         # Unlock height so sizeHints are not crushed by a previous maxHeight cap
         # (adding file rows otherwise overlaps Browse/Remove text).
         self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
         wrap = self._active_track_wrap()
         root = wrap.layout()
         if root is not None:
@@ -12561,6 +12859,8 @@ class TeDensityPlotDialog(QDialog):
         else:
             self._set_track_wraps_equal_height(False)
 
+        wrap_h = max(wrap.minimumSizeHint().height(), wrap.sizeHint().height())
+        pin_tool_tabs_height(self._tabs, wrap_h)
         height = self._dialog_stack_height(expanded=expanded)
         self._apply_dialog_height(height)
         if not expanded:
@@ -12568,6 +12868,8 @@ class TeDensityPlotDialog(QDialog):
 
     def _fit_options_content(self) -> None:
         page = self._options_tab
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
         page.ensurePolished()
         page.adjustSize()
         root = page.layout()
@@ -12581,6 +12883,7 @@ class TeDensityPlotDialog(QDialog):
                 root.totalMinimumSize().height(),
                 root.totalSizeHint().height(),
             )
+        pin_tool_tabs_height(self._tabs, content_h)
         tab_bar_h = self._tabs.tabBar().sizeHint().height() + 8
         buttons_h = self._button_box.sizeHint().height()
         lay = self.layout()

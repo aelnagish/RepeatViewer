@@ -8,14 +8,15 @@ from PySide6.QtCore import QSettings
 
 
 DEFAULT_SIMILARITY_EVALUE = 1e-4
-SETTINGS_VERSION = 6
+SETTINGS_VERSION = 7
 
 
 @dataclass
 class SimilarityAnnotationSettings:
     """Search thresholds for similarity annotation."""
 
-    blast_evalue: float = DEFAULT_SIMILARITY_EVALUE
+    blastn_evalue: float = DEFAULT_SIMILARITY_EVALUE
+    blastp_evalue: float = DEFAULT_SIMILARITY_EVALUE
     hmm_evalue: float = DEFAULT_SIMILARITY_EVALUE
     cdd_evalue: float = DEFAULT_SIMILARITY_EVALUE
     max_hits_per_database: int = 10
@@ -100,32 +101,32 @@ def load_similarity_annotation_settings() -> SimilarityAnnotationSettings:
     max_hits = _get_int(s, f"{prefix}max_hits_per_database", 10)
     show_db_name = _get_bool(s, f"{prefix}show_database_name_on_track", True)
     show_info = _get_bool(s, f"{prefix}show_info_window_after_run", True)
-    if version < SETTINGS_VERSION:
-        settings = SimilarityAnnotationSettings(
-            blast_evalue=_get_float(s, f"{prefix}blast_evalue", DEFAULT_SIMILARITY_EVALUE),
-            hmm_evalue=_get_float(s, f"{prefix}hmm_evalue", DEFAULT_SIMILARITY_EVALUE),
-            cdd_evalue=_get_float(s, f"{prefix}cdd_evalue", DEFAULT_SIMILARITY_EVALUE),
-            max_hits_per_database=max_hits,
-            show_database_name_on_track=show_db_name,
-            show_info_window_after_run=show_info,
-        )
-        save_similarity_annotation_settings(settings)
-        return settings
-    return SimilarityAnnotationSettings(
-        blast_evalue=_get_float(s, f"{prefix}blast_evalue", DEFAULT_SIMILARITY_EVALUE),
-        hmm_evalue=_get_float(s, f"{prefix}hmm_evalue", DEFAULT_SIMILARITY_EVALUE),
-        cdd_evalue=_get_float(s, f"{prefix}cdd_evalue", DEFAULT_SIMILARITY_EVALUE),
+    # v6 and earlier stored a single blast_evalue for both BLASTN and BLASTP.
+    legacy_blast = _get_float(s, f"{prefix}blast_evalue", DEFAULT_SIMILARITY_EVALUE)
+    blastn = _get_float(s, f"{prefix}blastn_evalue", legacy_blast)
+    blastp = _get_float(s, f"{prefix}blastp_evalue", legacy_blast)
+    hmm = _get_float(s, f"{prefix}hmm_evalue", DEFAULT_SIMILARITY_EVALUE)
+    cdd = _get_float(s, f"{prefix}cdd_evalue", DEFAULT_SIMILARITY_EVALUE)
+    settings = SimilarityAnnotationSettings(
+        blastn_evalue=blastn,
+        blastp_evalue=blastp,
+        hmm_evalue=hmm,
+        cdd_evalue=cdd,
         max_hits_per_database=max_hits,
         show_database_name_on_track=show_db_name,
         show_info_window_after_run=show_info,
     )
+    if version < SETTINGS_VERSION:
+        save_similarity_annotation_settings(settings)
+    return settings
 
 
 def save_similarity_annotation_settings(settings: SimilarityAnnotationSettings) -> None:
     s = QSettings()
     prefix = "similarity_annotation/"
     s.setValue(f"{prefix}settings_version", SETTINGS_VERSION)
-    s.setValue(f"{prefix}blast_evalue", settings.blast_evalue)
+    s.setValue(f"{prefix}blastn_evalue", settings.blastn_evalue)
+    s.setValue(f"{prefix}blastp_evalue", settings.blastp_evalue)
     s.setValue(f"{prefix}hmm_evalue", settings.hmm_evalue)
     s.setValue(f"{prefix}cdd_evalue", settings.cdd_evalue)
     s.setValue(f"{prefix}max_hits_per_database", settings.max_hits_per_database)

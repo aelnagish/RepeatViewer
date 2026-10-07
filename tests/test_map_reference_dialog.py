@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
 from PySide6.QtWidgets import QPushButton, QTabBar
 
 from repeatviewer.job_options import (
@@ -29,6 +30,15 @@ def _dialog(qapp, tmp_path, **kw):
     q = tmp_path / "variants.fa"
     q.write_text(">v1\nACGTACGTAC\n>v2\nACGTACGTAA\n")
     return MapReferenceDialog(files=[q], **kw), ref, q
+
+
+@pytest.fixture(autouse=True)
+def _silence_hisat2_reminder(monkeypatch):
+    """HISAT2 tab open schedules an install reminder; keep tests non-interactive."""
+    monkeypatch.setattr(
+        "repeatviewer.views.map_reference_dialog.MapReferenceDialog._remind_hisat2_if_needed",
+        lambda self: None,
+    )
 
 
 def test_buttons_and_align_style_tabs(qapp, tmp_path):

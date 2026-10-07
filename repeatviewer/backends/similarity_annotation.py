@@ -848,7 +848,7 @@ def _annotate_protein_database(
         return (), f"{database.name}: no ORFs long enough for BLASTP."
 
     lookup = _orf_lookup(orfs)
-    report_evalue = _clamp_evalue(settings.blast_evalue, default=DEFAULT_BLAST_EVALUE)
+    report_evalue = _clamp_evalue(settings.blastp_evalue, default=DEFAULT_BLAST_EVALUE)
     max_hits = _max_hits(settings.max_hits_per_database)
     with tempfile.TemporaryDirectory(prefix="repeatviewer_simann_protein_") as tmp:
         query_faa = Path(tmp) / "orfs.faa"
@@ -946,7 +946,7 @@ def _annotate_dna_database(
     readiness = database_search_readiness(database)
     if readiness is not None:
         return (), f"{database.name}: {readiness}"
-    report_evalue = _clamp_evalue(settings.blast_evalue, default=DEFAULT_BLAST_EVALUE)
+    report_evalue = _clamp_evalue(settings.blastn_evalue, default=DEFAULT_BLAST_EVALUE)
     max_hits = _max_hits(settings.max_hits_per_database)
     with tempfile.TemporaryDirectory(prefix="repeatviewer_simann_dna_") as tmp:
         query_fa = Path(tmp) / "query.fa"

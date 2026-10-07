@@ -36,6 +36,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -303,6 +304,107 @@ def hisat2_build_executable(hisat2: str) -> str | None:
     return which_tool("hisat2-build") or shutil.which("hisat2-build")
 
 
+_HISAT2_RECOMMENDED_ENV = "rv_env"
+_HISAT2_CONDA_PKG = "hisat2"
+_HISAT2_CONDA_INSTALL_CMD = (
+    f"conda install -n {_HISAT2_RECOMMENDED_ENV} -c conda-forge -c bioconda "
+    f"{_HISAT2_CONDA_PKG}"
+)
+_HISAT2_CONDA_CREATE_CMD = (
+    f"conda create -n {_HISAT2_RECOMMENDED_ENV} -c conda-forge -c bioconda "
+    f"{_HISAT2_CONDA_PKG}"
+)
+
+
+def _hisat2_conda_install_block(*, rich: bool) -> str:
+    """Create-or-install into the shared recommended env (same pattern as FastGA)."""
+    if rich:
+        return (
+            "Open a Terminal window.<br><br>"
+            "Install HISAT2 with conda into RepeatViewer:<br>"
+            f"<b>If</b> Conda environment <code>{_HISAT2_RECOMMENDED_ENV}</code> "
+            "exists:<br>"
+            f"<code>{_HISAT2_CONDA_INSTALL_CMD}</code><br>"
+            "<b>else:</b><br>"
+            f"<code>{_HISAT2_CONDA_CREATE_CMD}</code>"
+        )
+    return (
+        "Open a Terminal window.\n\n"
+        "Install HISAT2 with conda into RepeatViewer:\n"
+        f"If Conda environment {_HISAT2_RECOMMENDED_ENV} exists:\n"
+        f"  {_HISAT2_CONDA_INSTALL_CMD}\n"
+        "else:\n"
+        f"  {_HISAT2_CONDA_CREATE_CMD}"
+    )
+
+
+def hisat2_configuration_message(*, rich: bool = True) -> str:
+    """How to install and point RepeatViewer at HISAT2 (FastGA reminder style)."""
+    install = _hisat2_conda_install_block(rich=rich)
+    env_name = _HISAT2_RECOMMENDED_ENV
+    if sys.platform == "win32":
+        if rich:
+            return (
+                "HISAT2 is not bundled with RepeatViewer and is not configured "
+                "yet.<br><br>"
+                "On Windows, HISAT2 typically runs inside WSL2 (not as a native "
+                "Windows binary).<br><br>"
+                "1. Install WSL2 if needed (PowerShell as Administrator):"
+                "<br><code>wsl --install</code><br><br>"
+                f"2. Inside your WSL Linux distro:<br>{install}<br><br>"
+                "3. <b>Then</b>, in RepeatViewer:<br>"
+                "File → Setting → External tools (conda / WSL2) → enter "
+                f"<code>{env_name}</code> (or the Linux path to that env), "
+                "then click Test to confirm HISAT2 resolves."
+            )
+        return (
+            "HISAT2 is not bundled with RepeatViewer and is not configured yet.\n\n"
+            "On Windows, HISAT2 typically runs inside WSL2 (not as a native "
+            "Windows binary).\n\n"
+            "1. Install WSL2 if needed (PowerShell as Administrator):\n"
+            "   wsl --install\n\n"
+            f"2. Inside your WSL Linux distro:\n{install}\n\n"
+            "3. Then, in RepeatViewer:\n"
+            "   File → Setting → External tools (conda / WSL2) → enter "
+            f"{env_name} (or the Linux path to that env), then Test."
+        )
+    if rich:
+        return (
+            "HISAT2 is not bundled with RepeatViewer and is not configured "
+            "yet.<br><br>"
+            f"{install}<br><br>"
+            "<b>Then</b>, in RepeatViewer:<br>"
+            "File → Setting → External tools (conda) → enter "
+            f"<code>{env_name}</code> (or the path to that env), "
+            "then click Test to confirm HISAT2 resolves."
+        )
+    return (
+        "HISAT2 is not bundled with RepeatViewer and is not configured yet.\n\n"
+        f"{install}\n\n"
+        "Then, in RepeatViewer:\n"
+        "  File → Setting → External tools (conda) → enter "
+        f"{env_name} (or the path to that env), then Test."
+    )
+
+
+def show_hisat2_not_configured_dialog(parent=None) -> None:
+    """Remind the user how to install HISAT2 when it is missing (FastGA style)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    box = QMessageBox(parent)
+    box.setWindowTitle("HISAT2 not configured")
+    box.setIcon(QMessageBox.Icon.Information)
+    box.setTextFormat(Qt.TextFormat.RichText)
+    # Keep body normal weight so only explicit <b>…</b> stands out — same as FastGA.
+    box.setText(
+        f"<div style='font-weight:400'>{hisat2_configuration_message(rich=True)}</div>"
+    )
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+    box.exec()
+
+
 def engine_install_hint(engine: str) -> str:
     if engine == MAP_ENGINE_MINIMAP2:
         from repeatviewer.backends.minimap2_tools import (
@@ -322,11 +424,7 @@ def engine_install_hint(engine: str) -> str:
             "  conda install -c conda-forge -c bioconda minimap2"
         )
     if engine == MAP_ENGINE_HISAT2:
-        return (
-            "Install HISAT2 into the conda env set in File → Settings → External tools, "
-            "or put it on PATH:\n"
-            "  conda install -c conda-forge -c bioconda hisat2"
-        )
+        return hisat2_configuration_message(rich=False)
     pkg = _CONDA_PACKAGE.get(engine, engine)
     return ("Install it into the conda env set in File → Settings → External tools:\n"
             f"  conda install -c conda-forge -c bioconda {pkg}")
@@ -1540,8 +1638,10 @@ def run_hisat2_engine(reference: Path, queries: list[Path], opts: MapOptions, wo
 
     exe = engine_executable(MAP_ENGINE_HISAT2, system_path_only=opts.use_system_path)
     if not exe:
-        raise MapReferenceError("HISAT2 was not found.\n\n"
-                                + engine_install_hint(MAP_ENGINE_HISAT2))
+        raise MapReferenceError(
+            "HISAT2 is not configured.\n\n"
+            + engine_install_hint(MAP_ENGINE_HISAT2)
+        )
     prefix = ensure_hisat2_index(reference, exe, opts.threads, commands, say, cancel)
     paired = getattr(opts, "hisat2_reads", MAP_HISAT2_READS_SINGLE) == MAP_HISAT2_READS_PAIRED
     sam = work / "hisat2.sam"
@@ -1722,8 +1822,14 @@ def run_mapping(
                             f"not found; {ENGINE_NAMES[fallback]} was used instead.")
             engine = fallback
     elif not engine_available(engine, system_path_only=opts.use_system_path):
-        raise MapReferenceError(f"{ENGINE_NAMES.get(engine, engine)} was not found.\n\n"
-                                + engine_install_hint(engine))
+        if engine == MAP_ENGINE_HISAT2:
+            raise MapReferenceError(
+                "HISAT2 is not configured.\n\n" + engine_install_hint(engine)
+            )
+        raise MapReferenceError(
+            f"{ENGINE_NAMES.get(engine, engine)} was not found.\n\n"
+            + engine_install_hint(engine)
+        )
 
     features_by_id = (load_reference_features(reference, ref_lengths)
                       if opts.lift_annotations else {})

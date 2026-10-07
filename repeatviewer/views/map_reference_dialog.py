@@ -876,8 +876,19 @@ class MapReferenceDialog(QDialog):
             return
         # Swap which engine's Define-inputs list is shown.
         self._sync_inputs(resize=False)
+        if on_hs:
+            # Defer so the HISAT2 tab paints before any availability probe / reminder.
+            QTimer.singleShot(0, self._remind_hisat2_if_needed)
         if self.isVisible():
             self._resize_for_advanced(self._advanced_settings_btn.isChecked())
+
+    def _remind_hisat2_if_needed(self) -> None:
+        """Show install/bind instructions when HISAT2 is not configured (FastGA style)."""
+        if self._tab_bar.currentIndex() != self._TAB_HISAT2:
+            return
+        if mr.engine_available(MAP_ENGINE_HISAT2):
+            return
+        mr.show_hisat2_not_configured_dialog(self)
 
     def _update_executable_status(self, *_args) -> None:
         """Refresh Minimap2 PATH / HISAT2 lines on Options → Executables."""

@@ -108,81 +108,101 @@ def _tile_letter(label: str) -> str:
 
 
 class AnnotationElementColorsPanel(QWidget):
-    """Embeddable colors for nucleotides, amino acids, features, and databases."""
+    """Embeddable colors for nucleotides, amino acids, features, and databases.
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    Pass ``show_residue_colors=False`` for Sequence Annotation Advanced Settings
+    (feature types + similarity databases only; no DNA / protein palettes).
+    """
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        show_residue_colors: bool = True,
+    ) -> None:
         super().__init__(parent)
+        self._show_residue_colors = bool(show_residue_colors)
         databases = load_similarity_annotation_databases()
 
         body_layout = QVBoxLayout(self)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(12)
 
-        # --- Nucleotides (MSA figure-2 style) ---
-        body_layout.addWidget(self._section_label("Nucleotide colors"))
-        nuc_colors = dict(DEFAULT_NUCLEOTIDE_COLORS)
-        nuc_colors.update(load_custom_nucleotide_backgrounds())
-        if "U" in nuc_colors:
-            nuc_colors["T"] = nuc_colors["U"]
-        self._nuc_grid = ResidueColorGrid(
-            self,
-            colors=nuc_colors,
-            categories=list(NUCLEOTIDE_CATEGORIES),
-            linked_residues={"T": "U"},
-        )
-        nuc_presets = QHBoxLayout()
-        nuc_presets.setContentsMargins(0, 0, 0, 0)
-        nuc_presets.setSpacing(6)
-        nuc_preset_label = QLabel("Preset:", self)
-        nuc_preset_label.setFixedWidth(ResidueColorGrid.LABEL_WIDTH)
-        nuc_presets.addWidget(nuc_preset_label)
-        nuc_tips = {
-            "Default": "Standard A/C/G/T colours",
-            "Color-blind": "Wong / Paul Tol palette (same as Annotation → nucleotide Color-blind)",
-        }
-        for label, palette in NUCLEOTIDE_COLOR_PRESETS:
-            btn = QPushButton(label, self)
-            btn.setToolTip(nuc_tips.get(label, f"Apply {label} nucleotide colours"))
-            btn.clicked.connect(
-                lambda _checked=False, name=label, colors=palette: self._apply_nuc_preset(
-                    name, colors
+        self._nuc_grid: ResidueColorGrid | None = None
+        self._aa_grid: ResidueColorGrid | None = None
+        if self._show_residue_colors:
+            # --- Nucleotides (MSA figure-2 style) ---
+            body_layout.addWidget(self._section_label("Nucleotide colors"))
+            nuc_colors = dict(DEFAULT_NUCLEOTIDE_COLORS)
+            nuc_colors.update(load_custom_nucleotide_backgrounds())
+            if "U" in nuc_colors:
+                nuc_colors["T"] = nuc_colors["U"]
+            self._nuc_grid = ResidueColorGrid(
+                self,
+                colors=nuc_colors,
+                categories=list(NUCLEOTIDE_CATEGORIES),
+                linked_residues={"T": "U"},
+            )
+            nuc_presets = QHBoxLayout()
+            nuc_presets.setContentsMargins(0, 0, 0, 0)
+            nuc_presets.setSpacing(6)
+            nuc_preset_label = QLabel("Preset:", self)
+            nuc_preset_label.setFixedWidth(ResidueColorGrid.LABEL_WIDTH)
+            nuc_presets.addWidget(nuc_preset_label)
+            nuc_tips = {
+                "Default": "Standard A/C/G/T colours",
+                "Color-blind": (
+                    "Wong / Paul Tol palette (same as Annotation → nucleotide "
+                    "Color-blind)"
+                ),
+            }
+            for label, palette in NUCLEOTIDE_COLOR_PRESETS:
+                btn = QPushButton(label, self)
+                btn.setToolTip(
+                    nuc_tips.get(label, f"Apply {label} nucleotide colours")
                 )
-            )
-            nuc_presets.addWidget(btn)
-        nuc_presets.addStretch(1)
-        body_layout.addLayout(nuc_presets)
-        body_layout.addWidget(self._nuc_grid)
+                btn.clicked.connect(
+                    lambda _checked=False, name=label, colors=palette: (
+                        self._apply_nuc_preset(name, colors)
+                    )
+                )
+                nuc_presets.addWidget(btn)
+            nuc_presets.addStretch(1)
+            body_layout.addLayout(nuc_presets)
+            body_layout.addWidget(self._nuc_grid)
 
-        # --- Amino acids (MSA style) ---
-        body_layout.addWidget(self._section_label("Amino-acid colors"))
-        aa_colors = dict(DEFAULT_AMINO_ACID_COLORS)
-        aa_colors.update(load_custom_amino_acid_backgrounds())
-        self._aa_grid = ResidueColorGrid(
-            self,
-            colors=aa_colors,
-            categories=list(AMINO_ACID_CATEGORIES),
-        )
-        aa_presets = QHBoxLayout()
-        aa_presets.setContentsMargins(0, 0, 0, 0)
-        aa_presets.setSpacing(6)
-        aa_preset_label = QLabel("Preset:", self)
-        aa_preset_label.setFixedWidth(ResidueColorGrid.LABEL_WIDTH)
-        aa_presets.addWidget(aa_preset_label)
-        aa_tips = {
-            "Clustal": "Clustal X default amino-acid colours",
-            "Zappo": "Zappo physicochemical palette",
-            "Taylor": "Taylor / Lesk palette",
-        }
-        for label, palette in AMINO_ACID_COLOR_PRESETS:
-            btn = QPushButton(label, self)
-            btn.setToolTip(aa_tips.get(label, f"Apply {label} amino-acid colours"))
-            btn.clicked.connect(
-                lambda _checked=False, colors=palette: self._aa_grid.set_colors(colors)
+            # --- Amino acids (MSA style) ---
+            body_layout.addWidget(self._section_label("Amino-acid colors"))
+            aa_colors = dict(DEFAULT_AMINO_ACID_COLORS)
+            aa_colors.update(load_custom_amino_acid_backgrounds())
+            self._aa_grid = ResidueColorGrid(
+                self,
+                colors=aa_colors,
+                categories=list(AMINO_ACID_CATEGORIES),
             )
-            aa_presets.addWidget(btn)
-        aa_presets.addStretch(1)
-        body_layout.addLayout(aa_presets)
-        body_layout.addWidget(self._aa_grid)
+            aa_presets = QHBoxLayout()
+            aa_presets.setContentsMargins(0, 0, 0, 0)
+            aa_presets.setSpacing(6)
+            aa_preset_label = QLabel("Preset:", self)
+            aa_preset_label.setFixedWidth(ResidueColorGrid.LABEL_WIDTH)
+            aa_presets.addWidget(aa_preset_label)
+            aa_tips = {
+                "Clustal": "Clustal X default amino-acid colours",
+                "Zappo": "Zappo physicochemical palette",
+                "Taylor": "Taylor / Lesk palette",
+            }
+            for label, palette in AMINO_ACID_COLOR_PRESETS:
+                btn = QPushButton(label, self)
+                btn.setToolTip(aa_tips.get(label, f"Apply {label} amino-acid colours"))
+                btn.clicked.connect(
+                    lambda _checked=False, colors=palette: self._aa_grid.set_colors(
+                        colors
+                    )
+                )
+                aa_presets.addWidget(btn)
+            aa_presets.addStretch(1)
+            body_layout.addLayout(aa_presets)
+            body_layout.addWidget(self._aa_grid)
 
         # --- Feature types (label + colour swatch, no letter) ---
         body_layout.addWidget(self._section_label("Feature types"))
@@ -229,6 +249,8 @@ class AnnotationElementColorsPanel(QWidget):
         )
 
     def _apply_nuc_preset(self, name: str, colors: dict[str, str]) -> None:
+        if self._nuc_grid is None:
+            return
         self._nuc_grid.set_colors(colors)
         # Keep the Annotation sequence-view scheme flag in sync with this preset.
         save_color_blind_nucleotide_scheme(name == "Color-blind")
@@ -239,9 +261,11 @@ class AnnotationElementColorsPanel(QWidget):
         return label
 
     def restore_defaults(self) -> None:
-        self._nuc_grid.set_colors(default_nucleotide_backgrounds())
-        save_color_blind_nucleotide_scheme(False)
-        self._aa_grid.set_colors(default_amino_acid_backgrounds())
+        if self._nuc_grid is not None:
+            self._nuc_grid.set_colors(default_nucleotide_backgrounds())
+            save_color_blind_nucleotide_scheme(False)
+        if self._aa_grid is not None:
+            self._aa_grid.set_colors(default_amino_acid_backgrounds())
         defaults = default_feature_type_colors()
         self._feature_grid.set_colors(
             {
@@ -265,9 +289,13 @@ class AnnotationElementColorsPanel(QWidget):
         return self._database_grid.colors()
 
     def new_nucleotide_backgrounds(self) -> dict[str, str]:
+        if self._nuc_grid is None:
+            return {}
         return self._nuc_grid.colors()
 
     def new_amino_acid_backgrounds(self) -> dict[str, str]:
+        if self._aa_grid is None:
+            return {}
         return self._aa_grid.colors()
 
     def old_feature_type_colors(self) -> dict[str, str]:
@@ -279,8 +307,9 @@ class AnnotationElementColorsPanel(QWidget):
     def save(self) -> None:
         save_feature_type_colors(self.new_feature_type_colors())
         save_similarity_database_colors(self.new_database_colors())
-        save_custom_nucleotide_backgrounds(self.new_nucleotide_backgrounds())
-        save_custom_amino_acid_backgrounds(self.new_amino_acid_backgrounds())
+        if self._show_residue_colors:
+            save_custom_nucleotide_backgrounds(self.new_nucleotide_backgrounds())
+            save_custom_amino_acid_backgrounds(self.new_amino_acid_backgrounds())
 
 
 class AnnotationElementColorsDialog(QDialog):
