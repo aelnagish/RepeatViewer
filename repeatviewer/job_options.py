@@ -139,11 +139,22 @@ DEFAULT_CHROMOSOME_SORT = CHROMOSOME_SORT_NATURAL
 DEFAULT_TE_GENOME_MAP_METHYLATION_COVERAGE_MIN = 5
 DEFAULT_ANNOTATION_DENSITY = TE_GENOME_MAP_DENSITY_TE_LENGTH
 DEFAULT_ANNOTATION_FEATURE_TYPES = ("gene",)
+TE_GENOME_MAP_DIALOG_TAB_TE = "te"
+TE_GENOME_MAP_DIALOG_TAB_ANNOTATION = "annotation"
+TE_GENOME_MAP_DIALOG_TAB_METHYLATION = "methylation"
+# Legacy saved tab from the single-Parameters layout.
+TE_GENOME_MAP_DIALOG_TAB_PARAMETERS = TE_GENOME_MAP_DIALOG_TAB_TE
+TE_GENOME_MAP_DIALOG_TABS = (
+    TE_GENOME_MAP_DIALOG_TAB_TE,
+    TE_GENOME_MAP_DIALOG_TAB_ANNOTATION,
+    TE_GENOME_MAP_DIALOG_TAB_METHYLATION,
+    DIALOG_TAB_OPTIONS,
+)
 
 
 @dataclass
 class TeGenomeMapOptions:
-    """TE density plot: bin window, density metric, and chromosome filter."""
+    """Genome density plot: bin window, density metric, and chromosome filter."""
 
     bin_size_bp: int = DEFAULT_TE_GENOME_MAP_BIN_BP
     density_mode: str = DEFAULT_TE_GENOME_MAP_DENSITY
@@ -160,6 +171,14 @@ class TeGenomeMapOptions:
     chromosomes_only: list[str] | None = None
     superfamilies_only: list[str] | None = None
     chromosome_sort: str = DEFAULT_CHROMOSOME_SORT
+    # When True, Run uses every track tab that has files. When False, Run uses
+    # only the currently selected track tab (TE / Gene / Methylation).
+    plot_all_tracks_together: bool = False
+    # Reference genome FASTA for the plot. Empty means the project current genome.
+    genome_path: str = ""
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
+    last_dialog_tab: str = TE_GENOME_MAP_DIALOG_TAB_TE
 
 
 DEFAULT_TE_DIVERGENCE_BIN_WIDTH = 0.005
@@ -1675,6 +1694,28 @@ def load_te_genome_map_options() -> TeGenomeMapOptions:
         CHROMOSOME_SORT_SIZE_ASC,
     ):
         chrom_sort = DEFAULT_CHROMOSOME_SORT
+    tab = str(v.get("last_dialog_tab", TE_GENOME_MAP_DIALOG_TAB_TE))
+    if tab == "parameters":
+        tab = TE_GENOME_MAP_DIALOG_TAB_TE
+    if tab not in TE_GENOME_MAP_DIALOG_TABS:
+        tab = TE_GENOME_MAP_DIALOG_TAB_TE
+    if "plot_all_tracks_together" in v:
+        plot_all = _to_bool(v.get("plot_all_tracks_together"), False)
+    elif any(
+        key in v
+        for key in (
+            "include_te_tracks",
+            "include_annotation_tracks",
+            "include_methylation_tracks",
+        )
+    ):
+        plot_all = (
+            _to_bool(v.get("include_te_tracks"), True)
+            and _to_bool(v.get("include_annotation_tracks"), True)
+            and _to_bool(v.get("include_methylation_tracks"), True)
+        )
+    else:
+        plot_all = False
     return TeGenomeMapOptions(
         bin_size_bp=max(5_000, int(v.get("bin_size_bp", DEFAULT_TE_GENOME_MAP_BIN_BP))),
         density_mode=mode,
@@ -1693,6 +1734,16 @@ def load_te_genome_map_options() -> TeGenomeMapOptions:
         chromosomes_only=_parse_chromosomes_only_setting(v.get("chromosomes_only")),
         superfamilies_only=_parse_name_list_setting(v.get("superfamilies_only")),
         chromosome_sort=chrom_sort,
+        plot_all_tracks_together=plot_all,
+        genome_path=str(v.get("genome_path", "") or "").strip(),
+        show_process_window=_to_bool(
+            v.get("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW
+        ),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"),
+            DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+        ),
+        last_dialog_tab=tab,
     )
 
 
@@ -1705,6 +1756,11 @@ def save_te_genome_map_options(opts: TeGenomeMapOptions) -> None:
         sf_value = "__NONE__"
     elif opts.superfamilies_only:
         sf_value = "\n".join(opts.superfamilies_only)
+    tab = opts.last_dialog_tab
+    if tab == "parameters":
+        tab = TE_GENOME_MAP_DIALOG_TAB_TE
+    if tab not in TE_GENOME_MAP_DIALOG_TABS:
+        tab = TE_GENOME_MAP_DIALOG_TAB_TE
     _save_settings_group(
         "te_genome_map",
         {
@@ -1727,6 +1783,11 @@ def save_te_genome_map_options(opts: TeGenomeMapOptions) -> None:
             "chromosomes_only": chrom_value,
             "superfamilies_only": sf_value,
             "chromosome_sort": opts.chromosome_sort,
+            "plot_all_tracks_together": opts.plot_all_tracks_together,
+            "genome_path": opts.genome_path,
+            "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": opts.close_process_window_when_finished,
+            "last_dialog_tab": tab,
         },
     )
 

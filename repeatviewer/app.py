@@ -129,9 +129,13 @@ def run_app(argv: list[str] | None = None) -> int:
             splash.set_status("Ready")
             splash.finish_after_minimum(window)
 
-        from repeatviewer.backends.webengine_probe import warmup_webengine_probe
+        from repeatviewer.backends.webengine_probe import (
+            schedule_webengine_main_warmup,
+            warmup_webengine_probe,
+        )
 
         warmup_webengine_probe()
+        schedule_webengine_main_warmup(window)
 
         return app.exec()
     except Exception:

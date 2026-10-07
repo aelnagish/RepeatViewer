@@ -574,7 +574,7 @@ _TOOLBAR_TOOLTIPS = {
     "map_reference": "Map the selected sequences or reads to a reference (minimap2 / HISAT2)",
     "blast": "BLAST selected FASTA against the project genome using default parameters",
     "hmmer": "HMMER (pyhmmer) search of selected FASTA against a project HMM database",
-    "te_genome_map": "TE density plot using default parameters",
+    "te_genome_map": "Genome density plot using default parameters",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
     "extend": "Extend MSA ends using default parameters",
     "teaid": "TE-Aid interactive HTML report using default parameters",
@@ -5446,7 +5446,7 @@ class MainWindow(QMainWindow):
 
     def _populate_te_visualization_menu(self, menu: QMenu, *, skip_default: bool = False) -> None:
         if not skip_default:
-            menu.addAction("TE density plot", self._open_te_density_plot_dialog)
+            menu.addAction("Genome density plot", self._open_te_density_plot_dialog)
         menu.addAction("TE divergence plot", self._open_te_divergence_plot_dialog)
         menu.addAction("TE abundance plot", self._open_te_abundance_plot_dialog)
         menu.addAction("MSA plot", self._open_msa_plot_dialog)
@@ -7161,7 +7161,7 @@ class MainWindow(QMainWindow):
                 self._open_te_density_plot_dialog,
                 self._populate_te_visualization_menu,
                 tooltip=tip,
-                run_label="TE density plot",
+                run_label="Genome density plot",
             )
         elif tool_id == "te_divergence_plot":
             self._add_toolbar_text_action(
@@ -9832,6 +9832,17 @@ class MainWindow(QMainWindow):
             tab = persistable_dialog_tab(tab, first_tab=HMMER_DIALOG_TAB_PARAMETERS)
             self._hmmer_options = replace(self._hmmer_options, last_dialog_tab=tab)
             save_hmmer_options(self._hmmer_options)
+            return
+        if isinstance(dialog, TeDensityPlotDialog):
+            from repeatviewer.job_options import TE_GENOME_MAP_DIALOG_TAB_TE
+
+            tab = persistable_dialog_tab(
+                tab, first_tab=TE_GENOME_MAP_DIALOG_TAB_TE
+            )
+            self._te_genome_map_options = replace(
+                self._te_genome_map_options, last_dialog_tab=tab
+            )
+            save_te_genome_map_options(self._te_genome_map_options)
 
     def _is_fasta_file(self, path: Path) -> bool:
         return path.suffix.lower() in {".fa", ".fasta", ".fna", ".fas", ".faa"}
@@ -9845,14 +9856,14 @@ class MainWindow(QMainWindow):
             if not fasta_path.is_file():
                 QMessageBox.warning(
                     self,
-                    "Visualization",
+                    "Genome density plot",
                     f"TE consensus file not found:\n{fasta_path}",
                 )
                 return None
             if not self._is_fasta_file(fasta_path):
                 QMessageBox.warning(
                     self,
-                    "Visualization",
+                    "Genome density plot",
                     "Each TE consensus input must be a FASTA file (.fasta / .fa / .fna).",
                 )
                 return None
@@ -9880,14 +9891,14 @@ class MainWindow(QMainWindow):
             if meth_path is None or not meth_path.is_file():
                 QMessageBox.warning(
                     self,
-                    "Visualization",
+                    "Genome density plot",
                     f"DNA methylation file not found:\n{meth_path}",
                 )
                 return None
             if not is_bismark_cov_file(meth_path):
                 QMessageBox.warning(
                     self,
-                    "Visualization",
+                    "Genome density plot",
                     "Each DNA methylation input must be a Bismark coverage file "
                     "(*.cov or *.cov.gz).",
                 )
@@ -10001,7 +10012,7 @@ class MainWindow(QMainWindow):
         if not hit_paths:
             QMessageBox.warning(
                 self,
-                "Visualization",
+                "Genome density plot",
                 "Select at least one RepeatMasker .out or BLAST hit table.",
             )
             return None
@@ -10010,14 +10021,14 @@ class MainWindow(QMainWindow):
             if hit_path is None or not hit_path.is_file():
                 QMessageBox.warning(
                     self,
-                    "Visualization",
+                    "Genome density plot",
                     f"TE input file not found:\n{hit_path}",
                 )
                 return None
             if not is_te_hit_table_file(hit_path):
                 QMessageBox.warning(
                     self,
-                    "Visualization",
+                    "Genome density plot",
                     "Each TE input must be a RepeatMasker .out file or BLAST hit table (*_b.txt).",
                 )
                 return None
@@ -10031,14 +10042,14 @@ class MainWindow(QMainWindow):
         if not gene_path.is_file():
             QMessageBox.warning(
                 self,
-                "Visualization",
+                "Genome density plot",
                 f"Annotation file not found:\n{gene_path}",
             )
             return None
         if not is_gene_annotation_file(gene_path):
             QMessageBox.warning(
                 self,
-                "Visualization",
+                "Genome density plot",
                 "Annotation input must be a GFF, GFF3, GTF, BED, or VCF file.",
             )
             return None
@@ -10048,14 +10059,14 @@ class MainWindow(QMainWindow):
         if hit_path is None or not hit_path.is_file():
             QMessageBox.warning(
                 self,
-                "Visualization",
+                "Genome density plot",
                 "Select a RepeatMasker .out or BLAST hit table.",
             )
             return None
         if not is_te_hit_table_file(hit_path):
             QMessageBox.warning(
                 self,
-                "Visualization",
+                "Genome density plot",
                 "Input must be a RepeatMasker .out file or BLAST hit table (*_b.txt).",
             )
             return None
@@ -11237,24 +11248,36 @@ class MainWindow(QMainWindow):
         if self._project.is_pan_genome_mode:
             QMessageBox.information(
                 self,
-                "Visualization",
-                "Visualization is available only in single-genome mode.\n\n"
+                "Genome density plot",
+                "Genome density plot is available only in single-genome mode.\n\n"
                 f"Switch to single genome under {self._genome_menu_hint()}.",
             )
             return
         if not self._project.genome_file or not self._project.genome_file.is_file():
             QMessageBox.warning(
                 self,
-                "Visualization",
+                "Genome density plot",
                 f"Set the genome FASTA under {self._genome_menu_hint()} first.",
             )
             return
-        chrom_names = self._genome_chromosome_names()
-        chrom_sizes = self._genome_chromosome_sizes()
+        ref_genome = self._te_genome_map_reference_fasta(self._te_genome_map_options)
+        if ref_genome is None or not ref_genome.is_file():
+            QMessageBox.warning(
+                self,
+                "Genome density plot",
+                f"Set the genome FASTA under {self._genome_menu_hint()} first.",
+            )
+            return
+        if ref_genome == self._genome_path_resolved():
+            chrom_names = self._genome_chromosome_names()
+            chrom_sizes = self._genome_chromosome_sizes()
+        else:
+            chrom_names = chromosome_names_from_genome(ref_genome)
+            chrom_sizes = genome_chrom_sizes_from_fasta(ref_genome)
         if not chrom_names:
             QMessageBox.warning(
                 self,
-                "Visualization",
+                "Genome density plot",
                 "Could not read chromosome names from the genome FASTA.",
             )
             return
@@ -11272,36 +11295,63 @@ class MainWindow(QMainWindow):
         def _on_accept(dialog: TeDensityPlotDialog) -> None:
             self._te_genome_map_options = dialog.options()
             save_te_genome_map_options(self._te_genome_map_options)
+            if not dialog.should_run():
+                self._set_status_message("Genome density plot settings saved", 4000)
+                return
             masking_files: list[Path] = []
-            if dialog.te_masking_files():
-                validated_masking = self._validate_te_hit_inputs(dialog.te_masking_files())
-                if validated_masking is None:
-                    return
-                masking_files = validated_masking
-            consensus_files = self._validate_te_consensus_fastas(dialog.te_consensus_files())
-            if consensus_files is None:
-                return
-            gene_files = self._validate_gene_input_files(dialog.gene_input_files())
-            if dialog.gene_input_files() and gene_files is None:
-                return
-            methylation_files = self._validate_methylation_input_files(
-                dialog.methylation_input_files()
-            )
-            if dialog.methylation_input_files() and methylation_files is None:
-                return
-            if not masking_files and not consensus_files and not gene_files and not methylation_files:
-                QMessageBox.warning(
-                    self,
-                    "Visualization",
-                    "Provide at least one TE masking file, TE consensus FASTA, gene annotation, "
-                    "or DNA methylation file.",
+            consensus_files: list[Path] = []
+            if dialog.include_te_tracks():
+                if dialog.te_masking_files():
+                    validated_masking = self._validate_te_hit_inputs(
+                        dialog.te_masking_files()
+                    )
+                    if validated_masking is None:
+                        return
+                    masking_files = validated_masking
+                consensus_files = self._validate_te_consensus_fastas(
+                    dialog.te_consensus_files()
                 )
+                if consensus_files is None:
+                    return
+            gene_files: list[Path] = []
+            if dialog.include_annotation_tracks():
+                gene_files = self._validate_gene_input_files(dialog.gene_input_files())
+                if dialog.gene_input_files() and gene_files is None:
+                    return
+                gene_files = gene_files or []
+            methylation_files: list[Path] = []
+            if dialog.include_methylation_tracks():
+                methylation_files = self._validate_methylation_input_files(
+                    dialog.methylation_input_files()
+                )
+                if dialog.methylation_input_files() and methylation_files is None:
+                    return
+                methylation_files = methylation_files or []
+            if (
+                not masking_files
+                and not consensus_files
+                and not gene_files
+                and not methylation_files
+            ):
+                if dialog.plot_all_tracks_together():
+                    tip = (
+                        "Provide at least one TE, Gene, or Methylation input, "
+                        "or uncheck “Plot all track types together” and fill the "
+                        "active track tab."
+                    )
+                else:
+                    tip = (
+                        "Provide an input on the active track tab "
+                        f"({dialog.active_plot_track_tab()}), or enable "
+                        "Options → Plot all track types together."
+                    )
+                QMessageBox.warning(self, "Genome density plot", tip)
                 return
             self._start_te_viz_from_dialog(
                 masking_paths=masking_files,
                 consensus_fastas=consensus_files,
-                gene_paths=gene_files or [],
-                methylation_paths=methylation_files or [],
+                gene_paths=gene_files,
+                methylation_paths=methylation_files,
                 map_options=self._te_genome_map_options,
             )
 
@@ -11311,6 +11361,8 @@ class MainWindow(QMainWindow):
             chromosome_sizes=chrom_sizes,
             input_file=masking_input,
             consensus_input_file=consensus_input,
+            project=self._project,
+            project_genome=self._genome_path_resolved(),
             parent=self,
         )
         self._present_te_viz_dialog(dialog, _on_accept)
@@ -11659,7 +11711,9 @@ class MainWindow(QMainWindow):
                 "Provide at least one TE hit table, gene annotation, or DNA methylation file.",
             )
             return
-        if not self._project.genome_file or not self._project.genome_file.is_file():
+        opts = map_options or self._te_genome_map_options
+        genome_fasta = self._te_genome_map_reference_fasta(opts)
+        if genome_fasta is None or not genome_fasta.is_file():
             QMessageBox.warning(
                 self,
                 "Genome required",
@@ -11673,7 +11727,6 @@ class MainWindow(QMainWindow):
                 "A genome map is already being built. Please wait for it to finish.",
             )
             return
-        opts = map_options or self._te_genome_map_options
         if te_paths:
             if len(te_paths) == 1:
                 query_label = te_hit_table_stem(te_paths[0])
@@ -11710,7 +11763,7 @@ class MainWindow(QMainWindow):
             )
         output_html = self._confirm_plot_output_path(
             proposed,
-            title="TE density plot",
+            title="Genome density plot",
         )
         if output_html is None:
             return
@@ -11736,6 +11789,7 @@ class MainWindow(QMainWindow):
             superfamilies_only=None,
             chromosome_sort=opts.chromosome_sort,
             output_html=output_html,
+            genome_fasta=genome_fasta,
         )
 
     def _confirm_plot_output_path(self, proposed: Path, *, title: str) -> Path | None:
@@ -11749,6 +11803,18 @@ class MainWindow(QMainWindow):
             informative="Overwrite the existing plot, or save under a different name?",
             force_html_suffix=True,
         )
+
+    def _te_genome_map_reference_fasta(
+        self, map_options: TeGenomeMapOptions | None = None
+    ) -> Path | None:
+        """Genome FASTA for density plots (dialog choice, else project genome)."""
+        opts = map_options or self._te_genome_map_options
+        raw = str(getattr(opts, "genome_path", "") or "").strip()
+        if raw:
+            path = Path(raw).expanduser().resolve()
+            if path.is_file():
+                return path
+        return self._genome_path_resolved()
 
     def _start_genome_map_build(
         self,
@@ -11774,9 +11840,16 @@ class MainWindow(QMainWindow):
         superfamilies_only: list[str] | None,
         chromosome_sort: str,
         output_html: Path | None = None,
+        genome_fasta: Path | None = None,
     ) -> None:
-        genome = self._project.genome_file
-        assert genome is not None
+        genome = genome_fasta or self._te_genome_map_reference_fasta()
+        if genome is None or not genome.is_file():
+            QMessageBox.warning(
+                self,
+                "Genome density plot",
+                f"Set the genome FASTA under {self._genome_menu_hint()} first.",
+            )
+            return
         te_paths = [p.expanduser().resolve() for p in te_input_files]
         gene_paths = [p.expanduser().resolve() for p in (gene_files or [])]
         methylation_paths = [p.expanduser().resolve() for p in (methylation_files or [])]
@@ -11829,6 +11902,25 @@ class MainWindow(QMainWindow):
                 "num_workers": self._project.batch_workers,
                 "cancel": self._job_cancel,
             },
+        )
+        map_opts = self._te_genome_map_options
+        show_log = bool(
+            getattr(map_opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW)
+        )
+        close_when_finished = bool(
+            getattr(
+                map_opts,
+                "close_process_window_when_finished",
+                DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+            )
+        )
+        self._attach_process_monitor(
+            self._genome_map_worker,
+            title="Genome density plot",
+            enabled=show_log,
+            tool_key="te_genome_map",
+            mirror_progress=True,
+            close_when_finished=close_when_finished,
         )
         self._genome_map_worker.moveToThread(self._genome_map_thread)
         self._genome_map_thread.started.connect(self._genome_map_worker.run)
@@ -11895,8 +11987,8 @@ class MainWindow(QMainWindow):
             self._set_status_message("Stopped TE genome map", 6000, override_file_link=True)
             return
         if error.startswith("There is nothing to plot"):
-            QMessageBox.information(self, "TE density plot", error)
-            self._set_status_message("TE density plot: nothing to plot", 8000, override_file_link=True)
+            QMessageBox.information(self, "Genome density plot", error)
+            self._set_status_message("Genome density plot: nothing to plot", 8000, override_file_link=True)
             return
         QMessageBox.critical(self, "TE genome map failed", error)
         self._set_status_message("TE genome map failed", 6000, override_file_link=True)

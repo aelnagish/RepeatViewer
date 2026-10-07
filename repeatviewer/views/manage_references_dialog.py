@@ -95,11 +95,11 @@ _USE_FOR_ANNOTATION_HELP = (
     "An Annotation name is required (max 15 characters)."
 )
 _SET_AS_MAIN_GENOME_HELP = (
-    "Marks the selected FASTA DNA file as the main reference genome. "
+    "Marks the selected FASTA DNA file as the reference genome. "
     "For example, this will be the default reference for BLASTn and TE-Aid."
 )
 _SET_MAIN_REFERENCE_HELP = (
-    "Marks the selected FASTA DNA file as the main reference genome. "
+    "Marks the selected FASTA DNA file as the reference genome. "
     "For example, this will be the default reference for BLASTn and TE-Aid."
 )
 
@@ -394,7 +394,7 @@ class AddDatabaseDialog(QDialog):
         self._path = self._path_row.line_edit()
 
         self._show_annotation = QCheckBox("Use for annotation", self)
-        self._as_main = QCheckBox("Set as main reference genome", self)
+        self._as_main = QCheckBox("Set as reference genome", self)
         self._show_annotation_row = field_with_help(
             self._show_annotation,
             "Use for annotation",
@@ -403,7 +403,7 @@ class AddDatabaseDialog(QDialog):
         )
         self._as_main_row = field_with_help(
             self._as_main,
-            "Set as main reference genome",
+            "Set as reference genome",
             _SET_AS_MAIN_GENOME_HELP,
             parent=self,
         )
@@ -855,9 +855,9 @@ class ManageReferencesDialog(QDialog):
 
         self._add_btn = QPushButton("Add…", self)
         self._remove_btn = QPushButton("Remove", self)
-        self._set_main_btn = QPushButton("Set as main reference", self)
+        self._set_main_btn = QPushButton("Set as reference genome", self)
         self._set_main_help = make_help_button(
-            self, "Set as main reference", _SET_MAIN_REFERENCE_HELP
+            self, "Set as reference genome", _SET_MAIN_REFERENCE_HELP
         )
         self._add_btn.clicked.connect(self._add_database)
         self._remove_btn.clicked.connect(self._remove_selected)
@@ -1270,7 +1270,7 @@ class ManageReferencesDialog(QDialog):
     def _update_current_label(self) -> None:
         genome = self._project.genome_file
         if genome is None:
-            self._current_label.setText("Main reference: (none)")
+            self._current_label.setText("Reference genome: (none)")
             return
         # Prefer the managed / BLAST display name when available.
         label = genome.name
@@ -1288,7 +1288,7 @@ class ManageReferencesDialog(QDialog):
                 ):
                     label = db.name
                     break
-        self._current_label.setText(f"Main reference: {label} — {genome}")
+        self._current_label.setText(f"Reference genome: {label} — {genome}")
         self._current_label.setToolTip(str(genome))
 
     def _selected_rows(self) -> list[_RefRow]:

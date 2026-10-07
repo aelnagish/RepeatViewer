@@ -55,7 +55,12 @@ from repeatviewer.widgets.spin_boxes import (  # noqa: E402
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox  # noqa: E402
 from repeatviewer.widgets.path_browse import PathBrowseRow  # noqa: E402
-from repeatviewer.widgets.help_button import field_with_help, make_help_button, label_with_help  # noqa: E402
+from repeatviewer.widgets.help_button import (  # noqa: E402
+    HELP_BUTTON_SIZE,
+    field_with_help,
+    label_with_help,
+    make_help_button,
+)
 
 
 def exec_modal_dialog(dialog: QDialog) -> bool:
@@ -309,6 +314,9 @@ def dialog_should_run(dialog: QDialog) -> bool:
 # Outer width shared with AlignParamsDialog's default sizeHint (FastGA panel
 # minimum 560 plus dialog margins / chrome). BLAST / Flexidot / TE-Aid match this.
 TOOL_PARAMS_DIALOG_WIDTH = 608
+# Wider dialog when Inputs need Browse/Remove path rows (e.g. Genome density plot).
+# Use this when the user asks for a "longer" / "wider" window width.
+TOOL_PARAMS_DIALOG_WIDTH_WIDE = 720
 # Numeric/combo field width on Parameters forms (Align / BLAST / TE-Aid).
 TOOL_PARAMS_FIELD_WIDTH = 260
 # Longest Settings ``Foo:`` label across Align / BLAST / Mapping / TE-Aid / Flexidot /
@@ -371,7 +379,11 @@ def _run_cancel_button_box(parent: QWidget) -> QDialogButtonBox:
 
 
 from repeatviewer.branding import APP_DISPLAY_NAME
-from repeatviewer.backends.blast_genome_plot import format_genome_length_bp
+from repeatviewer.backends.blast_genome_plot import (
+    chromosome_names_from_genome,
+    format_genome_length_bp,
+    genome_chrom_sizes_from_fasta,
+)
 from repeatviewer.backends.database_prepare import blast_database_is_ready
 from repeatviewer.project import BLAST_MOLECULE_NUCL, BLAST_MOLECULE_PROT, RepeatViewerProject
 from repeatviewer.ui.theme import item_view_checkbox_stylesheet
@@ -384,8 +396,22 @@ from repeatviewer.job_options import (
     TE_GENOME_MAP_COLOR_SUPERFAMILY,
     TE_GENOME_MAP_DENSITY_HIT_COUNT,
     TE_GENOME_MAP_DENSITY_TE_LENGTH,
+    TE_GENOME_MAP_DIALOG_TAB_ANNOTATION,
+    TE_GENOME_MAP_DIALOG_TAB_METHYLATION,
+    TE_GENOME_MAP_DIALOG_TAB_TE,
+    TE_GENOME_MAP_DIALOG_TABS,
     DEFAULT_ANNOTATION_DENSITY,
     DEFAULT_ANNOTATION_FEATURE_TYPES,
+    DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+    DEFAULT_SHOW_PROCESS_WINDOW,
+    DEFAULT_TE_GENOME_MAP_BIN_BP,
+    DEFAULT_TE_GENOME_MAP_COLLAPSE_OVERLAPS,
+    DEFAULT_TE_GENOME_MAP_COLOR_BY,
+    DEFAULT_TE_GENOME_MAP_DENSITY,
+    DEFAULT_TE_GENOME_MAP_METHYLATION_COVERAGE_MIN,
+    DEFAULT_TE_GENOME_MAP_SHOW_DIFF_TRACK,
+    DEFAULT_TE_GENOME_MAP_SHOW_METH_DIFF_TRACK,
+    DEFAULT_TE_GENOME_MAP_SPLIT_STRAND,
     CHROMOSOME_SORT_NATURAL,
     CHROMOSOME_SORT_SIZE_ASC,
     CHROMOSOME_SORT_SIZE_DESC,
@@ -4413,8 +4439,45 @@ class FastGaPanel(QWidget):
         )
 
 
+def reference_genome_combo_label(
+    project: RepeatViewerProject | None,
+    genome: Path | None,
+) -> str:
+    """Display name for the project reference genome in genome/database combos.
+
+    Prefer the Manage Database display name when the FASTA is registered there;
+    otherwise use the file name. Never wraps the label as ``Current genome (…)``.
+    """
+    if genome is None:
+        return "Reference genome (not configured)"
+    try:
+        key = str(genome.expanduser().resolve())
+    except OSError:
+        key = str(genome)
+    if project is not None:
+        for managed in getattr(project, "managed_genomes", ()) or ():
+            try:
+                managed_path = Path(managed.path).expanduser().resolve()
+            except OSError:
+                continue
+            if str(managed_path) == key and getattr(managed, "name", ""):
+                return str(managed.name)
+        for db in getattr(project, "blast_databases", ()) or ():
+            if getattr(db, "molecule_type", None) != BLAST_MOLECULE_NUCL:
+                continue
+            try:
+                source = Path(db.source_fasta).expanduser().resolve()
+            except OSError:
+                continue
+            if str(source) == key and getattr(db, "name", ""):
+                return str(db.name)
+    return genome.name
+
+
 class GenomeBlastDatabaseRow(QWidget):
-    """Genome combo matching Blast Database: current genome + nucleotide DBs + Manage."""
+    """Genome combo matching Blast Database: reference genome + nucleotide DBs + Manage."""
+
+    selection_changed = Signal()
 
     def __init__(
         self,
@@ -4440,6 +4503,7 @@ class GenomeBlastDatabaseRow(QWidget):
 
         self._combo = QComboBox(self)
         self._combo.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        self._combo.currentIndexChanged.connect(lambda *_: self.selection_changed.emit())
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -4457,7 +4521,7 @@ class GenomeBlastDatabaseRow(QWidget):
         self.refresh(selected_path=selected_path)
 
     def selected_path(self) -> str | None:
-        """Return the selected FASTA path, or None if Current genome is not configured."""
+        """Return the selected FASTA path, or None if reference genome is not configured."""
         data = self._combo.currentData()
         if data:
             return str(data)
@@ -4466,12 +4530,10 @@ class GenomeBlastDatabaseRow(QWidget):
         return None
 
     def selected_label(self) -> str:
-        """Short display name for the current combo choice (DB name or genome stem)."""
+        """Short display name for the current combo choice (DB name or genome)."""
         data = self._combo.currentData()
         if not data:
-            if self._project_genome is not None:
-                return self._project_genome.stem
-            return "genome"
+            return reference_genome_combo_label(self._project, self._project_genome)
         text = self._combo.currentText().strip()
         if " (unavailable" in text:
             text = text.split(" (unavailable", 1)[0].strip()
@@ -4482,10 +4544,10 @@ class GenomeBlastDatabaseRow(QWidget):
             self._combo.setCurrentIndex(0)
 
     def refresh(self, *, selected_path: str | None = None) -> None:
-        """Fill combo like Blast Database (current genome + nucleotide DBs)."""
+        """Fill combo like Blast Database (reference genome + nucleotide DBs)."""
         from repeatviewer.database_settings import reload_blast_databases_into_project
 
-        # Preserve Current-genome selection (combo data is None) across refresh.
+        # Preserve reference-genome selection (combo data is None) across refresh.
         prefer_current = False
         target = selected_path
         if self._combo.count() > 0 and selected_path is None:
@@ -4503,44 +4565,45 @@ class GenomeBlastDatabaseRow(QWidget):
         if self._project is not None:
             reload_blast_databases_into_project(self._project)
 
-        self._combo.clear()
-        if self._project_genome is not None:
+        self._combo.blockSignals(True)
+        try:
+            self._combo.clear()
             self._combo.addItem(
-                f"Current genome ({self._project_genome.name})",
+                reference_genome_combo_label(self._project, self._project_genome),
                 None,
             )
-        else:
-            self._combo.addItem("Current genome (not configured)", None)
 
-        model = self._combo.model()
-        databases = (
-            list(self._project.blast_databases) if self._project is not None else []
-        )
-        for db in databases:
-            if db.molecule_type != BLAST_MOLECULE_NUCL:
-                continue
-            ready = blast_database_is_ready(db)
-            label = db.name if ready else f"{db.name} (unavailable — index files missing)"
-            data = str(Path(db.source_fasta).expanduser().resolve())
-            self._combo.addItem(label, data)
-            if not ready and isinstance(model, QStandardItemModel):
-                item = model.item(self._combo.count() - 1)
-                if item is not None:
-                    item.setEnabled(False)
+            model = self._combo.model()
+            databases = (
+                list(self._project.blast_databases) if self._project is not None else []
+            )
+            for db in databases:
+                if db.molecule_type != BLAST_MOLECULE_NUCL:
+                    continue
+                ready = blast_database_is_ready(db)
+                label = db.name if ready else f"{db.name} (unavailable — index files missing)"
+                data = str(Path(db.source_fasta).expanduser().resolve())
+                self._combo.addItem(label, data)
+                if not ready and isinstance(model, QStandardItemModel):
+                    item = model.item(self._combo.count() - 1)
+                    if item is not None:
+                        item.setEnabled(False)
 
-        if prefer_current or not target:
-            self._combo.setCurrentIndex(0)
-            return
-
-        resolved = str(Path(str(target)).expanduser().resolve())
-        index = self._combo.findData(resolved)
-        if index < 0 and self._project_genome is not None:
-            if resolved == str(self._project_genome):
-                index = 0
-        if index < 0:
-            self._combo.addItem(Path(resolved).name, resolved)
-            index = self._combo.count() - 1
-        self._combo.setCurrentIndex(index)
+            if prefer_current or not target:
+                self._combo.setCurrentIndex(0)
+            else:
+                resolved = str(Path(str(target)).expanduser().resolve())
+                index = self._combo.findData(resolved)
+                if index < 0 and self._project_genome is not None:
+                    if resolved == str(self._project_genome):
+                        index = 0
+                if index < 0:
+                    self._combo.addItem(Path(resolved).name, resolved)
+                    index = self._combo.count() - 1
+                self._combo.setCurrentIndex(index)
+        finally:
+            self._combo.blockSignals(False)
+        self.selection_changed.emit()
 
     def _manage_databases(self) -> None:
         from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
@@ -5517,7 +5580,7 @@ class ExtendParamsDialog(QDialog):
         if self._pan_genome_names:
             params_form.addRow("Pan-genome:", self._pan_genome)
         else:
-            params_form.addRow("Genome:", self._genome_row)
+            params_form.addRow("Reference genome:", self._genome_row)
         params_form.addRow("Extend left of MSA:", self._left)
         params_form.addRow("Extend right of MSA:", self._right)
         self._tabs.addTab(params_tab, "Parameters")
@@ -5650,10 +5713,17 @@ _BLAST_INPUTS_HELP = (
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
     "this run only and are not remembered next time."
 )
+_BLAST_DEFINE_INPUTS_HELP = (
+    "Choose FASTA files or folders for this BLAST run instead of the Files panel "
+    "selection.<br><br>"
+    "Click a file or folder in the panel to fill a row, or use <b>Browse</b>. "
+    "Paths are for this run only and are not remembered next time.<br><br>"
+    "Applies to BLASTn, BLASTp, and BLASTx (same Inputs panel on each tab)."
+)
 _BLAST_DATABASE_HELP = (
     "Subject database for the search.<br><br>"
-    "BLASTn can use the project genome or a saved nucleotide BLAST database. "
-    "BLASTp and BLASTx search a protein database chosen under "
+    "BLASTn can use the project reference genome or a saved nucleotide BLAST "
+    "database. BLASTp and BLASTx search a protein database chosen under "
     "<b>Manage Database</b>."
 )
 _BLAST_ONLINE_PROGRAM_HELP = (
@@ -6083,7 +6153,14 @@ class BlastParamsDialog(QDialog):
                 stretch=True,
             )
         )
-        inputs_radios_layout.addWidget(self._input_define)
+        inputs_radios_layout.addWidget(
+            field_with_help(
+                self._input_define,
+                "Define inputs",
+                _BLAST_DEFINE_INPUTS_HELP,
+                stretch=True,
+            )
+        )
         # Empty labels sized to Settings so radio dots line up with Database.
         self._inputs_radios_label = QLabel("")
         self._inputs_define_label = QLabel("")
@@ -6365,7 +6442,7 @@ class BlastParamsDialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         # Refresh in case Manage / Add ran while this dialog was constructed,
-        # and pick up a newly defined genome for the "Current genome" row.
+        # and pick up a newly defined genome for the reference-genome row.
         self._refresh_database_combos()
         # Force a tight compact height after polish (no blank gap under Inputs).
         self._blast_compact_size = None
@@ -6931,10 +7008,12 @@ class BlastParamsDialog(QDialog):
         target = combo.currentData() if selected_name is _KEEP_CURRENT else selected_name
         combo.clear()
         if molecule_type == BLAST_MOLECULE_NUCL:
-            if self._project.has_genome_configured() and self._project.genome_file is not None:
-                combo.addItem(f"Current genome ({self._project.genome_file.name})", None)
-            else:
-                combo.addItem("Current genome (not configured)", None)
+            genome = (
+                self._project.genome_file
+                if self._project.has_genome_configured()
+                else None
+            )
+            combo.addItem(reference_genome_combo_label(self._project, genome), None)
         else:
             combo.addItem("Select a protein database…", None)
         model = combo.model()
@@ -8922,8 +9001,8 @@ _TEAID_INPUTS_HELP = (
     "for this run only and are not remembered next time."
 )
 _TEAID_MODE_HELP = (
-    "<b>Single genome</b>: BLAST the consensus against one subject genome "
-    "(project genome or a saved nucleotide BLAST database).<br><br>"
+    "<b>Single genome</b>: BLAST the consensus against one reference genome "
+    "(project reference genome or a saved nucleotide BLAST database).<br><br>"
     "<b>Pangenome</b>: run TE-Aid on each provided genome and compare the "
     "results in one report (at least two genomes)."
 )
@@ -9336,6 +9415,7 @@ class TeaAidParamsDialog(QDialog):
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
+        self._tabs.tabBar().setDrawBase(False)
         self._tabs.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
         )
@@ -10205,6 +10285,7 @@ class ChromosomeMultiSelectWidget(QWidget):
         chromosome_sizes: dict[str, int] | None = None,
         preselected: list[str] | None = None,
         chromosome_sort: str = CHROMOSOME_SORT_NATURAL,
+        defer_populate: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -10215,6 +10296,7 @@ class ChromosomeMultiSelectWidget(QWidget):
         self._sort_mode = chromosome_sort
         self._preselected = None if preselected is None else set(preselected)
         self._check_boxes: list[QCheckBox] = []
+        self._populated = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -10273,12 +10355,38 @@ class ChromosomeMultiSelectWidget(QWidget):
         layout.addLayout(btn_row)
         self.setMaximumHeight(280)
 
-        self._rebuild_check_list()
-        if self._preselected is None and self._chrom_sizes:
-            self._select_min_size_mb(2.0)
+        if defer_populate:
+            self._checks_layout.addWidget(
+                QLabel("Expand Advanced Settings to load chromosomes…", self._checks_container)
+            )
+            self._checks_layout.addStretch(1)
+        else:
+            self.ensure_populated()
+
+    def ensure_populated(self) -> None:
+        """Build the checkbox list once (expensive for large genomes)."""
+        if self._populated:
+            return
+        self._populated = True
+        # Pick initial selection before the first build — avoid a second rebuild.
+        if self._preselected is not None:
+            selected: set[str] | None = set(self._preselected)
+        elif self._chrom_sizes:
+            selected = self._names_at_least_mb(2.0) or None
+        else:
+            selected = None
+        self._rebuild_check_list(selected)
 
     def _select_by_min_size_spinbox(self) -> None:
         self._select_min_size_mb(self._min_size_mb.value())
+
+    def _names_at_least_mb(self, min_mb: float) -> set[str]:
+        min_bp = int(float(min_mb) * 1_000_000)
+        return {
+            name
+            for name in self._all_chrom_names
+            if self._chrom_sizes.get(name, 0) >= min_bp
+        }
 
     @staticmethod
     def _natural_sort_key(name: str) -> list:
@@ -10316,30 +10424,45 @@ class ChromosomeMultiSelectWidget(QWidget):
 
     def _rebuild_check_list(self, selected: set[str] | None = None) -> None:
         if selected is None:
-            selected = {self._chrom_name_from_checkbox(cb) for cb in self._check_boxes if cb.isChecked()}
+            selected = {
+                self._chrom_name_from_checkbox(cb)
+                for cb in self._check_boxes
+                if cb.isChecked()
+            }
             if not selected and self._preselected is not None:
                 selected = set(self._preselected)
-        while self._checks_layout.count():
-            item = self._checks_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self._check_boxes.clear()
 
-        ordered = self._sorted_names(self._sort_mode)
-        if not ordered:
-            self._checks_layout.addWidget(QLabel("No items available", self._checks_container))
+        self._checks_container.setUpdatesEnabled(False)
+        self._scroll.setUpdatesEnabled(False)
+        try:
+            while self._checks_layout.count():
+                item = self._checks_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            self._check_boxes.clear()
+
+            ordered = self._sorted_names(self._sort_mode)
+            if not ordered:
+                self._checks_layout.addWidget(
+                    QLabel("No items available", self._checks_container)
+                )
+                self._checks_layout.addStretch(1)
+                return
+
+            # Batch-create checkboxes; defer show until the list is complete.
+            for name in ordered:
+                cb = QCheckBox(self._display_label(name), self._checks_container)
+                cb.setProperty("chrom_name", name)
+                cb.setChecked(bool(selected) and name in selected)
+                self._check_boxes.append(cb)
+                self._checks_layout.addWidget(cb)
             self._checks_layout.addStretch(1)
-            return
-
-        for name in ordered:
-            cb = QCheckBox(self._display_label(name), self._checks_container)
-            cb.setProperty("chrom_name", name)
-            cb.setChecked(name in selected)
-            self._check_boxes.append(cb)
-            self._checks_layout.addWidget(cb)
-        self._checks_layout.addStretch(1)
-        self._apply_filter(self._filter.text())
+            self._apply_filter(self._filter.text())
+        finally:
+            self._checks_container.setUpdatesEnabled(True)
+            self._scroll.setUpdatesEnabled(True)
 
     def set_chromosome_sort(self, mode: str) -> None:
         if mode not in (
@@ -10349,14 +10472,23 @@ class ChromosomeMultiSelectWidget(QWidget):
         ):
             mode = CHROMOSOME_SORT_NATURAL
         self._sort_mode = mode
-        self._rebuild_check_list()
+        if self._populated:
+            self._rebuild_check_list()
 
     def _apply_filter(self, text: str) -> None:
+        if not self._populated:
+            return
         needle = text.strip().lower()
         for cb in self._check_boxes:
             cb.setVisible(not needle or needle in cb.text().lower())
 
     def selected_names(self) -> list[str]:
+        if not self._populated:
+            if self._preselected is not None:
+                return list(self._preselected)
+            if self._chrom_sizes:
+                return list(self._names_at_least_mb(2.0))
+            return list(self._all_chrom_names)
         needle = self._filter.text().strip().lower()
         names: list[str] = []
         for cb in self._check_boxes:
@@ -10368,26 +10500,60 @@ class ChromosomeMultiSelectWidget(QWidget):
         return names
 
     def _check_all(self) -> None:
+        self.ensure_populated()
         for cb in self._check_boxes:
             if cb.isVisible():
                 cb.setChecked(True)
 
     def _uncheck_all(self) -> None:
+        self.ensure_populated()
         for cb in self._check_boxes:
             if cb.isVisible():
                 cb.setChecked(False)
 
     def _select_min_size_mb(self, min_mb: float) -> None:
-        min_bp = int(float(min_mb) * 1_000_000)
-        selected = {
-            name
-            for name in self._all_chrom_names
-            if self._chrom_sizes.get(name, 0) >= min_bp
-        }
-        self._rebuild_check_list(selected if selected else None)
+        self.ensure_populated()
+        selected = self._names_at_least_mb(min_mb)
+        # Toggle checks in place — do not rebuild hundreds of widgets.
+        for cb in self._check_boxes:
+            name = self._chrom_name_from_checkbox(cb)
+            cb.setChecked(name in selected)
 
     def name_count(self) -> int:
         return len(self._all_chrom_names)
+
+    def set_chromosomes(
+        self,
+        chromosome_names: list[str],
+        *,
+        chromosome_sizes: dict[str, int] | None = None,
+        preselected: list[str] | None = None,
+    ) -> None:
+        """Replace the genome chromosome list (e.g. after changing reference)."""
+        self._all_chrom_names = list(chromosome_names)
+        self._chrom_sizes = {
+            str(k): int(v) for k, v in (chromosome_sizes or {}).items()
+        }
+        self._preselected = None if preselected is None else set(preselected)
+        was_populated = self._populated
+        self._populated = False
+        self._check_boxes.clear()
+        while self._checks_layout.count():
+            item = self._checks_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        if was_populated:
+            self.ensure_populated()
+        else:
+            self._checks_layout.addWidget(
+                QLabel(
+                    "Expand Advanced Settings to load chromosomes…",
+                    self._checks_container,
+                )
+            )
+            self._checks_layout.addStretch(1)
 
 
 class _TeInputFileRow(QWidget):
@@ -10408,8 +10574,11 @@ class _TeInputFileRow(QWidget):
         file_filter: str = "TE hit tables (*.out *_b.txt *_blast.txt);;RepeatMasker (*.out);;All files (*)",
         start_dir: str = "",
         path_mode: str = "file",
+        help_title: str = "",
+        help_text: str = "",
     ) -> None:
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._row = PathBrowseRow(
             self,
             initial=initial,
@@ -10433,6 +10602,13 @@ class _TeInputFileRow(QWidget):
         layout.setSpacing(6)
         layout.addWidget(self._row, stretch=1)
         layout.addWidget(remove_btn)
+        # Keep path/Browse/Remove columns aligned: always reserve ? width.
+        if help_text:
+            layout.addWidget(make_help_button(self, help_title or "Help", help_text))
+        else:
+            help_spacer = QWidget(self)
+            help_spacer.setFixedSize(HELP_BUTTON_SIZE, HELP_BUTTON_SIZE)
+            layout.addWidget(help_spacer)
 
     def set_removable(self, removable: bool) -> None:
         self._remove_btn.setVisible(removable)
@@ -10467,6 +10643,8 @@ class TeMultiInputFilesWidget(QWidget):
         allow_multiple: bool = True,
         start_dir: str = "",
         path_mode: str = "file",
+        help_title: str = "",
+        help_text: str = "",
     ) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
@@ -10476,6 +10654,8 @@ class TeMultiInputFilesWidget(QWidget):
         self._allow_multiple = allow_multiple
         self._start_dir = start_dir
         self._path_mode = path_mode
+        self._help_title = help_title
+        self._help_text = help_text
 
         self._rows_layout = QVBoxLayout()
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -10512,6 +10692,8 @@ class TeMultiInputFilesWidget(QWidget):
         QTimer.singleShot(0, lambda: self._add_btn.setEnabled(True))
 
     def add_row(self, path: Path | None = None, *, focus: bool = False) -> None:
+        # Put ? on the first row only (after Browse/Remove).
+        first_row = not self._rows
         row = _TeInputFileRow(
             self,
             initial=path,
@@ -10521,6 +10703,8 @@ class TeMultiInputFilesWidget(QWidget):
             file_filter=self._file_filter,
             start_dir=self._start_dir,
             path_mode=self._path_mode,
+            help_title=self._help_title if first_row else "",
+            help_text=self._help_text if first_row else "",
         )
         row.remove_requested.connect(lambda r=row: self._remove_row(r))
         row.activated.connect(self._on_row_activated)
@@ -10528,6 +10712,8 @@ class TeMultiInputFilesWidget(QWidget):
         self._rows.append(row)
         self._rows_layout.addWidget(row)
         self._refresh_remove_buttons()
+        self.updateGeometry()
+        self._emit_paths_changed()
         if focus:
             self._on_row_activated(row)
             row._path.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -10866,8 +11052,111 @@ class PerFileAnnotationFeatureTypesWidget(QWidget):
         return out
 
 
+_GENOME_DENSITY_REFERENCE_HELP = (
+    "Reference genome for chromosome coordinates. "
+    "The TE masking files must be compatible with the reference genome. "
+    "For example, the “query sequence” of a RepeatMasker <code>.out</code> "
+    "file must have the same name as the chromosome name of the reference "
+    "genome."
+)
+_GENOME_DENSITY_TE_NAMING_HELP = (
+    "TE classification is recognized by the traditional naming method "
+    "<code>family#order/superfamily</code>. Example: in "
+    "<code>rnd-4_family-1340#LTR/Copia</code>, "
+    "<b>family</b> = <code>rnd-4_family-1340</code>, "
+    "<b>order</b> = <code>LTR</code>, "
+    "<b>superfamily</b> = <code>Copia</code>."
+)
+_GENOME_DENSITY_MASKING_HELP = (
+    "RepeatMasker <code>.out</code> or a BLAST hit table "
+    "(<code>*_b.txt</code>) for TE tracks.<br><br>"
+    "The TE masking files must be compatible with the reference genome. "
+    "For example, the “query sequence” of a RepeatMasker <code>.out</code> "
+    "file must have the same name as the chromosome name of the reference "
+    "genome.<br><br>"
+    "BLAST tables are tab-separated with columns:<br>"
+    "<code>qseqid sseqid pident length mismatch gapopen qstart qend "
+    "sstart send sstrand evalue bitscore</code><br><br>"
+    f"{_GENOME_DENSITY_TE_NAMING_HELP}<br><br>"
+    "Add multiple files to show each in different tracks."
+)
+_GENOME_DENSITY_CONSENSUS_HELP = (
+    "TE consensus FASTA files. Sequences from each file are BLASTed against "
+    "the reference genome. Each file is plotted on its own track.<br><br>"
+    f"{_GENOME_DENSITY_TE_NAMING_HELP}"
+)
+_GENOME_DENSITY_GENE_HELP = (
+    "GFF, GTF, BED, or VCF gene/annotation file. Each file is drawn on its "
+    "own track below TE tracks."
+)
+_GENOME_DENSITY_METHYLATION_HELP = (
+    "Bismark coverage (.cov / .cov.gz). Each file adds coverage and "
+    "methylation tracks per chromosome."
+)
+_GENOME_DENSITY_Y_AXIS_HELP = (
+    "<b>Total TE length (bp) per window</b>: sum of TE bases overlapping each "
+    "window. Example: a 100 kb window covering 12 kb of TE sequence → "
+    "Y = 12000.<br><br>"
+    "<b>TE hits number per window</b>: count of TE hits overlapping each "
+    "window. Example: the same window with 40 TE hits → Y = 40."
+)
+_GENOME_DENSITY_COLLAPSE_OVERLAPS_HELP = (
+    "For <b>Total TE length (bp) per window</b>, count each base pair at most "
+    "once when TEs overlap. When color is by order, superfamily, or family, "
+    "overlaps are collapsed separately within each TE type; with % identity "
+    "coloring, all TEs in a window are collapsed together. With separate "
+    "forward/reverse tracks, collapse applies within each strand track only."
+    "<br><br>"
+    "Unavailable when Y axis is <b>TE hits number per window</b> "
+    "(hit counts are not merged by overlap)."
+)
+_GENOME_DENSITY_TE_DIFF_HELP = (
+    "When exactly two TE hit-table sources are selected (masking files and/or "
+    "consensus BLAST tables), add a per-chromosome diff track "
+    "(exclusive TE bp: above = first source only, below = second only). "
+    "Track order follows input file order top to bottom. "
+    "This step is optional and can take extra time on large genomes."
+    "<br><br>"
+    "Enabled only when exactly two TE sources are provided."
+)
+_GENOME_DENSITY_COLOR_BY_HELP = (
+    "<b>% identity</b>: color by how similar each TE hit is to the consensus "
+    "(continuous scale).<br><br>"
+    "<b>TE order</b>: color by the broad class after <code>#</code> "
+    "(before <code>/</code>). Example: in "
+    "<code>rnd-4_family-1340#LTR/Copia</code>, order is <b>LTR</b>. "
+    "Other orders include LINE, DNA, RC.<br><br>"
+    "<b>TE superfamily</b>: color by the label after <code>/</code>. "
+    "Example: in <code>rnd-4_family-1340#LTR/Copia</code>, superfamily is "
+    "<b>Copia</b>. Other superfamilies include Gypsy, L1, Helitron.<br><br>"
+    "<b>TE family</b>: color by the name before <code>#</code> "
+    "(finest level; most colors). Example: in "
+    "<code>rnd-4_family-1340#LTR/Copia</code>, family is "
+    "<b>rnd-4_family-1340</b>."
+)
+_GENOME_DENSITY_WINDOW_HELP = (
+    "Sliding window size for density bins. TE, Gene, and Methylation tracks "
+    "use the same bin size; changing it on one tab updates the others."
+)
+_GENOME_DENSITY_CHROM_ORDER_HELP = (
+    "Order of chromosomes in the plot. Shared by all track types."
+)
+_GENOME_DENSITY_CHROMOSOMES_HELP = (
+    "Which chromosomes to include. Shared by TE, Gene, and Methylation — "
+    "changing it here updates every track."
+)
+_GENOME_DENSITY_PLOT_ALL_HELP = (
+    "When checked, Run combines TE, Gene, and Methylation inputs that have "
+    "files, using the same window size and chromosome selection for every "
+    "track. When unchecked, Run uses only the currently selected track tab."
+)
+
+
 class TeDensityPlotDialog(QDialog):
-    """TE density / genome coverage plot settings and input hit table."""
+    """Genome density plot (TE / Gene / Methylation tracks)."""
+
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH_WIDE
+    _ADVANCED_SCROLL_MAX_HEIGHT = 420
 
     def __init__(
         self,
@@ -10877,12 +11166,32 @@ class TeDensityPlotDialog(QDialog):
         chromosome_sizes: dict[str, int] | None = None,
         input_file: Path | None = None,
         consensus_input_file: Path | None = None,
+        project: RepeatViewerProject | None = None,
+        project_genome: Path | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Visualization")
-        self.setMinimumWidth(720)
+        self.setWindowTitle("Genome density plot")
         self._opts = initial or TeGenomeMapOptions()
+        self._project = project
+        self._project_genome = (
+            project_genome.expanduser().resolve()
+            if project_genome is not None and project_genome.is_file()
+            else None
+        )
+        self.setMinimumWidth(self._DIALOG_WIDTH)
+        self._te_density_compact_size: QSize | None = None
+
+        genome_selected = (self._opts.genome_path or "").strip() or None
+        self._genome_row = GenomeBlastDatabaseRow(
+            self,
+            project=project,
+            project_genome=self._project_genome,
+            selected_path=genome_selected,
+            manage_title="Manage Database",
+            help_title="Reference genome",
+            help_text=_GENOME_DENSITY_REFERENCE_HELP,
+        )
 
         masking_initial: list[Path] | None = None
         if input_file is not None:
@@ -10896,6 +11205,8 @@ class TeDensityPlotDialog(QDialog):
                 "Add another RepeatMasker .out or BLAST hit table. "
                 "Each file is drawn on its own track (first row = top track)."
             ),
+            help_title="TE masking file",
+            help_text=_GENOME_DENSITY_MASKING_HELP,
         )
         self._consensus_input = TeMultiInputFilesWidget(
             self,
@@ -10908,17 +11219,21 @@ class TeDensityPlotDialog(QDialog):
                 "Add another TE consensus FASTA. Sequences are BLASTed against the "
                 "project genome; each file is plotted on its own track."
             ),
+            help_title="TE consensus file",
+            help_text=_GENOME_DENSITY_CONSENSUS_HELP,
         )
         self._gene_input = TeMultiInputFilesWidget(
             self,
             placeholder="Optional GFF/GTF/BED/VCF annotation",
-            browse_title="Select annotation file",
+            browse_title="Select gene annotation file",
             file_filter="Annotations (*.gff *.gff3 *.gtf *.bed *.vcf *.vcf.gz);;All files (*)",
-            add_button_label="Add another annotation file",
+            add_button_label="Add another gene file",
             add_button_tooltip=(
-                "Add another GFF, GTF, BED, or VCF annotation file. "
+                "Add another GFF, GTF, BED, or VCF gene annotation file. "
                 "Each file is drawn on its own track below TE tracks."
             ),
+            help_title="Gene file",
+            help_text=_GENOME_DENSITY_GENE_HELP,
         )
         self._methylation_input = TeMultiInputFilesWidget(
             self,
@@ -10933,6 +11248,8 @@ class TeDensityPlotDialog(QDialog):
                 "chromosome: total (genome), covered (.cov lines), covered fraction, "
                 "and methylation level (0–1)."
             ),
+            help_title="Methylation file",
+            help_text=_GENOME_DENSITY_METHYLATION_HELP,
         )
         self._focused_file_input: TeMultiInputFilesWidget | None = None
         for widget in (
@@ -10942,11 +11259,21 @@ class TeDensityPlotDialog(QDialog):
             self._methylation_input,
         ):
             widget.field_activated.connect(self._on_file_input_field_activated)
+            widget.paths_changed.connect(self._on_file_rows_changed)
 
-        self._bin_kb = QSpinBox(self)
-        self._bin_kb.setRange(5, 500)
-        self._bin_kb.setValue(max(5, self._opts.bin_size_bp // 1000))
-        self._bin_kb.setSuffix(" kb")
+        def _make_bin_kb() -> QSpinBox:
+            spin = QSpinBox(self)
+            spin.setRange(5, 500)
+            spin.setValue(max(5, self._opts.bin_size_bp // 1000))
+            spin.setSuffix(" kb")
+            return spin
+
+        self._bin_kb = _make_bin_kb()
+        self._bin_kb_gene = _make_bin_kb()
+        self._bin_kb_meth = _make_bin_kb()
+        BlastParamsDialog._wire_synced_spins(
+            (self._bin_kb, self._bin_kb_gene, self._bin_kb_meth)
+        )
         self._density = QComboBox(self)
         self._density.addItem("Total TE length (bp) per window", TE_GENOME_MAP_DENSITY_TE_LENGTH)
         self._density.addItem("TE hits number per window", TE_GENOME_MAP_DENSITY_HIT_COUNT)
@@ -10976,13 +11303,6 @@ class TeDensityPlotDialog(QDialog):
         )
         self._collapse_overlaps = QCheckBox("Collapse overlapped TEs", self)
         self._collapse_overlaps.setChecked(bool(self._opts.collapse_overlaps))
-        self._collapse_overlaps.setToolTip(
-            "For total TE length per window, count each base pair at most once when TEs "
-            "overlap. When color is by order, superfamily, or family, overlaps are collapsed "
-            "separately within each TE type; with % identity coloring, all TEs in a window "
-            "are collapsed together. With separate forward/reverse tracks, collapse applies "
-            "within each strand track only."
-        )
         self._show_te_diff = QCheckBox("Show TE difference track (2 TE sources)", self)
         self._show_te_diff.setChecked(bool(self._opts.show_te_diff_track))
         self._show_meth_diff = QCheckBox(
@@ -10992,13 +11312,6 @@ class TeDensityPlotDialog(QDialog):
         self._show_meth_diff.setToolTip(
             "When two Bismark coverage files are provided, add a diff track per "
             "chromosome comparing methylation level (first file above axis, second below)."
-        )
-        self._show_te_diff.setToolTip(
-            "When exactly two TE hit-table sources are selected (masking files and/or "
-            "consensus BLAST tables), add a per-chromosome diff track "
-            "(exclusive TE bp: above = first source only, below = second only). "
-            "Track order follows input file order top to bottom. "
-            "This step is optional and can take extra time on large genomes."
         )
 
         self._annotation_density = QComboBox(self)
@@ -11025,11 +11338,23 @@ class TeDensityPlotDialog(QDialog):
         self._chromosome_sort.setToolTip(
             "Order of chromosomes in the list below (for selecting which to show)."
         )
+        for field in (
+            self._bin_kb,
+            self._bin_kb_gene,
+            self._bin_kb_meth,
+            self._density,
+            self._color_by,
+            self._annotation_density,
+            self._methylation_coverage_min,
+            self._chromosome_sort,
+        ):
+            field.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
         self._chrom_picker = ChromosomeMultiSelectWidget(
             chromosome_names or [],
             chromosome_sizes=chromosome_sizes,
             preselected=self._opts.chromosomes_only,
             chromosome_sort=self._opts.chromosome_sort,
+            defer_populate=True,
             parent=self,
         )
         sort_idx = self._chromosome_sort.findData(self._opts.chromosome_sort)
@@ -11038,54 +11363,582 @@ class TeDensityPlotDialog(QDialog):
             self._chromosome_sort.setCurrentIndex(sort_idx)
             self._chromosome_sort.blockSignals(False)
         self._chromosome_sort.currentIndexChanged.connect(self._on_chromosome_sort_changed)
-
-        form_host = QWidget(self)
-        form = QFormLayout()
-        form_host.setLayout(form)
-
-        form.addRow("TE masking file:", self._masking_input)
-        form.addRow("TE consensus file:", self._consensus_input)
-        form.addRow("Y axis content:", self._density)
-        form.addRow("Color by:", self._color_by)
-        form.addRow("", self._split_strand)
-        form.addRow("", self._collapse_overlaps)
-        form.addRow("", self._show_te_diff)
-        form.addRow(_form_section_separator())
-        form.addRow("Other annotation file:", self._gene_input)
-        form.addRow("Display content:", self._annotation_features)
-        form.addRow("Y axis content:", self._annotation_density)
-        form.addRow(_form_section_separator())
-        form.addRow("DNA methylation file:", self._methylation_input)
-        form.addRow("", self._show_meth_diff)
-        form.addRow("Methylation coverage min:", self._methylation_coverage_min)
-        form.addRow(_form_section_separator())
-        form.addRow("Window size:", self._bin_kb)
-        form.addRow("Chromosome order:", self._chromosome_sort)
         self._chrom_picker.setToolTip(
             "Each chromosome is one row in the map. Many small scaffolds are slower "
             "than a few large ones — set a minimum size (Mb) and click Confirm."
         )
-        form.addRow("Chromosomes to show:", self._chrom_picker)
+        self._genome_row.selection_changed.connect(self._on_reference_genome_changed)
+
+        def _section(title: str, parent: QWidget | None = None) -> QLabel:
+            return QLabel(f"<b>{title}</b>", parent)
+
+        def _make_form(parent: QWidget) -> QFormLayout:
+            form = QFormLayout(parent)
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setLabelAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+            form.setHorizontalSpacing(12)
+            form.setVerticalSpacing(4)
+            return form
+
+        # --- TE track page -------------------------------------------------
+        te_page = QWidget(self)
+        te_page.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        te_form = _make_form(te_page)
+        te_form.addRow(_section("Inputs", te_page))
+        te_form.addRow("Reference genome:", self._genome_row)
+        te_form.addRow("TE masking file:", self._masking_input)
+        te_form.addRow("TE consensus file:", self._consensus_input)
+        te_form.addRow(_form_section_separator())
+        te_form.addRow(_section("Settings", te_page))
+        te_form.addRow(
+            "Window size:",
+            field_with_help(
+                self._bin_kb, "Window size", _GENOME_DENSITY_WINDOW_HELP
+            ),
+        )
+        te_form.addRow(
+            "Y axis content:",
+            field_with_help(
+                self._density, "Y axis content", _GENOME_DENSITY_Y_AXIS_HELP
+            ),
+        )
+        te_form.addRow(
+            "Color by:",
+            field_with_help(self._color_by, "Color by", _GENOME_DENSITY_COLOR_BY_HELP),
+        )
+        self._split_spacer = QLabel("")
+        self._collapse_spacer = QLabel("")
+        self._te_diff_spacer = QLabel("")
+        te_form.addRow(self._split_spacer, self._split_strand)
+        te_form.addRow(
+            self._collapse_spacer,
+            field_with_help(
+                self._collapse_overlaps,
+                "Collapse overlapped TEs",
+                _GENOME_DENSITY_COLLAPSE_OVERLAPS_HELP,
+            ),
+        )
+        te_form.addRow(
+            self._te_diff_spacer,
+            field_with_help(
+                self._show_te_diff,
+                "Show TE difference track",
+                _GENOME_DENSITY_TE_DIFF_HELP,
+            ),
+        )
+        self._te_page = te_page
+        self._te_form = te_form
+
+        # --- Gene track page -----------------------------------------------
+        ann_page = QWidget(self)
+        ann_page.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        ann_form = _make_form(ann_page)
+        ann_form.addRow(_section("Inputs", ann_page))
+        ann_form.addRow("Gene file:", self._gene_input)
+        ann_form.addRow(_form_section_separator())
+        ann_form.addRow(_section("Settings", ann_page))
+        ann_form.addRow(
+            "Window size:",
+            field_with_help(
+                self._bin_kb_gene, "Window size", _GENOME_DENSITY_WINDOW_HELP
+            ),
+        )
+        ann_form.addRow("Display content:", self._annotation_features)
+        ann_form.addRow("Y axis content:", self._annotation_density)
+        self._ann_page = ann_page
+        self._ann_form = ann_form
+
+        # --- Methylation track page ----------------------------------------
+        meth_page = QWidget(self)
+        meth_page.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        meth_form = _make_form(meth_page)
+        meth_form.addRow(_section("Inputs", meth_page))
+        meth_form.addRow("Methylation file:", self._methylation_input)
+        meth_form.addRow(_form_section_separator())
+        meth_form.addRow(_section("Settings", meth_page))
+        meth_form.addRow(
+            "Window size:",
+            field_with_help(
+                self._bin_kb_meth, "Window size", _GENOME_DENSITY_WINDOW_HELP
+            ),
+        )
+        self._meth_diff_spacer = QLabel("")
+        meth_form.addRow(self._meth_diff_spacer, self._show_meth_diff)
+        meth_form.addRow(
+            "Methylation coverage min:", self._methylation_coverage_min
+        )
+        self._meth_page = meth_page
+        self._meth_form = meth_form
+
+        # Shared Advanced: chromosomes (applies to all tracks).
+        advanced_body = QWidget(self)
+        advanced_form = _make_form(advanced_body)
+        advanced_form.setVerticalSpacing(6)
+        advanced_form.addRow(
+            "Chromosome order:",
+            field_with_help(
+                self._chromosome_sort,
+                "Chromosome order",
+                _GENOME_DENSITY_CHROM_ORDER_HELP,
+            ),
+        )
+        chrom_field = QWidget(advanced_body)
+        chrom_field_row = QHBoxLayout(chrom_field)
+        chrom_field_row.setContentsMargins(0, 0, 0, 0)
+        chrom_field_row.setSpacing(6)
+        chrom_field_row.setAlignment(Qt.AlignmentFlag.AlignTop)
+        chrom_field_row.addWidget(self._chrom_picker, stretch=1)
+        chrom_field_row.addWidget(
+            make_help_button(
+                chrom_field,
+                "Chromosomes to show",
+                _GENOME_DENSITY_CHROMOSOMES_HELP,
+            )
+        )
+        advanced_form.addRow("Chromosomes to show:", chrom_field)
+        self._te_density_advanced_form = advanced_form
+
+        advanced_scroll = QScrollArea(self)
+        advanced_scroll.setWidgetResizable(True)
+        advanced_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        advanced_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        advanced_scroll.setWidget(advanced_body)
+        advanced_scroll.setMaximumHeight(self._ADVANCED_SCROLL_MAX_HEIGHT)
+        self._advanced_scroll = advanced_scroll
+
+        advanced = QWidget(self)
+        self._te_density_advanced_panel = advanced
+        advanced.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        advanced_layout = QVBoxLayout(advanced)
+        advanced_layout.setContentsMargins(0, 4, 0, 0)
+        advanced_layout.setSpacing(6)
+        advanced_layout.addWidget(_form_section_separator())
+        advanced_layout.addWidget(_section("Advanced Settings", advanced))
+        advanced_layout.addWidget(advanced_scroll)
+        advanced.setVisible(False)
+        advanced.setMaximumHeight(0)
 
         self._gene_input.paths_changed.connect(self._refresh_annotation_feature_types)
         self._refresh_annotation_feature_types()
 
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(form_host)
-        scroll.setMinimumHeight(320)
-        scroll.setMaximumHeight(560)
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="Genome density plot",
+                checked=bool(
+                    getattr(self._opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW)
+                ),
+                close_when_finished=bool(
+                    getattr(
+                        self._opts,
+                        "close_process_window_when_finished",
+                        DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+                    )
+                ),
+            )
+        )
 
-        buttons = _run_cancel_button_box(self)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        options_tab = QWidget(self)
+        options_layout = QVBoxLayout(options_tab)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+        options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._plot_all_together = QCheckBox(
+            "Plot all track types together", options_tab
+        )
+        self._plot_all_together.setChecked(
+            bool(getattr(self._opts, "plot_all_tracks_together", False))
+        )
+        self._plot_all_together.setToolTip(_GENOME_DENSITY_PLOT_ALL_HELP)
+        plot_box = QGroupBox("Tracks", options_tab)
+        plot_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        plot_box_layout = QVBoxLayout(plot_box)
+        plot_box_layout.addWidget(
+            field_with_help(
+                self._plot_all_together,
+                "Plot all track types together",
+                _GENOME_DENSITY_PLOT_ALL_HELP,
+                stretch=True,
+            )
+        )
+        options_layout.addWidget(plot_box)
+        options_layout.addWidget(process_box)
+        self._options_tab = options_tab
+
+        def _wrap_page(page: QWidget) -> QWidget:
+            wrap = QWidget(self)
+            wrap.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+            wrap_layout = QVBoxLayout(wrap)
+            wrap_layout.setContentsMargins(16, 10, 16, 10)
+            wrap_layout.setSpacing(4)
+            wrap_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+            wrap_layout.addWidget(page)
+            return wrap
+
+        self._te_wrap = _wrap_page(te_page)
+        self._ann_wrap = _wrap_page(ann_page)
+        self._meth_wrap = _wrap_page(meth_page)
+        self._last_track_tab = TE_GENOME_MAP_DIALOG_TAB_TE
+
+        self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        self._tabs.tabBar().setDrawBase(False)
+        self._tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
+        self._tabs.addTab(self._te_wrap, "TE")
+        self._tabs.addTab(self._ann_wrap, "Gene")
+        self._tabs.addTab(self._meth_wrap, "Methylation")
+        self._tabs.addTab(options_tab, "Options")
+        self._options_tab_index = 3
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        restore = QPushButton("Restore Defaults", self)
+        restore.clicked.connect(self._restore_defaults)
+        self._advanced_settings_btn = QPushButton("Advanced Settings ▸", self)
+        self._advanced_settings_btn.setCheckable(True)
+        self._advanced_settings_btn.setChecked(False)
+        self._advanced_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._advanced_settings_btn.toggled.connect(self._on_advanced_settings_toggled)
+        self._button_box = make_cancel_save_run_bar(
+            self,
+            left_widgets=[restore, self._advanced_settings_btn],
+        )
 
         layout = QVBoxLayout(self)
-        layout.addWidget(scroll)
-        layout.addWidget(buttons)
-        self.setLayout(layout)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tabs, 0)
+        layout.addWidget(advanced, 0)
+        layout.addWidget(self._button_box, 0)
+
+        open_tab = opening_dialog_tab(
+            self._opts.last_dialog_tab,
+            allowed=TE_GENOME_MAP_DIALOG_TABS,
+            first_tab=TE_GENOME_MAP_DIALOG_TAB_TE,
+        )
+        tab_map = {
+            TE_GENOME_MAP_DIALOG_TAB_TE: self._te_wrap,
+            TE_GENOME_MAP_DIALOG_TAB_ANNOTATION: self._ann_wrap,
+            TE_GENOME_MAP_DIALOG_TAB_METHYLATION: self._meth_wrap,
+            DIALOG_TAB_OPTIONS: options_tab,
+        }
+        self._tabs.setCurrentWidget(tab_map.get(open_tab, self._te_wrap))
+        if open_tab in (
+            TE_GENOME_MAP_DIALOG_TAB_TE,
+            TE_GENOME_MAP_DIALOG_TAB_ANNOTATION,
+            TE_GENOME_MAP_DIALOG_TAB_METHYLATION,
+        ):
+            self._last_track_tab = open_tab
+        self._masking_input.paths_changed.connect(self._sync_te_option_checkboxes)
+        self._consensus_input.paths_changed.connect(self._sync_te_option_checkboxes)
+        self._density.currentIndexChanged.connect(self._sync_te_option_checkboxes)
+        self._sync_te_option_checkboxes()
+        self._sync_field_column()
+        self.resize(self._DIALOG_WIDTH, 480)
+        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
+
+    def _sync_te_option_checkboxes(self) -> None:
+        """Grey TE options that do not apply to the current inputs / Y axis."""
+        te_sources = len(self._masking_input.paths()) + len(
+            self._consensus_input.paths()
+        )
+        self._show_te_diff.setEnabled(te_sources == 2)
+        length_mode = (
+            str(self._density.currentData()) == TE_GENOME_MAP_DENSITY_TE_LENGTH
+        )
+        self._collapse_overlaps.setEnabled(length_mode)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._te_density_compact_size = None
+        self.setMinimumWidth(self._DIALOG_WIDTH)
+        self._sync_field_column()
+        QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
+        # Warm chromosome checkboxes after the dialog is visible so the first
+        # Advanced Settings click does not stall on a large genome.
+        QTimer.singleShot(50, self._chrom_picker.ensure_populated)
+
+    def should_run(self) -> bool:
+        return dialog_should_run(self)
+
+    def current_dialog_tab(self) -> str:
+        current = self._tabs.currentWidget()
+        if current is self._options_tab:
+            return DIALOG_TAB_OPTIONS
+        if current is self._ann_wrap:
+            return TE_GENOME_MAP_DIALOG_TAB_ANNOTATION
+        if current is self._meth_wrap:
+            return TE_GENOME_MAP_DIALOG_TAB_METHYLATION
+        return TE_GENOME_MAP_DIALOG_TAB_TE
+
+    def active_plot_track_tab(self) -> str:
+        """Track tab used when not plotting all together."""
+        tab = self.current_dialog_tab()
+        if tab in (
+            TE_GENOME_MAP_DIALOG_TAB_TE,
+            TE_GENOME_MAP_DIALOG_TAB_ANNOTATION,
+            TE_GENOME_MAP_DIALOG_TAB_METHYLATION,
+        ):
+            self._last_track_tab = tab
+            return tab
+        return self._last_track_tab
+
+    def plot_all_tracks_together(self) -> bool:
+        return self._plot_all_together.isChecked()
+
+    def _on_track_page(self) -> bool:
+        return self._tabs.currentWidget() is not self._options_tab
+
+    def _active_track_wrap(self) -> QWidget:
+        current = self._tabs.currentWidget()
+        if current in (self._te_wrap, self._ann_wrap, self._meth_wrap):
+            return current
+        return self._te_wrap
+
+    def _sync_field_column(self) -> None:
+        sync_form_field_column_spacers(
+            self,
+            [
+                self._split_spacer,
+                self._collapse_spacer,
+                self._te_diff_spacer,
+                self._meth_diff_spacer,
+            ],
+            [self._te_form, self._ann_form, self._meth_form, self._te_density_advanced_form],
+        )
+
+    def _on_advanced_settings_toggled(self, checked: bool) -> None:
+        self._advanced_settings_btn.setText(
+            "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+        )
+        # Expand the panel first so the click feels immediate; populate chromosomes
+        # only if the idle warm-up has not finished yet.
+        self._set_advanced_visible(checked)
+        self._resize_for_advanced(checked)
+        if checked and not self._chrom_picker._populated:
+            QTimer.singleShot(0, self._finish_advanced_chrom_populate)
+
+    def _finish_advanced_chrom_populate(self) -> None:
+        self._chrom_picker.ensure_populated()
+        if self._advanced_settings_btn.isChecked():
+            self._resize_for_advanced(True)
+
+    def _fit_advanced_scroll_to_content(self) -> int:
+        """Size Advanced scroll to its form body (chrom picker is already height-capped)."""
+        body = self._advanced_scroll.widget()
+        if body is None:
+            need = 280
+        else:
+            body.updateGeometry()
+            need = max(body.minimumSizeHint().height(), body.sizeHint().height())
+            # ChromosomeMultiSelectWidget maxHeight is 280; keep this tight.
+            need = min(self._ADVANCED_SCROLL_MAX_HEIGHT, max(200, need))
+        self._advanced_scroll.setMaximumHeight(need)
+        return need
+
+    def _set_advanced_visible(self, visible: bool) -> None:
+        panel = self._te_density_advanced_panel
+        panel.setVisible(visible)
+        if visible:
+            self._fit_advanced_scroll_to_content()
+            panel.setMaximumHeight(16777215)
+        else:
+            panel.setMaximumHeight(0)
+        panel.updateGeometry()
+
+    def _on_tab_changed(self, _index: int) -> None:
+        tab = self.current_dialog_tab()
+        if tab in (
+            TE_GENOME_MAP_DIALOG_TAB_TE,
+            TE_GENOME_MAP_DIALOG_TAB_ANNOTATION,
+            TE_GENOME_MAP_DIALOG_TAB_METHYLATION,
+        ):
+            self._last_track_tab = tab
+        on_track = self._on_track_page()
+        self._advanced_settings_btn.setVisible(on_track)
+        if not on_track:
+            if self._advanced_settings_btn.isChecked():
+                self._advanced_settings_btn.blockSignals(True)
+                self._advanced_settings_btn.setChecked(False)
+                self._advanced_settings_btn.setText("Advanced Settings ▸")
+                self._advanced_settings_btn.blockSignals(False)
+                self._set_advanced_visible(False)
+            self._set_track_wraps_equal_height(False)
+            self._te_density_advanced_panel.setVisible(False)
+            self._fit_options_content()
+        else:
+            want = self._advanced_settings_btn.isChecked()
+            self._set_advanced_visible(want)
+            self._te_density_compact_size = None
+            self._resize_for_advanced(want)
+
+    def _track_wraps(self) -> tuple[QWidget, QWidget, QWidget]:
+        return (self._te_wrap, self._ann_wrap, self._meth_wrap)
+
+    def _set_track_wraps_equal_height(self, equal: bool) -> None:
+        """While Advanced is open, all track pages share the tallest height."""
+        wraps = self._track_wraps()
+        if not equal:
+            for wrap in wraps:
+                wrap.setMinimumHeight(0)
+            return
+        for wrap in wraps:
+            wrap.setMinimumHeight(0)
+            root = wrap.layout()
+            if root is not None:
+                root.invalidate()
+                root.activate()
+            wrap.updateGeometry()
+        target = max(
+            max(wrap.minimumSizeHint().height(), wrap.sizeHint().height())
+            for wrap in wraps
+        )
+        for wrap in wraps:
+            wrap.setMinimumHeight(target)
+
+    def _dialog_stack_height(self, *, expanded: bool) -> int:
+        """Exact height of tabs + optional Advanced + footer (no estimate padding)."""
+        self._tabs.updateGeometry()
+        self._button_box.updateGeometry()
+        tabs_h = max(self._tabs.minimumSizeHint().height(), self._tabs.sizeHint().height())
+        buttons_h = max(
+            self._button_box.minimumSizeHint().height(),
+            self._button_box.sizeHint().height(),
+        )
+        adv_h = 0
+        if expanded:
+            panel = self._te_density_advanced_panel
+            self._fit_advanced_scroll_to_content()
+            panel.updateGeometry()
+            adv_h = max(panel.minimumSizeHint().height(), panel.sizeHint().height())
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 8
+        # layout always has tabs, advanced (0 when collapsed), buttons → 2 gaps
+        return margin_h + tabs_h + adv_h + buttons_h + spacing * 2
+
+    def _apply_dialog_height(self, height: int) -> None:
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_h = screen.height() - 40 if screen is not None else 10_000
+        width = self._DIALOG_WIDTH
+        height = min(max(height, 220), max_h)
+        self.setMinimumWidth(width)
+        self.setMinimumHeight(0)
+        # Cap height to the content stack so AlignTop does not leave a blank
+        # under the buttons; callers unlock max before measuring when growing.
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+
+    def _on_file_rows_changed(self) -> None:
+        """Grow/shrink the dialog when masking/consensus/gene/meth rows change."""
+        if not self.isVisible() or not self._on_track_page():
+            return
+        # Let the new row finish laying out before measuring.
+        QTimer.singleShot(0, self._reflow_after_file_rows_changed)
+
+    def _reflow_after_file_rows_changed(self) -> None:
+        if not self._on_track_page():
+            return
+        self._resize_for_advanced(self._advanced_settings_btn.isChecked())
+
+    def _resize_for_advanced(self, expanded: bool) -> None:
+        if not self._on_track_page():
+            self._fit_options_content()
+            return
+        # Unlock height so sizeHints are not crushed by a previous maxHeight cap
+        # (adding file rows otherwise overlaps Browse/Remove text).
+        self.setMaximumHeight(16777215)
+        wrap = self._active_track_wrap()
+        root = wrap.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        wrap.updateGeometry()
+        self._sync_field_column()
+
+        if expanded:
+            self._set_track_wraps_equal_height(True)
+        else:
+            self._set_track_wraps_equal_height(False)
+
+        height = self._dialog_stack_height(expanded=expanded)
+        self._apply_dialog_height(height)
+        if not expanded:
+            self._te_density_compact_size = QSize(self._DIALOG_WIDTH, self.height())
+
+    def _fit_options_content(self) -> None:
+        page = self._options_tab
+        page.ensurePolished()
+        page.adjustSize()
+        root = page.layout()
+        if root is not None:
+            root.activate()
+        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
+        content_h = page_hint.height()
+        if root is not None:
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        tab_bar_h = self._tabs.tabBar().sizeHint().height() + 8
+        buttons_h = self._button_box.sizeHint().height()
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else None
+        margin_h = (margins.top() + margins.bottom()) if margins is not None else 34
+        spacing = lay.spacing() if lay is not None else 8
+        height = margin_h + tab_bar_h + content_h + buttons_h + spacing * 2
+        self._apply_dialog_height(height)
+
+    def _restore_defaults(self) -> None:
+        defaults = TeGenomeMapOptions()
+        self._bin_kb.setValue(max(5, defaults.bin_size_bp // 1000))
+        idx = self._density.findData(defaults.density_mode)
+        if idx >= 0:
+            self._density.setCurrentIndex(idx)
+        idx_color = self._color_by.findData(defaults.color_by)
+        if idx_color >= 0:
+            self._color_by.setCurrentIndex(idx_color)
+        self._split_strand.setChecked(defaults.split_strand_tracks)
+        self._collapse_overlaps.setChecked(defaults.collapse_overlaps)
+        self._show_te_diff.setChecked(defaults.show_te_diff_track)
+        self._show_meth_diff.setChecked(defaults.show_meth_diff_track)
+        self._sync_te_option_checkboxes()
+        self._methylation_coverage_min.setValue(defaults.methylation_coverage_min)
+        ann_idx = self._annotation_density.findData(defaults.annotation_density_mode)
+        if ann_idx >= 0:
+            self._annotation_density.setCurrentIndex(ann_idx)
+        self._annotation_features.set_global_fallback_types(
+            list(DEFAULT_ANNOTATION_FEATURE_TYPES)
+        )
+        self._annotation_features.set_saved_by_file({})
+        self._refresh_annotation_feature_types()
+        sort_idx = self._chromosome_sort.findData(defaults.chromosome_sort)
+        if sort_idx >= 0:
+            self._chromosome_sort.setCurrentIndex(sort_idx)
+        self._genome_row.reset_to_default()
+        self._chrom_picker.set_chromosome_sort(defaults.chromosome_sort)
+        self._reload_chromosomes_for_reference()
+        self._plot_all_together.setChecked(defaults.plot_all_tracks_together)
+        self.setMinimumWidth(self._DIALOG_WIDTH)
+        self._show_process_window.setChecked(defaults.show_process_window)
+        self._close_process_window.setChecked(
+            defaults.close_process_window_when_finished
+        )
+        if self._advanced_settings_btn.isChecked():
+            self._advanced_settings_btn.setChecked(False)
+        else:
+            self._resize_for_advanced(False)
 
     def _on_file_input_field_activated(self) -> None:
         sender = self.sender()
@@ -11138,11 +11991,51 @@ class TeDensityPlotDialog(QDialog):
     def methylation_input_files(self) -> list[Path]:
         return self._methylation_input.paths()
 
+    def include_te_tracks(self) -> bool:
+        if self.plot_all_tracks_together():
+            return True
+        return self.active_plot_track_tab() == TE_GENOME_MAP_DIALOG_TAB_TE
+
+    def include_annotation_tracks(self) -> bool:
+        if self.plot_all_tracks_together():
+            return True
+        return self.active_plot_track_tab() == TE_GENOME_MAP_DIALOG_TAB_ANNOTATION
+
+    def include_methylation_tracks(self) -> bool:
+        if self.plot_all_tracks_together():
+            return True
+        return self.active_plot_track_tab() == TE_GENOME_MAP_DIALOG_TAB_METHYLATION
+
     def gene_input_file(self) -> Path | None:
         paths = self.gene_input_files()
         return paths[0] if paths else None
 
+    def reference_genome_path(self) -> Path | None:
+        """FASTA used for chromosome coordinates (current genome or a nucleotide DB)."""
+        raw = self._genome_row.selected_path()
+        if not raw:
+            return self._project_genome
+        path = Path(raw).expanduser().resolve()
+        return path if path.is_file() else self._project_genome
+
+    def _on_reference_genome_changed(self) -> None:
+        if not self.isVisible():
+            return
+        self._reload_chromosomes_for_reference()
+        QTimer.singleShot(
+            0,
+            lambda: self._resize_for_advanced(self._advanced_settings_btn.isChecked()),
+        )
+
+    def _reload_chromosomes_for_reference(self) -> None:
+        genome = self.reference_genome_path()
+        names = chromosome_names_from_genome(genome)
+        sizes = genome_chrom_sizes_from_fasta(genome)
+        self._chrom_picker.set_chromosomes(names, chromosome_sizes=sizes)
+
     def options(self) -> TeGenomeMapOptions:
+        # Chromosome checkboxes are built lazily (open is fast); populate on Save/Run.
+        self._chrom_picker.ensure_populated()
         mode = self._density.currentData()
         if mode not in (TE_GENOME_MAP_DENSITY_HIT_COUNT, TE_GENOME_MAP_DENSITY_TE_LENGTH):
             mode = TE_GENOME_MAP_DENSITY_HIT_COUNT
@@ -11161,6 +12054,16 @@ class TeDensityPlotDialog(QDialog):
             CHROMOSOME_SORT_SIZE_ASC,
         ):
             chrom_sort = CHROMOSOME_SORT_NATURAL
+        genome = self.reference_genome_path()
+        genome_path = ""
+        if (
+            genome is not None
+            and self._project_genome is not None
+            and genome != self._project_genome
+        ):
+            genome_path = str(genome)
+        elif genome is not None and self._project_genome is None:
+            genome_path = str(genome)
         return TeGenomeMapOptions(
             bin_size_bp=max(5_000, int(self._bin_kb.value()) * 1000),
             density_mode=str(mode),
@@ -11177,6 +12080,16 @@ class TeDensityPlotDialog(QDialog):
             chromosomes_only=selected or None,
             superfamilies_only=None,
             chromosome_sort=chrom_sort,
+            plot_all_tracks_together=self.plot_all_tracks_together(),
+            genome_path=genome_path,
+            show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=(
+                self._close_process_window.isChecked()
+            ),
+            last_dialog_tab=persistable_dialog_tab(
+                self.current_dialog_tab(),
+                first_tab=TE_GENOME_MAP_DIALOG_TAB_TE,
+            ),
         )
 
 

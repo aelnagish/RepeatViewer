@@ -64,7 +64,7 @@ def test_teaid_dialog_blast_style_sections(qapp: QApplication) -> None:
     assert dlg._mode_single.isChecked()
     assert dlg._genome_row.isVisible()
     assert not dlg._pan_list.isVisible()
-    # No "?" on the Current genome combo; mode help is on the radios.
+    # No "?" on the reference genome combo; mode help is on the radios.
     assert not any(
         child.text() == "?" for child in dlg._genome_row.findChildren(QToolButton)
     )

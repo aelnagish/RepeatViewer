@@ -183,6 +183,98 @@ def warmup_webengine_probe() -> None:
     ).start()
 
 
+_MAIN_WARM_STARTED = False
+
+
+def schedule_webengine_main_warmup(parent) -> None:
+    """Init Chromium in the GUI process after the main window is shown.
+
+    WebEngine is deferred at import time (slow / crash risk on some Macs). Once
+    the UI is up — and the safety probe has not marked this machine unsafe —
+    create a hidden view so the first HTML preview does not flash the window.
+    """
+    global _MAIN_WARM_STARTED
+    if _MAIN_WARM_STARTED:
+        return
+    flag = os.environ.get("REPEATVIEWER_EMBED_HTML", "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return
+
+    from PySide6.QtCore import QTimer
+
+    attempts = {"n": 0}
+
+    def _try() -> None:
+        global _MAIN_WARM_STARTED
+        if _MAIN_WARM_STARTED:
+            return
+        if sys.platform == "darwin":
+            if webengine_is_known_unsafe():
+                return
+            cached = _read_cached()
+            # Wait for a background probe to finish when one is in flight.
+            if (
+                cached is None
+                and _PROBE_RESULT is None
+                and flag not in {"1", "true", "yes", "on"}
+            ):
+                attempts["n"] += 1
+                if attempts["n"] < 40:  # ~16s max
+                    QTimer.singleShot(400, _try)
+                return
+            if cached is False or _PROBE_RESULT is False:
+                return
+        _MAIN_WARM_STARTED = True
+        _warm_hidden_webengine_view(parent)
+
+    # Let the window finish showing / splash dismiss before Chromium starts.
+    QTimer.singleShot(400, _try)
+
+
+def _warm_hidden_webengine_view(parent) -> None:
+    """Create a disposable off-screen WebEngine view to start Chromium."""
+    try:
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtWebEngineCore import QWebEngineSettings
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+    except Exception:
+        logger.debug("WebEngine main-process warmup unavailable", exc_info=True)
+        return
+
+    try:
+        view = QWebEngineView(parent)
+        view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        view.setFixedSize(1, 1)
+        view.hide()
+        settings = view.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        settings.setAttribute(
+            QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, False
+        )
+        if hasattr(QWebEngineSettings.WebAttribute, "WebGLEnabled"):
+            settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, False)
+
+        cleaned = {"done": False}
+
+        def _cleanup() -> None:
+            if cleaned["done"]:
+                return
+            cleaned["done"] = True
+            try:
+                view.deleteLater()
+            except RuntimeError:
+                pass
+            mark_webengine_safe()
+
+        view.loadFinished.connect(lambda _ok: QTimer.singleShot(0, _cleanup))
+        QTimer.singleShot(10_000, _cleanup)
+        view.setHtml(
+            "<!DOCTYPE html><html><body>repeatviewer-webengine-warm</body></html>"
+        )
+    except Exception:
+        logger.debug("WebEngine main-process warmup failed", exc_info=True)
+
+
 def _run_webengine_probe() -> bool:
     """Spawn a child that creates a WebEngine view; treat crashes as unsafe."""
     env = os.environ.copy()

@@ -1,8 +1,9 @@
 ---
 description: >-
   Function window design — unify tool params dialogs (tabs, Mode/Inputs/Settings,
-  Options, Executables, Process output, 608 width). Trigger phrases: function window,
-  tool params dialog, Align-style dialog, follow the layout rule, tool-params-dialog-layout.
+  Options, Executables, Process output, 608 default / 720 wider width). Trigger phrases:
+  function window, tool params dialog, Align-style dialog, longer window width,
+  follow the layout rule, tool-params-dialog-layout.
 globs: repeatviewer/views/tool_dialogs.py,repeatviewer/views/map_reference_dialog.py,repeatviewer/views/tree_dialog.py
 alwaysApply: false
 ---
@@ -26,6 +27,7 @@ Say any of these in the chat when designing or editing a tool dialog:
 - **follow the layout rule** / **tool-params-dialog-layout**
 - **Options tab** + **Executables** / **Process output** / **Advanced Settings**
 - **dialog width 608** / **field width 260**
+- **longer window width** / **wider window width** / **dialog width 720**
 
 Also auto-applies when editing files matching the globs above.
 
@@ -35,7 +37,8 @@ Also auto-applies when editing files matching the globs above.
 
 | Constant | Value | Use |
 |---|---|---|
-| `TOOL_PARAMS_DIALOG_WIDTH` | **608** | Dialog width (minimum + fit/resize) |
+| `TOOL_PARAMS_DIALOG_WIDTH` | **608** | Default dialog width (minimum + fit/resize) |
+| `TOOL_PARAMS_DIALOG_WIDTH_WIDE` | **720** | Longer/wider dialog when Inputs need path + Browse/Remove space (e.g. Genome density plot). **Use this whenever the user asks for a longer/wider window width.** |
 | `TOOL_PARAMS_FIELD_WIDTH` | **260** | Settings / Advanced combo & spinbox width |
 | `TOOL_PARAMS_LABEL_COLUMN_REF` | `"Minimum alignment length:"` | Shared label-column width (font metrics) |
 
@@ -212,7 +215,7 @@ Always **`make_process_output_box(...)`**:
 
 ## 5. Height behaviour
 
-- Width stays **608**; height follows **active tab content**.
+- Width stays **608** (or **720** with `TOOL_PARAMS_DIALOG_WIDTH_WIDE` when a longer window is required); height follows **active tab content**.
 - On show and tab change: fit to content (no blank band above the footer).
 - Options after a tall Parameters tab: shrink (do not keep Parameters height).
 - Advanced expand/collapse: grow/shrink; remember compact size.
@@ -223,7 +226,7 @@ Always **`make_process_output_box(...)`**:
 
 ## 6. Anti-patterns
 
-- Width other than **608**, or one Settings combo wider than **260**.
+- Width other than **608** / **720** (`TOOL_PARAMS_DIALOG_WIDTH` / `_WIDE`), or one Settings combo wider than **260**.
 - Skipping **Options**, or putting Executables / Process output above Right-click.
 - Options without trailing stretch → Process output checkboxes spread apart.
 - Modal `exec()` when Define inputs must accept Files clicks.
@@ -237,7 +240,7 @@ Always **`make_process_output_box(...)`**:
 
 ## 7. Checklist (new function window)
 
-- [ ] Width **608**; root margins **22/18/22/16**; root spacing **8**
+- [ ] Width **608** (or **720** if longer/wider is required); root margins **22/18/22/16**; root spacing **8**
 - [ ] Tabs on top; compact bar; **Options** last
 - [ ] Normal tab sections as needed: Mode → Inputs → Outputs → Settings
 - [ ] Section separators **7** px; form H **12** / V **4**
