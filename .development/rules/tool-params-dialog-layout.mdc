@@ -1,9 +1,10 @@
 ---
 description: >-
   Function window design — unify tool params dialogs (tabs, Mode/Inputs/Settings,
-  Options, Executables, Process output, 608 default / 720 wider width). Trigger phrases:
-  function window, tool params dialog, Align-style dialog, longer window width,
-  follow the layout rule, tool-params-dialog-layout.
+  Define inputs per tab, Options, Executables, Process output, 608/720 width).
+  Trigger phrases: function window, tool params dialog, Align-style dialog,
+  Define inputs, Add another input, longer window width, follow the layout rule,
+  tool-params-dialog-layout.
 globs: repeatviewer/views/tool_dialogs.py,repeatviewer/views/map_reference_dialog.py,repeatviewer/views/tree_dialog.py
 alwaysApply: false
 ---
@@ -28,6 +29,7 @@ Say any of these in the chat when designing or editing a tool dialog:
 - **Options tab** + **Executables** / **Process output** / **Advanced Settings**
 - **dialog width 608** / **field width 260**
 - **longer window width** / **wider window width** / **dialog width 720**
+- **Define inputs** / **Add another input** / **per-tab inputs** / **unlink define inputs**
 
 Also auto-applies when editing files matching the globs above.
 
@@ -79,6 +81,11 @@ Rules:
 4. Hide the **Advanced Settings** footer button on the Options tab.
 5. Non-modal open when Define inputs must accept Files-panel clicks
    (`_present_te_viz_dialog` / same pattern as Align).
+6. **Above RepeatViewer only — never `WindowStaysOnTopHint`.** That flag covers
+   other apps (Safari, Finder, …). Use `_configure_app_floating_dialog` (parent
+   = main window) and raise open dialogs via `_raise_open_tool_dialogs` when the
+   main window activates and after Folders/Files panel clicks (those can bury
+   the dialog without an ActivationChange).
 
 ---
 
@@ -131,12 +138,59 @@ Field column must start on the **same vertical line** in every function window:
   at width **260**. Same width in Advanced as in Settings.
 - Shorten long combo *display* text; put detail in `?` (`field_with_help` /
   `label_with_help`).
-- Define inputs: `TeMultiInputFilesWidget`; placeholder
-  `Click in Files/Folders or Browse…`.
 - Help `?`: after the control by default; on the **label** when Browse must stay
   flush (path rows). Database/Genome + Manage: `?` on the combo row only.
 
 Exception: TE-Aid hit % rows stay compact (~100 px + swatch), not 260.
+
+### Define inputs (mandatory — avoid shared / crushed / short paths)
+
+Use **`TeMultiInputFilesWidget`**. Default add label is **`Add another input`**
+(override only for a domain-specific track, e.g. masking / methylation).
+Placeholder: `Click in Files/Folders or Browse…` (or tool-specific equivalent).
+
+**One widget per engine/program tab — never share across tabs**
+
+- Minimap2 and HISAT2 each get their own list; BLASTn / BLASTp / BLASTx / Online
+  each get their own list. Radios (Use selected / Define inputs) may stay shared.
+- Adding a row on one tab must **not** change another tab’s row count.
+- Pattern: host `QWidget` + one `TeMultiInputFilesWidget` per tab; show only the
+  active tab’s widget; `_active_define_inputs()` for fill / `run_files` / resize.
+- Canonical examples: `MapReferenceDialog`, `BlastParamsDialog`.
+
+**Width / path fill**
+
+- When Define inputs is on: `tool_params_dialog_width(define_inputs=True)` → **720**.
+- Same **720** when a path row appears for another reason (e.g. FastGA
+  **Compare against a reference** → Reference genome path). Align uses
+  `_align_needs_wide_inputs()` for both Define inputs and FastGA reference mode.
+- Form: `ExpandingFieldsGrow`. Path rows and Reference `PathBrowseRow`: horizontal
+  **`Expanding`** (no `setFixedWidth` on the path line edit).
+- Parent page / basic panel: horizontal **`Expanding`**, vertical **`Maximum`**.
+- Reference (or similar single path) Browse must align with Define-inputs Browse:
+  wrap Reference in a row with a trailing `HELP_BUTTON_SIZE` spacer (Define rows
+  always reserve that column). See Mapping / FastGA reference rows.
+
+**Height — no overlapping / squeezed rows (critical)**
+
+Adding a Define-input row must **grow the dialog**, never compress path/Browse
+rows. Classic bug: tab/stack `maximumHeight` pin stays from the previous fit;
+`sizeHint` is measured while still pinned → crushed height is re-pinned
+(MAFFT / MUSCLE “Add another input”).
+
+Required pattern (Align MAFFT/MUSCLE, Mapping, BLAST, FastGA, …):
+
+1. Connect `paths_changed` → **deferred** refit: `QTimer.singleShot(0, …)`.
+2. **Before** measuring content height: clear tab/stack/page pins
+   (`_pin_*_height(None)` or `setMaximumHeight(16777215)`), unlock the
+   multi-input widget height, then `ensurePolished` / `adjustSize` / layout
+   `invalidate`+`activate`.
+3. Measure → resize dialog → re-pin to the **new** content height.
+4. Hide Define rows with `setRowVisible` + `setFixedHeight(0)` when Use selected;
+   unlock height when Define is on.
+
+Never call resize/pin synchronously inside `add_row` / `paths_changed` without
+clearing the previous pin first.
 
 ### Advanced Settings (footer, not a page section)
 
@@ -230,11 +284,23 @@ Always **`make_process_output_box(...)`**:
 - Skipping **Options**, or putting Executables / Process output above Right-click.
 - Options without trailing stretch → Process output checkboxes spread apart.
 - Modal `exec()` when Define inputs must accept Files clicks.
+- ``WindowStaysOnTopHint`` on tool params dialogs (floats over other apps).
 - Stock `QSpinBox`/`QComboBox` that change value on mouse wheel.
 - `addRow("", radios)` without a spacer label.
 - Per-dialog label width that makes one tool wider than BLAST/Align.
 - Leaving Parameters height when switching to Options.
 - Hand-rolled Process output or Cancel/OK footers.
+- **One shared `TeMultiInputFilesWidget` for multiple engine/program tabs**
+  (Minimap2↔HISAT2, BLASTn↔BLASTp, …) — lists must be independent.
+- Add button text **`Add another TE file`** (or similar) when the generic
+  **`Add another input`** is correct.
+- Fixed-width Reference / Define path edits that stay short after the dialog
+  widens to **720**.
+- Adding Define-input rows without clearing height pins / refitting → overlapping
+  or **vertically squeezed** path / Browse / Remove rows (especially Align
+  MAFFT/MUSCLE).
+- Measuring `sizeHint` / compact height while a tab or stack `maximumHeight`
+  pin from the previous fit is still active.
 
 ---
 
@@ -249,5 +315,8 @@ Always **`make_process_output_box(...)`**:
 - [ ] Footer: Restore Defaults + Advanced Settings ▸ | Cancel Save Run
 - [ ] Options: Right-click (always) → Executables? → Process output?
 - [ ] PATH / named executable status (grey, elide, fit height on toggle)
-- [ ] Fit-to-content on show, tab change, Advanced, PATH toggle
+- [ ] Fit-to-content on show, tab change, Advanced, PATH toggle, Define-inputs add/remove
 - [ ] Non-modal if Define inputs fills from Files panel
+- [ ] Per-tab Define-inputs widgets (not shared across engines/programs)
+- [ ] Add button **Add another input**; path rows Expanding; width **720** when Define on
+- [ ] Reference Browse aligns with Define Browse (`HELP_BUTTON_SIZE` spacer)

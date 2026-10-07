@@ -194,17 +194,38 @@ def test_reference_browse_aligns_with_define_inputs_browse(qapp, tmp_path):
     dlg._sync_inputs()
     dlg._sync_field_column()
     qapp.processEvents()
-    define_browse = dlg._define_inputs._rows[0]._row._browse_btn
+    define_browse = dlg._active_define_inputs()._rows[0]._row._browse_btn
     ref_browse = dlg._reference._browse_btn
     define_x = define_browse.mapTo(dlg, define_browse.rect().topLeft()).x()
     ref_x = ref_browse.mapTo(dlg, ref_browse.rect().topLeft()).x()
     assert abs(define_x - ref_x) <= 2
-    # Same Inputs/Reference page for HISAT2.
+    # HISAT2 has its own Define-inputs list; Browse still aligns with Reference.
     dlg._tab_bar.setCurrentIndex(dlg._TAB_HISAT2)
     qapp.processEvents()
-    define_x = define_browse.mapTo(dlg, define_browse.rect().topLeft()).x()
+    hs_browse = dlg._active_define_inputs()._rows[0]._row._browse_btn
+    define_x = hs_browse.mapTo(dlg, hs_browse.rect().topLeft()).x()
     ref_x = ref_browse.mapTo(dlg, ref_browse.rect().topLeft()).x()
     assert abs(define_x - ref_x) <= 2
+
+
+def test_minimap2_and_hisat2_define_inputs_are_independent(qapp, tmp_path):
+    """Adding a Define-inputs row on Minimap2 must not add one on HISAT2."""
+    dlg, _ref, _q = _dialog(qapp, tmp_path)
+    dlg._input_define.setChecked(True)
+    dlg._sync_inputs()
+    assert len(dlg._mm_define_inputs._rows) == 1
+    assert len(dlg._hs_define_inputs._rows) == 1
+    dlg._mm_define_inputs.add_row(focus=True)
+    assert len(dlg._mm_define_inputs._rows) == 2
+    assert len(dlg._hs_define_inputs._rows) == 1
+    dlg._tab_bar.setCurrentIndex(dlg._TAB_HISAT2)
+    dlg._sync_inputs()
+    assert dlg._active_define_inputs() is dlg._hs_define_inputs
+    assert len(dlg._active_define_inputs()._rows) == 1
+    dlg._hs_define_inputs.add_row(focus=True)
+    assert len(dlg._hs_define_inputs._rows) == 2
+    assert len(dlg._mm_define_inputs._rows) == 2
+    assert dlg._mm_define_inputs._add_btn.text() == "Add another input"
 
 
 

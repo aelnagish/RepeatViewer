@@ -2801,6 +2801,8 @@ class MainWindow(QMainWindow):
             and hasattr(self, "_file_list")
         ):
             QTimer.singleShot(0, self._repair_browser_chrome)
+            # Keep open tool dialogs above RepeatViewer (not above other apps).
+            QTimer.singleShot(0, self._raise_open_tool_dialogs)
 
     def _purge_legacy_docks(self) -> None:
         """Drop stale dock widgets from older layouts; keep the current three panels."""
@@ -8320,6 +8322,9 @@ class MainWindow(QMainWindow):
         self._update_directory_watchers()
         self._persist_workspace()
         self._folder_tree.setFocus(Qt.FocusReason.OtherFocusReason)
+        # Folder clicks activate the main window chrome and can bury open params
+        # dialogs without an ActivationChange; re-stack above RepeatViewer only.
+        QTimer.singleShot(0, self._raise_open_tool_dialogs)
 
     def _refresh_current_folder(self) -> None:
         if self._current_folder and self._current_folder.is_dir():
@@ -9732,12 +9737,16 @@ class MainWindow(QMainWindow):
         dialog = self._te_viz_input_dialog
         if dialog is None:
             return
-        # Avoid stealing focus / flashing if already visible.
-        if dialog.isVisible():
+        try:
+            if dialog.isVisible():
+                # Keep above the main window without stealing keyboard focus.
+                dialog.raise_()
+                return
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except RuntimeError:
             return
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
 
     def _dismiss_open_tool_dialogs(self, *, keep: QDialog | None = None) -> None:
         """Close any other tool params window so only one stays open.
@@ -9759,15 +9768,50 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 setattr(self, attr, None)
 
+    @staticmethod
+    def _configure_app_floating_dialog(dialog: QDialog) -> None:
+        """Non-modal tool dialog: above RepeatViewer only, not above other apps.
+
+        Do not use ``WindowStaysOnTopHint`` — that covers Safari and every other
+        application. Parent the dialog to the main window and raise it when
+        RepeatViewer is activated (see ``_raise_open_tool_dialogs``).
+        """
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+
+    def _iter_open_tool_dialogs(self):
+        for attr in (
+            "_te_viz_input_dialog",
+            "_blast_params_dialog",
+            "_hmmer_params_dialog",
+        ):
+            dialog = getattr(self, attr, None)
+            if dialog is None:
+                continue
+            try:
+                if dialog.isVisible():
+                    yield dialog
+            except RuntimeError:
+                continue
+
+    def _raise_open_tool_dialogs(self) -> None:
+        """Stack open tool dialogs above the main window without stealing focus."""
+        for dialog in self._iter_open_tool_dialogs():
+            try:
+                dialog.raise_()
+            except RuntimeError:
+                continue
+
     def _present_te_viz_dialog(self, dialog: QDialog, on_accept) -> None:
         """Show a non-modal TE settings dialog so the Files panel stays clickable."""
         self._dismiss_open_tool_dialogs()
         if self._te_viz_input_dialog is not None and self._te_viz_input_dialog is not dialog:
             self._te_viz_input_dialog.close()
         self._te_viz_input_dialog = dialog
-        dialog.setModal(False)
-        dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        if dialog.parent() is None:
+            dialog.setParent(self, dialog.windowFlags())
+        self._configure_app_floating_dialog(dialog)
 
         def _finished(code: int) -> None:
             if self._te_viz_input_dialog is dialog:
@@ -10093,6 +10137,7 @@ class MainWindow(QMainWindow):
             # Folder restore selects a row without opening Preview; a click on
             # that same row does not fire currentItemChanged, so open here.
             self._schedule_preview_for_selection(panel_path)
+            QTimer.singleShot(0, self._raise_open_tool_dialogs)
 
     def _schedule_preview_for_selection(self, path: Path) -> None:
         """Debounced Preview open used by selection-change and explicit click."""
@@ -10520,9 +10565,7 @@ class MainWindow(QMainWindow):
         dialog = BlastParamsDialog(
             project=self._project, initial=self._blast_options, parent=self
         )
-        dialog.setModal(False)
-        dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self._configure_app_floating_dialog(dialog)
         self._blast_params_dialog = dialog
         dialog.finished.connect(self._on_blast_params_dialog_finished)
         dialog.show()
@@ -10599,9 +10642,7 @@ class MainWindow(QMainWindow):
             return
         self._dismiss_open_tool_dialogs()
         dialog = HmmerParamsDialog(initial=self._hmmer_options, parent=self)
-        dialog.setModal(False)
-        dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self._configure_app_floating_dialog(dialog)
         self._hmmer_params_dialog = dialog
         dialog.finished.connect(self._on_hmmer_params_dialog_finished)
         dialog.show()

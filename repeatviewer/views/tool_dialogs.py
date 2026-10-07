@@ -326,6 +326,13 @@ TOOL_PARAMS_FIELD_WIDTH = 260
 TOOL_PARAMS_LABEL_COLUMN_REF = "Minimum alignment length:"
 
 
+def tool_params_dialog_width(*, define_inputs: bool = False) -> int:
+    """Dialog width: 608 normally, 720 when Define-inputs path rows are shown."""
+    if define_inputs:
+        return TOOL_PARAMS_DIALOG_WIDTH_WIDE
+    return TOOL_PARAMS_DIALOG_WIDTH
+
+
 def settings_form_label_column_width(
     host: QWidget,
     forms: list[QFormLayout | None] | None = None,
@@ -1476,8 +1483,10 @@ class AlignParamsDialog(QDialog):
         mafft_form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
+        # ExpandingFieldsGrow so Define-inputs path + Browse fill the dialog width
+        # (Settings combos/spins stay fixed width and do not stretch).
         mafft_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
         mafft_form.setHorizontalSpacing(12)
         mafft_form.setVerticalSpacing(4)
@@ -1594,11 +1603,11 @@ class AlignParamsDialog(QDialog):
         self._mafft_input_selected.toggled.connect(self._sync_mafft_inputs)
         self._mafft_input_define.toggled.connect(self._sync_mafft_inputs)
         self._mafft_define_inputs.paths_changed.connect(
-            lambda: self._sync_mafft_inputs()
+            self._on_mafft_define_paths_changed
         )
         self._sync_mafft_inputs()
         mafft_tab.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
 
         self._muscle_mode = QComboBox(self)
@@ -1680,8 +1689,9 @@ class AlignParamsDialog(QDialog):
         muscle_form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
+        # Same as MAFFT: Define-inputs path rows grow; Settings stay fixed width.
         muscle_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
         muscle_form.setHorizontalSpacing(12)
         muscle_form.setVerticalSpacing(4)
@@ -1778,11 +1788,11 @@ class AlignParamsDialog(QDialog):
         self._muscle_input_selected.toggled.connect(self._sync_muscle_inputs)
         self._muscle_input_define.toggled.connect(self._sync_muscle_inputs)
         self._muscle_define_inputs.paths_changed.connect(
-            lambda: self._sync_muscle_inputs()
+            self._on_muscle_define_paths_changed
         )
         self._sync_muscle_inputs()
         muscle_tab.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
 
         self._use_system_mafft = QCheckBox(
@@ -1880,9 +1890,10 @@ class AlignParamsDialog(QDialog):
         self._options_tab = options_tab
         # Use the panel directly (no scroll area) so Advanced Settings can grow
         # the dialog height instead of disappearing into an empty viewport.
+        # Expanding horizontally so Define-inputs path rows fill like MAFFT/MUSCLE.
         self._fastga_panel.setMinimumWidth(560)
         self._fastga_panel.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         self._fastga_tab = self._fastga_panel
         self._fastga_compact_size: QSize | None = None
@@ -1983,7 +1994,7 @@ class AlignParamsDialog(QDialog):
             )
         chrome = self._dialog_chrome_height()
         height = chrome + content_h
-        width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
+        width = self._align_content_width()
         self.setMinimumHeight(0)
         self._pin_aligner_tab_height(content_h)
         self.setMaximumHeight(height)
@@ -2095,6 +2106,33 @@ class AlignParamsDialog(QDialog):
         buttons_h = self._button_box.sizeHint().height()
         return margin_h + spacing + tab_bar_h + buttons_h
 
+    def _align_needs_wide_inputs(self) -> bool:
+        """True when the active Align tab shows path rows that need width 720.
+
+        Define inputs (MAFFT / MUSCLE / FastGA), or FastGA Compare-against-a
+        reference (Reference genome path + Browse).
+        """
+        current = self._aligner_tabs.currentWidget()
+        if current is self._mafft_tab:
+            return self.mafft_input_source() == ALIGN_INPUT_DEFINE
+        if current is self._muscle_tab:
+            return self.muscle_input_source() == ALIGN_INPUT_DEFINE
+        if current is self._fastga_tab:
+            panel = self._fastga_panel
+            return (
+                panel.input_source() == FASTGA_INPUT_DEFINE
+                or panel.mode() == FASTGA_MODE_REFERENCE
+            )
+        return False
+
+    def _align_content_width(self) -> int:
+        """608 normally; 720 when Define inputs or FastGA reference mode needs path fill."""
+        width = tool_params_dialog_width(
+            define_inputs=self._align_needs_wide_inputs()
+        )
+        self.setMinimumWidth(width)
+        return width
+
     def _pin_aligner_tab_height(self, page_h: int | None) -> None:
         """Constrain the tab widget to the active page so other tabs cannot gap."""
         page = self._aligner_tabs.currentWidget()
@@ -2184,6 +2222,7 @@ class AlignParamsDialog(QDialog):
         margins = root.contentsMargins() if root is not None else None
         margin_h = (margins.top() + margins.bottom()) if margins is not None else 20
         spacing = root.spacing() if root is not None else 4
+        self._muscle_basic.ensurePolished()
         basic_h = max(
             self._muscle_basic.minimumSizeHint().height(),
             self._muscle_basic.sizeHint().height(),
@@ -2202,6 +2241,8 @@ class AlignParamsDialog(QDialog):
             # Caller may be measuring compact height; leave visibility alone when
             # the footer toggle still wants Advanced (handled by refit).
             pass
+        # Unlock prior height pins before measuring (Add Define-input rows).
+        self._pin_aligner_tab_height(None)
         root = panel.layout()
         if root is not None:
             root.invalidate()
@@ -2212,7 +2253,7 @@ class AlignParamsDialog(QDialog):
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
+        width = self._align_content_width()
 
         if not expanded:
             content_h = panel.compact_content_height()
@@ -2246,17 +2287,23 @@ class AlignParamsDialog(QDialog):
     def _resize_for_muscle_advanced(self, expanded: bool) -> None:
         panel = self._muscle_tab
         adv = self._muscle_advanced_panel
+        # Unlock prior height pins before measuring (Add Define-input rows).
+        self._pin_aligner_tab_height(None)
+        self._muscle_define_inputs.setMinimumHeight(0)
+        self._muscle_define_inputs.setMaximumHeight(16777215)
         root = panel.layout()
         if root is not None:
             root.invalidate()
             root.activate()
+        self._muscle_basic.ensurePolished()
+        self._muscle_basic.adjustSize()
         panel.updateGeometry()
         self._aligner_tabs.updateGeometry()
 
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
+        width = self._align_content_width()
 
         if not expanded:
             content_h = self._muscle_compact_content_height()
@@ -2321,17 +2368,23 @@ class AlignParamsDialog(QDialog):
     def _resize_for_mafft_advanced(self, expanded: bool) -> None:
         panel = self._mafft_tab
         adv = self._mafft_advanced_panel
+        # Unlock prior height pins before measuring (Add Define-input rows).
+        self._pin_aligner_tab_height(None)
+        self._mafft_define_inputs.setMinimumHeight(0)
+        self._mafft_define_inputs.setMaximumHeight(16777215)
         root = panel.layout()
         if root is not None:
             root.invalidate()
             root.activate()
+        self._mafft_basic.ensurePolished()
+        self._mafft_basic.adjustSize()
         panel.updateGeometry()
         self._aligner_tabs.updateGeometry()
 
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = max(self.width(), TOOL_PARAMS_DIALOG_WIDTH)
+        width = self._align_content_width()
 
         if not expanded:
             content_h = self._mafft_compact_content_height()
@@ -2447,6 +2500,13 @@ class AlignParamsDialog(QDialog):
             return expand_fastga_input_paths(self._mafft_define_inputs.paths())
         return [Path(p) for p in (panel_files or [])]
 
+    def _on_mafft_define_paths_changed(self) -> None:
+        # Defer so new rows finish layout before height is measured/pinned.
+        if not self.isVisible() or self._mafft_advanced_visible():
+            return
+        self._mafft_compact_size = None
+        QTimer.singleShot(0, lambda: self._resize_for_mafft_advanced(False))
+
     def _sync_mafft_inputs(self, *, resize: bool = True) -> None:
         define = self.mafft_input_source() == ALIGN_INPUT_DEFINE
         form = self._mafft_basic.layout()
@@ -2471,7 +2531,7 @@ class AlignParamsDialog(QDialog):
             and not self._mafft_advanced_visible()
         ):
             self._mafft_compact_size = None
-            self._resize_for_mafft_advanced(False)
+            QTimer.singleShot(0, lambda: self._resize_for_mafft_advanced(False))
 
     def _apply_mafft_path_from_panel(self, path: Path) -> bool:
         if self.mafft_input_source() != ALIGN_INPUT_DEFINE:
@@ -2506,6 +2566,13 @@ class AlignParamsDialog(QDialog):
             return expand_fastga_input_paths(self._muscle_define_inputs.paths())
         return [Path(p) for p in (panel_files or [])]
 
+    def _on_muscle_define_paths_changed(self) -> None:
+        # Defer so new rows finish layout before height is measured/pinned.
+        if not self.isVisible() or self._muscle_advanced_visible():
+            return
+        self._muscle_compact_size = None
+        QTimer.singleShot(0, lambda: self._resize_for_muscle_advanced(False))
+
     def _sync_muscle_inputs(self, *, resize: bool = True) -> None:
         define = self.muscle_input_source() == ALIGN_INPUT_DEFINE
         form = self._muscle_basic.layout()
@@ -2528,7 +2595,7 @@ class AlignParamsDialog(QDialog):
             and not self._muscle_advanced_visible()
         ):
             self._muscle_compact_size = None
-            self._resize_for_muscle_advanced(False)
+            QTimer.singleShot(0, lambda: self._resize_for_muscle_advanced(False))
 
     def _apply_muscle_path_from_panel(self, path: Path) -> bool:
         if self.muscle_input_source() != ALIGN_INPUT_DEFINE:
@@ -3646,7 +3713,7 @@ _MAFFT_MODE_HELP = (
 )
 _MAFFT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MAFFT uses the FASTA files that were "
-    "selected in the Files panel when this window opened.<br><br>"
+    "selected in the Files panel when you click Run.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
     "this run only and are not remembered next time."
 )
@@ -3709,7 +3776,7 @@ _MUSCLE_MODE_HELP = (
 )
 _MUSCLE_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MUSCLE uses the FASTA files that were "
-    "selected in the Files panel when this window opened.<br><br>"
+    "selected in the Files panel when you click Run.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
     "this run only and are not remembered next time."
 )
@@ -3740,7 +3807,7 @@ _FASTGA_MODE_HELP = (
 )
 _FASTGA_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): FastGA uses the FASTA files that were "
-    "selected in the Files panel when this window opened.<br><br>"
+    "selected in the Files panel when you click Run.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
     "this run only and are not remembered next time."
 )
@@ -3862,10 +3929,13 @@ class FastGaPanel(QWidget):
             ),
             minimum_width=280,
         )
-        # Match Threads spin width (path field only; Browse stays beside it).
-        ref_edit = self._reference.line_edit()
-        ref_edit.setFixedWidth(280)
-        ref_edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        # Expand with the dialog (same fill as Define-inputs path rows).
+        self._reference.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._reference.line_edit().setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self._combined = QCheckBox("Write all into one file", self)
         self._combined.setChecked(bool(opts.reference_combined))
 
@@ -3959,9 +4029,14 @@ class FastGaPanel(QWidget):
 
         basic = QWidget(self)
         self._basic_panel = basic
+        basic.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
         form = QFormLayout(basic)
         form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Match MAFFT/MUSCLE: Define-inputs path + Browse fill the row; fixed
+        # Settings/Output fields (280) stay put.
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(4)
@@ -3992,7 +4067,18 @@ class FastGaPanel(QWidget):
         self._mode_label = QLabel("")
         form.addRow(self._mode_label, mode_box)
         self._reference_label = QLabel("Reference genome:", basic)
-        self._reference_field = self._reference
+        # Trailing help-sized spacer matches Define-inputs rows (path/Browse align).
+        self._reference_field = QWidget(basic)
+        self._reference_field.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        ref_row = QHBoxLayout(self._reference_field)
+        ref_row.setContentsMargins(0, 0, 0, 0)
+        ref_row.setSpacing(6)
+        ref_row.addWidget(self._reference, stretch=1)
+        ref_help_spacer = QWidget(self._reference_field)
+        ref_help_spacer.setFixedSize(HELP_BUTTON_SIZE, HELP_BUTTON_SIZE)
+        ref_row.addWidget(ref_help_spacer)
         form.addRow(self._reference_label, self._reference_field)
         self._combined_field = field_with_help(
             self._combined, "Write all into one file", _FASTGA_COMBINED_HELP
@@ -4860,7 +4946,7 @@ class PanGenomeBlastListWidget(QWidget):
 
 _HMMER_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): HMMER uses the FASTA files that "
-    "were selected in the Files panel when this window opened.<br><br>"
+    "were selected in the Files panel when you click Run.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files or folders. Paths are "
     "for this run only and are not remembered next time."
 )
@@ -5001,13 +5087,14 @@ class HmmerParamsDialog(QDialog):
 
         basic = QWidget(params_tab)
         self._hmmer_basic = basic
-        basic.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        basic.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         form = QFormLayout(basic)
         form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        # Expanding so Define-inputs path + Browse fill the dialog width.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(4)
         self._hmmer_basic_form = form
@@ -5393,7 +5480,10 @@ class HmmerParamsDialog(QDialog):
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = self._DIALOG_WIDTH
+        width = tool_params_dialog_width(
+            define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
+        )
+        self.setMinimumWidth(width)
 
         if not expanded:
             height = chrome + self._hmmer_compact_content_height()
@@ -5709,7 +5799,7 @@ _KEEP_CURRENT = object()
 
 _BLAST_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): BLAST uses the FASTA files that were "
-    "selected in the Files panel when this window opened.<br><br>"
+    "selected in the Files panel when you click Run.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
     "this run only and are not remembered next time."
 )
@@ -5718,7 +5808,8 @@ _BLAST_DEFINE_INPUTS_HELP = (
     "selection.<br><br>"
     "Click a file or folder in the panel to fill a row, or use <b>Browse</b>. "
     "Paths are for this run only and are not remembered next time.<br><br>"
-    "Applies to BLASTn, BLASTp, and BLASTx (same Inputs panel on each tab)."
+    "Each BLAST tab keeps its own Define-inputs list (BLASTn, BLASTp, BLASTx, "
+    "and Online BLAST are independent)."
 )
 _BLAST_DATABASE_HELP = (
     "Subject database for the search.<br><br>"
@@ -6106,40 +6197,59 @@ class BlastParamsDialog(QDialog):
             field.setFixedWidth(260)
             field.setAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # Shared Inputs panel (below tab bar; hidden on Options — no reparenting).
+        # Shared Inputs radios; each program tab has its own Define-inputs list.
         self._input_group = QButtonGroup(self)
         self._input_selected = QRadioButton("Use selected sequences", self)
         self._input_define = QRadioButton("Define inputs", self)
         self._input_group.addButton(self._input_selected)
         self._input_group.addButton(self._input_define)
         self._input_selected.setChecked(True)
-        self._define_inputs = TeMultiInputFilesWidget(
-            self,
-            initial=None,
-            start_empty=False,
-            placeholder="Click in Files/Folders or Browse…",
-            browse_title="Choose a FASTA file",
-            file_filter=(
-                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
-            ),
-            add_button_label="Add another input",
-            add_button_tooltip=(
-                "Add another FASTA file or folder path. Click a file or folder in "
-                "the panel to fill a row, or use Browse."
-            ),
-            path_mode="file_or_directory",
+
+        def _make_blast_define_inputs() -> TeMultiInputFilesWidget:
+            return TeMultiInputFilesWidget(
+                self,
+                initial=None,
+                start_empty=False,
+                placeholder="Click in Files/Folders or Browse…",
+                browse_title="Choose a FASTA file",
+                file_filter=(
+                    "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+                ),
+                add_button_label="Add another input",
+                add_button_tooltip=(
+                    "Add another FASTA file or folder path. Click a file or folder in "
+                    "the panel to fill a row, or use Browse."
+                ),
+                path_mode="file_or_directory",
+            )
+
+        self._blastn_define_inputs = _make_blast_define_inputs()
+        self._blastp_define_inputs = _make_blast_define_inputs()
+        self._blastx_define_inputs = _make_blast_define_inputs()
+        self._online_define_inputs = _make_blast_define_inputs()
+        self._define_inputs_by_tab = (
+            self._blastn_define_inputs,
+            self._blastp_define_inputs,
+            self._blastx_define_inputs,
+            self._online_define_inputs,
         )
+        # Backward-compatible alias: active tab's widget (updated on tab change).
+        self._define_inputs = self._blastn_define_inputs
         self._input_selected.toggled.connect(self._sync_blast_inputs)
         self._input_define.toggled.connect(self._sync_blast_inputs)
-        self._define_inputs.paths_changed.connect(self._sync_blast_inputs)
+        for widget in self._define_inputs_by_tab:
+            widget.paths_changed.connect(self._on_blast_define_paths_changed)
 
         self._inputs_panel = QWidget(self)
         self._inputs_panel.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         self._inputs_form = self._parameter_form(self._inputs_panel)
         self._inputs_form.setContentsMargins(16, 10, 16, 0)
         self._inputs_form.setVerticalSpacing(4)
+        self._inputs_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
         self._inputs_form.addRow(self._blast_section("Inputs", self._inputs_panel))
         self._inputs_radios_box = QWidget(self._inputs_panel)
         inputs_radios_layout = QVBoxLayout(self._inputs_radios_box)
@@ -6164,8 +6274,17 @@ class BlastParamsDialog(QDialog):
         # Empty labels sized to Settings so radio dots line up with Database.
         self._inputs_radios_label = QLabel("")
         self._inputs_define_label = QLabel("")
+        self._define_inputs_host = QWidget(self._inputs_panel)
+        self._define_inputs_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        define_host_layout = QVBoxLayout(self._define_inputs_host)
+        define_host_layout.setContentsMargins(0, 0, 0, 0)
+        define_host_layout.setSpacing(0)
+        for widget in self._define_inputs_by_tab:
+            define_host_layout.addWidget(widget)
         self._inputs_form.addRow(self._inputs_radios_label, self._inputs_radios_box)
-        self._inputs_form.addRow(self._inputs_define_label, self._define_inputs)
+        self._inputs_form.addRow(self._inputs_define_label, self._define_inputs_host)
         self._inputs_form.addRow(_form_section_separator())
         self._sync_blast_inputs_field_column()
         self._sync_blast_inputs(resize=False)
@@ -6664,26 +6783,49 @@ class BlastParamsDialog(QDialog):
             return ALIGN_INPUT_DEFINE
         return ALIGN_INPUT_SELECTED
 
+    def _active_define_inputs(self) -> TeMultiInputFilesWidget:
+        index = self._tabs.currentIndex() if hasattr(self, "_tabs") else 0
+        if 0 <= index < len(self._define_inputs_by_tab):
+            return self._define_inputs_by_tab[index]
+        return self._blastn_define_inputs
+
+    def _on_blast_define_paths_changed(self) -> None:
+        # Only the active tab's widget should drive a height refit.
+        if self.sender() is not None and self.sender() is not self._active_define_inputs():
+            return
+        self._sync_blast_inputs()
+
     def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
         from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
 
         if self.input_source() == ALIGN_INPUT_DEFINE:
-            return expand_fastga_input_paths(self._define_inputs.paths())
+            return expand_fastga_input_paths(self._active_define_inputs().paths())
         return [Path(p) for p in (panel_files or [])]
 
     def _sync_blast_inputs(self, *, resize: bool = True) -> None:
         define = self.input_source() == ALIGN_INPUT_DEFINE
-        # Collapse the form row fully — a hidden TeMultiInputFilesWidget still
-        # reports a large sizeHint and leaves a blank gap above Settings.
+        active = self._active_define_inputs()
+        self._define_inputs = active
+        # Collapse the form row fully — a hidden host still reports a large
+        # sizeHint and leaves a blank gap above Settings.
         if hasattr(self, "_inputs_form"):
-            self._inputs_form.setRowVisible(self._define_inputs, define)
-        self._define_inputs.setVisible(define)
+            self._inputs_form.setRowVisible(self._define_inputs_host, define)
+        self._define_inputs_host.setVisible(define)
+        for widget in self._define_inputs_by_tab:
+            show = define and widget is active
+            widget.setVisible(show)
+            if show:
+                widget.setMinimumHeight(0)
+                widget.setMaximumHeight(16777215)
+            else:
+                widget.setFixedHeight(0)
+            widget.updateGeometry()
         if define:
-            self._define_inputs.setMinimumHeight(0)
-            self._define_inputs.setMaximumHeight(16777215)
+            self._define_inputs_host.setMinimumHeight(0)
+            self._define_inputs_host.setMaximumHeight(16777215)
         else:
-            self._define_inputs.setFixedHeight(0)
-        self._define_inputs.updateGeometry()
+            self._define_inputs_host.setFixedHeight(0)
+        self._define_inputs_host.updateGeometry()
         self._inputs_panel.updateGeometry()
         self._sync_blast_inputs_field_column()
         # Keep dialog height in sync when Define inputs opens/closes (Align-style).
@@ -6694,7 +6836,7 @@ class BlastParamsDialog(QDialog):
             and not self._advanced_settings_btn.isChecked()
         ):
             self._blast_compact_size = None
-            self._resize_for_blast_advanced(False)
+            QTimer.singleShot(0, lambda: self._resize_for_blast_advanced(False))
 
     def _sync_blast_inputs_field_column(self) -> None:
         """Indent Inputs radios to the Settings field column (Align-style)."""
@@ -6718,7 +6860,7 @@ class BlastParamsDialog(QDialog):
             candidate = Path(path).expanduser().resolve()
         except OSError:
             return False
-        return bool(self._define_inputs.accept_path(candidate))
+        return bool(self._active_define_inputs().accept_path(candidate))
 
     def apply_folder_from_panel(self, folder: Path) -> bool:
         if self.input_source() != ALIGN_INPUT_DEFINE:
@@ -6731,7 +6873,7 @@ class BlastParamsDialog(QDialog):
             return False
         if not candidate.is_dir():
             return False
-        return bool(self._define_inputs.accept_path(candidate))
+        return bool(self._active_define_inputs().accept_path(candidate))
 
     def _current_advanced_panel(self) -> QWidget | None:
         index = self._tabs.currentIndex()
@@ -6771,6 +6913,9 @@ class BlastParamsDialog(QDialog):
             if panel.isVisible() or panel.maximumHeight() != 0:
                 panel.setVisible(False)
                 panel.setMaximumHeight(0)
+
+        # Show this tab's Define-inputs list (independent of other BLAST tabs).
+        self._sync_blast_inputs(resize=False)
 
         # Align keeps each tab's own size; always re-fit when switching back
         # from Options (or after Advanced) so height/pin stay consistent.
@@ -6897,7 +7042,10 @@ class BlastParamsDialog(QDialog):
         chrome = self._blast_dialog_chrome_height()
         inputs_h = self._blast_inputs_height()
         page_h = self._blast_stack_page_height(expanded=expanded)
-        width = self._DIALOG_WIDTH
+        width = tool_params_dialog_width(
+            define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
+        )
+        self.setMinimumWidth(width)
 
         if not expanded:
             height = chrome + inputs_h + page_h
@@ -7113,7 +7261,8 @@ class BlastParamsDialog(QDialog):
         self._blastp_database.setCurrentIndex(0)
         self._blastx_database.setCurrentIndex(0)
         self._input_selected.setChecked(True)
-        self._define_inputs.clear_paths()
+        for widget in self._define_inputs_by_tab:
+            widget.clear_paths()
         self._sync_blast_inputs()
         self._use_system_blast.setChecked(False)
         self._show_process_window.setChecked(defaults.show_process_window)
@@ -7459,7 +7608,7 @@ _FLEXIDOT_MODE_HELP = (
 )
 _FLEXIDOT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): Flexidot uses the FASTA files that "
-    "were selected in the Files panel when this window opened.<br><br>"
+    "were selected in the Files panel when you click Run.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are "
     "for this run only and are not remembered next time."
 )
@@ -7660,14 +7809,15 @@ class FlexidotParamsDialog(QDialog):
         basic = QWidget(params_tab)
         self._flexidot_basic = basic
         basic.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         form = QFormLayout(basic)
         form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        # Expanding so Define-inputs path + Browse fill the dialog width.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(4)
 
@@ -8051,7 +8201,10 @@ class FlexidotParamsDialog(QDialog):
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = self._DIALOG_WIDTH
+        width = tool_params_dialog_width(
+            define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
+        )
+        self.setMinimumWidth(width)
 
         if not expanded:
             height = chrome + self._flexidot_compact_content_height()
@@ -8996,7 +9149,7 @@ class OrfPredictionParamsDialog(QDialog):
 
 _TEAID_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): TE-Aid uses the FASTA files that "
-    "were selected in the Files panel when this window opened.<br><br>"
+    "were selected in the Files panel when you click Run.<br><br>"
     "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are "
     "for this run only and are not remembered next time."
 )
@@ -9245,14 +9398,15 @@ class TeaAidParamsDialog(QDialog):
         basic = QWidget(params_tab)
         self._teaid_basic = basic
         basic.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         form = QFormLayout(basic)
         form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        # Expanding so Define-inputs path + Browse fill the dialog width.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(4)
 
@@ -9649,7 +9803,10 @@ class TeaAidParamsDialog(QDialog):
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = self._DIALOG_WIDTH
+        width = tool_params_dialog_width(
+            define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
+        )
+        self.setMinimumWidth(width)
 
         if not expanded:
             height = chrome + self._teaid_compact_content_height()
@@ -10576,19 +10733,35 @@ class _TeInputFileRow(QWidget):
         path_mode: str = "file",
         help_title: str = "",
         help_text: str = "",
+        path_edit_width: int | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._row = PathBrowseRow(
-            self,
-            initial=initial,
-            placeholder=placeholder,
-            browse_title=browse_title,
-            file_filter=file_filter,
-            start_dir=start_dir,
-            mode=path_mode,
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred
+            if path_edit_width is not None
+            else QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
         )
+        row_kwargs: dict = {
+            "initial": initial,
+            "placeholder": placeholder,
+            "browse_title": browse_title,
+            "file_filter": file_filter,
+            "start_dir": start_dir,
+            "mode": path_mode,
+        }
+        if path_edit_width is not None:
+            row_kwargs["minimum_width"] = path_edit_width
+        self._row = PathBrowseRow(self, **row_kwargs)
         self._path = self._row.line_edit()
+        if path_edit_width is not None:
+            self._path.setFixedWidth(path_edit_width)
+            self._path.setSizePolicy(
+                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+            )
+            self._row.setSizePolicy(
+                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+            )
         self._row.activated.connect(lambda _w: self.activated.emit(self))
         self._row.path_changed.connect(self.path_changed.emit)
 
@@ -10600,7 +10773,10 @@ class _TeInputFileRow(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(self._row, stretch=1)
+        layout.addWidget(
+            self._row,
+            stretch=0 if path_edit_width is not None else 1,
+        )
         layout.addWidget(remove_btn)
         # Keep path/Browse/Remove columns aligned: always reserve ? width.
         if help_text:
@@ -10609,6 +10785,8 @@ class _TeInputFileRow(QWidget):
             help_spacer = QWidget(self)
             help_spacer.setFixedSize(HELP_BUTTON_SIZE, HELP_BUTTON_SIZE)
             layout.addWidget(help_spacer)
+        if path_edit_width is not None:
+            layout.addStretch(1)
 
     def set_removable(self, removable: bool) -> None:
         self._remove_btn.setVisible(removable)
@@ -10635,19 +10813,26 @@ class TeMultiInputFilesWidget(QWidget):
         placeholder: str = "RepeatMasker .out or BLAST hit table",
         browse_title: str = "Select RepeatMasker .out or BLAST hit table",
         file_filter: str = "TE hit tables (*.out *_b.txt *_blast.txt);;RepeatMasker (*.out);;All files (*)",
-        add_button_label: str = "Add another TE file",
+        add_button_label: str = "Add another input",
         add_button_tooltip: str = (
-            "Add another RepeatMasker .out or BLAST hit table. "
-            "Track order in the plot matches file order: first row = top track."
+            "Add another file or folder path. Click a file or folder in the "
+            "panel to fill a row, or use Browse."
         ),
         allow_multiple: bool = True,
         start_dir: str = "",
         path_mode: str = "file",
         help_title: str = "",
         help_text: str = "",
+        path_edit_width: int | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self._path_edit_width = path_edit_width
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred
+            if path_edit_width is not None
+            else QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
         self._placeholder = placeholder
         self._browse_title = browse_title
         self._file_filter = file_filter
@@ -10705,6 +10890,7 @@ class TeMultiInputFilesWidget(QWidget):
             path_mode=self._path_mode,
             help_title=self._help_title if first_row else "",
             help_text=self._help_text if first_row else "",
+            path_edit_width=self._path_edit_width,
         )
         row.remove_requested.connect(lambda r=row: self._remove_row(r))
         row.activated.connect(self._on_row_activated)
@@ -10712,6 +10898,9 @@ class TeMultiInputFilesWidget(QWidget):
         self._rows.append(row)
         self._rows_layout.addWidget(row)
         self._refresh_remove_buttons()
+        # Unlock any height pin from a parent dialog so new rows are not crushed.
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
         self.updateGeometry()
         self._emit_paths_changed()
         if focus:
@@ -10822,14 +11011,14 @@ class TeHitTableInputWidget(QWidget):
 
 
 class GeneInputFileWidget(QWidget):
-    """Optional GFF/GTF/BED/VCF annotation path entry."""
+    """GFF/GTF/BED/VCF annotation path entry."""
 
     def __init__(self, parent: QWidget | None = None, *, initial: Path | None = None) -> None:
         super().__init__(parent)
         self._row = PathBrowseRow(
             self,
             initial=initial,
-            placeholder="Optional GFF/GTF/BED/VCF annotation",
+            placeholder="GFF/GTF/BED/VCF annotation",
             browse_title="Select annotation file",
             file_filter=(
                 "Annotations (*.gff *.gff3 *.gtf *.bed *.vcf *.vcf.gz);;All files (*)"
@@ -10863,23 +11052,53 @@ def _form_section_separator() -> QWidget:
 
 
 class AnnotationFeatureTypesWidget(QWidget):
-    """Checklist of GFF/GTF feature types (or BED intervals)."""
+    """Checklist of GFF/GTF feature types (or BED / VCF classes).
+
+    Styled like ``ChromosomeMultiSelectWidget``: bordered scroll list of
+    checkboxes plus Show all / Show none.
+    """
 
     _DEFAULT_TYPES = ("gene", "mRNA", "CDS", "exon", "transcript")
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._list = QListWidget(self)
-        self._list.setMaximumHeight(92)
-        self._list.setMinimumHeight(72)
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self._list.setToolTip(
+        self._check_boxes: list[QCheckBox] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.Shape.StyledPanel)
+        self._scroll.setFixedHeight(150)
+        self._scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._scroll.setToolTip(
             "Feature types from column 3 of GFF/GTF files. BED files use a single "
             "'interval' type. VCF files use SNP, INDEL, MNP, SV, and other variant classes."
         )
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._list)
+        self._checks_container = QWidget(self._scroll)
+        self._checks_layout = QVBoxLayout(self._checks_container)
+        self._checks_layout.setContentsMargins(6, 6, 6, 6)
+        self._checks_layout.setSpacing(4)
+        self._scroll.setWidget(self._checks_container)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(6)
+        select_all_btn = QPushButton("Show all", self)
+        select_all_btn.clicked.connect(self._check_all)
+        clear_btn = QPushButton("Show none", self)
+        clear_btn.clicked.connect(self._uncheck_all)
+        btn_row.addWidget(select_all_btn)
+        btn_row.addWidget(clear_btn)
+        btn_row.addStretch(1)
+
+        layout.addWidget(self._scroll)
+        layout.addLayout(btn_row)
+        self.setMaximumHeight(220)
         self._populate_default()
 
     def _populate_default(self) -> None:
@@ -10888,37 +11107,35 @@ class AnnotationFeatureTypesWidget(QWidget):
 
     def _set_types(self, types: list[str], *, checked: set[str] | None = None) -> None:
         prev = checked if checked is not None else {t.lower() for t in self.selected_types()}
-        self._list.clear()
+        while self._checks_layout.count():
+            item = self._checks_layout.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._check_boxes.clear()
         for feature_type in types:
-            item = QListWidgetItem(feature_type)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            state = (
-                Qt.CheckState.Checked
-                if feature_type.lower() in prev
-                else Qt.CheckState.Unchecked
-            )
-            item.setCheckState(state)
-            self._list.addItem(item)
+            cb = QCheckBox(feature_type, self._checks_container)
+            cb.setChecked(feature_type.lower() in prev)
+            self._check_boxes.append(cb)
+            self._checks_layout.addWidget(cb)
+        self._checks_layout.addStretch(1)
+
+    def _check_all(self) -> None:
+        for cb in self._check_boxes:
+            cb.setChecked(True)
+
+    def _uncheck_all(self) -> None:
+        for cb in self._check_boxes:
+            cb.setChecked(False)
 
     def selected_types(self) -> list[str]:
-        out: list[str] = []
-        for index in range(self._list.count()):
-            item = self._list.item(index)
-            if item is not None and item.checkState() == Qt.CheckState.Checked:
-                out.append(item.text())
-        return out
+        return [cb.text() for cb in self._check_boxes if cb.isChecked()]
 
     def set_checked_types(self, types: list[str]) -> None:
         want = {t.lower() for t in types if t.strip()}
-        for index in range(self._list.count()):
-            item = self._list.item(index)
-            if item is None:
-                continue
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if item.text().lower() in want
-                else Qt.CheckState.Unchecked
-            )
+        for cb in self._check_boxes:
+            cb.setChecked(cb.text().lower() in want)
 
     def refresh_from_paths(self, paths: list[Path]) -> None:
         from repeatviewer.backends.gff_features import list_feature_types_in_annotation
@@ -11059,6 +11276,17 @@ _GENOME_DENSITY_REFERENCE_HELP = (
     "file must have the same name as the chromosome name of the reference "
     "genome."
 )
+_GENOME_DENSITY_GENE_REFERENCE_HELP = (
+    "Reference genome for chromosome coordinates. "
+    "Annotation files must use the same chromosome names as this genome "
+    "(GFF/GTF <code>seqid</code>, BED chrom, or VCF <code>CHROM</code>). "
+    "Features whose chromosome is not in the reference are skipped."
+)
+_GENOME_DENSITY_METH_REFERENCE_HELP = (
+    "Reference genome for chromosome coordinates. "
+    "Bismark coverage files must use the same chromosome names as this genome "
+    "(column 1). Rows whose chromosome is not in the reference are skipped."
+)
 _GENOME_DENSITY_TE_NAMING_HELP = (
     "TE classification is recognized by the traditional naming method "
     "<code>family#order/superfamily</code>. Example: in "
@@ -11086,12 +11314,40 @@ _GENOME_DENSITY_CONSENSUS_HELP = (
     f"{_GENOME_DENSITY_TE_NAMING_HELP}"
 )
 _GENOME_DENSITY_GENE_HELP = (
-    "GFF, GTF, BED, or VCF gene/annotation file. Each file is drawn on its "
-    "own track below TE tracks."
+    "GFF, GTF, BED, or VCF annotation file. Each file is drawn on its own "
+    "track below TE tracks.<br><br>"
+    "<b>Chromosome names must match the reference genome</b> (seqid / chrom / "
+    "VCF <code>CHROM</code>). Features whose chromosome is not in the reference "
+    "are skipped and will not appear on the map.<br><br>"
+    "<b>VCF</b>: each variant becomes an interval from <code>POS</code> through "
+    "the REF allele length. Variants are classified as <b>SNP</b>, <b>INDEL</b>, "
+    "<b>MNP</b>, <b>SV</b> (symbolic <code>&lt;…&gt;</code> alts), or other. Use "
+    "<b>Display content</b> to choose which classes to plot (same density "
+    "binning as GFF/BED features)."
 )
 _GENOME_DENSITY_METHYLATION_HELP = (
     "Bismark coverage (.cov / .cov.gz). Each file adds coverage and "
-    "methylation tracks per chromosome."
+    "methylation tracks per chromosome.<br><br>"
+    "<b>Chromosome names must match the reference genome</b> "
+    "(column 1). Rows whose chromosome is not in the reference are skipped."
+    "<br><br>"
+    "Tab-separated columns: chrom, start, end, % methylation, count methylated, "
+    "count unmethylated. Example:<br>"
+    "<code>chr1&nbsp;&nbsp;1000&nbsp;&nbsp;1000&nbsp;&nbsp;75.0&nbsp;&nbsp;3&nbsp;&nbsp;1</code>"
+)
+_GENOME_DENSITY_METH_COVERAGE_MIN_HELP = (
+    "Minimum read depth at a cytosine site for it to be used "
+    "(methylated + unmethylated counts in the .cov file). Sites below this "
+    "threshold are ignored when building methylation tracks.<br><br>"
+    "Example: with min = 5, a site with 3 + 1 = 4 reads is dropped; "
+    "3 + 2 = 5 reads is kept."
+)
+_GENOME_DENSITY_METH_DIFF_HELP = (
+    "When exactly two Bismark coverage files are provided, add a per-chromosome "
+    "difference track comparing methylation level "
+    "(first file above the axis, second file below). "
+    "File order follows the Inputs list top to bottom.<br><br>"
+    "Enabled only when exactly two methylation files are provided."
 )
 _GENOME_DENSITY_Y_AXIS_HELP = (
     "<b>Total TE length (bp) per window</b>: sum of TE bases overlapping each "
@@ -11099,6 +11355,10 @@ _GENOME_DENSITY_Y_AXIS_HELP = (
     "Y = 12000.<br><br>"
     "<b>TE hits number per window</b>: count of TE hits overlapping each "
     "window. Example: the same window with 40 TE hits → Y = 40."
+)
+_GENOME_DENSITY_SPLIT_STRAND_HELP = (
+    "Draw separate forward- and reverse-strand tracks per chromosome for "
+    "RepeatMasker .out TE hits and for GFF/GTF/BED/VCF annotation features."
 )
 _GENOME_DENSITY_COLLAPSE_OVERLAPS_HELP = (
     "For <b>Total TE length (bp) per window</b>, count each base pair at most "
@@ -11183,15 +11443,29 @@ class TeDensityPlotDialog(QDialog):
         self._te_density_compact_size: QSize | None = None
 
         genome_selected = (self._opts.genome_path or "").strip() or None
-        self._genome_row = GenomeBlastDatabaseRow(
-            self,
-            project=project,
-            project_genome=self._project_genome,
-            selected_path=genome_selected,
-            manage_title="Manage Database",
-            help_title="Reference genome",
-            help_text=_GENOME_DENSITY_REFERENCE_HELP,
+
+        def _make_genome_row(help_text: str) -> GenomeBlastDatabaseRow:
+            return GenomeBlastDatabaseRow(
+                self,
+                project=project,
+                project_genome=self._project_genome,
+                selected_path=genome_selected,
+                manage_title="Manage Database",
+                help_title="Reference genome",
+                help_text=help_text,
+            )
+
+        # Same reference on TE / Gene / Methylation — change one, update all.
+        self._genome_row_te = _make_genome_row(_GENOME_DENSITY_REFERENCE_HELP)
+        self._genome_row_ann = _make_genome_row(_GENOME_DENSITY_GENE_REFERENCE_HELP)
+        self._genome_row_meth = _make_genome_row(_GENOME_DENSITY_METH_REFERENCE_HELP)
+        self._genome_rows = (
+            self._genome_row_te,
+            self._genome_row_ann,
+            self._genome_row_meth,
         )
+        self._genome_row = self._genome_row_te
+        self._syncing_genome_rows = False
 
         masking_initial: list[Path] | None = None
         if input_file is not None:
@@ -11224,20 +11498,21 @@ class TeDensityPlotDialog(QDialog):
         )
         self._gene_input = TeMultiInputFilesWidget(
             self,
-            placeholder="Optional GFF/GTF/BED/VCF annotation",
-            browse_title="Select gene annotation file",
+            placeholder="GFF/GTF/BED/VCF annotation",
+            browse_title="Select annotation file",
             file_filter="Annotations (*.gff *.gff3 *.gtf *.bed *.vcf *.vcf.gz);;All files (*)",
-            add_button_label="Add another gene file",
+            add_button_label="Add another annotation file",
             add_button_tooltip=(
-                "Add another GFF, GTF, BED, or VCF gene annotation file. "
-                "Each file is drawn on its own track below TE tracks."
+                "Add another GFF, GTF, BED, or VCF annotation file. "
+                "Each file is drawn on its own track below TE tracks. "
+                "Chromosome names must match the reference genome."
             ),
-            help_title="Gene file",
+            help_title="Annotation files",
             help_text=_GENOME_DENSITY_GENE_HELP,
         )
         self._methylation_input = TeMultiInputFilesWidget(
             self,
-            placeholder="Optional Bismark coverage (.cov / .cov.gz)",
+            placeholder="Bismark coverage (.cov / .cov.gz)",
             browse_title="Select Bismark coverage file",
             file_filter=(
                 "Bismark coverage (*.cov *.cov.gz *bismark*.cov*);;All files (*)"
@@ -11246,7 +11521,8 @@ class TeDensityPlotDialog(QDialog):
             add_button_tooltip=(
                 "Add another Bismark coverage file. Each file adds four tracks per "
                 "chromosome: total (genome), covered (.cov lines), covered fraction, "
-                "and methylation level (0–1)."
+                "and methylation level (0–1). Chromosome names must match the "
+                "reference genome."
             ),
             help_title="Methylation file",
             help_text=_GENOME_DENSITY_METHYLATION_HELP,
@@ -11291,16 +11567,8 @@ class TeDensityPlotDialog(QDialog):
         self._methylation_coverage_min = QSpinBox(self)
         self._methylation_coverage_min.setRange(1, 10_000)
         self._methylation_coverage_min.setValue(max(1, int(self._opts.methylation_coverage_min)))
-        self._methylation_coverage_min.setToolTip(
-            "Reserved for future filtering. Covered tracks count every line in the "
-            "Bismark .cov file whose position falls in each window."
-        )
         self._split_strand = QCheckBox("Separate forward / reverse strands", self)
         self._split_strand.setChecked(bool(self._opts.split_strand_tracks))
-        self._split_strand.setToolTip(
-            "Draw separate forward- and reverse-strand tracks per chromosome for "
-            "RepeatMasker .out TE hits and for GFF/GTF/BED/VCF annotation features."
-        )
         self._collapse_overlaps = QCheckBox("Collapse overlapped TEs", self)
         self._collapse_overlaps.setChecked(bool(self._opts.collapse_overlaps))
         self._show_te_diff = QCheckBox("Show TE difference track (2 TE sources)", self)
@@ -11309,10 +11577,6 @@ class TeDensityPlotDialog(QDialog):
             "Show methylation difference track (2 methylation files)", self
         )
         self._show_meth_diff.setChecked(bool(self._opts.show_meth_diff_track))
-        self._show_meth_diff.setToolTip(
-            "When two Bismark coverage files are provided, add a diff track per "
-            "chromosome comparing methylation level (first file above axis, second below)."
-        )
 
         self._annotation_density = QComboBox(self)
         self._annotation_density.addItem(
@@ -11367,7 +11631,8 @@ class TeDensityPlotDialog(QDialog):
             "Each chromosome is one row in the map. Many small scaffolds are slower "
             "than a few large ones — set a minimum size (Mb) and click Confirm."
         )
-        self._genome_row.selection_changed.connect(self._on_reference_genome_changed)
+        for row in self._genome_rows:
+            row.selection_changed.connect(self._on_genome_row_changed)
 
         def _section(title: str, parent: QWidget | None = None) -> QLabel:
             return QLabel(f"<b>{title}</b>", parent)
@@ -11378,17 +11643,18 @@ class TeDensityPlotDialog(QDialog):
             form.setLabelAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
-            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+            # Expanding so path + Browse rows fill the dialog width.
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
             form.setHorizontalSpacing(12)
             form.setVerticalSpacing(4)
             return form
 
         # --- TE track page -------------------------------------------------
         te_page = QWidget(self)
-        te_page.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        te_page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         te_form = _make_form(te_page)
         te_form.addRow(_section("Inputs", te_page))
-        te_form.addRow("Reference genome:", self._genome_row)
+        te_form.addRow("Reference genome:", self._genome_row_te)
         te_form.addRow("TE masking file:", self._masking_input)
         te_form.addRow("TE consensus file:", self._consensus_input)
         te_form.addRow(_form_section_separator())
@@ -11412,7 +11678,14 @@ class TeDensityPlotDialog(QDialog):
         self._split_spacer = QLabel("")
         self._collapse_spacer = QLabel("")
         self._te_diff_spacer = QLabel("")
-        te_form.addRow(self._split_spacer, self._split_strand)
+        te_form.addRow(
+            self._split_spacer,
+            field_with_help(
+                self._split_strand,
+                "Separate forward / reverse strands",
+                _GENOME_DENSITY_SPLIT_STRAND_HELP,
+            ),
+        )
         te_form.addRow(
             self._collapse_spacer,
             field_with_help(
@@ -11434,10 +11707,11 @@ class TeDensityPlotDialog(QDialog):
 
         # --- Gene track page -----------------------------------------------
         ann_page = QWidget(self)
-        ann_page.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        ann_page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         ann_form = _make_form(ann_page)
         ann_form.addRow(_section("Inputs", ann_page))
-        ann_form.addRow("Gene file:", self._gene_input)
+        ann_form.addRow("Reference genome:", self._genome_row_ann)
+        ann_form.addRow("Annotation files:", self._gene_input)
         ann_form.addRow(_form_section_separator())
         ann_form.addRow(_section("Settings", ann_page))
         ann_form.addRow(
@@ -11453,9 +11727,10 @@ class TeDensityPlotDialog(QDialog):
 
         # --- Methylation track page ----------------------------------------
         meth_page = QWidget(self)
-        meth_page.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        meth_page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         meth_form = _make_form(meth_page)
         meth_form.addRow(_section("Inputs", meth_page))
+        meth_form.addRow("Reference genome:", self._genome_row_meth)
         meth_form.addRow("Methylation file:", self._methylation_input)
         meth_form.addRow(_form_section_separator())
         meth_form.addRow(_section("Settings", meth_page))
@@ -11466,9 +11741,21 @@ class TeDensityPlotDialog(QDialog):
             ),
         )
         self._meth_diff_spacer = QLabel("")
-        meth_form.addRow(self._meth_diff_spacer, self._show_meth_diff)
         meth_form.addRow(
-            "Methylation coverage min:", self._methylation_coverage_min
+            "Methylation coverage min:",
+            field_with_help(
+                self._methylation_coverage_min,
+                "Methylation coverage min",
+                _GENOME_DENSITY_METH_COVERAGE_MIN_HELP,
+            ),
+        )
+        meth_form.addRow(
+            self._meth_diff_spacer,
+            field_with_help(
+                self._show_meth_diff,
+                "Show methylation difference track",
+                _GENOME_DENSITY_METH_DIFF_HELP,
+            ),
         )
         self._meth_page = meth_page
         self._meth_form = meth_form
@@ -11517,7 +11804,9 @@ class TeDensityPlotDialog(QDialog):
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         advanced_layout = QVBoxLayout(advanced)
-        advanced_layout.setContentsMargins(0, 4, 0, 0)
+        # Match tab-page wrap margins (16) so Advanced labels/fields line up
+        # with Inputs / Settings inside the tabs.
+        advanced_layout.setContentsMargins(16, 4, 16, 0)
         advanced_layout.setSpacing(6)
         advanced_layout.addWidget(_form_section_separator())
         advanced_layout.addWidget(_section("Advanced Settings", advanced))
@@ -11574,7 +11863,7 @@ class TeDensityPlotDialog(QDialog):
 
         def _wrap_page(page: QWidget) -> QWidget:
             wrap = QWidget(self)
-            wrap.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+            wrap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
             wrap_layout = QVBoxLayout(wrap)
             wrap_layout.setContentsMargins(16, 10, 16, 10)
             wrap_layout.setSpacing(4)
@@ -11640,6 +11929,7 @@ class TeDensityPlotDialog(QDialog):
             self._last_track_tab = open_tab
         self._masking_input.paths_changed.connect(self._sync_te_option_checkboxes)
         self._consensus_input.paths_changed.connect(self._sync_te_option_checkboxes)
+        self._methylation_input.paths_changed.connect(self._sync_te_option_checkboxes)
         self._density.currentIndexChanged.connect(self._sync_te_option_checkboxes)
         self._sync_te_option_checkboxes()
         self._sync_field_column()
@@ -11647,11 +11937,15 @@ class TeDensityPlotDialog(QDialog):
         QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
 
     def _sync_te_option_checkboxes(self) -> None:
-        """Grey TE options that do not apply to the current inputs / Y axis."""
+        """Grey TE / methylation options that do not apply to current inputs."""
         te_sources = len(self._masking_input.paths()) + len(
             self._consensus_input.paths()
         )
         self._show_te_diff.setEnabled(te_sources == 2)
+        meth_files = len(self._methylation_input.paths())
+        self._show_meth_diff.setEnabled(meth_files == 2)
+        if meth_files != 2:
+            self._show_meth_diff.setChecked(False)
         length_mode = (
             str(self._density.currentData()) == TE_GENOME_MAP_DENSITY_TE_LENGTH
         )
@@ -11724,6 +12018,8 @@ class TeDensityPlotDialog(QDialog):
         # only if the idle warm-up has not finished yet.
         self._set_advanced_visible(checked)
         self._resize_for_advanced(checked)
+        if checked:
+            self._sync_field_column()
         if checked and not self._chrom_picker._populated:
             QTimer.singleShot(0, self._finish_advanced_chrom_populate)
 
@@ -11926,7 +12222,13 @@ class TeDensityPlotDialog(QDialog):
         sort_idx = self._chromosome_sort.findData(defaults.chromosome_sort)
         if sort_idx >= 0:
             self._chromosome_sort.setCurrentIndex(sort_idx)
-        self._genome_row.reset_to_default()
+        self._syncing_genome_rows = True
+        try:
+            for row in self._genome_rows:
+                row.reset_to_default()
+        finally:
+            self._syncing_genome_rows = False
+        self._genome_row = self._genome_row_te
         self._chrom_picker.set_chromosome_sort(defaults.chromosome_sort)
         self._reload_chromosomes_for_reference()
         self._plot_all_together.setChecked(defaults.plot_all_tracks_together)
@@ -12017,6 +12319,32 @@ class TeDensityPlotDialog(QDialog):
             return self._project_genome
         path = Path(raw).expanduser().resolve()
         return path if path.is_file() else self._project_genome
+
+    def _on_genome_row_changed(self) -> None:
+        """Keep TE / Gene / Methylation Reference genome combos in lockstep."""
+        if self._syncing_genome_rows:
+            return
+        sender = self.sender()
+        if not isinstance(sender, GenomeBlastDatabaseRow):
+            return
+        data = sender._combo.currentData()
+        # refresh(None) means "keep current"; pass project genome / "" for reference.
+        if data is None:
+            sync_path: str | None = (
+                str(self._project_genome) if self._project_genome is not None else ""
+            )
+        else:
+            sync_path = str(data)
+        self._syncing_genome_rows = True
+        try:
+            for row in self._genome_rows:
+                if row is sender:
+                    continue
+                row.refresh(selected_path=sync_path)
+            self._genome_row = sender
+        finally:
+            self._syncing_genome_rows = False
+        self._on_reference_genome_changed()
 
     def _on_reference_genome_changed(self) -> None:
         if not self.isVisible():
@@ -12438,20 +12766,21 @@ class MsaPlotDialog(QDialog):
 
         root = QWidget(self)
         self._msa_root = root
-        root.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        root.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(16, 10, 16, 10)
         root_layout.setSpacing(4)
 
         basic = QWidget(root)
         self._msa_basic = basic
-        basic.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        basic.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         form = QFormLayout(basic)
         form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        # Expanding so Define-inputs path + Browse fill the dialog width.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(4)
 
@@ -12680,7 +13009,10 @@ class MsaPlotDialog(QDialog):
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         chrome = self._dialog_chrome_height()
-        width = self._DIALOG_WIDTH
+        width = tool_params_dialog_width(
+            define_inputs=self.input_source() == ALIGN_INPUT_DEFINE
+        )
+        self.setMinimumWidth(width)
 
         if not expanded:
             height = chrome + self._msa_compact_content_height()

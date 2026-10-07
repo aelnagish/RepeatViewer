@@ -78,10 +78,11 @@ from repeatviewer.views.tool_dialogs import (
     set_named_executable_status,
     set_path_checkbox_status,
     sync_form_field_column_spacers,
+    tool_params_dialog_width,
     system_path_executable_label,
 )
 from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
-from repeatviewer.widgets.help_button import field_with_help
+from repeatviewer.widgets.help_button import HELP_BUTTON_SIZE, field_with_help
 from repeatviewer.widgets.path_browse import PathBrowseRow
 from repeatviewer.widgets.spin_boxes import NoWheelSpinBox as QSpinBox
 
@@ -245,6 +246,13 @@ class MapReferenceDialog(QDialog):
             browse_title="Choose the reference FASTA",
             file_filter="FASTA (*.fa *.fasta *.fna *.fas *.fa.gz *.fasta.gz);;All files (*)",
         )
+        # Expand with the dialog (same fill as Define-inputs / FastGA reference).
+        self._reference.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._reference.line_edit().setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
 
         self._input_group = QButtonGroup(self)
         self._input_selected = QRadioButton("Use selected sequences", self)
@@ -252,21 +260,35 @@ class MapReferenceDialog(QDialog):
         self._input_group.addButton(self._input_selected)
         self._input_group.addButton(self._input_define)
         self._input_selected.setChecked(True)
-        self._define_inputs = TeMultiInputFilesWidget(
-            self,
-            initial=None,
-            allow_multiple=True,
-            start_empty=False,
-            placeholder="Query FASTA / FASTQ (.fa / .fq / .gz)",
-            browse_title="Choose query files",
-            file_filter=(
-                "Sequence (*.fa *.fasta *.fna *.fas *.fq *.fastq "
-                "*.fa.gz *.fasta.gz *.fq.gz *.fastq.gz);;All files (*)"
-            ),
-            path_mode="file",
-        )
+
+        def _make_map_define_inputs() -> TeMultiInputFilesWidget:
+            return TeMultiInputFilesWidget(
+                self,
+                initial=None,
+                allow_multiple=True,
+                start_empty=False,
+                placeholder="Query FASTA / FASTQ (.fa / .fq / .gz)",
+                browse_title="Choose query files",
+                file_filter=(
+                    "Sequence (*.fa *.fasta *.fna *.fas *.fq *.fastq "
+                    "*.fa.gz *.fasta.gz *.fq.gz *.fastq.gz);;All files (*)"
+                ),
+                path_mode="file",
+                add_button_label="Add another input",
+                add_button_tooltip=(
+                    "Add another FASTA / FASTQ file. Click a file in the panel "
+                    "to fill a row, or use Browse."
+                ),
+            )
+
+        # Independent Define-inputs lists for Minimap2 and HISAT2.
+        self._mm_define_inputs = _make_map_define_inputs()
+        self._hs_define_inputs = _make_map_define_inputs()
+        self._define_inputs = self._mm_define_inputs
         self._input_selected.toggled.connect(self._sync_inputs)
         self._input_define.toggled.connect(self._sync_inputs)
+        self._mm_define_inputs.paths_changed.connect(self._on_define_paths_changed)
+        self._hs_define_inputs.paths_changed.connect(self._on_define_paths_changed)
 
         self._hisat2_library = QComboBox(self)
         for label, value in (
@@ -464,11 +486,11 @@ class MapReferenceDialog(QDialog):
         ):
             field.setFixedWidth(120)
 
-        # --- engine page (shared Inputs; Settings/Advanced swap by tab) ------
+        # --- engine page (shared radios/Reference; per-engine Define inputs) -
         engine_page = QWidget(self)
         self._engine_page = engine_page
         engine_page.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         engine_root = QVBoxLayout(engine_page)
         engine_root.setContentsMargins(16, 10, 16, 10)
@@ -477,7 +499,7 @@ class MapReferenceDialog(QDialog):
 
         basic = QWidget(engine_page)
         self._engine_basic = basic
-        basic.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        basic.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         form = QFormLayout(basic)
         form.setContentsMargins(0, 0, 0, 0)
         form.setLabelAlignment(
@@ -505,9 +527,30 @@ class MapReferenceDialog(QDialog):
         # Empty labels sized to Settings so radio dots line up with Map mode.
         self._inputs_radios_label = QLabel("")
         self._inputs_define_label = QLabel("")
+        self._define_inputs_host = QWidget(basic)
+        self._define_inputs_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        define_host_layout = QVBoxLayout(self._define_inputs_host)
+        define_host_layout.setContentsMargins(0, 0, 0, 0)
+        define_host_layout.setSpacing(0)
+        define_host_layout.addWidget(self._mm_define_inputs)
+        define_host_layout.addWidget(self._hs_define_inputs)
         form.addRow(self._inputs_radios_label, inputs_box)
-        form.addRow(self._inputs_define_label, self._define_inputs)
-        form.addRow("Reference:", self._reference)
+        form.addRow(self._inputs_define_label, self._define_inputs_host)
+        # Trailing help-sized spacer matches Define-inputs rows (Browse X align).
+        self._reference_field = QWidget(basic)
+        self._reference_field.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        ref_row = QHBoxLayout(self._reference_field)
+        ref_row.setContentsMargins(0, 0, 0, 0)
+        ref_row.setSpacing(6)
+        ref_row.addWidget(self._reference, stretch=1)
+        ref_help_spacer = QWidget(self._reference_field)
+        ref_help_spacer.setFixedSize(HELP_BUTTON_SIZE, HELP_BUTTON_SIZE)
+        ref_row.addWidget(ref_help_spacer)
+        form.addRow("Reference:", self._reference_field)
 
         form.addRow(_form_section_separator())
         form.addRow(_section("Settings"))
@@ -831,6 +874,8 @@ class MapReferenceDialog(QDialog):
             if self.isVisible():
                 self._fit_options()
             return
+        # Swap which engine's Define-inputs list is shown.
+        self._sync_inputs(resize=False)
         if self.isVisible():
             self._resize_for_advanced(self._advanced_settings_btn.isChecked())
 
@@ -947,18 +992,46 @@ class MapReferenceDialog(QDialog):
             # Sensible PAF defaults for the contig view.
             self._mm_cigar.setChecked(True)
             self._mm_cs.setChecked(True)
+    def _active_define_inputs(self) -> TeMultiInputFilesWidget:
+        if self._tab_bar.currentIndex() == self._TAB_HISAT2:
+            return self._hs_define_inputs
+        return self._mm_define_inputs
+
+    def _on_define_paths_changed(self) -> None:
+        # Ignore path changes from the hidden engine's widget.
+        if self.sender() is not None and self.sender() is not self._active_define_inputs():
+            return
+        if (
+            self.isVisible()
+            and self._tab_bar.currentIndex() != self._TAB_OPTIONS
+            and not self._advanced_settings_btn.isChecked()
+        ):
+            self._engine_compact_size = None
+            QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
+
     def _sync_inputs(self, *, resize: bool = True) -> None:
         define = self._input_define.isChecked()
+        active = self._active_define_inputs()
+        self._define_inputs = active
         form = self._engine_basic.layout()
         if isinstance(form, QFormLayout):
-            form.setRowVisible(self._define_inputs, define)
-        self._define_inputs.setVisible(define)
+            form.setRowVisible(self._define_inputs_host, define)
+        self._define_inputs_host.setVisible(define)
+        for widget in (self._mm_define_inputs, self._hs_define_inputs):
+            show = define and widget is active
+            widget.setVisible(show)
+            if show:
+                widget.setMinimumHeight(0)
+                widget.setMaximumHeight(16777215)
+            else:
+                widget.setFixedHeight(0)
+            widget.updateGeometry()
         if define:
-            self._define_inputs.setMinimumHeight(0)
-            self._define_inputs.setMaximumHeight(16777215)
+            self._define_inputs_host.setMinimumHeight(0)
+            self._define_inputs_host.setMaximumHeight(16777215)
         else:
-            self._define_inputs.setFixedHeight(0)
-        self._define_inputs.updateGeometry()
+            self._define_inputs_host.setFixedHeight(0)
+        self._define_inputs_host.updateGeometry()
         self._engine_basic.updateGeometry()
         self._sync_field_column()
         if (
@@ -968,7 +1041,7 @@ class MapReferenceDialog(QDialog):
             and not self._advanced_settings_btn.isChecked()
         ):
             self._engine_compact_size = None
-            self._resize_for_advanced(False)
+            QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
 
     def _set_advanced_visible(self, visible: bool) -> None:
         panel = self._advanced_panel
@@ -1029,11 +1102,23 @@ class MapReferenceDialog(QDialog):
         if self._tab_bar.currentIndex() == self._TAB_OPTIONS:
             self._fit_options()
             return
+        # Clear prior height pins so newly added Define-input rows can grow.
+        self._stack.setMaximumHeight(16777215)
+        self._engine_page.setMaximumHeight(16777215)
+        self._define_inputs_host.setMaximumHeight(16777215)
+        active = self._active_define_inputs()
+        if self._input_define.isChecked():
+            active.setMinimumHeight(0)
+            active.setMaximumHeight(16777215)
         self._engine_page.ensurePolished()
         self._engine_basic.ensurePolished()
+        self._engine_basic.adjustSize()
         content_h = self._engine_page_height(expanded=expanded)
         chrome = self._dialog_chrome_height()
-        width = self._DIALOG_WIDTH
+        width = tool_params_dialog_width(
+            define_inputs=self._input_define.isChecked()
+        )
+        self.setMinimumWidth(width)
         screen = self.screen().availableGeometry() if self.screen() else None
         max_h = screen.height() - 40 if screen is not None else 10_000
         height = min(max(chrome + content_h, 200), max_h)
@@ -1073,7 +1158,8 @@ class MapReferenceDialog(QDialog):
     def _restore_defaults(self) -> None:
         d = MapOptions()
         self._input_selected.setChecked(True)
-        self._define_inputs.clear_paths()
+        self._mm_define_inputs.clear_paths()
+        self._hs_define_inputs.clear_paths()
         self._set_combo(self._hisat2_library, d.hisat2_library)
         self._set_combo(self._hisat2_reads, d.hisat2_reads)
         self._set_combo(self._hisat2_strand, d.hisat2_strandness)
@@ -1125,7 +1211,7 @@ class MapReferenceDialog(QDialog):
 
     def run_files(self, *, panel_files: list[Path] | None = None) -> list[Path]:
         if self.input_source() == ALIGN_INPUT_DEFINE:
-            return self._define_inputs.paths()
+            return self._active_define_inputs().paths()
         return [Path(p) for p in (panel_files if panel_files is not None else self._panel_files)]
 
     def files(self) -> list[Path]:
@@ -1137,7 +1223,7 @@ class MapReferenceDialog(QDialog):
         if not resolved.is_file():
             return False
         if self.input_source() == ALIGN_INPUT_DEFINE:
-            return bool(self._define_inputs.accept_path(resolved))
+            return bool(self._active_define_inputs().accept_path(resolved))
         if not _is_fasta(resolved):
             return False
         self._reference.set_path(resolved)

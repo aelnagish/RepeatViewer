@@ -312,6 +312,51 @@ def test_align_window_has_a_fastga_tab_and_follows_the_rules(qapp, tmp_path):
     assert dlg.selected_aligner() == ALIGNER_MAFFT  # right-click choice
 
 
+def test_mafft_and_muscle_define_inputs_rows_keep_height_after_add(qapp, tmp_path):
+    """Add another input must grow the dialog — not squeeze path/Browse rows."""
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    dlg, _files = _align_dialog(qapp, tmp_path)
+    dlg.show()
+    qapp.processEvents()
+    tabs = dlg.findChild(QTabWidget)
+
+    for tab_index, define_radio, widget, resize in (
+        (
+            0,
+            dlg._mafft_input_define,
+            dlg._mafft_define_inputs,
+            dlg._resize_for_mafft_advanced,
+        ),
+        (
+            1,
+            dlg._muscle_input_define,
+            dlg._muscle_define_inputs,
+            dlg._resize_for_muscle_advanced,
+        ),
+    ):
+        tabs.setCurrentIndex(tab_index)
+        define_radio.setChecked(True)
+        qapp.processEvents()
+        resize(False)
+        qapp.processEvents()
+        assert len(widget._rows) == 1
+        before = widget._rows[0]._path.height()
+        assert before >= 20
+        widget.add_row(focus=True)
+        # Drain deferred refit (paths_changed → QTimer.singleShot(0, …)).
+        loop = QEventLoop()
+        QTimer.singleShot(0, loop.quit)
+        loop.exec()
+        qapp.processEvents()
+        assert len(widget._rows) == 2
+        h0 = widget._rows[0]._path.height()
+        h1 = widget._rows[1]._path.height()
+        assert h0 >= before - 2, (tab_index, h0, before)
+        assert h1 >= before - 2, (tab_index, h1, before)
+        assert abs(h0 - h1) <= 2
+
+
 def test_align_dialog_reopens_last_tab(qapp, tmp_path):
     from repeatviewer.job_options import AlignOptions, DIALOG_TAB_OPTIONS
 
@@ -331,6 +376,7 @@ def test_align_dialog_reopens_last_tab(qapp, tmp_path):
 def test_fastga_reference_path_matches_define_inputs_width(qapp, tmp_path):
     """Reference genome path box / Browse must match Define-inputs width."""
     from repeatviewer.job_options import FASTGA_INPUT_DEFINE
+    from repeatviewer.views.tool_dialogs import TOOL_PARAMS_DIALOG_WIDTH_WIDE
 
     ref = tmp_path / "ref.fa"
     ref.write_text(">x\nACGT\n")
@@ -361,6 +407,35 @@ def test_fastga_reference_path_matches_define_inputs_width(qapp, tmp_path):
         ref_browse.mapTo(dlg, ref_browse.rect().topLeft()).x()
         - define_browse.mapTo(dlg, define_browse.rect().topLeft()).x()
     ) <= 2
+
+
+def test_fastga_reference_mode_widens_dialog_like_define_inputs(qapp, tmp_path):
+    """Compare against a reference uses the same 720 width as Define inputs."""
+    from repeatviewer.job_options import FASTGA_MODE_SELF
+    from repeatviewer.views.tool_dialogs import (
+        TOOL_PARAMS_DIALOG_WIDTH,
+        TOOL_PARAMS_DIALOG_WIDTH_WIDE,
+    )
+
+    dlg, _files = _align_dialog(qapp, tmp_path, initial_tab=ALIGNER_FASTGA)
+    dlg.show()
+    qapp.processEvents()
+    panel = dlg.fastga_panel()
+    panel._mode_buttons[FASTGA_MODE_SELF].setChecked(True)
+    panel._input_selected.setChecked(True)
+    panel._sync()
+    qapp.processEvents()
+    dlg._resize_for_fastga_advanced(False)
+    qapp.processEvents()
+    assert dlg.width() == TOOL_PARAMS_DIALOG_WIDTH
+
+    panel._mode_buttons[FASTGA_MODE_REFERENCE].setChecked(True)
+    panel._sync()
+    qapp.processEvents()
+    dlg._resize_for_fastga_advanced(False)
+    qapp.processEvents()
+    assert dlg.width() == TOOL_PARAMS_DIALOG_WIDTH_WIDE
+    assert dlg._align_needs_wide_inputs() is True
 
 
 def test_files_panel_click_fills_the_reference_only_in_reference_mode(qapp, tmp_path):

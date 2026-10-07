@@ -66,21 +66,40 @@ def test_blast_dialog_align_style_sections_and_footer(qapp: QApplication) -> Non
     content_bottom = dlg._stack.geometry().bottom()
     buttons_top = dlg._button_box.geometry().top()
     assert buttons_top - content_bottom <= 20
-    # Shared Inputs panel stays put; visible on program tabs, hidden on Options.
+    # Shared Inputs radios; each program tab has its own Define-inputs widget.
     dlg._tabs.setCurrentIndex(0)
     assert dlg._inputs_panel.isVisible()
     assert dlg._inputs_radios_box.parent() is dlg._inputs_panel
-    assert dlg._define_inputs.parent() is dlg._inputs_panel
+    assert dlg._define_inputs_host.parent() is dlg._inputs_panel
+    assert dlg._active_define_inputs() is dlg._blastn_define_inputs
     dlg._tabs.setCurrentIndex(1)
     assert dlg._inputs_panel.isVisible()
     assert dlg._inputs_radios_box.parent() is dlg._inputs_panel
+    assert dlg._active_define_inputs() is dlg._blastp_define_inputs
     # Online BLAST: Inputs visible, no Advanced Settings.
     dlg._tabs.setCurrentIndex(3)
     assert dlg._inputs_panel.isVisible()
     assert dlg._advanced_settings_btn.isHidden()
+    assert dlg._active_define_inputs() is dlg._online_define_inputs
     dlg._tabs.setCurrentIndex(4)
     assert dlg._inputs_panel.isHidden()
     assert dlg._advanced_settings_btn.isHidden()
+
+
+def test_blast_define_inputs_are_independent_per_tab(qapp: QApplication) -> None:
+    dlg = _blast_dialog(qapp)
+    dlg._input_define.setChecked(True)
+    dlg._sync_blast_inputs()
+    assert len(dlg._blastn_define_inputs._rows) == 1
+    assert len(dlg._blastp_define_inputs._rows) == 1
+    dlg._blastn_define_inputs.add_row(focus=True)
+    assert len(dlg._blastn_define_inputs._rows) == 2
+    assert len(dlg._blastp_define_inputs._rows) == 1
+    dlg._tabs.setCurrentIndex(1)
+    dlg._sync_blast_inputs()
+    assert dlg._active_define_inputs() is dlg._blastp_define_inputs
+    assert len(dlg._active_define_inputs()._rows) == 1
+    assert dlg._blastn_define_inputs._add_btn.text() == "Add another input"
 
 
 def test_blast_options_process_output_stays_compact_after_program_tab(
@@ -132,7 +151,7 @@ def test_blast_define_inputs_are_session_only_and_fill_from_panel(
 
     dlg._input_define.setChecked(True)
     assert dlg.input_source() == ALIGN_INPUT_DEFINE
-    assert dlg._define_inputs.isVisible()
+    assert dlg._active_define_inputs().isVisible()
     assert dlg.apply_path_from_panel(q1) is True
     assert dlg.apply_folder_from_panel(tmp_path) is True
     run_files = dlg.run_files()
