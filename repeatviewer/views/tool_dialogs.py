@@ -9969,12 +9969,93 @@ class TeaAidParamsDialog(QDialog):
 
 
 class MsaCleanParamsDialog(QDialog):
-    """MSA clean parameters.
+    """MSA clean parameters (BLAST-style strategy tabs).
 
-    Opened from the MSA Clean drop menu / Tools menu. Parameters holds the
-    Combined pipeline and step thresholds; Options sets right-click behavior
-    when wired on the toolbar.
+    Tabs: Remove gappy columns | Clean with divergence | Clean with gaps |
+    Options. Each strategy tab has Inputs + Settings. Combined pipeline
+    (which steps, in what order) lives under Options with right-click.
     """
+
+    _DIALOG_WIDTH = TOOL_PARAMS_DIALOG_WIDTH
+    _TAB_GAPPY = 0
+    _TAB_DIV = 1
+    _TAB_GAP = 2
+    _TAB_OPTIONS = 3
+
+    _INPUTS_HELP = (
+        "<b>Use selected sequences</b> (default): clean the aligned FASTA files "
+        "selected in the Files panel.<br><br>"
+        "<b>Define inputs</b>: choose alignment files or folders explicitly "
+        "(click in Files/Folders or Browse). Each file is cleaned separately."
+    )
+    _GAP_THRESHOLD_HELP = (
+        "Columns whose gap proportion is <b>above</b> this value are removed "
+        "immediately.<br><br>"
+        "Example: with threshold <b>0.80</b>, a column that is 85% gaps is dropped."
+    )
+    _SIMI_GAP_HELP = (
+        "For columns that are <b>not</b> removed by the gap threshold, this is "
+        "the maximum gap proportion allowed when applying the similarity keep "
+        "rule.<br><br>"
+        "Example: with <b>0.40</b>, only columns with fewer than 40% gaps are "
+        "eligible to be kept based on similarity."
+    )
+    _SIMILARITY_HELP = (
+        "Among columns that pass the similarity-check gap threshold, keep the "
+        "column only if the most common nucleotide occupies at least this "
+        "fraction of non-gap bases.<br><br>"
+        "Example: with <b>0.70</b>, a column that is mostly T (≥70%) is kept; "
+        "a mixed column is removed."
+    )
+    _MIN_NT_HELP = (
+        "Columns with fewer than this many non-gap nucleotides are removed "
+        "(too little data to trust).<br><br>"
+        "Example: with <b>5</b>, a column that has only 3 real bases is dropped."
+    )
+    _DIV_THRESHOLD_HELP = (
+        "End-cropping continues while the sum of per-base divergence scores "
+        "in the sliding window is <b>below</b> this value. Cropped bases become "
+        "gaps (<code>-</code>).<br><br>"
+        "Higher values crop more aggressively from each sequence end."
+    )
+    _DIV_WINDOW_HELP = (
+        "Length (bp) of the sliding window used at each sequence end when "
+        "scoring divergence for cropping.<br><br>"
+        "Example: <b>20</b> means each step looks at 20 positions from the end."
+    )
+    _ROW_GAP_THRESHOLD_HELP = (
+        "End-cropping continues while the gap proportion inside the sliding "
+        "window is <b>above</b> this value. Cropped bases become gaps "
+        "(<code>-</code>).<br><br>"
+        "Example: with <b>0.050</b>, cropping stops once the window is under "
+        "5% gaps."
+    )
+    _ROW_GAP_WINDOW_HELP = (
+        "Length (bp) of the sliding window used at each sequence end when "
+        "measuring gap proportion for cropping.<br><br>"
+        "Example: <b>300</b> means each step inspects 300 positions from the end."
+    )
+    _COMBINED_HELP = (
+        "Combined MSA clean runs the <b>checked</b> steps below in list order "
+        "on each input alignment.<br><br>"
+        "• Check a step to include it; uncheck to skip it.<br>"
+        "• Drag steps to change run order.<br>"
+        "• At least one step must stay checked.<br><br>"
+        "<b>Important:</b> each step cleans the <b>result of the previous "
+        "step</b>, not the original file again. The pipeline is cumulative.<br><br>"
+        "<b>Example:</b> with this order checked "
+        "(1) <b>Remove gappy columns</b>, "
+        "(2) <b>Clean rows with divergence</b>, "
+        "(3) <b>Clean rows with gaps</b>:<br>"
+        "first gappy columns are removed (using that tab’s Settings); "
+        "then divergence cleaning runs on that cleaned alignment; "
+        "then gap cleaning runs on the divergence cleaned result. "
+        "If you uncheck divergence, gap cleaning still runs on the output of "
+        "gappy column removal.<br><br>"
+        "Each step uses the Settings from its own tab. Combined is used when "
+        "you choose it under Right click action, or when you Run from the "
+        "Options tab."
+    )
 
     def __init__(
         self,
@@ -9985,9 +10066,11 @@ class MsaCleanParamsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("MSA clean parameters")
+        self.setMinimumWidth(self._DIALOG_WIDTH)
         opts = initial or MsaCleanOptions()
         self._for_run = for_run
         self._run_after = False
+        self._msa_compact_size: QSize | None = None
 
         self._method_labels = {
             "msa_clean_div": "Clean rows with divergence",
@@ -10000,11 +10083,240 @@ class MsaCleanParamsDialog(QDialog):
             "msa_clean_gappy": opts.use_gappy_columns,
         }
 
+        def _make_form(parent: QWidget) -> QFormLayout:
+            form = QFormLayout(parent)
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setLabelAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            form.setFieldGrowthPolicy(
+                QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+            )
+            form.setHorizontalSpacing(12)
+            form.setVerticalSpacing(4)
+            return form
+
+        def _wrap_page(page: QWidget) -> QWidget:
+            wrap = QWidget(self)
+            wrap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+            layout = QVBoxLayout(wrap)
+            layout.setContentsMargins(16, 10, 16, 10)
+            layout.setSpacing(4)
+            layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+            layout.addWidget(page)
+            return wrap
+
+        def _spin_float(
+            value: float, *, decimals: int, step: float, lo: float = 0.0, hi: float = 1.0
+        ) -> QDoubleSpinBox:
+            spin = QDoubleSpinBox(self)
+            spin.setRange(lo, hi)
+            spin.setDecimals(decimals)
+            spin.setSingleStep(step)
+            spin.setValue(value)
+            spin.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+            return spin
+
+        def _spin_int(value: int, *, lo: int, hi: int) -> QSpinBox:
+            spin = QSpinBox(self)
+            spin.setRange(lo, hi)
+            spin.setValue(value)
+            spin.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+            return spin
+
+        def _section(title: str, parent: QWidget | None = None) -> QLabel:
+            return QLabel(f"<b>{title}</b>", parent)
+
+        def _make_define() -> TeMultiInputFilesWidget:
+            return TeMultiInputFilesWidget(
+                self,
+                initial=None,
+                allow_multiple=True,
+                start_empty=False,
+                placeholder="Click in Files/Folders or Browse…",
+                browse_title="Select MSA FASTA",
+                file_filter="FASTA (*.fa *.fasta *.fas *.fna *.faa);;All files (*)",
+                add_button_label="Add another input",
+                add_button_tooltip=(
+                    "Add another aligned FASTA file or folder path. Click a file "
+                    "or folder in the panel to fill a row, or use Browse."
+                ),
+                path_mode="file_or_directory",
+            )
+
+        def _add_inputs_settings(
+            form: QFormLayout,
+            page: QWidget,
+            *,
+            method_id: str,
+            selected: QRadioButton,
+            define: QRadioButton,
+            define_inputs: TeMultiInputFilesWidget,
+            sel_spacer: QLabel,
+            def_spacer: QLabel,
+            settings_rows: list[tuple[str, QWidget, str]],
+        ) -> None:
+            del method_id  # strategy overview lives on per-parameter ? helps
+            # BLAST / Align Inputs pattern: both radios in one field column;
+            # Define path rows on the next form row with an empty label so Browse
+            # lines up with Settings (never addRow(define_widget) spanning).
+            form.addRow(_section("Inputs", page))
+            inputs_box = QWidget(page)
+            inputs_layout = QVBoxLayout(inputs_box)
+            inputs_layout.setContentsMargins(0, 0, 0, 0)
+            inputs_layout.setSpacing(2)
+            inputs_layout.addWidget(
+                field_with_help(
+                    selected, "MSA clean inputs", self._INPUTS_HELP, stretch=True
+                )
+            )
+            inputs_layout.addWidget(define)
+            form.addRow(sel_spacer, inputs_box)
+            form.addRow(def_spacer, define_inputs)
+            form.addRow(_form_section_separator())
+            form.addRow(_section("Settings", page))
+            for label, widget, help_text in settings_rows:
+                form.addRow(
+                    label,
+                    field_with_help(widget, label.rstrip(":"), help_text),
+                )
+
+        # --- Gappy tab ------------------------------------------------------
+        self._gap_threshold = _spin_float(opts.gappy.gap_threshold, decimals=2, step=0.05)
+        self._simi_gap = _spin_float(opts.gappy.simi_check_gap_thr, decimals=2, step=0.05)
+        self._similarity = _spin_float(opts.gappy.similarity_thr, decimals=2, step=0.05)
+        self._min_nt = _spin_int(opts.gappy.min_nucleotide, lo=1, hi=50)
+        gappy_page = QWidget(self)
+        gappy_page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._gappy_form = _make_form(gappy_page)
+        self._gappy_input_selected = QRadioButton("Use selected sequences", gappy_page)
+        self._gappy_input_define = QRadioButton("Define inputs", gappy_page)
+        gappy_group = QButtonGroup(gappy_page)
+        gappy_group.addButton(self._gappy_input_selected)
+        gappy_group.addButton(self._gappy_input_define)
+        self._gappy_input_selected.setChecked(True)
+        self._gappy_define_inputs = _make_define()
+        self._gappy_sel_spacer = QLabel("")
+        self._gappy_def_spacer = QLabel("")
+        _add_inputs_settings(
+            self._gappy_form,
+            gappy_page,
+            method_id="msa_clean_gappy",
+            selected=self._gappy_input_selected,
+            define=self._gappy_input_define,
+            define_inputs=self._gappy_define_inputs,
+            sel_spacer=self._gappy_sel_spacer,
+            def_spacer=self._gappy_def_spacer,
+            settings_rows=[
+                ("Gap threshold:", self._gap_threshold, self._GAP_THRESHOLD_HELP),
+                (
+                    "Similarity check gap threshold:",
+                    self._simi_gap,
+                    self._SIMI_GAP_HELP,
+                ),
+                ("Similarity threshold:", self._similarity, self._SIMILARITY_HELP),
+                ("Min nucleotides per column:", self._min_nt, self._MIN_NT_HELP),
+            ],
+        )
+        self._gappy_tab = _wrap_page(gappy_page)
+
+        # --- Divergence tab -------------------------------------------------
+        self._div_threshold = _spin_float(
+            opts.divergence.threshold, decimals=2, step=0.05
+        )
+        self._div_window = _spin_int(opts.divergence.window_size, lo=1, hi=10_000)
+        div_page = QWidget(self)
+        div_page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._div_form = _make_form(div_page)
+        self._div_input_selected = QRadioButton("Use selected sequences", div_page)
+        self._div_input_define = QRadioButton("Define inputs", div_page)
+        div_group = QButtonGroup(div_page)
+        div_group.addButton(self._div_input_selected)
+        div_group.addButton(self._div_input_define)
+        self._div_input_selected.setChecked(True)
+        self._div_define_inputs = _make_define()
+        self._div_sel_spacer = QLabel("")
+        self._div_def_spacer = QLabel("")
+        _add_inputs_settings(
+            self._div_form,
+            div_page,
+            method_id="msa_clean_div",
+            selected=self._div_input_selected,
+            define=self._div_input_define,
+            define_inputs=self._div_define_inputs,
+            sel_spacer=self._div_sel_spacer,
+            def_spacer=self._div_def_spacer,
+            settings_rows=[
+                ("Divergence threshold:", self._div_threshold, self._DIV_THRESHOLD_HELP),
+                ("Window size (bp):", self._div_window, self._DIV_WINDOW_HELP),
+            ],
+        )
+        self._div_tab = _wrap_page(div_page)
+
+        # --- Gaps tab -------------------------------------------------------
+        self._row_gap_threshold = _spin_float(
+            opts.gap_row.gap_threshold, decimals=3, step=0.01
+        )
+        self._row_gap_window = _spin_int(opts.gap_row.window_size, lo=1, hi=10_000)
+        gap_page = QWidget(self)
+        gap_page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._gap_form = _make_form(gap_page)
+        self._gap_input_selected = QRadioButton("Use selected sequences", gap_page)
+        self._gap_input_define = QRadioButton("Define inputs", gap_page)
+        gap_group = QButtonGroup(gap_page)
+        gap_group.addButton(self._gap_input_selected)
+        gap_group.addButton(self._gap_input_define)
+        self._gap_input_selected.setChecked(True)
+        self._gap_define_inputs = _make_define()
+        self._gap_sel_spacer = QLabel("")
+        self._gap_def_spacer = QLabel("")
+        _add_inputs_settings(
+            self._gap_form,
+            gap_page,
+            method_id="msa_clean_gap",
+            selected=self._gap_input_selected,
+            define=self._gap_input_define,
+            define_inputs=self._gap_define_inputs,
+            sel_spacer=self._gap_sel_spacer,
+            def_spacer=self._gap_def_spacer,
+            settings_rows=[
+                (
+                    "Gap proportion threshold:",
+                    self._row_gap_threshold,
+                    self._ROW_GAP_THRESHOLD_HELP,
+                ),
+                ("Window size (bp):", self._row_gap_window, self._ROW_GAP_WINDOW_HELP),
+            ],
+        )
+        self._gap_tab = _wrap_page(gap_page)
+
+        self._focused_file_input: TeMultiInputFilesWidget | None = None
+        for widget in (
+            self._gappy_define_inputs,
+            self._div_define_inputs,
+            self._gap_define_inputs,
+        ):
+            widget.field_activated.connect(self._on_file_input_field_activated)
+            widget.paths_changed.connect(self._on_define_paths_changed)
+
+        for selected, define in (
+            (self._gappy_input_selected, self._gappy_input_define),
+            (self._div_input_selected, self._div_input_define),
+            (self._gap_input_selected, self._gap_input_define),
+        ):
+            selected.toggled.connect(self._sync_active_inputs)
+            define.toggled.connect(self._sync_active_inputs)
+
+        # --- Combined checklist (Options) -----------------------------------
         self._method_order = QListWidget()
         self._method_order.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._method_order.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self._method_order.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._method_order.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._method_order.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._method_order.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self._method_order.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -10020,7 +10332,6 @@ class MsaCleanParamsDialog(QDialog):
                 method_id,
                 checked=enabled_methods.get(method_id, False),
             )
-        # Ensure every known method appears (in case order was incomplete).
         listed = {
             str(self._method_order.item(i).data(Qt.ItemDataRole.UserRole))
             for i in range(self._method_order.count())
@@ -10035,18 +10346,7 @@ class MsaCleanParamsDialog(QDialog):
         self._method_order.itemChanged.connect(self._on_method_item_changed)
         self._fit_method_list_height()
 
-        combined_help = (
-            "Combined MSA clean runs the checked cleaning steps in list order "
-            "on the selected alignment.\n\n"
-            "How to use it:\n"
-            "• Check a step to include it in the pipeline.\n"
-            "• Uncheck a step to skip it.\n"
-            "• Drag steps up or down to change the order they run.\n"
-            "• At least one step must stay checked.\n\n"
-            "Each step uses the parameters in its section below. "
-            "Use the ? next to a step title for details on that method."
-        )
-        combined_box = QGroupBox(self)
+        combined_box = QGroupBox("Combined MSA clean", self)
         combined_layout = QVBoxLayout(combined_box)
         combined_layout.setContentsMargins(10, 8, 10, 8)
         combined_layout.setSpacing(6)
@@ -10054,15 +10354,11 @@ class MsaCleanParamsDialog(QDialog):
         combined_header_layout = QHBoxLayout(combined_header)
         combined_header_layout.setContentsMargins(0, 0, 0, 0)
         combined_header_layout.setSpacing(6)
-        combined_title = QLabel("Combined MSA clean", combined_header)
-        title_font = combined_title.font()
-        title_font.setBold(True)
-        combined_title.setFont(title_font)
-        combined_header_layout.addWidget(combined_title, 1)
         combined_header_layout.addWidget(
-            self._msa_help_button("Combined MSA clean", combined_help),
-            0,
-            Qt.AlignmentFlag.AlignRight,
+            QLabel("Pipeline steps", combined_header), stretch=1
+        )
+        combined_header_layout.addWidget(
+            make_help_button(combined_header, "Combined MSA clean", self._COMBINED_HELP)
         )
         combined_layout.addWidget(combined_header)
         hint = QLabel("Check steps to include. Drag to set order.", combined_box)
@@ -10070,136 +10366,57 @@ class MsaCleanParamsDialog(QDialog):
         combined_layout.addWidget(hint)
         combined_layout.addWidget(self._method_order)
 
-        spin_width = 90
-
-        div_box = QGroupBox(self)
-        self._div_threshold = QDoubleSpinBox()
-        self._div_threshold.setRange(0.0, 1.0)
-        self._div_threshold.setDecimals(2)
-        self._div_threshold.setSingleStep(0.05)
-        self._div_threshold.setValue(opts.divergence.threshold)
-        self._div_threshold.setFixedWidth(spin_width)
-
-        self._div_window = QSpinBox()
-        self._div_window.setRange(1, 10_000)
-        self._div_window.setValue(opts.divergence.window_size)
-        self._div_window.setFixedWidth(spin_width)
-
-        self._fill_labeled_grid(
-            div_box,
-            [
-                ("Divergence threshold:", self._div_threshold),
-                ("Window size (bp):", self._div_window),
-            ],
-            heading="Clean rows with divergence",
-            help_text=msa_clean_method_description("msa_clean_div"),
-        )
-
-        gap_box = QGroupBox(self)
-        self._row_gap_threshold = QDoubleSpinBox()
-        self._row_gap_threshold.setRange(0.0, 1.0)
-        self._row_gap_threshold.setDecimals(3)
-        self._row_gap_threshold.setSingleStep(0.01)
-        self._row_gap_threshold.setValue(opts.gap_row.gap_threshold)
-        self._row_gap_threshold.setFixedWidth(spin_width)
-
-        self._row_gap_window = QSpinBox()
-        self._row_gap_window.setRange(1, 10_000)
-        self._row_gap_window.setValue(opts.gap_row.window_size)
-        self._row_gap_window.setFixedWidth(spin_width)
-
-        self._fill_labeled_grid(
-            gap_box,
-            [
-                ("Gap proportion threshold:", self._row_gap_threshold),
-                ("Window size (bp):", self._row_gap_window),
-            ],
-            heading="Clean rows with gaps",
-            help_text=msa_clean_method_description("msa_clean_gap"),
-        )
-
-        gappy_box = QGroupBox(self)
-        self._gap_threshold = QDoubleSpinBox()
-        self._gap_threshold.setRange(0.0, 1.0)
-        self._gap_threshold.setDecimals(2)
-        self._gap_threshold.setSingleStep(0.05)
-        self._gap_threshold.setValue(opts.gappy.gap_threshold)
-        self._gap_threshold.setFixedWidth(spin_width)
-
-        self._simi_gap = QDoubleSpinBox()
-        self._simi_gap.setRange(0.0, 1.0)
-        self._simi_gap.setDecimals(2)
-        self._simi_gap.setSingleStep(0.05)
-        self._simi_gap.setValue(opts.gappy.simi_check_gap_thr)
-        self._simi_gap.setFixedWidth(spin_width)
-
-        self._similarity = QDoubleSpinBox()
-        self._similarity.setRange(0.0, 1.0)
-        self._similarity.setDecimals(2)
-        self._similarity.setSingleStep(0.05)
-        self._similarity.setValue(opts.gappy.similarity_thr)
-        self._similarity.setFixedWidth(spin_width)
-
-        self._min_nt = QSpinBox()
-        self._min_nt.setRange(1, 50)
-        self._min_nt.setValue(opts.gappy.min_nucleotide)
-        self._min_nt.setFixedWidth(spin_width)
-
-        self._fill_labeled_grid(
-            gappy_box,
-            [
-                ("Gap threshold:", self._gap_threshold),
-                ("Similarity check gap threshold:", self._simi_gap),
-                ("Similarity threshold:", self._similarity),
-                ("Min nucleotides per column:", self._min_nt),
-            ],
-            heading="Remove gappy columns",
-            help_text=msa_clean_method_description("msa_clean_gappy"),
-        )
-
+        # --- Options: right-click + combined --------------------------------
         self._right_click_group = QButtonGroup(self)
         self._right_click_buttons: dict[str, QRadioButton] = {}
+        rc_box = QGroupBox("Right-click action", self)
+        rc_box_layout = QVBoxLayout(rc_box)
+        rc_box_layout.setSpacing(6)
+        rc_box_layout.addWidget(
+            QLabel(
+                "Right-clicking the MSA Clean button runs, with saved settings:",
+                self,
+            )
+        )
         for label, value in (
-            ("Run Combined MSA clean", MSA_CLEAN_RIGHT_CLICK_COMBINED),
-            ("Run Remove gappy columns", MSA_CLEAN_RIGHT_CLICK_GAPPY),
-            ("Run Clean rows with divergence", MSA_CLEAN_RIGHT_CLICK_DIV),
-            ("Run Clean rows with gaps", MSA_CLEAN_RIGHT_CLICK_GAP),
+            ("Combined MSA clean", MSA_CLEAN_RIGHT_CLICK_COMBINED),
+            ("Remove gappy columns", MSA_CLEAN_RIGHT_CLICK_GAPPY),
+            ("Clean rows with divergence", MSA_CLEAN_RIGHT_CLICK_DIV),
+            ("Clean rows with gaps", MSA_CLEAN_RIGHT_CLICK_GAP),
             ("Open this dialog", MSA_CLEAN_RIGHT_CLICK_DIALOG),
         ):
             radio = QRadioButton(label, self)
             radio.setChecked(opts.right_click_action == value)
             self._right_click_group.addButton(radio)
             self._right_click_buttons[value] = radio
+            rc_box_layout.addWidget(radio)
         if not any(b.isChecked() for b in self._right_click_buttons.values()):
             self._right_click_buttons[MSA_CLEAN_RIGHT_CLICK_COMBINED].setChecked(True)
 
-        rc_box = QGroupBox("Right-click action", self)
-        rc_box_layout = QVBoxLayout(rc_box)
-        rc_box_layout.setSpacing(6)
-        rc_box_layout.addWidget(
-            QLabel("Right-clicking the MSA Clean button does:", self)
-        )
-        for radio in self._right_click_buttons.values():
-            rc_box_layout.addWidget(radio)
-
         options_tab = QWidget(self)
+        options_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         options_layout = QVBoxLayout(options_tab)
-        options_layout.setContentsMargins(12, 10, 12, 10)
-        options_layout.setSpacing(8)
+        options_layout.setContentsMargins(16, 14, 16, 14)
+        options_layout.setSpacing(14)
+        options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
+        options_layout.addWidget(combined_box)
+        options_layout.addStretch(1)
+        self._options_tab = options_tab
 
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
-        params_tab = QWidget(self)
-        params_layout = QVBoxLayout(params_tab)
-        params_layout.setContentsMargins(12, 10, 12, 10)
-        params_layout.setSpacing(10)
-        params_layout.addWidget(combined_box)
-        params_layout.addWidget(div_box)
-        params_layout.addWidget(gap_box)
-        params_layout.addWidget(gappy_box)
-        self._tabs.addTab(params_tab, "Parameters")
-        self._tabs.addTab(options_tab, "Options")
+        self._tabs.tabBar().setExpanding(False)
+        self._tabs.tabBar().setDrawBase(False)
+        self._tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._tabs.addTab(self._gappy_tab, "Remove gappy columns")
+        self._tabs.addTab(self._div_tab, "Clean with divergence")
+        self._tabs.addTab(self._gap_tab, "Clean with gaps")
+        self._tabs.addTab(self._options_tab, "Options")
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
@@ -10207,69 +10424,254 @@ class MsaCleanParamsDialog(QDialog):
             self,
             left_widgets=[restore],
             on_accept=self._on_accept,
-            include_run=False,
+            include_run=True,
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(22, 18, 22, 16)
         layout.setSpacing(8)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._button_box)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tabs, 0)
+        layout.addWidget(self._button_box, 0)
         self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._sync_active_inputs()
+        self._sync_field_column()
         self._on_tab_changed(self._tabs.currentIndex())
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._fit_method_list_height()
+        self._sync_field_column()
         QTimer.singleShot(0, self._fit_to_current_tab)
 
-    def _on_tab_changed(self, tab_index: int) -> None:
+    def _on_file_input_field_activated(self) -> None:
+        sender = self.sender()
+        if isinstance(sender, TeMultiInputFilesWidget):
+            self._focused_file_input = sender
+
+    def apply_path_from_panel(self, path: Path) -> bool:
+        if self._tabs.currentWidget() is self._options_tab:
+            return False
+        if self.input_source() != ALIGN_INPUT_DEFINE:
+            return False
+        define = self._active_define_inputs()
+        if define is None:
+            return False
+        try:
+            candidate = Path(path).expanduser().resolve()
+        except OSError:
+            return False
+        return bool(define.accept_path(candidate))
+
+    def apply_folder_from_panel(self, folder: Path) -> bool:
+        return self.apply_path_from_panel(folder)
+
+    def _active_define_inputs(self) -> TeMultiInputFilesWidget | None:
+        current = self._tabs.currentWidget()
+        if current is self._gappy_tab:
+            return self._gappy_define_inputs
+        if current is self._div_tab:
+            return self._div_define_inputs
+        if current is self._gap_tab:
+            return self._gap_define_inputs
+        return None
+
+    def _active_input_radios(self) -> tuple[QRadioButton, QRadioButton] | None:
+        current = self._tabs.currentWidget()
+        if current is self._gappy_tab:
+            return self._gappy_input_selected, self._gappy_input_define
+        if current is self._div_tab:
+            return self._div_input_selected, self._div_input_define
+        if current is self._gap_tab:
+            return self._gap_input_selected, self._gap_input_define
+        return None
+
+    def input_source(self) -> str:
+        radios = self._active_input_radios()
+        if radios is not None and radios[1].isChecked():
+            return ALIGN_INPUT_DEFINE
+        return ALIGN_INPUT_SELECTED
+
+    def run_files(self) -> list[Path]:
+        define = self._active_define_inputs()
+        if define is None:
+            return []
+        return define.paths()
+
+    def selected_method(self) -> str:
+        current = self._tabs.currentWidget()
+        if current is self._gappy_tab:
+            return "msa_clean_gappy"
+        if current is self._div_tab:
+            return "msa_clean_div"
+        if current is self._gap_tab:
+            return "msa_clean_gap"
+        return "msa_clean"
+
+    def _sync_active_inputs(self) -> None:
+        for selected, define, widget, form in (
+            (
+                self._gappy_input_selected,
+                self._gappy_input_define,
+                self._gappy_define_inputs,
+                self._gappy_form,
+            ),
+            (
+                self._div_input_selected,
+                self._div_input_define,
+                self._div_define_inputs,
+                self._div_form,
+            ),
+            (
+                self._gap_input_selected,
+                self._gap_input_define,
+                self._gap_define_inputs,
+                self._gap_form,
+            ),
+        ):
+            use_define = define.isChecked()
+            form.setRowVisible(widget, use_define)
+            if use_define:
+                widget.setMinimumHeight(0)
+                widget.setMaximumHeight(16777215)
+            else:
+                widget.setFixedHeight(0)
+            widget.setVisible(use_define)
+            widget.updateGeometry()
+        if self.isVisible() and self._tabs.currentWidget() is not self._options_tab:
+            self._msa_compact_size = None
+            QTimer.singleShot(0, self._fit_to_current_tab)
+
+    def _on_define_paths_changed(self) -> None:
+        if not self.isVisible() or self._tabs.currentWidget() is self._options_tab:
+            return
+        self._msa_compact_size = None
+        QTimer.singleShot(0, self._fit_to_current_tab)
+
+    def _sync_field_column(self) -> None:
+        sync_form_field_column_spacers(
+            self,
+            [
+                self._gappy_sel_spacer,
+                self._gappy_def_spacer,
+                self._div_sel_spacer,
+                self._div_def_spacer,
+                self._gap_sel_spacer,
+                self._gap_def_spacer,
+            ],
+            [self._gappy_form, self._div_form, self._gap_form],
+        )
+
+    def _on_tab_changed(self, _tab_index: int) -> None:
+        self._sync_active_inputs()
         self._fit_to_current_tab()
 
+    def _pin_msa_tab_height(self, page_h: int | None) -> None:
+        """Pin tab stack to current page height so unused tabs cannot leave a gap."""
+        if page_h is None:
+            self._tabs.setMinimumHeight(0)
+            self._tabs.setMaximumHeight(16777215)
+            for i in range(self._tabs.count()):
+                page = self._tabs.widget(i)
+                if page is not None:
+                    page.setMinimumHeight(0)
+                    page.setMaximumHeight(16777215)
+            return
+        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
+        tabs_h = tab_bar_h + max(1, int(page_h)) + 8
+        self._tabs.setMinimumHeight(0)
+        self._tabs.setMaximumHeight(tabs_h)
+        current = self._tabs.currentWidget()
+        if current is not None:
+            current.setMinimumHeight(0)
+            current.setMaximumHeight(max(1, int(page_h)))
+
     def _fit_to_current_tab(self) -> None:
+        """Shrink/grow the dialog height to the active tab’s content (BLAST-style)."""
         page = self._tabs.currentWidget()
         if page is None:
             return
-        page.ensurePolished()
-        page.adjustSize()
-        page_hint = page.sizeHint()
+        # Unlock height pins before measuring (Define-input growth / tab switch).
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        self._pin_msa_tab_height(None)
+        for widget in (
+            self._gappy_define_inputs,
+            self._div_define_inputs,
+            self._gap_define_inputs,
+        ):
+            if widget.isVisible():
+                widget.setMinimumHeight(0)
+                widget.setMaximumHeight(16777215)
+
+        # Measure the wrap’s inner form page when present (not the tallest tab).
+        measure = page
+        page_layout = page.layout()
+        if page_layout is not None and page_layout.count() == 1:
+            inner = page_layout.itemAt(0).widget()
+            if inner is not None:
+                measure = inner
+        measure.ensurePolished()
+        measure.adjustSize()
+        measure_layout = measure.layout()
+        if measure_layout is not None:
+            measure_layout.invalidate()
+            measure_layout.activate()
+        if page_layout is not None:
+            page_layout.invalidate()
+            page_layout.activate()
+        hint = measure.minimumSizeHint().expandedTo(measure.sizeHint())
+        content_h = hint.height()
+        if measure_layout is not None:
+            content_h = max(
+                content_h,
+                measure_layout.totalMinimumSize().height(),
+                measure_layout.totalSizeHint().height(),
+            )
+        if page_layout is not None:
+            content_h = max(
+                content_h,
+                page_layout.totalMinimumSize().height(),
+                page_layout.totalSizeHint().height(),
+            )
+
+        self._pin_msa_tab_height(content_h)
         tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
-        tab_chrome = tab_bar_h + 8
+        tabs_h = tab_bar_h + content_h + 8
         buttons_h = self._button_box.sizeHint().height()
         margins = self.layout().contentsMargins()
         spacing = self.layout().spacing()
         height = (
-            page_hint.height()
-            + tab_chrome
+            tabs_h
             + buttons_h
             + margins.top()
             + margins.bottom()
             + spacing
             + 4
         )
-        width = max(
-            480,
-            page_hint.width() + margins.left() + margins.right() + 24,
-            self._button_box.sizeHint().width() + margins.left() + margins.right(),
-        )
-        self.setFixedSize(width, height)
+        wide = self.input_source() == ALIGN_INPUT_DEFINE and page is not self._options_tab
+        width = tool_params_dialog_width(define_inputs=wide)
+        self.setMinimumWidth(width)
+        self.setMaximumWidth(16777215)
+        self.setMaximumHeight(height)
+        target_w = max(width, self.width() if self.isVisible() else width)
+        self.resize(target_w, height)
+        # Keep width freely resizable; leave tab height pinned so content stays tight.
+        self.setMaximumHeight(16777215)
 
     def _on_accept(self) -> None:
         if not self._checked_method_ids():
             QMessageBox.warning(
                 self,
                 "MSA clean",
-                "Enable at least one step in Combined MSA clean.",
+                "Enable at least one step under Options → Combined MSA clean.",
             )
-            self._tabs.setCurrentIndex(0)
+            self._tabs.setCurrentIndex(self._TAB_OPTIONS)
             return
         self.accept()
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
-
-    def _msa_help_button(self, title: str, help_text: str) -> QToolButton:
-        return make_help_button(self, title, help_text)
 
     def _add_method_list_item(self, method_id: str, *, checked: bool) -> None:
         label_text = self._method_labels[method_id]
@@ -10287,72 +10689,16 @@ class MsaCleanParamsDialog(QDialog):
         )
         self._method_order.addItem(item)
 
-    def _fill_labeled_grid(
-        self,
-        box,
-        rows,
-        *,
-        heading: str | None = None,
-        help_text: str = "",
-    ) -> None:
-        """Lay out (label, widget) rows in a group box with a real label column.
-
-        Uses an explicit QGridLayout rather than QFormLayout: the form's label
-        column was collapsing to nothing here, clipping the descriptions to a
-        stray character. A grid gives column 0 its natural width and stretches
-        column 1, so every label is always fully visible.
-        """
-        outer = QVBoxLayout(box)
-        outer.setContentsMargins(10, 8, 10, 8)
-        outer.setSpacing(8)
-        if heading:
-            header = QWidget(box)
-            header_layout = QHBoxLayout(header)
-            header_layout.setContentsMargins(0, 0, 0, 0)
-            header_layout.setSpacing(6)
-            title = QLabel(heading, header)
-            font = title.font()
-            font.setBold(True)
-            title.setFont(font)
-            header_layout.addWidget(title, 1)
-            if help_text:
-                header_layout.addWidget(
-                    self._msa_help_button(heading, help_text),
-                    0,
-                    Qt.AlignmentFlag.AlignRight,
-                )
-            outer.addWidget(header)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
-        grid.setColumnStretch(0, 0)
-        grid.setColumnStretch(1, 1)
-        for row, (text, widget) in enumerate(rows):
-            label = QLabel(text)
-            grid.addWidget(
-                label,
-                row,
-                0,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            )
-            grid.addWidget(widget, row, 1)
-        outer.addLayout(grid)
-
     def _fit_method_list_height(self) -> None:
-        """Keep the Combined list only as tall as its rows, with a little padding."""
         count = max(1, self._method_order.count())
         row_h = self._method_order.sizeHintForRow(0)
         if row_h <= 0:
             row_h = 22
         frame = 2 * self._method_order.frameWidth()
-        # Extra space above the first row and below the last so the list
-        # does not feel flush against the frame (matches stylesheet padding).
         padding = 16
         self._method_order.setFixedHeight(row_h * count + frame + padding)
 
     def _on_method_item_changed(self, item: QListWidgetItem) -> None:
-        # Keep at least one step checked.
         if item.checkState() == Qt.CheckState.Checked:
             return
         if self._checked_method_ids():
@@ -10400,6 +10746,14 @@ class MsaCleanParamsDialog(QDialog):
         self._method_order.blockSignals(False)
         self._fit_method_list_height()
         self._right_click_buttons[MSA_CLEAN_RIGHT_CLICK_COMBINED].setChecked(True)
+        for selected in (
+            self._gappy_input_selected,
+            self._div_input_selected,
+            self._gap_input_selected,
+        ):
+            selected.setChecked(True)
+        self._sync_active_inputs()
+        self._fit_to_current_tab()
 
     def options(self) -> MsaCleanOptions:
         method_order = tuple(self._all_method_ids_in_order())
@@ -10430,6 +10784,7 @@ class MsaCleanParamsDialog(QDialog):
             ),
             right_click_action=right_click_action,
         )
+
 
 
 class ChromosomeMultiSelectWidget(QWidget):
@@ -11055,10 +11410,9 @@ class AnnotationFeatureTypesWidget(QWidget):
     """Checklist of GFF/GTF feature types (or BED / VCF classes).
 
     Styled like ``ChromosomeMultiSelectWidget``: bordered scroll list of
-    checkboxes plus Show all / Show none.
+    checkboxes plus Show all / Show none. Types appear only after annotation
+    files are provided.
     """
-
-    _DEFAULT_TYPES = ("gene", "mRNA", "CDS", "exon", "transcript")
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -11096,17 +11450,14 @@ class AnnotationFeatureTypesWidget(QWidget):
         btn_row.addWidget(clear_btn)
         btn_row.addStretch(1)
 
+        self._select_all_btn = select_all_btn
+        self._clear_btn = clear_btn
         layout.addWidget(self._scroll)
         layout.addLayout(btn_row)
         self.setMaximumHeight(220)
-        self._populate_default()
+        self._set_empty_state()
 
-    def _populate_default(self) -> None:
-        checked = {t.lower() for t in DEFAULT_ANNOTATION_FEATURE_TYPES}
-        self._set_types(list(self._DEFAULT_TYPES), checked=checked)
-
-    def _set_types(self, types: list[str], *, checked: set[str] | None = None) -> None:
-        prev = checked if checked is not None else {t.lower() for t in self.selected_types()}
+    def _clear_checks(self) -> None:
         while self._checks_layout.count():
             item = self._checks_layout.takeAt(0)
             widget = item.widget() if item is not None else None
@@ -11114,12 +11465,34 @@ class AnnotationFeatureTypesWidget(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self._check_boxes.clear()
+
+    def _set_empty_state(self, message: str | None = None) -> None:
+        self._clear_checks()
+        self._checks_layout.addWidget(
+            QLabel(
+                message
+                or "Add an annotation file to list feature types…",
+                self._checks_container,
+            )
+        )
+        self._checks_layout.addStretch(1)
+        self._select_all_btn.setEnabled(False)
+        self._clear_btn.setEnabled(False)
+
+    def _set_types(self, types: list[str], *, checked: set[str] | None = None) -> None:
+        prev = checked if checked is not None else {t.lower() for t in self.selected_types()}
+        self._clear_checks()
+        if not types:
+            self._set_empty_state("No feature types found in the annotation file.")
+            return
         for feature_type in types:
             cb = QCheckBox(feature_type, self._checks_container)
             cb.setChecked(feature_type.lower() in prev)
             self._check_boxes.append(cb)
             self._checks_layout.addWidget(cb)
         self._checks_layout.addStretch(1)
+        self._select_all_btn.setEnabled(True)
+        self._clear_btn.setEnabled(True)
 
     def _check_all(self) -> None:
         for cb in self._check_boxes:
@@ -11137,34 +11510,52 @@ class AnnotationFeatureTypesWidget(QWidget):
         for cb in self._check_boxes:
             cb.setChecked(cb.text().lower() in want)
 
+    @staticmethod
+    def _default_checked_for_types(types: list[str]) -> set[str]:
+        """Prefer saved defaults that exist in the file; otherwise check all."""
+        available = {t.lower(): t for t in types}
+        preferred = [
+            available[t.lower()]
+            for t in DEFAULT_ANNOTATION_FEATURE_TYPES
+            if t.lower() in available
+        ]
+        if preferred:
+            return {t.lower() for t in preferred}
+        return {t.lower() for t in types}
+
     def refresh_from_paths(self, paths: list[Path]) -> None:
         from repeatviewer.backends.gff_features import list_feature_types_in_annotation
 
+        valid = [raw.expanduser() for raw in paths if raw.expanduser().is_file()]
+        if not valid:
+            self._set_empty_state()
+            return
         merged: set[str] = set()
-        for raw in paths:
-            path = raw.expanduser()
-            if not path.is_file():
-                continue
+        for path in valid:
             merged.update(list_feature_types_in_annotation(path))
         if not merged:
-            self._populate_default()
+            self._set_empty_state("No feature types found in the annotation file.")
             return
+        ordered = sorted(merged, key=str.lower)
         if merged == {"interval"}:
             self._set_types(["interval"], checked={"interval"})
             return
         merged_lower = {t.lower() for t in merged}
         if merged_lower.issubset({"snp", "indel", "mnp", "sv", "variant", "other"}):
             default = [
-                t for t in sorted(merged, key=str.lower)
-                if t.lower() in {"snp", "indel", "mnp", "sv"}
-            ]
-            if not default:
-                default = sorted(merged, key=str.lower)
-            prev = {t.lower() for t in self.selected_types()} or {t.lower() for t in default}
-            self._set_types(sorted(merged, key=str.lower), checked=prev)
+                t for t in ordered if t.lower() in {"snp", "indel", "mnp", "sv"}
+            ] or ordered
+            prev = (
+                {t.lower() for t in self.selected_types()}
+                or {t.lower() for t in default}
+            )
+            self._set_types(ordered, checked=prev)
             return
-        prev = {t.lower() for t in self.selected_types()} or {"gene"}
-        self._set_types(sorted(merged, key=str.lower), checked=prev)
+        prev = (
+            {t.lower() for t in self.selected_types()}
+            or self._default_checked_for_types(ordered)
+        )
+        self._set_types(ordered, checked=prev)
 
 
 class PerFileAnnotationFeatureTypesWidget(QWidget):
@@ -11406,9 +11797,12 @@ _GENOME_DENSITY_CHROMOSOMES_HELP = (
     "changing it here updates every track."
 )
 _GENOME_DENSITY_PLOT_ALL_HELP = (
-    "When checked, Run combines TE, Gene, and Methylation inputs that have "
-    "files, using the same window size and chromosome selection for every "
-    "track. When unchecked, Run uses only the currently selected track tab."
+    "When checked, <b>Run</b> from any tab (TE, Gene, or Methylation) builds "
+    "all three track types in one plot, using each tab’s defined inputs. "
+    "Tabs with no inputs are skipped. All included tracks share the same "
+    "window size and chromosome selection, and appear as separate tracks on "
+    "the map.<br><br>"
+    "When unchecked, <b>Run</b> uses only the currently selected track tab."
 )
 
 

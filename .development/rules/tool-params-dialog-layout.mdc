@@ -143,11 +143,44 @@ Field column must start on the **same vertical line** in every function window:
 
 Exception: TE-Aid hit % rows stay compact (~100 px + swatch), not 260.
 
-### Define inputs (mandatory — avoid shared / crushed / short paths)
+### Define inputs (mandatory — BLAST / Align layout only)
 
 Use **`TeMultiInputFilesWidget`**. Default add label is **`Add another input`**
 (override only for a domain-specific track, e.g. masking / methylation).
-Placeholder: `Click in Files/Folders or Browse…` (or tool-specific equivalent).
+Placeholder: **`Click in Files/Folders or Browse…`** (or tool-specific equivalent).
+
+**Canonical layout (copy BLAST / MAFFT — do not invent a variant)**
+
+```
+Inputs                          ← bold section title only (no ? on the title)
+  [spacer]  ○ Use selected…  ?  ← radios stacked in ONE field widget
+            ○ Define inputs     ← no separate ? on Define inputs (MSA Clean);
+                                  BLAST may put ? on both radios
+  [spacer]  [path] [Browse]     ← TeMultiInputFilesWidget on its OWN form row
+            Add another input
+── separator ──
+Settings                        ← bold section title only (no ? on the title)
+  Label:    [control]  ?        ← ? only on individual parameters
+```
+
+**Form rows (critical — wrong layout looks “unaligned” vs BLAST)**
+
+1. Put **both** radios in one `QWidget` + `QVBoxLayout` (spacing **2**).
+2. `form.addRow(empty_spacer_label, radios_box)` — never put Define on its own
+   radio-only form row.
+3. `form.addRow(empty_spacer_label, define_inputs_widget)` — path rows sit in the
+   **field column** (same left edge as Settings controls).
+4. **Never** `form.addRow(define_inputs)` alone (spanning row). That full-bleed
+   path line is the MSA-Clean mistake to avoid.
+5. Hide Define with `form.setRowVisible(define_widget, False)` +
+   `setFixedHeight(0)` when Use selected; unlock height when Define is on.
+
+**Help `?` placement**
+
+- **Do** put `?` on parameter fields (Gap threshold, Threads, …).
+- **Do not** put `?` on the **Settings** section heading.
+- **Do not** put a lone `?` only behind **Define inputs** when Use selected
+  already carries the Inputs help (prefer one Inputs help on Use selected).
 
 **One widget per engine/program tab — never share across tabs**
 
@@ -156,7 +189,7 @@ Placeholder: `Click in Files/Folders or Browse…` (or tool-specific equivalent)
 - Adding a row on one tab must **not** change another tab’s row count.
 - Pattern: host `QWidget` + one `TeMultiInputFilesWidget` per tab; show only the
   active tab’s widget; `_active_define_inputs()` for fill / `run_files` / resize.
-- Canonical examples: `MapReferenceDialog`, `BlastParamsDialog`.
+- Canonical examples: `BlastParamsDialog`, `AlignParamsDialog` (MAFFT), MSA Clean.
 
 **Width / path fill**
 
@@ -171,22 +204,34 @@ Placeholder: `Click in Files/Folders or Browse…` (or tool-specific equivalent)
   wrap Reference in a row with a trailing `HELP_BUTTON_SIZE` spacer (Define rows
   always reserve that column). See Mapping / FastGA reference rows.
 
-**Height — no overlapping / squeezed rows (critical)**
+**Height — auto-fit content; no empty gap; no squeezed rows (critical)**
+
+Dialog **height must follow the active tab’s content** (tab switch, Define
+inputs on/off, Add another input). Never leave a tall blank band under Settings
+because `QTabWidget` kept the previous (taller) tab’s height.
 
 Adding a Define-input row must **grow the dialog**, never compress path/Browse
-rows. Classic bug: tab/stack `maximumHeight` pin stays from the previous fit;
-`sizeHint` is measured while still pinned → crushed height is re-pinned
-(MAFFT / MUSCLE “Add another input”).
+rows. Classic bugs:
+- Tab/stack `maximumHeight` pin stays from the previous fit; `sizeHint` is
+  measured while still pinned → crushed height is re-pinned (MAFFT / MUSCLE).
+- Pins cleared but tab stack not re-pinned to the **current** page → empty gap
+  (MSA Clean).
 
-Required pattern (Align MAFFT/MUSCLE, Mapping, BLAST, FastGA, …):
+Required pattern (Align MAFFT/MUSCLE, Mapping, BLAST, FastGA, MSA Clean, …):
 
-1. Connect `paths_changed` → **deferred** refit: `QTimer.singleShot(0, …)`.
-2. **Before** measuring content height: clear tab/stack/page pins
-   (`_pin_*_height(None)` or `setMaximumHeight(16777215)`), unlock the
+1. Connect `paths_changed` / tab change → **deferred** refit:
+   `QTimer.singleShot(0, …)`.
+2. **Before** measuring: clear dialog + tab/stack/page pins
+   (`_pin_*_height(None)` / `setMaximumHeight(16777215)`), unlock the
    multi-input widget height, then `ensurePolished` / `adjustSize` / layout
    `invalidate`+`activate`.
-3. Measure → resize dialog → re-pin to the **new** content height.
-4. Hide Define rows with `setRowVisible` + `setFixedHeight(0)` when Use selected;
+3. Measure the **active page only** (not the tallest tab). Prefer the inner
+   form page inside a wrap layout.
+4. `resize` dialog to chrome + that height; **re-pin** tab/page
+   `maximumHeight` to the new content so unused space cannot reappear.
+5. **Do not** `setFixedSize` (blocks drag-resize). Use `setMinimumWidth` +
+   `resize`; keep width freely expandable.
+6. Hide Define rows with `setRowVisible` + `setFixedHeight(0)` when Use selected;
    unlock height when Define is on.
 
 Never call resize/pin synchronously inside `add_row` / `paths_changed` without

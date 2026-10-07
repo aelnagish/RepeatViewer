@@ -7195,16 +7195,15 @@ class MainWindow(QMainWindow):
                 right_click_slot=self._quick_teaid_right_click,
             )
         elif tool_id == "msa_clean":
-            self._add_toolbar_text_menu_button(
+            self._add_toolbar_action_button(
                 bar,
                 "MSA Clean",
-                self._run_default_msa_clean,
-                self._populate_msa_clean_menu,
+                self._open_msa_clean_dialog,
                 tooltip=(
-                    "Click: choose Combined or a single clean step.\n"
-                    "Right-click: run the action chosen in the Options tab."
+                    "Click: set parameters and run.\n"
+                    "Right-click: run the action chosen in the Options tab, "
+                    "with saved settings."
                 ),
-                show_default_action=False,
                 right_click_slot=self._quick_msa_clean_right_click,
             )
         elif tool_id == "consensus":
@@ -12615,24 +12614,46 @@ class MainWindow(QMainWindow):
             action.setStatusTip(desc)
 
     def _modify_msa_clean_parameters(self) -> None:
-        """Menu: Cancel / Save settings dialog (no Run — clean runs from the tool menu)."""
+        """Menu: same Cancel / Save / Run dialog as the MSA Clean toolbar button."""
         self._open_msa_clean_dialog()
 
     def _open_msa_clean_dialog(self) -> None:
-        """Open MSA Clean parameters (from Options right-click or Change menu)."""
+        """Click MSA Clean: parameters dialog. Run runs; Save stores only.
+
+        Non-modal so Files/Folders clicks can fill Define inputs (Align-style).
+        """
+
+        def _accepted(dialog: MsaCleanParamsDialog) -> None:
+            from repeatviewer.job_options import ALIGN_INPUT_DEFINE
+
+            self._msa_clean_options = dialog.options()
+            save_msa_clean_options(self._msa_clean_options)
+            self._persist_workspace()
+            if not dialog.should_run():
+                self._set_status_message("MSA clean settings saved", 4000)
+                return
+            method = dialog.selected_method()
+            if (
+                method != "msa_clean"
+                and dialog.input_source() == ALIGN_INPUT_DEFINE
+            ):
+                run_files = dialog.run_files()
+                if not run_files:
+                    QMessageBox.information(
+                        self,
+                        "No FASTA inputs",
+                        "Add one or more aligned FASTA files under Define inputs.",
+                    )
+                    return
+                self._apply_msa_clean(method, preselected=run_files)
+                return
+            self._apply_msa_clean(method)
+
         dialog = MsaCleanParamsDialog(
             initial=self._msa_clean_options,
             parent=self,
         )
-        try:
-            if not dialog.exec():
-                return
-            self._msa_clean_options = dialog.options()
-            save_msa_clean_options(self._msa_clean_options)
-            self._persist_workspace()
-        finally:
-            QTimer.singleShot(0, self._repair_browser_chrome)
-        self._set_status_message("MSA clean settings saved", 4000)
+        self._present_te_viz_dialog(dialog, _accepted)
 
     def _quick_msa_clean_right_click(self) -> None:
         """Right-click MSA Clean: run the action chosen in the Options tab."""
@@ -12645,10 +12666,13 @@ class MainWindow(QMainWindow):
     def _run_default_msa_clean(self) -> None:
         self._apply_msa_clean("msa_clean")
 
-    def _apply_msa_clean(self, func_name: str) -> None:
+    def _apply_msa_clean(
+        self, func_name: str, *, preselected: list[Path] | None = None
+    ) -> None:
         self._apply_function(
             func_name,
             msa_clean_options=self._msa_clean_options,
+            preselected=preselected,
         )
 
     def _ensure_preview_dock_attached(self) -> None:

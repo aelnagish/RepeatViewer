@@ -15,9 +15,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QListView,
-    QMenu,
     QMessageBox,
     QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -469,6 +470,123 @@ class _ReorderOnlyListWidget(QListWidget):
         painter.drawEllipse(right - 5, y - 3, 6, 6)
         painter.end()
 
+class _AddToolbarButtonsDialog(QDialog):
+    """Pick one or more tools to add to the toolbar in one step."""
+
+    def __init__(
+        self,
+        *,
+        available: list[tuple[str, list[tuple[str, str]]]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add toolbar buttons")
+        self.setMinimumWidth(420)
+        self.setMinimumHeight(360)
+
+        hint = QLabel("Check one or more functions, then click Add.")
+        hint.setWordWrap(True)
+
+        self._tree = QTreeWidget(self)
+        self._tree.setHeaderHidden(True)
+        self._tree.setRootIsDecorated(True)
+        self._tree.setUniformRowHeights(True)
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+
+        for category, entries in available:
+            if not entries:
+                continue
+            parent_item = QTreeWidgetItem([category])
+            parent_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            parent_item.setCheckState(0, Qt.CheckState.Unchecked)
+            for tool_id, label in entries:
+                child = QTreeWidgetItem([label])
+                child.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+                )
+                child.setCheckState(0, Qt.CheckState.Unchecked)
+                child.setData(0, Qt.ItemDataRole.UserRole, tool_id)
+                parent_item.addChild(child)
+            self._tree.addTopLevelItem(parent_item)
+            parent_item.setExpanded(True)
+
+        self._tree.itemChanged.connect(self._on_item_changed)
+
+        select_row = QHBoxLayout()
+        select_row.setContentsMargins(0, 0, 0, 0)
+        select_all = QPushButton("Select all")
+        select_all.clicked.connect(lambda: self._set_all_checked(True))
+        select_none = QPushButton("Select none")
+        select_none.clicked.connect(lambda: self._set_all_checked(False))
+        select_row.addWidget(select_all)
+        select_row.addWidget(select_none)
+        select_row.addStretch()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok is not None:
+            ok.setText("Add")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+        layout.addWidget(hint)
+        layout.addWidget(self._tree, stretch=1)
+        layout.addLayout(select_row)
+        layout.addWidget(buttons)
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        del column
+        if item.childCount() <= 0:
+            return
+        state = item.checkState(0)
+        self._tree.blockSignals(True)
+        try:
+            for index in range(item.childCount()):
+                child = item.child(index)
+                if child is not None:
+                    child.setCheckState(0, state)
+        finally:
+            self._tree.blockSignals(False)
+
+    def _set_all_checked(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self._tree.blockSignals(True)
+        try:
+            for i in range(self._tree.topLevelItemCount()):
+                parent = self._tree.topLevelItem(i)
+                if parent is None:
+                    continue
+                parent.setCheckState(0, state)
+                for j in range(parent.childCount()):
+                    child = parent.child(j)
+                    if child is not None:
+                        child.setCheckState(0, state)
+        finally:
+            self._tree.blockSignals(False)
+
+    def selected_tool_ids(self) -> list[str]:
+        picked: list[str] = []
+        for i in range(self._tree.topLevelItemCount()):
+            parent = self._tree.topLevelItem(i)
+            if parent is None:
+                continue
+            for j in range(parent.childCount()):
+                child = parent.child(j)
+                if child is None or child.checkState(0) != Qt.CheckState.Checked:
+                    continue
+                tool_id = child.data(0, Qt.ItemDataRole.UserRole)
+                if tool_id:
+                    picked.append(str(tool_id))
+        return picked
+
+
 class ToolbarCustomizeWidget(QWidget):
     """Inline panel to choose toolbar buttons and font size."""
 
@@ -511,12 +629,12 @@ class ToolbarCustomizeWidget(QWidget):
         button_row.setContentsMargins(0, 4, 0, 0)
         button_row.setSpacing(8)
 
-        self._add_btn = QPushButton("Add button")
+        self._add_btn = QPushButton("Add buttons…")
         self._add_btn.setToolTip(
-            "Add File, Sequence, Tools, Plugins, or Workflows items, or a separator"
+            "Add one or more File, Sequence, Tools, Plugins, or Workflows items, "
+            "or a separator"
         )
-        self._add_menu = QMenu(self)
-        self._add_btn.clicked.connect(self._show_add_menu)
+        self._add_btn.clicked.connect(self._show_add_dialog)
         button_row.addWidget(self._add_btn)
 
         remove_btn = QPushButton("Remove")
@@ -564,42 +682,31 @@ class ToolbarCustomizeWidget(QWidget):
         self._list.addItem(item)
         return item
 
-    def _show_add_menu(self) -> None:
-        self._populate_add_menu()
-        self._add_menu.exec(self._add_btn.mapToGlobal(self._add_btn.rect().bottomLeft()))
-
-    def _add_category_menu(
+    def _available_add_categories(
         self,
-        title: str,
-        tool_ids: tuple[str, ...],
-        current_ids: set[str],
-    ) -> None:
-        menu = self._add_menu.addMenu(title)
-        added = 0
-        for tool_id in tool_ids:
-            if tool_id in current_ids or tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
-                continue
-            menu.addAction(
-                toolbar_item_label(tool_id, self._labels),
-                lambda checked=False, tid=tool_id: self._add_tool(tid),
-            )
-            added += 1
-        if added == 0:
-            empty = menu.addAction(f"(all {title} tools listed)")
-            empty.setEnabled(False)
-
-    def _populate_add_menu(self) -> None:
-        self._add_menu.clear()
+    ) -> list[tuple[str, list[tuple[str, str]]]]:
         current_ids = self._current_tool_ids()
+        categories: list[tuple[str, list[tuple[str, str]]]] = []
 
-        self._add_category_menu("File", FILE_TOOLBAR_IDS, current_ids)
-        self._add_category_menu("Sequence", SEQUENCE_TOOLBAR_IDS, current_ids)
-        self._add_category_menu("Tools", TOOLS_TOOLBAR_IDS, current_ids)
+        def _entries(tool_ids: tuple[str, ...]) -> list[tuple[str, str]]:
+            out: list[tuple[str, str]] = []
+            for tool_id in tool_ids:
+                if tool_id in current_ids or tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
+                    continue
+                out.append((tool_id, toolbar_item_label(tool_id, self._labels)))
+            return out
 
-        plugins_menu = self._add_menu.addMenu("Plugins")
-        plugins_added = 0
-        wrappers_menu = self._add_menu.addMenu("Command wrappers")
-        wrappers_added = 0
+        for title, ids in (
+            ("File", FILE_TOOLBAR_IDS),
+            ("Sequence", SEQUENCE_TOOLBAR_IDS),
+            ("Tools", TOOLS_TOOLBAR_IDS),
+        ):
+            entries = _entries(ids)
+            if entries:
+                categories.append((title, entries))
+
+        plugins: list[tuple[str, str]] = []
+        wrappers: list[tuple[str, str]] = []
         if self._registry is not None:
             from repeatviewer.plugins.custom_command import UserCommandPlugin
 
@@ -607,33 +714,24 @@ class ToolbarCustomizeWidget(QWidget):
                 tool_id = plugin_tool_id(plugin.id)
                 if tool_id in current_ids:
                     continue
+                entry = (tool_id, plugin.label)
                 if isinstance(plugin, UserCommandPlugin):
-                    wrappers_menu.addAction(
-                        plugin.label,
-                        lambda checked=False, tid=tool_id: self._add_tool(tid),
-                    )
-                    wrappers_added += 1
+                    wrappers.append(entry)
                 else:
-                    plugins_menu.addAction(
-                        plugin.label,
-                        lambda checked=False, tid=tool_id: self._add_tool(tid),
-                    )
-                    plugins_added += 1
-        if plugins_added == 0:
-            empty = plugins_menu.addAction("(all plugins listed)")
-            empty.setEnabled(False)
-        if wrappers_added == 0:
-            empty = wrappers_menu.addAction("(all wrappers listed)")
-            empty.setEnabled(False)
+                    plugins.append(entry)
+        if plugins:
+            categories.append(("Plugins", plugins))
+        if wrappers:
+            categories.append(("Command wrappers", wrappers))
 
-        workflows_menu = self._add_menu.addMenu("Workflows")
-        workflows_added = 0
+        workflows: list[tuple[str, str]] = []
         if "workflows_manage" not in current_ids:
-            workflows_menu.addAction(
-                toolbar_item_label("workflows_manage", self._labels),
-                lambda: self._add_tool("workflows_manage"),
+            workflows.append(
+                (
+                    "workflows_manage",
+                    toolbar_item_label("workflows_manage", self._labels),
+                )
             )
-            workflows_added += 1
         try:
             from repeatviewer.workflows import load_workflow_specs
 
@@ -641,33 +739,48 @@ class ToolbarCustomizeWidget(QWidget):
                 tool_id = workflow_tool_id(spec.id)
                 if tool_id in current_ids:
                     continue
-                workflows_menu.addAction(
-                    spec.name,
-                    lambda checked=False, tid=tool_id: self._add_tool(tid),
-                )
-                workflows_added += 1
+                workflows.append((tool_id, spec.name))
         except Exception:  # noqa: BLE001
             pass
-        if workflows_added == 0:
-            empty = workflows_menu.addAction("(all workflows listed)")
-            empty.setEnabled(False)
+        if workflows:
+            categories.append(("Workflows", workflows))
 
-        self._add_menu.addSeparator()
-        self._add_menu.addAction(
-            "— separator —",
-            lambda: self._add_tool(next_separator_tool_id(current_ids)),
+        categories.append(
+            ("Layout", [("__separator__", "— separator —")])
         )
+        return categories
 
-    def _add_tool(self, tool_id: str) -> None:
-        if tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
+    def _show_add_dialog(self) -> None:
+        available = self._available_add_categories()
+        # Layout/separator alone still counts as something to add.
+        has_tools = any(
+            title != "Layout" and entries for title, entries in available
+        )
+        if not has_tools and not any(title == "Layout" for title, _ in available):
+            QMessageBox.information(
+                self,
+                "Add toolbar buttons",
+                "All available functions are already on the toolbar.",
+            )
             return
-        if is_toolbar_separator(tool_id):
+        dialog = _AddToolbarButtonsDialog(available=available, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        last_item: QListWidgetItem | None = None
+        for tool_id in dialog.selected_tool_ids():
+            last_item = self._add_tool(tool_id) or last_item
+        if last_item is not None:
+            self._list.setCurrentItem(last_item)
+            self._list.scrollToItem(last_item)
+
+    def _add_tool(self, tool_id: str) -> QListWidgetItem | None:
+        if tool_id in TOOLBAR_CUSTOMIZE_HIDDEN:
+            return None
+        if tool_id == "__separator__" or is_toolbar_separator(tool_id):
             tool_id = next_separator_tool_id(self._current_tool_ids())
         if tool_id in self._current_tool_ids():
-            return
-        item = self._append_list_item(tool_id, visible=True)
-        self._list.setCurrentItem(item)
-        self._list.scrollToItem(item)
+            return None
+        return self._append_list_item(tool_id, visible=True)
 
     def _remove_selected(self) -> None:
         selected = self._list.selectedItems()

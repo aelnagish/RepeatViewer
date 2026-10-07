@@ -553,7 +553,9 @@ class SettingsDialog(QDialog):
         self._restore_geometry.setToolTip("Restore the window size and position from the last session.")
         self._show_splash = QCheckBox()
         self._show_splash.setChecked(load_show_splash())
-        self._show_splash.setToolTip("Show the RepeatViewer banner with a tip while the app loads.")
+        self._show_splash.setToolTip(
+            "Show the startup splash (app banner and tip) while RepeatViewer is loading."
+        )
 
         # Cytogenetic images
         self._cyto_experimenter = QLineEdit(load_cyto_experimenter())
