@@ -890,10 +890,11 @@ Two mappers; **Auto** (Options → mapper for right-click) picks one from the in
 - **HISAT2** — short DNA / RNA-seq (Illumina), including spliced RNA.
 
 minimap2 **2.31** is bundled with RepeatViewer where platform builds exist.
-HISAT2 is **not** bundled (binaries are large); install it via conda or PATH:
+HISAT2 is **not** bundled (binaries are large); install **2.2 or newer**
+(recommended **2.2.3**) via conda or PATH:
 
 ```
-conda install -c conda-forge -c bioconda hisat2
+conda install -c conda-forge -c bioconda hisat2=2.2.3
 ```
 
 To use your own minimap2 instead of the bundle, tick

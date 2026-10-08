@@ -96,7 +96,7 @@ ZOOM_CONTROL_HEIGHT = 18
 ZOOM_SPIN_WIDTH = 56
 # Kept for sequence_map_viewer imports (embedded map toolbar height).
 ZOOM_SLIDER_HEIGHT = 22
-ANNOTATION_ZOOM_SLIDER_WIDTH = 240
+ANNOTATION_ZOOM_SLIDER_WIDTH = 120
 
 
 def apply_annotation_zoom_slider_style(slider: QSlider) -> None:

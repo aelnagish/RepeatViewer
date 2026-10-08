@@ -44,6 +44,37 @@ def test_file_color_persists_and_colors_name(tmp_path: Path, monkeypatch) -> Non
     settings.clear()
 
 
+def test_file_color_keeps_zebra_background(tmp_path: Path) -> None:
+    """Colored text must not wipe zebra / family band row backgrounds."""
+    QApplication.instance() or QApplication([])
+    settings = QSettings()
+    settings.clear()
+
+    a = tmp_path / "a.fa"
+    b = tmp_path / "b.fa"
+    for path in (a, b):
+        path.write_text(">x\nACGT\n")
+
+    table = FileListTableWidget()
+    table.set_list_banding(family=False, row_zebra=True)
+    table.add_file_row(a, fill_metadata_columns=True)
+    table.add_file_row(b, fill_metadata_columns=True)
+    table.apply_list_banding()
+
+    # Odd rows get the zebra tint.
+    before = table.item(1, _COL_NAME).background().color().name()
+    assert before != "#000000" or table.item(1, _COL_NAME).background().style() != 0
+
+    table._set_files_color([b], "#16a34a")
+    name = table.item(1, _COL_NAME)
+    assert name.foreground().color().name() == "#16a34a"
+    after = name.background()
+    assert after.style() != 0  # still has a band brush, not empty
+    assert after.color().name() == before
+
+    settings.clear()
+
+
 def test_changing_file_color_updates_metadata_immediately(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     settings = QSettings()

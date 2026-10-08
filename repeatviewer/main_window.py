@@ -2671,6 +2671,8 @@ class MainWindow(QMainWindow):
         query = self._file_filter.text().strip().lower()
         visible_paths: list[Path] = []
         for path in paths:
+            if self._is_hidden_browser_file(path):
+                continue
             if query and query not in path.name.lower():
                 continue
             visible_paths.append(path)
@@ -8037,6 +8039,15 @@ class MainWindow(QMainWindow):
             ".pjs",  # BLAST+ metadata
         }
 
+    def _is_hidden_browser_file(self, path: Path) -> bool:
+        """True for files that must stay out of the Files panel (incl. job outputs)."""
+        return (
+            is_repeatviewer_hits_cache_file(path)
+            or is_sequence_map_hidden_file(path)
+            or is_flexidot_extra_plot_file(path)
+            or self._is_blast_index_sidecar(path)
+        )
+
     def _files_for_folder(self, folder: Path) -> list[Path]:
         files: list[Path] = []
         stats: dict[str, tuple[float, int]] = {}
@@ -8051,12 +8062,7 @@ class MainWindow(QMainWindow):
                     except OSError:
                         continue
                     path = Path(entry.path)
-                    if (
-                        is_repeatviewer_hits_cache_file(path)
-                        or is_sequence_map_hidden_file(path)
-                        or is_flexidot_extra_plot_file(path)
-                        or self._is_blast_index_sidecar(path)
-                    ):
+                    if self._is_hidden_browser_file(path):
                         continue
                     try:
                         st = entry.stat(follow_symlinks=False)
@@ -8094,12 +8100,7 @@ class MainWindow(QMainWindow):
                     except OSError:
                         continue
                     path = Path(entry.path)
-                    if (
-                        is_repeatviewer_hits_cache_file(path)
-                        or is_sequence_map_hidden_file(path)
-                        or is_flexidot_extra_plot_file(path)
-                        or self._is_blast_index_sidecar(path)
-                    ):
+                    if self._is_hidden_browser_file(path):
                         continue
                     n_files += 1
         except OSError:
@@ -8371,6 +8372,9 @@ class MainWindow(QMainWindow):
             return
         resolved = path.expanduser().resolve()
         if resolved.parent != self._current_folder:
+            return
+        # Annotation JSON sidecars stay hidden; do not insert or highlight them.
+        if self._is_hidden_browser_file(resolved):
             return
 
         sidecar_key = str(resolved)
@@ -8986,6 +8990,9 @@ class MainWindow(QMainWindow):
                 resolved = path.expanduser().resolve()
                 if resolved.parent != self._current_folder:
                     return
+                # Job outputs can include hidden sidecars (e.g. *.seqmap_RV.json).
+                if self._is_hidden_browser_file(resolved):
+                    return
                 key = str(resolved)
                 if as_output:
                     self._highlight_output_keys.add(key)
@@ -9006,6 +9013,8 @@ class MainWindow(QMainWindow):
             for path in new_outputs or []:
                 resolved = path.expanduser().resolve()
                 if resolved.parent != self._current_folder:
+                    continue
+                if self._is_hidden_browser_file(resolved):
                     continue
                 if resolved.name in existing_names:
                     continue
@@ -9083,6 +9092,8 @@ class MainWindow(QMainWindow):
         def _track(path: Path, *, as_output: bool) -> None:
             resolved = path.expanduser().resolve()
             if resolved.parent != self._current_folder:
+                return
+            if self._is_hidden_browser_file(resolved):
                 return
             key = str(resolved)
             if as_output:

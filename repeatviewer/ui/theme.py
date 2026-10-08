@@ -330,6 +330,7 @@ def application_stylesheet(
     QWidget#AnnotationMapToolbar {{
         min-height: 26px;
         max-height: 28px;
+        background: palette(window);
     }}
     QWidget#AnnotationMapToolbar QSpinBox {{
         min-height: 18px;
@@ -342,6 +343,7 @@ def application_stylesheet(
     }}
     QWidget#AnnotationMapToolbar QLabel {{
         padding: 0px;
+        color: palette(window-text);
     }}
     QTabWidget::pane {{
         border: none;
@@ -401,6 +403,17 @@ def application_stylesheet(
     QToolButton#PreviewActionsButton::menu-indicator {{
         image: none;
         width: 0px;
+    }}
+    QWidget#annotationRailTabs {{
+        background: transparent;
+        margin: 0px;
+        padding: 0px;
+    }}
+    QToolButton#AnnotationRailTabButton {{
+        border: none;
+        background: transparent;
+        padding: 0px;
+        margin: 0px;
     }}
     QTabBar#PreviewFileTabBar::tab:selected {{
         background: palette(highlight);

@@ -574,10 +574,8 @@ class FileListTableWidget(QTableWidget):
         else:
             color = get_file_color(path)
         brush = QBrush(QColor(color)) if color else QBrush()
-        if color:
-            clear_bg = QBrush()
-        else:
-            clear_bg = self._family_band_brush(row)
+        # Keep zebra / family band tint under the colored text.
+        band_bg = self._family_band_brush(row)
 
         label = color_label(color) if color else "—"
         # Empty colors sort last when ascending.
@@ -586,7 +584,7 @@ class FileListTableWidget(QTableWidget):
         cell.setData(_ROLE_PATH, path_text)
         cell.setTextAlignment(_LEFT_ALIGN)
         cell.setForeground(brush)
-        cell.setBackground(clear_bg)
+        cell.setBackground(band_bg)
         self.setItem(row, _COL_COLOR, cell)
 
         # Name + every other populated cell (Length, GC, …) update immediately.
@@ -594,7 +592,7 @@ class FileListTableWidget(QTableWidget):
             existing = self.item(row, column)
             if existing is None:
                 continue
-            existing.setBackground(clear_bg)
+            existing.setBackground(band_bg)
             existing.setForeground(brush)
             font = existing.font()
             if font.bold():
@@ -695,11 +693,7 @@ class FileListTableWidget(QTableWidget):
         if not self._family_banding_enabled:
             return
         from repeatviewer.browser_file_groups import family_band_flags
-        from repeatviewer.widgets.file_colors import load_file_colors
 
-        colors = self._bulk_file_colors
-        if colors is None:
-            colors = load_file_colors()
         names: list[str] = []
         rows: list[int] = []
         for row in range(self.rowCount()):
@@ -716,26 +710,18 @@ class FileListTableWidget(QTableWidget):
             name_item = self.item(row, _COL_NAME)
             if name_item is not None:
                 name_item.setData(_ROLE_FAMILY_BAND, bool(tinted))
-            raw = self._path_for_row(row)
-            if raw and colors.get(raw):
-                # User color owns the row; leave job/user styling alone.
-                continue
             brush = self._family_band_brush(row)
             for column in range(self.columnCount()):
                 cell = self.item(row, column)
                 if cell is None:
                     continue
+                # Background only — keep user file-color text if set.
                 cell.setBackground(brush)
 
     def apply_row_zebra_banding(self) -> None:
         """Tint every other row when the list is not sorted by Name."""
         if not self._row_zebra_enabled:
             return
-        from repeatviewer.widgets.file_colors import load_file_colors
-
-        colors = self._bulk_file_colors
-        if colors is None:
-            colors = load_file_colors()
         for row in range(self.rowCount()):
             name_item = self.item(row, _COL_NAME)
             if name_item is None:
@@ -743,13 +729,11 @@ class FileListTableWidget(QTableWidget):
             text = name_item.text()
             if not text or text.startswith("("):
                 continue
-            raw = self._path_for_row(row)
-            if raw and colors.get(raw):
-                continue
             brush = self._family_band_brush(row)
             for column in range(self.columnCount()):
                 cell = self.item(row, column)
                 if cell is not None:
+                    # Background only — keep user file-color text if set.
                     cell.setBackground(brush)
 
     def reapply_file_colors(self) -> None:

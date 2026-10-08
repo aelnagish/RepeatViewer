@@ -84,6 +84,19 @@ def test_companion_delete_gff_does_not_take_json(tmp_path: Path) -> None:
 def test_seqmap_json_files_are_hidden_from_file_list() -> None:
     assert is_sequence_map_hidden_file(Path("Beetle1.seqmap_RV.json"))
     assert is_sequence_map_hidden_file(Path("Beetle1.seqmap.json"))
+    assert is_sequence_map_hidden_file(
+        Path("Retrofit0002155_Beta_vulgaris_Ty1_copia__Retrofit.seqmap_RV.json")
+    )
+
+
+def test_main_window_hides_seqmap_job_outputs(qapp) -> None:
+    """Job finish must not list *.seqmap_RV.json via the incremental add path."""
+    from repeatviewer.main_window import MainWindow
+
+    host = MainWindow.__new__(MainWindow)
+    sidecar = Path("Retrofit.seqmap_RV.json")
+    assert host._is_hidden_browser_file(sidecar)
+    assert is_sequence_map_hidden_file(sidecar)
 
 
 def test_empty_json_sidecar_does_not_restore_gff_features(tmp_path: Path) -> None:

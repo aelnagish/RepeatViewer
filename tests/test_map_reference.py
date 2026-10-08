@@ -361,6 +361,8 @@ def test_hisat2_configuration_message_matches_fastga_style():
     rich = mr.hisat2_configuration_message(rich=True)
     plain = mr.hisat2_configuration_message(rich=False)
     assert "not bundled with RepeatViewer" in rich
+    assert f"Supported version: HISAT2 {mr.HISAT2_SUPPORTED_VERSION} or newer" in rich
+    assert f"hisat2={mr.HISAT2_RECOMMENDED_VERSION}" in rich
     assert "<b>If</b>" in rich
     assert "<b>else:</b>" in rich
     assert "<b>Then</b>, in RepeatViewer:" in rich
@@ -368,6 +370,8 @@ def test_hisat2_configuration_message_matches_fastga_style():
     assert "conda install -n rv_env" in rich
     assert "External tools" in rich
     assert "not bundled with RepeatViewer" in plain
+    assert f"Supported version: HISAT2 {mr.HISAT2_SUPPORTED_VERSION} or newer" in plain
+    assert f"hisat2={mr.HISAT2_RECOMMENDED_VERSION}" in plain
     assert "rv_env" in plain
 
 

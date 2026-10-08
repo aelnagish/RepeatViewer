@@ -304,8 +304,18 @@ def hisat2_build_executable(hisat2: str) -> str | None:
     return which_tool("hisat2-build") or shutil.which("hisat2-build")
 
 
+# Bioconda current stable; Mapping calls the HISAT2 2.2 CLI (-p, -k, --dta, …).
+HISAT2_SUPPORTED_VERSION = "2.2"
+HISAT2_RECOMMENDED_VERSION = "2.2.3"
+_HISAT2_SUPPORTED_VERSION_HTML = (
+    f"<b>Supported version: HISAT2 {HISAT2_SUPPORTED_VERSION} or newer</b>"
+)
+_HISAT2_SUPPORTED_VERSION_PLAIN = (
+    f"Supported version: HISAT2 {HISAT2_SUPPORTED_VERSION} or newer"
+)
+
 _HISAT2_RECOMMENDED_ENV = "rv_env"
-_HISAT2_CONDA_PKG = "hisat2"
+_HISAT2_CONDA_PKG = f"hisat2={HISAT2_RECOMMENDED_VERSION}"
 _HISAT2_CONDA_INSTALL_CMD = (
     f"conda install -n {_HISAT2_RECOMMENDED_ENV} -c conda-forge -c bioconda "
     f"{_HISAT2_CONDA_PKG}"
@@ -340,6 +350,9 @@ def _hisat2_conda_install_block(*, rich: bool) -> str:
 
 def hisat2_configuration_message(*, rich: bool = True) -> str:
     """How to install and point RepeatViewer at HISAT2 (FastGA reminder style)."""
+    version = (
+        _HISAT2_SUPPORTED_VERSION_HTML if rich else _HISAT2_SUPPORTED_VERSION_PLAIN
+    )
     install = _hisat2_conda_install_block(rich=rich)
     env_name = _HISAT2_RECOMMENDED_ENV
     if sys.platform == "win32":
@@ -347,6 +360,7 @@ def hisat2_configuration_message(*, rich: bool = True) -> str:
             return (
                 "HISAT2 is not bundled with RepeatViewer and is not configured "
                 "yet.<br><br>"
+                f"{version}<br><br>"
                 "On Windows, HISAT2 typically runs inside WSL2 (not as a native "
                 "Windows binary).<br><br>"
                 "1. Install WSL2 if needed (PowerShell as Administrator):"
@@ -359,6 +373,7 @@ def hisat2_configuration_message(*, rich: bool = True) -> str:
             )
         return (
             "HISAT2 is not bundled with RepeatViewer and is not configured yet.\n\n"
+            f"{version}\n\n"
             "On Windows, HISAT2 typically runs inside WSL2 (not as a native "
             "Windows binary).\n\n"
             "1. Install WSL2 if needed (PowerShell as Administrator):\n"
@@ -372,6 +387,7 @@ def hisat2_configuration_message(*, rich: bool = True) -> str:
         return (
             "HISAT2 is not bundled with RepeatViewer and is not configured "
             "yet.<br><br>"
+            f"{version}<br><br>"
             f"{install}<br><br>"
             "<b>Then</b>, in RepeatViewer:<br>"
             "File → Setting → External tools (conda) → enter "
@@ -380,6 +396,7 @@ def hisat2_configuration_message(*, rich: bool = True) -> str:
         )
     return (
         "HISAT2 is not bundled with RepeatViewer and is not configured yet.\n\n"
+        f"{version}\n\n"
         f"{install}\n\n"
         "Then, in RepeatViewer:\n"
         "  File → Setting → External tools (conda) → enter "
