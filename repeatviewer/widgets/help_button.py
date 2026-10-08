@@ -50,6 +50,12 @@ def show_help_message(parent: QWidget | None, title: str, help_text: str) -> Non
     )
     box.setStandardButtons(QMessageBox.StandardButton.Ok)
     box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+    # Allow clickable https links in help bodies (e.g. NCBI genetic codes).
+    for label in box.findChildren(QLabel):
+        label.setOpenExternalLinks(True)
+        label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
     box.exec()
 
 

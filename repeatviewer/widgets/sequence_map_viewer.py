@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QTextEdit,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -810,23 +811,14 @@ def _complement_base(base: str) -> str:
     return base.translate(_COMPLEMENT_BASE)
 
 
-def _translate_dna_fragment(dna: str) -> str:
+def _translate_dna_fragment(dna: str, *, table: int = 1) -> str:
     """Translate a codon-aligned DNA fragment (empty-safe)."""
-    from Bio.Seq import Seq
+    from repeatviewer.backends.genetic_codes import translate_dna_codons
 
-    text = (dna or "").upper().replace("U", "T")
-    rem = len(text) % 3
-    if rem:
-        text = text[: len(text) - rem]
-    if not text:
-        return ""
-    try:
-        return str(Seq(text).translate(to_stop=False))
-    except Exception:  # noqa: BLE001
-        return ""
+    return translate_dna_codons(dna, table=table)
 
 
-def _translate_dna_frame(sequence: str, frame: int) -> str:
+def _translate_dna_frame(sequence: str, frame: int, *, table: int = 1) -> str:
     """Translate one reading frame; ``frame`` in {±1, ±2, ±3}.
 
     Prefer :func:`_iter_visible_frame_residues` for painting — this full-sequence
@@ -839,7 +831,7 @@ def _translate_dna_frame(sequence: str, frame: int) -> str:
         dna = text[frame - 1 :]
     else:
         dna = reverse_complement(text)[abs(frame) - 1 :]
-    return _translate_dna_fragment(dna)
+    return _translate_dna_fragment(dna, table=table)
 
 
 def _iter_visible_frame_residues(
@@ -847,6 +839,8 @@ def _iter_visible_frame_residues(
     frame: int,
     visible_start: int,
     visible_end: int,
+    *,
+    table: int = 1,
 ):
     """Yield ``(fwd_start0, fwd_end0, aa)`` for residues overlapping the viewport.
 
@@ -877,7 +871,9 @@ def _iter_visible_frame_residues(
         length -= length % 3
         if length < 3:
             return
-        aa = _translate_dna_fragment(sequence[dna_start : dna_start + length])
+        aa = _translate_dna_fragment(
+            sequence[dna_start : dna_start + length], table=table
+        )
         for ai, residue in enumerate(aa):
             start0 = dna_start + ai * 3
             end0 = start0 + 3
@@ -905,7 +901,7 @@ def _iter_visible_frame_residues(
     length -= length % 3
     if length < 3:
         return
-    aa = _translate_dna_fragment(fragment_rc[:length])
+    aa = _translate_dna_fragment(fragment_rc[:length], table=table)
     for ai, residue in enumerate(aa):
         c0 = rc_lo + ai * 3
         c1 = c0 + 3
@@ -914,6 +910,12 @@ def _iter_visible_frame_residues(
         if f_end <= vs or f_start >= ve:
             continue
         yield f_start, f_end, residue
+
+
+def _draw_cell_separator(painter: QPainter, cell: QRectF) -> None:
+    """Thin right-edge hairline so adjacent coloured cells read as a grid."""
+    painter.setPen(QPen(QColor(0, 0, 0, 60), 1))
+    painter.drawLine(cell.topRight(), cell.bottomRight())
 
 
 def _draw_feature_selection_chrome(painter: QPainter, rect: QRectF) -> None:
@@ -1439,6 +1441,7 @@ class AnnotationTrackWidget(QWidget):
         self._move_preview_track: int | None = None
         self._move_ghost_y: float | None = None
         self._feature_bar_height = float(_ANNOT_FEATURE_HEIGHT)
+        self._track_gap = float(_TRACK_GAP)
         self._label_point_size = 7
         self._hover_idx: int | None = None
         self._range_selection: tuple[int, int] | None = None
@@ -1460,6 +1463,13 @@ class AnnotationTrackWidget(QWidget):
 
     def set_feature_bar_height(self, height: int) -> None:
         self._feature_bar_height = float(max(8, min(40, int(height))))
+        self._refresh_geometry_from_layout()
+
+    def set_track_gap(self, gap: int) -> None:
+        self._track_gap = float(max(0, min(40, int(gap))))
+        self._refresh_geometry_from_layout()
+
+    def _refresh_geometry_from_layout(self) -> None:
         if self._features:
             self.set_view(
                 features=self._features,
@@ -1517,7 +1527,7 @@ class AnnotationTrackWidget(QWidget):
         super().leaveEvent(event)
 
     def _row_height(self) -> float:
-        return float(self._feature_bar_height + _TRACK_GAP)
+        return float(self._feature_bar_height + self._track_gap)
 
     def _feature_full_label(self, feat: SequenceFeature) -> str:
         base = feat.name or feat.feature_type
@@ -2359,7 +2369,10 @@ class SequenceMapCanvas(QWidget):
         self._split_tracks_by_source = True
         self._show_complement = False
         self._translation_frames: frozenset[int] = frozenset()
+        self._translation_table = 1
+        self._translation_three_letter = False
         self._letter_min_px = 4
+        self._hover_track_tip = ""
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(max(120, self.width()), max(1, int(self._content_height())))
@@ -2387,6 +2400,24 @@ class SequenceMapCanvas(QWidget):
         self.update()
         if not changed:
             self.contentHeightChanged.emit()
+
+    def set_translation_table(self, table_id: int) -> None:
+        from repeatviewer.backends.genetic_codes import normalize_genetic_code_id
+
+        table_id = normalize_genetic_code_id(table_id)
+        if table_id == self._translation_table:
+            return
+        self._translation_table = table_id
+        self._invalidate_seq_layer_cache()
+        self.update()
+
+    def set_translation_three_letter(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._translation_three_letter:
+            return
+        self._translation_three_letter = enabled
+        self._invalidate_seq_layer_cache()
+        self.update()
 
     def set_letter_min_px(self, pixels: int) -> None:
         pixels = max(1, min(24, int(pixels)))
@@ -2711,6 +2742,56 @@ class SequenceMapCanvas(QWidget):
             rows.append(f"frame:{frame}")
         return rows
 
+    @staticmethod
+    def _track_kind_label(kind: str, *, is_protein: bool = False) -> str:
+        if kind == "forward":
+            return "Protein sequence" if is_protein else "Forward strand"
+        if kind == "complement":
+            return "Reverse strand"
+        if kind.startswith("frame:"):
+            try:
+                frame = int(kind.split(":", 1)[1])
+            except ValueError:
+                return "Translation"
+            if frame > 0:
+                return f"Forward frame {frame}"
+            return f"Reverse frame {abs(frame)}"
+        return ""
+
+    def _display_row_kind_at_y(self, y: float) -> str | None:
+        """Return ``forward`` / ``complement`` / ``frame:N`` under vertical ``y``, if any."""
+        if not self._sequence:
+            return None
+        _origin_x, origin_y, _cell_w, cell_h = self._nucleotide_cell_geometry()
+        if cell_h <= 0:
+            return None
+        y0 = float(origin_y)
+        h = float(cell_h)
+        if y0 <= y < y0 + h:
+            return "forward"
+        gap = 2.0
+        cursor = y0 + h + gap
+        for kind in self._extra_display_rows():
+            if cursor <= y < cursor + h:
+                return kind
+            cursor += h + gap
+        return None
+
+    def _update_sequence_track_tooltip(self, pos: QPointF, global_pos) -> None:
+        kind = self._display_row_kind_at_y(float(pos.y()))
+        tip = (
+            self._track_kind_label(kind, is_protein=self._is_protein)
+            if kind
+            else ""
+        )
+        if tip == self._hover_track_tip:
+            return
+        self._hover_track_tip = tip
+        if tip:
+            QToolTip.showText(global_pos, tip, self)
+        else:
+            QToolTip.hideText()
+
     def _extra_display_height(self) -> float:
         rows = self._extra_display_rows()
         if not rows:
@@ -2974,8 +3055,7 @@ class SequenceMapCanvas(QWidget):
                 # thin separator so adjacent cells read as a clean uniform grid
                 # (bright colors like green can otherwise look "off" next to
                 # duller neighbors even though the cells are the same width)
-                painter.setPen(QPen(QColor(0, 0, 0, 60), 1))
-                painter.drawLine(cell.topRight(), cell.bottomRight())
+                _draw_cell_separator(painter, cell)
         if show_letters:
             painter.save()
             painter.setClipRect(cell)
@@ -3236,6 +3316,8 @@ class SequenceMapCanvas(QWidget):
             self._sequence_font_for_track(float(cell_h)) if show_letters else None
         )
 
+        from repeatviewer.backends.genetic_codes import amino_acid_display
+
         for kind in rows:
             if kind == "complement":
                 for i in range(visible_start, visible_end):
@@ -3249,16 +3331,24 @@ class SequenceMapCanvas(QWidget):
                     # Always fill — even if color-bases is off — so the second
                     # track cannot disappear into the paper background.
                     painter.fillRect(cell, bg if self._color_bases else QColor("#e8e8e8"))
-                    if show_letters and letter_font is not None:
-                        painter.setFont(letter_font)
-                        painter.setPen(fg if self._color_bases else QColor("#222222"))
-                        painter.drawText(
-                            cell, Qt.AlignmentFlag.AlignCenter, letter
-                        )
+                    if show_letters:
+                        _draw_cell_separator(painter, cell)
+                        if letter_font is not None:
+                            painter.setFont(letter_font)
+                            painter.setPen(
+                                fg if self._color_bases else QColor("#222222")
+                            )
+                            painter.drawText(
+                                cell, Qt.AlignmentFlag.AlignCenter, letter
+                            )
             elif kind.startswith("frame:"):
                 frame = int(kind.split(":", 1)[1])
                 for start0, end0, residue in _iter_visible_frame_residues(
-                    seq, frame, visible_start, visible_end
+                    seq,
+                    frame,
+                    visible_start,
+                    visible_end,
+                    table=self._translation_table,
                 ):
                     x = origin_x + start0 * cell_w - scroll
                     w = float(end0 - start0) * cell_w
@@ -3267,12 +3357,26 @@ class SequenceMapCanvas(QWidget):
                         continue
                     bg, fg = _base_colors(residue, is_protein=True)
                     painter.fillRect(cell, bg if self._color_bases else QColor("#e8e8e8"))
-                    if show_letters and letter_font is not None:
-                        painter.setFont(letter_font)
-                        painter.setPen(fg if self._color_bases else QColor("#222222"))
-                        painter.drawText(
-                            cell, Qt.AlignmentFlag.AlignCenter, residue
-                        )
+                    if show_letters:
+                        _draw_cell_separator(painter, cell)
+                        if letter_font is not None:
+                            label = amino_acid_display(
+                                residue,
+                                three_letter=self._translation_three_letter,
+                            )
+                            font = letter_font
+                            if self._translation_three_letter and len(label) > 1:
+                                # Fit Met / Ter into a 3-base-wide codon cell.
+                                font = QFont(letter_font)
+                                pt = max(5, int(letter_font.pointSizeF() * 0.72))
+                                font.setPointSize(pt)
+                            painter.setFont(font)
+                            painter.setPen(
+                                fg if self._color_bases else QColor("#222222")
+                            )
+                            painter.drawText(
+                                cell, Qt.AlignmentFlag.AlignCenter, label
+                            )
             y += float(cell_h) + gap
 
     def _draw_features(self, painter: QPainter) -> None:
@@ -3505,6 +3609,9 @@ class SequenceMapCanvas(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._drag_select and self._select_start_bp is not None:
+            if self._hover_track_tip:
+                self._hover_track_tip = ""
+                QToolTip.hideText()
             bp = self._bp_at_pos(event.position().x(), event.position().y())
             if bp == self._select_end_bp:
                 event.accept()
@@ -3517,7 +3624,16 @@ class SequenceMapCanvas(QWidget):
             self.update(self._selection_change_damage(old_sel, (a, b)))
             event.accept()
             return
+        self._update_sequence_track_tooltip(
+            event.position(), event.globalPosition().toPoint()
+        )
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._hover_track_tip:
+            self._hover_track_tip = ""
+            QToolTip.hideText()
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4967,6 +5083,16 @@ class SequenceMapWidget(QWidget):
         self._canvas._invalidate_seq_layer_cache()
         self._canvas.update()
 
+    def set_translation_table(self, table_id: int) -> None:
+        self._canvas.set_translation_table(table_id)
+        self._canvas._invalidate_seq_layer_cache()
+        self._canvas.update()
+
+    def set_translation_three_letter(self, enabled: bool) -> None:
+        self._canvas.set_translation_three_letter(enabled)
+        self._canvas._invalidate_seq_layer_cache()
+        self._canvas.update()
+
     def set_letter_min_px(self, pixels: int) -> None:
         self._canvas.set_letter_min_px(pixels)
         self._sync_header_views()
@@ -4977,6 +5103,10 @@ class SequenceMapWidget(QWidget):
 
     def set_annotation_thickness(self, height: int) -> None:
         self._annot_track.set_feature_bar_height(height)
+        self._sync_header_views()
+
+    def set_annotation_distance(self, gap: int) -> None:
+        self._annot_track.set_track_gap(gap)
         self._sync_header_views()
 
     def set_base_number_size(self, point_size: int) -> None:
@@ -6117,6 +6247,7 @@ class SequenceMapPanel(QWidget):
         self._rail.saveClicked.connect(lambda: self._save_annotations(silent=True))
         self._rail.exportClicked.connect(self._export_annotation_view)
         self._rail.colorsClicked.connect(self._open_annotation_settings_dialog)
+        self._rail.residueColorsChanged.connect(self._on_residue_colors_changed)
         self._rail.featureDetectClicked.connect(self._on_auto_run_clicked)
         self._rail.featureDetectSettingsClicked.connect(self._open_auto_annotation_settings)
         self._rail.similarityAnnotateClicked.connect(self._on_similarity_run_clicked)
@@ -6167,22 +6298,28 @@ class SequenceMapPanel(QWidget):
         rail.showComplementChanged.connect(self._map.set_show_complement)
         rail.showTranslationChanged.connect(self._on_show_translation_toggled)
         rail.translationFramesChanged.connect(self._on_translation_frames_changed)
+        rail.translationOptionsChanged.connect(self._on_translation_options_changed)
         rail.basesZoomedInChanged.connect(self._on_bases_zoomed_in_changed)
         rail.basesZoomedOutChanged.connect(self._map.set_letter_min_px)
         rail.annotationLabelSizeChanged.connect(self._map.set_annotation_label_size)
         rail.annotationThicknessChanged.connect(self._map.set_annotation_thickness)
+        rail.annotationDistanceChanged.connect(self._map.set_annotation_distance)
         rail.sequenceNameSizeChanged.connect(self._on_sequence_name_size_changed)
         rail.baseNumberSizeChanged.connect(self._map.set_base_number_size)
+        rail.splitTracksBySourceChanged.connect(self._on_split_tracks_by_source_changed)
         for signal in (
             rail.showComplementChanged,
             rail.showTranslationChanged,
             rail.translationFramesChanged,
+            rail.translationOptionsChanged,
             rail.basesZoomedInChanged,
             rail.basesZoomedOutChanged,
             rail.annotationLabelSizeChanged,
             rail.annotationThicknessChanged,
+            rail.annotationDistanceChanged,
             rail.sequenceNameSizeChanged,
             rail.baseNumberSizeChanged,
+            rail.splitTracksBySourceChanged,
         ):
             signal.connect(lambda *_a: self._save_show_panel_settings())
 
@@ -6198,8 +6335,19 @@ class SequenceMapPanel(QWidget):
         else:
             self._map.set_translation_frames(frozenset())
 
+    def _on_translation_options_changed(self) -> None:
+        rail = self._rail
+        self._map.set_translation_three_letter(rail.translation_three_letter())
+        self._map.set_translation_table(rail.translation_genetic_code())
+        if rail.show_translation.isChecked():
+            self._map.set_translation_frames(rail.selected_translation_frames())
+
     def _on_bases_zoomed_in_changed(self, point_size: int) -> None:
         self._map.set_font_point_size(point_size)
+
+    def _on_split_tracks_by_source_changed(self, enabled: bool) -> None:
+        _save_split_tracks_by_source(bool(enabled))
+        self._map.set_split_tracks_by_source(bool(enabled))
 
     def _on_sequence_name_size_changed(self, point_size: int) -> None:
         self._rail.set_sequence_name_font_point_size(point_size)
@@ -6214,10 +6362,12 @@ class SequenceMapPanel(QWidget):
         blockers = [
             rail.show_complement,
             rail.show_translation,
+            rail.split_tracks_by_source,
             rail.bases_zoomed_in,
             rail.bases_zoomed_out,
             rail.annotation_label_size,
             rail.annotation_thickness,
+            rail.annotation_distance,
             rail.sequence_name_size,
             rail.base_number_size,
             *rail.frame_checks.values(),
@@ -6228,8 +6378,7 @@ class SequenceMapPanel(QWidget):
             rail.show_complement.setChecked(bool(s.value("show_complement", False, type=bool)))
             show_tr = bool(s.value("show_translation", False, type=bool))
             rail.show_translation.setChecked(show_tr)
-            for check in rail.frame_checks.values():
-                check.setEnabled(show_tr)
+            rail.translation_more_btn.setEnabled(show_tr)
             frames_raw = s.value("translation_frames", "1")
             try:
                 frames = {
@@ -6239,12 +6388,21 @@ class SequenceMapPanel(QWidget):
                 }
             except ValueError:
                 frames = {1}
-            for frame, check in rail.frame_checks.items():
-                check.setChecked(frame in frames or (not frames and frame == 1))
+            three_letter = bool(
+                s.value("translation_three_letter", False, type=bool)
+            )
+            genetic_code = int(s.value("translation_genetic_code", 1))
+            rail.set_translation_options(
+                frames=frames or {1},
+                three_letter=three_letter,
+                genetic_code=genetic_code,
+            )
+            rail.split_tracks_by_source.setChecked(_load_split_tracks_by_source())
             rail.bases_zoomed_in.setValue(int(s.value("bases_zoomed_in", 13)))
             rail.bases_zoomed_out.setValue(int(s.value("bases_zoomed_out", 4)))
             rail.annotation_label_size.setValue(int(s.value("annotation_label_size", 7)))
             rail.annotation_thickness.setValue(int(s.value("annotation_thickness", 18)))
+            rail.annotation_distance.setValue(int(s.value("annotation_distance", 0)))
             rail.sequence_name_size.setValue(int(s.value("sequence_name_size", 12)))
             rail.base_number_size.setValue(int(s.value("base_number_size", 7)))
         finally:
@@ -6253,10 +6411,13 @@ class SequenceMapPanel(QWidget):
         s.endGroup()
         self._map.set_show_complement(rail.show_complement.isChecked())
         self._on_show_translation_toggled(rail.show_translation.isChecked())
+        self._on_translation_options_changed()
+        self._map.set_split_tracks_by_source(rail.split_tracks_by_source.isChecked())
         self._map.set_font_point_size(rail.bases_zoomed_in.value())
         self._map.set_letter_min_px(rail.bases_zoomed_out.value())
         self._map.set_annotation_label_size(rail.annotation_label_size.value())
         self._map.set_annotation_thickness(rail.annotation_thickness.value())
+        self._map.set_annotation_distance(rail.annotation_distance.value())
         self._rail.set_sequence_name_font_point_size(rail.sequence_name_size.value())
         self._map.set_base_number_size(rail.base_number_size.value())
 
@@ -6266,12 +6427,19 @@ class SequenceMapPanel(QWidget):
         s.beginGroup("annotation_map_display")
         s.setValue("show_complement", rail.show_complement.isChecked())
         s.setValue("show_translation", rail.show_translation.isChecked())
-        frames = sorted(rail.selected_translation_frames()) or [1]
+        frames = sorted(
+            frame
+            for frame, check in rail.frame_checks.items()
+            if check.isChecked()
+        ) or [1]
         s.setValue("translation_frames", ",".join(str(f) for f in frames))
+        s.setValue("translation_three_letter", rail.translation_three_letter())
+        s.setValue("translation_genetic_code", rail.translation_genetic_code())
         s.setValue("bases_zoomed_in", rail.bases_zoomed_in.value())
         s.setValue("bases_zoomed_out", rail.bases_zoomed_out.value())
         s.setValue("annotation_label_size", rail.annotation_label_size.value())
         s.setValue("annotation_thickness", rail.annotation_thickness.value())
+        s.setValue("annotation_distance", rail.annotation_distance.value())
         s.setValue("sequence_name_size", rail.sequence_name_size.value())
         s.setValue("base_number_size", rail.base_number_size.value())
         s.endGroup()
@@ -6402,6 +6570,11 @@ class SequenceMapPanel(QWidget):
     def _on_show_online_blast_toggled(self, checked: bool) -> None:
         del checked
 
+    def _on_residue_colors_changed(self) -> None:
+        self._map.refresh_nucleotide_colors()
+        self._map.update()
+        self._broadcast_shared_annotation_settings_changed()
+
     def _open_annotation_settings_dialog(self) -> None:
         dialog = AnnotationElementColorsDialog(
             parent=self,
@@ -6412,10 +6585,6 @@ class SequenceMapPanel(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self._map.set_font_point_size(dialog.font_point_size())
-        split_on = dialog.split_tracks_by_source()
-        _save_split_tracks_by_source(split_on)
-        self._map.set_split_tracks_by_source(split_on)
         if dialog.apply_to_current_sequence():
             self._apply_element_colors_to_map(
                 dialog.old_feature_type_colors(),
@@ -6423,6 +6592,7 @@ class SequenceMapPanel(QWidget):
                 dialog.old_database_colors(),
                 dialog.new_database_colors(),
             )
+        self._rail.sync_color_scheme_combos()
         self._map.refresh_nucleotide_colors()
         self._map.update()
         self._broadcast_shared_annotation_settings_changed()
@@ -6831,6 +7001,7 @@ class SequenceMapPanel(QWidget):
         )
         fit = fit_after_load and saved_view is None
         self._map.load(data, fit_after_load=fit)
+        self._rail.set_sequence_kind(bool(data.is_protein))
         if saved_view is not None:
             self._map.restore_view_state_for_session(saved_view)
         self._feature_undo_stack.clear()
@@ -6968,6 +7139,7 @@ class SequenceMapPanel(QWidget):
         finally:
             self._sequence_switch_updating = False
         self._map.load(data, fit_after_load=True)
+        self._rail.set_sequence_kind(bool(data.is_protein))
         self._feature_undo_stack.clear()
         self._sync_too_long_controls()
         if not self._map.is_too_long_for_display():
@@ -7140,7 +7312,13 @@ class SequenceMapPanel(QWidget):
         self._map.set_show_similarity_database_name(
             self._similarity_ann_settings.show_database_name_on_track
         )
-        self._map.reload_split_tracks_by_source_pref()
+        split_on = _load_split_tracks_by_source()
+        self._map.set_split_tracks_by_source(split_on)
+        rail = getattr(self, "_rail", None)
+        if rail is not None and hasattr(rail, "split_tracks_by_source"):
+            rail.split_tracks_by_source.blockSignals(True)
+            rail.split_tracks_by_source.setChecked(split_on)
+            rail.split_tracks_by_source.blockSignals(False)
         self._map.set_show_online_blast(False)
         self._rebuild_add_feature_buttons()
         self.refresh_similarity_databases()

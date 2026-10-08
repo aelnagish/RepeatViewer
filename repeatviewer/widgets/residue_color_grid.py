@@ -56,7 +56,8 @@ class ResidueColorGrid(QWidget):
                 label.setAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                 )
-                label.setStyleSheet("color: #444;")
+                # Use the theme text color so labels stay readable in dark mode.
+                label.setStyleSheet("color: palette(window-text);")
                 buttons = QWidget(self)
                 row = QHBoxLayout(buttons)
                 row.setContentsMargins(0, 0, 0, 0)
