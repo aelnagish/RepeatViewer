@@ -458,20 +458,16 @@ def legacy_stem_features_gff_path(fasta_path: Path) -> Path:
 
 
 def resolve_sidecar_path(fasta_path: Path) -> Path | None:
-    canonical = sidecar_path(fasta_path)
-    if canonical.is_file():
-        return canonical
+    """Return an existing annotation JSON path next to ``fasta_path``, if any.
+
+    Does not rename or write files in the source directory.
+    """
     for candidate in (
+        sidecar_path(fasta_path),
         legacy_stem_sidecar_path(fasta_path),
         legacy_sidecar_path(fasta_path),
     ):
-        if not candidate.is_file():
-            continue
-        # Migrate legacy name to ``*.seqmap_RV.json`` when possible.
-        try:
-            candidate.replace(canonical)
-            return canonical
-        except OSError:
+        if candidate.is_file():
             return candidate
     return None
 

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
-from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox, QStyle, QStyleOptionSpinBox
+from PySide6.QtWidgets import (
+    QDoubleSpinBox,
+    QSlider,
+    QSpinBox,
+    QStyle,
+    QStyleOptionSpinBox,
+)
 
 
 def _hit_spin_stepper(widget: QSpinBox | QDoubleSpinBox, pos: QPoint) -> bool:
@@ -80,3 +86,10 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         if self._clear_focus_on_stepper_release:
             self._clear_focus_on_stepper_release = False
             self.clearFocus()
+
+
+class NoWheelSlider(QSlider):
+    """Ignore wheel events so scrolling the panel does not change the value."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802 (Qt API)
+        event.ignore()

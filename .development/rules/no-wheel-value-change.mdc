@@ -1,0 +1,48 @@
+---
+description: >-
+  Never let mouse-wheel scrolling change combo/spin values. Use NoWheelComboBox
+  and NoWheelSpinBox / NoWheelDoubleSpinBox for all value controls.
+alwaysApply: true
+---
+
+# No scroll-to-change values
+
+**Never** introduce UI where hovering a control and scrolling the mouse wheel
+changes its value (combo selection, spin box number, slider tied to a field, etc.).
+
+Scrolling over a panel must scroll the panel (or be ignored) — not quietly
+edit the focused/hovered field.
+
+## Required widgets
+
+| Control | Use this | Module |
+|---------|----------|--------|
+| Combo / dropdown | `NoWheelComboBox` | `repeatviewer/widgets/combo_boxes.py` |
+| Integer spin | `NoWheelSpinBox` | `repeatviewer/widgets/spin_boxes.py` |
+| Float spin | `NoWheelDoubleSpinBox` | `repeatviewer/widgets/spin_boxes.py` |
+
+Prefer the project alias pattern used in tool dialogs:
+
+```python
+from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
+from repeatviewer.widgets.spin_boxes import NoWheelSpinBox as QSpinBox
+from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox as QDoubleSpinBox
+```
+
+## Do not
+
+- Subclass or use plain `QComboBox`, `QSpinBox`, or `QDoubleSpinBox` for
+  editable parameter fields without ignoring `wheelEvent`.
+- “Fix” zoom/scroll by re-enabling wheel-to-change on form fields.
+- Add new spin/combo helpers that call `super().wheelEvent(event)` for value
+  changes.
+
+## Allowed wheel use
+
+Wheel may still drive **view navigation** (canvas zoom/pan, list/table scroll,
+tree scroll) — only **not** discrete form values.
+
+## When touching old code
+
+If you see a plain `QComboBox` / `QSpinBox` / `QDoubleSpinBox` in a form or
+settings panel, switch it to the NoWheel variant while editing that area.

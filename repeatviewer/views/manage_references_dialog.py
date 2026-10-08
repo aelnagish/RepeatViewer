@@ -114,6 +114,14 @@ TypeFilter = Literal[
     "cdd",
 ]
 SectionFilter = Literal["blast", "hmm", "others"]
+# What the caller can accept when using Manage Database → Select.
+PickCompatible = Literal[
+    "blast_nucl",
+    "blast_prot",
+    "blast_any",
+    "hmm",
+    "cdd",
+]
 
 _COL_NAME = 0
 _COL_ANN_NAME = 1
@@ -128,6 +136,44 @@ _FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".faa"}
 _BLAST_KINDS = {DB_KIND_FASTA_DNA, DB_KIND_FASTA_PROTEIN}
 _HMM_KINDS = {DB_KIND_HMM_DNA, DB_KIND_HMM_PROTEIN}
 _OTHER_KINDS = {DB_KIND_CDD}
+
+_PICK_COMPATIBLE_LABELS: dict[str, str] = {
+    "blast_nucl": "nucleotide BLAST / genome FASTA",
+    "blast_prot": "protein BLAST FASTA",
+    "blast_any": "BLAST FASTA",
+    "hmm": "HMM database",
+    "cdd": "CDD database",
+}
+
+
+def fasta_path_from_database_pick(payload: object) -> Path | None:
+    """Resolve a Manage Database Select payload to a FASTA path when possible."""
+    if isinstance(payload, BlastDatabase):
+        return Path(payload.source_fasta).expanduser().resolve()
+    if isinstance(payload, ManagedGenome):
+        return Path(payload.path).expanduser().resolve()
+    if isinstance(payload, UserDatabase):
+        if payload.is_hmm or payload.db_type == DATABASE_TYPE_CDD:
+            return None
+        return Path(payload.path).expanduser().resolve()
+    if payload is None:
+        return None
+    try:
+        path = Path(payload).expanduser().resolve()
+    except (TypeError, ValueError):
+        return None
+    return path
+
+
+def database_name_from_pick(payload: object) -> str | None:
+    """Display/registry name for combo widgets that store database names."""
+    if isinstance(payload, BlastDatabase):
+        return str(payload.name or "").strip() or None
+    if isinstance(payload, ManagedGenome):
+        return str(payload.name or "").strip() or None
+    if isinstance(payload, UserDatabase):
+        return str(payload.name or "").strip() or None
+    return None
 
 
 class _MiddleElideDelegate(QStyledItemDelegate):
@@ -417,10 +463,10 @@ class AddDatabaseDialog(QDialog):
             field_with_help(self._name, "Name", _NAME_HELP, parent=self),
         )
         form.addRow(
-            "Annotation name:",
+            "Short name:",
             field_with_help(
                 self._ann_name,
-                "Annotation name",
+                "Short name",
                 _ANNOTATION_NAME_HELP,
                 parent=self,
             ),
@@ -755,6 +801,8 @@ class ManageReferencesDialog(QDialog):
     """Manage Database — BLAST | HMM | Others."""
 
     references_changed = Signal()
+    # Emitted when the user clicks Select (BlastDatabase | Path | UserDatabase).
+    databaseSelected = Signal(object)
 
     def __init__(
         self,
@@ -764,6 +812,7 @@ class ManageReferencesDialog(QDialog):
         role_filter: RoleFilter | TypeFilter = "all",
         type_filter: TypeFilter | None = None,
         scope_filter: str = "all",  # ignored (legacy)
+        pick_mode: bool = False,
     ) -> None:
         del scope_filter
         super().__init__(parent)
@@ -778,6 +827,10 @@ class ManageReferencesDialog(QDialog):
         self._rows: list[_RefRow] = []
         self._sort_column = _COL_NAME
         self._sort_order = Qt.SortOrder.AscendingOrder
+        self._pick_mode = bool(pick_mode)
+        self._pick_callback = None
+        self._pick_compatible: frozenset[str] = frozenset()
+        self._search_text = ""
         del type_filter  # type filter UI removed; tab already scopes kinds
 
         self._legacy_role = (
@@ -804,6 +857,11 @@ class ManageReferencesDialog(QDialog):
         tab_row.setContentsMargins(0, 0, 0, 0)
         tab_row.addWidget(self._section_bar, 0, Qt.AlignmentFlag.AlignLeft)
         tab_row.addStretch(1)
+
+        self._search = QLineEdit(self)
+        self._search.setPlaceholderText("Search name, annotation, type, or path…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._on_search_changed)
 
         self._table = QTableWidget(0, _COL_COUNT, self)
         self._table.setHorizontalHeaderLabels(
@@ -833,12 +891,14 @@ class ManageReferencesDialog(QDialog):
         header.setSortIndicatorShown(True)
         header.setSortIndicator(self._sort_column, self._sort_order)
         header.sectionClicked.connect(self._on_header_clicked)
-        header.setSectionResizeMode(_COL_NAME, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(_COL_NAME, 140)
+        # Name gets leftover width so long database names stay readable.
+        header.setSectionResizeMode(_COL_NAME, QHeaderView.ResizeMode.Stretch)
+        header.setMinimumSectionSize(80)
         header.setSectionResizeMode(_COL_ANN_NAME, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(_COL_ANN_NAME, 160)
+        header.resizeSection(_COL_ANN_NAME, 110)
         header.setSectionResizeMode(_COL_TYPE, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(_COL_PATH, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(_COL_PATH, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(_COL_PATH, 200)
         header.setSectionResizeMode(_COL_TIME, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(_COL_ANNOTATION, QHeaderView.ResizeMode.ResizeToContents)
         self._table.verticalHeader().setVisible(False)
@@ -855,6 +915,13 @@ class ManageReferencesDialog(QDialog):
 
         self._add_btn = QPushButton("Add…", self)
         self._remove_btn = QPushButton("Remove", self)
+        self._select_btn = QPushButton("Select", self)
+        self._select_btn.setToolTip(
+            "Fill the database field that opened this window "
+            "(only compatible types are accepted)."
+        )
+        self._select_btn.clicked.connect(self._select_current)
+        self._table.doubleClicked.connect(self._on_table_double_clicked)
         self._set_main_btn = QPushButton("Set as reference genome", self)
         self._set_main_help = make_help_button(
             self, "Set as reference genome", _SET_MAIN_REFERENCE_HELP
@@ -866,6 +933,7 @@ class ManageReferencesDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._add_btn)
         btn_row.addWidget(self._remove_btn)
+        btn_row.addWidget(self._select_btn)
         btn_row.addWidget(self._set_main_btn)
         btn_row.addWidget(self._set_main_help)
         btn_row.addStretch(1)
@@ -881,6 +949,7 @@ class ManageReferencesDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(tab_row)
+        layout.addWidget(self._search)
         layout.addWidget(self._table, 1)
         layout.addLayout(btn_row)
         layout.addWidget(self._current_label)
@@ -891,6 +960,63 @@ class ManageReferencesDialog(QDialog):
         self._sync_section_chrome()
         self._populate()
         self._update_buttons()
+        if self._pick_mode:
+            self.set_pick_mode(True)
+
+    def set_pick_mode(
+        self,
+        enabled: bool = True,
+        *,
+        callback=None,
+        role_filter: str | None = None,
+        compatible: PickCompatible | tuple[PickCompatible, ...] | list[str] | None = None,
+    ) -> None:
+        """Enable Select-to-fill mode for a tool database field.
+
+        ``compatible`` limits Select to matching kinds, e.g. ``blast_nucl`` for
+        TE-Aid / BLASTn, ``blast_prot`` for BLASTp/x, ``hmm`` for HMMER.
+        """
+        self._pick_mode = bool(enabled)
+        self._pick_callback = callback if enabled else None
+        if not enabled:
+            self._pick_compatible = frozenset()
+        elif compatible is None:
+            self._pick_compatible = frozenset()
+        elif isinstance(compatible, str):
+            self._pick_compatible = frozenset({compatible})
+        else:
+            self._pick_compatible = frozenset(str(item) for item in compatible if item)
+        if role_filter is not None:
+            self.apply_role_filter(role_filter)
+        elif self._pick_compatible:
+            # Jump to the tab that matches the requested kind.
+            if self._pick_compatible & {"blast_nucl", "blast_prot", "blast_any"}:
+                self.apply_role_filter("blast")
+            elif "hmm" in self._pick_compatible:
+                self.apply_role_filter("annotation")
+            elif "cdd" in self._pick_compatible:
+                self.apply_role_filter("all")
+                self._section_bar.setCurrentIndex(2)
+        self._select_btn.setDefault(self._pick_mode)
+        self._update_select_tooltip()
+        self._update_buttons()
+        if self._pick_mode:
+            self.raise_()
+            self.activateWindow()
+
+    def _update_select_tooltip(self) -> None:
+        if not self._pick_compatible:
+            self._select_btn.setToolTip(
+                "Fill the database field that opened this window."
+            )
+            return
+        labels = [
+            _PICK_COMPATIBLE_LABELS[key]
+            for key in sorted(self._pick_compatible)
+            if key in _PICK_COMPATIBLE_LABELS
+        ]
+        need = ", ".join(labels) if labels else "a compatible database"
+        self._select_btn.setToolTip(f"Fill the opener’s field. Requires: {need}.")
 
     def apply_role_filter(self, role_filter: str) -> None:
         """Switch tab when an existing dialog is re-opened with a role hint."""
@@ -1209,8 +1335,26 @@ class ManageReferencesDialog(QDialog):
         # Hide entries that are not ready (no Status column).
         return [r for r in rows if r.status == "Ready"]
 
+    def _on_search_changed(self, text: str) -> None:
+        self._search_text = str(text or "").strip().lower()
+        self._populate()
+
+    def _row_matches_search(self, row: _RefRow) -> bool:
+        needle = self._search_text
+        if not needle:
+            return True
+        haystacks = (
+            row.name,
+            row.annotation_name,
+            kind_label(row.kind),
+            row.path_display,
+        )
+        return any(needle in str(part or "").lower() for part in haystacks)
+
     def _populate(self) -> None:
-        filtered = self._sort_rows(self._build_rows())
+        filtered = [
+            row for row in self._sort_rows(self._build_rows()) if self._row_matches_search(row)
+        ]
         self._rows = filtered
         self._table.blockSignals(True)
         self._table.setRowCount(0)
@@ -1298,6 +1442,12 @@ class ManageReferencesDialog(QDialog):
     def _update_buttons(self) -> None:
         selected = self._selected_rows()
         self._remove_btn.setEnabled(bool(selected))
+        can_select = (
+            len(selected) == 1
+            and self._selection_payload(selected[0]) is not None
+            and self._row_is_compatible(selected[0])
+        )
+        self._select_btn.setEnabled(can_select)
         can_main = False
         if len(selected) == 1 and self._current_section() == "blast":
             row = selected[0]
@@ -1308,6 +1458,124 @@ class ManageReferencesDialog(QDialog):
             ):
                 can_main = True
         self._set_main_btn.setEnabled(can_main)
+
+    def _row_is_compatible(self, row: _RefRow) -> bool:
+        """True when Select may fill the opener with this row."""
+        needed = self._pick_compatible
+        if not needed:
+            # No restriction (or not in pick mode): any resolvable payload is OK.
+            return self._selection_payload(row) is not None
+
+        kind = row.kind
+        blast = row.blast
+        if "blast_nucl" in needed:
+            if blast is not None and blast.molecule_type == BLAST_MOLECULE_NUCL:
+                return True
+            if row.genome is not None:
+                return True
+            if kind == DB_KIND_FASTA_DNA:
+                return True
+        if "blast_prot" in needed:
+            if blast is not None and blast.molecule_type == BLAST_MOLECULE_PROT:
+                return True
+            if kind == DB_KIND_FASTA_PROTEIN:
+                return True
+        if "blast_any" in needed:
+            if blast is not None or row.genome is not None:
+                return True
+            if kind in _BLAST_KINDS:
+                return True
+        if "hmm" in needed:
+            if kind in _HMM_KINDS:
+                return True
+            if row.annotation is not None and row.annotation.is_hmm:
+                return True
+        if "cdd" in needed:
+            if kind == DB_KIND_CDD:
+                return True
+            if (
+                row.annotation is not None
+                and row.annotation.db_type == DATABASE_TYPE_CDD
+            ):
+                return True
+        return False
+
+    def _compatible_requirement_text(self) -> str:
+        if not self._pick_compatible:
+            return "a database"
+        labels = [
+            _PICK_COMPATIBLE_LABELS[key]
+            for key in sorted(self._pick_compatible)
+            if key in _PICK_COMPATIBLE_LABELS
+        ]
+        return ", ".join(labels) if labels else "a compatible database"
+
+    def _selection_payload(self, row: _RefRow):
+        """Return the database object / path for Select, or None if unsupported."""
+        if row.blast is not None:
+            return row.blast
+        if row.genome is not None:
+            return row.genome.path
+        if row.annotation is not None:
+            return row.annotation
+        return None
+
+    def _on_table_double_clicked(self, _index) -> None:  # noqa: ANN001
+        if self._pick_mode:
+            self._select_current()
+
+    def _select_current(self) -> None:
+        selected = self._selected_rows()
+        if len(selected) != 1:
+            QMessageBox.information(
+                self,
+                "Select",
+                "Select one database row first.",
+            )
+            return
+        row = selected[0]
+        if not self._row_is_compatible(row):
+            QMessageBox.information(
+                self,
+                "Select",
+                f"“{row.name}” is not compatible here.\n"
+                f"This field needs: {self._compatible_requirement_text()}.",
+            )
+            return
+        payload = self._selection_payload(row)
+        if payload is None:
+            QMessageBox.information(
+                self,
+                "Select",
+                "That row cannot be used as a database source.",
+            )
+            return
+        if not self._pick_mode and not callable(self._pick_callback):
+            QMessageBox.information(
+                self,
+                "Select",
+                "Open Manage Database from the tool field you want to fill "
+                "(for example TE-Aid, BLAST, HMMER, or Transfer annotation), "
+                "then click Select.",
+            )
+            return
+        callback = self._pick_callback
+        self.databaseSelected.emit(payload)
+        if callable(callback):
+            try:
+                callback(payload)
+            except Exception:  # noqa: BLE001
+                logging.exception("Manage Database select callback failed")
+        name = row.name or "database"
+        if self._pick_mode:
+            self._pick_callback = None
+            self._pick_mode = False
+            self._pick_compatible = frozenset()
+            self._select_btn.setDefault(False)
+            self._update_select_tooltip()
+            self.accept()
+            return
+        self._current_label.setText(f"Selected: {name}")
 
     def _ensure_user_db_tracked(self, db: UserDatabase) -> UserDatabase:
         """Return the project-owned UserDatabase for ``db`` (append if missing).

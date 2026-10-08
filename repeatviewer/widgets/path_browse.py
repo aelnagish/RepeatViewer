@@ -167,37 +167,22 @@ class PathBrowseRow(QWidget):
             return
         self._browse()
 
-    def _browse(self) -> None:
-        start = self._path.text().strip() or self._start_dir or str(Path.home())
-        if self._mode == "directory":
-            chosen = QFileDialog.getExistingDirectory(
-                self,
-                self._browse_title,
-                start,
-            )
-            if chosen:
-                self._path.setText(chosen)
-                self.path_changed.emit()
-            return
-        if self._mode == "file_or_directory":
-            menu = QMenu(self)
-            act_file = menu.addAction("FASTA file…")
-            act_folder = menu.addAction("Folder…")
-            chosen_act = menu.exec(
-                self._browse_btn.mapToGlobal(self._browse_btn.rect().bottomLeft())
-            )
-            if chosen_act is act_folder:
-                chosen = QFileDialog.getExistingDirectory(
-                    self,
-                    "Choose a folder of FASTA files",
-                    start,
-                )
-                if chosen:
-                    self._path.setText(chosen)
-                    self.path_changed.emit()
-                return
-            if chosen_act is not act_file:
-                return
+    def _browse_start_dir(self) -> str:
+        raw = self._path.text().strip() or self._start_dir or str(Path.home())
+        try:
+            path = Path(raw).expanduser()
+            if path.is_file():
+                return str(path.parent)
+            if path.is_dir():
+                return str(path)
+            parent = path.parent
+            if parent.is_dir():
+                return str(parent)
+        except OSError:
+            pass
+        return raw
+
+    def _browse_file(self, start: str) -> None:
         chosen, _ = QFileDialog.getOpenFileName(
             self,
             self._browse_title,
@@ -207,3 +192,40 @@ class PathBrowseRow(QWidget):
         if chosen:
             self._path.setText(chosen)
             self.path_changed.emit()
+
+    def _browse_directory(self, start: str, *, title: str | None = None) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            title or self._browse_title,
+            start,
+        )
+        if chosen:
+            self._path.setText(chosen)
+            self.path_changed.emit()
+
+    def _browse(self) -> None:
+        start = self._browse_start_dir()
+        if self._mode == "directory":
+            self._browse_directory(start)
+            return
+        if self._mode == "file_or_directory":
+            # Menu under Browse: pick a FASTA file or a folder of FASTAs.
+            menu = QMenu(self)
+            act_file = menu.addAction("FASTA file...")
+            act_file.setData("file")
+            act_folder = menu.addAction("Folder...")
+            act_folder.setData("directory")
+            chosen_act = menu.exec(
+                self._browse_btn.mapToGlobal(self._browse_btn.rect().bottomLeft())
+            )
+            if chosen_act is None:
+                return
+            kind = str(chosen_act.data() or "")
+            if kind == "directory":
+                self._browse_directory(
+                    start, title="Choose a folder of FASTA files"
+                )
+                return
+            if kind != "file":
+                return
+        self._browse_file(start)

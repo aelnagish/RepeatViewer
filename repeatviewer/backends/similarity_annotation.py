@@ -1468,6 +1468,9 @@ def run_similarity_annotations(
         )
         return index, entry, detected, msg
 
+    if progress is not None:
+        progress(f"0/{total} starting")
+
     if workers > 1 and total > 1:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
@@ -1480,16 +1483,18 @@ def run_similarity_annotations(
                 db_results[index] = (entry, detected, msg)
                 completed += 1
                 if progress is not None:
-                    progress(
-                        f"Similarity annotation {completed}/{total}: {entry.database.name}"
-                    )
+                    # Completed count after each DB finishes.
+                    progress(f"{completed}/{total} {entry.database.name}")
     else:
         for index, entry in enumerate(databases):
             check_cancelled(cancel)
             if progress is not None:
-                progress(f"Similarity annotation {index + 1}/{total}: {entry.database.name}")
+                progress(f"{index}/{total} {entry.database.name}")
             _, _, detected, msg = _run_one(index, entry)
             db_results[index] = (entry, detected, msg)
+            completed = index + 1
+            if progress is not None:
+                progress(f"{completed}/{total} {entry.database.name}")
 
     for index, result in enumerate(db_results):
         if result is None:

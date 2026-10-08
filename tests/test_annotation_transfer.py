@@ -83,31 +83,64 @@ def test_lift_features_partial_when_alignment_clips_feature() -> None:
 
 
 def test_transfer_annotations_identical_sequences(tmp_path: Path) -> None:
-    """End-to-end transfer when source and target are identical (needs minimap2)."""
+    """Hybrid transfer places features on identical source/target sequences."""
     from repeatviewer.backends.map_reference import MAP_ENGINE_MINIMAP2, engine_executable
+    from repeatviewer.backends.similarity_annotation import _blast_executable
 
-    if not engine_executable(MAP_ENGINE_MINIMAP2):
-        pytest.skip("minimap2 not available")
+    has_minimap = bool(engine_executable(MAP_ENGINE_MINIMAP2))
+    has_blast = False
+    try:
+        _blast_executable("blastn", use_system_blast=False)
+        has_blast = True
+    except FileNotFoundError:
+        try:
+            _blast_executable("blastn", use_system_blast=True)
+            has_blast = True
+        except FileNotFoundError:
+            pass
+    if not has_minimap and not has_blast:
+        pytest.skip("minimap2 and blastn unavailable")
 
-    seq = ("ACGT" * 80) + ("TTAA" * 20)  # 400 bp
+    import random
+
+    rng = random.Random(0)
+    seq = "".join(rng.choice("ACGT") for _ in range(400))
     features = [
         SequenceFeature(start=21, end=60, name="f1", feature_type="LTR", strand="+"),
         SequenceFeature(start=200, end=240, name="f2", feature_type="ORF", strand="-"),
     ]
+    fasta = tmp_path / "src.fa"
+    fasta.write_text(f">src\n{seq}\n", encoding="utf-8")
+    from repeatviewer.backends.sequence_features import save_annotations
+
+    save_annotations(
+        fasta,
+        sequence_id="src",
+        sequence_length=len(seq),
+        features=features,
+    )
     result = transfer_annotations(
         source_id="src",
         source_sequence=seq,
         target_id="tgt",
         target_sequence=seq,
         features=features,
-        opts=AnnotationTransferOptions(min_identity=0.5, min_coverage=0.5),
+        opts=AnnotationTransferOptions(
+            min_identity=0.5,
+            min_coverage=0.5,
+            annotation_source="Transfer (test)",
+            strategy="hybrid",
+        ),
+        source_fasta=fasta,
     )
     assert isinstance(result, AnnotationTransferResult)
     assert result.features
     assert len(result.features) == 2
+    assert all(f.source == "Transfer (test)" for f in result.features)
     counts = result.counts()
     assert counts["transferred"] == 2
     assert counts["lost"] == 0
+    assert counts.get("liftover", 0) + counts.get("blastn", 0) == 2
 
 
 def test_sequence_map_panel_has_geneious_rail() -> None:
@@ -129,10 +162,11 @@ def test_sequence_map_panel_has_geneious_rail() -> None:
         assert panel._rail._tab_buttons[2]._label == "Find"
         assert hasattr(panel._rail, "find_query")
         assert panel._rail._stack.count() == 3
-        assert panel._auto_ann_run_btn.text() == "Run feature detection"
-        assert panel._similarity_ann_run_btn.text() == "Run similarity"
+        assert panel._auto_ann_run_btn.text() == "Run"
+        assert panel._similarity_ann_run_btn.text() == "Run"
         assert hasattr(panel._rail, "show_complement")
         assert hasattr(panel._rail, "transfer_run_btn")
+        assert panel._rail.transfer_run_btn.text() == "Run"
         assert panel.layout().indexOf(panel._map) >= 0
         assert panel.layout().indexOf(panel._rail) >= 0
         assert panel.layout().indexOf(panel._map) < panel.layout().indexOf(panel._rail)

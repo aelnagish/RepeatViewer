@@ -1479,6 +1479,9 @@ class FolderTreeWidget(QTreeWidget):
     """Folder-only navigator; accepts dropped folders/files."""
 
     folder_selected = Signal(Path)
+    # Fires on every left-click of a folder row (including re-click of the
+    # already-selected folder) so path fields can click-to-fill.
+    folder_clicked = Signal(Path)
     files_dropped_to_folder = Signal(Path, list)
     folder_dropped = Signal(Path)
     rename_folder_requested = Signal(Path)
@@ -1771,6 +1774,7 @@ class FolderTreeWidget(QTreeWidget):
         self._emit_folder_for_item(current)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        clicked_folder: Path | None = None
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
             item = self.itemAt(pos)
@@ -1805,11 +1809,16 @@ class FolderTreeWidget(QTreeWidget):
                     )
                     if has_branch:
                         item.setExpanded(not item.isExpanded())
+                    # Chevron only — do not treat as a folder path click.
+                else:
+                    clicked_folder = self._folder_path_for_item(item)
         self._user_selecting = True
         try:
             super().mousePressEvent(event)
         finally:
             self._user_selecting = False
+        if clicked_folder is not None:
+            self.folder_clicked.emit(clicked_folder)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         self._user_selecting = True
@@ -2327,6 +2336,7 @@ class MainWindow(QMainWindow):
         self._folder_tree = FolderTreeWidget()
         self._folder_tree.setObjectName("FolderTree")
         self._folder_tree.folder_selected.connect(self._on_folder_selected)
+        self._folder_tree.folder_clicked.connect(self._on_folder_clicked_for_path_fill)
         self._folder_tree.files_dropped_to_folder.connect(self._copy_files_to_folder)
         self._folder_tree.folder_dropped.connect(
             lambda folder: self._add_root_folder(folder, unhide=True, warn_spaces=True),
@@ -3274,6 +3284,8 @@ class MainWindow(QMainWindow):
         self._folder_nav.setObjectName("FoldersDockNavHost")
         self._folder_nav.set_roots_provider(self._workspace_root_folders)
         self._folder_nav.navigate_requested.connect(self._on_folder_nav_requested)
+        self._folder_nav.file_navigate_requested.connect(self._on_file_nav_requested)
+        self._file_nav_navigating = False
 
         folders_trailing = QWidget()
         folders_trailing.setObjectName("FoldersDockTrailing")
@@ -7474,24 +7486,49 @@ class MainWindow(QMainWindow):
             self._prepare_configured_genomes()
         self._update_status()
 
-    def _open_manage_references(self, *, role_filter: str = "all") -> None:
+    def _open_manage_references(
+        self,
+        *,
+        role_filter: str = "all",
+        pick_callback=None,
+        pick_mode: bool = False,
+        compatible=None,
+    ) -> None:
         from repeatviewer.views.manage_references_dialog import ManageReferencesDialog
 
+        use_pick = bool(pick_mode or pick_callback is not None)
         existing = self._manage_references_dialog
         if existing is not None and existing.isVisible():
             if role_filter != "all":
                 existing.apply_role_filter(role_filter)
+            if use_pick:
+                existing.set_pick_mode(
+                    True,
+                    callback=pick_callback,
+                    role_filter=role_filter,
+                    compatible=compatible,
+                )
             existing.raise_()
             existing.activateWindow()
             return
         self._persist_workspace()
         self._manage_refs_genome_snapshot = self._genome_path_resolved()
         dialog = ManageReferencesDialog(
-            self._project, self, role_filter=role_filter  # type: ignore[arg-type]
+            self._project,
+            self,
+            role_filter=role_filter,  # type: ignore[arg-type]
+            pick_mode=use_pick,
         )
         self._manage_references_dialog = dialog
         dialog.references_changed.connect(self._on_manage_references_changed)
         dialog.finished.connect(self._on_manage_references_finished)
+        if use_pick:
+            dialog.set_pick_mode(
+                True,
+                callback=pick_callback,
+                role_filter=role_filter,
+                compatible=compatible,
+            )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -8304,6 +8341,40 @@ class MainWindow(QMainWindow):
     def _on_folder_nav_requested(self, folder: Path, record_history: bool) -> None:
         self._navigate_to_folder(folder, record_history=record_history)
 
+    def _on_file_nav_requested(self, path: Path, record_history: bool) -> None:
+        """Back/forward through recently opened files (Folders ◀ / ▶)."""
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except OSError:
+            resolved = Path(path).expanduser()
+        if not resolved.is_file():
+            self._set_status_message(f"File no longer exists: {resolved.name}", 5000)
+            return
+        self._file_nav_navigating = True
+        try:
+            parent = resolved.parent
+            try:
+                current = (
+                    self._current_folder.expanduser().resolve()
+                    if self._current_folder is not None
+                    else None
+                )
+            except OSError:
+                current = self._current_folder
+            if current != parent:
+                # Only change folder when the history file lives elsewhere.
+                self._navigate_to_folder(
+                    parent,
+                    record_history=True,
+                    open_preview=False,
+                )
+            self._select_path_in_file_list(resolved)
+            self._open_file_in_preview(resolved)
+            if hasattr(self, "_folder_nav") and self._folder_nav is not None:
+                self._folder_nav.set_file(resolved, record_history=record_history)
+        finally:
+            self._file_nav_navigating = False
+
     def _navigate_to_folder(
         self,
         folder: Path,
@@ -8332,12 +8403,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_folder_selected(self, folder: Path) -> None:
-        self._sync_define_database_dialog_from_folder(folder)
-        self._sync_manage_references_from_folder(folder)
-        self._sync_te_viz_dialog_from_folder(folder)
-        self._sync_blast_params_dialog_from_folder(folder)
-        self._sync_hmmer_params_dialog_from_folder(folder)
-        self._sync_create_folder_dialog_from_folder(folder)
+        self._sync_path_fields_from_folder(folder)
         # Restore last selection highlight/scroll only — do not load Preview until
         # the user clicks a file (keeps folder switching fast for large files).
         self._populate_file_list(folder, record_history=True, open_preview=False)
@@ -8347,6 +8413,19 @@ class MainWindow(QMainWindow):
         # Folder clicks activate the main window chrome and can bury open params
         # dialogs without an ActivationChange; re-stack above RepeatViewer only.
         QTimer.singleShot(0, self._raise_open_tool_dialogs)
+
+    def _on_folder_clicked_for_path_fill(self, folder: Path) -> None:
+        """Re-click of the current Folders row: fill path fields without reloading."""
+        self._sync_path_fields_from_folder(folder)
+
+    def _sync_path_fields_from_folder(self, folder: Path) -> None:
+        self._sync_define_database_dialog_from_folder(folder)
+        self._sync_manage_references_from_folder(folder)
+        self._sync_te_viz_dialog_from_folder(folder)
+        self._sync_blast_params_dialog_from_folder(folder)
+        self._sync_hmmer_params_dialog_from_folder(folder)
+        self._sync_create_folder_dialog_from_folder(folder)
+        self._sync_transfer_source_from_folder(folder)
 
     def _refresh_current_folder(self) -> None:
         if self._current_folder and self._current_folder.is_dir():
@@ -9508,6 +9587,18 @@ class MainWindow(QMainWindow):
     def _open_file_in_preview(self, path: Path) -> None:
         self._open_preview_tab(path, replace=True)
         self._set_status_file_link(path)
+        # Record last-used file for Folders ◀ / ▶ (skip while navigating
+        # that history so back/forward does not re-append).
+        if (
+            hasattr(self, "_folder_nav")
+            and self._folder_nav is not None
+            and not getattr(self, "_file_nav_navigating", False)
+        ):
+            try:
+                if Path(path).expanduser().is_file():
+                    self._folder_nav.set_file(path, record_history=True)
+            except OSError:
+                pass
 
     def _on_file_current_item_changed(
         self,
@@ -9522,6 +9613,10 @@ class MainWindow(QMainWindow):
             self._preview_selection_timer.stop()
             self._set_status_file_link(None)
             return
+        # Keyboard / selection change: end Transfer when leaving this FASTA.
+        # Click-to-fill Source is handled in itemClicked (fills first).
+        if not self._transfer_source_fill_armed():
+            self._stop_transfer_session_on_file_navigation(path)
         self._schedule_preview_for_selection(path)
 
     def _open_pending_preview_selection(self) -> None:
@@ -10166,6 +10261,9 @@ class MainWindow(QMainWindow):
             self._sync_blast_params_dialog_from_files(panel_path)
             self._sync_hmmer_params_dialog_from_files(panel_path)
             self._sync_tree_trait_dialog_from_files(panel_path)
+            filled_transfer = self._sync_transfer_source_from_files(panel_path)
+            if not filled_transfer:
+                self._stop_transfer_session_on_file_navigation(panel_path)
             # Folder restore selects a row without opening Preview; a click on
             # that same row does not fire currentItemChanged, so open here.
             self._schedule_preview_for_selection(panel_path)
@@ -10207,6 +10305,50 @@ class MainWindow(QMainWindow):
         for panel in self._open_tree_panels():
             if panel.apply_path_from_panel(clicked_path):
                 return
+
+    def _open_sequence_map_panels(self):
+        from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
+
+        for panel in self.findChildren(SequenceMapPanel):
+            yield panel
+
+    def _sync_transfer_source_from_files(self, clicked_path: Path) -> bool:
+        """Transfer Source: click a FASTA in Files after focusing the path field."""
+        for panel in self._open_sequence_map_panels():
+            if panel.apply_path_from_panel(clicked_path):
+                return True
+        return False
+
+    def _sync_transfer_source_from_folder(self, folder: Path) -> bool:
+        """Transfer Source: click a folder in Folders after focusing the path field."""
+        for panel in self._open_sequence_map_panels():
+            if panel.apply_folder_from_panel(folder):
+                return True
+        return False
+
+    def _transfer_source_fill_armed(self) -> bool:
+        """True when Transfer Source is waiting for a Files/Folders click-to-fill."""
+        for panel in self._open_sequence_map_panels():
+            accepts = getattr(panel, "_transfer_source_accepts_panel_fill", None)
+            if callable(accepts) and accepts():
+                return True
+        return False
+
+    def _stop_transfer_session_on_file_navigation(self, clicked_path: Path) -> None:
+        """End Transfer search/preview when the user selects another Files row."""
+        for panel in self._open_sequence_map_panels():
+            panel_path = getattr(panel, "_path", None)
+            try:
+                same = (
+                    panel_path is not None
+                    and Path(panel_path).expanduser().resolve()
+                    == clicked_path.expanduser().resolve()
+                )
+            except OSError:
+                same = False
+            if same:
+                continue
+            panel.cancel_transfer_annotation()
 
     def _on_file_double_clicked(self, item: FileListRow) -> None:
         raw = item.data(ROLE_PATH)
@@ -16223,6 +16365,21 @@ class MainWindow(QMainWindow):
 
     def _stop_current_job(self) -> None:
         """Stop currently running background job/map build."""
+        # Annotation panel jobs (feature detection / similarity) use the same
+        # status-bar progress + Stop button as BLAST.
+        from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
+
+        for panel in self.findChildren(SequenceMapPanel):
+            if (
+                panel.cancel_auto_annotation()
+                or panel.cancel_similarity_annotation()
+                or panel.cancel_transfer_annotation()
+            ):
+                self._set_status_message("Stopping…", 8000)
+                if self._stop_btn is not None:
+                    self._stop_btn.setEnabled(False)
+                return
+
         if not (
             self._worker_thread is not None
             or self._genome_map_thread is not None

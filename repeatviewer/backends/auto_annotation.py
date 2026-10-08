@@ -167,10 +167,15 @@ def run_auto_annotations(
     messages: list[str] = []
     next_track = _next_track(features)
     total = len(ordered)
+    if progress is not None:
+        progress(f"0/{total} starting")
     for index, mode in enumerate(ordered, start=1):
         if progress is not None:
-            progress(f"Auto annotation {index}/{total}: {mode.value}")
+            # Completed count before this mode: index-1.
+            progress(f"{index - 1}/{total} {mode.value}")
         result = run_auto_annotation(fasta_path, mode, cancel=cancel, settings=settings)
+        if progress is not None:
+            progress(f"{index}/{total} {mode.value}")
         if result.message.strip():
             messages.append(result.message.strip())
         existing = _features_for_mode(features, mode)

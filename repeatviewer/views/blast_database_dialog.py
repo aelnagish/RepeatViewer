@@ -32,11 +32,20 @@ from repeatviewer.backends.database_prepare import (
 )
 from repeatviewer.backends.gui_functions import sanitize_name
 from repeatviewer.project import (
+    ANNOTATION_NAME_MAX_LENGTH,
     BLAST_MOLECULE_NUCL,
     BLAST_MOLECULE_PROT,
     BlastDatabase,
+    normalize_annotation_name,
 )
+from repeatviewer.widgets.help_button import field_with_help
 from repeatviewer.widgets.path_browse import PathBrowseRow
+
+_SHORT_NAME_HELP = (
+    "Optional short label (max "
+    f"{ANNOTATION_NAME_MAX_LENGTH} characters) shown in BLAST database lists "
+    "and on the Annotation tab. Leave blank to use the full Name."
+)
 
 
 def style_blast_db_progress(progress: QProgressDialog) -> None:
@@ -133,11 +142,17 @@ class AddBlastDatabaseDialog(QDialog):
         self._worker: _BuildDatabaseWorker | None = None
         self._progress: QProgressDialog | None = None
         self._pending_name = ""
+        self._pending_short_name = ""
         self._pending_fasta = Path()
         self._pending_molecule_type = BLAST_MOLECULE_NUCL
 
         self._name = QLineEdit(self)
         self._name.setPlaceholderText("Database name")
+        self._short_name = QLineEdit(self)
+        self._short_name.setMaxLength(ANNOTATION_NAME_MAX_LENGTH)
+        self._short_name.setPlaceholderText(
+            f"Optional — short label (max {ANNOTATION_NAME_MAX_LENGTH})"
+        )
         self._fasta_row = PathBrowseRow(
             self,
             placeholder="Click a FASTA in Files, or Browse",
@@ -168,6 +183,15 @@ class AddBlastDatabaseDialog(QDialog):
         if self._molecule_type is not None:
             form.addRow("Type:", self._molecule_type)
         form.addRow("Name:", self._name)
+        form.addRow(
+            "Short name:",
+            field_with_help(
+                self._short_name,
+                "Short name",
+                _SHORT_NAME_HELP,
+                parent=self,
+            ),
+        )
         form.addRow("FASTA:", self._fasta_row)
 
         self._buttons = QDialogButtonBox(
@@ -287,7 +311,9 @@ class AddBlastDatabaseDialog(QDialog):
         progress.show()
         self._progress = progress
 
+        short_name = normalize_annotation_name(self._short_name.text())
         self._pending_name = name
+        self._pending_short_name = short_name
         self._pending_fasta = fasta_path
         self._pending_molecule_type = molecule_type
 
@@ -328,6 +354,7 @@ class AddBlastDatabaseDialog(QDialog):
             db_prefix_path=Path(str(db_prefix)),
             molecule_type=self._pending_molecule_type,
             created_at=datetime.now().isoformat(timespec="seconds"),
+            annotation_name=self._pending_short_name,
         )
         self.accept()
 

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -18,6 +17,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
+    QLayoutItem,
     QLineEdit,
     QPushButton,
     QRadioButton,
@@ -29,6 +30,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
+
+from repeatviewer.backends.annotation_colors import load_add_feature_buttons
 from repeatviewer.backends.genetic_codes import (
     genetic_code_choices,
     normalize_genetic_code_id,
@@ -44,7 +48,13 @@ from repeatviewer.widgets.preview_zoom import (
     save_custom_amino_acid_backgrounds,
     save_custom_nucleotide_backgrounds,
 )
-from repeatviewer.widgets.spin_boxes import NoWheelDoubleSpinBox, NoWheelSpinBox
+from repeatviewer.widgets.path_browse import PathBrowseRow
+from repeatviewer.widgets.preview_controls import apply_annotation_zoom_slider_style
+from repeatviewer.widgets.spin_boxes import (
+    NoWheelDoubleSpinBox,
+    NoWheelSlider,
+    NoWheelSpinBox,
+)
 
 _NCBI_GENETIC_CODES_URL = (
     "https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi"
@@ -70,6 +80,19 @@ _MODULE_WIDTH = 300
 _TAB_BUTTON_HEIGHT_MIN = 36
 _TAB_PILL_RADIUS = 7
 _TAB_TEXT_PAD = 4  # vertical padding around rotated label
+
+# Persist Annotation rail tab + collapsible section expand state.
+_SETTINGS_GROUP = "sequence_annotation_rail"
+_SETTINGS_TAB_KEY = "last_tab"
+_SETTINGS_SECTIONS_KEY = "expanded_sections"
+# Default first open: Annotation tab with all sections collapsed.
+_DEFAULT_TAB_INDEX = 1
+_ANNOTATION_SECTION_IDS = (
+    "manual",
+    "feature_detection",
+    "similarity",
+    "transfer",
+)
 
 # Translation frames: +1..+3 forward, -1..-3 reverse.
 TRANSLATION_FRAMES: tuple[int, ...] = (1, 2, 3, -1, -2, -3)
@@ -210,6 +233,168 @@ def _h_divider(parent: QWidget | None = None) -> QFrame:
     return line
 
 
+class _FlowLayout(QLayout):
+    """Left-to-right wrapping row layout for compact checkbox chips."""
+
+    def __init__(self, parent: QWidget | None = None, *, spacing: int = 6) -> None:
+        super().__init__(parent)
+        self._items: list[QLayoutItem] = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    def addItem(self, item: QLayoutItem) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientation:  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        left, top, right, bottom = self.getContentsMargins()
+        size += QSize(left + right, top + bottom)
+        return size
+
+    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        effective = rect.adjusted(left, top, -right, -bottom)
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        space = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + space
+            if line_height and next_x - space > effective.right() + 1:
+                x = effective.x()
+                y += line_height + space
+                next_x = x + hint.width() + space
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + bottom
+
+
+class _CollapsibleSection(QWidget):
+    """Section title matching Annotations headers; click (or right arrow) to expand."""
+
+    expandedChanged = Signal(bool)
+
+    def __init__(
+        self,
+        title: str,
+        parent: QWidget | None = None,
+        *,
+        expanded: bool = True,
+    ) -> None:
+        super().__init__(parent)
+        self.setMinimumWidth(0)
+        self._expanded = bool(expanded)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
+
+        self._header = QWidget(self)
+        self._header.setObjectName("annotationSectionHeader")
+        self._header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        header_row = QHBoxLayout(self._header)
+        header_row.setContentsMargins(0, 2, 0, 2)
+        header_row.setSpacing(6)
+
+        self._title = QLabel(title, self._header)
+        title_font = self._title.font()
+        title_font.setBold(True)
+        self._title.setFont(title_font)
+        self._title.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        header_row.addWidget(self._title, 1)
+
+        self._arrow = QLabel(self._header)
+        self._arrow.setFixedWidth(12)
+        self._arrow.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        arrow_font = self._arrow.font()
+        # 3/4 of the title size (half was too small; 3/2 of that).
+        arrow_font.setPointSizeF(max(6.0, title_font.pointSizeF() * 0.75))
+        self._arrow.setFont(arrow_font)
+        header_row.addWidget(self._arrow, 0)
+        self._sync_arrow()
+        self._header.mousePressEvent = self._on_header_pressed  # type: ignore[method-assign]
+        root.addWidget(self._header)
+
+        self._body = QWidget(self)
+        self._body_layout = QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(0, 0, 0, 0)
+        self._body_layout.setSpacing(6)
+        self._body.setVisible(self._expanded)
+        root.addWidget(self._body)
+
+    def body_layout(self) -> QVBoxLayout:
+        return self._body_layout
+
+    def add_widget(self, widget: QWidget) -> None:
+        self._body_layout.addWidget(widget)
+
+    def add_layout(self, layout: QHBoxLayout | QVBoxLayout | QFormLayout | QGridLayout) -> None:
+        self._body_layout.addLayout(layout)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def set_expanded(self, expanded: bool, *, notify: bool = True) -> None:
+        expanded = bool(expanded)
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self._body.setVisible(expanded)
+        self._sync_arrow()
+        if notify:
+            self.expandedChanged.emit(expanded)
+
+    def _sync_arrow(self) -> None:
+        # Right side disclosure: ▼ expanded, ▶ collapsed.
+        self._arrow.setText("▼" if self._expanded else "▶")
+
+    def _on_header_pressed(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.set_expanded(not self._expanded)
+        event.accept()
+
+
 class _RotatedTabButton(QToolButton):
     """Vertical pill tab (Actions-style chrome, label rotated −90°)."""
 
@@ -291,7 +476,8 @@ class _RotatedTabButton(QToolButton):
 class SequenceAnnotationRail(QWidget):
     """Vertical pill-tab strip + stacked Display / Annotation / Find / Others panels."""
 
-    addFeatureClicked = Signal()
+    addFeatureClicked = Signal()  # Add with type from manual_feature_combo
+    addFeatureSettingsClicked = Signal()  # Manage feature types in the dropdown
     deleteClicked = Signal()
     restoreClicked = Signal()
     saveClicked = Signal()
@@ -303,6 +489,9 @@ class SequenceAnnotationRail(QWidget):
     similarityAnnotateClicked = Signal()
     similaritySettingsClicked = Signal()
     transferRequested = Signal()
+    transferThresholdChanged = Signal()
+    transferSourceChanged = Signal()
+    manageDatabaseClicked = Signal()
     tabChanged = Signal(int)
     findRequested = Signal(int)  # +1 next, -1 previous, 0 find all
 
@@ -340,6 +529,11 @@ class SequenceAnnotationRail(QWidget):
         self._stack.setFixedWidth(_MODULE_WIDTH)
         self._stack.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
+        )
+        # Clip overflowing page content so it cannot paint over the tab strip.
+        self._stack.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._stack.setStyleSheet(
+            "QStackedWidget { background: transparent; }"
         )
 
         self._show_page = self._build_show_page()
@@ -382,18 +576,18 @@ class SequenceAnnotationRail(QWidget):
             self._tab_buttons.append(btn)
         tab_layout.addStretch(1)
         self._tab_group.idClicked.connect(self._on_tab_clicked)
-        self._tab_buttons[0].setChecked(True)
-        # Ensure the initially selected tab paints with the active highlight.
-        self._tab_buttons[0].update()
 
         root.addWidget(self._stack, 0)
         root.addWidget(divider, 0)
         root.addWidget(self._tab_strip, 0)
+        self._restore_rail_ui_state()
 
     def _wrap_scroll(self, body: QWidget) -> QScrollArea:
+        # Never let page contents force the rail wider than the module column.
         body.setMinimumWidth(0)
+        body.setMaximumWidth(_MODULE_WIDTH)
         body.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Minimum,
         )
         scroll = QScrollArea(self)
@@ -401,19 +595,24 @@ class SequenceAnnotationRail(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setMinimumWidth(0)
+        scroll.setFixedWidth(_MODULE_WIDTH)
         scroll.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Expanding,
         )
         scroll.setWidget(body)
         # Keep page content as wide as the viewport (minus scrollbar when shown).
         scroll.viewport().setAutoFillBackground(False)
+        scroll.viewport().setMinimumWidth(0)
         return scroll
 
     def _full_width_button(self, text: str, page: QWidget) -> QPushButton:
         btn = QPushButton(text, page)
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # macOS QPushButton sizeHints are often wider than half the rail.
         btn.setMinimumWidth(0)
+        btn.setMaximumWidth(_MODULE_WIDTH)
         return btn
 
     def _build_show_page(self) -> QWidget:
@@ -649,24 +848,82 @@ class SequenceAnnotationRail(QWidget):
         layout.addStretch(1)
         return self._wrap_scroll(page)
 
+    def _two_column_buttons(
+        self, buttons: list[QPushButton], page: QWidget
+    ) -> QWidget:
+        """Lay out action buttons two per row, filling the rail width."""
+        host = QWidget(page)
+        host.setMinimumWidth(0)
+        host.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
+        column = QVBoxLayout(host)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(6)
+        for index in range(0, len(buttons), 2):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            left = buttons[index]
+            left.setMinimumWidth(0)
+            left.setMaximumWidth(_MODULE_WIDTH)
+            left.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            )
+            if index + 1 < len(buttons):
+                right = buttons[index + 1]
+                right.setMinimumWidth(0)
+                right.setMaximumWidth(_MODULE_WIDTH)
+                right.setSizePolicy(
+                    QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+                )
+                row.addWidget(left, 1)
+                row.addWidget(right, 1)
+            else:
+                # Odd last button spans the full row.
+                row.addWidget(left, 1)
+            column.addLayout(row)
+        return host
+
+    def _compact_run_more_row(
+        self,
+        page: QWidget,
+        *,
+        run_tooltip: str,
+        more_tooltip: str,
+        run_clicked,
+        more_clicked,
+    ) -> tuple[QWidget, QPushButton, QPushButton]:
+        row = QWidget(page)
+        row.setMinimumWidth(0)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        run_btn = QPushButton("Run", row)
+        run_btn.setToolTip(run_tooltip)
+        run_btn.setFixedWidth(52)
+        run_btn.clicked.connect(run_clicked)
+        more_btn = QPushButton("Setting", row)
+        more_btn.setToolTip(more_tooltip)
+        more_btn.setFixedWidth(64)
+        more_btn.clicked.connect(more_clicked)
+        layout.addWidget(run_btn, 0)
+        layout.addWidget(more_btn, 0)
+        layout.addStretch(1)
+        return row, run_btn, more_btn
+
     def _build_annotations_page(self) -> QWidget:
         page = QWidget()
+        page.setMinimumWidth(0)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         layout.addWidget(_section_label("Annotations", page))
+        layout.addWidget(_h_divider(page))
 
-        hint = QLabel(
-            "Select a region on the sequence, then Add feature. "
-            "Or run feature / similarity detection below.",
-            page,
-        )
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        self.add_feature_btn = self._full_width_button("Add feature", page)
-        self.add_feature_btn.clicked.connect(self.addFeatureClicked.emit)
-        layout.addWidget(self.add_feature_btn)
+        # Hidden compatibility alias — Add moved to "Manually add feature" below.
+        self.add_feature_btn = QPushButton("Add", page)
+        self.add_feature_btn.hide()
 
         self.delete_btn = self._full_width_button("Delete", page)
         self.delete_btn.clicked.connect(self.deleteClicked.emit)
@@ -676,115 +933,189 @@ class SequenceAnnotationRail(QWidget):
         self.export_btn.clicked.connect(self.exportClicked.emit)
         self.save_btn = self._full_width_button("Save", page)
         self.save_btn.clicked.connect(self.saveClicked.emit)
-        for btn in (
-            self.delete_btn,
-            self.restore_btn,
-            self.export_btn,
-            self.save_btn,
-        ):
-            layout.addWidget(btn)
+        layout.addWidget(
+            self._two_column_buttons(
+                [
+                    self.delete_btn,
+                    self.restore_btn,
+                    self.export_btn,
+                    self.save_btn,
+                ],
+                page,
+            )
+        )
 
-        layout.addWidget(_section_label("Feature detection", page))
-        self.auto_ann_all_check = QCheckBox("All", page)
-        layout.addWidget(self.auto_ann_all_check)
+        self.annotation_job_status = QLabel("", page)
+        self.annotation_job_status.setWordWrap(True)
+        self.annotation_job_status.setStyleSheet("color: palette(mid);")
+        self.annotation_job_status.hide()
+        layout.addWidget(self.annotation_job_status)
+
+        layout.addWidget(_h_divider(page))
+        manual_section = _CollapsibleSection(
+            "Manually add feature", page, expanded=False
+        )
+        self.manual_feature_host = QWidget(manual_section)
+        self.manual_feature_host.setMinimumWidth(0)
+        self.manual_feature_flow = _FlowLayout(self.manual_feature_host, spacing=6)
+        self.manual_feature_host.setLayout(self.manual_feature_flow)
+        self.manual_feature_checks: dict[str, QCheckBox] = {}
+        self._manual_feature_exclusive = False
+        manual_section.add_widget(self.manual_feature_host)
+        self.manual_add_btn = QPushButton("Add", manual_section)
+        self.manual_add_btn.setFixedWidth(52)
+        self.manual_add_btn.setToolTip(
+            "Add the checked feature type on the current sequence selection."
+        )
+        self.manual_add_btn.clicked.connect(self.addFeatureClicked.emit)
+        self.manual_feature_settings_btn = QPushButton("Setting", manual_section)
+        self.manual_feature_settings_btn.setFixedWidth(64)
+        self.manual_feature_settings_btn.setToolTip(
+            "Manage which feature types appear in the list."
+        )
+        self.manual_feature_settings_btn.clicked.connect(
+            self.addFeatureSettingsClicked.emit
+        )
+        manual_btn_row = QHBoxLayout()
+        manual_btn_row.setContentsMargins(0, 0, 0, 0)
+        manual_btn_row.setSpacing(6)
+        manual_btn_row.addWidget(self.manual_add_btn, 0)
+        manual_btn_row.addWidget(self.manual_feature_settings_btn, 0)
+        manual_btn_row.addStretch(1)
+        manual_section.add_layout(manual_btn_row)
+        layout.addWidget(manual_section)
+        # Hidden combo kept for tests / legacy callers.
+        self.manual_feature_combo = QComboBox(page)
+        self.manual_feature_combo.hide()
+        self.populate_manual_feature_types()
+
+        layout.addWidget(_h_divider(page))
+        feature_section = _CollapsibleSection(
+            "Feature detection", page, expanded=False
+        )
+        self.auto_ann_all_check = QCheckBox("All", feature_section)
+        feature_section.add_widget(self.auto_ann_all_check)
         self.auto_ann_checks: dict[object, QCheckBox] = {}
-        auto_row = QWidget(page)
-        auto_layout = QHBoxLayout(auto_row)
-        auto_layout.setContentsMargins(0, 0, 0, 0)
-        auto_layout.setSpacing(6)
+        auto_host = QWidget(feature_section)
+        auto_host.setMinimumWidth(0)
+        auto_flow = _FlowLayout(auto_host, spacing=6)
+        auto_host.setLayout(auto_flow)
         for label in ("LTR", "TIR", "Tandem", "ORF"):
-            check = QCheckBox(label, auto_row)
+            check = QCheckBox(label, auto_host)
             check.setChecked(True)
-            auto_layout.addWidget(check)
+            check.setMinimumWidth(0)
+            auto_flow.addWidget(check)
             # Keys filled by SequenceMapPanel with AutoAnnotationMode enums.
             self.auto_ann_checks[label] = check
-        auto_layout.addStretch(1)
-        layout.addWidget(auto_row)
-        auto_btn_row = QWidget(page)
-        auto_btn_layout = QHBoxLayout(auto_btn_row)
-        auto_btn_layout.setContentsMargins(0, 0, 0, 0)
-        auto_btn_layout.setSpacing(6)
-        self.auto_ann_run_btn = self._full_width_button(
-            "Run feature detection", auto_btn_row
+        feature_section.add_widget(auto_host)
+        auto_btn_row, self.auto_ann_run_btn, self.auto_ann_settings_btn = (
+            self._compact_run_more_row(
+                feature_section,
+                run_tooltip="Run feature detection",
+                more_tooltip="Feature detection settings",
+                run_clicked=self.featureDetectClicked.emit,
+                more_clicked=self.featureDetectSettingsClicked.emit,
+            )
         )
-        self.auto_ann_run_btn.clicked.connect(self.featureDetectClicked.emit)
-        self.auto_ann_settings_btn = QToolButton(auto_btn_row)
-        self.auto_ann_settings_btn.setText("⚙")
-        self.auto_ann_settings_btn.setToolTip("Feature detection settings")
-        self.auto_ann_settings_btn.clicked.connect(self.featureDetectSettingsClicked.emit)
-        auto_btn_layout.addWidget(self.auto_ann_run_btn, 1)
-        auto_btn_layout.addWidget(self.auto_ann_settings_btn, 0)
-        layout.addWidget(auto_btn_row)
+        feature_section.add_widget(auto_btn_row)
+        layout.addWidget(feature_section)
 
-        layout.addWidget(_section_label("Similarity annotation", page))
-        self.similarity_ann_all_check = QCheckBox("All databases", page)
-        layout.addWidget(self.similarity_ann_all_check)
-        self.similarity_db_host = QWidget(page)
+        layout.addWidget(_h_divider(page))
+        similarity_section = _CollapsibleSection(
+            "Similarity annotation", page, expanded=False
+        )
+        self.similarity_ann_all_check = QCheckBox(
+            "All databases", similarity_section
+        )
+        similarity_section.add_widget(self.similarity_ann_all_check)
+        self.similarity_db_host = QWidget(similarity_section)
+        self.similarity_db_host.setMinimumWidth(0)
         self.similarity_db_layout = QVBoxLayout(self.similarity_db_host)
         self.similarity_db_layout.setContentsMargins(0, 0, 0, 0)
         self.similarity_db_layout.setSpacing(2)
-        layout.addWidget(self.similarity_db_host)
-        sim_btn_row = QWidget(page)
-        sim_btn_layout = QHBoxLayout(sim_btn_row)
-        sim_btn_layout.setContentsMargins(0, 0, 0, 0)
-        sim_btn_layout.setSpacing(6)
-        self.similarity_ann_run_btn = self._full_width_button(
-            "Run similarity", sim_btn_row
+        similarity_section.add_widget(self.similarity_db_host)
+        sim_btn_row, self.similarity_ann_run_btn, self.similarity_ann_settings_btn = (
+            self._compact_run_more_row(
+                similarity_section,
+                run_tooltip="Run similarity annotation",
+                more_tooltip=(
+                    "Similarity annotation settings "
+                    "(also used by Sequence Annotation)"
+                ),
+                run_clicked=self.similarityAnnotateClicked.emit,
+                more_clicked=self.similaritySettingsClicked.emit,
+            )
         )
-        self.similarity_ann_run_btn.clicked.connect(self.similarityAnnotateClicked.emit)
-        self.similarity_ann_settings_btn = QToolButton(sim_btn_row)
-        self.similarity_ann_settings_btn.setText("⚙")
-        self.similarity_ann_settings_btn.setToolTip("Similarity annotation settings")
-        self.similarity_ann_settings_btn.clicked.connect(
-            self.similaritySettingsClicked.emit
-        )
-        sim_btn_layout.addWidget(self.similarity_ann_run_btn, 1)
-        sim_btn_layout.addWidget(self.similarity_ann_settings_btn, 0)
-        layout.addWidget(sim_btn_row)
+        similarity_section.add_widget(sim_btn_row)
+        layout.addWidget(similarity_section)
 
-        layout.addWidget(_section_label("Transfer from another sequence", page))
-        intro = QLabel(
-            "Lift annotations from a source sequence onto a target via "
-            "minimap2 alignment.",
-            page,
+        layout.addWidget(_h_divider(page))
+        transfer_section = _CollapsibleSection(
+            "Transfer annotation", page, expanded=False
         )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
 
-        self.transfer_source = QComboBox(page)
-        self.transfer_target = QComboBox(page)
-        self.transfer_target_browse = QPushButton("Browse…", page)
-        self.transfer_target_browse.setToolTip(
-            "Choose another FASTA as the transfer target"
+        self.transfer_source_row = PathBrowseRow(
+            transfer_section,
+            placeholder="FASTA file or folder with annotations…",
+            browse_title="Choose transfer source FASTA",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.ffn *.faa);;All files (*)"
+            ),
+            # Browse opens a menu: FASTA file... or Folder...
+            mode="file_or_directory",
+            minimum_width=120,
         )
-        target_row = QWidget(page)
-        target_layout = QHBoxLayout(target_row)
-        target_layout.setContentsMargins(0, 0, 0, 0)
-        target_layout.setSpacing(4)
-        target_layout.addWidget(self.transfer_target, 1)
-        target_layout.addWidget(self.transfer_target_browse, 0)
+        self.transfer_source_row.set_default_tooltip(
+            "Click a FASTA in Files or a folder in Folders to fill this path "
+            "(click the field first to replace an existing path). Or use Browse. "
+            "Only annotated sequences (*.seqmap_RV.json) are used."
+        )
+        self.transfer_source_row.path_changed.connect(self.transferSourceChanged.emit)
+        self.transfer_source_row.text_changed.connect(
+            lambda _text: self.transferSourceChanged.emit()
+        )
+        # Compatibility aliases (older code expected a combo + manage button).
+        self.transfer_source = QComboBox(transfer_section)
+        self.transfer_source.hide()
+        self.transfer_manage_db_btn = QPushButton("Browse", transfer_section)
+        self.transfer_manage_db_btn.hide()
+        self.transfer_manage_db_btn.clicked.connect(
+            self.transfer_source_row._on_browse_clicked
+        )
+        # Hidden target widgets: transfer always uses the currently open sequence.
+        self.transfer_target = QComboBox(transfer_section)
+        self.transfer_target.hide()
+        self.transfer_target_browse = QPushButton("Browse…", transfer_section)
+        self.transfer_target_browse.hide()
 
-        self.transfer_selected_only = QCheckBox("Selected features only", page)
+        self.transfer_selected_only = QCheckBox(
+            "Selected features only", transfer_section
+        )
+        self.transfer_selected_only.hide()
         self.transfer_selected_only.setToolTip(
-            "When checked, only features selected on the track are transferred. "
-            "Otherwise all features on the source are used."
+            "When checked, only features selected on the source track are "
+            "transferred. Otherwise all features on the source are used."
         )
-        self.transfer_allow_reverse = QCheckBox("Allow reverse strand", page)
+        self.transfer_allow_reverse = QCheckBox(
+            "Allow reverse strand", transfer_section
+        )
         self.transfer_allow_reverse.setChecked(True)
 
-        self.transfer_min_identity = NoWheelDoubleSpinBox(page)
-        self.transfer_min_identity.setRange(0.0, 1.0)
-        self.transfer_min_identity.setDecimals(2)
-        self.transfer_min_identity.setSingleStep(0.05)
-        self.transfer_min_identity.setValue(0.50)
-        self.transfer_min_identity.setMinimumWidth(0)
+        self.transfer_min_identity_slider, self.transfer_min_identity_value_label = (
+            self._transfer_threshold_slider_row(transfer_section)
+        )
+        self.transfer_min_coverage_slider, self.transfer_min_coverage_value_label = (
+            self._transfer_threshold_slider_row(transfer_section)
+        )
+        # Legacy alias for code that read spin-box values.
+        self.transfer_min_identity = NoWheelDoubleSpinBox(transfer_section)
+        self.transfer_min_identity.hide()
+        self.transfer_min_coverage = NoWheelDoubleSpinBox(transfer_section)
+        self.transfer_min_coverage.hide()
 
-        self.transfer_min_coverage = NoWheelDoubleSpinBox(page)
-        self.transfer_min_coverage.setRange(0.0, 1.0)
-        self.transfer_min_coverage.setDecimals(2)
-        self.transfer_min_coverage.setSingleStep(0.05)
-        self.transfer_min_coverage.setValue(0.50)
-        self.transfer_min_coverage.setMinimumWidth(0)
+        source_label = QLabel("Source", transfer_section)
+        transfer_section.add_widget(source_label)
+        transfer_section.add_widget(self.transfer_source_row)
 
         xfer_form = QFormLayout()
         xfer_form.setContentsMargins(0, 0, 0, 0)
@@ -794,23 +1125,54 @@ class SequenceAnnotationRail(QWidget):
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
         xfer_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        xfer_form.addRow("Source:", self.transfer_source)
-        xfer_form.addRow("Target:", target_row)
-        xfer_form.addRow("Min identity:", self.transfer_min_identity)
-        xfer_form.addRow("Min coverage:", self.transfer_min_coverage)
-        layout.addLayout(xfer_form)
-        layout.addWidget(self.transfer_selected_only)
-        layout.addWidget(self.transfer_allow_reverse)
+        xfer_form.setFormAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        xfer_form.addRow(
+            "Min identity:",
+            self._threshold_slider_field(
+                self.transfer_min_identity_slider,
+                self.transfer_min_identity_value_label,
+            ),
+        )
+        xfer_form.addRow(
+            "Min coverage:",
+            self._threshold_slider_field(
+                self.transfer_min_coverage_slider,
+                self.transfer_min_coverage_value_label,
+            ),
+        )
+        transfer_section.add_layout(xfer_form)
+        transfer_section.add_widget(self.transfer_selected_only)
+        transfer_section.add_widget(self.transfer_allow_reverse)
 
-        self.transfer_run_btn = self._full_width_button("Transfer", page)
-        self.transfer_run_btn.clicked.connect(self.transferRequested.emit)
-        layout.addWidget(self.transfer_run_btn)
+        self.transfer_run_btn = QPushButton("Run", transfer_section)
+        self.transfer_run_btn.setFixedWidth(52)
+        self.transfer_run_btn.setToolTip(
+            "Hybrid: minimap2 sequence alignment + feature lift, then blastn "
+            "for leftovers. Matches become source “Transfer (…)”."
+        )
+        self.transfer_run_btn.clicked.connect(
+            lambda: self.transferRequested.emit()
+        )
+        transfer_run_row = QHBoxLayout()
+        transfer_run_row.setContentsMargins(0, 0, 0, 0)
+        transfer_run_row.addWidget(self.transfer_run_btn, 0)
+        transfer_run_row.addStretch(1)
+        transfer_section.add_layout(transfer_run_row)
+        layout.addWidget(transfer_section)
 
-        self.transfer_summary = QLabel("", page)
-        self.transfer_summary.setWordWrap(True)
-        layout.addWidget(self.transfer_summary)
+        self._annotation_sections: dict[str, _CollapsibleSection] = {
+            "manual": manual_section,
+            "feature_detection": feature_section,
+            "similarity": similarity_section,
+            "transfer": transfer_section,
+        }
+        for section in self._annotation_sections.values():
+            section.expandedChanged.connect(self._save_rail_ui_state)
+
         layout.addStretch(1)
         return self._wrap_scroll(page)
 
@@ -1048,6 +1410,7 @@ class SequenceAnnotationRail(QWidget):
     def _on_tab_clicked(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
         self.tabChanged.emit(index)
+        self._save_rail_ui_state()
 
     def set_current_tab(self, index: int) -> None:
         index = max(0, min(index, self._stack.count() - 1))
@@ -1055,12 +1418,190 @@ class SequenceAnnotationRail(QWidget):
         self._stack.setCurrentIndex(index)
         for btn in self._tab_buttons:
             btn.update()
+        self._save_rail_ui_state()
+
+    def _settings(self) -> QSettings:
+        settings = QSettings()
+        settings.beginGroup(_SETTINGS_GROUP)
+        return settings
+
+    def _restore_rail_ui_state(self) -> None:
+        """Default: Annotation tab, all sections collapsed; restore last state."""
+        settings = self._settings()
+        try:
+            raw_tab = settings.value(_SETTINGS_TAB_KEY, _DEFAULT_TAB_INDEX)
+            try:
+                tab = int(raw_tab)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                tab = _DEFAULT_TAB_INDEX
+            tab = max(0, min(tab, self._stack.count() - 1))
+            self._tab_buttons[tab].setChecked(True)
+            self._stack.setCurrentIndex(tab)
+            for btn in self._tab_buttons:
+                btn.update()
+
+            sections = getattr(self, "_annotation_sections", None) or {}
+            saved = settings.value(_SETTINGS_SECTIONS_KEY, [])
+            if isinstance(saved, str):
+                expanded_ids = {saved} if saved else set()
+            elif isinstance(saved, (list, tuple)):
+                expanded_ids = {str(item) for item in saved}
+            else:
+                expanded_ids = set()
+            for section_id, section in sections.items():
+                section.set_expanded(
+                    section_id in expanded_ids, notify=False
+                )
+        finally:
+            settings.endGroup()
+
+    def _save_rail_ui_state(self, *_args) -> None:
+        settings = self._settings()
+        try:
+            settings.setValue(_SETTINGS_TAB_KEY, int(self._stack.currentIndex()))
+            sections = getattr(self, "_annotation_sections", None) or {}
+            expanded = [
+                section_id
+                for section_id, section in sections.items()
+                if section.is_expanded()
+            ]
+            settings.setValue(_SETTINGS_SECTIONS_KEY, expanded)
+        finally:
+            settings.endGroup()
+
+    def _transfer_threshold_slider_row(
+        self, parent: QWidget
+    ) -> tuple[NoWheelSlider, QLabel]:
+        slider = NoWheelSlider(Qt.Orientation.Horizontal, parent)
+        slider.setObjectName("annotationZoomSlider")
+        slider.setRange(0, 100)
+        slider.setValue(50)
+        slider.setMinimumWidth(120)
+        slider.setFixedHeight(18)
+        slider.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        apply_annotation_zoom_slider_style(slider)
+        value_label = QLabel("0.50", parent)
+        value_label.setMinimumWidth(36)
+        value_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        def _sync(value: int) -> None:
+            frac = max(0, min(100, int(value))) / 100.0
+            value_label.setText(f"{frac:.2f}")
+            self.transferThresholdChanged.emit()
+
+        slider.valueChanged.connect(_sync)
+        return slider, value_label
+
+    @staticmethod
+    def _threshold_slider_field(slider: NoWheelSlider, value_label: QLabel) -> QWidget:
+        row = QWidget(slider.parentWidget())
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(slider, 1)
+        layout.addWidget(value_label, 0)
+        return row
+
+    def transfer_min_identity_value(self) -> float:
+        return float(self.transfer_min_identity_slider.value()) / 100.0
+
+    def transfer_min_coverage_value(self) -> float:
+        return float(self.transfer_min_coverage_slider.value()) / 100.0
+
+    def populate_manual_feature_types(
+        self, buttons: list[tuple[str, str]] | None = None
+    ) -> None:
+        """Fill the Manually add feature type list (label, feature_type)."""
+        entries = list(buttons) if buttons is not None else load_add_feature_buttons()
+        previous = str(self.manual_feature_combo.currentData() or "").strip()
+        if not previous:
+            _label, previous = self.selected_manual_feature()
+            if previous == "others" and not self.manual_feature_checks:
+                previous = ""
+
+        self.manual_feature_combo.blockSignals(True)
+        try:
+            self.manual_feature_combo.clear()
+            for label, feature_type in entries:
+                self.manual_feature_combo.addItem(str(label), str(feature_type))
+            if previous:
+                idx = self.manual_feature_combo.findData(previous)
+                if idx >= 0:
+                    self.manual_feature_combo.setCurrentIndex(idx)
+        finally:
+            self.manual_feature_combo.blockSignals(False)
+
+        while self.manual_feature_flow.count():
+            item = self.manual_feature_flow.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.manual_feature_checks.clear()
+        self._manual_feature_exclusive = True
+        restore_type = previous or (
+            str(entries[0][1]) if entries else "others"
+        )
+        for label, feature_type in entries:
+            check = QCheckBox(str(label), self.manual_feature_host)
+            check.setProperty("feature_type", str(feature_type))
+            check.setChecked(str(feature_type) == restore_type)
+            check.setMinimumWidth(0)
+            check.toggled.connect(self._on_manual_feature_check_toggled)
+            self.manual_feature_flow.addWidget(check)
+            self.manual_feature_checks[str(feature_type)] = check
+        self.manual_feature_host.updateGeometry()
+
+    def _on_manual_feature_check_toggled(self, checked: bool) -> None:
+        if not self._manual_feature_exclusive:
+            return
+        sender = self.sender()
+        if not isinstance(sender, QCheckBox):
+            return
+        if checked:
+            for check in self.manual_feature_checks.values():
+                if check is not sender and check.isChecked():
+                    check.blockSignals(True)
+                    check.setChecked(False)
+                    check.blockSignals(False)
+            return
+        if any(c.isChecked() for c in self.manual_feature_checks.values()):
+            return
+        sender.blockSignals(True)
+        sender.setChecked(True)
+        sender.blockSignals(False)
+
+    def selected_manual_feature(self) -> tuple[str, str]:
+        """Return ``(label, feature_type)`` for the checked manual feature type."""
+        for check in self.manual_feature_checks.values():
+            if check.isChecked():
+                feature_type = str(check.property("feature_type") or "").strip()
+                label = str(check.text() or "").strip() or feature_type
+                if feature_type:
+                    return label, feature_type
+        combo = self.manual_feature_combo
+        if combo.count() > 0:
+            label = str(combo.currentText() or "").strip() or "Others"
+            feature_type = str(combo.currentData() or "").strip() or "others"
+            return label, feature_type
+        return ("Others", "others")
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(text or "")
 
+    def set_annotation_job_status(self, text: str) -> None:
+        """Live progress for Feature detection / Similarity / Transfer on Annotation tab."""
+        msg = str(text or "").strip()
+        self.annotation_job_status.setText(msg)
+        self.annotation_job_status.setVisible(bool(msg))
+        # Keep Display-tab status in sync for consistency.
+        self.status_label.setText(msg)
+
     def set_transfer_summary(self, text: str) -> None:
-        self.transfer_summary.setText(text or "")
+        """Transfer progress is shown on the map preview, not in the rail."""
+        del text
 
     def set_sequence_name_font_point_size(self, point_size: int) -> None:
         font = self.sequence_combo.font()

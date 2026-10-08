@@ -1492,10 +1492,10 @@ class AlignParamsDialog(QDialog):
             ),
             add_button_label="Add another input",
             add_button_tooltip=(
-                "Add another FASTA file or folder path. Click a file or folder in "
-                "the panel to fill a row, or use Browse."
+                "Add another FASTA file path. Click a file in the Files panel "
+                "to fill a row, or use Browse."
             ),
-            path_mode="file_or_directory",
+            path_mode="file",
         )
 
         mafft_tab = QWidget(self)
@@ -1698,10 +1698,10 @@ class AlignParamsDialog(QDialog):
             ),
             add_button_label="Add another input",
             add_button_tooltip=(
-                "Add another FASTA file or folder path. Click a file or folder in "
-                "the panel to fill a row, or use Browse."
+                "Add another FASTA file path. Click a file in the Files panel "
+                "to fill a row, or use Browse."
             ),
-            path_mode="file_or_directory",
+            path_mode="file",
         )
 
         muscle_tab = QWidget(self)
@@ -3747,7 +3747,7 @@ _MAFFT_MODE_HELP = (
 _MAFFT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MAFFT uses the FASTA files that were "
     "selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
+    "<b>Define inputs</b>: choose different FASTA files. Paths are for "
     "this run only and are not remembered next time."
 )
 _MAFFT_STRATEGY_HELP = (
@@ -3810,7 +3810,7 @@ _MUSCLE_MODE_HELP = (
 _MUSCLE_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MUSCLE uses the FASTA files that were "
     "selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
+    "<b>Define inputs</b>: choose different FASTA files. Paths are for "
     "this run only and are not remembered next time."
 )
 _MUSCLE_ALGORITHM_HELP = (
@@ -3841,7 +3841,7 @@ _FASTGA_MODE_HELP = (
 _FASTGA_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): FastGA uses the FASTA files that were "
     "selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
+    "<b>Define inputs</b>: choose different FASTA files. Paths are for "
     "this run only and are not remembered next time."
 )
 _FASTGA_REFERENCE_HELP = (
@@ -4044,10 +4044,10 @@ class FastGaPanel(QWidget):
             ),
             add_button_label="Add another input",
             add_button_tooltip=(
-                "Add another FASTA file or folder path. Click a file or folder in "
-                "the panel to fill a row, or use Browse."
+                "Add another FASTA file path. Click a file in the Files panel "
+                "to fill a row, or use Browse."
             ),
-            path_mode="file_or_directory",
+            path_mode="file",
         )
         self._path_target = "input"  # or "reference"
 
@@ -4743,6 +4743,12 @@ class GenomeBlastDatabaseRow(QWidget):
             return
         existing = self._blast_manager_dialog
         if existing is not None and existing.isVisible():
+            existing.set_pick_mode(
+                True,
+                callback=self._on_database_picked,
+                role_filter="blast",
+                compatible="blast_nucl",
+            )
             existing.raise_()
             existing.activateWindow()
             return
@@ -4760,9 +4766,30 @@ class GenomeBlastDatabaseRow(QWidget):
             lambda: self.refresh(selected_path=self._combo.currentData())
         )
         dialog.finished.connect(self._on_manager_finished)
+        dialog.set_pick_mode(
+            True,
+            callback=self._on_database_picked,
+            role_filter="blast",
+            compatible="blast_nucl",
+        )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _on_database_picked(self, payload) -> None:
+        from repeatviewer.views.manage_references_dialog import (
+            fasta_path_from_database_pick,
+        )
+
+        path = fasta_path_from_database_pick(payload)
+        if path is None:
+            QMessageBox.information(
+                self,
+                self._manage_title,
+                "Select a nucleotide BLAST / genome FASTA database.",
+            )
+            return
+        self.refresh(selected_path=str(path))
 
     def _on_manager_finished(self, _result: int = 0) -> None:
         self._blast_manager_dialog = None
@@ -4961,6 +4988,12 @@ class PanGenomeBlastListWidget(QWidget):
             return
         existing = self._blast_manager_dialog
         if existing is not None and existing.isVisible():
+            existing.set_pick_mode(
+                True,
+                callback=self._on_database_picked,
+                role_filter="blast",
+                compatible="blast_nucl",
+            )
             existing.raise_()
             existing.activateWindow()
             return
@@ -4975,9 +5008,39 @@ class PanGenomeBlastListWidget(QWidget):
         self._blast_manager_dialog = dialog
         dialog.references_changed.connect(self.refresh_all)
         dialog.finished.connect(self._on_manager_finished)
+        dialog.set_pick_mode(
+            True,
+            callback=self._on_database_picked,
+            role_filter="blast",
+            compatible="blast_nucl",
+        )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _on_database_picked(self, payload) -> None:
+        from repeatviewer.views.manage_references_dialog import (
+            fasta_path_from_database_pick,
+        )
+
+        path = fasta_path_from_database_pick(payload)
+        if path is None:
+            QMessageBox.information(
+                self,
+                self._manage_title,
+                "Select a nucleotide BLAST / genome FASTA database.",
+            )
+            return
+        self.refresh_all()
+        target = None
+        for _wrap, genome, _btn in self._rows:
+            if genome._combo.currentData() is None:  # noqa: SLF001
+                target = genome
+                break
+        if target is None and self._rows:
+            target = self._rows[-1][1]
+        if target is not None:
+            target.refresh(selected_path=str(path))
 
     def _on_manager_finished(self, _result: int = 0) -> None:
         self._blast_manager_dialog = None
@@ -4987,7 +5050,7 @@ class PanGenomeBlastListWidget(QWidget):
 _HMMER_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): HMMER uses the FASTA files that "
     "were selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files or folders. Paths are "
+    "<b>Define inputs</b>: choose different FASTA files. Paths are "
     "for this run only and are not remembered next time."
 )
 _HMMER_DATABASE_HELP = (
@@ -5060,10 +5123,10 @@ class HmmerParamsDialog(QDialog):
             ),
             add_button_label="Add another input",
             add_button_tooltip=(
-                "Add another FASTA file or folder path. Click a file or folder in "
-                "the panel to fill a row, or use Browse."
+                "Add another FASTA file path. Click a file in the Files panel "
+                "to fill a row, or use Browse."
             ),
-            path_mode="file_or_directory",
+            path_mode="file",
         )
         self._input_selected.toggled.connect(self._sync_hmmer_inputs)
         self._input_define.toggled.connect(self._sync_hmmer_inputs)
@@ -5375,6 +5438,12 @@ class HmmerParamsDialog(QDialog):
         from repeatviewer.views.manage_references_dialog import ManageReferencesDialog
 
         if self._define_database_dialog is not None and self._define_database_dialog.isVisible():
+            self._define_database_dialog.set_pick_mode(
+                True,
+                callback=self._on_hmm_database_picked,
+                role_filter="annotation",
+                compatible="hmm",
+            )
             self._define_database_dialog.raise_()
             self._define_database_dialog.activateWindow()
             return
@@ -5404,9 +5473,31 @@ class HmmerParamsDialog(QDialog):
             )
         )
         dialog.finished.connect(self._on_define_database_finished)
+        dialog.set_pick_mode(
+            True,
+            callback=self._on_hmm_database_picked,
+            role_filter="annotation",
+            compatible="hmm",
+        )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _on_hmm_database_picked(self, payload) -> None:
+        from repeatviewer.views.manage_references_dialog import database_name_from_pick
+        from repeatviewer.project import UserDatabase
+
+        name = database_name_from_pick(payload)
+        if not name and isinstance(payload, UserDatabase):
+            name = str(payload.name or "").strip()
+        if not name:
+            QMessageBox.information(
+                self,
+                "HMMER",
+                "Select an HMM DNA or HMM Protein database.",
+            )
+            return
+        self._populate_database_combo(selected_name=name)
 
     def _on_define_database_finished(self, _result: int = 0) -> None:
         self._define_database_dialog = None
@@ -5844,13 +5935,13 @@ _KEEP_CURRENT = object()
 _BLAST_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): BLAST uses the FASTA files that were "
     "selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are for "
+    "<b>Define inputs</b>: choose different FASTA files. Paths are for "
     "this run only and are not remembered next time."
 )
 _BLAST_DEFINE_INPUTS_HELP = (
-    "Choose FASTA files or folders for this BLAST run instead of the Files panel "
+    "Choose FASTA files for this BLAST run instead of the Files panel "
     "selection.<br><br>"
-    "Click a file or folder in the panel to fill a row, or use <b>Browse</b>. "
+    "Click a file in the Files panel to fill a row, or use <b>Browse</b>. "
     "Paths are for this run only and are not remembered next time.<br><br>"
     "Each BLAST tab keeps its own Define-inputs list (BLASTn, BLASTp, BLASTx, "
     "and Online BLAST are independent)."
@@ -6261,10 +6352,10 @@ class BlastParamsDialog(QDialog):
                 ),
                 add_button_label="Add another input",
                 add_button_tooltip=(
-                    "Add another FASTA file or folder path. Click a file or folder in "
-                    "the panel to fill a row, or use Browse."
+                    "Add another FASTA file path. Click a file in the Files panel "
+                    "to fill a row, or use Browse."
                 ),
-                path_mode="file_or_directory",
+                path_mode="file",
             )
 
         self._blastn_define_inputs = _make_blast_define_inputs()
@@ -7249,9 +7340,28 @@ class BlastParamsDialog(QDialog):
     def _manage_databases(self) -> None:
         from repeatviewer.views.blast_database_dialog import BlastDatabaseManagerDialog
 
+        tab = self._tabs.currentIndex() if hasattr(self, "_tabs") else 0
+        if tab == 0:
+            compatible = "blast_nucl"
+            role = "blast"
+        elif tab in (1, 2):
+            compatible = "blast_prot"
+            role = "blast"
+        else:
+            # Online BLAST / Options — allow managing DBs, but Select needs a program tab.
+            compatible = None
+            role = "blast"
+
         # Non-modal manager (and Add dialog) so Files-panel clicks can fill FASTA.
         existing = getattr(self, "_blast_manager_dialog", None)
         if existing is not None and existing.isVisible():
+            if compatible is not None:
+                existing.set_pick_mode(
+                    True,
+                    callback=self._on_blast_database_picked,
+                    role_filter=role,
+                    compatible=compatible,
+                )
             existing.raise_()
             existing.activateWindow()
             return
@@ -7259,9 +7369,72 @@ class BlastParamsDialog(QDialog):
         self._blast_manager_dialog = dialog
         dialog.references_changed.connect(self._refresh_database_combos)
         dialog.finished.connect(self._on_blast_manager_finished)
+        if compatible is not None:
+            dialog.set_pick_mode(
+                True,
+                callback=self._on_blast_database_picked,
+                role_filter=role,
+                compatible=compatible,
+            )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _on_blast_database_picked(self, payload) -> None:
+        from repeatviewer.views.manage_references_dialog import (
+            database_name_from_pick,
+            fasta_path_from_database_pick,
+        )
+        from repeatviewer.project import BlastDatabase
+
+        tab = self._tabs.currentIndex() if hasattr(self, "_tabs") else 0
+        if tab == 0:
+            combo = self._blastn_database
+            molecule = BLAST_MOLECULE_NUCL
+        elif tab == 1:
+            combo = self._blastp_database
+            molecule = BLAST_MOLECULE_PROT
+        elif tab == 2:
+            combo = self._blastx_database
+            molecule = BLAST_MOLECULE_PROT
+        else:
+            QMessageBox.information(
+                self,
+                "BLAST",
+                "Switch to the BLASTn, BLASTp, or BLASTx tab, then Select a database.",
+            )
+            return
+
+        name = database_name_from_pick(payload)
+        if isinstance(payload, BlastDatabase):
+            if payload.molecule_type != molecule:
+                need = "nucleotide" if molecule == BLAST_MOLECULE_NUCL else "protein"
+                QMessageBox.information(
+                    self,
+                    "BLAST",
+                    f"This tab needs a {need} BLAST database.",
+                )
+                return
+            name = str(payload.name or "").strip() or name
+        elif tab == 0:
+            # Reference-genome style path pick for BLASTn.
+            path = fasta_path_from_database_pick(payload)
+            if path is not None and self._project.has_genome_configured():
+                genome = self._project.genome_file
+                if genome is not None and path.resolve() == Path(genome).resolve():
+                    self._populate_database_combo(
+                        combo, molecule, selected_name=None
+                    )
+                    return
+
+        if not name:
+            QMessageBox.information(
+                self,
+                "BLAST",
+                "Select a compatible BLAST database.",
+            )
+            return
+        self._populate_database_combo(combo, molecule, selected_name=name)
 
     def _on_blast_manager_finished(self, _result: int = 0) -> None:
         self._blast_manager_dialog = None
@@ -7672,7 +7845,7 @@ _FLEXIDOT_MODE_HELP = (
 _FLEXIDOT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): Flexidot uses the FASTA files that "
     "were selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are "
+    "<b>Define inputs</b>: choose different FASTA files. Paths are "
     "for this run only and are not remembered next time."
 )
 _FLEXIDOT_OUTPUT_FORMAT_HELP = (
@@ -7781,10 +7954,10 @@ class FlexidotParamsDialog(QDialog):
             ),
             add_button_label="Add another input",
             add_button_tooltip=(
-                "Add another FASTA file or folder path. Click a file or folder in "
-                "the panel to fill a row, or use Browse."
+                "Add another FASTA file path. Click a file in the Files panel "
+                "to fill a row, or use Browse."
             ),
-            path_mode="file_or_directory",
+            path_mode="file",
         )
         self._input_selected.toggled.connect(self._sync_flexidot_inputs)
         self._input_define.toggled.connect(self._sync_flexidot_inputs)
@@ -8401,7 +8574,7 @@ _TE_ANNOTATION_ADVANCED_SCROLL_MAX_HEIGHT = 420
 _TE_ANN_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): Sequence Annotation uses the FASTA "
     "files that were selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are "
+    "<b>Define inputs</b>: choose different FASTA files. Paths are "
     "for this run only and are not remembered next time."
 )
 _TE_ANN_FEATURE_DETECTION_HELP = (
@@ -8628,10 +8801,10 @@ class TeAnnotationDialog(QDialog):
             ),
             add_button_label="Add another input",
             add_button_tooltip=(
-                "Add another FASTA file or folder path. Click a file or folder in "
-                "the panel to fill a row, or use Browse."
+                "Add another FASTA file path. Click a file in the Files panel "
+                "to fill a row, or use Browse."
             ),
-            path_mode="file_or_directory",
+            path_mode="file",
         )
 
         # --- Feature detection (formerly Auto annotation) -----------------
@@ -9457,7 +9630,7 @@ class OrfPredictionParamsDialog(QDialog):
 _TEAID_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): TE-Aid uses the FASTA files that "
     "were selected in the Files panel when you click Run.<br><br>"
-    "<b>Define inputs</b>: choose different FASTA files (or folders). Paths are "
+    "<b>Define inputs</b>: choose different FASTA files. Paths are "
     "for this run only and are not remembered next time."
 )
 _TEAID_MODE_HELP = (
@@ -9560,10 +9733,10 @@ class TeaAidParamsDialog(QDialog):
             ),
             add_button_label="Add another input",
             add_button_tooltip=(
-                "Add another FASTA file or folder path. Click a file or folder in "
-                "the panel to fill a row, or use Browse."
+                "Add another FASTA file path. Click a file in the Files panel "
+                "to fill a row, or use Browse."
             ),
-            path_mode="file_or_directory",
+            path_mode="file",
         )
         self._input_selected.toggled.connect(self._sync_teaid_inputs)
         self._input_define.toggled.connect(self._sync_teaid_inputs)
@@ -10298,8 +10471,8 @@ class MsaCleanParamsDialog(QDialog):
     _INPUTS_HELP = (
         "<b>Use selected sequences</b> (default): clean the aligned FASTA files "
         "selected in the Files panel.<br><br>"
-        "<b>Define inputs</b>: choose alignment files or folders explicitly "
-        "(click in Files/Folders or Browse). Each file is cleaned separately."
+        "<b>Define inputs</b>: choose alignment files explicitly "
+        "(click in Files or Browse). Each file is cleaned separately."
     )
     _GAP_THRESHOLD_HELP = (
         "Columns whose gap proportion is <b>above</b> this value are removed "
@@ -10451,10 +10624,10 @@ class MsaCleanParamsDialog(QDialog):
                 file_filter="FASTA (*.fa *.fasta *.fas *.fna *.faa);;All files (*)",
                 add_button_label="Add another input",
                 add_button_tooltip=(
-                    "Add another aligned FASTA file or folder path. Click a file "
-                    "or folder in the panel to fill a row, or use Browse."
+                    "Add another aligned FASTA file path. Click a file in the "
+                    "Files panel to fill a row, or use Browse."
                 ),
-                path_mode="file_or_directory",
+                path_mode="file",
             )
 
         def _add_inputs_settings(

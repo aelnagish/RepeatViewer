@@ -1989,6 +1989,8 @@ class FilePreviewPage(QWidget):
             if self._annotation_panel is not None:
                 # Drop stale loaded sequence so Dotplot sync cannot reinject
                 # the previous (e.g. 50 Mbp) record into a small new file.
+                # Switching FASTA also ends any live Transfer search/preview.
+                self._annotation_panel.cancel_transfer_annotation()
                 self._annotation_panel._loaded_data = None
                 try:
                     self._annotation_panel._path = path.expanduser().resolve()
