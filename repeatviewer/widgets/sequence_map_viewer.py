@@ -289,7 +289,7 @@ def _draw_selection_side_guides(painter: QPainter, rect: QRectF) -> None:
     """Dashed left/right edges only — no top/bottom rail on range selections."""
     if rect.width() < 0.5 or rect.height() < 0.5:
         return
-    pen = QPen(_SELECTION_BORDER, 1, Qt.PenStyle.DashLine)
+    pen = QPen(_SELECTION_BORDER, 2, Qt.PenStyle.DashLine)
     pen.setCosmetic(True)
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -350,7 +350,7 @@ _NO_COLOR_BG = QColor("#fafafa")
 _SELECTION_FILL = QColor(10, 40, 120, 100)
 _SELECTION_BORDER = QColor(5, 20, 70, 255)
 # Unselected annotation-region veil (not applied on the nucleotide strip).
-_SELECTION_DIM = QColor(190, 190, 190, 140)
+_SELECTION_DIM = QColor(210, 210, 210, 90)
 # Edit > Find hits (the current hit is also selected, so it shows in blue on top).
 _FIND_HIT_FILL = QColor(245, 158, 11, 110)
 _FIND_HIT_BORDER = QColor(180, 83, 9, 230)
@@ -1194,10 +1194,15 @@ class ViewportRulerWidget(QWidget):
                 # Tick from top down toward the nucleotide track.
                 painter.drawLine(int(x), 1, int(x), _VIEWPORT_RULER_HEIGHT - 3)
             text = str(bp)
+            text_w = fm.horizontalAdvance(text)
+            # Skip labels that would clip off the right (end of sequence) or left edge.
+            label_x = int(x + 2)
+            if label_x < _LEFT_MARGIN or label_x + text_w > vw - 2:
+                continue
             if x - last_label_x < min_label_w and bp != 1 and bp != seq_len:
                 continue
             # Baseline flush to the bottom edge so the track sits under the numbers.
-            painter.drawText(int(x + 2), _VIEWPORT_RULER_HEIGHT - 2, text)
+            painter.drawText(label_x, _VIEWPORT_RULER_HEIGHT - 2, text)
             last_label_x = x
         painter.end()
 
@@ -3487,14 +3492,8 @@ class SequenceMapCanvas(QWidget):
         self._selected_indices.clear()
         bp = self._bp_at_pos(pos.x(), pos.y())
         old_sel = self.selection_range()
-        # Click outside an existing range selection → clear (grey region click).
-        if old_sel is not None:
-            a, b = old_sel
-            if a != b and (bp < a or bp > b):
-                self.clear_selection()
-                self.update(self._selection_change_damage(old_sel, None))
-                event.accept()
-                return
+        # Always begin a new range here — even when clicking outside an existing
+        # selection — so the user can drag another region without a clear click first.
         self._select_start_bp = bp
         self._select_end_bp = bp
         self._drag_select = True
