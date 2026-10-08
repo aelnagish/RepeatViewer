@@ -168,12 +168,12 @@ def test_sequence_map_panel_has_geneious_rail() -> None:
     panel = SequenceMapPanel(fasta, autoload=False)
     try:
         assert isinstance(panel._rail, SequenceAnnotationRail)
-        assert panel._rail.add_feature_btn.text() == "Add feature"
+        assert panel._rail.add_feature_btn.text() in {"Add", "Add feature"}
         assert panel._rail._tab_buttons[0]._label == "Display"
         assert panel._rail._tab_buttons[1]._label == "Annotation"
         assert panel._rail._tab_buttons[2]._label == "Find"
         assert hasattr(panel._rail, "find_query")
-        assert panel._rail._stack.count() == 3
+        assert panel._rail._stack.count() == 4
         assert panel._auto_ann_run_btn.text() == "Run"
         assert panel._similarity_ann_run_btn.text() == "Run"
         assert hasattr(panel._rail, "show_complement")

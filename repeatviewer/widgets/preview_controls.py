@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMenu,
     QPushButton,
@@ -692,15 +693,19 @@ class AnnotationZoomBar(QWidget):
     """Controls beside Text/Annotation tabs.
 
     Single-sequence Annotation: Actions menu (zoom lives on the map toolbar).
-    Multi-sequence overview: −/+/slider, Fit, Extract, and name filter.
+    Multi-sequence overview: same chrome as the map toolbar — −/+/slider,
+    Position, Select, Fit.
     """
 
     fit_mode_changed = Signal(str)
     reset_requested = Signal()
     fit_requested = Signal()
-    extract_requested = Signal()
+    select_requested = Signal()
+    extract_requested = Signal()  # kept for callers; Extract is not on this bar
     filter_text_changed = Signal(str)
     filter_return_pressed = Signal()
+
+    _POSITION_SPIN_WIDTH = 96
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -752,6 +757,40 @@ class AnnotationZoomBar(QWidget):
         )
         apply_annotation_zoom_slider_style(self._zoom_slider)
 
+        pos_label = QLabel("Position:", self._overview_host)
+        self._pos_start = NoWheelSpinBox(self._overview_host)
+        self._pos_start.setMinimum(1)
+        self._pos_start.setMaximum(1)
+        self._pos_start.setValue(1)
+        self._pos_start.setKeyboardTracking(False)
+        self._pos_start.setFixedWidth(self._POSITION_SPIN_WIDTH)
+        self._pos_start.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._pos_start.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._pos_start.setGroupSeparatorShown(True)
+        self._pos_start.setToolTip("1-based start position (column)")
+        self._pos_start.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        to_label = QLabel("to", self._overview_host)
+        self._pos_end = NoWheelSpinBox(self._overview_host)
+        self._pos_end.setMinimum(1)
+        self._pos_end.setMaximum(1)
+        self._pos_end.setValue(1)
+        self._pos_end.setKeyboardTracking(False)
+        self._pos_end.setFixedWidth(self._POSITION_SPIN_WIDTH)
+        self._pos_end.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._pos_end.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._pos_end.setGroupSeparatorShown(True)
+        self._pos_end.setToolTip("1-based end position (column)")
+        self._pos_end.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        select_btn = QPushButton("Select", self._overview_host)
+        select_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        select_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        select_btn.setToolTip(
+            "Zoom to the Position range and center it in the window"
+        )
+        select_btn.clicked.connect(self.select_requested.emit)
+
         fit_btn = QPushButton("Fit", self._overview_host)
         fit_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
         fit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -761,32 +800,12 @@ class AnnotationZoomBar(QWidget):
         )
         fit_btn.clicked.connect(self.fit_requested.emit)
 
-        extract_btn = QPushButton("Extract", self._overview_host)
-        extract_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        extract_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        extract_btn.setToolTip(
-            "Extract selected sequences (click / Shift / ⌘, or drag on names)"
-        )
-        extract_btn.clicked.connect(self.extract_requested.emit)
-
+        # Hidden: overview name jump still available via bind API / Find.
         self._name_filter = QLineEdit(self._overview_host)
         self._name_filter.setObjectName("FileFilter")
         self._name_filter.setPlaceholderText("Filter by name…")
         self._name_filter.setClearButtonEnabled(True)
-        self._name_filter.setFrame(False)
-        self._name_filter.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
-        self._name_filter.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._name_filter.setMaximumHeight(ZOOM_CONTROL_HEIGHT)
-        self._name_filter.setMinimumWidth(140)
-        self._name_filter.setMaximumWidth(280)
-        self._name_filter.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Fixed,
-        )
-        self._name_filter.setToolTip(
-            "Type part of a sequence name to jump to it. "
-            "Press Enter for the next match."
-        )
+        self._name_filter.hide()
         self._name_filter.textChanged.connect(self.filter_text_changed.emit)
         self._name_filter.returnPressed.connect(self.filter_return_pressed.emit)
 
@@ -794,9 +813,12 @@ class AnnotationZoomBar(QWidget):
             zoom_out,
             zoom_in,
             self._zoom_slider,
+            pos_label,
+            self._pos_start,
+            to_label,
+            self._pos_end,
+            select_btn,
             fit_btn,
-            extract_btn,
-            self._name_filter,
         ):
             ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self._overview_host)
@@ -835,6 +857,32 @@ class AnnotationZoomBar(QWidget):
     @property
     def name_filter(self) -> QLineEdit:
         return self._name_filter
+
+    @property
+    def pos_start(self) -> QSpinBox:
+        return self._pos_start
+
+    @property
+    def pos_end(self) -> QSpinBox:
+        return self._pos_end
+
+    def set_position_range(self, maximum: int, *, start: int = 1, end: int | None = None) -> None:
+        """Update Position spin limits for the loaded alignment / longest sequence."""
+        maximum = max(1, int(maximum))
+        start = max(1, min(maximum, int(start)))
+        end_val = maximum if end is None else max(1, min(maximum, int(end)))
+        if end_val < start:
+            end_val = start
+        for spin in (self._pos_start, self._pos_end):
+            spin.blockSignals(True)
+            spin.setMaximum(maximum)
+            spin.blockSignals(False)
+        self._pos_start.blockSignals(True)
+        self._pos_start.setValue(start)
+        self._pos_start.blockSignals(False)
+        self._pos_end.blockSignals(True)
+        self._pos_end.setValue(end_val)
+        self._pos_end.blockSignals(False)
 
     def sync_display(self, value: int) -> None:
         """Update percent spin without emitting map zoom."""
@@ -1294,7 +1342,7 @@ class PreviewHeaderBar(QWidget):
         divider.setFixedHeight(1)
         outer.addWidget(divider)
 
-        # −/+/Fit/Extract/filter sit under the line; same control styles as before.
+        # −/+/Position/Select/Fit sit under the line; same control styles as before.
         self._preview_zoom_bar = preview_zoom_bar
         self._annotation_zoom_bar = annotation_zoom_bar
         self._controls_host = QWidget(self)
@@ -1303,9 +1351,10 @@ class PreviewHeaderBar(QWidget):
         controls_row = QHBoxLayout(self._controls_host)
         controls_row.setContentsMargins(6, 2, 6, 2)
         controls_row.setSpacing(4)
-        controls_row.addStretch(1)
+        # Left-align −/+/Position/Select/Fit (same side as Text/Overview tabs).
         if annotation_zoom_bar is not None:
             controls_row.addWidget(annotation_zoom_bar, 0, Qt.AlignmentFlag.AlignVCenter)
+        controls_row.addStretch(1)
         self._controls_host.hide()
         outer.addWidget(self._controls_host)
 

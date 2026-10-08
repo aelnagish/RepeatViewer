@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QPointF,
+    QRect,
+    QRectF,
+    QSettings,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -18,7 +31,11 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QScrollArea,
@@ -29,10 +46,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from repeatviewer.backends.annotation_colors import similarity_database_color
+from repeatviewer.backends.auto_annotation import AutoAnnotationMode
+from repeatviewer.backends.auto_annotation_settings import (
+    load_auto_annotation_settings,
+    save_auto_annotation_settings,
+)
+from repeatviewer.backends.database_prepare import database_search_readiness
+from repeatviewer.backends.job_cancel import JobCancellation
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
     fasta_record_lengths,
     feature_display_pack_key,
+    is_aligned_fasta,
+    load_aligned_fasta_rows,
     load_all_features_by_id,
     load_features_by_id_from_json,
     ordered_feature_pack_keys,
@@ -41,8 +68,35 @@ from repeatviewer.backends.sequence_features import (
     resolve_sidecar_path,
     save_annotations_multi,
 )
+from repeatviewer.backends.similarity_annotation import (
+    SimilarityDatabaseRun,
+    load_use_system_blast_from_settings,
+)
+from repeatviewer.backends.similarity_annotation_settings import (
+    load_similarity_annotation_settings,
+    save_similarity_annotation_settings,
+)
+from repeatviewer.backends.te_annotation_batch import (
+    TeAnnotationOptions,
+    run_te_annotation_on_fasta,
+)
+from repeatviewer.database_settings import load_similarity_annotation_databases
 from repeatviewer.widgets.preview_controls import (
     AnnotationZoomBar,
+)
+from repeatviewer.widgets.preview_zoom import (
+    amino_acid_color_map,
+    invalidate_residue_color_maps,
+    nucleotide_base_color_map,
+)
+from repeatviewer.widgets.sequence_annotation_rail import SequenceAnnotationRail
+from repeatviewer.workers.base import Worker
+
+_AUTO_ANNOTATION_MODES: tuple[tuple[str, AutoAnnotationMode], ...] = (
+    ("LTR", AutoAnnotationMode.LTR),
+    ("TIR", AutoAnnotationMode.TIR),
+    ("Tandem", AutoAnnotationMode.TANDEM),
+    ("ORF", AutoAnnotationMode.ORF),
 )
 
 _BAR_HEIGHT = 7
@@ -54,7 +108,8 @@ _FEAT_HEIGHT = 10
 _FEAT_GAP = 2
 _ROW_BOTTOM_PAD = 4
 _MIN_ROW_HEIGHT = 18
-_NAME_COLUMN_DEFAULT = 280
+_NAME_COLUMN_DEFAULT = 200
+_NAME_COLUMN_MAX = 220
 _NAME_PAD = 8
 _SELECTED_BG_LIGHT = QColor(11, 92, 171, 36)
 _SELECTED_BG_DARK = QColor(80, 160, 255, 48)
@@ -63,6 +118,10 @@ _DEFAULT_FEAT = QColor("#c0392b")
 # limit is calculated per data set so the longest sequence always fits.
 _ABS_MIN_PPB = 1e-12
 _MAX_PPB = 4.0
+_MSA_MAX_PPB = 16.0
+_MSA_LETTER_MIN_PPB = 7.5
+_MSA_ROW_HEIGHT = 18
+_MSA_GAP_FILL = QColor(220, 220, 220, 90)
 _MAX_ZOOM_OVER_FIT = 32.0
 _QT_MAX_WIDGET_SIZE = 16_777_215
 _BAR_RIGHT_PAD = 8
@@ -70,6 +129,20 @@ _ZOOM_STEP = 1.08
 _SCALE_HEIGHT = 28
 # Ignore tiny moves (click / accidental jitter); macOS-like drag threshold.
 _RUBBER_MIN_PX = 14
+
+
+def _guess_msa_is_protein(seqs: list[str]) -> bool:
+    """Heuristic: protein when most alphabetic residues are not ACGTUN."""
+    sample_parts: list[str] = []
+    for seq in seqs[:30]:
+        sample_parts.append(seq[:400])
+        if sum(len(p) for p in sample_parts) >= 8_000:
+            break
+    letters = [c for c in "".join(sample_parts) if c.isalpha()]
+    if not letters:
+        return False
+    nuc = sum(1 for c in letters if c in "ACGTUN")
+    return (nuc / len(letters)) < 0.85
 
 
 def _is_dark(widget: QWidget) -> bool:
@@ -357,7 +430,7 @@ class _NamesColumn(QWidget):
 
 
 class _BarsCanvas(QWidget):
-    """Length bars + feature arrows (no name column)."""
+    """Length bars + feature arrows, or aligned MSA residue rows (no name column)."""
 
     selectionChanged = Signal()
     featureActivated = Signal(int, int)
@@ -371,6 +444,10 @@ class _BarsCanvas(QWidget):
         self._lengths: dict[str, int] = {}
         self._features: dict[str, list[SequenceFeature]] = {}
         self._tracks: dict[str, list[list[SequenceFeature]]] = {}
+        self._msa_seqs: list[str] = []
+        self._msa_mode = False
+        self._msa_protein = False
+        self._msa_colors: dict[str, tuple[str, str]] = {}
         self._row_tops: list[int] = []
         self._row_heights: list[int] = []
         self._max_length = 1
@@ -392,6 +469,9 @@ class _BarsCanvas(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
+    def is_msa_mode(self) -> bool:
+        return bool(self._msa_mode)
+
     def set_data(
         self,
         record_ids: list[str],
@@ -400,6 +480,9 @@ class _BarsCanvas(QWidget):
         *,
         fit_bars_width: int | None = None,
     ) -> None:
+        self._msa_mode = False
+        self._msa_seqs = []
+        self._msa_colors = {}
         self._record_ids = list(record_ids)
         self._lengths = dict(lengths)
         self._features = dict(features)
@@ -421,6 +504,56 @@ class _BarsCanvas(QWidget):
         self.update()
         self.zoomChanged.emit(self._ppb)
         self.rowsChanged.emit()
+
+    def set_msa_data(
+        self,
+        record_ids: list[str],
+        sequences: list[str],
+        *,
+        fit_bars_width: int | None = None,
+    ) -> None:
+        """Show aligned residue rows (same length); no feature tracks."""
+        if len(record_ids) != len(sequences):
+            raise ValueError("record_ids and sequences length mismatch")
+        self._msa_mode = True
+        self._msa_seqs = list(sequences)
+        self._msa_protein = _guess_msa_is_protein(self._msa_seqs)
+        self._msa_colors = (
+            amino_acid_color_map()
+            if self._msa_protein
+            else nucleotide_base_color_map()
+        )
+        self._record_ids = list(record_ids)
+        width = len(sequences[0]) if sequences else 1
+        self._lengths = {rid: width for rid in record_ids}
+        self._features = {rid: [] for rid in record_ids}
+        self._tracks = {rid: [] for rid in record_ids}
+        self._max_length = max(1, width)
+        self._selected_rows = set()
+        self._selected_feat = None
+        self._rubber = QRect()
+        self._rubber_active = False
+        self._drag_origin = None
+        if fit_bars_width and fit_bars_width > 40 and self._max_length > 0:
+            self._ppb = self.fit_pixels_per_base(fit_bars_width)
+        fit_ppb, max_ppb = self.zoom_bounds()
+        self._ppb = max(fit_ppb, min(max_ppb, self._ppb))
+        self._recompute_layout()
+        self.update()
+        self.zoomChanged.emit(self._ppb)
+        self.rowsChanged.emit()
+
+    def refresh_msa_colors(self) -> None:
+        """Reload Annotation residue palettes after Display color settings change."""
+        if not self._msa_mode:
+            return
+        invalidate_residue_color_maps()
+        self._msa_colors = (
+            amino_acid_color_map()
+            if self._msa_protein
+            else nucleotide_base_color_map()
+        )
+        self.update()
 
     def pixels_per_base(self) -> float:
         return self._ppb
@@ -478,7 +611,8 @@ class _BarsCanvas(QWidget):
             )
             / max(1, self._max_length),
         )
-        desired_max = max(_MAX_PPB, fit_ppb * _MAX_ZOOM_OVER_FIT)
+        ceil = _MSA_MAX_PPB if self._msa_mode else _MAX_PPB
+        desired_max = max(ceil, fit_ppb * _MAX_ZOOM_OVER_FIT)
         return fit_ppb, max(fit_ppb, min(desired_max, geometry_limit))
 
     def set_pixels_per_base(self, ppb: float) -> None:
@@ -556,8 +690,11 @@ class _BarsCanvas(QWidget):
         self._row_heights = []
         y = 0
         for rid in self._record_ids:
-            n_tracks = len(self._tracks.get(rid) or [])
-            h = _row_height(n_tracks)
+            if self._msa_mode:
+                h = _MSA_ROW_HEIGHT
+            else:
+                n_tracks = len(self._tracks.get(rid) or [])
+                h = _row_height(n_tracks)
             self._row_tops.append(y)
             self._row_heights.append(h)
             y += h
@@ -600,6 +737,8 @@ class _BarsCanvas(QWidget):
         return rows
 
     def _hit_feature(self, row: int, x: float, y: float) -> int | None:
+        if self._msa_mode:
+            return None
         if not (0 <= row < len(self._record_ids)):
             return None
         rid = self._record_ids[row]
@@ -739,6 +878,93 @@ class _BarsCanvas(QWidget):
         clip = event.rect()
         base = self.palette().color(QPalette.ColorRole.Base)
         painter.fillRect(clip, base)
+        if self._msa_mode:
+            self._paint_msa_rows(painter, clip)
+        else:
+            self._paint_bar_rows(painter, clip)
+
+        # Region-zoom overlay only after a real drag (not on click).
+        if self._rubber_active and not self._rubber.isNull():
+            x0 = self._rubber.left()
+            x1 = max(x0 + 1, self._rubber.right())
+            dim = QColor(0, 0, 0, 90) if _is_dark(self) else QColor(40, 40, 40, 55)
+            if x0 > 0:
+                painter.fillRect(QRect(0, clip.top(), x0, clip.height()), dim)
+            if x1 < self.width():
+                painter.fillRect(
+                    QRect(x1, clip.top(), self.width() - x1, clip.height()), dim
+                )
+            edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
+            painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
+            painter.drawLine(x0, clip.top(), x0, clip.bottom())
+            painter.drawLine(x1, clip.top(), x1, clip.bottom())
+        painter.end()
+
+    def _paint_msa_rows(self, painter: QPainter, clip: QRect) -> None:
+        """Column-aligned residue cells (visible rows/columns only)."""
+        sel_bg = _SELECTED_BG_DARK if _is_dark(self) else _SELECTED_BG_LIGHT
+        ppb = max(self._ppb, 1e-12)
+        show_letters = ppb >= _MSA_LETTER_MIN_PPB
+        c0 = max(0, int((clip.left() - self._bar_pad) / ppb) - 1)
+        c1 = min(self._max_length, int((clip.right() - self._bar_pad) / ppb) + 2)
+        font = QFont(self.font())
+        if show_letters:
+            font.setFamily("Menlo")
+            font.setStyleHint(QFont.StyleHint.Monospace)
+            font.setPointSize(max(8, min(12, int(ppb * 0.85))))
+            painter.setFont(font)
+        gap_fill = (
+            QColor(70, 70, 70, 70) if _is_dark(self) else _MSA_GAP_FILL
+        )
+        for index, rid in enumerate(self._record_ids):
+            top = self._row_tops[index]
+            height = self._row_heights[index]
+            if top + height < clip.top() or top > clip.bottom():
+                continue
+            if index in self._selected_rows:
+                painter.fillRect(0, top, self.width(), height, sel_bg)
+            seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
+            cell_h = max(2, height - 2)
+            y = top + 1
+            for j in range(c0, c1):
+                x = self._bar_pad + j * ppb
+                if x + ppb < clip.left() or x > clip.right():
+                    continue
+                ch = seq[j] if j < len(seq) else "-"
+                cell = QRectF(x, y, max(0.5, ppb), float(cell_h))
+                if ch in "-.":
+                    painter.fillRect(cell, gap_fill)
+                    continue
+                pair = self._msa_colors.get(ch) or self._msa_colors.get(ch.upper())
+                if pair is None:
+                    continue
+                bg_hex, fg_hex = pair
+                painter.fillRect(cell, QColor(bg_hex))
+                if show_letters and ppb >= 6:
+                    painter.setPen(QColor(fg_hex))
+                    painter.drawText(
+                        cell.toRect(),
+                        int(Qt.AlignmentFlag.AlignCenter),
+                        ch,
+                    )
+            hits = self._find_hits.get(rid)
+            if hits:
+                painter.setPen(QPen(_FIND_HIT_BORDER, 1))
+                current = self._find_current
+                for hit_start, hit_end in hits:
+                    x0 = self._bar_pad + (hit_start - 1) * ppb
+                    x1 = self._bar_pad + hit_end * ppb
+                    mark = QRectF(x0, y, max(2.0, x1 - x0), float(cell_h))
+                    is_current = (
+                        current is not None and current == (rid, hit_start, hit_end)
+                    )
+                    painter.fillRect(
+                        mark, _FIND_CURRENT_FILL if is_current else _FIND_HIT_FILL
+                    )
+                    painter.drawRect(mark)
+                painter.setPen(Qt.PenStyle.NoPen)
+
+    def _paint_bar_rows(self, painter: QPainter, clip: QRect) -> None:
         sel_bg = _SELECTED_BG_DARK if _is_dark(self) else _SELECTED_BG_LIGHT
 
         for index, rid in enumerate(self._record_ids):
@@ -798,23 +1024,6 @@ class _BarsCanvas(QWidget):
                         )
                         painter.drawRect(rect.adjusted(-1, -1, 1, 1))
                     flat_index += 1
-
-        # Region-zoom overlay only after a real drag (not on click).
-        if self._rubber_active and not self._rubber.isNull():
-            x0 = self._rubber.left()
-            x1 = max(x0 + 1, self._rubber.right())
-            dim = QColor(0, 0, 0, 90) if _is_dark(self) else QColor(40, 40, 40, 55)
-            if x0 > 0:
-                painter.fillRect(QRect(0, clip.top(), x0, clip.height()), dim)
-            if x1 < self.width():
-                painter.fillRect(
-                    QRect(x1, clip.top(), self.width() - x1, clip.height()), dim
-                )
-            edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
-            painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
-            painter.drawLine(x0, clip.top(), x0, clip.bottom())
-            painter.drawLine(x1, clip.top(), x1, clip.bottom())
-        painter.end()
 
 
 class _ScaleRuler(QWidget):
@@ -985,7 +1194,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars_scroll.verticalScrollBar().setSingleStep(18)
         self._bars_scroll.verticalScrollBar().setPageStep(120)
 
-        # Zoom / Fit / Extract / filter live on AnnotationZoomBar (same row as
+        # Zoom / Position / Select / Fit live on AnnotationZoomBar (same row as
         # Text / Annotation). Keep hidden locals until bind, and for standalone use.
         self._header_zoom_bar = None
         self._zoom_slider = QSlider(Qt.Orientation.Horizontal, self)
@@ -1024,12 +1233,43 @@ class MultiSequenceOverviewPanel(QWidget):
         self._splitter.setChildrenCollapsible(False)
         self._splitter.splitterMoved.connect(self._on_splitter_moved)
 
-        layout = QVBoxLayout(self)
+        self._auto_ann_settings = load_auto_annotation_settings()
+        self._similarity_ann_settings = load_similarity_annotation_settings()
+        self._ann_cancel = JobCancellation()
+        self._ann_thread: QThread | None = None
+        self._ann_worker: Worker | None = None
+        self._ann_job_kind = ""
+        self._auto_all_updating = False
+        self._similarity_all_updating = False
+        self._similarity_db_rows: list[tuple] = []
+
+        self._rail = SequenceAnnotationRail(self)
+        self._rail.set_overview_display_mode(True)
+        self._rail.residueColorsChanged.connect(self._on_residue_colors_changed)
+        self._rail.colorsClicked.connect(self._on_colors_setting_clicked)
+        self._wire_overview_annotation_rail()
+
+        map_rail_divider = QFrame(self)
+        map_rail_divider.setFrameShape(QFrame.Shape.VLine)
+        map_rail_divider.setFrameShadow(QFrame.Shadow.Plain)
+        map_rail_divider.setFixedWidth(1)
+        map_rail_divider.setStyleSheet("color: palette(mid);")
+
+        content = QWidget(self)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(self._splitter, 1)
+
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._splitter, 1)
+        layout.addWidget(content, 1)
+        layout.addWidget(map_rail_divider, 0)
+        layout.addWidget(self._rail, 0)
 
     def _compute_name_width(self, viewport_width: int | None = None) -> int:
+        """Keep names compact so the MSA + right control panel get more width."""
         font = QFont(self.font())
         font.setPointSize(max(10, font.pointSize() - 1))
         fm = QFontMetrics(font)
@@ -1037,10 +1277,11 @@ class MultiSequenceOverviewPanel(QWidget):
         for rid in self._record_ids[:500]:
             widest = max(widest, fm.horizontalAdvance(rid))
         natural = widest + 2 * _NAME_PAD + 4
-        cap = _NAME_COLUMN_DEFAULT + 40
+        cap = _NAME_COLUMN_MAX
         if viewport_width and viewport_width > 100:
-            cap = min(cap, max(140, int(viewport_width * 0.38)))
-        return max(140, min(cap, natural))
+            # At most ~22% of the overview content (names | tracks), not the rail.
+            cap = min(cap, max(120, int(viewport_width * 0.22)))
+        return max(120, min(cap, natural))
 
     def _current_name_width(self) -> int:
         sizes = self._splitter.sizes()
@@ -1091,6 +1332,7 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         self._safe_disconnect(bar.zoom_slider.valueChanged, self._on_zoom_slider_changed)
         self._safe_disconnect(bar.fit_requested, self._fit_bars)
+        self._safe_disconnect(bar.select_requested, self._select_by_position)
         self._safe_disconnect(bar.extract_requested, self._extract_selected)
         self._safe_disconnect(bar.filter_text_changed, self._on_name_filter_edited)
         self._safe_disconnect(bar.filter_return_pressed, self._on_name_filter_next)
@@ -1099,13 +1341,14 @@ class MultiSequenceOverviewPanel(QWidget):
         self._header_zoom_bar = None
 
     def bind_annotation_zoom_bar(self, bar) -> None:
-        """Attach header −/+/slider/Fit/Extract/filter (same row as Text/Annotation)."""
+        """Attach header −/+/slider/Position/Select/Fit (same row as Text/Annotation)."""
         if not isinstance(bar, AnnotationZoomBar):
             return
 
         prev_owner = getattr(bar, "_bound_overview", None)
         if prev_owner is self and self._header_zoom_bar is bar:
             bar.set_overview_mode(True)
+            self._sync_header_position_spins()
             return
         if prev_owner is not None and prev_owner is not self:
             try:
@@ -1150,13 +1393,439 @@ class MultiSequenceOverviewPanel(QWidget):
         self._name_filter.blockSignals(False)
         self._zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
         bar.fit_requested.connect(self._fit_bars)
+        bar.select_requested.connect(self._select_by_position)
         bar.extract_requested.connect(self._extract_selected)
         bar.filter_text_changed.connect(self._on_name_filter_edited)
         bar.filter_return_pressed.connect(self._on_name_filter_next)
+        self._sync_header_position_spins()
 
-    def load_path(self, path: Path) -> None:
+    def is_msa_mode(self) -> bool:
+        return self._bars.is_msa_mode()
+
+    def _wire_overview_annotation_rail(self) -> None:
+        """Connect Annotation tab Run actions to per-sequence batch annotate."""
+        rail = self._rail
+        self._auto_ann_checks: dict[AutoAnnotationMode, QCheckBox] = {}
+        for label, mode in _AUTO_ANNOTATION_MODES:
+            check = rail.auto_ann_checks.get(label)
+            if check is None:
+                continue
+            self._auto_ann_checks[mode] = check
+            check.toggled.connect(self._on_auto_annotation_check_toggled)
+        rail.auto_ann_all_check.toggled.connect(self._on_auto_annotation_all_toggled)
+        rail.similarity_ann_all_check.toggled.connect(
+            self._on_similarity_annotation_all_toggled
+        )
+        rail.featureDetectClicked.connect(self._on_auto_run_clicked)
+        rail.featureDetectSettingsClicked.connect(self._open_auto_annotation_settings)
+        rail.similarityAnnotateClicked.connect(self._on_similarity_run_clicked)
+        rail.similaritySettingsClicked.connect(
+            self._open_similarity_annotation_settings
+        )
+        rail.saveClicked.connect(self._save_overview_annotations)
+        self._sync_auto_annotation_all_check()
+        self._refresh_similarity_database_rows()
+
+    def _on_residue_colors_changed(self) -> None:
+        self._bars.refresh_msa_colors()
+
+    def _on_colors_setting_clicked(self) -> None:
+        from repeatviewer.widgets.annotation_colors_dialog import (
+            AnnotationElementColorsDialog,
+        )
+
+        dialog = AnnotationElementColorsDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._on_residue_colors_changed()
+
+    def _annotation_running(self) -> bool:
+        thread = self._ann_thread
+        return thread is not None and thread.isRunning()
+
+    def _set_annotation_job_status(self, text: str) -> None:
+        self._rail.set_annotation_job_status(text)
+        if text:
+            self.statusMessage.emit(text)
+
+    def _clear_annotation_job_status(self) -> None:
+        self._rail.set_annotation_job_status("")
+
+    def _main_window_for_job_progress(self):
+        win = self.window()
+        if win is not None and hasattr(win, "_show_job_progress"):
+            return win
+        return None
+
+    def _begin_window_job_progress(self, title: str, total_steps: int) -> None:
+        win = self._main_window_for_job_progress()
+        if win is None:
+            return
+        win._show_job_progress(title, max(1, int(total_steps)))
+
+    def _update_window_job_progress(self, completed: int, detail: str = "") -> None:
+        win = self._main_window_for_job_progress()
+        if win is None or not hasattr(win, "_on_job_progress"):
+            return
+        win._on_job_progress(max(0, int(completed)), str(detail or ""))
+
+    def _end_window_job_progress(self) -> None:
+        win = self._main_window_for_job_progress()
+        if win is None:
+            return
+        if getattr(win, "_job_running", False) and hasattr(win, "_task_progress"):
+            bar = win._task_progress
+            if bar is not None:
+                total = max(1, int(getattr(bar, "_total", 1)))
+                bar.update(total, "Done")
+        if hasattr(win, "_hide_job_progress"):
+            win._hide_job_progress()
+
+    def _sync_auto_annotation_all_check(self) -> None:
+        checks = list(self._auto_ann_checks.values())
+        if not checks:
+            return
+        all_checked = all(check.isChecked() for check in checks)
+        self._auto_all_updating = True
+        self._rail.auto_ann_all_check.setChecked(all_checked)
+        self._auto_all_updating = False
+
+    def _on_auto_annotation_check_toggled(self, _checked: bool) -> None:
+        if self._auto_all_updating:
+            return
+        self._sync_auto_annotation_all_check()
+
+    def _on_auto_annotation_all_toggled(self, checked: bool) -> None:
+        if self._auto_all_updating:
+            return
+        self._auto_all_updating = True
+        try:
+            for check in self._auto_ann_checks.values():
+                check.setChecked(checked)
+        finally:
+            self._auto_all_updating = False
+
+    def _sync_similarity_annotation_all_check(self) -> None:
+        checks = [check for _entry, check in self._similarity_db_rows]
+        if not checks:
+            self._similarity_all_updating = True
+            self._rail.similarity_ann_all_check.setChecked(False)
+            self._similarity_all_updating = False
+            return
+        all_checked = all(check.isChecked() for check in checks)
+        self._similarity_all_updating = True
+        self._rail.similarity_ann_all_check.setChecked(all_checked)
+        self._similarity_all_updating = False
+
+    def _on_similarity_annotation_all_toggled(self, checked: bool) -> None:
+        if self._similarity_all_updating:
+            return
+        self._similarity_all_updating = True
+        try:
+            for _entry, check in self._similarity_db_rows:
+                check.setChecked(checked)
+        finally:
+            self._similarity_all_updating = False
+
+    def _on_similarity_db_check_toggled(self, _checked: bool) -> None:
+        if self._similarity_all_updating:
+            return
+        self._sync_similarity_annotation_all_check()
+
+    def _make_similarity_db_check(self, entry, index: int) -> QCheckBox:
+        color = similarity_database_color(entry.name, index)
+        check = QCheckBox(entry.name, self._rail.similarity_db_host)
+        readiness = database_search_readiness(entry)
+        tooltip = f"{entry.display_type_label}\n{entry.path}"
+        if readiness is not None:
+            tooltip += f"\n\nNot ready: {readiness}"
+            check.setChecked(False)
+        else:
+            check.setChecked(True)
+        check.setToolTip(tooltip)
+        check.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
+        check.toggled.connect(self._on_similarity_db_check_toggled)
+        return check
+
+    def _refresh_similarity_database_rows(self) -> None:
+        self._rail.clear_similarity_db_checks()
+        self._similarity_db_rows = []
+        databases = load_similarity_annotation_databases()
+        if not databases:
+            empty = QLabel(
+                "No similarity databases configured.", self._rail.similarity_db_host
+            )
+            empty.setStyleSheet("color: palette(mid);")
+            empty.setWordWrap(True)
+            self._rail.add_similarity_db_widget(empty)
+            self._sync_similarity_annotation_all_check()
+            return
+        for index, entry in enumerate(databases):
+            check = self._make_similarity_db_check(entry, index)
+            self._rail.add_similarity_db_check(check)
+            self._similarity_db_rows.append((entry, check))
+        self._sync_similarity_annotation_all_check()
+
+    def _selected_auto_annotation_modes(self) -> list[AutoAnnotationMode]:
+        return [
+            mode for mode, check in self._auto_ann_checks.items() if check.isChecked()
+        ]
+
+    def _selected_similarity_databases(self) -> list[SimilarityDatabaseRun]:
+        selected: list[SimilarityDatabaseRun] = []
+        for index, (entry, check) in enumerate(self._similarity_db_rows):
+            if check.isChecked():
+                selected.append(
+                    SimilarityDatabaseRun(
+                        database=entry,
+                        color=similarity_database_color(entry.name, index),
+                    )
+                )
+        return selected
+
+    def _set_annotation_controls_enabled(self, enabled: bool) -> None:
+        rail = self._rail
+        rail.auto_ann_settings_btn.setEnabled(enabled)
+        rail.auto_ann_all_check.setEnabled(enabled)
+        for check in self._auto_ann_checks.values():
+            check.setEnabled(enabled)
+        rail.similarity_ann_settings_btn.setEnabled(enabled)
+        rail.similarity_ann_all_check.setEnabled(enabled)
+        for _entry, check in self._similarity_db_rows:
+            check.setEnabled(enabled)
+        running = not enabled
+        rail.auto_ann_run_btn.setEnabled(True)
+        rail.similarity_ann_run_btn.setEnabled(True)
+        rail.auto_ann_run_btn.setText("Stop" if running and self._ann_job_kind == "auto" else "Run")
+        rail.similarity_ann_run_btn.setText(
+            "Stop" if running and self._ann_job_kind == "similarity" else "Run"
+        )
+
+    def _open_auto_annotation_settings(self) -> None:
+        from repeatviewer.widgets.sequence_map_viewer import AutoAnnotationSettingsDialog
+
+        self._auto_ann_settings = load_auto_annotation_settings()
+        dialog = AutoAnnotationSettingsDialog(self._auto_ann_settings, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._auto_ann_settings = dialog.settings()
+        save_auto_annotation_settings(self._auto_ann_settings)
+        self.statusMessage.emit("Auto annotation settings saved.")
+
+    def _open_similarity_annotation_settings(self) -> None:
+        from repeatviewer.widgets.sequence_map_viewer import (
+            SimilarityAnnotationSettingsDialog,
+        )
+
+        self._similarity_ann_settings = load_similarity_annotation_settings()
+        dialog = SimilarityAnnotationSettingsDialog(
+            self._similarity_ann_settings, parent=self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._similarity_ann_settings = dialog.settings()
+        save_similarity_annotation_settings(self._similarity_ann_settings)
+        self.statusMessage.emit("Similarity annotation settings saved.")
+
+    def _on_auto_run_clicked(self) -> None:
+        if self._annotation_running():
+            if self._ann_job_kind == "auto":
+                self._stop_annotation_job()
+            return
+        modes = self._selected_auto_annotation_modes()
+        if not modes:
+            QMessageBox.information(
+                self,
+                "Feature detection",
+                "Select at least one detector to run.",
+            )
+            return
+        self._start_batch_annotation(
+            TeAnnotationOptions(auto_modes=tuple(modes)),
+            kind="auto",
+            title="Feature detection",
+            total_steps=max(1, len(self._record_ids) or 1),
+        )
+
+    def _on_similarity_run_clicked(self) -> None:
+        if self._annotation_running():
+            if self._ann_job_kind == "similarity":
+                self._stop_annotation_job()
+            return
+        databases = self._selected_similarity_databases()
+        if not databases:
+            QMessageBox.information(
+                self,
+                "Similarity annotation",
+                "Select at least one database to search.",
+            )
+            return
+        issues = []
+        for entry in databases:
+            readiness = database_search_readiness(entry.database)
+            if readiness is not None:
+                issues.append(f"{entry.database.name}: {readiness}")
+        if issues:
+            QMessageBox.warning(
+                self,
+                "Similarity annotation",
+                "These databases are not ready to search:\n\n" + "\n\n".join(issues),
+            )
+            return
+        self._start_batch_annotation(
+            TeAnnotationOptions(similarity_databases=tuple(databases)),
+            kind="similarity",
+            title="Similarity annotation",
+            total_steps=max(1, len(self._record_ids) or 1),
+        )
+
+    def _stop_annotation_job(self) -> None:
+        if not self._annotation_running():
+            return
+        self._ann_cancel.request()
+        self._set_annotation_job_status("Stopping annotation…")
+
+    def _start_batch_annotation(
+        self,
+        options: TeAnnotationOptions,
+        *,
+        kind: str,
+        title: str,
+        total_steps: int,
+    ) -> None:
+        if self._annotation_running():
+            return
+        if not self._path.is_file():
+            QMessageBox.warning(self, title, "No FASTA file loaded.")
+            return
+        self._ann_cancel.reset()
+        self._ann_job_kind = kind
+        self._set_annotation_controls_enabled(False)
+        n = len(self._record_ids) or 1
+        self._set_annotation_job_status(
+            f"{title}: running on {n:,} sequence{'s' if n != 1 else ''}…"
+        )
+        self.statusMessage.emit(
+            f"Running {title.lower()} on every sequence in {self._path.name}…"
+        )
+        self._begin_window_job_progress(title, total_steps)
+
+        path = self._path
+        auto_cfg = self._auto_ann_settings
+        sim_cfg = self._similarity_ann_settings
+        cancel = self._ann_cancel
+
+        def _job(*, progress=None):
+            def _prog(completed: int, total: int, label: str) -> None:
+                if progress is None:
+                    return
+                if completed < 0:
+                    progress(str(label))
+                else:
+                    progress(f"{max(0, int(completed))}/{max(1, int(total))} {label}")
+
+            return run_te_annotation_on_fasta(
+                path,
+                options,
+                auto_settings=auto_cfg,
+                similarity_settings=sim_cfg,
+                use_system_blast=load_use_system_blast_from_settings(),
+                cancel=cancel,
+                progress=_prog,
+            )
+
+        worker = Worker(_job, progress=True)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.signals.progress.connect(self._on_batch_annotation_progress)
+        worker.signals.finished.connect(self._on_batch_annotation_finished)
+        worker.signals.error.connect(self._on_batch_annotation_error)
+        worker.signals.finished.connect(thread.quit)
+        worker.signals.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_annotation_thread)
+        self._ann_worker = worker
+        self._ann_thread = thread
+        thread.start()
+
+    @Slot(str)
+    def _on_batch_annotation_progress(self, message: str) -> None:
+        text = str(message or "").strip()
+        match = re.match(r"^(\d+)\s*/\s*(\d+)\s+(.+)$", text)
+        if match is None:
+            self._set_annotation_job_status(text)
+            return
+        completed, total, detail = (
+            int(match.group(1)),
+            int(match.group(2)),
+            match.group(3).strip(),
+        )
+        kind = "Feature detection" if self._ann_job_kind == "auto" else "Similarity"
+        self._set_annotation_job_status(f"{kind} {completed}/{total}: {detail}")
+        self._update_window_job_progress(completed, detail)
+
+    @Slot(object)
+    def _on_batch_annotation_finished(self, result: object) -> None:
+        self._clear_annotation_job_status()
+        kind = "Feature detection" if self._ann_job_kind == "auto" else "Similarity"
+        if isinstance(result, list) and result:
+            self.statusMessage.emit(
+                f"{kind} finished for all sequences · saved {Path(result[0]).name}"
+            )
+        else:
+            self.statusMessage.emit(f"{kind} finished for all sequences.")
+        was_msa = self.is_msa_mode()
+        self.load_path(self._path, msa_mode=was_msa)
+        self.annotationsSaved.emit(self._path)
+
+    @Slot(str)
+    def _on_batch_annotation_error(self, message: str) -> None:
+        self._clear_annotation_job_status()
+        lower = str(message or "").lower()
+        if "stopped by user" in lower or "job stopped" in lower:
+            self.statusMessage.emit("Annotation stopped.")
+            return
+        QMessageBox.warning(self, "Annotation failed", str(message))
+        self.statusMessage.emit(f"Annotation failed: {message}")
+
+    @Slot()
+    def _clear_annotation_thread(self) -> None:
+        self._ann_thread = None
+        self._ann_worker = None
+        self._ann_job_kind = ""
+        self._set_annotation_controls_enabled(True)
+        self._end_window_job_progress()
+
+    def _save_overview_annotations(self) -> None:
+        if not self._record_ids:
+            return
+        try:
+            json_path, _gff = save_annotations_multi(
+                self._path,
+                features_by_id=self._features,
+                lengths_by_id=self._lengths,
+                record_ids=self._record_ids,
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Save annotations", str(exc))
+            return
+        self.statusMessage.emit(f"Saved annotations · {json_path.name}")
+        self.annotationsSaved.emit(self._path)
+
+    def load_path(self, path: Path, *, msa_mode: bool | None = None) -> None:
+        """Load multi-FASTA overview.
+
+        When ``msa_mode`` is True (or auto-detected via equal lengths), paint
+        aligned residue rows instead of length bars.
+        """
         self._path = path.expanduser().resolve()
         self._bars.set_find_hits({}, None)  # hits belong to the previous file
+        use_msa = bool(msa_mode) if msa_mode is not None else is_aligned_fasta(self._path)
+        if use_msa:
+            self._load_msa_path()
+            return
         try:
             lengths = fasta_record_lengths(self._path)
         except (OSError, ValueError) as exc:
@@ -1206,6 +1875,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_data(record_ids, lengths, features, fit_bars_width=None)
         self._sync_names_column()
         self._update_scale()
+        self._sync_header_position_spins()
         QTimer.singleShot(0, self._try_initial_fit)
         QTimer.singleShot(50, self._try_initial_fit)
         QTimer.singleShot(200, self._try_initial_fit)
@@ -1226,6 +1896,43 @@ class MultiSequenceOverviewPanel(QWidget):
                 f"{len(record_ids):,} sequences · no annotation JSON / .RV.gff3 yet"
             )
 
+    def _load_msa_path(self) -> None:
+        """Load equal-length FASTA as colored residue rows."""
+        try:
+            record_ids, sequences = load_aligned_fasta_rows(self._path)
+        except (OSError, ValueError) as exc:
+            self._record_ids = []
+            self._lengths = {}
+            self._features = {}
+            self._bars.set_data([], {}, {})
+            self._scale.set_scale(ppb=_ABS_MIN_PPB, max_length=1, bar_pad=8)
+            self.statusMessage.emit(str(exc))
+            return
+        width = len(sequences[0]) if sequences else 1
+        self._record_ids = record_ids
+        self._lengths = {rid: width for rid in record_ids}
+        self._features = {rid: [] for rid in record_ids}
+        self._did_initial_fit = False
+        self._search_needle = ""
+        self._search_hits = []
+        self._search_hit_index = -1
+        total_w = max(400, self.width() or 800)
+        self._name_width = self._compute_name_width(total_w)
+        tracks_w = max(200, total_w - self._name_width)
+        self._splitter.setSizes([self._name_width, tracks_w])
+        self._sync_viewport_fill()
+        self._bars.set_msa_data(record_ids, sequences, fit_bars_width=None)
+        self._sync_names_column()
+        self._update_scale()
+        self._sync_header_position_spins()
+        QTimer.singleShot(0, self._try_initial_fit)
+        QTimer.singleShot(50, self._try_initial_fit)
+        QTimer.singleShot(200, self._try_initial_fit)
+        kind = "protein" if self._bars._msa_protein else "nucleotide"
+        self.statusMessage.emit(
+            f"{len(record_ids):,} aligned sequences · {width:,} columns · {kind} MSA"
+        )
+
     def _sync_viewport_fill(self) -> None:
         vp = self._bars_scroll.viewport()
         self._bars.set_viewport_min_size(vp.width(), vp.height())
@@ -1241,6 +1948,40 @@ class MultiSequenceOverviewPanel(QWidget):
     def _bars_viewport_width(self) -> int:
         return max(80, self._bars_scroll.viewport().width())
 
+    def _sync_header_position_spins(self) -> None:
+        bar = self._header_zoom_bar
+        if bar is None or not hasattr(bar, "set_position_range"):
+            return
+        maximum = max(1, int(self._bars.max_length()))
+        bar.set_position_range(maximum, start=1, end=maximum)
+
+    def _select_by_position(self) -> None:
+        """Zoom/scroll to the header Position range (same idea as single-seq Select)."""
+        bar = self._header_zoom_bar
+        if bar is None:
+            return
+        start = int(bar.pos_start.value())
+        end = int(bar.pos_end.value())
+        if end < start:
+            start, end = end, start
+            bar.set_position_range(
+                max(1, int(self._bars.max_length())), start=start, end=end
+            )
+        maximum = max(1, int(self._bars.max_length()))
+        start = max(1, min(maximum, start))
+        end = max(start, min(maximum, end))
+        # Inclusive columns → half-open bp window used by zoom_to_bp_range.
+        self._on_region_zoom(float(start - 1), float(end))
+        self._sync_zoom_slider_from_ppb()
+        # Center the selected span in the viewport when possible.
+        ppb = max(self._bars.pixels_per_base(), 1e-12)
+        mid_x = self._bars.bar_pad() + ((start - 1 + end) / 2.0) * ppb
+        vp_w = max(1, self._bars_scroll.viewport().width())
+        target = int(round(mid_x - vp_w / 2.0))
+        hbar = self._bars_scroll.horizontalScrollBar()
+        hbar.setValue(max(0, min(hbar.maximum(), target)))
+        self._update_scale()
+
     def _fit_bars(self) -> None:
         # Keep the user's splitter ratio; only zoom tracks to the track viewport.
         self._name_width = self._current_name_width()
@@ -1250,6 +1991,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_names_column()
         self._update_scale()
         self._sync_zoom_slider_from_ppb()
+        self._sync_header_position_spins()
 
     def _slider_ppb_bounds(self) -> tuple[float, float]:
         return self._bars.zoom_bounds(self._bars_viewport_width())

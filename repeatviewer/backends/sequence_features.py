@@ -683,6 +683,64 @@ def fasta_record_lengths(path: Path) -> dict[str, int]:
     return lengths
 
 
+def is_aligned_fasta(path: Path) -> bool:
+    """True when the FASTA has ≥2 records that all share one positive length.
+
+    Used to choose residue-row MSA view in Preview Annotation. Streams once;
+    does not load sequences into memory.
+    """
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        return False
+    count = 0
+    length: int | None = None
+    try:
+        for record in SeqIO.parse(str(resolved), "fasta"):
+            rid = str(record.id).strip()
+            if not rid:
+                continue
+            seq_len = len(record.seq)
+            if seq_len <= 0:
+                return False
+            if length is None:
+                length = seq_len
+            elif seq_len != length:
+                return False
+            count += 1
+    except (OSError, ValueError):
+        return False
+    return count >= 2 and length is not None and length > 0
+
+
+def load_aligned_fasta_rows(path: Path) -> tuple[list[str], list[str]]:
+    """Load an aligned FASTA as ``(record_ids, uppercase_sequences)``.
+
+    Raises ``ValueError`` when the file is empty or sequences differ in length.
+    Record ids are uniquified like :func:`fasta_record_lengths`.
+    """
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    raw_ids: list[str] = []
+    seqs: list[str] = []
+    for record in SeqIO.parse(str(resolved), "fasta"):
+        rid = str(record.id).strip()
+        if not rid:
+            continue
+        raw_ids.append(rid)
+        seqs.append(str(record.seq).upper())
+    if len(raw_ids) < 2:
+        raise ValueError(f"Need at least two sequences in {resolved.name}")
+    lengths = {len(s) for s in seqs}
+    if len(lengths) != 1:
+        raise ValueError(
+            "Sequences have different lengths; provide an aligned FASTA (MSA)."
+        )
+    if lengths.pop() == 0:
+        raise ValueError("Alignment has zero columns.")
+    return uniquify_record_ids(raw_ids), seqs
+
+
 def _fasta_lengths_and_single_sequence(
     path: Path,
 ) -> tuple[dict[str, int], str | None]:

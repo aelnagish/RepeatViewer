@@ -653,6 +653,7 @@ class FilePreviewPage(QWidget):
         self.path = path.expanduser().resolve()
         self._single_fasta_mode = False
         self._multi_fasta_mode = False
+        self._msa_aligned_mode = False  # multi-FASTA with equal lengths → residue rows
         self._annotation_panel: SequenceMapPanel | None = None
         self._annotation_overview = None  # MultiSequenceOverviewPanel, multi-FASTA only
         self._dotplot_panel = None  # built lazily on first view
@@ -1155,6 +1156,7 @@ class FilePreviewPage(QWidget):
         self._single_fasta_mode = enabled
         if not enabled:
             self._multi_fasta_mode = False
+            self._msa_aligned_mode = False
         self._apply_view_mode()
         self._refresh_sequence_info_bar()
 
@@ -1924,7 +1926,9 @@ class FilePreviewPage(QWidget):
                     self._update_open_progress(0, progress_detail)
         try:
             if self._multi_fasta_mode:
-                self._ensure_annotation_overview().load_path(path)
+                self._ensure_annotation_overview().load_path(
+                    path, msa_mode=self._msa_aligned_mode
+                )
             else:
                 self._ensure_annotation_panel().load_path(path)
             try:
@@ -1950,6 +1954,12 @@ class FilePreviewPage(QWidget):
         try:
             self._set_single_fasta_mode(True)
             self._multi_fasta_mode = _is_multi_fasta_file(path)
+            if self._multi_fasta_mode:
+                from repeatviewer.backends.sequence_features import is_aligned_fasta
+
+                self._msa_aligned_mode = is_aligned_fasta(path)
+            else:
+                self._msa_aligned_mode = False
             self._annotation_data_loaded_for = None
             default_tab = load_default_fasta_preview_tab()
             if stay_on_annotation:
@@ -2216,8 +2226,13 @@ class FilePreviewPage(QWidget):
         if self._single_fasta_mode:
             self._refresh_sequence_info_bar()
             if self._multi_fasta_mode:
+                from repeatviewer.backends.sequence_features import is_aligned_fasta
+
+                self._msa_aligned_mode = is_aligned_fasta(self.path)
                 if self._annotation_overview is not None:
-                    self._annotation_overview.load_path(self.path)
+                    self._annotation_overview.load_path(
+                        self.path, msa_mode=self._msa_aligned_mode
+                    )
                     try:
                         self._annotation_data_loaded_for = self.path.expanduser().resolve()
                     except OSError:
@@ -2861,7 +2876,7 @@ class PreviewTabWidget(QTabWidget):
                 and widget.is_annotation_preview_active()
                 and widget.is_multi_fasta_preview()
             ):
-                # Multi-seq overview: −/+/Fit/Extract/filter under the tab divider.
+                # Multi-seq overview: −/+/Position/Select/Fit under the tab divider.
                 self._header_bar.set_header_zoom_mode("annotation")
             elif is_annotation:
                 # Single-seq Annotation: Actions on the Preview title bar (like Dotplot).

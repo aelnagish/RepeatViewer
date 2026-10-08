@@ -93,8 +93,10 @@ _TAB_TEXT_PAD = 4  # vertical padding around rotated label
 _SETTINGS_GROUP = "sequence_annotation_rail"
 _SETTINGS_TAB_KEY = "last_tab"
 _SETTINGS_SECTIONS_KEY = "expanded_sections"
+_SETTINGS_COLLAPSED_KEY = "panel_collapsed"
 # Default first open: Annotation tab with all sections collapsed.
 _DEFAULT_TAB_INDEX = 1
+_COLLAPSED_RAIL_WIDTH = _RAIL_TAB_WIDTH
 _ANNOTATION_SECTION_IDS = (
     "manual",
     "feature_detection",
@@ -501,6 +503,7 @@ class SequenceAnnotationRail(QWidget):
     transferSourceChanged = Signal()
     manageDatabaseClicked = Signal()
     tabChanged = Signal(int)
+    panelCollapsedChanged = Signal(bool)
     findRequested = Signal(int)  # +1 next, -1 previous, 0 find all
 
     # Display / size signals (live apply).
@@ -527,14 +530,19 @@ class SequenceAnnotationRail(QWidget):
         super().__init__(parent)
         self.setObjectName("sequenceAnnotationRail")
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.setFixedWidth(_MODULE_WIDTH + _RAIL_TAB_WIDTH + 1)
+        self._module_width = _MODULE_WIDTH
+        self._overview_mode = False
+        self._panel_collapsed = False
+        self._active_tab = _DEFAULT_TAB_INDEX
+        self._updating_tabs = False
+        self.setFixedWidth(self._expanded_rail_width())
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         self._stack = QStackedWidget(self)
-        self._stack.setFixedWidth(_MODULE_WIDTH)
+        self._stack.setFixedWidth(self._module_width)
         self._stack.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
         )
@@ -553,11 +561,11 @@ class SequenceAnnotationRail(QWidget):
         self._stack.addWidget(self._find_page)
         self._stack.addWidget(self._others_page)
 
-        divider = QFrame(self)
-        divider.setFrameShape(QFrame.Shape.VLine)
-        divider.setFrameShadow(QFrame.Shadow.Plain)
-        divider.setFixedWidth(1)
-        divider.setStyleSheet("color: palette(mid);")
+        self._divider = QFrame(self)
+        self._divider.setFrameShape(QFrame.Shape.VLine)
+        self._divider.setFrameShadow(QFrame.Shadow.Plain)
+        self._divider.setFixedWidth(1)
+        self._divider.setStyleSheet("color: palette(mid);")
 
         self._tab_strip = QWidget(self)
         self._tab_strip.setFixedWidth(_RAIL_TAB_WIDTH)
@@ -566,15 +574,22 @@ class SequenceAnnotationRail(QWidget):
         tab_layout.setContentsMargins(1, 2, 1, 2)
         tab_layout.setSpacing(2)
 
+        # Non-exclusive: re-clicking the active tab collapses the panel.
         self._tab_group = QButtonGroup(self)
-        self._tab_group.setExclusive(True)
+        self._tab_group.setExclusive(False)
         self._tab_buttons: list[_RotatedTabButton] = []
+        self._tab_tips = (
+            "Display — sequence display and colors (click again to hide)",
+            "Annotations — detect, edit, and transfer features (click again to hide)",
+            "Find — motif search in the active sequence (click again to hide)",
+            "Others — sizes and extra display options (click again to hide)",
+        )
         for index, (label, tip) in enumerate(
             (
-                ("Display", "Display — sequence display and colors"),
-                ("Annotation", "Annotations — detect, edit, and transfer features"),
-                ("Find", "Find — motif search in the active sequence"),
-                ("Others", "Others — sizes and extra display options"),
+                ("Display", self._tab_tips[0]),
+                ("Annotation", self._tab_tips[1]),
+                ("Find", self._tab_tips[2]),
+                ("Others", self._tab_tips[3]),
             )
         ):
             btn = _RotatedTabButton(label, self._tab_strip)
@@ -582,18 +597,42 @@ class SequenceAnnotationRail(QWidget):
             self._tab_group.addButton(btn, index)
             tab_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignHCenter)
             self._tab_buttons.append(btn)
+            btn.clicked.connect(lambda _checked=False, i=index: self._on_tab_clicked(i))
         tab_layout.addStretch(1)
-        self._tab_group.idClicked.connect(self._on_tab_clicked)
 
         root.addWidget(self._stack, 0)
-        root.addWidget(divider, 0)
+        root.addWidget(self._divider, 0)
         root.addWidget(self._tab_strip, 0)
         self._restore_rail_ui_state()
 
+    def _expanded_rail_width(self) -> int:
+        return int(self._module_width) + _RAIL_TAB_WIDTH + 1
+
+    def _apply_module_geometry(self) -> None:
+        """Resize the module column and every scroll page to ``_module_width``."""
+        width = max(200, int(self._module_width))
+        self._module_width = width
+        self._stack.setFixedWidth(width)
+        for index in range(self._stack.count()):
+            page = self._stack.widget(index)
+            if page is None:
+                continue
+            page.setFixedWidth(width)
+            page.setMinimumWidth(0)
+            page.setMaximumWidth(width)
+            if isinstance(page, QScrollArea):
+                body = page.widget()
+                if body is not None:
+                    body.setMinimumWidth(0)
+                    body.setMaximumWidth(width)
+        if not self._panel_collapsed:
+            self.setFixedWidth(self._expanded_rail_width())
+
     def _wrap_scroll(self, body: QWidget) -> QScrollArea:
         # Never let page contents force the rail wider than the module column.
+        width = self._module_width
         body.setMinimumWidth(0)
-        body.setMaximumWidth(_MODULE_WIDTH)
+        body.setMaximumWidth(width)
         body.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Minimum,
@@ -604,7 +643,7 @@ class SequenceAnnotationRail(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setMinimumWidth(0)
-        scroll.setFixedWidth(_MODULE_WIDTH)
+        scroll.setFixedWidth(width)
         scroll.setSizePolicy(
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Expanding,
@@ -620,7 +659,7 @@ class SequenceAnnotationRail(QWidget):
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         # macOS QPushButton sizeHints are often wider than half the rail.
         btn.setMinimumWidth(0)
-        btn.setMaximumWidth(_MODULE_WIDTH)
+        btn.setMaximumWidth(self._module_width)
         return btn
 
     def _build_show_page(self) -> QWidget:
@@ -646,8 +685,10 @@ class SequenceAnnotationRail(QWidget):
         self.seq_count_label.setStyleSheet("color: palette(mid);")
         self.seq_count_label.hide()
 
-        layout.addWidget(_h_divider(page))
-        layout.addWidget(_section_label("Tracks", page))
+        self._tracks_divider = _h_divider(page)
+        self._tracks_label = _section_label("Tracks", page)
+        layout.addWidget(self._tracks_divider)
+        layout.addWidget(self._tracks_label)
 
         self.show_complement = QCheckBox("Show complement", page)
         self.show_complement.setToolTip(
@@ -874,14 +915,14 @@ class SequenceAnnotationRail(QWidget):
             row.setSpacing(6)
             left = buttons[index]
             left.setMinimumWidth(0)
-            left.setMaximumWidth(_MODULE_WIDTH)
+            left.setMaximumWidth(self._module_width)
             left.setSizePolicy(
                 QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
             )
             if index + 1 < len(buttons):
                 right = buttons[index + 1]
                 right.setMinimumWidth(0)
-                right.setMaximumWidth(_MODULE_WIDTH)
+                right.setMaximumWidth(self._module_width)
                 right.setSizePolicy(
                     QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
                 )
@@ -1426,18 +1467,111 @@ class SequenceAnnotationRail(QWidget):
         """Compatibility hook; size label is fixed as DNA/protein labels."""
         del is_protein
 
+    def set_overview_display_mode(self, enabled: bool = True) -> None:
+        """Adapt Display/Annotation for multi-sequence overview.
+
+        Keeps Annotation (feature detection / similarity run on every sequence).
+        Hides single-map-only track toggles, manual add, and transfer.
+        Module width matches the single-sequence Annotation rail.
+        """
+        overview = bool(enabled)
+        self._overview_mode = overview
+        for widget in (
+            self.show_complement,
+            self.show_translation,
+            self.translation_more_btn,
+            self.split_tracks_by_source,
+            self._tracks_divider,
+            self._tracks_label,
+        ):
+            widget.setVisible(not overview)
+        self._tab_buttons[self.TAB_ANNOTATIONS].setVisible(True)
+        sections = getattr(self, "_annotation_sections", None) or {}
+        for section_id in ("manual", "transfer"):
+            section = sections.get(section_id)
+            if section is not None:
+                section.setVisible(not overview)
+        if overview:
+            self.auto_ann_run_btn.setToolTip(
+                "Run feature detection on every sequence in this file"
+            )
+            self.similarity_ann_run_btn.setToolTip(
+                "Run similarity annotation on every sequence in this file"
+            )
+            for btn in (self.delete_btn, self.restore_btn, self.export_btn):
+                btn.setVisible(False)
+        else:
+            self.auto_ann_run_btn.setToolTip("Run feature detection")
+            self.similarity_ann_run_btn.setToolTip("Run similarity annotation")
+            for btn in (self.delete_btn, self.restore_btn, self.export_btn):
+                btn.setVisible(True)
+        self._module_width = _MODULE_WIDTH
+        self._apply_module_geometry()
+
+    def is_panel_collapsed(self) -> bool:
+        return bool(self._panel_collapsed)
+
+    def set_panel_collapsed(self, collapsed: bool, *, persist: bool = True) -> None:
+        """Hide or show the control pages; tab strip always stays visible."""
+        collapsed = bool(collapsed)
+        if collapsed == self._panel_collapsed:
+            if collapsed:
+                self._sync_tab_checked_state(None)
+            return
+        self._panel_collapsed = collapsed
+        self._stack.setVisible(not collapsed)
+        self._divider.setVisible(not collapsed)
+        if collapsed:
+            self.setFixedWidth(_COLLAPSED_RAIL_WIDTH)
+            self._sync_tab_checked_state(None)
+        else:
+            self.setFixedWidth(self._expanded_rail_width())
+            self._stack.setCurrentIndex(self._active_tab)
+            self._sync_tab_checked_state(self._active_tab)
+        self.panelCollapsedChanged.emit(collapsed)
+        if persist:
+            self._save_rail_ui_state()
+
+    def _sync_tab_checked_state(self, active: int | None) -> None:
+        self._updating_tabs = True
+        try:
+            for i, btn in enumerate(self._tab_buttons):
+                btn.setChecked(active is not None and i == active)
+                btn.update()
+        finally:
+            self._updating_tabs = False
+
     def _on_tab_clicked(self, index: int) -> None:
+        if self._updating_tabs:
+            return
+        index = max(0, min(index, self._stack.count() - 1))
+        # Re-click active tab → collapse; click while collapsed or another tab → show.
+        if not self._panel_collapsed and index == self._active_tab:
+            self.set_panel_collapsed(True)
+            return
+        self._active_tab = index
+        was_collapsed = self._panel_collapsed
+        if was_collapsed:
+            self._panel_collapsed = False
+            self._stack.setVisible(True)
+            self._divider.setVisible(True)
+            self.setFixedWidth(self._expanded_rail_width())
         self._stack.setCurrentIndex(index)
+        self._sync_tab_checked_state(index)
+        if was_collapsed:
+            self.panelCollapsedChanged.emit(False)
         self.tabChanged.emit(index)
         self._save_rail_ui_state()
 
     def set_current_tab(self, index: int) -> None:
         index = max(0, min(index, self._stack.count() - 1))
-        self._tab_buttons[index].setChecked(True)
-        self._stack.setCurrentIndex(index)
-        for btn in self._tab_buttons:
-            btn.update()
-        self._save_rail_ui_state()
+        self._active_tab = index
+        if self._panel_collapsed:
+            self.set_panel_collapsed(False)
+        else:
+            self._stack.setCurrentIndex(index)
+            self._sync_tab_checked_state(index)
+            self._save_rail_ui_state()
 
     def _settings(self) -> QSettings:
         settings = QSettings()
@@ -1454,10 +1588,18 @@ class SequenceAnnotationRail(QWidget):
             except (TypeError, ValueError):
                 tab = _DEFAULT_TAB_INDEX
             tab = max(0, min(tab, self._stack.count() - 1))
-            self._tab_buttons[tab].setChecked(True)
+            self._active_tab = tab
             self._stack.setCurrentIndex(tab)
-            for btn in self._tab_buttons:
-                btn.update()
+
+            collapsed_raw = settings.value(_SETTINGS_COLLAPSED_KEY, False)
+            if isinstance(collapsed_raw, str):
+                collapsed = collapsed_raw.strip().lower() in {"1", "true", "yes"}
+            else:
+                collapsed = bool(collapsed_raw)
+            self._panel_collapsed = False  # force apply below
+            self.set_panel_collapsed(collapsed, persist=False)
+            if not collapsed:
+                self._sync_tab_checked_state(tab)
 
             sections = getattr(self, "_annotation_sections", None) or {}
             saved = settings.value(_SETTINGS_SECTIONS_KEY, [])
@@ -1477,7 +1619,8 @@ class SequenceAnnotationRail(QWidget):
     def _save_rail_ui_state(self, *_args) -> None:
         settings = self._settings()
         try:
-            settings.setValue(_SETTINGS_TAB_KEY, int(self._stack.currentIndex()))
+            settings.setValue(_SETTINGS_TAB_KEY, int(self._active_tab))
+            settings.setValue(_SETTINGS_COLLAPSED_KEY, bool(self._panel_collapsed))
             sections = getattr(self, "_annotation_sections", None) or {}
             expanded = [
                 section_id
