@@ -1,8 +1,11 @@
 """Hybrid annotation transfer (whole-seq lift + per-feature blastn).
 
 Strategy (default ``hybrid``):
-1. **Sequence→sequence** with minimap2, then lift features through the
-   alignment (Geneious-style Transfer by Alignment / liftOver-like).
+1. **Sequence→sequence** alignment, then lift features through the alignment
+   (Geneious-style Transfer by Alignment / liftOver-like):
+   - sequences shorter than 10 kb → MAFFT fast mode (FFT-NS-1:
+     ``--retree 1 --maxiterate 0``)
+   - longer sequences → minimap2 ``asm20``
 2. **Per-feature blastn** for any feature that was lost or failed thresholds —
    extract that feature’s DNA and search the target (Annotate from Database).
 
@@ -16,6 +19,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -24,9 +28,14 @@ from Bio import SeqIO
 from repeatviewer.backends.job_cancel import JobCancellation, JobCancelledError
 from repeatviewer.backends.sequence_features import SequenceFeature, resolve_sidecar_path
 
+if TYPE_CHECKING:
+    from repeatviewer.backends.map_reference import MappedRead
+
 _DEFAULT_TRANSFER_SOURCE = "Annotation transfer"
 # Whole-seq lift is preferred when alignment is at least this strong.
 _LIFT_ALIGN_MIN_IDENTITY = 0.35
+# Prefer MAFFT pairwise lift when both sequences are shorter than this.
+_LIFT_MAFFT_MAX_LEN = 10_000
 _FASTA_SUFFIXES = {".fa", ".fasta", ".fna", ".fas", ".ffn", ".faa"}
 
 
@@ -122,6 +131,24 @@ class AnnotationTransferOptions:
     strategy: str = "hybrid"
     annotation_source: str = _DEFAULT_TRANSFER_SOURCE
     use_system_blast: bool = False
+    use_system_mafft: bool = False
+
+
+def prefer_mafft_liftover(source_len: int, target_len: int) -> bool:
+    """True when sequences are short enough for MAFFT fast pairwise lift."""
+    return max(int(source_len), int(target_len)) < _LIFT_MAFFT_MAX_LEN
+
+
+def load_use_system_mafft_from_settings() -> bool:
+    from PySide6.QtCore import QSettings
+
+    s = QSettings()
+    s.beginGroup("project")
+    raw = s.value("use_system_mafft", False)
+    s.endGroup()
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
 
 
 @dataclass
@@ -297,6 +324,244 @@ def _make_placed(
     )
 
 
+def _parse_fasta_stdout(text: str) -> list[tuple[str, str]]:
+    """Parse FASTA text from an aligner stdout into (id, sequence) pairs."""
+    from io import StringIO
+
+    pairs: list[tuple[str, str]] = []
+    for rec in SeqIO.parse(StringIO(text), "fasta"):
+        pairs.append((str(rec.id), str(rec.seq)))
+    return pairs
+
+
+def _mafft_fast_pair_read(
+    *,
+    command: list[str],
+    env: dict[str, str],
+    source_id: str,
+    source_sequence: str,
+    target_id: str,
+    target_sequence: str,
+    strand: str,
+    threads: int,
+    cancel: JobCancellation | None,
+    work: Path,
+) -> MappedRead | None:
+    """Run one FFT-NS-1 pairwise MAFFT; ``strand`` is applied to the MappedRead."""
+    from repeatviewer.backends.map_reference import (
+        MappedRead,
+        compute_stats,
+        project_gapped_pair,
+        revcomp,
+    )
+    from repeatviewer.external_process import run_logged_process
+
+    ref_seq = source_sequence.replace("-", "").replace(".", "")
+    qry_seq = target_sequence.replace("-", "").replace(".", "")
+    if strand == "-":
+        qry_seq = revcomp(qry_seq)
+    safe = "Q000001"
+    both = work / f"pair_{'rc' if strand == '-' else 'fw'}.fa"
+    SeqIO.write(
+        [
+            SeqRecord(Seq(ref_seq), id="REF", description=""),
+            SeqRecord(Seq(qry_seq), id=safe, description=""),
+        ],
+        str(both),
+        "fasta",
+    )
+    # FFT-NS-1 — Align dialog “very fast progressive”.
+    full = [
+        *command,
+        "--nuc",
+        "--quiet",
+        "--retree",
+        "1",
+        "--maxiterate",
+        "0",
+        "--thread",
+        str(max(1, int(threads))),
+        str(both),
+    ]
+    try:
+        result = run_logged_process(
+            full,
+            tool="MAFFT",
+            cwd=work,
+            env=env,
+            stdout_is_result=True,
+            timeout=600,
+            cancel=cancel,
+        )
+    except JobCancelledError:
+        raise
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if cancel is not None and cancel.requested:
+        raise JobCancelledError("Annotation transfer cancelled.")
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return None
+    rows = dict(_parse_fasta_stdout(result.stdout))
+    ref_gapped = rows.get("REF")
+    qry_gapped = rows.get(safe)
+    if ref_gapped is None or qry_gapped is None:
+        return None
+    projected = project_gapped_pair(ref_gapped.upper(), qry_gapped.upper())
+    if projected is None:
+        return None
+    start, end, row, ref_row, ins, clipped, clip_left = projected
+    qlen = sum(1 for c in qry_gapped if c != "-")
+    return compute_stats(
+        MappedRead(
+            name=target_id or "target",
+            ref_id=source_id or "source",
+            start=start,
+            end=end,
+            strand=strand,
+            row=row,
+            insertions=ins,
+            ref_row=ref_row,
+            query_length=qlen,
+            clipped=clipped,
+            clip_left=clip_left,
+        )
+    )
+
+
+def _align_pair_via_mafft_fast(
+    *,
+    source_id: str,
+    source_sequence: str,
+    target_id: str,
+    target_sequence: str,
+    cfg: AnnotationTransferOptions,
+    cancel: JobCancellation | None,
+    progress,
+    work: Path,
+) -> MappedRead | None:
+    """Pairwise MAFFT FFT-NS-1; optional RC of the target when reverse is allowed."""
+    from repeatviewer.backends.sequence_aligner import mafft_command
+
+    resolved = mafft_command(use_system_mafft=bool(cfg.use_system_mafft))
+    if resolved is None:
+        _emit(progress, "MAFFT not found — cannot use short-sequence lift.")
+        return None
+    command, env = resolved
+    _emit(progress, f"MAFFT fast (FFT-NS-1) aligning {target_id} → {source_id}…")
+    strands = ["+", "-"] if cfg.allow_reverse else ["+"]
+    best = None
+    best_score = -1.0
+    for strand in strands:
+        if cancel is not None and cancel.requested:
+            raise JobCancelledError("Annotation transfer cancelled.")
+        read = _mafft_fast_pair_read(
+            command=command,
+            env=env,
+            source_id=source_id,
+            source_sequence=source_sequence,
+            target_id=target_id,
+            target_sequence=target_sequence,
+            strand=strand,
+            threads=int(cfg.threads),
+            cancel=cancel,
+            work=work,
+        )
+        if read is None:
+            continue
+        score = float(read.identity) * max(1, read.aligned_bp)
+        if score > best_score:
+            best_score = score
+            best = read
+    if best is None:
+        _emit(progress, "MAFFT produced no usable pairwise alignment.")
+    return best
+
+
+def _align_pair_via_minimap2(
+    *,
+    source_id: str,
+    source_sequence: str,
+    target_id: str,
+    target_sequence: str,
+    cfg: AnnotationTransferOptions,
+    cancel: JobCancellation | None,
+    progress,
+    work: Path,
+) -> MappedRead | None:
+    """Whole-sequence minimap2 asm20 alignment (longer sequences)."""
+    from repeatviewer.backends.map_reference import (
+        MAP_ENGINE_MINIMAP2,
+        engine_executable,
+        parse_paf_line,
+    )
+    from repeatviewer.conda_tools import prepare_command
+
+    exe = engine_executable(MAP_ENGINE_MINIMAP2)
+    if not exe:
+        _emit(progress, "minimap2 not found — skipping whole-sequence lift.")
+        return None
+    ref_fa = work / "source.fa"
+    qry_fa = work / "target.fa"
+    SeqIO.write(
+        [SeqRecord(Seq(source_sequence), id=source_id or "source", description="")],
+        str(ref_fa),
+        "fasta",
+    )
+    SeqIO.write(
+        [SeqRecord(Seq(target_sequence), id=target_id or "target", description="")],
+        str(qry_fa),
+        "fasta",
+    )
+    cmd = [
+        exe,
+        "-x",
+        "asm20",
+        "-t",
+        str(max(1, int(cfg.threads))),
+        "-c",
+        "--cs=long",
+        "--secondary=no",
+        str(ref_fa),
+        str(qry_fa),
+    ]
+    _emit(progress, f"minimap2 aligning {target_id} → {source_id}…")
+    try:
+        proc = subprocess.run(
+            prepare_command(cmd),
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _emit(progress, f"minimap2 failed ({exc}) — skipping lift.")
+        return None
+    if cancel is not None and cancel.requested:
+        raise JobCancelledError("Annotation transfer cancelled.")
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:200]
+        _emit(progress, f"minimap2 exit {proc.returncode}: {detail}")
+        return None
+    best = None
+    best_score = -1.0
+    for line in (proc.stdout or "").splitlines():
+        if not line.strip() or line.startswith("@"):
+            continue
+        try:
+            _qname, _qlen, read = parse_paf_line(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if read is None:
+            continue
+        if not cfg.allow_reverse and read.strand == "-":
+            continue
+        score = float(read.identity) * max(1, read.aligned_bp)
+        if score > best_score:
+            best_score = score
+            best = read
+    return best
+
+
 def _transfer_via_liftover(
     *,
     source_id: str,
@@ -308,7 +573,10 @@ def _transfer_via_liftover(
     cancel: JobCancellation | None,
     progress,
 ) -> tuple[dict[int, LiftedAnnotation], float, str]:
-    """Whole-sequence minimap2 alignment → lift features. Returns by feature index."""
+    """Whole-sequence alignment → lift features. Returns by feature index.
+
+    Short pairs (<10 kb) use MAFFT fast mode; longer pairs use minimap2.
+    """
     from repeatviewer.backends.map_reference import (
         MAP_ENGINE_MINIMAP2,
         STATUS_CHANGED,
@@ -317,18 +585,39 @@ def _transfer_via_liftover(
         STATUS_PARTIAL,
         engine_executable,
         lift_features,
-        parse_paf_line,
     )
-    from repeatviewer.conda_tools import prepare_command
+    from repeatviewer.backends.sequence_aligner import mafft_command
 
-    _emit(
-        progress,
-        "Method A — sequence→sequence (minimap2), then lift features through "
-        "the alignment…",
-    )
-    exe = engine_executable(MAP_ENGINE_MINIMAP2)
-    if not exe:
-        _emit(progress, "minimap2 not found — skipping whole-sequence lift.")
+    use_mafft = prefer_mafft_liftover(len(source_sequence), len(target_sequence))
+    mafft_ok = bool(mafft_command(use_system_mafft=bool(cfg.use_system_mafft)))
+    minimap_ok = bool(engine_executable(MAP_ENGINE_MINIMAP2))
+
+    if use_mafft and mafft_ok:
+        aligner = "mafft"
+        _emit(
+            progress,
+            "Method A — sequence→sequence (MAFFT fast, <10 kb), then lift "
+            "features through the alignment…",
+        )
+    elif use_mafft and not mafft_ok and minimap_ok:
+        aligner = "minimap2"
+        _emit(
+            progress,
+            "MAFFT not found for short-sequence lift — falling back to "
+            "minimap2…",
+        )
+    elif minimap_ok:
+        aligner = "minimap2"
+        _emit(
+            progress,
+            "Method A — sequence→sequence (minimap2), then lift features "
+            "through the alignment…",
+        )
+    else:
+        _emit(
+            progress,
+            "Neither MAFFT nor minimap2 found — skipping whole-sequence lift.",
+        )
         return {}, 0.0, "+"
 
     if cancel is not None and cancel.requested:
@@ -336,67 +625,52 @@ def _transfer_via_liftover(
 
     with tempfile.TemporaryDirectory(prefix="rv_annot_xfer_lift_") as tmp:
         tmp_path = Path(tmp)
-        ref_fa = tmp_path / "source.fa"
-        qry_fa = tmp_path / "target.fa"
-        SeqIO.write(
-            [SeqRecord(Seq(source_sequence), id=source_id or "source", description="")],
-            str(ref_fa),
-            "fasta",
-        )
-        SeqIO.write(
-            [SeqRecord(Seq(target_sequence), id=target_id or "target", description="")],
-            str(qry_fa),
-            "fasta",
-        )
-        cmd = [
-            exe,
-            "-x",
-            "asm20",
-            "-t",
-            str(max(1, int(cfg.threads))),
-            "-c",
-            "--cs=long",
-            "--secondary=no",
-            str(ref_fa),
-            str(qry_fa),
-        ]
-        _emit(progress, f"minimap2 aligning {target_id} → {source_id}…")
-        try:
-            proc = subprocess.run(
-                prepare_command(cmd),
-                capture_output=True,
-                text=True,
-                timeout=600,
-                check=False,
+        if aligner == "mafft":
+            best = _align_pair_via_mafft_fast(
+                source_id=source_id,
+                source_sequence=source_sequence,
+                target_id=target_id,
+                target_sequence=target_sequence,
+                cfg=cfg,
+                cancel=cancel,
+                progress=progress,
+                work=tmp_path,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
-            _emit(progress, f"minimap2 failed ({exc}) — skipping lift.")
-            return {}, 0.0, "+"
-
-        if cancel is not None and cancel.requested:
-            raise JobCancelledError("Annotation transfer cancelled.")
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()[:200]
-            _emit(progress, f"minimap2 exit {proc.returncode}: {detail}")
-            return {}, 0.0, "+"
-
-        best = None
-        best_score = -1.0
-        for line in (proc.stdout or "").splitlines():
-            if not line.strip() or line.startswith("@"):
-                continue
-            try:
-                _qname, _qlen, read = parse_paf_line(line)
-            except Exception:  # noqa: BLE001
-                continue
-            if read is None:
-                continue
-            if not cfg.allow_reverse and read.strand == "-":
-                continue
-            score = float(read.identity) * max(1, read.aligned_bp)
-            if score > best_score:
-                best_score = score
-                best = read
+            # Tandem-perfect repeats can confuse FFT-NS-1; fall back when weak.
+            mafft_weak = (
+                best is not None
+                and float(best.identity) < _LIFT_ALIGN_MIN_IDENTITY
+            )
+            if (best is None or mafft_weak) and minimap_ok:
+                why = "weak alignment" if mafft_weak else "no alignment"
+                _emit(progress, f"MAFFT lift {why} — retrying with minimap2…")
+                mm = _align_pair_via_minimap2(
+                    source_id=source_id,
+                    source_sequence=source_sequence,
+                    target_id=target_id,
+                    target_sequence=target_sequence,
+                    cfg=cfg,
+                    cancel=cancel,
+                    progress=progress,
+                    work=tmp_path,
+                )
+                if mm is not None and (
+                    best is None
+                    or float(mm.identity) * max(1, mm.aligned_bp)
+                    > float(best.identity) * max(1, best.aligned_bp)
+                ):
+                    best = mm
+        else:
+            best = _align_pair_via_minimap2(
+                source_id=source_id,
+                source_sequence=source_sequence,
+                target_id=target_id,
+                target_sequence=target_sequence,
+                cfg=cfg,
+                cancel=cancel,
+                progress=progress,
+                work=tmp_path,
+            )
 
         if best is None:
             _emit(progress, "No whole-sequence alignment — skipping lift.")
@@ -721,11 +995,13 @@ def transfer_annotations(
 
     _emit(
         progress,
-        "Transfer strategy: hybrid — (1) minimap2 sequence alignment + feature "
-        "lift, then (2) blastn on remaining feature DNAs."
+        "Transfer strategy: hybrid — (1) whole-seq alignment + feature lift "
+        "(MAFFT fast if <10 kb, else minimap2), then (2) blastn on remaining "
+        "feature DNAs."
         if strategy == "hybrid"
         else (
-            "Transfer strategy: liftover only (minimap2 sequence→sequence)."
+            "Transfer strategy: liftover only (MAFFT fast if <10 kb, else "
+            "minimap2)."
             if strategy == "liftover"
             else "Transfer strategy: blastn only (feature DNA → target)."
         ),

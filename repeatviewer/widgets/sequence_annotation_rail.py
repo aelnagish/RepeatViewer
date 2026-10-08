@@ -659,7 +659,7 @@ class SequenceAnnotationRail(QWidget):
         )
         self.show_translation.toggled.connect(self._on_show_translation_toggled)
         translation_row.addWidget(self.show_translation)
-        self.translation_more_btn = QPushButton("More…", page)
+        self.translation_more_btn = QPushButton("Setting", page)
         self.translation_more_btn.setEnabled(False)
         self.translation_more_btn.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
@@ -738,7 +738,7 @@ class SequenceAnnotationRail(QWidget):
         color_form.addRow("Protein:", self.protein_scheme)
         layout.addLayout(color_form)
 
-        self.colors_btn = QPushButton("Advanced color setting…", page)
+        self.colors_btn = QPushButton("Setting", page)
         self.colors_btn.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
@@ -1064,6 +1064,8 @@ class SequenceAnnotationRail(QWidget):
             # Browse opens a menu: FASTA file... or Folder...
             mode="file_or_directory",
             minimum_width=120,
+            browse_below=True,
+            elide_middle=True,
         )
         self.transfer_source_row.set_default_tooltip(
             "Click a FASTA in Files or a folder in Folders to fill this path "
@@ -1151,8 +1153,9 @@ class SequenceAnnotationRail(QWidget):
         self.transfer_run_btn = QPushButton("Run", transfer_section)
         self.transfer_run_btn.setFixedWidth(52)
         self.transfer_run_btn.setToolTip(
-            "Hybrid: minimap2 sequence alignment + feature lift, then blastn "
-            "for leftovers. Matches become source “Transfer (…)”."
+            "Hybrid: whole-seq alignment + feature lift (MAFFT fast if <10 kb, "
+            "else minimap2), then blastn for leftovers. Matches become source "
+            "“Transfer (…)”."
         )
         self.transfer_run_btn.clicked.connect(
             lambda: self.transferRequested.emit()

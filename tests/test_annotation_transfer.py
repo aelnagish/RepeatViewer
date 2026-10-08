@@ -9,6 +9,7 @@ import pytest
 from repeatviewer.backends.annotation_transfer import (
     AnnotationTransferOptions,
     AnnotationTransferResult,
+    prefer_mafft_liftover,
     transfer_annotations,
 )
 from repeatviewer.backends.map_reference import (
@@ -39,6 +40,14 @@ def _perfect_read(*, ref_len: int = 100, name: str = "tgt") -> MappedRead:
         clip_left=0,
     )
     return compute_stats(read)
+
+
+def test_prefer_mafft_liftover_under_10kb() -> None:
+    assert prefer_mafft_liftover(100, 200) is True
+    assert prefer_mafft_liftover(9_999, 9_999) is True
+    assert prefer_mafft_liftover(10_000, 100) is False
+    assert prefer_mafft_liftover(100, 10_000) is False
+    assert prefer_mafft_liftover(50_000, 50_000) is False
 
 
 def test_lift_features_intact_span() -> None:
@@ -85,8 +94,10 @@ def test_lift_features_partial_when_alignment_clips_feature() -> None:
 def test_transfer_annotations_identical_sequences(tmp_path: Path) -> None:
     """Hybrid transfer places features on identical source/target sequences."""
     from repeatviewer.backends.map_reference import MAP_ENGINE_MINIMAP2, engine_executable
+    from repeatviewer.backends.sequence_aligner import mafft_command
     from repeatviewer.backends.similarity_annotation import _blast_executable
 
+    has_mafft = bool(mafft_command(use_system_mafft=False) or mafft_command(use_system_mafft=True))
     has_minimap = bool(engine_executable(MAP_ENGINE_MINIMAP2))
     has_blast = False
     try:
@@ -98,8 +109,9 @@ def test_transfer_annotations_identical_sequences(tmp_path: Path) -> None:
             has_blast = True
         except FileNotFoundError:
             pass
-    if not has_minimap and not has_blast:
-        pytest.skip("minimap2 and blastn unavailable")
+    # Short identical seqs prefer MAFFT; allow minimap2/blastn fallbacks.
+    if not has_mafft and not has_minimap and not has_blast:
+        pytest.skip("MAFFT, minimap2, and blastn unavailable")
 
     import random
 

@@ -7879,6 +7879,7 @@ class SequenceMapPanel(QWidget):
             AnnotationTransferOptions,
             AnnotationTransferResult,
             discover_annotated_transfer_sources,
+            load_use_system_mafft_from_settings,
             transfer_annotations,
         )
         from repeatviewer.backends.sequence_features import load_sequence_map_data
@@ -7933,6 +7934,7 @@ class SequenceMapPanel(QWidget):
             allow_reverse=bool(self._rail.transfer_allow_reverse.isChecked()),
             annotation_source=ann_source,
             use_system_blast=load_use_system_blast_from_settings(),
+            use_system_mafft=load_use_system_mafft_from_settings(),
         )
 
         self._clear_transfer_preview_state()
