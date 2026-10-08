@@ -5763,7 +5763,7 @@ class MainWindow(QMainWindow):
 
         add("clear_highlights", "Clear Highlights", self._clear_job_file_highlights)
         menu.addSeparator()
-        add("find", "Find…", self._edit_find, std.Find)
+        add("find", "Find in Current Document…", self._edit_find, std.Find)
         add("find_next", "Find Next", lambda: self._find_from_menu(1), Qt.Key.Key_F3)
         self._edit_actions["find_next"].setShortcuts(
             [QKeySequence(Qt.Key.Key_F3), QKeySequence("Ctrl+G")]
@@ -6183,6 +6183,7 @@ class MainWindow(QMainWindow):
             dialog.itemActivated.connect(self._find_show_index)
             dialog.saveRequested.connect(self._find_save_hits)
             dialog.closed.connect(self._find_closed)
+            self._configure_app_floating_dialog(dialog)
             self._find_dialog = dialog
         if self._find_page() is None and self._find_state is None:
             self._find_dialog.set_status("Open a FASTA file in Preview to search it.")
@@ -9912,6 +9913,7 @@ class MainWindow(QMainWindow):
             "_te_viz_input_dialog",
             "_blast_params_dialog",
             "_hmmer_params_dialog",
+            "_find_dialog",
         ):
             dialog = getattr(self, attr, None)
             if dialog is None:

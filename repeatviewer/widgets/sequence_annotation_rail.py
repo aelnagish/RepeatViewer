@@ -41,7 +41,7 @@ from repeatviewer.backends.msa_plot import (
     AMINO_ACID_COLOR_PRESETS,
     NUCLEOTIDE_COLOR_PRESETS,
 )
-from repeatviewer.widgets.help_button import make_help_button
+from repeatviewer.widgets.help_button import field_with_help, make_help_button
 from repeatviewer.widgets.preview_zoom import (
     load_color_blind_nucleotide_scheme,
     save_color_blind_nucleotide_scheme,
@@ -65,6 +65,14 @@ _READING_FRAMES_HELP = (
     "(offset by 0, 1, or 2 bases).<br><br>"
     "<b>Reverse 1 / 2 / 3</b> — reverse reading frames on the complementary strand "
     "(reverse-complement translation)."
+)
+_FIND_IUPAC_HELP = (
+    "<b>On</b>: IUPAC ambiguity codes are treated as wildcards.<br><br>"
+    "<b>Query</b> — e.g. R matches A or G, Y matches C or T, N matches any base.<br>"
+    "<b>Sequence</b> — ambiguous letters in the sequence (N, R, Y, …) also count "
+    "as a match for the corresponding motif base.<br><br>"
+    "<b>Off</b>: each letter matches only itself (an R in the motif only matches "
+    "an R in the sequence)."
 )
 _GENETIC_CODE_HELP = (
     "The genetic code table controls how DNA codons are translated into amino acids "
@@ -1185,6 +1193,7 @@ class SequenceAnnotationRail(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
         layout.addWidget(_section_label("Find", page))
+        layout.addWidget(_h_divider(page))
 
         self.find_query = QLineEdit(page)
         self.find_query.setPlaceholderText("Sequence or name…")
@@ -1227,19 +1236,21 @@ class SequenceAnnotationRail(QWidget):
         opts_layout = QVBoxLayout(opts)
         opts_layout.setContentsMargins(16, 0, 0, 0)
         opts_layout.setSpacing(2)
-        self.find_reverse_complement = QCheckBox("Also find reverse complement", opts)
+        self.find_reverse_complement = QCheckBox("Include reverse complement", opts)
         self.find_reverse_complement.setChecked(True)
-        self.find_iupac_query = QCheckBox("Interpret IUPAC codes in query", opts)
-        self.find_iupac_query.setChecked(True)
-        self.find_iupac_sequence = QCheckBox("Interpret IUPAC codes in sequence", opts)
+        self.find_iupac = QCheckBox("Interpret IUPAC codes", opts)
+        self.find_iupac.setChecked(True)
         self.find_allow_gaps = QCheckBox("Allow gaps in sequence", opts)
-        for check in (
-            self.find_reverse_complement,
-            self.find_iupac_query,
-            self.find_iupac_sequence,
-            self.find_allow_gaps,
-        ):
-            opts_layout.addWidget(check)
+        opts_layout.addWidget(self.find_reverse_complement)
+        opts_layout.addWidget(
+            field_with_help(
+                self.find_iupac,
+                "Interpret IUPAC codes",
+                _FIND_IUPAC_HELP,
+                parent=opts,
+            )
+        )
+        opts_layout.addWidget(self.find_allow_gaps)
         self.find_max_mismatches = NoWheelSpinBox(opts)
         self.find_max_mismatches.setRange(0, 20)
         self.find_max_mismatches.setValue(0)
@@ -1265,14 +1276,18 @@ class SequenceAnnotationRail(QWidget):
         self.find_next_btn.clicked.connect(lambda: self.findRequested.emit(1))
         self.find_prev_btn.clicked.connect(lambda: self.findRequested.emit(-1))
         self.find_all_btn.clicked.connect(lambda: self.findRequested.emit(0))
-        layout.addWidget(self.find_next_btn)
-        layout.addWidget(self.find_prev_btn)
+        find_nav = QHBoxLayout()
+        find_nav.setContentsMargins(0, 0, 0, 0)
+        find_nav.setSpacing(6)
+        find_nav.addWidget(self.find_prev_btn, 1)
+        find_nav.addWidget(self.find_next_btn, 1)
+        layout.addLayout(find_nav)
         layout.addWidget(self.find_all_btn)
 
+        # Status used to show grey match text under the buttons; keep a hidden
+        # label so set_find_status callers stay valid without showing it.
         self.find_status = QLabel("", page)
-        self.find_status.setWordWrap(True)
-        self.find_status.setStyleSheet("color: palette(mid);")
-        layout.addWidget(self.find_status)
+        self.find_status.hide()
         layout.addStretch(1)
         self.sync_find_option_enabled()
         return self._wrap_scroll(page)
@@ -1282,11 +1297,12 @@ class SequenceAnnotationRail(QWidget):
         from repeatviewer.backends.find_in_file import FindRequest
         from repeatviewer.backends.motif_search import FindOptions
 
+        iupac = self.find_iupac.isChecked()
         options = FindOptions(
             protein=self.find_protein.isChecked(),
             both_strands=self.find_reverse_complement.isChecked(),
-            iupac_in_query=self.find_iupac_query.isChecked(),
-            iupac_in_sequence=self.find_iupac_sequence.isChecked(),
+            iupac_in_query=iupac,
+            iupac_in_sequence=iupac,
             allow_gaps=self.find_allow_gaps.isChecked(),
             max_mismatches=int(self.find_max_mismatches.value()),
         )
@@ -1300,6 +1316,7 @@ class SequenceAnnotationRail(QWidget):
         )
 
     def set_find_status(self, text: str) -> None:
+        # Find panel no longer shows status text; keep API for map-viewer calls.
         self.find_status.setText(text or "")
 
     def sync_find_option_enabled(self) -> None:
@@ -1308,8 +1325,7 @@ class SequenceAnnotationRail(QWidget):
             self.find_nucleotides,
             self.find_protein,
             self.find_reverse_complement,
-            self.find_iupac_query,
-            self.find_iupac_sequence,
+            self.find_iupac,
             self.find_allow_gaps,
             self.find_max_mismatches,
         ):

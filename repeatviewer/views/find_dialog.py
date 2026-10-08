@@ -1,8 +1,8 @@
-"""Edit > Find: the Find window and its background worker.
+"""Edit > Find in current document: the Find window and its background worker.
 
 The window only collects options and shows results; the main window runs the
 search (``repeatviewer.backends.find_in_file``) and moves the Annotation view
-from hit to hit. Buttons are Close / Find All / Find Previous / Find Next
+from hit to hit. Buttons are Find All / Find Previous / Find Next
 (agreed exception to the Cancel / Save / Run rule).
 """
 
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -24,7 +25,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QRadioButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from repeatviewer.backends.find_in_file import FindRequest, FoundItem, find_in_fasta
 from repeatviewer.backends.motif_search import FindCancelled, FindOptions
 from repeatviewer.widgets.help_button import make_help_button
+from repeatviewer.widgets.spin_boxes import NoWheelSpinBox as QSpinBox
 
 _SETTINGS = "find"
 
@@ -44,16 +45,16 @@ QUERY_HELP = (
     "<b>Numbers only</b> (114590001, 1000-2000, scaffold_5:1000-2000) go to that position."
 )
 STRAND_HELP = (
-    "<b>Also Find Reverse Complement</b>: report hits on the minus strand too "
+    "<b>Include reverse complement</b>: report hits on the minus strand too "
     "(shown as strand -).<br>A palindrome such as GAATTC is reported once."
 )
-IUPAC_QUERY_HELP = (
-    "<b>On</b>: codes in your motif are wildcards, e.g. R = A or G, Y = C or T, N = any base.<br>"
-    "<b>Off</b>: an R in the motif only matches an R in the sequence."
-)
-IUPAC_SEQUENCE_HELP = (
-    "<b>On</b>: ambiguous letters in the sequence count as a match, e.g. an N matches any "
-    "base of the motif.<br><b>Off</b>: N, R, Y and so on in the sequence are mismatches."
+IUPAC_HELP = (
+    "<b>On</b>: IUPAC ambiguity codes are treated as wildcards.<br><br>"
+    "<b>Query</b> — e.g. R matches A or G, Y matches C or T, N matches any base.<br>"
+    "<b>Sequence</b> — ambiguous letters in the sequence (N, R, Y, …) also count "
+    "as a match for the corresponding motif base.<br><br>"
+    "<b>Off</b>: each letter matches only itself (an R in the motif only matches "
+    "an R in the sequence)."
 )
 GAPS_HELP = (
     "Ignore gap characters (- and .) in the sequence, so a motif is found even when an "
@@ -69,9 +70,9 @@ PROTEIN_HELP = (
     "(standard genetic code). X in the motif matches any amino acid."
 )
 NAMES_HELP = (
-    "<b>Sequence Names</b>: sequences whose name contains the text.<br>"
-    "<b>Annotation Names</b>: annotations whose name or type contains the text.<br>"
-    "<b>Case Sensitive</b> applies to these two only."
+    "<b>Sequence names</b>: sequences whose name contains the text.<br>"
+    "<b>Annotation names</b>: annotations whose name or type contains the text.<br>"
+    "<b>Case sensitive</b> applies to these two only."
 )
 
 
@@ -151,7 +152,7 @@ class FindDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Find")
+        self.setWindowTitle("Find in current document")
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
         self._items: list[FoundItem] = []
@@ -163,64 +164,88 @@ class FindDialog(QDialog):
         self._query.setMinimumWidth(320)
         self._query.returnPressed.connect(lambda: self.findRequested.emit(1))
 
+        # Labels / hierarchy match the Annotation Preview Find tab.
         self._in_sequence = _check("Sequence", self)
         self._nucleotides = QRadioButton("Nucleotides", self)
         self._protein = QRadioButton("Protein (6 frames)", self)
         self._kind_group = QButtonGroup(self)
         self._kind_group.addButton(self._nucleotides)
         self._kind_group.addButton(self._protein)
-        self._both_strands = _check("Also Find Reverse Complement", self)
-        self._iupac_query = _check("Interpret IUPAC Codes in Query", self)
-        self._iupac_sequence = _check("Interpret IUPAC Codes in Sequence", self)
-        self._allow_gaps = _check("Allow Gaps in Sequence", self)
+        self._both_strands = _check("Include reverse complement", self)
+        self._iupac = _check("Interpret IUPAC codes", self)
+        self._allow_gaps = _check("Allow gaps in sequence", self)
         self._mismatches = QSpinBox(self)
         self._mismatches.setRange(0, 10)
-        self._in_names = _check("Sequence Names", self)
-        self._in_annotations = _check("Annotation Names", self)
-        self._case = _check("Case Sensitive", self)
+        self._in_names = _check("Sequence names", self)
+        self._in_annotations = _check("Annotation names", self)
+        self._case = _check("Case sensitive", self)
 
         form = QGridLayout()
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(6)
         form.addWidget(QLabel("Find:", self), 0, 0)
-        form.addWidget(_with_help(self._query, "Find", QUERY_HELP, self), 0, 1)
-        kind_row = QWidget(self)
-        kind_layout = QHBoxLayout(kind_row)
-        kind_layout.setContentsMargins(0, 0, 0, 0)
-        kind_layout.addWidget(self._in_sequence)
-        kind_layout.addSpacing(12)
-        kind_layout.addWidget(self._nucleotides)
-        kind_layout.addWidget(self._protein)
-        kind_layout.addWidget(make_help_button(kind_row, "Nucleotides or Protein", PROTEIN_HELP))
-        kind_layout.addStretch(1)
-        form.addWidget(QLabel("Search in:", self), 1, 0)
-        form.addWidget(kind_row, 1, 1)
-        seq_opts = QWidget(self)
+        form.addWidget(
+            _with_help(self._query, "Find in current document", QUERY_HELP, self),
+            0,
+            1,
+        )
+        form.addWidget(
+            QLabel("Search in:", self),
+            1,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+        )
+
+        search_col = QWidget(self)
+        search_layout = QVBoxLayout(search_col)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(4)
+        search_layout.addWidget(self._in_sequence)
+
+        # Indented under Sequence (keep ? help on each option).
+        seq_opts = QWidget(search_col)
         seq_layout = QVBoxLayout(seq_opts)
         seq_layout.setContentsMargins(22, 0, 0, 0)
         seq_layout.setSpacing(4)
-        seq_layout.addWidget(_with_help(self._both_strands, "Reverse Complement", STRAND_HELP, self))
-        seq_layout.addWidget(_with_help(self._iupac_query, "IUPAC Codes in Query", IUPAC_QUERY_HELP, self))
-        seq_layout.addWidget(_with_help(self._iupac_sequence, "IUPAC Codes in Sequence", IUPAC_SEQUENCE_HELP, self))
-        seq_layout.addWidget(_with_help(self._allow_gaps, "Allow Gaps", GAPS_HELP, self))
-        mm_row = QWidget(self)
+        kind_row = QWidget(seq_opts)
+        kind_layout = QHBoxLayout(kind_row)
+        kind_layout.setContentsMargins(0, 0, 0, 0)
+        kind_layout.setSpacing(6)
+        kind_layout.addWidget(self._nucleotides)
+        kind_layout.addWidget(
+            make_help_button(kind_row, "Nucleotides or Protein", PROTEIN_HELP)
+        )
+        kind_layout.addStretch(1)
+        seq_layout.addWidget(kind_row)
+        seq_layout.addWidget(self._protein)
+        seq_layout.addWidget(
+            _with_help(
+                self._both_strands, "Include reverse complement", STRAND_HELP, self
+            )
+        )
+        seq_layout.addWidget(
+            _with_help(self._iupac, "Interpret IUPAC codes", IUPAC_HELP, self)
+        )
+        seq_layout.addWidget(
+            _with_help(self._allow_gaps, "Allow gaps in sequence", GAPS_HELP, self)
+        )
+        mm_row = QWidget(seq_opts)
         mm_layout = QHBoxLayout(mm_row)
         mm_layout.setContentsMargins(0, 0, 0, 0)
-        mm_layout.addWidget(QLabel("Max Mismatches:", mm_row))
+        mm_layout.addWidget(QLabel("Max mismatches:", mm_row))
         mm_layout.addWidget(self._mismatches)
-        mm_layout.addWidget(make_help_button(mm_row, "Max Mismatches", MISMATCH_HELP))
+        mm_layout.addWidget(make_help_button(mm_row, "Max mismatches", MISMATCH_HELP))
         mm_layout.addStretch(1)
         seq_layout.addWidget(mm_row)
-        form.addWidget(seq_opts, 2, 1)
-        names_row = QWidget(self)
-        names_layout = QHBoxLayout(names_row)
-        names_layout.setContentsMargins(0, 0, 0, 0)
-        names_layout.addWidget(self._in_names)
-        names_layout.addWidget(self._in_annotations)
-        names_layout.addWidget(self._case)
-        names_layout.addWidget(make_help_button(names_row, "Names", NAMES_HELP))
-        names_layout.addStretch(1)
-        form.addWidget(names_row, 3, 1)
+        search_layout.addWidget(seq_opts)
+
+        # Same level as Sequence.
+        search_layout.addWidget(self._in_names)
+        search_layout.addWidget(self._in_annotations)
+        search_layout.addWidget(
+            _with_help(self._case, "Names", NAMES_HELP, self)
+        )
+        form.addWidget(search_col, 1, 1)
 
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
@@ -240,11 +265,13 @@ class FindDialog(QDialog):
         self._table.hide()
         self._table.itemSelectionChanged.connect(self._on_table_selection)
 
+        results_line = QFrame(self)
+        results_line.setFrameShape(QFrame.Shape.HLine)
+        results_line.setFrameShadow(QFrame.Shadow.Sunken)
+
         self._save_btn = QPushButton("Save Hits as Annotations…", self)
         self._save_btn.setEnabled(False)
         self._save_btn.clicked.connect(self.saveRequested.emit)
-        close_btn = QPushButton("Close", self)
-        close_btn.clicked.connect(self.close)
         self._all_btn = QPushButton("Find All", self)
         self._all_btn.clicked.connect(lambda: self.findRequested.emit(0))
         self._prev_btn = QPushButton("Find Previous", self)
@@ -255,11 +282,12 @@ class FindDialog(QDialog):
         buttons = QHBoxLayout()
         buttons.addWidget(self._save_btn)
         buttons.addStretch(1)
-        for btn in (close_btn, self._all_btn, self._prev_btn, self._next_btn):
+        for btn in (self._all_btn, self._prev_btn, self._next_btn):
             buttons.addWidget(btn)
 
         root = QVBoxLayout(self)
         root.addLayout(form)
+        root.addWidget(results_line)
         root.addWidget(self._status)
         root.addWidget(self._table, stretch=1)
         root.addLayout(buttons)
@@ -288,8 +316,12 @@ class FindDialog(QDialog):
         self._in_sequence.setChecked(flag("in_sequence", True))
         (self._protein if flag("protein", False) else self._nucleotides).setChecked(True)
         self._both_strands.setChecked(flag("both_strands", True))
-        self._iupac_query.setChecked(flag("iupac_query", True))
-        self._iupac_sequence.setChecked(flag("iupac_sequence", False))
+        # One IUPAC control (legacy split query/sequence settings → OR).
+        if s.contains("iupac"):
+            iupac_on = flag("iupac", True)
+        else:
+            iupac_on = flag("iupac_query", True) or flag("iupac_sequence", False)
+        self._iupac.setChecked(iupac_on)
         self._allow_gaps.setChecked(flag("allow_gaps", False))
         try:
             self._mismatches.setValue(int(s.value("mismatches", 0)))
@@ -307,8 +339,9 @@ class FindDialog(QDialog):
         s.setValue("in_sequence", self._in_sequence.isChecked())
         s.setValue("protein", self._protein.isChecked())
         s.setValue("both_strands", self._both_strands.isChecked())
-        s.setValue("iupac_query", self._iupac_query.isChecked())
-        s.setValue("iupac_sequence", self._iupac_sequence.isChecked())
+        s.setValue("iupac", self._iupac.isChecked())
+        s.setValue("iupac_query", self._iupac.isChecked())
+        s.setValue("iupac_sequence", self._iupac.isChecked())
         s.setValue("allow_gaps", self._allow_gaps.isChecked())
         s.setValue("mismatches", self._mismatches.value())
         s.setValue("in_names", self._in_names.isChecked())
@@ -318,20 +351,26 @@ class FindDialog(QDialog):
 
     def _sync_enabled(self) -> None:
         on = self._in_sequence.isChecked()
-        for widget in (self._nucleotides, self._protein, self._iupac_query,
-                       self._iupac_sequence, self._allow_gaps, self._mismatches):
+        for widget in (
+            self._nucleotides,
+            self._protein,
+            self._both_strands,
+            self._iupac,
+            self._allow_gaps,
+            self._mismatches,
+        ):
             widget.setEnabled(on)
-        self._both_strands.setEnabled(on)
 
     def query_text(self) -> str:
         return self._query.text().strip()
 
     def request(self) -> FindRequest:
+        iupac = self._iupac.isChecked()
         options = FindOptions(
             protein=self._protein.isChecked(),
             both_strands=self._both_strands.isChecked(),
-            iupac_in_query=self._iupac_query.isChecked(),
-            iupac_in_sequence=self._iupac_sequence.isChecked(),
+            iupac_in_query=iupac,
+            iupac_in_sequence=iupac,
             allow_gaps=self._allow_gaps.isChecked(),
             max_mismatches=self._mismatches.value(),
         )
