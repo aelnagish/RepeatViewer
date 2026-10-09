@@ -105,7 +105,7 @@ from repeatviewer.backends.te_annotation_batch import (
 )
 from repeatviewer.database_settings import load_similarity_annotation_databases
 from repeatviewer.widgets.preview_controls import (
-    OVERVIEW_TOOLBAR_HEIGHT,
+    ANNOTATION_TOOLBAR_RENDERED_HEIGHT,
     AnnotationZoomBar,
 )
 from repeatviewer.widgets.preview_zoom import (
@@ -2951,30 +2951,25 @@ class MultiSequenceOverviewPanel(QWidget):
         self._name_filter.textChanged.connect(self._on_name_filter_edited)
         self._name_filter.returnPressed.connect(self._on_name_filter_next)
 
-        # Host for AnnotationZoomBar — above the sequence tracks only (same
-        # left edge as single-seq AnnotationMapToolbar over the map).
+        # Host for AnnotationZoomBar — above the complete overview map so its
+        # controls start at the same left edge as the sequence names.
         self._toolbar_slot = QWidget(self)
         self._toolbar_slot.setObjectName("OverviewMapToolbarSlot")
         self._toolbar_slot.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self._toolbar_slot.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
+        self._toolbar_slot.setFixedHeight(ANNOTATION_TOOLBAR_RENDERED_HEIGHT)
         self._toolbar_slot_layout = QHBoxLayout(self._toolbar_slot)
+        # Match the single-sequence AnnotationMapToolbar exactly: its first
+        # control begins at x=6 with no extra host inset.
         self._toolbar_slot_layout.setContentsMargins(0, 0, 0, 0)
         self._toolbar_slot_layout.setSpacing(0)
         self._toolbar_slot.hide()
-
-        # Keep name rows level with bars when the map toolbar is shown.
-        self._toolbar_shim = QWidget(self)
-        self._toolbar_shim.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
-        self._toolbar_shim.hide()
 
         names_col = QWidget(self)
         names_layout = QVBoxLayout(names_col)
         names_layout.setContentsMargins(0, 0, 0, 0)
         names_layout.setSpacing(0)
-        # Scale lives under Select/Fit; shim keeps name rows aligned with tracks.
-        names_layout.addWidget(self._toolbar_shim, 0)
         names_layout.addWidget(self._scale_shim, 0)
         names_layout.addWidget(self._names_scroll, 1)
         names_layout.addWidget(self._hbar_shim)
@@ -2983,7 +2978,6 @@ class MultiSequenceOverviewPanel(QWidget):
         tracks_layout = QVBoxLayout(tracks_col)
         tracks_layout.setContentsMargins(0, 0, 0, 0)
         tracks_layout.setSpacing(0)
-        tracks_layout.addWidget(self._toolbar_slot, 0)
         tracks_layout.addWidget(self._scale, 0)
         tracks_layout.addWidget(self._bars_scroll, 1)
 
@@ -2994,6 +2988,16 @@ class MultiSequenceOverviewPanel(QWidget):
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.splitterMoved.connect(self._on_splitter_moved)
+
+        # Toolbar spans both splitter columns.  The scale and sequence tracks
+        # retain their existing name-column offset below it.
+        map_host = QWidget(self)
+        map_layout = QVBoxLayout(map_host)
+        map_layout.setContentsMargins(0, 0, 0, 0)
+        map_layout.setSpacing(0)
+        map_layout.addWidget(self._toolbar_slot, 0)
+        map_layout.addWidget(self._splitter, 1)
+        self._map_host = map_host
 
         self._auto_ann_settings = load_auto_annotation_settings()
         self._similarity_ann_settings = load_similarity_annotation_settings()
@@ -3046,7 +3050,7 @@ class MultiSequenceOverviewPanel(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._splitter, 1)
+        layout.addWidget(self._map_host, 1)
         layout.addWidget(map_rail_divider, 0)
         layout.addWidget(self._rail, 0)
 
@@ -3118,7 +3122,6 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.set_overview_mode(False)
         bar.hide()
         self._toolbar_slot.hide()
-        self._toolbar_shim.hide()
         if host is None:
             return
         layout = host.layout()
@@ -3127,7 +3130,7 @@ class MultiSequenceOverviewPanel(QWidget):
             layout.insertWidget(0, bar, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def _mount_zoom_bar_in_panel(self, bar: AnnotationZoomBar) -> None:
-        """Place −/+/Position/Select/Fit above the tracks (single-seq map alignment)."""
+        """Place −/+/Position/Select/Fit above names and sequence tracks."""
         from repeatviewer.widgets.sequence_map_viewer import (
             _app_chrome_background,
             _apply_map_paper_background,
@@ -3148,13 +3151,9 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.set_overview_mode(True)
         bar.show()
         self._toolbar_slot.show()
-        self._toolbar_shim.show()
         # Match single-seq AnnotationMapToolbar chrome (Select/Fit button fill).
-        # Shim uses the same chrome so the strip reads continuous over names|tracks,
-        # while −/+/Select/Fit start at the left edge of the sequence track.
         chrome = _app_chrome_background()
         _apply_map_paper_background(self._toolbar_slot, chrome)
-        _apply_map_paper_background(self._toolbar_shim, chrome)
         _apply_map_paper_background(bar, chrome)
 
     def _unbind_header_zoom_bar(self) -> None:

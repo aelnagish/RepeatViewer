@@ -6,15 +6,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from PySide6.QtCore import QPointF, QRect, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QMouseEvent, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from repeatviewer.backends.sequence_features import SequenceFeature
 from repeatviewer.widgets.preview_controls import (
-    OVERVIEW_TOOLBAR_HEIGHT,
+    ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH,
+    ANNOTATION_TOOLBAR_RENDERED_HEIGHT,
     ZOOM_SLIDER_HEIGHT,
     AnnotationZoomBar,
+    PreviewHeaderBar,
+    PreviewZoomBar,
     _OVERVIEW_POSITION_SPIN_WIDTH,
     _OVERVIEW_SELECT_FIT_HEIGHT,
     _ZOOM_BTN_SIDE,
@@ -26,7 +29,7 @@ def test_overview_zoom_bar_matches_single_seq_sizes(qapp: QApplication) -> None:
     bar.set_overview_mode(True)
     bar.show()
     qapp.processEvents()
-    assert bar.height() == OVERVIEW_TOOLBAR_HEIGHT == 28
+    assert bar.height() == ANNOTATION_TOOLBAR_RENDERED_HEIGHT == 26
     assert bar._zoom_slider.height() == ZOOM_SLIDER_HEIGHT == 22
     assert bar._pos_start.width() == _OVERVIEW_POSITION_SPIN_WIDTH == 108
     assert _ZOOM_BTN_SIDE == ZOOM_SLIDER_HEIGHT
@@ -50,6 +53,82 @@ def test_overview_zoom_bar_matches_single_seq_sizes(qapp: QApplication) -> None:
     bar.close()
 
 
+def test_msa_toolbar_matches_rendered_single_sequence_control_sizes(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Compare final styled geometry, not only pre-stylesheet fixed values."""
+    from PySide6.QtWidgets import QPushButton, QToolButton
+
+    from repeatviewer.ui.theme import application_stylesheet
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+    from repeatviewer.widgets.sequence_map_viewer import SequenceMapWidget
+
+    previous_stylesheet = qapp.styleSheet()
+    qapp.setStyleSheet(application_stylesheet(toolbar_font_pt=12))
+    single = SequenceMapWidget(embedded=True)
+    msa = AnnotationZoomBar()
+    fasta = tmp_path / "msa.fa"
+    fasta.write_text(">a\nACGT\n>b\nACGT\n", encoding="utf-8")
+    overview = MultiSequenceOverviewPanel(fasta)
+    try:
+        overview.bind_annotation_zoom_bar(msa)
+        single.show()
+        overview.show()
+        qapp.processEvents()
+
+        single_minus = next(
+            w for w in single._toolbar.findChildren(QToolButton) if w.text() == "−"
+        )
+        msa_minus = next(
+            w for w in msa._overview_host.findChildren(QToolButton) if w.text() == "−"
+        )
+        single_select = next(
+            w
+            for w in single._toolbar.findChildren(QPushButton)
+            if w.text() == "Select"
+        )
+
+        # Measurements recorded from the fully styled single-sequence toolbar.
+        assert single._pos_start.size().width() == 108
+        assert single._pos_start.size().height() == 20
+        assert single_minus.size().width() == 22
+        assert single_minus.size().height() == 22
+        assert single_select.height() == 22
+        assert (
+            single_select.width()
+            == msa._select_btn.width()
+            == ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH
+            == 55
+        )
+
+        assert msa._pos_start.size() == single._pos_start.size()
+        assert msa._pos_end.size() == single._pos_end.size()
+        assert msa_minus.size() == single_minus.size()
+        assert msa._select_btn.height() == single_select.height()
+        assert msa._fit_btn.height() == single_select.height()
+        assert msa._clean_btn.height() == single_select.height()
+        assert msa._consensus_btn.height() == single_select.height()
+        assert (
+            single._toolbar.height()
+            == overview._toolbar_slot.height()
+            == msa.height()
+            == ANNOTATION_TOOLBAR_RENDERED_HEIGHT
+            == 26
+        )
+        assert msa_minus.mapTo(overview._toolbar_slot, QPoint(0, 0)) == (
+            single_minus.mapTo(single._toolbar, QPoint(0, 0))
+        ) == QPoint(6, 2)
+        assert overview._toolbar_slot.palette().color(
+            QPalette.ColorRole.Window
+        ) == single._toolbar.palette().color(QPalette.ColorRole.Window)
+    finally:
+        overview._unbind_header_zoom_bar()
+        overview.close()
+        single.close()
+        msa.close()
+        qapp.setStyleSheet(previous_stylesheet)
+
+
 def test_overview_mounts_zoom_bar_beside_rail(qapp: QApplication, tmp_path: Path) -> None:
     from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
 
@@ -64,15 +143,17 @@ def test_overview_mounts_zoom_bar_beside_rail(qapp: QApplication, tmp_path: Path
     qapp.processEvents()
     assert bar.parent() is panel._toolbar_slot
     assert not panel._toolbar_slot.isHidden()
-    assert not panel._toolbar_shim.isHidden()
     assert bar._actions_btn.isHidden()
-    # Toolbar sits above tracks only (left edge aligned with the sequence map).
+    # Toolbar spans names + tracks and its first control aligns with name text.
     from PySide6.QtCore import QPoint
-    from PySide6.QtWidgets import QPushButton
+    from PySide6.QtWidgets import QPushButton, QToolButton
 
     slot_x = panel._toolbar_slot.mapTo(panel, QPoint(0, 0)).x()
-    shim_w = panel._toolbar_shim.width()
-    assert slot_x >= shim_w - 1
+    assert slot_x == 0
+    zoom_out = next(
+        w for w in bar._overview_host.findChildren(QToolButton) if w.text() == "−"
+    )
+    assert abs(zoom_out.mapTo(panel, QPoint(0, 0)).x() - 6) <= 1
     select = next(
         w
         for w in bar._overview_host.findChildren(QPushButton)
@@ -81,8 +162,43 @@ def test_overview_mounts_zoom_bar_beside_rail(qapp: QApplication, tmp_path: Path
     assert select.size().height() == _OVERVIEW_SELECT_FIT_HEIGHT
     assert select.size().width() <= 80
     panel._unbind_header_zoom_bar()
-    assert panel._toolbar_shim.isHidden()
+    assert panel._toolbar_slot.isHidden()
     panel.close()
+    bar.close()
+
+
+def test_header_refresh_keeps_overview_zoom_bar_visible(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """A late preview-header sync must not hide the MSA's mounted toolbar."""
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "msa.fa"
+    fasta.write_text(">a\nACGT\n>b\nACGT\n", encoding="utf-8")
+    preview_bar = PreviewZoomBar()
+    bar = AnnotationZoomBar()
+    header = PreviewHeaderBar(preview_bar, annotation_zoom_bar=bar)
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.show()
+    panel.bind_annotation_zoom_bar(bar)
+    qapp.processEvents()
+
+    assert bar.parent() is panel._toolbar_slot
+    assert not bar.isHidden()
+
+    # This is the refresh that used to call bar.setVisible(False) after the
+    # Overview had already reparented and shown the shared control bar.
+    header.set_header_zoom_mode("preview")
+    qapp.processEvents()
+
+    assert bar.parent() is panel._toolbar_slot
+    assert not bar.isHidden()
+    assert not panel._toolbar_slot.isHidden()
+
+    panel._unbind_header_zoom_bar()
+    panel.close()
+    header.close()
+    preview_bar.close()
     bar.close()
 
 

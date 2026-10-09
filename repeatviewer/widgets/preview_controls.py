@@ -138,6 +138,11 @@ def _add_default_fasta_tab_menu(parent_menu: QMenu) -> QAction:
 # Title-bar PreviewZoomBar stays compact; overview map toolbar is taller.
 ZOOM_BAR_HEIGHT = 18
 OVERVIEW_TOOLBAR_HEIGHT = 28
+# With the application stylesheet, the single-sequence AnnotationMapToolbar
+# renders at 26 px (22 px controls plus 2 px top/bottom margins).
+ANNOTATION_TOOLBAR_RENDERED_HEIGHT = 26
+# Rendered width of Select in the styled single-sequence Annotation toolbar.
+ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH = 55
 ZOOM_CONTROL_HEIGHT = 18
 ZOOM_SPIN_WIDTH = 56
 # Kept for sequence_map_viewer imports (embedded map toolbar height).
@@ -864,6 +869,7 @@ class AnnotationZoomBar(QWidget):
 
         # Same size / policy as single-seq AnnotationMapToolbar Select / Fit.
         select_btn = QPushButton("Select", self._overview_host)
+        select_btn.setFixedWidth(ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH)
         select_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
         select_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         select_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -958,7 +964,8 @@ class AnnotationZoomBar(QWidget):
         if self._overview_mode:
             # Match AnnotationMapToolbar chrome identity for theme / sizing.
             self.setObjectName("AnnotationMapToolbar")
-            self.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
+            self.setFixedHeight(ANNOTATION_TOOLBAR_RENDERED_HEIGHT)
+            self._overview_host.setFixedHeight(ANNOTATION_TOOLBAR_RENDERED_HEIGHT)
             # Zero outer margins — overview_host already matches map toolbar padding.
             lay = self.layout()
             if lay is not None:
@@ -967,6 +974,7 @@ class AnnotationZoomBar(QWidget):
         else:
             self.setObjectName("PreviewZoomBar")
             self.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
+            self._overview_host.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
             lay = self.layout()
             if lay is not None:
                 lay.setContentsMargins(6, 2, 8, 2)
@@ -974,6 +982,17 @@ class AnnotationZoomBar(QWidget):
         setter = getattr(self._default_tab_action, "set_multi_fasta_choices", None)
         if callable(setter):
             setter(self._overview_mode)
+        # The MSA bar becomes ``AnnotationMapToolbar`` only after construction
+        # and reparenting. Qt does not automatically re-evaluate descendant
+        # stylesheet selectors after that object-name change, so its controls
+        # otherwise retain different native sizes from the single-sequence
+        # toolbar. Re-polish the whole subtree to apply the same toolbar rules.
+        for widget in (self, *self.findChildren(QWidget)):
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.updateGeometry()
+        self.update()
 
     def set_multi_fasta_default_tabs(self, enabled: bool) -> None:
         """Multi-seq: Default preview tab is Text / Overview (no Dotplot)."""
@@ -1534,7 +1553,13 @@ class PreviewHeaderBar(QWidget):
                 self._annotation_zoom_bar = None
                 bar = None
         if bar is not None and not tabs_only:
-            bar.setVisible(show_annotation)
+            # Multi-sequence Overview reparents the shared bar into its own
+            # toolbar slot.  Header refreshes still run after that mount (for
+            # example while an MSA is opening); hiding the bar here would then
+            # hide the controls inside the active Overview.  Only the header
+            # owns the bar's visibility while no Overview is bound to it.
+            if getattr(bar, "_bound_overview", None) is None:
+                bar.setVisible(show_annotation)
         self._controls_host.setVisible(
             show_annotation and bar is not None and not tabs_only
         )
