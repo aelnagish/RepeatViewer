@@ -3112,7 +3112,8 @@ class SequenceMapCanvas(QWidget):
             painter.save()
             painter.setClipRect(cell)
             painter.setFont(self._sequence_font_for_track(cell.height()))
-            painter.setPen(fg)
+            # Coloured background → black letter (matches MSA letter style).
+            painter.setPen(QColor("#111111") if self._color_bases else fg)
             painter.drawText(cell, Qt.AlignmentFlag.AlignCenter, base)
             painter.restore()
 
@@ -3388,7 +3389,9 @@ class SequenceMapCanvas(QWidget):
                         if letter_font is not None:
                             painter.setFont(letter_font)
                             painter.setPen(
-                                fg if self._color_bases else QColor("#222222")
+                                QColor("#111111")
+                                if self._color_bases
+                                else QColor("#222222")
                             )
                             painter.drawText(
                                 cell, Qt.AlignmentFlag.AlignCenter, letter
@@ -3424,7 +3427,9 @@ class SequenceMapCanvas(QWidget):
                                 font.setPointSize(pt)
                             painter.setFont(font)
                             painter.setPen(
-                                fg if self._color_bases else QColor("#222222")
+                                QColor("#111111")
+                                if self._color_bases
+                                else QColor("#222222")
                             )
                             painter.drawText(
                                 cell, Qt.AlignmentFlag.AlignCenter, label

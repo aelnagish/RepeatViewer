@@ -13,6 +13,138 @@ from repeatviewer.backends.sequence_features import SequenceFeature
 # Same gap alphabet as motif Find ("Allow gaps in sequence").
 GAP_CHARS = frozenset("-.")
 
+# MSA residue paint modes (Display → Color). Apply to nucleotide and protein
+# at letter/nucleotide zoom only; zoomed-out overview always fills backgrounds.
+MSA_COLOR_ALL_BACKGROUNDS = "all_backgrounds"
+MSA_COLOR_LETTERS_ONLY = "letters_only"
+# Fill letters whose column frequency is below the divergence threshold.
+MSA_COLOR_NO_BG_WHEN_CONSERVED = "no_bg_when_conserved"
+# Fill letters whose column frequency meets the divergence threshold.
+MSA_COLOR_BG_WHEN_CONSERVED = "bg_when_conserved"
+
+MSA_COLOR_MODE_CHOICES: tuple[tuple[str, str], ...] = (
+    (MSA_COLOR_LETTERS_ONLY, "No background"),
+    (MSA_COLOR_ALL_BACKGROUNDS, "Color all background"),
+    (MSA_COLOR_BG_WHEN_CONSERVED, "Color conserved background"),
+    (MSA_COLOR_NO_BG_WHEN_CONSERVED, "Color divergent background"),
+)
+
+MSA_COLOR_MODE_IDS = frozenset(mode_id for mode_id, _label in MSA_COLOR_MODE_CHOICES)
+
+# Fraction of non-gap letters in a column required for a residue to count as conserved.
+DEFAULT_MSA_DIVERGENCE_THRESHOLD = 0.4
+
+
+def normalize_msa_color_mode(mode: str | None) -> str:
+    text = str(mode or "").strip()
+    if text in MSA_COLOR_MODE_IDS:
+        return text
+    return MSA_COLOR_ALL_BACKGROUNDS
+
+
+def normalize_msa_divergence_threshold(value: float | int | None) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return DEFAULT_MSA_DIVERGENCE_THRESHOLD
+
+
+def column_residue_frequencies(sequences: list[str]) -> list[dict[str, float]]:
+    """Per-column frequency of each non-gap residue (upper-case keys).
+
+    Frequencies sum to 1.0 over non-gap letters. All-gap columns yield ``{}``.
+    """
+    if not sequences:
+        return []
+    width = len(sequences[0])
+    if any(len(s) != width for s in sequences):
+        raise ValueError("MSA rows must share one length")
+    out: list[dict[str, float]] = []
+    n_rows = len(sequences)
+    for col in range(width):
+        counts: dict[str, int] = {}
+        total = 0
+        for row in range(n_rows):
+            ch = sequences[row][col]
+            if ch in GAP_CHARS:
+                continue
+            up = ch.upper()
+            counts[up] = counts.get(up, 0) + 1
+            total += 1
+        if total <= 0:
+            out.append({})
+        else:
+            out.append({letter: count / total for letter, count in counts.items()})
+    return out
+
+
+def column_conservation_mask(
+    sequences: list[str],
+    *,
+    threshold: float = 1.0,
+) -> list[bool]:
+    """True when at least one non-gap residue meets ``threshold`` in the column.
+
+    ``threshold=1.0`` matches the old unanimous-column definition.
+    """
+    thresh = normalize_msa_divergence_threshold(threshold)
+    freqs = column_residue_frequencies(sequences)
+    return [
+        any(freq >= thresh for freq in col_freqs.values()) for col_freqs in freqs
+    ]
+
+
+def letter_is_conserved(
+    column_freqs: dict[str, float] | None,
+    residue: str,
+    *,
+    threshold: float,
+) -> bool:
+    """Whether ``residue`` meets the column frequency threshold."""
+    ch = str(residue or "").upper()
+    if not ch or ch in GAP_CHARS:
+        return False
+    freqs = column_freqs or {}
+    return float(freqs.get(ch, 0.0)) >= normalize_msa_divergence_threshold(threshold)
+
+
+def msa_residue_fill_background(
+    mode: str | None,
+    *,
+    residue: str,
+    column_freqs: dict[str, float] | None = None,
+    threshold: float = DEFAULT_MSA_DIVERGENCE_THRESHOLD,
+    column_conserved: bool | None = None,
+) -> bool:
+    """Whether an MSA cell should paint a residue background fill.
+
+    Gaps never take a residue colour fill here (caller may still draw ``-``).
+    ``column_conserved`` is accepted for older callers and ignored when
+    ``column_freqs`` is provided.
+    """
+    ch = str(residue or "")
+    if ch in GAP_CHARS:
+        return False
+    normalized = normalize_msa_color_mode(mode)
+    if normalized == MSA_COLOR_ALL_BACKGROUNDS:
+        return True
+    if normalized == MSA_COLOR_LETTERS_ONLY:
+        return False
+    if column_freqs is not None:
+        conserved = letter_is_conserved(
+            column_freqs, ch, threshold=threshold
+        )
+    elif column_conserved is not None:
+        conserved = bool(column_conserved)
+    else:
+        conserved = False
+    if normalized == MSA_COLOR_NO_BG_WHEN_CONSERVED:
+        # Divergent: fill letters that do not meet the threshold.
+        return not conserved
+    if normalized == MSA_COLOR_BG_WHEN_CONSERVED:
+        return conserved
+    return True
+
 
 def sequence_has_gaps(sequence: str) -> bool:
     return any(ch in GAP_CHARS for ch in sequence)
@@ -96,6 +228,182 @@ def project_features_to_ungapped(
     out: list[SequenceFeature] = []
     for feat in features:
         mapped = project_feature_to_ungapped(feat, keep)
+        if mapped is not None:
+            out.append(mapped)
+    return out
+
+
+def remove_alignment_columns(
+    sequences: list[str],
+    start_1based: int,
+    end_1based: int,
+) -> list[str]:
+    """Drop inclusive 1-based columns ``[start, end]`` from every MSA row."""
+    if not sequences:
+        return []
+    width = len(sequences[0])
+    if any(len(s) != width for s in sequences):
+        raise ValueError("MSA rows must share one length")
+    a = max(1, min(width, int(start_1based)))
+    b = max(1, min(width, int(end_1based)))
+    if b < a:
+        a, b = b, a
+    # 0-based slice ends exclusive
+    lo, hi = a - 1, b
+    return [s[:lo] + s[hi:] for s in sequences]
+
+
+def splice_rows_region(
+    sequences: list[str],
+    start_1based: int,
+    end_1based: int,
+    row_indices: set[int] | list[int],
+) -> list[str]:
+    """Remove ``[start, end]`` only from ``row_indices``, then pad with gaps.
+
+    Other rows are unchanged. All rows are right-padded with ``-`` so the MSA
+    stays equal-length.
+    """
+    if not sequences:
+        return []
+    width = len(sequences[0])
+    if any(len(s) != width for s in sequences):
+        raise ValueError("MSA rows must share one length")
+    a = max(1, min(width, int(start_1based)))
+    b = max(1, min(width, int(end_1based)))
+    if b < a:
+        a, b = b, a
+    lo, hi = a - 1, b
+    rows = {int(i) for i in row_indices}
+    out: list[str] = []
+    for i, seq in enumerate(sequences):
+        if i in rows:
+            out.append(seq[:lo] + seq[hi:])
+        else:
+            out.append(seq)
+    max_len = max((len(s) for s in out), default=0)
+    if max_len <= 0:
+        return out
+    return [s + ("-" * (max_len - len(s))) for s in out]
+
+
+def mask_rows_region(
+    sequences: list[str],
+    start_1based: int,
+    end_1based: int,
+    row_indices: set[int] | list[int] | None = None,
+) -> list[str]:
+    """Replace ``[start, end]`` with ``-`` on the given rows (or all rows)."""
+    if not sequences:
+        return []
+    width = len(sequences[0])
+    if any(len(s) != width for s in sequences):
+        raise ValueError("MSA rows must share one length")
+    a = max(1, min(width, int(start_1based)))
+    b = max(1, min(width, int(end_1based)))
+    if b < a:
+        a, b = b, a
+    lo, hi = a - 1, b
+    gap = "-" * (hi - lo)
+    if row_indices is None:
+        rows = set(range(len(sequences)))
+    else:
+        rows = {int(i) for i in row_indices}
+    out: list[str] = []
+    for i, seq in enumerate(sequences):
+        if i in rows:
+            out.append(seq[:lo] + gap + seq[hi:])
+        else:
+            out.append(seq)
+    return out
+
+
+def drop_features_overlapping_region(
+    features: list[SequenceFeature],
+    start_1based: int,
+    end_1based: int,
+) -> list[SequenceFeature]:
+    """Drop features that overlap inclusive ``[start, end]`` (any overlap)."""
+    a = int(start_1based)
+    b = int(end_1based)
+    if b < a:
+        a, b = b, a
+    kept: list[SequenceFeature] = []
+    for feat in features:
+        fs, fe = int(feat.start), int(feat.end)
+        if fe < fs:
+            fs, fe = fe, fs
+        if fe < a or fs > b:
+            kept.append(feat)
+    return kept
+
+
+def remap_interval_after_column_delete(
+    start: int,
+    end: int,
+    del_start: int,
+    del_end: int,
+) -> tuple[int, int] | None:
+    """Map a 1-based inclusive interval after deleting ``[del_start, del_end]``.
+
+    Returns ``None`` when the interval is entirely removed.
+    """
+    a = int(start)
+    b = int(end)
+    if b < a:
+        a, b = b, a
+    d0 = int(del_start)
+    d1 = int(del_end)
+    if d1 < d0:
+        d0, d1 = d1, d0
+    n = d1 - d0 + 1
+    if b < d0:
+        return a, b
+    if a > d1:
+        return a - n, b - n
+
+    def map_start(p: int) -> int:
+        if p < d0:
+            return p
+        if p > d1:
+            return p - n
+        return d0
+
+    def map_end(p: int) -> int:
+        if p < d0:
+            return p
+        if p > d1:
+            return p - n
+        return d0 - 1
+
+    ns, ne = map_start(a), map_end(b)
+    if ne < ns:
+        return None
+    return ns, ne
+
+
+def remap_feature_after_column_delete(
+    feat: SequenceFeature,
+    del_start: int,
+    del_end: int,
+) -> SequenceFeature | None:
+    """Shift/shrink a feature after MSA columns are deleted; drop if gone."""
+    mapped = remap_interval_after_column_delete(
+        feat.start, feat.end, del_start, del_end
+    )
+    if mapped is None:
+        return None
+    return replace(feat, start=mapped[0], end=mapped[1])
+
+
+def remap_features_after_column_delete(
+    features: list[SequenceFeature],
+    del_start: int,
+    del_end: int,
+) -> list[SequenceFeature]:
+    out: list[SequenceFeature] = []
+    for feat in features:
+        mapped = remap_feature_after_column_delete(feat, del_start, del_end)
         if mapped is not None:
             out.append(mapped)
     return out

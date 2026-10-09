@@ -762,13 +762,14 @@ class AnnotationZoomBar(QWidget):
 
     Single-sequence Annotation: Actions menu (zoom lives on the map toolbar).
     Multi-sequence overview: same chrome as the map toolbar — −/+/slider,
-    Position, Select, Fit.
+    Position, Select, Fit, Consensus.
     """
 
     fit_mode_changed = Signal(str)
     reset_requested = Signal()
     fit_requested = Signal()
     select_requested = Signal()
+    consensus_requested = Signal()
     extract_requested = Signal()  # kept for callers; Extract is not on this bar
     filter_text_changed = Signal(str)
     filter_return_pressed = Signal()
@@ -871,6 +872,17 @@ class AnnotationZoomBar(QWidget):
         fit_btn.clicked.connect(self.fit_requested.emit)
         self._fit_btn = fit_btn
 
+        consensus_btn = QPushButton("Consensus", self._overview_host)
+        consensus_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        consensus_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        consensus_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        consensus_btn.setToolTip(
+            "Build a consensus sequence for this alignment "
+            "(opens Consensus parameters)"
+        )
+        consensus_btn.clicked.connect(self.consensus_requested.emit)
+        self._consensus_btn = consensus_btn
+
         # Hidden: overview name jump still available via bind API / Find.
         self._name_filter = QLineEdit(self._overview_host)
         self._name_filter.setObjectName("FileFilter")
@@ -890,6 +902,7 @@ class AnnotationZoomBar(QWidget):
             self._pos_end,
             select_btn,
             fit_btn,
+            consensus_btn,
         ):
             ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
         # Left-pack controls like AnnotationMapToolbar (stretch after Fit).
@@ -913,7 +926,7 @@ class AnnotationZoomBar(QWidget):
         self.set_overview_mode(False)
 
     def set_overview_mode(self, enabled: bool) -> None:
-        """Show multi-seq −/+/Position/Select/Fit; Actions stay on the Preview title bar."""
+        """Show multi-seq −/+/Position/Select/Fit/Consensus; Actions stay on Preview title."""
         self._overview_mode = bool(enabled)
         self._overview_host.setVisible(self._overview_mode)
         # Title-bar PreviewZoomBar owns Actions (aligned with "Preview"), matching

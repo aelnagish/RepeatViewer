@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 from PySide6.QtCore import QPointF, QRect, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from repeatviewer.backends.sequence_features import SequenceFeature
 from repeatviewer.widgets.preview_controls import (
@@ -32,15 +32,25 @@ def test_overview_zoom_bar_matches_single_seq_sizes(qapp: QApplication) -> None:
     assert _ZOOM_BTN_SIDE == ZOOM_SLIDER_HEIGHT
     # Actions lives on the Preview title bar in overview mode (not this bar).
     assert bar._actions_btn.isHidden()
-    # Select / Fit live in overview host as QPushButtons with fixed height 20.
+    # Select / Fit / Consensus live in overview host as QPushButtons with fixed height 20.
     from PySide6.QtWidgets import QPushButton
 
+    labels = [
+        w.text()
+        for w in bar._overview_host.findChildren(QPushButton)
+        if w.text() in {"Select", "Fit", "Consensus"}
+    ]
+    assert labels == ["Select", "Fit", "Consensus"]
     heights = [
         w.height()
         for w in bar._overview_host.findChildren(QPushButton)
-        if w.text() in {"Select", "Fit"}
+        if w.text() in {"Select", "Fit", "Consensus"}
     ]
-    assert heights == [_OVERVIEW_SELECT_FIT_HEIGHT, _OVERVIEW_SELECT_FIT_HEIGHT]
+    assert heights == [
+        _OVERVIEW_SELECT_FIT_HEIGHT,
+        _OVERVIEW_SELECT_FIT_HEIGHT,
+        _OVERVIEW_SELECT_FIT_HEIGHT,
+    ]
     bar.close()
 
 
@@ -321,3 +331,342 @@ def test_run_te_annotation_filters_record_ids(tmp_path: Path) -> None:
             record_ids=["b"],
         )
     assert annotated == ["b"]
+
+
+def test_name_click_selects_sequence_msa_click_clears(qapp: QApplication) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.set_msa_data(["a", "b"], ["ACGTACGT", "ACGTACGT"])
+    canvas._select_row_click(1, Qt.KeyboardModifier.NoModifier)
+    assert canvas.selected_rows() == [1]
+    # Residue click (no drag) clears name-selected sequences.
+    canvas._drag_origin = QPointF(10, 2)
+    canvas._drag_kind = "region"
+    canvas._press_feat = None
+    canvas._rubber_active = False
+    release = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(10, 2),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mouseReleaseEvent(release)
+    assert canvas.selected_rows() == []
+    canvas.close()
+
+
+def test_feature_click_sets_column_selection_and_shift_arrows(
+    qapp: QApplication,
+) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    feats = {
+        "a": [SequenceFeature(start=4, end=6, name="f1", feature_type="LTR")],
+        "b": [SequenceFeature(start=2, end=8, name="f2", feature_type="ORF")],
+    }
+    canvas.set_msa_data(["a", "b"], ["ACGTACGTAC", "ACGTACGTAC"], features=feats)
+    # Select feature on row 0 (flat index 0) → columns 4–6.
+    canvas._set_feature_selection({(0, 0)}, set_columns=True)
+    assert canvas.region_selection() == (4, 6)
+    assert canvas.selected_feature_column_span() == (4, 6)
+
+    assert canvas.apply_shift_edge_expand("left")
+    assert canvas.region_selection() == (1, 3)  # exclude left boundary
+    assert canvas.apply_shift_edge_expand("left")
+    assert canvas.region_selection() == (1, 6)  # include right boundary
+
+    canvas._set_feature_selection({(0, 0)}, set_columns=True)
+    assert canvas.apply_shift_edge_expand("right")
+    assert canvas.region_selection() == (7, 10)  # exclude right boundary
+    assert canvas.apply_shift_edge_expand("right")
+    assert canvas.region_selection() == (4, 10)  # include left boundary
+
+    # Multiple features → leftmost / rightmost.
+    canvas._set_feature_selection({(0, 0), (1, 0)}, set_columns=True)
+    assert canvas.selected_feature_column_span() == (2, 8)
+    assert canvas.region_selection() == (2, 8)
+    canvas.close()
+
+
+def test_annotation_drag_selects_on_partial_overlap(qapp: QApplication) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(800, 200)
+    canvas.show()
+    qapp.processEvents()
+    feats = {
+        "a": [SequenceFeature(start=2, end=5, name="f1", feature_type="LTR")],
+        "b": [SequenceFeature(start=4, end=8, name="f2", feature_type="ORF")],
+    }
+    canvas.set_msa_data(["a", "b"], ["ACGTACGTAC", "ACGTACGTAC"], features=feats)
+    canvas.set_msa_residue_size(12)
+    canvas.set_pixels_per_base(20.0)
+    qapp.processEvents()
+
+    # Partial overlap of feature a still selects it.
+    partial = QRect(
+        int(canvas.bp_to_x(3.0)),
+        int(canvas._feature_band_y0(0)),
+        int(canvas.bp_to_x(4.5) - canvas.bp_to_x(3.0)),
+        12,
+    )
+    assert (0, 0) in canvas._features_intersecting_rect(partial)
+
+    full = QRect(
+        int(canvas.bp_to_x(1.0)),
+        int(canvas._feature_band_y0(0) - 1),
+        int(canvas.bp_to_x(9.0) - canvas.bp_to_x(1.0)),
+        int(canvas._feature_band_y0(1) + 14 - canvas._feature_band_y0(0)),
+    )
+    canvas._drag_origin = QPointF(full.left(), full.top())
+    canvas._drag_kind = "features"
+    canvas._rubber_active = True
+    canvas._rubber = full
+    release = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(full.right(), full.bottom()),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mouseReleaseEvent(release)
+    qapp.processEvents()
+    assert (0, 0) in canvas.selected_features()
+    assert (1, 0) in canvas.selected_features()
+    assert canvas.region_selection() == (2, 8)
+    assert canvas.regional_rows() is None
+    assert canvas.selected_rows() == []  # column select clears name rows
+    canvas.close()
+
+
+def test_msa_drag_keeps_regional_box_without_row_highlight(
+    qapp: QApplication,
+) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(600, 200)
+    canvas.show()
+    qapp.processEvents()
+    canvas.set_msa_data(
+        ["a", "b", "c"],
+        ["ACGTACGTAC", "ACGTACGTAC", "ACGTACGTAC"],
+    )
+    canvas.set_pixels_per_base(15.0)
+    canvas._select_row_click(2, Qt.KeyboardModifier.NoModifier)
+    assert canvas.selected_rows() == [2]
+    qapp.processEvents()
+    top0 = canvas.row_tops()[0]
+    bot1 = canvas.row_tops()[1] + canvas.row_heights()[1] - 1
+    x0 = canvas.bp_to_x(2.0)
+    x1 = canvas.bp_to_x(6.0)
+    canvas._drag_origin = QPointF(x0, top0)
+    canvas._drag_kind = "region"
+    canvas._rubber_active = True
+    canvas._rubber = QRect(int(x0), int(top0), int(x1 - x0), int(bot1 - top0))
+    release = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(x1, bot1),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mouseReleaseEvent(release)
+    qapp.processEvents()
+    assert canvas.is_regional_selection()
+    assert canvas.region_selection() is not None
+    assert canvas.regional_rows() == {0, 1}
+    # Regional select clears prior name-column row selection.
+    assert canvas.selected_rows() == []
+    canvas.close()
+
+
+def test_scale_shows_column_selection_band(qapp: QApplication) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _ScaleRuler
+
+    ruler = _ScaleRuler()
+    ruler.set_scale(ppb=10.0, max_length=100, bar_pad=8)
+    assert ruler._region_sel is None
+    ruler.set_region_selection(10, 40)
+    assert ruler._region_sel == (10, 40)
+    ruler.set_region_selection(None)
+    assert ruler._region_sel is None
+    ruler.close()
+
+
+def test_scale_drag_selects_columns_only(qapp: QApplication) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _ScaleRuler
+
+    ruler = _ScaleRuler()
+    ruler.resize(400, 28)
+    ruler.set_scale(ppb=10.0, max_length=100, bar_pad=8)
+    ruler.set_scroll_x(0)
+    got: list[tuple[int, int]] = []
+    ruler.columnRegionSelected.connect(lambda a, b: got.append((a, b)))
+    ruler._drag_origin_x = 8.0 + 10.0 * 4  # near column 5
+    ruler._rubber_active = True
+    release = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(8.0 + 10.0 * 20, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    ruler.mouseReleaseEvent(release)
+    assert got
+    assert got[0][0] < got[0][1]
+    ruler.close()
+
+
+def test_delete_removes_shift_delete_fills_gaps(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "aln.fa"
+    fasta.write_text(
+        ">s1\nACGTACGTAC\n>s2\nACGTACGTAC\n",
+        encoding="utf-8",
+    )
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    panel._bars.set_region_selection(3, 5)
+    panel._features = {
+        "s1": [
+            SequenceFeature(start=2, end=8, name="overlap", feature_type="LTR"),
+            SequenceFeature(start=9, end=10, name="keep", feature_type="ORF"),
+        ],
+        "s2": [],
+    }
+    # Plain Delete → remove columns; overlapping feature dropped + coords remapped.
+    panel._delete_selected_msa_edit(hard_delete=True)
+    qapp.processEvents()
+    assert panel._bars.msa_sequences() == ["ACCGTAC", "ACCGTAC"]
+    assert [f.name for f in panel._features["s1"]] == ["keep"]
+    assert panel._features["s1"][0].start == 6  # 9 → 6 after deleting 3 cols
+    assert panel._features["s1"][0].end == 7
+
+    panel._restore_features()
+    qapp.processEvents()
+    assert panel._bars.msa_sequences() == ["ACGTACGTAC", "ACGTACGTAC"]
+
+    # Shift+Delete → gaps; overlapping feature dropped.
+    panel._bars.set_region_selection(3, 5)
+    panel._features = {
+        "s1": [
+            SequenceFeature(start=2, end=8, name="overlap", feature_type="LTR"),
+            SequenceFeature(start=9, end=10, name="keep", feature_type="ORF"),
+        ],
+        "s2": [],
+    }
+    panel._delete_selected_msa_edit(hard_delete=False)
+    qapp.processEvents()
+    assert panel._bars.msa_sequences() == ["AC---CGTAC", "AC---CGTAC"]
+    assert [f.name for f in panel._features["s1"]] == ["keep"]
+    assert panel._features["s1"][0].start == 9
+    panel.close()
+
+
+def test_scale_click_selects_single_column(qapp: QApplication) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _ScaleRuler
+
+    ruler = _ScaleRuler()
+    ruler.resize(400, 28)
+    ruler.set_scale(ppb=10.0, max_length=100, bar_pad=8)
+    ruler.set_scroll_x(0)
+    got: list[tuple[int, int]] = []
+    ruler.columnRegionSelected.connect(lambda a, b: got.append((a, b)))
+    # Click without drag near column 10 (x ≈ 8 + 9.5*10).
+    ruler._drag_origin_x = 8.0 + 9.5 * 10
+    ruler._rubber_active = False
+    release = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(8.0 + 9.5 * 10, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    ruler.mouseReleaseEvent(release)
+    assert got == [(10, 10)]
+    ruler.close()
+
+
+def test_shift_arrow_expands_column_selection(qapp: QApplication) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.set_msa_data(["a", "b"], ["ACGTACGTAC", "ACGTACGTAC"])
+    canvas.set_region_selection(4, 6)
+    assert canvas.apply_shift_edge_expand("left")
+    assert canvas.region_selection() == (1, 3)
+    assert canvas.apply_shift_edge_expand("left")
+    assert canvas.region_selection() == (1, 6)
+    canvas.set_region_selection(4, 6)
+    assert canvas.apply_shift_edge_expand("right")
+    assert canvas.region_selection() == (7, 10)
+    assert canvas.apply_shift_edge_expand("right")
+    assert canvas.region_selection() == (4, 10)
+    canvas.close()
+
+
+def test_overview_consensus_button_runs_con_generater(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from repeatviewer.job_options import ConsensusOptions
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "aln.fa"
+    fasta.write_text(">a\nACGT\n>b\nACCT\n", encoding="utf-8")
+    panel = MultiSequenceOverviewPanel(fasta)
+    got: list[Path] = []
+    panel.sequenceExtracted.connect(got.append)
+    panel._run_consensus(
+        ConsensusOptions(threshold=0.5, ambiguous="N", sequence_type="nucleotide")
+    )
+    assert len(got) == 1
+    assert got[0].is_file()
+    assert "_0.5_co.fa" in got[0].name
+    text = got[0].read_text(encoding="utf-8")
+    assert ">consensus" in text
+    panel.close()
+
+
+def test_scale_column_selection_shift_arrows_match_feature(
+    qapp: QApplication,
+) -> None:
+    """Scale column select uses the same Shift+Left/Right two-step cycle."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    feats = {
+        "a": [SequenceFeature(start=4, end=6, name="f1", feature_type="LTR")],
+        "b": [],
+    }
+    canvas.set_msa_data(["a", "b"], ["ACGTACGTAC", "ACGTACGTAC"], features=feats)
+    canvas._set_feature_selection({(0, 0)}, set_columns=True)
+    assert canvas.selected_features() == [(0, 0)]
+
+    # Pure column select (as from the scale) clears feature chrome.
+    canvas.clear_feature_selection()
+    canvas.set_region_selection(4, 6)
+    assert canvas.selected_features() == []
+    assert canvas.region_selection() == (4, 6)
+
+    assert canvas.apply_shift_edge_expand("left")
+    assert canvas.region_selection() == (1, 3)
+    assert canvas.apply_shift_edge_expand("left")
+    assert canvas.region_selection() == (1, 6)
+
+    canvas.set_region_selection(4, 6)
+    assert canvas.apply_shift_edge_expand("right")
+    assert canvas.region_selection() == (7, 10)
+    assert canvas.apply_shift_edge_expand("right")
+    assert canvas.region_selection() == (4, 10)
+    canvas.close()

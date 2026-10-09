@@ -494,6 +494,8 @@ class SequenceAnnotationRail(QWidget):
     exportClicked = Signal()
     colorsClicked = Signal()
     residueColorsChanged = Signal()  # quick nucleotide / protein scheme applied
+    msaColoringModeChanged = Signal(str)  # MSA residue paint mode id
+    msaDivergenceChanged = Signal(float)  # conserved-letter frequency threshold 0–1
     featureDetectClicked = Signal()
     featureDetectSettingsClicked = Signal()
     similarityAnnotateClicked = Signal()
@@ -516,6 +518,7 @@ class SequenceAnnotationRail(QWidget):
     basesZoomedOutChanged = Signal(int)
     annotationLabelSizeChanged = Signal(int)
     annotationThicknessChanged = Signal(int)
+    columnDistanceChanged = Signal(int)  # MSA overview: gap between residue columns
     annotationDistanceChanged = Signal(int)
     sequenceNameSizeChanged = Signal(int)
     baseNumberSizeChanged = Signal(int)
@@ -799,6 +802,114 @@ class SequenceAnnotationRail(QWidget):
         color_form.addRow("Protein:", self.protein_scheme)
         layout.addLayout(color_form)
 
+        from repeatviewer.backends.msa_coordinates import (
+            DEFAULT_MSA_DIVERGENCE_THRESHOLD,
+            MSA_COLOR_ALL_BACKGROUNDS,
+            MSA_COLOR_MODE_CHOICES,
+        )
+
+        _MSA_SCHEME_HELP = (
+            "Controls coloured residue backgrounds in the MSA "
+            "(nucleotide and protein) at letter/nucleotide zoom. "
+            "Zoomed-out overview always fills residue backgrounds.<br><br>"
+            "<b>No background</b><br>"
+            "Show coloured letters on white cells.<br><br>"
+            "<b>Color all background</b><br>"
+            "Fill every residue cell with its colour.<br><br>"
+            "<b>Color conserved background</b><br>"
+            "Fill only letters that meet the divergence threshold in "
+            "their column.<br><br>"
+            "<b>Color divergent background</b><br>"
+            "Fill only letters below the divergence threshold.<br><br>"
+            "<b>Divergence</b><br>"
+            "A letter is conserved when it occupies at least this fraction "
+            "of the non-gap residues in its column. For example, "
+            "<b>0.40</b> means a letter present in ≥40% of sequences "
+            "(ignoring gaps) counts as conserved. Applies to conserved "
+            "and divergent modes only."
+        )
+
+        self.msa_coloring_label = QLabel("MSA color scheme:", page)
+        scheme_header = QWidget(page)
+        scheme_header_layout = QHBoxLayout(scheme_header)
+        scheme_header_layout.setContentsMargins(0, 4, 0, 0)
+        scheme_header_layout.setSpacing(4)
+        scheme_header_layout.addWidget(self.msa_coloring_label, 0)
+        scheme_header_layout.addWidget(
+            make_help_button(
+                scheme_header,
+                "MSA color scheme",
+                _MSA_SCHEME_HELP,
+            ),
+            0,
+        )
+        scheme_header_layout.addStretch(1)
+        layout.addWidget(scheme_header)
+
+        self._msa_color_group = QButtonGroup(page)
+        self._msa_color_radios: dict[str, QRadioButton] = {}
+        mode_host = QWidget(page)
+        mode_layout = QVBoxLayout(mode_host)
+        mode_layout.setContentsMargins(16, 0, 0, 0)
+        mode_layout.setSpacing(2)
+        for mode_id, label in MSA_COLOR_MODE_CHOICES:
+            radio = QRadioButton(label, mode_host)
+            self._msa_color_group.addButton(radio)
+            self._msa_color_radios[mode_id] = radio
+            mode_layout.addWidget(radio)
+        layout.addWidget(mode_host)
+        self.msa_coloring_mode_host = mode_host
+
+        div_row = QWidget(page)
+        div_layout = QHBoxLayout(div_row)
+        div_layout.setContentsMargins(16, 4, 0, 0)
+        div_layout.setSpacing(6)
+        self.msa_divergence_label = QLabel("Divergence:", div_row)
+        self.msa_divergence_slider = NoWheelSlider(
+            Qt.Orientation.Horizontal, div_row
+        )
+        self.msa_divergence_slider.setObjectName("annotationZoomSlider")
+        self.msa_divergence_slider.setRange(0, 100)
+        self.msa_divergence_slider.setValue(
+            int(round(DEFAULT_MSA_DIVERGENCE_THRESHOLD * 100))
+        )
+        self.msa_divergence_slider.setMinimumWidth(72)
+        self.msa_divergence_slider.setFixedHeight(18)
+        self.msa_divergence_slider.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        apply_annotation_zoom_slider_style(self.msa_divergence_slider)
+        self.msa_divergence_value = QLabel(
+            f"{DEFAULT_MSA_DIVERGENCE_THRESHOLD:.2f}", div_row
+        )
+        self.msa_divergence_value.setMinimumWidth(36)
+        self.msa_divergence_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.msa_divergence_slider.valueChanged.connect(
+            self._on_msa_divergence_slider_changed
+        )
+        div_layout.addWidget(self.msa_divergence_label, 0)
+        div_layout.addWidget(self.msa_divergence_slider, 1)
+        div_layout.addWidget(self.msa_divergence_value, 0)
+        layout.addWidget(div_row)
+        self.msa_divergence_row = div_row
+
+        # Connect after divergence row exists (toggled fires on setChecked).
+        for radio in self._msa_color_radios.values():
+            radio.toggled.connect(self._on_msa_coloring_mode_changed)
+        default_radio = self._msa_color_radios.get(MSA_COLOR_ALL_BACKGROUNDS)
+        if default_radio is not None:
+            default_radio.setChecked(True)
+        self._sync_msa_divergence_enabled()
+
+        # Hidden until overview/MSA Display mode enables it.
+        self.msa_coloring_label.setVisible(False)
+        scheme_header.setVisible(False)
+        self.msa_coloring_header = scheme_header
+        self.msa_coloring_mode_host.setVisible(False)
+        self.msa_divergence_row.setVisible(False)
+
         self.colors_btn = QPushButton("Setting", page)
         self.colors_btn.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
@@ -889,6 +1000,20 @@ class SequenceAnnotationRail(QWidget):
             self.annotationDistanceChanged.emit
         )
 
+        self.column_distance = NoWheelSpinBox(page)
+        self.column_distance.setRange(0, 40)
+        self.column_distance.setValue(0)
+        self.column_distance.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
+        self.column_distance.setToolTip(
+            "Horizontal gap between MSA residue backgrounds (pixels). "
+            "0 connects neighbouring nucleotides."
+        )
+        self.column_distance.valueChanged.connect(self.columnDistanceChanged.emit)
+        self._column_distance_label = QLabel("Column distance:", page)
+        # Overview/MSA only — hidden for single-sequence map.
+        self._column_distance_label.setVisible(False)
+        self.column_distance.setVisible(False)
+
         self.sequence_name_size = NoWheelSpinBox(page)
         self.sequence_name_size.setRange(8, 24)
         self.sequence_name_size.setValue(12)
@@ -906,6 +1031,7 @@ class SequenceAnnotationRail(QWidget):
         sizes.addRow("Annotation thickness:", self.annotation_thickness)
         self._annotation_distance_label = QLabel("Annotation distance:", page)
         sizes.addRow(self._annotation_distance_label, self.annotation_distance)
+        sizes.addRow(self._column_distance_label, self.column_distance)
         layout.addLayout(sizes)
         layout.addStretch(1)
         return self._wrap_scroll(page)
@@ -1466,6 +1592,78 @@ class SequenceAnnotationRail(QWidget):
         save_custom_amino_acid_backgrounds(dict(palette))
         self.residueColorsChanged.emit()
 
+    def _on_msa_coloring_mode_changed(self, checked: bool = True) -> None:
+        if not checked:
+            return
+        self._sync_msa_divergence_enabled()
+        self.msaColoringModeChanged.emit(self.msa_coloring_mode_id())
+
+    def _on_msa_divergence_slider_changed(self, value: int) -> None:
+        frac = max(0, min(100, int(value))) / 100.0
+        self.msa_divergence_value.setText(f"{frac:.2f}")
+        self.msaDivergenceChanged.emit(frac)
+
+    def msa_coloring_mode_id(self) -> str:
+        from repeatviewer.backends.msa_coordinates import (
+            MSA_COLOR_ALL_BACKGROUNDS,
+            normalize_msa_color_mode,
+        )
+
+        for mode_id, radio in self._msa_color_radios.items():
+            if radio.isChecked():
+                return normalize_msa_color_mode(mode_id)
+        return MSA_COLOR_ALL_BACKGROUNDS
+
+    def set_msa_coloring_mode(self, mode_id: str) -> None:
+        from repeatviewer.backends.msa_coordinates import normalize_msa_color_mode
+
+        mode = normalize_msa_color_mode(mode_id)
+        radio = self._msa_color_radios.get(mode)
+        if radio is None or radio.isChecked():
+            self._sync_msa_divergence_enabled()
+            return
+        radio.blockSignals(True)
+        radio.setChecked(True)
+        radio.blockSignals(False)
+        self._sync_msa_divergence_enabled()
+
+    def msa_divergence_threshold(self) -> float:
+        from repeatviewer.backends.msa_coordinates import (
+            normalize_msa_divergence_threshold,
+        )
+
+        return normalize_msa_divergence_threshold(
+            self.msa_divergence_slider.value() / 100.0
+        )
+
+    def set_msa_divergence_threshold(self, value: float) -> None:
+        from repeatviewer.backends.msa_coordinates import (
+            normalize_msa_divergence_threshold,
+        )
+
+        frac = normalize_msa_divergence_threshold(value)
+        slider_val = int(round(frac * 100))
+        self.msa_divergence_slider.blockSignals(True)
+        self.msa_divergence_slider.setValue(slider_val)
+        self.msa_divergence_slider.blockSignals(False)
+        self.msa_divergence_value.setText(f"{frac:.2f}")
+
+    def _sync_msa_divergence_enabled(self) -> None:
+        from repeatviewer.backends.msa_coordinates import (
+            MSA_COLOR_BG_WHEN_CONSERVED,
+            MSA_COLOR_NO_BG_WHEN_CONSERVED,
+        )
+
+        row = getattr(self, "msa_divergence_row", None)
+        if row is None:
+            return
+        mode = self.msa_coloring_mode_id()
+        enabled = mode in (
+            MSA_COLOR_BG_WHEN_CONSERVED,
+            MSA_COLOR_NO_BG_WHEN_CONSERVED,
+        )
+        row.setEnabled(enabled)
+
     def set_sequence_kind(self, is_protein: bool) -> None:
         """Compatibility hook; size label is fixed as DNA/protein labels."""
         del is_protein
@@ -1486,6 +1684,15 @@ class SequenceAnnotationRail(QWidget):
             self.split_tracks_by_source,
         ):
             widget.setVisible(not overview)
+        # MSA coloring is overview-only (single-seq map has no multi-row conservation).
+        self.msa_coloring_label.setVisible(overview)
+        self.msa_coloring_header.setVisible(overview)
+        self.msa_coloring_mode_host.setVisible(overview)
+        self.msa_divergence_row.setVisible(overview)
+        if overview:
+            self._sync_msa_divergence_enabled()
+        self._column_distance_label.setVisible(overview)
+        self.column_distance.setVisible(overview)
         # Keep Tracks header + annotation-track toggle in overview.
         self._tracks_divider.setVisible(True)
         self._tracks_label.setVisible(True)
@@ -1508,6 +1715,15 @@ class SequenceAnnotationRail(QWidget):
             self.annotation_distance.setToolTip(
                 "Vertical gap between sequences (pixels)."
             )
+            self.delete_btn.setToolTip(
+                "Delete: remove selected residues/columns, or selected "
+                "sequence(s). Shift+Delete: fill selection / selected "
+                "sequence(s) with gaps. Or delete a selected feature "
+                "(Esc clears the band first)."
+            )
+            self.restore_btn.setToolTip(
+                "Undo the last Delete (Ctrl+Z). Restores MSA and features."
+            )
         else:
             self.auto_ann_run_btn.setToolTip("Run feature detection")
             self.similarity_ann_run_btn.setToolTip("Run similarity annotation")
@@ -1515,6 +1731,8 @@ class SequenceAnnotationRail(QWidget):
             self.annotation_distance.setToolTip(
                 "Vertical gap between annotation rows (pixels)."
             )
+            self.delete_btn.setToolTip("Delete the selected feature.")
+            self.restore_btn.setToolTip("Undo the last feature Delete.")
         for btn in (self.delete_btn, self.restore_btn, self.export_btn):
             btn.setVisible(True)
         self._module_width = _MODULE_WIDTH

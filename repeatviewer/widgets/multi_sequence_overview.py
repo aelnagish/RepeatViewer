@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -61,6 +62,19 @@ from repeatviewer.backends.auto_annotation_settings import (
 )
 from repeatviewer.backends.database_prepare import database_search_readiness
 from repeatviewer.backends.job_cancel import JobCancellation
+from repeatviewer.backends.msa_coordinates import (
+    DEFAULT_MSA_DIVERGENCE_THRESHOLD,
+    MSA_COLOR_ALL_BACKGROUNDS,
+    column_residue_frequencies,
+    drop_features_overlapping_region,
+    mask_rows_region,
+    msa_residue_fill_background,
+    normalize_msa_color_mode,
+    normalize_msa_divergence_threshold,
+    remap_features_after_column_delete,
+    remove_alignment_columns,
+    splice_rows_region,
+)
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
     fasta_record_lengths,
@@ -74,6 +88,7 @@ from repeatviewer.backends.sequence_features import (
     resolve_features_gff_path,
     resolve_sidecar_path,
     save_annotations_multi,
+    write_aligned_fasta_rows,
 )
 from repeatviewer.backends.similarity_annotation import (
     SimilarityDatabaseRun,
@@ -130,7 +145,8 @@ _MSA_MAX_PPB = 16.0
 _MSA_LETTER_MIN_PPB = 7.5
 _MSA_ROW_HEIGHT = 18
 _DEFAULT_MSA_FONT_PT = 4
-_DEFAULT_MSA_SEQUENCE_DISTANCE = 1
+_DEFAULT_MSA_SEQUENCE_DISTANCE = 0
+_DEFAULT_MSA_COLUMN_DISTANCE = 0
 _OVERVIEW_DISPLAY_SETTINGS_GROUP = "annotation_overview_display"
 _FEATURE_UNDO_LIMIT = 32
 
@@ -142,16 +158,37 @@ def _clone_features_by_id(
         rid: [SequenceFeature.from_dict(feat.to_dict()) for feat in feats]
         for rid, feats in features_by_id.items()
     }
-_MSA_GAP_FILL = QColor(220, 220, 220, 90)
+
+
+@dataclass
+class _OverviewUndoSnapshot:
+    """Features plus optional MSA rows so Restore can undo column/row deletes."""
+
+    features: dict[str, list[SequenceFeature]]
+    sequences: list[str] | None = None
+    lengths: dict[str, int] | None = None
+    record_ids: list[str] | None = None
+
+
+# MSA canvas / gap cells stay white (not palette Base grey).
+_MSA_CANVAS_LIGHT = QColor(255, 255, 255)
+_MSA_CANVAS_DARK = QColor(28, 28, 28)
 _REGION_BAND_LIGHT = QColor(11, 92, 171, 55)
 _REGION_BAND_DARK = QColor(80, 160, 255, 70)
 _MAX_ZOOM_OVER_FIT = 32.0
 _QT_MAX_WIDGET_SIZE = 16_777_215
 _BAR_RIGHT_PAD = 8
 _ZOOM_STEP = 1.08
-_SCALE_HEIGHT = 28
-# Ignore tiny moves (click / accidental jitter); macOS-like drag threshold.
-_RUBBER_MIN_PX = 14
+_SCALE_HEIGHT = 32
+# Ignore tiny moves (click / accidental jitter); keep low for responsive feel.
+_RUBBER_MIN_PX = 4
+# Recapture the drag paint cache when the rubber nears its edge.
+_DRAG_CACHE_EDGE_PX = 24
+_DRAG_CACHE_PAD_PX = 80
+
+
+def _msa_canvas_color(widget: QWidget) -> QColor:
+    return _MSA_CANVAS_DARK if _is_dark(widget) else _MSA_CANVAS_LIGHT
 
 
 def _guess_msa_is_protein(seqs: list[str]) -> bool:
@@ -337,8 +374,10 @@ class _NamesColumn(QWidget):
     """Sequence names; row geometry matches the tracks canvas exactly."""
 
     rowClicked = Signal(int, object)  # row, keyboard modifiers
-    rowsDragSelected = Signal(object)  # list[int]
+    rowsDragPreview = Signal(object)  # list[int] while dragging (live)
+    rowsDragSelected = Signal(object)  # list[int] on drag release (commit)
     selectAllRequested = Signal()
+    deleteRequested = Signal()  # Delete / Backspace (macOS name focus)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -383,7 +422,10 @@ class _NamesColumn(QWidget):
         self.update()
 
     def set_selected_rows(self, rows: set[int]) -> None:
-        self._selected_rows = set(rows)
+        new = set(rows)
+        if new == self._selected_rows:
+            return
+        self._selected_rows = new
         self.update()
 
     def _label_font(self) -> QFont:
@@ -413,6 +455,7 @@ class _NamesColumn(QWidget):
             row = self._row_at_y(event.position().y())
             if row >= 0:
                 self.rowClicked.emit(row, event.modifiers())
+            self.grabMouse()
             event.accept()
             return
         super().mousePressEvent(event)
@@ -430,15 +473,27 @@ class _NamesColumn(QWidget):
                 ).normalized()
                 rows = self._rows_in_y_range(rubber.top(), rubber.bottom())
                 if rows:
-                    self.rowsDragSelected.emit(rows)
+                    self.set_selected_rows(set(rows))
+                    self.rowsDragPreview.emit(rows)
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            if QWidget.mouseGrabber() is self:
+                self.releaseMouse()
+            was_dragging = self._dragging
+            origin = self._drag_origin
             self._drag_origin = None
             self._dragging = False
+            if was_dragging and origin is not None:
+                rubber = QRect(
+                    origin.toPoint(), event.position().toPoint()
+                ).normalized()
+                rows = self._rows_in_y_range(rubber.top(), rubber.bottom())
+                if rows:
+                    self.rowsDragSelected.emit(rows)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -454,6 +509,46 @@ class _NamesColumn(QWidget):
             self.selectAllRequested.emit()
             event.accept()
             return
+        # Plain Delete/Backspace (and macOS ⌘⌫ = StandardKey.Delete).
+        if event.matches(QKeySequence.StandardKey.Delete) or event.key() in (
+            Qt.Key.Key_Delete,
+            Qt.Key.Key_Backspace,
+        ):
+            self.deleteRequested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Undo) or (
+            event.key() == Qt.Key.Key_Z
+            and event.modifiers()
+            & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
+            and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        ):
+            node = self.parent()
+            while node is not None:
+                restore = getattr(node, "_restore_features", None)
+                if callable(restore):
+                    restore(True)
+                    event.accept()
+                    return
+                node = node.parent()
+        # Forward Shift+arrows to the tracks canvas (feature edge expand).
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier and event.key() in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+        ):
+            node = self.parent()
+            while node is not None:
+                bars = getattr(node, "_bars", None)
+                apply = getattr(bars, "apply_shift_edge_expand", None) if bars else None
+                if callable(apply):
+                    direction = (
+                        "left" if event.key() == Qt.Key.Key_Left else "right"
+                    )
+                    if apply(direction):
+                        event.accept()
+                        return
+                    break
+                node = node.parent()
         super().keyPressEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -502,6 +597,7 @@ class _BarsCanvas(QWidget):
     regionZoomRequested = Signal(float, float)  # kept for Fit/Select zoom helpers
     regionSelectionChanged = Signal(object)  # tuple[int,int] | None (1-based inclusive)
     rowsChanged = Signal()  # layout / selection updated — refresh names column
+    deleteRequested = Signal()  # Delete / Backspace while tracks focused
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -516,24 +612,44 @@ class _BarsCanvas(QWidget):
         self._msa_qcolors: dict[str, tuple[QColor, QColor]] = {}
         self._msa_residue_height = _MSA_ROW_HEIGHT
         self._msa_font_pt = _DEFAULT_MSA_FONT_PT
+        self._msa_color_mode = MSA_COLOR_ALL_BACKGROUNDS
+        self._msa_divergence_threshold = DEFAULT_MSA_DIVERGENCE_THRESHOLD
+        self._msa_col_freqs: list[dict[str, float]] = []
         self._sequence_row_gap = 0  # pixels between sequences (Others → distance)
+        self._column_distance = 0  # pixels between residue backgrounds
         self._show_annotation_track = True
         self._region_sel: tuple[int, int] | None = None
+        # When set, column band is limited to these rows (MSA regional drag).
+        # ``None`` means full-height column selection (scale / feature).
+        self._regional_rows: set[int] | None = None
         self._row_tops: list[int] = []
         self._row_heights: list[int] = []
         self._max_length = 1
         self._selected_rows: set[int] = set()
-        self._selected_feat: tuple[int, int] | None = None
+        # Selected annotation features as (row, flat_feature_index).
+        self._selected_feats: set[tuple[int, int]] = set()
         self._ppb = 0.05
         self._bar_pad = 8
         self._min_viewport = QSize(120, 40)
         self._drag_origin: QPointF | None = None
+        self._drag_kind: str | None = None  # "region" | "features"
+        self._press_feat: tuple[int, int] | None = None
         self._rubber = QRect()
         self._rubber_active = False  # True only after drag exceeds threshold
         self._rubber_prev = QRect()  # last overlay rect (for cheap partial updates)
         self._drag_paint_cache: QPixmap | None = None
+        self._drag_cache_origin = QPoint(0, 0)
+        # Live selection previews (scale columns / name rows) drawn on the cache.
+        self._preview_columns: tuple[int, int] | None = None
+        self._preview_rows: set[int] | None = None
+        self._preview_dirty = QRect()
+        self._cache_include_selection = True
         self._pending_scroll_bp: float | None = None
         self._pending_anchor: tuple[float, float] | None = None
+        # Shift+Left / Shift+Right cycle: 0 = outer side, 1 = include feature edge.
+        self._edge_expand_phase: dict[str, int] = {"left": 0, "right": 0}
+        # Anchor span for Shift+arrow when expanding a column selection.
+        self._edge_expand_anchor: tuple[int, int] | None = None
         # Edit > Find: hit ranges per record id, and the hit being shown.
         self._find_hits: dict[str, list[tuple[int, int]]] = {}
         self._find_current: tuple[str, int, int] | None = None
@@ -544,6 +660,9 @@ class _BarsCanvas(QWidget):
 
     def is_msa_mode(self) -> bool:
         return bool(self._msa_mode)
+
+    def msa_sequences(self) -> list[str]:
+        return list(self._msa_seqs)
 
     def set_data(
         self,
@@ -557,6 +676,7 @@ class _BarsCanvas(QWidget):
         self._msa_seqs = []
         self._msa_colors = {}
         self._msa_qcolors = {}
+        self._msa_col_freqs = []
         self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
         self._lengths = dict(lengths)
@@ -567,11 +687,15 @@ class _BarsCanvas(QWidget):
         }
         self._max_length = max((lengths.get(rid, 1) for rid in record_ids), default=1)
         self._selected_rows = set()
-        self._selected_feat = None
+        self._selected_feats = set()
         self._region_sel = None
+        self._regional_rows = None
         self._rubber = QRect()
         self._rubber_active = False
         self._drag_origin = None
+        self._drag_kind = None
+        self._press_feat = None
+        self._reset_edge_expand_phase()
         if fit_bars_width and fit_bars_width > 40 and self._max_length > 0:
             self._ppb = self.fit_pixels_per_base(fit_bars_width)
         fit_ppb, max_ppb = self.zoom_bounds()
@@ -602,6 +726,7 @@ class _BarsCanvas(QWidget):
             else nucleotide_base_color_map()
         )
         self._rebuild_msa_qcolor_cache()
+        self._rebuild_msa_conservation()
         self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
         width = len(sequences[0]) if sequences else 1
@@ -616,11 +741,15 @@ class _BarsCanvas(QWidget):
         }
         self._max_length = max(1, width)
         self._selected_rows = set()
-        self._selected_feat = None
+        self._selected_feats = set()
         self._region_sel = None
+        self._regional_rows = None
         self._rubber = QRect()
         self._rubber_active = False
         self._drag_origin = None
+        self._drag_kind = None
+        self._press_feat = None
+        self._reset_edge_expand_phase()
         if fit_bars_width and fit_bars_width > 40 and self._max_length > 0:
             self._ppb = self.fit_pixels_per_base(fit_bars_width)
         fit_ppb, max_ppb = self.zoom_bounds()
@@ -678,8 +807,42 @@ class _BarsCanvas(QWidget):
     def msa_residue_height(self) -> int:
         return int(self._msa_residue_height)
 
+    def _msa_shows_letters(self) -> bool:
+        ppb = max(self._ppb, 1e-12)
+        return bool(self._msa_mode) and ppb >= _MSA_LETTER_MIN_PPB and ppb >= 6
+
+    def _msa_letter_band_height(self) -> int:
+        """Residue-band height; at letter zoom grows with ``ppb`` so cells stay square."""
+        base = max(1, int(self._msa_residue_height))
+        if not self._msa_shows_letters():
+            return base
+        return max(base, int(math.ceil(self._ppb)))
+
+    def _msa_letter_font_for_cell(self, cell_w: float, cell_h: float) -> QFont:
+        """Font that fills most of the cell (figure-2 letter-to-background ratio)."""
+        font = QFont(self.font())
+        font.setFamily("Menlo")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        # ~9% margin each side → letter occupies ~82% of the shorter cell edge.
+        target = max(2.0, min(float(cell_w), float(cell_h)) * 0.82)
+        lo = max(2, int(self._msa_font_pt))
+        hi = min(96, max(lo, int(math.ceil(target)) + 2))
+        best = lo
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            font.setPointSize(mid)
+            fm = QFontMetrics(font)
+            glyph = float(max(fm.height(), fm.ascent() + fm.descent()))
+            if glyph <= target:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        font.setPointSize(best)
+        return font
+
     def set_sequence_row_gap(self, gap: int) -> None:
-        """Vertical gap between sequences (Others → Annotation/Sequence distance)."""
+        """Vertical gap between sequences (Others → Sequence distance)."""
         self._sequence_row_gap = max(0, min(40, int(gap)))
         self._recompute_layout()
         self.update()
@@ -687,14 +850,45 @@ class _BarsCanvas(QWidget):
     def sequence_row_gap(self) -> int:
         return int(self._sequence_row_gap)
 
+    def set_column_distance(self, gap: int) -> None:
+        """Horizontal gap between MSA residue backgrounds (Others → Column distance)."""
+        new = max(0, min(40, int(gap)))
+        if new == self._column_distance:
+            return
+        self._column_distance = new
+        self._clear_drag_paint_cache()
+        self.update()
+
+    def column_distance(self) -> int:
+        return int(self._column_distance)
+
     def region_selection(self) -> tuple[int, int] | None:
         return self._region_sel
 
-    def set_region_selection(self, start: int | None, end: int | None = None) -> None:
+    def regional_rows(self) -> set[int] | None:
+        """Rows limited by an MSA regional drag, or ``None`` for full columns."""
+        if self._regional_rows is None:
+            return None
+        return set(self._regional_rows)
+
+    def is_regional_selection(self) -> bool:
+        return self._region_sel is not None and self._regional_rows is not None
+
+    def set_region_selection(
+        self,
+        start: int | None,
+        end: int | None = None,
+        *,
+        keep_expand_anchor: bool = False,
+    ) -> None:
+        """Full-height column selection (scale / feature). Clears regional rows."""
         if start is None:
-            if self._region_sel is None:
+            if self._region_sel is None and self._regional_rows is None:
                 return
             self._region_sel = None
+            self._regional_rows = None
+            if not keep_expand_anchor:
+                self._reset_edge_expand_phase()
             self.update()
             self.regionSelectionChanged.emit(None)
             return
@@ -704,16 +898,68 @@ class _BarsCanvas(QWidget):
         if b < a:
             a, b = b, a
         new = (a, b)
-        if new == self._region_sel:
+        same_band = new == self._region_sel and self._regional_rows is None
+        rows_changed = bool(self._selected_rows)
+        if same_band and not rows_changed:
             return
         self._region_sel = new
+        self._regional_rows = None
+        # Column / feature selection clears name-column row highlights.
+        self._selected_rows = set()
+        if not keep_expand_anchor:
+            self._reset_edge_expand_phase()
+        self.update()
+        if not same_band:
+            self.regionSelectionChanged.emit(new)
+        if rows_changed:
+            self.selectionChanged.emit()
+            self.rowsChanged.emit()
+
+    def set_regional_selection(
+        self,
+        start: int,
+        end: int,
+        rows: list[int] | set[int],
+    ) -> None:
+        """Keep selection as the dragged MSA box (columns × rows only).
+
+        Does not highlight whole sequence rows in the name column — only the box.
+        """
+        maximum = max(1, int(self._max_length))
+        a = max(1, min(maximum, int(start)))
+        b = max(1, min(maximum, int(end)))
+        if b < a:
+            a, b = b, a
+        row_set = {
+            int(r) for r in rows if 0 <= int(r) < len(self._record_ids)
+        }
+        if not row_set:
+            self.set_region_selection(a, b)
+            return
+        new = (a, b)
+        if (
+            new == self._region_sel
+            and row_set == self._regional_rows
+            and not self._selected_rows
+        ):
+            return
+        rows_changed = bool(self._selected_rows)
+        self._region_sel = new
+        self._regional_rows = row_set
+        # Clear name-picked rows; regional rows drive name highlights via sync.
+        self._selected_rows = set()
+        self._reset_edge_expand_phase()
         self.update()
         self.regionSelectionChanged.emit(new)
+        self.selectionChanged.emit()
+        self.rowsChanged.emit()
+        del rows_changed
 
     def select_all_rows(self) -> None:
         n = len(self._record_ids)
         self._selected_rows = set(range(n)) if n else set()
-        self._selected_feat = None
+        self._selected_feats = set()
+        self._reset_edge_expand_phase()
         self.update()
         self.selectionChanged.emit()
         self.rowsChanged.emit()
@@ -732,6 +978,41 @@ class _BarsCanvas(QWidget):
         self._clear_drag_paint_cache()
         self.update()
 
+    def set_msa_color_mode(self, mode: str) -> None:
+        """Display → Color MSA painting mode (nucleotide and protein)."""
+        new = normalize_msa_color_mode(mode)
+        if new == self._msa_color_mode:
+            return
+        self._msa_color_mode = new
+        if self._msa_mode:
+            self._clear_drag_paint_cache()
+            self.update()
+
+    def msa_color_mode(self) -> str:
+        return str(self._msa_color_mode)
+
+    def set_msa_divergence_threshold(self, value: float) -> None:
+        """Fraction (0–1) of a column a letter must occupy to count as conserved."""
+        new = normalize_msa_divergence_threshold(value)
+        if abs(new - self._msa_divergence_threshold) < 1e-9:
+            return
+        self._msa_divergence_threshold = new
+        if self._msa_mode:
+            self._clear_drag_paint_cache()
+            self.update()
+
+    def msa_divergence_threshold(self) -> float:
+        return float(self._msa_divergence_threshold)
+
+    def _rebuild_msa_conservation(self) -> None:
+        if not self._msa_seqs:
+            self._msa_col_freqs = []
+            return
+        try:
+            self._msa_col_freqs = column_residue_frequencies(self._msa_seqs)
+        except ValueError:
+            self._msa_col_freqs = [{} for _ in range(len(self._msa_seqs[0]))]
+
     def _rebuild_msa_qcolor_cache(self) -> None:
         cache: dict[str, tuple[QColor, QColor]] = {}
         for key, pair in self._msa_colors.items():
@@ -743,40 +1024,227 @@ class _BarsCanvas(QWidget):
                 cache[key.lower()] = (bg, fg)
         self._msa_qcolors = cache
 
+    def _msa_should_fill_background(self, col: int, ch: str) -> bool:
+        """Whether the residue cell background should be painted for ``ch``.
+
+        MSA color scheme / divergence rules apply only at nucleotide (letter)
+        zoom. Zoomed-out overview always fills residue backgrounds.
+        """
+        if ch in "-.":
+            return False
+        if not self._msa_shows_letters():
+            return True
+        freqs = (
+            self._msa_col_freqs[col]
+            if 0 <= col < len(self._msa_col_freqs)
+            else None
+        )
+        return msa_residue_fill_background(
+            self._msa_color_mode,
+            residue=ch,
+            column_freqs=freqs,
+            threshold=self._msa_divergence_threshold,
+        )
+
     def _clear_drag_paint_cache(self) -> None:
         self._drag_paint_cache = None
+        self._drag_cache_origin = QPoint(0, 0)
         self._rubber_prev = QRect()
+        self._preview_columns = None
+        self._preview_rows = None
+        self._preview_dirty = QRect()
+        self._cache_include_selection = True
 
-    def _capture_drag_paint_cache(self) -> None:
-        """Snapshot the MSA/bars under the rubber overlay for smooth dragging."""
-        w = max(1, self.width())
-        h = max(1, self.height())
-        pm = QPixmap(w, h)
-        pm.fill(self.palette().color(QPalette.ColorRole.Base))
+    def _capture_drag_paint_cache(self, *, include_selection: bool = True) -> None:
+        """Snapshot the visible MSA/bars under the rubber (viewport only)."""
+        vis = self.visibleRegion().boundingRect()
+        if vis.isEmpty():
+            vis = QRect(0, 0, max(1, self.width()), max(1, self.height()))
+        # Pad so the rubber can grow a bit without immediate recapture.
+        pad = _DRAG_CACHE_PAD_PX
+        vis = vis.adjusted(-pad, -pad, pad, pad).intersected(
+            QRect(0, 0, max(1, self.width()), max(1, self.height()))
+        )
+        if vis.isEmpty():
+            vis = QRect(0, 0, max(1, self.width()), max(1, self.height()))
+        self._cache_include_selection = bool(include_selection)
+        pm = QPixmap(vis.size())
+        pm.fill(
+            _msa_canvas_color(self)
+            if self._msa_mode
+            else self.palette().color(QPalette.ColorRole.Base)
+        )
         painter = QPainter(pm)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        clip = QRect(0, 0, w, h)
+        painter.translate(-vis.left(), -vis.top())
         if self._msa_mode:
-            self._paint_msa_rows(painter, clip)
+            self._paint_msa_rows(painter, vis)
         else:
-            self._paint_bar_rows(painter, clip)
+            self._paint_bar_rows(painter, vis)
         painter.end()
+        self._cache_include_selection = True
         self._drag_paint_cache = pm
+        self._drag_cache_origin = vis.topLeft()
+
+    def _ensure_live_selection_cache(self) -> None:
+        """Bare MSA snapshot for column/row selection previews (no overlays)."""
+        if self._drag_paint_cache is not None and not self._rubber_active:
+            return
+        self._rubber_active = False
+        self._rubber = QRect()
+        self._capture_drag_paint_cache(include_selection=False)
+
+    def _column_band_rect(self, start: int, end: int) -> QRect:
+        x0 = int(self.bp_to_x(start - 1))
+        x1 = int(math.ceil(self.bp_to_x(end)))
+        if x1 < x0:
+            x0, x1 = x1, x0
+        return QRect(x0, 0, max(1, x1 - x0), max(1, self.height()))
+
+    def _rows_band_rect(self, rows: set[int]) -> QRect:
+        tops = [
+            self._row_tops[r]
+            for r in rows
+            if 0 <= r < len(self._row_tops)
+        ]
+        bottoms = [
+            self._row_tops[r] + self._row_heights[r]
+            for r in rows
+            if 0 <= r < len(self._row_tops)
+        ]
+        if not tops:
+            return QRect()
+        y0 = int(min(tops))
+        y1 = int(max(bottoms))
+        return QRect(0, y0, max(1, self.width()), max(1, y1 - y0))
+
+    def _update_preview_dirty(self, dirty: QRect) -> None:
+        area = dirty.adjusted(-3, -3, 3, 3).united(self._preview_dirty)
+        self._preview_dirty = QRect(dirty)
+        clipped = area.intersected(self.rect())
+        if clipped.isNull():
+            self.update()
+        else:
+            self.update(clipped)
+
+    def set_column_selection_preview(self, start: int, end: int) -> None:
+        """Live full-height column band while dragging the scale (cache blit)."""
+        maximum = max(1, int(self._max_length))
+        a = max(1, min(maximum, int(start)))
+        b = max(1, min(maximum, int(end)))
+        if b < a:
+            a, b = b, a
+        new = (a, b)
+        if new == self._preview_columns and self._drag_paint_cache is not None:
+            return
+        self._ensure_live_selection_cache()
+        old = self._preview_columns
+        self._preview_columns = new
+        self._preview_rows = None
+        dirty = self._column_band_rect(a, b)
+        if old is not None:
+            dirty = dirty.united(self._column_band_rect(old[0], old[1]))
+        self._update_preview_dirty(dirty)
+
+    def set_row_selection_preview(self, rows: list[int] | set[int]) -> None:
+        """Live sequence-row highlight while dragging names (cache blit)."""
+        row_set = {
+            int(r) for r in rows if 0 <= int(r) < len(self._record_ids)
+        }
+        if row_set == self._preview_rows and self._drag_paint_cache is not None:
+            return
+        self._ensure_live_selection_cache()
+        old = self._preview_rows
+        self._preview_rows = set(row_set)
+        self._preview_columns = None
+        dirty = self._rows_band_rect(row_set)
+        if old:
+            dirty = dirty.united(self._rows_band_rect(old))
+        self._update_preview_dirty(dirty)
+
+    def finish_live_selection_preview(self) -> None:
+        """Drop the live-selection cache after commit or cancel."""
+        if (
+            self._drag_paint_cache is None
+            and self._preview_columns is None
+            and self._preview_rows is None
+        ):
+            return
+        self._clear_drag_paint_cache()
+        self.update()
+
+    def _paint_live_selection_overlays(self, painter: QPainter, clip: QRect) -> None:
+        band = _REGION_BAND_DARK if _is_dark(self) else _REGION_BAND_LIGHT
+        edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
+        cols = self._preview_columns
+        if cols is not None:
+            start, end = cols
+            x0 = self.bp_to_x(start - 1)
+            x1 = self.bp_to_x(end)
+            width = max(1.0, x1 - x0)
+            painter.fillRect(
+                QRectF(x0, clip.top(), width, float(clip.height())),
+                band,
+            )
+            painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
+            painter.drawLine(int(x0), clip.top(), int(x0), clip.bottom())
+            painter.drawLine(int(x1), clip.top(), int(x1), clip.bottom())
+            painter.setPen(Qt.PenStyle.NoPen)
+        rows = self._preview_rows
+        if rows:
+            for index in rows:
+                if not (0 <= index < len(self._row_tops)):
+                    continue
+                top = self._row_tops[index]
+                height = self._row_heights[index]
+                if top + height < clip.top() or top > clip.bottom():
+                    continue
+                painter.fillRect(0, top, self.width(), height, band)
+            # One outer dash per contiguous block.
+            sorted_rows = sorted(r for r in rows if 0 <= r < len(self._row_tops))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
+            width = max(1, self.width() - 1)
+            i = 0
+            while i < len(sorted_rows):
+                start = sorted_rows[i]
+                end = start
+                while i + 1 < len(sorted_rows) and sorted_rows[i + 1] == end + 1:
+                    i += 1
+                    end = sorted_rows[i]
+                y0 = int(self._row_tops[start])
+                y1 = int(self._row_tops[end] + self._row_heights[end])
+                painter.drawRect(0, y0, width, max(1, y1 - y0 - 1))
+                i += 1
+            painter.setPen(Qt.PenStyle.NoPen)
+
+    def _rubber_needs_cache_recapture(self, rubber: QRect) -> bool:
+        cache = self._drag_paint_cache
+        if cache is None or cache.isNull():
+            return True
+        origin = self._drag_cache_origin
+        bounds = QRect(origin.x(), origin.y(), cache.width(), cache.height())
+        inset = bounds.adjusted(
+            _DRAG_CACHE_EDGE_PX,
+            _DRAG_CACHE_EDGE_PX,
+            -_DRAG_CACHE_EDGE_PX,
+            -_DRAG_CACHE_EDGE_PX,
+        )
+        return not inset.contains(rubber.normalized())
 
     def _update_rubber_overlay(self, rubber: QRect) -> None:
-        """Repaint only the band that changed while dragging a region."""
+        """Repaint the rubber union; keep drag lightweight (cache blit + overlay)."""
+        new = QRect(rubber).normalized()
+        if self._rubber_needs_cache_recapture(new):
+            self._capture_drag_paint_cache(include_selection=True)
         old = QRect(self._rubber_prev)
         self._rubber = QRect(rubber)
         self._rubber_active = True
-        new = QRect(rubber).normalized()
-        dirty = old.united(new)
-        # Full-height strips (dim overlay spans the viewport vertically).
+        dirty = old.united(new).adjusted(-3, -3, 3, 3)
         if dirty.isNull():
             self.update()
         else:
-            left = max(0, dirty.left() - 2)
-            right = min(self.width(), dirty.right() + 2)
-            self.update(QRect(left, 0, max(1, right - left), self.height()))
+            self.update(dirty.intersected(self.rect()))
         self._rubber_prev = QRect(new)
 
     def pixels_per_base(self) -> float:
@@ -809,14 +1277,26 @@ class _BarsCanvas(QWidget):
         return set(self._selected_rows)
 
     def selected_feature(self) -> tuple[int, int] | None:
-        """``(row, flat_feature_index)`` or ``None``."""
-        return self._selected_feat
+        """Primary ``(row, flat_feature_index)`` when exactly one feature is selected."""
+        if len(self._selected_feats) == 1:
+            return next(iter(self._selected_feats))
+        if not self._selected_feats:
+            return None
+        return sorted(self._selected_feats)[0]
+
+    def selected_features(self) -> list[tuple[int, int]]:
+        return sorted(self._selected_feats)
 
     def clear_feature_selection(self) -> None:
-        if self._selected_feat is None:
+        if not self._selected_feats:
             return
-        self._selected_feat = None
+        self._selected_feats = set()
+        self._reset_edge_expand_phase()
         self.update()
+
+    def _reset_edge_expand_phase(self) -> None:
+        self._edge_expand_phase = {"left": 0, "right": 0}
+        self._edge_expand_anchor = None
 
     def set_viewport_min_size(self, width: int, height: int) -> None:
         self._min_viewport = QSize(max(40, int(width)), max(40, int(height)))
@@ -916,7 +1396,6 @@ class _BarsCanvas(QWidget):
 
     def set_selected_rows(self, rows: list[int] | set[int]) -> None:
         self._selected_rows = {int(r) for r in rows if 0 <= int(r) < len(self._record_ids)}
-        self._selected_feat = None
         self.update()
         self.selectionChanged.emit()
         self.rowsChanged.emit()
@@ -937,8 +1416,10 @@ class _BarsCanvas(QWidget):
         gap = max(0, int(self._sequence_row_gap))
         for i, rid in enumerate(self._record_ids):
             if self._msa_mode:
-                # Residue band tracks letter size; no _MIN_ROW_HEIGHT floor.
-                h = int(self._msa_residue_height) + self._msa_track_block_height(rid)
+                # Letter zoom: band grows with ppb so glyph/background stay in ratio.
+                h = int(self._msa_letter_band_height()) + self._msa_track_block_height(
+                    rid
+                )
             else:
                 n_tracks = (
                     len(self._tracks.get(rid) or [])
@@ -993,8 +1474,16 @@ class _BarsCanvas(QWidget):
     def _feature_band_y0(self, row: int) -> int:
         top = self._row_tops[row]
         if self._msa_mode:
-            return top + int(self._msa_residue_height) + 1
+            return top + int(self._msa_letter_band_height()) + 1
         return top + _BAR_TOP_PAD + _BAR_HEIGHT + 2
+
+    def _y_in_annotation_band(self, row: int, y: float) -> bool:
+        if not self._show_annotation_track or row < 0 or row >= len(self._row_tops):
+            return False
+        top = self._row_tops[row]
+        height = self._row_heights[row] if row < len(self._row_heights) else 0
+        feat_y0 = self._feature_band_y0(row)
+        return feat_y0 <= y < top + height
 
     def _hit_feature(self, row: int, x: float, y: float) -> int | None:
         if not self._show_annotation_track:
@@ -1019,9 +1508,97 @@ class _BarsCanvas(QWidget):
                 flat_index += 1
         return None
 
+    def _feature_by_flat_index(
+        self, row: int, flat_index: int
+    ) -> SequenceFeature | None:
+        if not (0 <= row < len(self._record_ids)):
+            return None
+        rid = self._record_ids[row]
+        i = 0
+        for track in self._tracks.get(rid) or []:
+            for feat in track:
+                if i == flat_index:
+                    return feat
+                i += 1
+        return None
+
+    def _features_intersecting_rect(self, rubber: QRect) -> set[tuple[int, int]]:
+        """Features whose arrows intersect the rubber-band (partial overlap OK)."""
+        hits: set[tuple[int, int]] = set()
+        if rubber.isNull() or not self._show_annotation_track:
+            return hits
+        rx0, ry0 = float(rubber.left()), float(rubber.top())
+        rx1, ry1 = float(rubber.right()), float(rubber.bottom())
+        for row, rid in enumerate(self._record_ids):
+            if row >= len(self._row_tops):
+                continue
+            top = self._row_tops[row]
+            height = self._row_heights[row]
+            if top + height < ry0 or top > ry1:
+                continue
+            length = max(1, int(self._lengths.get(rid, 1)))
+            feat_y0 = self._feature_band_y0(row)
+            flat_index = 0
+            for track_i, track in enumerate(self._tracks.get(rid) or []):
+                ty = feat_y0 + track_i * (_FEAT_HEIGHT + _FEAT_GAP)
+                ty1 = ty + _FEAT_HEIGHT
+                for feat in track:
+                    start = max(1, min(int(feat.start), length))
+                    end = max(1, min(int(feat.end), length))
+                    if start > end:
+                        start, end = end, start
+                    x0 = self._bar_pad + (start - 1) * self._ppb
+                    x1 = self._bar_pad + end * self._ppb
+                    if x1 >= rx0 and x0 <= rx1 and ty1 >= ry0 and ty <= ry1:
+                        hits.add((row, flat_index))
+                    flat_index += 1
+        return hits
+
+    def selected_feature_column_span(self) -> tuple[int, int] | None:
+        """Leftmost/rightmost 1-based columns of selected features."""
+        if not self._selected_feats:
+            return None
+        left: int | None = None
+        right: int | None = None
+        for row, flat_i in self._selected_feats:
+            feat = self._feature_by_flat_index(row, flat_i)
+            if feat is None:
+                continue
+            a, b = int(feat.start), int(feat.end)
+            if b < a:
+                a, b = b, a
+            left = a if left is None else min(left, a)
+            right = b if right is None else max(right, b)
+        if left is None or right is None:
+            return None
+        return left, right
+
+    def _set_feature_selection(
+        self,
+        feats: set[tuple[int, int]],
+        *,
+        set_columns: bool = False,
+    ) -> None:
+        self._selected_feats = set(feats)
+        self._reset_edge_expand_phase()
+        if set_columns:
+            span = self.selected_feature_column_span()
+            if span is not None:
+                self.set_region_selection(span[0], span[1])
+            else:
+                self.set_region_selection(None)
+        self.update()
+
     def _select_row_click(self, row: int, modifiers: Qt.KeyboardModifier) -> None:
+        """Select sequences from the name column (not from MSA residue clicks)."""
         if row < 0:
             return
+        # Name pick clears a column/regional box so the row highlight is clear.
+        if self._region_sel is not None or self._regional_rows is not None:
+            self._region_sel = None
+            self._regional_rows = None
+            self._reset_edge_expand_phase()
+            self.regionSelectionChanged.emit(None)
         if modifiers & (
             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
         ):
@@ -1033,11 +1610,65 @@ class _BarsCanvas(QWidget):
             anchor = min(self._selected_rows)
             lo, hi = (anchor, row) if anchor <= row else (row, anchor)
             self._selected_rows = set(range(lo, hi + 1))
+        elif row in self._selected_rows:
+            # Plain click on an already-selected name → clear selection.
+            self._selected_rows = set()
         else:
             self._selected_rows = {row}
         self.update()
         self.selectionChanged.emit()
         self.rowsChanged.emit()
+
+    def _columns_from_rubber(self, rubber: QRect) -> tuple[int, int]:
+        start_bp = self.x_to_bp(rubber.left())
+        end_bp = self.x_to_bp(rubber.right())
+        if end_bp < start_bp:
+            start_bp, end_bp = end_bp, start_bp
+        start_i = max(1, int(math.floor(start_bp)) + 1)
+        end_i = max(start_i, int(math.ceil(end_bp)))
+        return start_i, end_i
+
+    def apply_shift_edge_expand(self, direction: str) -> bool:
+        """Shift+Left / Shift+Right from a feature or column selection.
+
+        Uses the feature span when features are selected; otherwise the current
+        column / regional column range. Left/right cycle:
+
+          Left:  ``[1, L-1]`` then ``[1, R]``
+          Right: ``[R+1, end]`` then ``[L, end]``
+        """
+        span = self.selected_feature_column_span()
+        if span is None and self._region_sel is not None:
+            # Stick to the original edges across the two-step cycle.
+            if self._edge_expand_anchor is None:
+                self._edge_expand_anchor = self._region_sel
+            span = self._edge_expand_anchor
+        if span is None:
+            return False
+        left, right = int(span[0]), int(span[1])
+        if right < left:
+            left, right = right, left
+        maximum = max(1, int(self._max_length))
+        key = "left" if direction == "left" else "right"
+        phase = int(self._edge_expand_phase.get(key, 0)) % 2
+        if key == "left":
+            if phase == 0:
+                if left <= 1:
+                    return False
+                self.set_region_selection(1, left - 1, keep_expand_anchor=True)
+            else:
+                self.set_region_selection(1, right, keep_expand_anchor=True)
+        else:
+            if phase == 0:
+                if right >= maximum:
+                    return False
+                self.set_region_selection(right + 1, maximum, keep_expand_anchor=True)
+            else:
+                self.set_region_selection(left, maximum, keep_expand_anchor=True)
+        self._edge_expand_phase[key] = 1 - phase
+        other = "right" if key == "left" else "left"
+        self._edge_expand_phase[other] = 0
+        return True
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1045,11 +1676,18 @@ class _BarsCanvas(QWidget):
             self._drag_origin = QPointF(pos)
             self._rubber = QRect()
             self._rubber_active = False
+            # Drop any live column/row preview before a regional drag.
+            if self._preview_columns is not None or self._preview_rows:
+                self.finish_live_selection_preview()
             row = self._row_at_y(pos.y())
-            if row >= 0:
-                feat_i = self._hit_feature(row, pos.x(), pos.y())
-                self._selected_feat = (row, feat_i) if feat_i is not None else None
-                self._select_row_click(row, event.modifiers())
+            feat_i = self._hit_feature(row, pos.x(), pos.y()) if row >= 0 else None
+            self._press_feat = (row, feat_i) if feat_i is not None else None
+            if row >= 0 and self._y_in_annotation_band(row, pos.y()):
+                self._drag_kind = "features"
+            else:
+                self._drag_kind = "region"
+            self.grabMouse()
+            # Sequence selection is via the name column; MSA press only starts a drag.
             event.accept()
             return
         super().mousePressEvent(event)
@@ -1059,16 +1697,12 @@ class _BarsCanvas(QWidget):
             origin = self._drag_origin.toPoint()
             current = event.position().toPoint()
             rubber = QRect(origin, current).normalized()
-            # Only activate region UI after a real drag distance.
             if rubber.width() >= _RUBBER_MIN_PX or rubber.height() >= _RUBBER_MIN_PX:
                 if not self._rubber_active:
-                    # Snapshot once; drag overlays blit the cache (smooth).
-                    self._capture_drag_paint_cache()
-                    self._selected_feat = None
-                # Defer row/name sync until release — only update the overlay.
-                rows = self._rows_in_y_range(rubber.top(), rubber.bottom())
-                if rows:
-                    self._selected_rows = set(rows)
+                    self._preview_columns = None
+                    self._preview_rows = None
+                    self._capture_drag_paint_cache(include_selection=True)
+                # Defer feature hit-testing until release — keeps the drag smooth.
                 self._update_rubber_overlay(rubber)
             event.accept()
             return
@@ -1076,33 +1710,65 @@ class _BarsCanvas(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self._drag_origin is not None:
+            if QWidget.mouseGrabber() is self:
+                self.releaseMouse()
             rubber = QRect(self._rubber)
             active = self._rubber_active
+            press_feat = self._press_feat
+            drag_kind = self._drag_kind
             self._drag_origin = None
+            self._press_feat = None
+            self._drag_kind = None
             self._rubber = QRect()
             self._rubber_active = False
             self._clear_drag_paint_cache()
             if active and (
                 rubber.width() >= _RUBBER_MIN_PX or rubber.height() >= _RUBBER_MIN_PX
             ):
-                rows = self._rows_in_y_range(rubber.top(), rubber.bottom())
-                if rows:
-                    self._selected_rows = set(rows)
-                    self._selected_feat = None
+                if drag_kind == "features":
+                    feats = self._features_intersecting_rect(rubber)
+                    # Partial overlap selects the feature → column span.
+                    self._set_feature_selection(feats, set_columns=True)
+                else:
+                    rows = self._rows_in_y_range(rubber.top(), rubber.bottom())
+                    start_i, end_i = self._columns_from_rubber(rubber)
+                    # Column / region drag: drop feature chrome so Shift+arrows
+                    # expand from this column span (same cycle as feature select).
+                    self._selected_feats = set()
+                    # Keep the dragged box (not a full-height column band).
+                    self.set_regional_selection(start_i, end_i, rows)
+                    self.setFocus(Qt.FocusReason.MouseFocusReason)
+            elif press_feat is not None:
+                # Click a feature → select it and its columns.
+                mods = event.modifiers()
+                if mods & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.MetaModifier
+                ):
+                    feats = set(self._selected_feats)
+                    if press_feat in feats:
+                        feats.discard(press_feat)
+                    else:
+                        feats.add(press_feat)
+                    self._set_feature_selection(feats, set_columns=True)
+                else:
+                    self._set_feature_selection({press_feat}, set_columns=True)
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+            else:
+                # Plain click on residues/bars clears column, feature, and
+                # name-selected sequence highlights (selected or not).
+                self._selected_feats = set()
+                self._reset_edge_expand_phase()
+                rows_cleared = bool(self._selected_rows)
+                if rows_cleared:
+                    self._selected_rows = set()
+                if self._region_sel is not None:
+                    self.set_region_selection(None)
+                else:
+                    self.update()
+                if rows_cleared:
                     self.selectionChanged.emit()
                     self.rowsChanged.emit()
-                # Drag selects a column/bp region (does not zoom).
-                start_bp = self.x_to_bp(rubber.left())
-                end_bp = self.x_to_bp(rubber.right())
-                if end_bp < start_bp:
-                    start_bp, end_bp = end_bp, start_bp
-                start_i = max(1, int(math.floor(start_bp)) + 1)
-                end_i = max(start_i, int(math.ceil(end_bp)))
-                self.set_region_selection(start_i, end_i)
-            elif self._region_sel is not None:
-                # Plain click (inside or outside the blue band) clears the region.
-                self.set_region_selection(None)
-            self.update()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -1110,10 +1776,51 @@ class _BarsCanvas(QWidget):
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         from PySide6.QtGui import QKeySequence
 
-        if event.key() == Qt.Key.Key_Escape and self._region_sel is not None:
-            self.set_region_selection(None)
+        if event.key() == Qt.Key.Key_Escape:
+            cleared = False
+            if self._region_sel is not None:
+                self.set_region_selection(None)
+                cleared = True
+            if self._selected_rows:
+                self._selected_rows = set()
+                self.update()
+                self.selectionChanged.emit()
+                self.rowsChanged.emit()
+                cleared = True
+            if cleared:
+                event.accept()
+                return
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            if event.key() == Qt.Key.Key_Left and self.apply_shift_edge_expand("left"):
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Right and self.apply_shift_edge_expand("right"):
+                event.accept()
+                return
+        # Plain Delete/Backspace; on macOS ⌘⌫ also matches StandardKey.Delete.
+        if event.matches(QKeySequence.StandardKey.Delete) or event.key() in (
+            Qt.Key.Key_Delete,
+            Qt.Key.Key_Backspace,
+        ):
+            self.deleteRequested.emit()
             event.accept()
             return
+        if event.matches(QKeySequence.StandardKey.Undo) or (
+            event.key() == Qt.Key.Key_Z
+            and event.modifiers()
+            & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
+            and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        ):
+            # Forward to panel undo (MSA / feature Restore).
+            node = self.parent()
+            while node is not None:
+                restore = getattr(node, "_restore_features", None)
+                if callable(restore):
+                    restore(True)
+                    event.accept()
+                    return
+                node = node.parent()
         if event.matches(QKeySequence.StandardKey.SelectAll) or (
             event.key() == Qt.Key.Key_A
             and event.modifiers()
@@ -1155,11 +1862,33 @@ class _BarsCanvas(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         clip = event.rect()
-        base = self.palette().color(QPalette.ColorRole.Base)
-        # During rubber-band drag, blit the cached MSA and only redraw the overlay.
+        base = (
+            _msa_canvas_color(self)
+            if self._msa_mode
+            else self.palette().color(QPalette.ColorRole.Base)
+        )
+        # During rubber / live selection preview, blit the cached MSA and overlay.
         cache = self._drag_paint_cache
-        if self._rubber_active and cache is not None and not cache.isNull():
-            painter.drawPixmap(clip, cache, clip)
+        live_preview = (
+            cache is not None
+            and not cache.isNull()
+            and (
+                self._rubber_active
+                or self._preview_columns is not None
+                or bool(self._preview_rows)
+            )
+        )
+        if live_preview:
+            origin = self._drag_cache_origin
+            src = clip.translated(-origin.x(), -origin.y())
+            src = src.intersected(QRect(0, 0, cache.width(), cache.height()))
+            if src.width() < clip.width() or src.height() < clip.height():
+                painter.fillRect(clip, base)
+            if not src.isEmpty():
+                dest = src.translated(origin.x(), origin.y())
+                painter.drawPixmap(dest, cache, src)
+            if self._preview_columns is not None or self._preview_rows:
+                self._paint_live_selection_overlays(painter, clip)
         else:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, not self._msa_mode)
             painter.fillRect(clip, base)
@@ -1168,24 +1897,68 @@ class _BarsCanvas(QWidget):
             else:
                 self._paint_bar_rows(painter, clip)
 
-        # Region overlay only after a real drag (not on click).
+        # Drag overlay: regional rectangle (MSA) or feature-box (annotation).
         if self._rubber_active and not self._rubber.isNull():
-            x0 = self._rubber.left()
-            x1 = max(x0 + 1, self._rubber.right())
-            dim = QColor(0, 0, 0, 90) if _is_dark(self) else QColor(40, 40, 40, 55)
-            if x0 > 0:
-                painter.fillRect(QRect(0, clip.top(), x0, clip.height()), dim)
-            if x1 < self.width():
-                painter.fillRect(
-                    QRect(x1, clip.top(), self.width() - x1, clip.height()), dim
-                )
+            rect = self._rubber.normalized()
             edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
-            painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
-            painter.drawLine(x0, clip.top(), x0, clip.bottom())
-            painter.drawLine(x1, clip.top(), x1, clip.bottom())
+            if self._drag_kind == "features":
+                fill = QColor(edge)
+                fill.setAlpha(45)
+                painter.fillRect(rect, fill)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
+                painter.drawRect(rect)
+            else:
+                # Regional selection: highlight the dragged rows × columns box.
+                fill = QColor(edge)
+                fill.setAlpha(55)
+                painter.fillRect(rect, fill)
+                dim = (
+                    QColor(0, 0, 0, 70) if _is_dark(self) else QColor(40, 40, 40, 40)
+                )
+                # Dim outside the regional box (full canvas).
+                if rect.top() > clip.top():
+                    painter.fillRect(
+                        QRect(clip.left(), clip.top(), clip.width(), rect.top() - clip.top()),
+                        dim,
+                    )
+                if rect.bottom() < clip.bottom():
+                    painter.fillRect(
+                        QRect(
+                            clip.left(),
+                            rect.bottom() + 1,
+                            clip.width(),
+                            clip.bottom() - rect.bottom(),
+                        ),
+                        dim,
+                    )
+                if rect.left() > clip.left():
+                    painter.fillRect(
+                        QRect(
+                            clip.left(),
+                            rect.top(),
+                            rect.left() - clip.left(),
+                            rect.height(),
+                        ),
+                        dim,
+                    )
+                if rect.right() < clip.right():
+                    painter.fillRect(
+                        QRect(
+                            rect.right() + 1,
+                            rect.top(),
+                            clip.right() - rect.right(),
+                            rect.height(),
+                        ),
+                        dim,
+                    )
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
+                painter.drawRect(rect)
         painter.end()
 
     def _paint_region_band(self, painter: QPainter, clip: QRect) -> None:
+        """Committed selection: full-height columns, or one regional box (no row dashes)."""
         sel = self._region_sel
         if sel is None:
             return
@@ -1195,10 +1968,37 @@ class _BarsCanvas(QWidget):
         if x1 < clip.left() or x0 > clip.right():
             return
         band = _REGION_BAND_DARK if _is_dark(self) else _REGION_BAND_LIGHT
+        edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
+        width = max(1.0, x1 - x0)
+        regional = self._regional_rows
+        if regional is not None:
+            tops = [
+                self._row_tops[r]
+                for r in regional
+                if 0 <= r < len(self._row_tops)
+            ]
+            bottoms = [
+                self._row_tops[r] + self._row_heights[r]
+                for r in regional
+                if 0 <= r < len(self._row_tops)
+            ]
+            if not tops:
+                return
+            y0 = float(min(tops))
+            y1 = float(max(bottoms))
+            rect = QRectF(x0, y0, width, max(1.0, y1 - y0))
+            painter.fillRect(rect, band)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
+            painter.drawRect(rect)
+            return
         painter.fillRect(
-            QRectF(x0, clip.top(), max(1.0, x1 - x0), float(clip.height())),
+            QRectF(x0, clip.top(), width, float(clip.height())),
             band,
         )
+        painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
+        painter.drawLine(int(x0), clip.top(), int(x0), clip.bottom())
+        painter.drawLine(int(x1), clip.top(), int(x1), clip.bottom())
 
     def _paint_feature_tracks(
         self,
@@ -1231,7 +2031,7 @@ class _BarsCanvas(QWidget):
                 _draw_arrow_feature(
                     painter, rect, fc, forward=feat.is_forward()
                 )
-                if self._selected_feat == (row, flat_index):
+                if (row, flat_index) in self._selected_feats:
                     painter.setBrush(Qt.BrushStyle.NoBrush)
                     painter.setPen(
                         QPen(QColor("#4ea1ff" if _is_dark(self) else "#0b5cab"), 2)
@@ -1243,29 +2043,26 @@ class _BarsCanvas(QWidget):
         """Column-aligned residue cells (visible rows/columns only)."""
         sel_bg = _SELECTED_BG_DARK if _is_dark(self) else _SELECTED_BG_LIGHT
         ppb = max(self._ppb, 1e-12)
-        show_letters = ppb >= _MSA_LETTER_MIN_PPB and ppb >= 6
+        show_letters = self._msa_shows_letters()
         c0 = max(0, int((clip.left() - self._bar_pad) / ppb) - 1)
         c1 = min(self._max_length, int((clip.right() - self._bar_pad) / ppb) + 2)
-        if show_letters:
-            font = QFont(self.font())
-            font.setFamily("Menlo")
-            font.setStyleHint(QFont.StyleHint.Monospace)
-            font.setPointSize(max(2, min(36, int(self._msa_font_pt))))
-            painter.setFont(font)
-        gap_fill = (
-            QColor(70, 70, 70, 70) if _is_dark(self) else _MSA_GAP_FILL
-        )
         qcolors = self._msa_qcolors
-        # Colored cell height matches letter metrics (set_msa_residue_size).
-        residue_h = max(1, int(self._msa_residue_height))
+        # At letter zoom, band grows with ppb (square cells); font scales to fill.
+        residue_h = max(1, int(self._msa_letter_band_height()))
+        if show_letters:
+            painter.setFont(self._msa_letter_font_for_cell(ppb, float(residue_h)))
+        # Equal inset on all sides from Column distance (0 → backgrounds connect).
+        _bg_margin = max(0.0, float(self._column_distance) * 0.5)
         painter.setPen(Qt.PenStyle.NoPen)
         for index, rid in enumerate(self._record_ids):
             top = self._row_tops[index]
             height = self._row_heights[index]
             if top + height < clip.top() or top > clip.bottom():
                 continue
-            if index in self._selected_rows:
-                painter.fillRect(0, top, self.width(), height, sel_bg)
+            if self._cache_include_selection and index in self._selected_rows:
+                # Name-column selection → MSA highlight (outline drawn once below).
+                band = _REGION_BAND_DARK if _is_dark(self) else _REGION_BAND_LIGHT
+                painter.fillRect(0, top, self.width(), height, band)
             seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
             y = top
             # Coalesce same-residue runs when zoomed out (far fewer draw calls).
@@ -1278,23 +2075,53 @@ class _BarsCanvas(QWidget):
                 if x > clip.right():
                     break
                 ch = seq[j] if j < len(seq) else "-"
+                fill_bg = self._msa_should_fill_background(j, ch)
                 run_end = j + 1
-                if not show_letters:
+                # Coalesce only when columns share one fill (distance 0).
+                if not show_letters and self._column_distance <= 0:
                     while run_end < c1:
                         nxt = seq[run_end] if run_end < len(seq) else "-"
                         if nxt != ch:
+                            break
+                        if self._msa_should_fill_background(run_end, nxt) != fill_bg:
                             break
                         run_end += 1
                 span = run_end - j
                 cell = QRectF(x, y, max(0.5, ppb * span), float(residue_h))
                 if ch in "-.":
-                    painter.fillRect(cell, gap_fill)
+                    # Gaps stay on the white canvas (no grey cell fill).
+                    if show_letters:
+                        gap_fg = (
+                            QColor("#d0d0d0")
+                            if _is_dark(self)
+                            else QColor("#666666")
+                        )
+                        painter.setPen(gap_fg)
+                        painter.drawText(
+                            cell.toRect(),
+                            int(Qt.AlignmentFlag.AlignCenter),
+                            "-",
+                        )
+                        painter.setPen(Qt.PenStyle.NoPen)
                 else:
                     pair = qcolors.get(ch)
                     if pair is not None:
-                        painter.fillRect(cell, pair[0])
+                        if fill_bg:
+                            m = _bg_margin
+                            if m > 0 and (
+                                cell.width() > 2.0 * m + 0.5
+                                and cell.height() > 2.0 * m + 0.5
+                            ):
+                                painter.fillRect(
+                                    cell.adjusted(m, m, -m, -m), pair[0]
+                                )
+                            else:
+                                painter.fillRect(cell, pair[0])
                         if show_letters:
-                            painter.setPen(pair[1])
+                            # Coloured background → black letter; no fill → residue colour.
+                            painter.setPen(
+                                QColor("#111111") if fill_bg else pair[0]
+                            )
                             painter.drawText(
                                 cell.toRect(),
                                 int(Qt.AlignmentFlag.AlignCenter),
@@ -1326,7 +2153,36 @@ class _BarsCanvas(QWidget):
                 length=length,
                 feat_y0=self._feature_band_y0(index),
             )
-        self._paint_region_band(painter, clip)
+        if self._cache_include_selection:
+            self._paint_selected_row_outlines(painter, clip)
+            self._paint_region_band(painter, clip)
+
+    def _paint_selected_row_outlines(self, painter: QPainter, clip: QRect) -> None:
+        """One dashed outline per contiguous name-selected block (no internal dashes)."""
+        if not self._selected_rows:
+            return
+        rows = sorted(
+            r for r in self._selected_rows if 0 <= r < len(self._row_tops)
+        )
+        if not rows:
+            return
+        edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
+        width = max(1, self.width() - 1)
+        i = 0
+        while i < len(rows):
+            start = rows[i]
+            end = start
+            while i + 1 < len(rows) and rows[i + 1] == end + 1:
+                i += 1
+                end = rows[i]
+            y0 = int(self._row_tops[start])
+            y1 = int(self._row_tops[end] + self._row_heights[end])
+            if y1 >= clip.top() and y0 <= clip.bottom():
+                painter.drawRect(0, y0, width, max(1, y1 - y0 - 1))
+            i += 1
+        painter.setPen(Qt.PenStyle.NoPen)
 
     def _paint_bar_rows(self, painter: QPainter, clip: QRect) -> None:
         sel_bg = _SELECTED_BG_DARK if _is_dark(self) else _SELECTED_BG_LIGHT
@@ -1336,7 +2192,9 @@ class _BarsCanvas(QWidget):
             height = self._row_heights[index]
             if top + height < clip.top() or top > clip.bottom():
                 continue
-            selected = index in self._selected_rows
+            selected = (
+                self._cache_include_selection and index in self._selected_rows
+            )
             if selected:
                 painter.fillRect(0, top, self.width(), height, sel_bg)
 
@@ -1367,11 +2225,19 @@ class _BarsCanvas(QWidget):
                 length=length,
                 feat_y0=self._feature_band_y0(index),
             )
-        self._paint_region_band(painter, clip)
+        if self._cache_include_selection:
+            self._paint_region_band(painter, clip)
 
 
 class _ScaleRuler(QWidget):
-    """Horizontal bp scale under the tracks only."""
+    """Horizontal bp scale under the tracks only.
+
+    Drag horizontally here to select MSA columns without changing sequence rows.
+    The selected column band is painted on the scale to match the MSA overlay.
+    """
+
+    columnRegionSelected = Signal(int, int)  # 1-based inclusive start, end
+    columnRegionPreview = Signal(object)  # tuple[int,int] | None while dragging
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1379,8 +2245,15 @@ class _ScaleRuler(QWidget):
         self._max_length = 1
         self._bar_pad = 8
         self._scroll_x = 0
+        self._region_sel: tuple[int, int] | None = None
+        self._drag_origin_x: float | None = None
+        self._drag_current_x: float | None = None
+        self._rubber_active = False
         self.setFixedHeight(_SCALE_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        # Focus so Shift+Left/Right (column edge expand) works after scale select.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_scale(self, *, ppb: float, max_length: int, bar_pad: int) -> None:
         self._ppb = max(_ABS_MIN_PPB, float(ppb))
@@ -1392,16 +2265,174 @@ class _ScaleRuler(QWidget):
         self._scroll_x = int(value)
         self.update()
 
+    def set_region_selection(self, start: int | None, end: int | None = None) -> None:
+        """Mirror the MSA column band onto the scale."""
+        if start is None:
+            if self._region_sel is None:
+                return
+            self._region_sel = None
+            self.update()
+            return
+        maximum = max(1, int(self._max_length))
+        a = max(1, min(maximum, int(start)))
+        b = max(1, min(maximum, int(end if end is not None else start)))
+        if b < a:
+            a, b = b, a
+        new = (a, b)
+        if new == self._region_sel:
+            return
+        self._region_sel = new
+        self.update()
+
+    def _x_to_bp(self, x: float) -> float:
+        return (float(x) + self._scroll_x - self._bar_pad) / max(self._ppb, 1e-12)
+
+    def _bp_to_x(self, bp: float) -> float:
+        return self._bar_pad + float(bp) * max(self._ppb, 1e-12) - self._scroll_x
+
+    def _columns_from_x_range(self, x0: float, x1: float) -> tuple[int, int]:
+        a = self._x_to_bp(x0)
+        b = self._x_to_bp(x1)
+        if b < a:
+            a, b = b, a
+        start_i = max(1, int(math.floor(a)) + 1)
+        end_i = max(start_i, min(self._max_length, int(math.ceil(b))))
+        return start_i, end_i
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_origin_x = float(event.position().x())
+            self._drag_current_x = self._drag_origin_x
+            self._rubber_active = False
+            self.grabMouse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if (
+            self._drag_origin_x is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            self._drag_current_x = float(event.position().x())
+            if abs(self._drag_current_x - self._drag_origin_x) >= _RUBBER_MIN_PX:
+                self._rubber_active = True
+                start_i, end_i = self._columns_from_x_range(
+                    self._drag_origin_x, self._drag_current_x
+                )
+                self.columnRegionPreview.emit((start_i, end_i))
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_origin_x is not None:
+            if QWidget.mouseGrabber() is self:
+                self.releaseMouse()
+            x0 = self._drag_origin_x
+            x1 = float(event.position().x())
+            active = self._rubber_active
+            self._drag_origin_x = None
+            self._drag_current_x = None
+            self._rubber_active = False
+            if active and abs(x1 - x0) >= _RUBBER_MIN_PX:
+                start_i, end_i = self._columns_from_x_range(x0, x1)
+                self._region_sel = (start_i, end_i)
+                self.columnRegionSelected.emit(start_i, end_i)
+            else:
+                # Click (no drag) → select the single column under the cursor.
+                col = self._columns_from_x_range(x1, x1)[0]
+                self._region_sel = (col, col)
+                self.columnRegionSelected.emit(col, col)
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _bars_canvas(self):
+        """Owning overview panel's MSA canvas, if present."""
+        node = self.parent()
+        while node is not None:
+            bars = getattr(node, "_bars", None)
+            if bars is not None:
+                return bars
+            node = node.parent()
+        return None
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        from PySide6.QtGui import QKeySequence
+
+        bars = self._bars_canvas()
+        # Same Shift+Left / Shift+Right cycle as feature / MSA column selection.
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier and event.key() in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+        ):
+            apply = getattr(bars, "apply_shift_edge_expand", None) if bars else None
+            if callable(apply):
+                direction = "left" if event.key() == Qt.Key.Key_Left else "right"
+                if apply(direction):
+                    event.accept()
+                    return
+        if event.matches(QKeySequence.StandardKey.Delete) or event.key() in (
+            Qt.Key.Key_Delete,
+            Qt.Key.Key_Backspace,
+        ):
+            delete = getattr(bars, "deleteRequested", None) if bars else None
+            if delete is not None:
+                delete.emit()
+                event.accept()
+                return
+        if event.key() == Qt.Key.Key_Escape:
+            clear = getattr(bars, "set_region_selection", None) if bars else None
+            if callable(clear) and getattr(bars, "region_selection", lambda: None)():
+                clear(None)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _paint_column_selection(self, painter: QPainter) -> None:
+        """Highlight selected / in-drag columns on the scale strip."""
+        sel = self._region_sel
+        if (
+            self._rubber_active
+            and self._drag_origin_x is not None
+            and self._drag_current_x is not None
+        ):
+            sel = self._columns_from_x_range(self._drag_origin_x, self._drag_current_x)
+        if sel is None:
+            return
+        start, end = sel
+        x0 = self._bp_to_x(start - 1)
+        x1 = self._bp_to_x(end)
+        band = _REGION_BAND_DARK if _is_dark(self) else _REGION_BAND_LIGHT
+        painter.fillRect(
+            QRectF(x0, 0, max(1.0, x1 - x0), float(self.height())),
+            band,
+        )
+        edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
+        painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
+        painter.drawLine(int(x0), 0, int(x0), self.height())
+        painter.drawLine(int(x1), 0, int(x1), self.height())
+
     def paintEvent(self, _event) -> None:  # noqa: N802
+        """Top MSA ruler: labels without commas; major / mid / unit ticks."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         base = self.palette().color(QPalette.ColorRole.Base)
         painter.fillRect(self.rect(), base)
+        self._paint_column_selection(painter)
         fg = self.palette().color(QPalette.ColorRole.Text)
         if _is_dark(self):
             fg = QColor("#c8c8c8")
         font = QFont(self.font())
-        font.setPointSize(max(8, font.pointSize() - 1))
+        font.setFamily("Menlo")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        # Half the previous label size (was ~pointSize-1, min 8).
+        font.setPointSize(max(4, (max(8, font.pointSize() - 1)) // 2))
         painter.setFont(font)
         fm = QFontMetrics(font)
 
@@ -1415,26 +2446,30 @@ class _ScaleRuler(QWidget):
         start_bp = max(0.0, (self._scroll_x - origin) / ppb)
         end_bp = min(float(self._max_length), start_bp + bars_width / ppb)
         span = max(1.0, end_bp - start_bp)
-        sample = f"{int(end_bp):,}"
+        # No thousands separators (e.g. 1000 not 1,000).
+        sample = f"{int(end_bp)}"
         min_label_px = fm.horizontalAdvance(sample) + 12
         step = _tick_step_for_span(span, bars_width, float(min_label_px))
 
-        baseline = self.height() - 4
+        # Labels above; ticks along the bottom edge (toward the MSA).
+        baseline = self.height() - 3
+        label_baseline = max(fm.ascent() + 1, baseline - 14)
         painter.setPen(QPen(fg, 1))
         painter.drawLine(0, baseline, width, baseline)
 
         first = int(start_bp // step) * step
         last_label_right = -1.0
-        bp = first
+        bp = float(first)
         guard = 0
         while bp <= end_bp + step and guard < 500:
             guard += 1
             x = origin + bp * ppb - self._scroll_x
             if -2 <= x <= width + 2:
-                painter.drawLine(int(x), baseline - 6, int(x), baseline)
-                label = f"{int(bp):,}"
+                # Major tick under labeled positions.
+                painter.setPen(QPen(fg, 1))
+                painter.drawLine(int(x), baseline - 8, int(x), baseline)
+                label = f"{int(bp)}"
                 label_w = fm.horizontalAdvance(label)
-                # Prefer centering; left-align near the left edge so "0" is visible.
                 label_left = x - label_w / 2
                 if label_left < bars_left + 2:
                     label_left = bars_left + 2
@@ -1442,10 +2477,38 @@ class _ScaleRuler(QWidget):
                 if label_right > bars_right - 2:
                     label_left = bars_right - 2 - label_w
                     label_right = label_left + label_w
-                if label_left >= last_label_right + 6 and label_right <= bars_right:
-                    painter.drawText(int(label_left), baseline - 8, label)
+                if label_left >= last_label_right + 4 and label_right <= bars_right:
+                    painter.drawText(
+                        int(label_left),
+                        int(label_baseline),
+                        label,
+                    )
                     last_label_right = label_right
             bp += step
+
+        # Mid-step ticks and small unit dots when zoomed in enough.
+        mid_step = max(1, step // 2)
+        show_unit_dots = ppb >= 3.5 and step <= 20
+        unit_step = 1
+        tick_start = int(math.floor(start_bp))
+        tick_end = int(math.ceil(end_bp)) + 1
+        painter.setPen(QPen(fg, 1))
+        for pos in range(max(0, tick_start), tick_end + 1):
+            if pos > self._max_length:
+                break
+            x = origin + pos * ppb - self._scroll_x
+            if x < -2 or x > width + 2:
+                continue
+            if step > 0 and pos % step == 0:
+                continue  # already drew major
+            if mid_step > 0 and pos % mid_step == 0 and step >= 2:
+                painter.drawLine(int(x), baseline - 5, int(x), baseline)
+            elif show_unit_dots and pos % unit_step == 0:
+                # Small divider dots between numbers (figure 2).
+                painter.setBrush(fg)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(QPointF(x, baseline - 1.5), 1.1, 1.1)
+                painter.setPen(QPen(fg, 1))
         painter.end()
 
 
@@ -1530,9 +2593,13 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.zoomChanged.connect(self._on_zoom_changed)
         self._bars.regionZoomRequested.connect(self._on_region_zoom)
         self._bars.regionSelectionChanged.connect(self._on_region_selection_changed)
+        self._scale.columnRegionSelected.connect(self._on_scale_column_region)
+        self._scale.columnRegionPreview.connect(self._on_scale_column_preview)
         self._names.rowClicked.connect(self._on_name_row_clicked)
+        self._names.rowsDragPreview.connect(self._on_name_rows_preview)
         self._names.rowsDragSelected.connect(self._on_name_rows_dragged)
         self._names.selectAllRequested.connect(self._select_all_sequences)
+        self._names.deleteRequested.connect(self._on_delete_clicked)
         # Bars owns the vertical scrollbar; names stays synced. Wheel over either
         # pane uses pixelDelta (trackpad) or a gentle mouse-wheel step.
         self._names_scroll.viewport().installEventFilter(self)
@@ -1578,18 +2645,19 @@ class MultiSequenceOverviewPanel(QWidget):
         names_layout = QVBoxLayout(names_col)
         names_layout.setContentsMargins(0, 0, 0, 0)
         names_layout.setSpacing(0)
+        # Scale lives under Select/Fit; shim keeps name rows aligned with tracks.
         names_layout.addWidget(self._toolbar_shim, 0)
+        names_layout.addWidget(self._scale_shim, 0)
         names_layout.addWidget(self._names_scroll, 1)
         names_layout.addWidget(self._hbar_shim)
-        names_layout.addWidget(self._scale_shim)
 
         tracks_col = QWidget(self)
         tracks_layout = QVBoxLayout(tracks_col)
         tracks_layout.setContentsMargins(0, 0, 0, 0)
         tracks_layout.setSpacing(0)
         tracks_layout.addWidget(self._toolbar_slot, 0)
+        tracks_layout.addWidget(self._scale, 0)
         tracks_layout.addWidget(self._bars_scroll, 1)
-        tracks_layout.addWidget(self._scale)
 
         self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self._splitter.addWidget(names_col)
@@ -1610,11 +2678,13 @@ class MultiSequenceOverviewPanel(QWidget):
         self._auto_all_updating = False
         self._similarity_all_updating = False
         self._similarity_db_rows: list[tuple] = []
-        self._feature_undo_stack: list[dict[str, list[SequenceFeature]]] = []
+        self._feature_undo_stack: list[_OverviewUndoSnapshot] = []
 
         self._rail = SequenceAnnotationRail(self)
         self._rail.set_overview_display_mode(True)
         self._rail.residueColorsChanged.connect(self._on_residue_colors_changed)
+        self._rail.msaColoringModeChanged.connect(self._on_msa_coloring_mode_changed)
+        self._rail.msaDivergenceChanged.connect(self._on_msa_divergence_changed)
         self._rail.colorsClicked.connect(self._on_colors_setting_clicked)
         self._transfer_cancel = JobCancellation()
         self._transfer_thread: QThread | None = None
@@ -1689,11 +2759,16 @@ class MultiSequenceOverviewPanel(QWidget):
             self._bars.content_height(),
             self._bars_scroll.viewport().height(),
         )
+        # Highlight name-picked rows and rows inside a regional MSA box.
+        highlight = self._bars.selected_row_set()
+        regional = self._bars.regional_rows()
+        if regional:
+            highlight = highlight | regional
         self._names.set_rows(
             self._bars.record_ids(),
             self._bars.row_tops(),
             self._bars.row_heights(),
-            self._bars.selected_row_set(),
+            highlight,
             width=width,
             content_height=content_h,
         )
@@ -1759,6 +2834,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._safe_disconnect(bar.zoom_slider.valueChanged, self._on_zoom_slider_changed)
         self._safe_disconnect(bar.fit_requested, self._fit_bars)
         self._safe_disconnect(bar.select_requested, self._select_by_position)
+        self._safe_disconnect(bar.consensus_requested, self._open_consensus_dialog)
         self._safe_disconnect(bar.extract_requested, self._extract_selected)
         self._safe_disconnect(bar.filter_text_changed, self._on_name_filter_edited)
         self._safe_disconnect(bar.filter_return_pressed, self._on_name_filter_next)
@@ -1821,6 +2897,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
         bar.fit_requested.connect(self._fit_bars)
         bar.select_requested.connect(self._select_by_position)
+        bar.consensus_requested.connect(self._open_consensus_dialog)
         bar.extract_requested.connect(self._extract_selected)
         bar.filter_text_changed.connect(self._on_name_filter_edited)
         bar.filter_return_pressed.connect(self._on_name_filter_next)
@@ -1850,19 +2927,24 @@ class MultiSequenceOverviewPanel(QWidget):
             self._open_similarity_annotation_settings
         )
         rail.saveClicked.connect(self._save_overview_annotations)
-        rail.deleteClicked.connect(self._delete_selected_feature)
+        rail.deleteClicked.connect(self._on_delete_clicked)
         rail.restoreClicked.connect(self._restore_features)
         rail.exportClicked.connect(self._export_overview_view)
+        self._bars.deleteRequested.connect(self._on_delete_clicked)
         rail.addFeatureClicked.connect(self._on_add_feature_clicked)
         rail.transferRequested.connect(self._on_transfer_annotations_clicked)
         rail.basesZoomedInChanged.connect(self._on_bases_zoomed_in_changed)
         rail.annotationDistanceChanged.connect(self._on_sequence_row_gap_changed)
+        rail.columnDistanceChanged.connect(self._on_column_distance_changed)
         rail.showAnnotationTrackChanged.connect(self._on_show_annotation_track_changed)
         self._load_overview_display_settings()
         bases = int(rail.bases_zoomed_in.value())
         self._bars.set_msa_residue_size(bases)
         self._names.set_label_point_size(bases)
         self._bars.set_sequence_row_gap(int(rail.annotation_distance.value()))
+        self._bars.set_column_distance(int(rail.column_distance.value()))
+        self._bars.set_msa_color_mode(rail.msa_coloring_mode_id())
+        self._bars.set_msa_divergence_threshold(rail.msa_divergence_threshold())
         self._sync_auto_annotation_all_check()
         self._refresh_similarity_database_rows()
 
@@ -1872,7 +2954,7 @@ class MultiSequenceOverviewPanel(QWidget):
         return s
 
     def _load_overview_display_settings(self) -> None:
-        """MSA/overview defaults: DNA/protein labels 4, sequence distance 1."""
+        """MSA/overview defaults: DNA/protein labels 4, sequence/column distance 0."""
         rail = self._rail
         s = self._overview_display_settings()
         try:
@@ -1880,18 +2962,44 @@ class MultiSequenceOverviewPanel(QWidget):
             distance = int(
                 s.value("sequence_distance", _DEFAULT_MSA_SEQUENCE_DISTANCE)
             )
+            col_distance = int(
+                s.value("column_distance", _DEFAULT_MSA_COLUMN_DISTANCE)
+            )
+            msa_mode = normalize_msa_color_mode(
+                str(s.value("msa_coloring_mode", MSA_COLOR_ALL_BACKGROUNDS) or "")
+            )
+            msa_div = normalize_msa_divergence_threshold(
+                s.value(
+                    "msa_divergence_threshold",
+                    DEFAULT_MSA_DIVERGENCE_THRESHOLD,
+                )
+            )
         finally:
             s.endGroup()
         bases = max(2, min(36, bases))
         distance = max(0, min(40, distance))
-        for widget in (rail.bases_zoomed_in, rail.annotation_distance):
+        col_distance = max(0, min(40, col_distance))
+        for widget in (
+            rail.bases_zoomed_in,
+            rail.annotation_distance,
+            rail.column_distance,
+        ):
             widget.blockSignals(True)
         try:
             rail.bases_zoomed_in.setValue(bases)
             rail.annotation_distance.setValue(distance)
+            rail.column_distance.setValue(col_distance)
         finally:
-            for widget in (rail.bases_zoomed_in, rail.annotation_distance):
+            for widget in (
+                rail.bases_zoomed_in,
+                rail.annotation_distance,
+                rail.column_distance,
+            ):
                 widget.blockSignals(False)
+        rail.set_msa_coloring_mode(msa_mode)
+        rail.set_msa_divergence_threshold(msa_div)
+        self._bars.set_msa_color_mode(msa_mode)
+        self._bars.set_msa_divergence_threshold(msa_div)
 
     def _save_overview_display_settings(self) -> None:
         rail = self._rail
@@ -1899,6 +3007,12 @@ class MultiSequenceOverviewPanel(QWidget):
         try:
             s.setValue("bases_zoomed_in", int(rail.bases_zoomed_in.value()))
             s.setValue("sequence_distance", int(rail.annotation_distance.value()))
+            s.setValue("column_distance", int(rail.column_distance.value()))
+            s.setValue("msa_coloring_mode", rail.msa_coloring_mode_id())
+            s.setValue(
+                "msa_divergence_threshold",
+                float(rail.msa_divergence_threshold()),
+            )
         finally:
             s.endGroup()
 
@@ -1914,6 +3028,10 @@ class MultiSequenceOverviewPanel(QWidget):
         self._save_overview_display_settings()
         self._sync_names_column()
 
+    def _on_column_distance_changed(self, gap: int) -> None:
+        self._bars.set_column_distance(int(gap))
+        self._save_overview_display_settings()
+
     def _on_show_annotation_track_changed(self, enabled: bool) -> None:
         self._bars.set_show_annotation_track(bool(enabled))
         self._sync_names_column()
@@ -1922,6 +3040,14 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.select_all_rows()
 
     def _on_region_selection_changed(self, region: object) -> None:
+        # Keep the bottom scale highlight in sync with the MSA column band.
+        if region is None:
+            self._scale.set_region_selection(None)
+        else:
+            try:
+                self._scale.set_region_selection(int(region[0]), int(region[1]))  # type: ignore[index]
+            except (TypeError, ValueError, IndexError):
+                self._scale.set_region_selection(None)
         bar = self._header_zoom_bar
         if bar is None or not hasattr(bar, "set_position_range"):
             return
@@ -1942,6 +3068,14 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _on_residue_colors_changed(self) -> None:
         self._bars.refresh_msa_colors()
+
+    def _on_msa_coloring_mode_changed(self, mode: str) -> None:
+        self._bars.set_msa_color_mode(mode)
+        self._save_overview_display_settings()
+
+    def _on_msa_divergence_changed(self, value: float) -> None:
+        self._bars.set_msa_divergence_threshold(value)
+        self._save_overview_display_settings()
 
     def _on_colors_setting_clicked(self) -> None:
         from repeatviewer.widgets.annotation_colors_dialog import (
@@ -2355,7 +3489,17 @@ class MultiSequenceOverviewPanel(QWidget):
         self._end_window_job_progress()
 
     def _push_feature_undo_snapshot(self) -> None:
-        self._feature_undo_stack.append(_clone_features_by_id(self._features))
+        seqs = self._bars.msa_sequences() if self.is_msa_mode() else None
+        lengths = dict(self._lengths) if seqs is not None else None
+        ids = list(self._record_ids) if seqs is not None else None
+        self._feature_undo_stack.append(
+            _OverviewUndoSnapshot(
+                features=_clone_features_by_id(self._features),
+                sequences=list(seqs) if seqs is not None else None,
+                lengths=lengths,
+                record_ids=ids,
+            )
+        )
         if len(self._feature_undo_stack) > _FEATURE_UNDO_LIMIT:
             self._feature_undo_stack.pop(0)
 
@@ -2395,14 +3539,39 @@ class MultiSequenceOverviewPanel(QWidget):
             self.annotationsSaved.emit(gff_path)
         return gff_path
 
-    def _delete_selected_feature(self) -> None:
-        sel = self._bars.selected_feature()
-        if sel is None:
+    def _on_delete_clicked(self) -> None:
+        """MSA: Delete → remove; Shift+Delete → gaps. Else delete a feature."""
+        # Shift+Delete fills with '-'; plain Delete splices/removes.
+        fill_gaps = bool(
+            QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier
+        )
+        if self.is_msa_mode() and self._bars.region_selection() is not None:
+            self._delete_selected_msa_edit(hard_delete=not fill_gaps)
+            return
+        if self.is_msa_mode() and self._bars.selected_rows():
+            self._delete_selected_msa_rows(hard_delete=not fill_gaps)
+            return
+        if self._bars.selected_feature() is not None:
+            self._delete_selected_feature()
+            return
+        if self.is_msa_mode():
             QMessageBox.information(
                 self,
                 "Delete",
-                "Select a feature on a sequence track, then click Delete.",
+                "Select sequences, a region, or columns, then Delete (remove) "
+                "or Shift+Delete (→ gaps). Ctrl+Z undoes. "
+                "Or select a feature and Delete.",
             )
+            return
+        QMessageBox.information(
+            self,
+            "Delete",
+            "Select a feature on a sequence track, then click Delete.",
+        )
+
+    def _delete_selected_feature(self) -> None:
+        sel = self._bars.selected_feature()
+        if sel is None:
             return
         row, feat_index = sel
         if not (0 <= row < len(self._record_ids)):
@@ -2439,16 +3608,305 @@ class MultiSequenceOverviewPanel(QWidget):
         self._persist_overview_features()
         self.statusMessage.emit(f"Deleted feature on {rid}.")
 
-    def _restore_features(self) -> None:
-        if not self._feature_undo_stack:
-            QMessageBox.information(
+    def _delete_selected_msa_rows(self, *, hard_delete: bool) -> None:
+        """Edit name-selected whole sequences.
+
+        * Delete — remove the selected sequence(s) from the MSA.
+        * Shift+Delete — fill each selected row with gaps.
+        """
+        if not self.is_msa_mode():
+            return
+        rows = sorted(self._bars.selected_rows())
+        if not rows:
+            return
+        seqs = self._bars.msa_sequences()
+        if not seqs:
+            return
+        n = len(seqs)
+        row_set = {r for r in rows if 0 <= r < n}
+        if not row_set:
+            return
+        title = "Delete" if hard_delete else "Gap fill"
+        if hard_delete and len(row_set) >= n:
+            QMessageBox.warning(
                 self,
-                "Restore",
-                "No feature changes to restore.",
+                title,
+                "Cannot delete every sequence. Leave at least one.",
             )
             return
-        self._features = self._feature_undo_stack.pop()
+
+        self._push_feature_undo_snapshot()
+        if hard_delete:
+            keep = [i for i in range(n) if i not in row_set]
+            new_ids = [self._record_ids[i] for i in keep]
+            new_seqs = [seqs[i] for i in keep]
+            new_features = {
+                rid: list(self._features.get(rid) or []) for rid in new_ids
+            }
+            new_width = len(new_seqs[0]) if new_seqs else 0
+            if new_width <= 0 or not new_ids:
+                self._feature_undo_stack.pop()
+                QMessageBox.warning(
+                    self,
+                    title,
+                    "Cannot delete every sequence. Leave at least one.",
+                )
+                return
+            try:
+                write_aligned_fasta_rows(self._path, new_ids, new_seqs)
+            except (OSError, ValueError) as exc:
+                self._feature_undo_stack.pop()
+                QMessageBox.critical(self, title, str(exc))
+                return
+            self._record_ids = new_ids
+            self._features = new_features
+            self._lengths = {rid: new_width for rid in new_ids}
+            keep_ppb = self._bars.pixels_per_base()
+            self._bars.set_msa_data(
+                new_ids,
+                new_seqs,
+                features=new_features,
+                fit_bars_width=None,
+            )
+            self._bars.set_pixels_per_base(keep_ppb)
+            self._bars.set_selected_rows([])
+            self._bars.set_region_selection(None)
+            self._sync_names_column()
+            self._update_scale()
+            self._sync_header_position_spins()
+            self._persist_overview_features()
+            self.statusMessage.emit(
+                f"Removed {len(row_set)} sequence(s) · "
+                f"{len(new_ids)} remain. Ctrl+Z to undo."
+            )
+            return
+
+        # Shift+Delete: gap-fill entire selected rows.
+        width = len(seqs[0])
+        try:
+            new_seqs = mask_rows_region(seqs, 1, width, row_set)
+        except ValueError as exc:
+            self._feature_undo_stack.pop()
+            QMessageBox.warning(self, title, str(exc))
+            return
+        edited_ids = {
+            self._record_ids[r] for r in row_set if 0 <= r < len(self._record_ids)
+        }
+        new_features: dict[str, list[SequenceFeature]] = {}
+        for rid in self._record_ids:
+            feats = list(self._features.get(rid) or [])
+            if rid in edited_ids:
+                feats = drop_features_overlapping_region(feats, 1, width)
+            new_features[rid] = feats
+        try:
+            write_aligned_fasta_rows(self._path, self._record_ids, new_seqs)
+        except (OSError, ValueError) as exc:
+            self._feature_undo_stack.pop()
+            QMessageBox.critical(self, title, str(exc))
+            return
+        self._features = new_features
+        keep_ppb = self._bars.pixels_per_base()
+        keep_sel = list(row_set)
+        self._bars.set_msa_data(
+            self._record_ids,
+            new_seqs,
+            features=self._features,
+            fit_bars_width=None,
+        )
+        self._bars.set_pixels_per_base(keep_ppb)
+        self._bars.set_selected_rows(keep_sel)
+        self._bars.set_region_selection(None)
+        self._sync_names_column()
+        self._update_scale()
+        self._persist_overview_features()
+        self.statusMessage.emit(
+            f"Filled {len(row_set)} sequence(s) with gaps. Ctrl+Z to undo."
+        )
+
+    def _delete_selected_msa_edit(self, *, hard_delete: bool) -> None:
+        """Edit the selected MSA region.
+
+        * Delete — remove residues/columns (splice).
+        * Shift+Delete — replace residues with ``-`` (keep columns).
+        Features overlapping the edited span on changed rows are dropped.
+        """
+        region = self._bars.region_selection()
+        if region is None or not self.is_msa_mode():
+            return
+        start, end = int(region[0]), int(region[1])
+        if end < start:
+            start, end = end, start
+        seqs = self._bars.msa_sequences()
+        if not seqs:
+            return
+        width = len(seqs[0])
+        start = max(1, min(width, start))
+        end = max(start, min(width, end))
+        n_del = end - start + 1
+        regional_rows = self._bars.regional_rows()
+        is_regional = regional_rows is not None and len(regional_rows) > 0
+        if is_regional:
+            rows = set(regional_rows)
+            edited_ids = {
+                self._record_ids[r]
+                for r in rows
+                if 0 <= r < len(self._record_ids)
+            }
+        else:
+            rows = set(range(len(seqs)))
+            edited_ids = set(self._record_ids)
+
+        title = "Delete" if hard_delete else "Gap fill"
+        if hard_delete and n_del >= width and not is_regional:
+            QMessageBox.warning(
+                self,
+                title,
+                "Cannot delete the entire alignment. Leave at least one column.",
+            )
+            return
+        if hard_delete and is_regional and n_del >= width:
+            QMessageBox.warning(
+                self,
+                title,
+                "Cannot delete the entire sequence. Leave at least one column.",
+            )
+            return
+
+        self._push_feature_undo_snapshot()
+        try:
+            if hard_delete:
+                if is_regional:
+                    new_seqs = splice_rows_region(seqs, start, end, rows)
+                else:
+                    new_seqs = remove_alignment_columns(seqs, start, end)
+            else:
+                new_seqs = mask_rows_region(
+                    seqs,
+                    start,
+                    end,
+                    rows if is_regional else None,
+                )
+        except ValueError as exc:
+            self._feature_undo_stack.pop()
+            QMessageBox.warning(self, title, str(exc))
+            return
+
+        new_features: dict[str, list[SequenceFeature]] = {}
+        for rid in self._record_ids:
+            feats = list(self._features.get(rid) or [])
+            if rid in edited_ids:
+                # Drop annotations that overlap the edited span.
+                feats = drop_features_overlapping_region(feats, start, end)
+                if hard_delete:
+                    feats = remap_features_after_column_delete(feats, start, end)
+            new_features[rid] = feats
+
+        new_width = len(new_seqs[0]) if new_seqs else 0
+        if new_width <= 0:
+            self._feature_undo_stack.pop()
+            QMessageBox.warning(
+                self,
+                title,
+                "Cannot delete the entire alignment. Leave at least one column.",
+            )
+            return
+        try:
+            write_aligned_fasta_rows(self._path, self._record_ids, new_seqs)
+        except (OSError, ValueError) as exc:
+            self._feature_undo_stack.pop()
+            QMessageBox.critical(self, title, str(exc))
+            return
+
+        self._features = new_features
+        self._lengths = {rid: new_width for rid in self._record_ids}
+        keep_ppb = self._bars.pixels_per_base()
+        self._bars.set_msa_data(
+            self._record_ids,
+            new_seqs,
+            features=self._features,
+            fit_bars_width=None,
+        )
+        self._bars.set_pixels_per_base(keep_ppb)
+        self._bars.set_region_selection(None)
+        self._sync_names_column()
+        self._update_scale()
+        self._sync_header_position_spins()
+        self._persist_overview_features()
+        if hard_delete:
+            scope = (
+                f"{len(rows)} sequence(s)"
+                if is_regional
+                else "all sequences"
+            )
+            self.statusMessage.emit(
+                f"Removed columns {start}–{end} from {scope} · "
+                f"{new_width} columns remain. Ctrl+Z to undo."
+            )
+        else:
+            scope = (
+                f"{len(rows)} sequence(s)"
+                if is_regional
+                else "all sequences"
+            )
+            self.statusMessage.emit(
+                f"Filled columns {start}–{end} with gaps on {scope}. "
+                "Ctrl+Z to undo."
+            )
+
+    def _restore_features(self, quiet: bool = False) -> None:
+        if not self._feature_undo_stack:
+            if not quiet:
+                QMessageBox.information(
+                    self,
+                    "Restore",
+                    "No changes to restore.",
+                )
+            return
+        snap = self._feature_undo_stack.pop()
+        self._features = snap.features
         self._bars.clear_feature_selection()
+        if snap.sequences is not None and self.is_msa_mode():
+            new_seqs = list(snap.sequences)
+            new_ids = (
+                list(snap.record_ids)
+                if snap.record_ids is not None
+                else list(self._record_ids)
+            )
+            if len(new_ids) != len(new_seqs):
+                QMessageBox.critical(
+                    self,
+                    "Restore",
+                    "Undo snapshot is inconsistent (ids vs sequences).",
+                )
+                return
+            new_width = len(new_seqs[0]) if new_seqs else 1
+            self._record_ids = new_ids
+            self._lengths = (
+                dict(snap.lengths)
+                if snap.lengths is not None
+                else {rid: new_width for rid in new_ids}
+            )
+            try:
+                write_aligned_fasta_rows(self._path, new_ids, new_seqs)
+            except (OSError, ValueError) as exc:
+                QMessageBox.critical(self, "Restore", str(exc))
+                return
+            keep_ppb = self._bars.pixels_per_base()
+            self._bars.set_msa_data(
+                new_ids,
+                new_seqs,
+                features=self._features,
+                fit_bars_width=None,
+            )
+            self._bars.set_pixels_per_base(keep_ppb)
+            self._bars.set_selected_rows([])
+            self._bars.set_region_selection(None)
+            self._sync_names_column()
+            self._update_scale()
+            self._sync_header_position_spins()
+            self._persist_overview_features()
+            self.statusMessage.emit("Restored previous MSA and features.")
+            return
         self._refresh_features_after_edit()
         self._persist_overview_features()
         self.statusMessage.emit("Restored previous feature state.")
@@ -2758,6 +4216,60 @@ class MultiSequenceOverviewPanel(QWidget):
         self._update_scale()
         self._sync_zoom_slider_from_ppb()
         self._sync_header_position_spins()
+
+    def _open_consensus_dialog(self) -> None:
+        """Open Consensus parameters for the FASTA shown in this overview."""
+        from repeatviewer.job_options import (
+            load_consensus_options,
+            save_consensus_options,
+        )
+        from repeatviewer.views.tool_dialogs import ConsensusParamsDialog
+
+        if not self._path.is_file():
+            QMessageBox.warning(
+                self,
+                "Consensus",
+                f"Sequence file not found:\n{self._path}",
+            )
+            return
+        opts = load_consensus_options()
+        dialog = ConsensusParamsDialog(initial=opts, parent=self)
+        if not dialog.exec():
+            return
+        opts = dialog.options()
+        save_consensus_options(opts)
+        if not dialog.should_run():
+            self.statusMessage.emit("Consensus settings saved.")
+            return
+        self._run_consensus(opts)
+
+    def _run_consensus(self, opts=None) -> None:
+        """Write a consensus FASTA beside the current alignment."""
+        from repeatviewer.backends.teaid_plotter import TeaidInputError, con_generater
+        from repeatviewer.job_options import ConsensusOptions, load_consensus_options
+
+        cons_opts = opts if opts is not None else load_consensus_options()
+        if not isinstance(cons_opts, ConsensusOptions):
+            cons_opts = load_consensus_options()
+        try:
+            out_path, length = con_generater(
+                str(self._path),
+                str(self._path.parent),
+                threshold=cons_opts.threshold,
+                ambiguous=cons_opts.ambiguous,
+                sequence_type=cons_opts.sequence_type,
+            )
+        except TeaidInputError as exc:
+            QMessageBox.warning(self, "Consensus", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 — surface tool failures
+            QMessageBox.critical(self, "Consensus failed", str(exc))
+            return
+        result = Path(out_path).expanduser().resolve()
+        self.sequenceExtracted.emit(result)
+        self.statusMessage.emit(
+            f"Consensus written · {result.name} ({length:,} residues)"
+        )
 
     def _slider_ppb_bounds(self) -> tuple[float, float]:
         return self._bars.zoom_bounds(self._bars_viewport_width())
@@ -3431,11 +4943,36 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.zoom_to_bp_range(start_bp, end_bp, self._bars_viewport_width())
 
     def _on_name_row_clicked(self, row: int, modifiers: object) -> None:
+        self._bars.finish_live_selection_preview()
         self._bars._select_row_click(row, modifiers)  # type: ignore[arg-type]
+
+    def _on_name_rows_preview(self, rows: object) -> None:
+        """Live name-drag highlight without a full MSA residue repaint."""
+        row_list = [int(r) for r in (rows or [])]
+        self._bars.set_row_selection_preview(row_list)
 
     def _on_name_rows_dragged(self, rows: object) -> None:
         row_list = [int(r) for r in (rows or [])]
+        self._bars.finish_live_selection_preview()
         self._bars.set_selected_rows(row_list)
+
+    def _on_scale_column_region(self, start: int, end: int) -> None:
+        """Column selection from dragging the bottom scale (no row change)."""
+        self._bars.finish_live_selection_preview()
+        # Pure column select: clear feature chrome so Shift+arrows use this span.
+        self._bars.clear_feature_selection()
+        self._bars.set_region_selection(int(start), int(end))
+        self._bars.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def _on_scale_column_preview(self, region: object) -> None:
+        """Live column band on the MSA while dragging the scale (cache blit)."""
+        if region is None:
+            return
+        try:
+            start, end = int(region[0]), int(region[1])  # type: ignore[index]
+        except (TypeError, ValueError, IndexError):
+            return
+        self._bars.set_column_selection_preview(start, end)
 
     def _on_feature_activated(self, row: int, feat_index: int) -> None:
         self._modify_feature_at(row, feat_index)

@@ -113,3 +113,75 @@ def test_annotate_one_record_projects_msa_features(tmp_path: Path) -> None:
 def test_project_features_list_noop_without_gaps() -> None:
     feats = [SequenceFeature(start=3, end=5, name="a", feature_type="LTR")]
     assert project_features_to_gapped(feats, None)[0].start == 3
+
+
+def test_column_residue_frequencies_and_threshold() -> None:
+    from repeatviewer.backends.msa_coordinates import (
+        MSA_COLOR_ALL_BACKGROUNDS,
+        MSA_COLOR_BG_WHEN_CONSERVED,
+        MSA_COLOR_LETTERS_ONLY,
+        MSA_COLOR_NO_BG_WHEN_CONSERVED,
+        column_conservation_mask,
+        column_residue_frequencies,
+        letter_is_conserved,
+        msa_residue_fill_background,
+        normalize_msa_color_mode,
+        normalize_msa_divergence_threshold,
+    )
+
+    freqs = column_residue_frequencies(["AA-", "AA-", "AC-"])
+    assert freqs[0] == {"A": 1.0}
+    assert abs(freqs[1]["A"] - 2 / 3) < 1e-9
+    assert abs(freqs[1]["C"] - 1 / 3) < 1e-9
+    assert freqs[2] == {}
+    assert letter_is_conserved(freqs[1], "A", threshold=0.4)
+    assert not letter_is_conserved(freqs[1], "C", threshold=0.4)
+    assert column_conservation_mask(
+        ["AA-", "AA-", "AC-"], threshold=0.4
+    ) == [True, True, False]
+    # Unanimous columns at threshold 1.0.
+    assert column_conservation_mask(
+        ["AAT-", "ACT-", "A-T-"],
+        threshold=1.0,
+    ) == [True, False, True, False]
+
+    assert normalize_msa_color_mode(None) == MSA_COLOR_ALL_BACKGROUNDS
+    assert normalize_msa_divergence_threshold(0.4) == 0.4
+
+    freqs_mix = {"A": 0.7, "T": 0.3}
+    assert msa_residue_fill_background(
+        MSA_COLOR_ALL_BACKGROUNDS,
+        residue="A",
+        column_freqs=freqs_mix,
+        threshold=0.4,
+    )
+    assert not msa_residue_fill_background(
+        MSA_COLOR_LETTERS_ONLY,
+        residue="A",
+        column_freqs=freqs_mix,
+        threshold=0.4,
+    )
+    assert msa_residue_fill_background(
+        MSA_COLOR_BG_WHEN_CONSERVED,
+        residue="A",
+        column_freqs=freqs_mix,
+        threshold=0.4,
+    )
+    assert not msa_residue_fill_background(
+        MSA_COLOR_BG_WHEN_CONSERVED,
+        residue="T",
+        column_freqs=freqs_mix,
+        threshold=0.4,
+    )
+    assert msa_residue_fill_background(
+        MSA_COLOR_NO_BG_WHEN_CONSERVED,
+        residue="T",
+        column_freqs=freqs_mix,
+        threshold=0.4,
+    )
+    assert not msa_residue_fill_background(
+        mode=MSA_COLOR_ALL_BACKGROUNDS,
+        residue="-",
+        column_freqs=freqs_mix,
+        threshold=0.4,
+    )

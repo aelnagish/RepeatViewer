@@ -31,11 +31,12 @@ OutputFormat = Literal["png", "pdf"]
 # IUPAC nucleotide ambiguity codes (default white so users can recolour them).
 _NUCLEOTIDE_AMBIGUITY_LETTERS = ("I", "R", "Y", "W", "S", "M", "K", "B", "H", "D", "V")
 
-# Nucleotide defaults (A green, C purple-blue, G black, T/U pink); ambiguities white.
+# Nucleotide defaults (A green, C purple-blue, G charcoal, T/U pink); ambiguities white.
+# G uses medium-dark grey (not pure black) so black letters stay readable.
 NUCLEOTIDE_COLORS_DEFAULT: dict[str, str] = {
     "A": "#00C800",
     "C": "#7040E8",
-    "G": "#000000",
+    "G": "#707070",
     "T": "#F06090",
     "U": "#F06090",
     "N": "#C8C8C8",
@@ -45,10 +46,11 @@ NUCLEOTIDE_COLORS_DEFAULT: dict[str, str] = {
 }
 
 # Same Wong / Paul Tol palette as Annotation nucleotide Color-blind.
+# G matches Default charcoal (#707070) so black letters stay readable.
 NUCLEOTIDE_COLORS_COLORBLIND: dict[str, str] = {
     "A": "#E69F00",
     "C": "#0072B2",
-    "G": "#000000",
+    "G": "#707070",
     "T": "#009E73",
     "U": "#009E73",
     "N": "#C8C8C8",

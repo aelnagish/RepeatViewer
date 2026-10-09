@@ -251,22 +251,24 @@ def save_show_sequence_summary(enabled: bool) -> None:
 
 
 # Wong / Paul Tol–style nucleotide colors (color-blind friendly).
+# G matches Default charcoal so black letters stay readable on fill.
 _COLORBLIND_BASE_COLORS: dict[str, tuple[str, str]] = {
     "A": ("#E69F00", "#000000"),
     "C": ("#0072B2", "#FFFFFF"),
-    "G": ("#000000", "#FFFFFF"),
+    "G": ("#707070", "#000000"),
     "T": ("#009E73", "#FFFFFF"),
     "U": ("#009E73", "#FFFFFF"),
     "N": ("#C8C8C8", "#000000"),
 }
 
-# Same MSA "Default" palette used by Element colors / MSA plot (figure 2).
+# Same MSA "Default" palette used by Element colors / MSA plot.
+# G is charcoal grey (not pure black) so black letters remain readable.
 _STANDARD_BASE_COLORS: dict[str, tuple[str, str]] = {
     "A": ("#00C800", "#000000"),
-    "C": ("#7040E8", "#FFFFFF"),
-    "G": ("#000000", "#FFFFFF"),
-    "T": ("#F06090", "#FFFFFF"),
-    "U": ("#F06090", "#FFFFFF"),
+    "C": ("#7040E8", "#000000"),
+    "G": ("#707070", "#000000"),
+    "T": ("#F06090", "#000000"),
+    "U": ("#F06090", "#000000"),
     "N": ("#C8C8C8", "#000000"),
 }
 
