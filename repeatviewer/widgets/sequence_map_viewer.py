@@ -284,6 +284,7 @@ _AUTO_ANN_CHECK_EXTRA_SPACING = 4
 _MIN_FEATURE_COLUMN_WIDTH = 54
 _SIMILARITY_DB_CHIP_SPACING = 4
 _MARQUEE_DRAG_THRESHOLD = 3.0
+_FEATURE_EDGE_HIT_PX = 6.0
 _ANNOT_TRACK_VPAD = 8
 _ANNOT_FEATURE_HEIGHT = 18
 logger = logging.getLogger(__name__)
@@ -1317,6 +1318,27 @@ def _feature_with_track(feat: SequenceFeature, track: int) -> SequenceFeature:
     )
 
 
+def _feature_with_bounds(
+    feat: SequenceFeature, start: int, end: int
+) -> SequenceFeature:
+    a, b = int(start), int(end)
+    if b < a:
+        a, b = b, a
+    return SequenceFeature(
+        start=a,
+        end=b,
+        name=feat.name,
+        feature_type=feat.feature_type,
+        color=feat.color,
+        strand=feat.strand,
+        track=feat.track,
+        parent=feat.parent,
+        source=feat.source,
+        pident=feat.pident,
+        subject_id=feat.subject_id,
+    )
+
+
 def _feature_with_color(feat: SequenceFeature, color: str) -> SequenceFeature:
     return SequenceFeature(
         start=feat.start,
@@ -1444,6 +1466,7 @@ class AnnotationTrackWidget(QWidget):
     modifyRequested = Signal()
     changeColorRequested = Signal()
     tracksMoved = Signal(object)  # list[SequenceFeature]
+    featuresResized = Signal(object)  # list[SequenceFeature]
     attachImageRequested = Signal()  # selected feature
     openImagesRequested = Signal(int)  # feature index with images
     imagesDropped = Signal(int, list)  # feature index, image paths
@@ -1464,6 +1487,7 @@ class AnnotationTrackWidget(QWidget):
         self._scroll_px = 0.0
         self._ppb = 1.0
         self._viewport_w = 200
+        self._seq_length = 1
         self._selected_indices: set[int] = set()
         self._row_count = 0
         self._marquee_active = False
@@ -1471,6 +1495,7 @@ class AnnotationTrackWidget(QWidget):
         self._marquee_current: QPointF | None = None
         self._press_pos: QPointF | None = None
         self._press_hit: int | None = None
+        self._press_edge: str | None = None  # "start" | "end"
         self._marquee_additive_base: set[int] = set()
         self._mouse_grabbed = False
         self._show_similarity_database_name = True
@@ -1478,6 +1503,11 @@ class AnnotationTrackWidget(QWidget):
         self._move_indices: set[int] = set()
         self._move_preview_track: int | None = None
         self._move_ghost_y: float | None = None
+        self._resize_active = False
+        self._resize_idx: int | None = None
+        self._resize_edge: str | None = None
+        self._resize_orig_start = 0
+        self._resize_orig_end = 0
         self._feature_bar_height = float(_ANNOT_FEATURE_HEIGHT)
         self._track_gap = float(_TRACK_GAP)
         self._label_point_size = 7
@@ -1517,6 +1547,7 @@ class AnnotationTrackWidget(QWidget):
                 ppb=self._ppb,
                 viewport_w=self._viewport_w,
                 selected_indices=self._selected_indices,
+                seq_length=self._seq_length,
             )
         else:
             self.update()
@@ -1550,18 +1581,28 @@ class AnnotationTrackWidget(QWidget):
 
     def hideEvent(self, event) -> None:  # noqa: N802
         self._press_pos = None
+        self._press_edge = None
         self._marquee_active = False
         self._move_active = False
         self._move_indices = set()
         self._move_preview_track = None
         self._move_ghost_y = None
+        self._resize_active = False
+        self._resize_idx = None
+        self._resize_edge = None
         self._hover_idx = None
         self._release_drag_mouse()
         super().hideEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
-        if self._hover_idx is not None and not self._move_active and not self._marquee_active:
+        if (
+            self._hover_idx is not None
+            and not self._move_active
+            and not self._marquee_active
+            and not self._resize_active
+        ):
             self._hover_idx = None
+            self.unsetCursor()
             self.update()
         super().leaveEvent(event)
 
@@ -1719,6 +1760,54 @@ class AnnotationTrackWidget(QWidget):
                 return idx
         return None
 
+    def _x_to_bp(self, x: float) -> int:
+        if self._ppb <= 0:
+            return 1
+        bp = int((float(x) + self._scroll_px - _LEFT_MARGIN) / self._ppb) + 1
+        return max(1, min(max(1, self._seq_length), bp))
+
+    def _feature_resizable(self, idx: int) -> bool:
+        if not (0 <= idx < len(self._features)):
+            return False
+        if idx < len(self._feature_alphas) and int(self._feature_alphas[idx]) < 255:
+            return False  # transfer / ghost preview overlay
+        return True
+
+    def _edge_hit(self, pos: QPointF) -> tuple[int, str] | None:
+        """Return ``(feature_index, 'start'|'end')`` when near a feature edge."""
+        idx = self._hit_test_feature(pos)
+        if idx is None or not self._feature_resizable(idx):
+            return None
+        rect = self._feature_rect(idx)
+        threshold = min(
+            max(4.0, _FEATURE_EDGE_HIT_PX),
+            max(2.0, rect.width() * 0.35),
+        )
+        dist_left = abs(float(pos.x()) - float(rect.left()))
+        dist_right = abs(float(pos.x()) - float(rect.right()))
+        if dist_left <= threshold and dist_left <= dist_right:
+            return idx, "start"
+        if dist_right <= threshold:
+            return idx, "end"
+        return None
+
+    def _apply_resize_at(self, x: float) -> None:
+        idx = self._resize_idx
+        edge = self._resize_edge
+        if idx is None or edge is None or not (0 <= idx < len(self._features)):
+            return
+        bp = self._x_to_bp(x)
+        start, end = self._resize_orig_start, self._resize_orig_end
+        if edge == "start":
+            start = min(bp, end)
+        else:
+            end = max(bp, start)
+        feat = self._features[idx]
+        if int(feat.start) == start and int(feat.end) == end:
+            return
+        self._features[idx] = _feature_with_bounds(feat, start, end)
+        self.update()
+
     def _row_band_rect(self, row: int) -> QRectF:
         row_h = self._row_height()
         y = _ANNOT_TRACK_VPAD + row * row_h
@@ -1785,19 +1874,24 @@ class AnnotationTrackWidget(QWidget):
         viewport_w: int,
         selected_indices: set[int] | frozenset[int] | None = None,
         feature_alphas: list[int] | None = None,
+        seq_length: int | None = None,
     ) -> None:
-        self._features = list(features)
-        self._feature_rows = list(feature_rows)
-        if feature_alphas is not None and len(feature_alphas) == len(features):
-            self._feature_alphas = list(feature_alphas)
-        else:
-            self._feature_alphas = [255] * len(features)
+        if not self._resize_active:
+            self._features = list(features)
+            self._feature_rows = list(feature_rows)
+            if feature_alphas is not None and len(feature_alphas) == len(features):
+                self._feature_alphas = list(feature_alphas)
+            else:
+                self._feature_alphas = [255] * len(features)
         self._scroll_px = max(0.0, float(scroll_px))
         self._ppb = max(_FIT_MIN_PPB, float(ppb))
         self._viewport_w = max(1, int(viewport_w))
+        if seq_length is not None:
+            self._seq_length = max(1, int(seq_length))
         if (
             not self._marquee_active
             and not self._move_active
+            and not self._resize_active
             and self._press_pos is None
         ):
             self._selected_indices = set(selected_indices or [])
@@ -1805,7 +1899,11 @@ class AnnotationTrackWidget(QWidget):
         self._selected_indices &= valid
         if self._hover_idx is not None and self._hover_idx not in valid:
             self._hover_idx = None
-        self._row_count = max((r for r in feature_rows), default=-1) + 1 if features else 0
+        self._row_count = (
+            max((r for r in self._feature_rows), default=-1) + 1
+            if self._features
+            else 0
+        )
         track_w = max(1, int(viewport_w))
         bar_h = int(self._feature_bar_height)
         if self._row_count > 0:
@@ -2116,6 +2214,7 @@ class AnnotationTrackWidget(QWidget):
             and 0 <= hover_idx < len(self._features)
             and not self._marquee_active
             and not self._move_active
+            and not self._resize_active
         ):
             feat = self._features[hover_idx]
             rect = self._feature_rect(hover_idx)
@@ -2177,7 +2276,12 @@ class AnnotationTrackWidget(QWidget):
             event.accept()
             return
         self._press_pos = pos
-        self._press_hit = self._hit_test_feature(pos)
+        edge = self._edge_hit(pos)
+        if edge is not None:
+            self._press_hit, self._press_edge = edge
+        else:
+            self._press_hit = self._hit_test_feature(pos)
+            self._press_edge = None
         self._marquee_active = False
         self._marquee_origin = None
         self._marquee_current = None
@@ -2185,17 +2289,30 @@ class AnnotationTrackWidget(QWidget):
         self._move_indices = set()
         self._move_preview_track = None
         self._move_ghost_y = None
+        self._resize_active = False
+        self._resize_idx = None
+        self._resize_edge = None
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         pos = event.position()
         if self._press_pos is None:
-            hit = self._hit_test_feature(pos)
+            edge = self._edge_hit(pos)
+            hit = edge[0] if edge is not None else self._hit_test_feature(pos)
             if hit != self._hover_idx:
                 self._hover_idx = hit
                 self.update()
+            if edge is not None:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            else:
+                self.unsetCursor()
             super().mouseMoveEvent(event)
+            return
+
+        if self._resize_active:
+            self._apply_resize_at(pos.x())
+            event.accept()
             return
 
         if self._move_active:
@@ -2214,6 +2331,26 @@ class AnnotationTrackWidget(QWidget):
         delta = pos - self._press_pos
         if math.hypot(delta.x(), delta.y()) < _MARQUEE_DRAG_THRESHOLD:
             super().mouseMoveEvent(event)
+            return
+
+        # Edge grab → resize start/end (takes priority over track move / marquee).
+        if self._press_edge is not None and self._press_hit is not None:
+            idx = self._press_hit
+            feat = self._features[idx]
+            self._resize_active = True
+            self._resize_idx = idx
+            self._resize_edge = self._press_edge
+            self._resize_orig_start = int(feat.start)
+            self._resize_orig_end = int(feat.end)
+            if idx not in self._selected_indices:
+                self._selected_indices = {idx}
+                self._emit_selection()
+            self._hover_idx = None
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            self.grabMouse()
+            self._mouse_grabbed = True
+            self._apply_resize_at(pos.x())
+            event.accept()
             return
 
         # Drag from an already-selected feature (mostly vertical) → move track.
@@ -2253,14 +2390,32 @@ class AnnotationTrackWidget(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             super().mouseReleaseEvent(event)
             return
-        if self._press_pos is None and not self._marquee_active and not self._move_active:
+        if (
+            self._press_pos is None
+            and not self._marquee_active
+            and not self._move_active
+            and not self._resize_active
+        ):
             self._release_drag_mouse()
             super().mouseReleaseEvent(event)
             return
         pos = event.position()
         additive = self._additive_modifier(event.modifiers())
         try:
-            if self._move_active and self._move_indices:
+            if self._resize_active and self._resize_idx is not None:
+                idx = self._resize_idx
+                feat = self._features[idx] if 0 <= idx < len(self._features) else None
+                changed = (
+                    feat is not None
+                    and (
+                        int(feat.start) != self._resize_orig_start
+                        or int(feat.end) != self._resize_orig_end
+                    )
+                )
+                if changed:
+                    self.featuresResized.emit(list(self._features))
+                self._emit_selection()
+            elif self._move_active and self._move_indices:
                 updated = self._features_after_track_move(pos.y())
                 if updated is not None:
                     self.tracksMoved.emit(updated)
@@ -2297,6 +2452,7 @@ class AnnotationTrackWidget(QWidget):
         finally:
             self._press_pos = None
             self._press_hit = None
+            self._press_edge = None
             self._marquee_active = False
             self._marquee_origin = None
             self._marquee_current = None
@@ -2305,6 +2461,9 @@ class AnnotationTrackWidget(QWidget):
             self._move_indices = set()
             self._move_preview_track = None
             self._move_ghost_y = None
+            self._resize_active = False
+            self._resize_idx = None
+            self._resize_edge = None
             self._release_drag_mouse()
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.update()
@@ -3925,6 +4084,7 @@ class SequenceMapWidget(QWidget):
     modifyFeatureRequested = Signal()
     changeFeatureColorRequested = Signal()
     annotationTracksMoveRequested = Signal(object)  # list[SequenceFeature]
+    annotationFeaturesResizeRequested = Signal(object)  # list[SequenceFeature]
     attachFeatureImageRequested = Signal()
     openFeatureImagesRequested = Signal(int)  # feature index
     featureImagesDropped = Signal(int, list)  # feature index, image paths
@@ -4161,6 +4321,7 @@ class SequenceMapWidget(QWidget):
         self._annot_track.modifyRequested.connect(self._request_modify_feature)
         self._annot_track.changeColorRequested.connect(self._request_change_feature_color)
         self._annot_track.tracksMoved.connect(self._on_annot_tracks_moved)
+        self._annot_track.featuresResized.connect(self._on_annot_features_resized)
         self._annot_track.attachImageRequested.connect(self._request_attach_feature_image)
         self._annot_track.openImagesRequested.connect(self._on_annot_open_images)
         self._annot_track.imagesDropped.connect(self._on_annot_images_dropped)
@@ -4501,6 +4662,7 @@ class SequenceMapWidget(QWidget):
             viewport_w=vw,
             selected_indices=display_selected,
             feature_alphas=feature_alphas,
+            seq_length=seq_len,
         )
         self._sync_sequence_block_layout()
 
@@ -5422,6 +5584,14 @@ class SequenceMapWidget(QWidget):
             self._merge_display_features_into_full(updated)
         )
 
+    def _on_annot_features_resized(self, features: object) -> None:
+        updated = list(features or [])
+        if not updated:
+            return
+        self.annotationFeaturesResizeRequested.emit(
+            self._merge_display_features_into_full(updated)
+        )
+
     def _on_canvas_feature_action(self, action: str) -> None:
         kind = str(action or "").strip().lower()
         if kind == "delete":
@@ -6316,6 +6486,9 @@ class SequenceMapPanel(QWidget):
         self._map.modifyFeatureRequested.connect(self._modify_feature)
         self._map.changeFeatureColorRequested.connect(self._change_selected_feature_colors)
         self._map.annotationTracksMoveRequested.connect(self._apply_annotation_track_move)
+        self._map.annotationFeaturesResizeRequested.connect(
+            self._apply_annotation_feature_resize
+        )
         self._map.attachFeatureImageRequested.connect(self._attach_image_to_selected_feature)
         self._map.openFeatureImagesRequested.connect(self._open_feature_images)
         self._map.featureImagesDropped.connect(self._on_feature_images_dropped)
@@ -8422,6 +8595,27 @@ class SequenceMapPanel(QWidget):
         self._map.set_selected_features(selected)
         self._persist_annotations()
         self.statusMessage.emit("Moved annotation track(s).")
+
+    def _apply_annotation_feature_resize(self, features: object) -> None:
+        updated = list(features or [])
+        if not updated:
+            return
+        selected = set(self._map.selected_feature_indices())
+        self._push_feature_undo_snapshot()
+        self._map.set_features(updated)
+        self._map.set_selected_features(selected)
+        self._persist_annotations()
+        picked = [
+            updated[i] for i in sorted(selected) if 0 <= i < len(updated)
+        ]
+        if len(picked) == 1:
+            feat = picked[0]
+            self.statusMessage.emit(
+                f"Resized “{feat.name or feat.feature_type}” "
+                f"to {feat.start}–{feat.end}."
+            )
+        else:
+            self.statusMessage.emit("Resized annotation feature(s).")
 
     def _selected_features(self) -> list[SequenceFeature]:
         self._map._sync_feature_selection_from_annot_track()

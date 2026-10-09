@@ -131,6 +131,7 @@ _BAR_TOP_PAD = 3
 _FEAT_HEIGHT = 12
 _FEAT_LABEL_MIN_WIDTH = 28.0
 _FEAT_LABEL_POINT_SIZE = 7
+_FEAT_EDGE_HIT_PX = 6.0
 _FEAT_GAP = 2
 _ROW_BOTTOM_PAD = 4
 _MIN_ROW_HEIGHT = 18
@@ -307,6 +308,27 @@ def _feature_display_label(
         base,
         str(feat.feature_type or ""),
         show_database_name=show_database_name,
+    )
+
+
+def _feature_with_bounds(
+    feat: SequenceFeature, start: int, end: int
+) -> SequenceFeature:
+    a, b = int(start), int(end)
+    if b < a:
+        a, b = b, a
+    return SequenceFeature(
+        start=a,
+        end=b,
+        name=feat.name,
+        feature_type=feat.feature_type,
+        color=feat.color,
+        strand=feat.strand,
+        track=feat.track,
+        parent=feat.parent,
+        source=feat.source,
+        pident=feat.pident,
+        subject_id=feat.subject_id,
     )
 
 
@@ -622,6 +644,7 @@ class _BarsCanvas(QWidget):
 
     selectionChanged = Signal()
     featureActivated = Signal(int, int)
+    featureResized = Signal(str, int, object)  # rid, store_index, SequenceFeature
     zoomChanged = Signal(float)
     regionZoomRequested = Signal(float, float)  # kept for Fit/Select zoom helpers
     regionSelectionChanged = Signal(object)  # tuple[int,int] | None (1-based inclusive)
@@ -664,8 +687,17 @@ class _BarsCanvas(QWidget):
         self._bar_pad = 8
         self._min_viewport = QSize(120, 40)
         self._drag_origin: QPointF | None = None
-        self._drag_kind: str | None = None  # "region" | "features"
+        self._drag_kind: str | None = None  # "region" | "features" | "resize"
         self._press_feat: tuple[int, int] | None = None
+        self._press_edge: str | None = None  # "start" | "end"
+        self._resize_active = False
+        self._resize_rid = ""
+        self._resize_store_index = -1
+        self._resize_flat = -1
+        self._resize_row = -1
+        self._resize_edge: str | None = None
+        self._resize_orig_start = 0
+        self._resize_orig_end = 0
         self._rubber = QRect()
         self._rubber_active = False  # True only after drag exceeds threshold
         self._rubber_prev = QRect()  # last overlay rect (for cheap partial updates)
@@ -1578,6 +1610,80 @@ class _BarsCanvas(QWidget):
                 i += 1
         return None
 
+    def _store_index_for_flat(
+        self, row: int, flat_index: int
+    ) -> tuple[str, int, SequenceFeature] | None:
+        """Map packed flat index → (record_id, store_index, feature)."""
+        feat = self._feature_by_flat_index(row, flat_index)
+        if feat is None or not (0 <= row < len(self._record_ids)):
+            return None
+        rid = self._record_ids[row]
+        store = list(self._features.get(rid) or [])
+        for i, candidate in enumerate(store):
+            if (
+                int(candidate.start) == int(feat.start)
+                and int(candidate.end) == int(feat.end)
+                and candidate.name == feat.name
+                and candidate.feature_type == feat.feature_type
+                and candidate.strand == feat.strand
+            ):
+                return rid, i, candidate
+        return None
+
+    def _edge_hit(self, row: int, x: float, y: float) -> tuple[int, str] | None:
+        """Return ``(flat_index, 'start'|'end')`` when near a feature edge."""
+        flat = self._hit_feature(row, x, y)
+        if flat is None:
+            return None
+        rect = self._feature_rect(row, flat)
+        if rect is None:
+            return None
+        threshold = min(
+            max(4.0, _FEAT_EDGE_HIT_PX),
+            max(2.0, rect.width() * 0.35),
+        )
+        dist_left = abs(float(x) - float(rect.left()))
+        dist_right = abs(float(x) - float(rect.right()))
+        if dist_left <= threshold and dist_left <= dist_right:
+            return flat, "start"
+        if dist_right <= threshold:
+            return flat, "end"
+        return None
+
+    def _x_to_feature_bp(self, x: float, *, length: int) -> int:
+        bp = int(math.floor(self.x_to_bp(x))) + 1
+        return max(1, min(max(1, length), bp))
+
+    def _apply_resize_at(self, x: float) -> None:
+        if not self._resize_active or self._resize_edge is None:
+            return
+        rid = self._resize_rid
+        length = max(1, int(self._lengths.get(rid, self._max_length)))
+        bp = self._x_to_feature_bp(x, length=length)
+        start, end = self._resize_orig_start, self._resize_orig_end
+        if self._resize_edge == "start":
+            start = min(bp, end)
+        else:
+            end = max(bp, start)
+        store = list(self._features.get(rid) or [])
+        if not (0 <= self._resize_store_index < len(store)):
+            return
+        current = store[self._resize_store_index]
+        if int(current.start) == start and int(current.end) == end:
+            return
+        updated = _feature_with_bounds(current, start, end)
+        store[self._resize_store_index] = updated
+        self._features[rid] = store
+        # Keep packed tracks in sync for live paint without a full re-layout.
+        flat_i = 0
+        for track in self._tracks.get(rid) or []:
+            for j, feat in enumerate(track):
+                if flat_i == self._resize_flat:
+                    track[j] = updated
+                    self.update()
+                    return
+                flat_i += 1
+
     def _feature_full_label(self, feat: SequenceFeature) -> str:
         label = _feature_display_label(
             feat, show_database_name=self._show_similarity_database_name
@@ -1765,16 +1871,25 @@ class _BarsCanvas(QWidget):
             self._drag_origin = QPointF(pos)
             self._rubber = QRect()
             self._rubber_active = False
+            self._resize_active = False
+            self._press_edge = None
             # Drop any live column/row preview before a regional drag.
             if self._preview_columns is not None or self._preview_rows:
                 self.finish_live_selection_preview()
             row = self._row_at_y(pos.y())
-            feat_i = self._hit_feature(row, pos.x(), pos.y()) if row >= 0 else None
-            self._press_feat = (row, feat_i) if feat_i is not None else None
-            if row >= 0 and self._y_in_annotation_band(row, pos.y()):
-                self._drag_kind = "features"
+            edge = self._edge_hit(row, pos.x(), pos.y()) if row >= 0 else None
+            if edge is not None:
+                flat_i, edge_kind = edge
+                self._press_feat = (row, flat_i)
+                self._press_edge = edge_kind
+                self._drag_kind = "resize"
             else:
-                self._drag_kind = "region"
+                feat_i = self._hit_feature(row, pos.x(), pos.y()) if row >= 0 else None
+                self._press_feat = (row, feat_i) if feat_i is not None else None
+                if row >= 0 and self._y_in_annotation_band(row, pos.y()):
+                    self._drag_kind = "features"
+                else:
+                    self._drag_kind = "region"
             self.grabMouse()
             # Sequence selection is via the name column; MSA press only starts a drag.
             event.accept()
@@ -1785,8 +1900,33 @@ class _BarsCanvas(QWidget):
         if self._drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
             if self._hover_feat is not None:
                 self._hover_feat = None
+            pos = event.position()
+            if self._drag_kind == "resize" and self._press_feat is not None:
+                origin = self._drag_origin
+                delta = math.hypot(pos.x() - origin.x(), pos.y() - origin.y())
+                if not self._resize_active and delta >= _RUBBER_MIN_PX:
+                    row, flat_i = self._press_feat
+                    resolved = self._store_index_for_flat(row, flat_i)
+                    if resolved is None:
+                        event.accept()
+                        return
+                    rid, store_i, feat = resolved
+                    self._resize_active = True
+                    self._resize_rid = rid
+                    self._resize_store_index = store_i
+                    self._resize_flat = flat_i
+                    self._resize_row = row
+                    self._resize_edge = self._press_edge
+                    self._resize_orig_start = int(feat.start)
+                    self._resize_orig_end = int(feat.end)
+                    self._set_feature_selection({(row, flat_i)}, set_columns=False)
+                    self.setCursor(Qt.CursorShape.SizeHorCursor)
+                if self._resize_active:
+                    self._apply_resize_at(pos.x())
+                event.accept()
+                return
             origin = self._drag_origin.toPoint()
-            current = event.position().toPoint()
+            current = pos.toPoint()
             rubber = QRect(origin, current).normalized()
             if rubber.width() >= _RUBBER_MIN_PX or rubber.height() >= _RUBBER_MIN_PX:
                 if not self._rubber_active:
@@ -1799,16 +1939,26 @@ class _BarsCanvas(QWidget):
             return
         pos = event.position()
         row = self._row_at_y(pos.y())
-        feat_i = self._hit_feature(row, pos.x(), pos.y()) if row >= 0 else None
+        edge = self._edge_hit(row, pos.x(), pos.y()) if row >= 0 else None
+        feat_i = (
+            edge[0]
+            if edge is not None
+            else (self._hit_feature(row, pos.x(), pos.y()) if row >= 0 else None)
+        )
         hover = (row, feat_i) if feat_i is not None else None
         if hover != self._hover_feat:
             self._hover_feat = hover
             self.update()
+        if edge is not None:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.unsetCursor()
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         if self._hover_feat is not None:
             self._hover_feat = None
+            self.unsetCursor()
             self.update()
         super().leaveEvent(event)
 
@@ -1820,12 +1970,31 @@ class _BarsCanvas(QWidget):
             active = self._rubber_active
             press_feat = self._press_feat
             drag_kind = self._drag_kind
+            resize_active = self._resize_active
+            resize_rid = self._resize_rid
+            resize_store = self._resize_store_index
+            resize_orig_start = self._resize_orig_start
+            resize_orig_end = self._resize_orig_end
             self._drag_origin = None
             self._press_feat = None
+            self._press_edge = None
             self._drag_kind = None
             self._rubber = QRect()
             self._rubber_active = False
+            self._resize_active = False
             self._clear_drag_paint_cache()
+            self.unsetCursor()
+            if resize_active and resize_store >= 0 and resize_rid:
+                store = list(self._features.get(resize_rid) or [])
+                if 0 <= resize_store < len(store):
+                    feat = store[resize_store]
+                    if (
+                        int(feat.start) != resize_orig_start
+                        or int(feat.end) != resize_orig_end
+                    ):
+                        self.featureResized.emit(resize_rid, resize_store, feat)
+                event.accept()
+                return
             if active and (
                 rubber.width() >= _RUBBER_MIN_PX or rubber.height() >= _RUBBER_MIN_PX
             ):
@@ -2748,6 +2917,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars_scroll.horizontalScrollBar().valueChanged.connect(self._on_hscroll)
         self._bars.rowsChanged.connect(self._sync_names_column)
         self._bars.featureActivated.connect(self._on_feature_activated)
+        self._bars.featureResized.connect(self._on_feature_resized)
         self._bars.zoomChanged.connect(self._on_zoom_changed)
         self._bars.regionZoomRequested.connect(self._on_region_zoom)
         self._bars.regionSelectionChanged.connect(self._on_region_selection_changed)
@@ -5316,6 +5486,31 @@ class MultiSequenceOverviewPanel(QWidget):
         if len(written) > 4:
             names += ", …"
         self.statusMessage.emit(f"Extracted {len(written)} file(s): {names}")
+
+    def _on_feature_resized(
+        self, rid: str, store_index: int, feat: object
+    ) -> None:
+        """Commit an edge-drag resize from the overview canvas."""
+        if not isinstance(feat, SequenceFeature):
+            return
+        store = list(self._features.get(rid) or [])
+        if not (0 <= int(store_index) < len(store)):
+            return
+        self._push_feature_undo_snapshot()
+        store[int(store_index)] = feat
+        self._features[rid] = store
+        self._refresh_features_after_edit()
+        gff_path = self._persist_overview_features()
+        label = feat.name or feat.feature_type
+        if gff_path is not None:
+            self.statusMessage.emit(
+                f"Resized “{label}” on {rid} to {feat.start}–{feat.end} "
+                f"→ {gff_path.name}"
+            )
+        else:
+            self.statusMessage.emit(
+                f"Resized “{label}” on {rid} to {feat.start}–{feat.end}."
+            )
 
     def _modify_feature_at(self, row: int, feat_index: int) -> None:
         from repeatviewer.widgets.sequence_map_viewer import ModifyFeatureDialog

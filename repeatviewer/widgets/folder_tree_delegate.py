@@ -254,12 +254,21 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
                 painter.drawRoundedRect(bg_rect, 4, 4)
                 # Prefer HighlightedText when it contrasts; otherwise force white/black.
                 # (Custom accent + qdarktheme often leaves HighlightedText dark.)
+                # Always override user folder colors (orange/green/blue…) so text
+                # stays readable on the blue selection bar — same as Files.
                 sel_text = opt.palette.color(QPalette.ColorRole.HighlightedText)
                 if abs(sel_text.lightness() - highlight.lightness()) < 80:
                     sel_text = _contrasting_on(highlight)
-                opt.palette.setBrush(QPalette.ColorRole.Text, sel_text)
-                opt.palette.setBrush(QPalette.ColorRole.WindowText, sel_text)
-                opt.palette.setBrush(QPalette.ColorRole.HighlightedText, sel_text)
+                for group in (
+                    QPalette.ColorGroup.Active,
+                    QPalette.ColorGroup.Inactive,
+                    QPalette.ColorGroup.Disabled,
+                ):
+                    opt.palette.setBrush(group, QPalette.ColorRole.Text, sel_text)
+                    opt.palette.setBrush(group, QPalette.ColorRole.WindowText, sel_text)
+                    opt.palette.setBrush(
+                        group, QPalette.ColorRole.HighlightedText, sel_text
+                    )
                 # State_Selected was cleared so Qt would keep Normal (grey) chevrons;
                 # paint the Selected (white) pixmap so the arrow matches the text.
                 paint_selected_icon = not opt.icon.isNull()
@@ -269,6 +278,14 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
                 text = self._readable_text_brush(opt)
                 opt.palette.setBrush(QPalette.ColorRole.Text, text)
                 opt.palette.setBrush(QPalette.ColorRole.WindowText, text)
+
+        force_sel_text: QColor | None = None
+        if is_selected or is_current:
+            # Re-read from the palette we just wrote (may be HighlightedText or
+            # the luminance fallback). Used for an explicit text draw below.
+            force_sel_text = opt.palette.color(
+                QPalette.ColorGroup.Active, QPalette.ColorRole.Text
+            )
 
         if paint_selected_icon:
             style = widget.style() if widget is not None else QApplication.style()
@@ -287,4 +304,30 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
                 )
                 opt.icon = QIcon()
 
-        super().paint(painter, opt, index)
+        # Draw via the style directly — ``super().paint`` re-runs initStyleOption
+        # and would restore the item's custom ForegroundRole color over sel_text.
+        # When selected, also strip ``opt.text`` and draw the label ourselves so
+        # QStyleSheetStyle cannot re-apply ForegroundRole (blue/green folders on
+        # a blue selection bar would otherwise stay unreadable).
+        style = widget.style() if widget is not None else QApplication.style()
+        label = opt.text
+        if force_sel_text is not None and label:
+            opt.text = ""
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+        if force_sel_text is not None and label:
+            text_rect = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemText,
+                opt,
+                widget,
+            )
+            if not text_rect.isValid() or text_rect.width() <= 0:
+                text_rect = opt.rect.adjusted(2, 0, -2, 0)
+            style.drawItemText(
+                painter,
+                text_rect,
+                int(opt.displayAlignment or Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                opt.palette,
+                bool(opt.state & QStyle.StateFlag.State_Enabled),
+                label,
+                QPalette.ColorRole.Text,
+            )
