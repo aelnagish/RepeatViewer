@@ -9,9 +9,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
-from Bio import Align, AlignIO, BiopythonDeprecationWarning, SeqIO
+from Bio import BiopythonDeprecationWarning, SeqIO
 from Bio.Seq import Seq
-from Bio.Align import AlignInfo
 from Bio.SeqRecord import SeqRecord
 from plotly.subplots import make_subplots
 
@@ -81,6 +80,51 @@ def _resolve_consensus_sequence_type(records, sequence_type: str) -> str:
     return detect_sequence_type(np.asarray(seqs, dtype="<U1"))
 
 
+def _alignment_dumb_consensus(
+    sequences: list[str],
+    *,
+    threshold: float = 0.8,
+    ambiguous: str = "N",
+) -> str:
+    """Majority consensus matching Biopython's removed ``SummaryInfo.dumb_consensus``.
+
+    Per column: among non-gap residues, if a single letter's share of non-gap
+    letters meets ``threshold``, emit that letter; otherwise emit ``ambiguous``.
+    All-gap columns use ``ambiguous``. Ties use ``ambiguous``.
+    """
+    if not sequences:
+        return ""
+    width = len(sequences[0])
+    if any(len(seq) != width for seq in sequences):
+        raise ValueError("MSA rows must share one length")
+    try:
+        thresh = float(threshold)
+    except (TypeError, ValueError):
+        thresh = 0.8
+    amb = str(ambiguous or "N")[:1] or "N"
+    out: list[str] = []
+    for col in range(width):
+        counts: dict[str, int] = {}
+        num_atoms = 0
+        for seq in sequences:
+            ch = seq[col]
+            if ch in "-.":
+                continue
+            up = ch.upper()
+            counts[up] = counts.get(up, 0) + 1
+            num_atoms += 1
+        if num_atoms <= 0:
+            out.append(amb)
+            continue
+        max_size = max(counts.values())
+        winners = [letter for letter, n in counts.items() if n == max_size]
+        if len(winners) == 1 and max_size / num_atoms >= thresh:
+            out.append(winners[0])
+        else:
+            out.append(amb)
+    return "".join(out)
+
+
 def con_generater(
     input_file,
     output_dir,
@@ -101,6 +145,8 @@ def con_generater(
         )
 
     amb = normalize_consensus_ambiguous(ambiguous)
+    # Normalize for API compatibility; majority consensus needs no alphabet.
+    normalize_consensus_sequence_type(sequence_type)
 
     if len(records) == 1:
         consensus_seq = Seq(str(records[0].seq).replace("-", "")).upper()
@@ -116,14 +162,14 @@ def con_generater(
                 "Align the sequences first (Align menu) or use a single-sequence FASTA."
             )
 
-        alignment = Align.MultipleSeqAlignment(records)
-        consensus_seq = AlignInfo.SummaryInfo(alignment).dumb_consensus(
-            threshold=threshold,
-            ambiguous=amb,
+        # Own majority consensus: Biopython removed SummaryInfo.dumb_consensus.
+        consensus_seq = Seq(
+            _alignment_dumb_consensus(
+                [str(rec.seq) for rec in records],
+                threshold=threshold,
+                ambiguous=amb,
+            )
         )
-        if not isinstance(consensus_seq, Seq):
-            consensus_seq = Seq(str(consensus_seq))
-        consensus_seq = consensus_seq.upper()
 
     consensus_seq_len = len(consensus_seq)
     consensus_seq_obj = SeqRecord(

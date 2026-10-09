@@ -3416,6 +3416,9 @@ class MainWindow(QMainWindow):
         self._preview_tabs.setObjectName("PreviewTabs")
         self._preview_tabs.annotationsSaved.connect(self._on_preview_annotations_saved)
         self._preview_tabs.sequenceExtracted.connect(self._on_preview_sequence_extracted)
+        self._preview_tabs.openInAdditionalPreviewTab.connect(
+            self._on_preview_open_additional_tab
+        )
         self._preview_tabs.fileWritten.connect(self._on_preview_file_written)
         self._preview_tabs.openFileRequested.connect(self._on_preview_open_requested)
         self._preview_tabs.dotplotRegionSelected.connect(self._on_dotplot_region_selected)
@@ -8442,6 +8445,13 @@ class MainWindow(QMainWindow):
     def _on_preview_sequence_extracted(self, path: object) -> None:
         # Show the new FASTA in Files, but keep the current file selected/previewed.
         self._sync_sidecar_in_file_list(path, select=False)
+
+    def _on_preview_open_additional_tab(self, path: object) -> None:
+        """Open a derived FASTA (e.g. MSA clean) as an additional Preview tab."""
+        if not isinstance(path, Path) or not path.is_file():
+            return
+        self._sync_sidecar_in_file_list(path, select=False)
+        self._open_files_in_preview_tabs([path.expanduser().resolve()])
 
     def _on_preview_file_written(self, path: object) -> None:
         # Exported tree figure etc.: show it in Files, keep the current preview.

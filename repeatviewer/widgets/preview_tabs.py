@@ -643,6 +643,7 @@ class FilePreviewPage(QWidget):
 
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
     sequenceExtracted = Signal(object)  # Path to a FASTA extracted from a selection
+    openInAdditionalPreviewTab = Signal(object)  # Path to open as a new Preview tab
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
     fileWritten = Signal(object)  # Path of a file written from the preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
@@ -1152,7 +1153,26 @@ class FilePreviewPage(QWidget):
             return
         self._load()
 
+    def release_shared_annotation_zoom_bar(self) -> None:
+        """Return AnnotationZoomBar to the header before this page is destroyed.
+
+        Multi-seq Overview reparents the shared bar into its toolbar. If the
+        page is deleted without unbinding, Qt destroys the bar with the page
+        and the next HTML/preview sync crashes (``already deleted``).
+        """
+        overview = getattr(self, "_annotation_overview", None)
+        if overview is None:
+            return
+        unbind = getattr(overview, "_unbind_header_zoom_bar", None)
+        if callable(unbind):
+            try:
+                unbind()
+            except RuntimeError:
+                pass
+
     def _set_single_fasta_mode(self, enabled: bool) -> None:
+        if self._single_fasta_mode and not enabled:
+            self.release_shared_annotation_zoom_bar()
         self._single_fasta_mode = enabled
         if not enabled:
             self._multi_fasta_mode = False
@@ -1249,6 +1269,9 @@ class FilePreviewPage(QWidget):
             self._annotation_overview = MultiSequenceOverviewPanel(self.path, self)
             self._annotation_overview.annotationsSaved.connect(self.annotationsSaved.emit)
             self._annotation_overview.sequenceExtracted.connect(self.sequenceExtracted.emit)
+            self._annotation_overview.openInAdditionalPreviewTab.connect(
+                self.openInAdditionalPreviewTab.emit
+            )
             holder_layout = self._fasta_annotation_holder.layout()
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_annotation_holder)
@@ -2393,6 +2416,7 @@ class PreviewTabWidget(QTabWidget):
 
     annotationsSaved = Signal(object)  # Path to a newly written annotation file
     sequenceExtracted = Signal(object)  # Path to a FASTA extracted from a selection
+    openInAdditionalPreviewTab = Signal(object)  # Path to open as a new Preview tab
     dotplotRegionSelected = Signal(dict)  # payload from window.__flexidotLastClick
     fileWritten = Signal(object)  # Path of a file written from a preview (e.g. tree export)
     openFileRequested = Signal(object)  # Path a preview asks to open (contig view → Results)
@@ -2712,6 +2736,7 @@ class PreviewTabWidget(QTabWidget):
     def _wire_preview_page(self, page: FilePreviewPage) -> None:
         page.annotationsSaved.connect(self.annotationsSaved.emit)
         page.sequenceExtracted.connect(self.sequenceExtracted.emit)
+        page.openInAdditionalPreviewTab.connect(self.openInAdditionalPreviewTab.emit)
         page.dotplotRegionSelected.connect(self.dotplotRegionSelected.emit)
         page.fileWritten.connect(self.fileWritten.emit)
         page.openFileRequested.connect(self.openFileRequested.emit)
@@ -2876,9 +2901,9 @@ class PreviewTabWidget(QTabWidget):
                 and widget.is_annotation_preview_active()
                 and widget.is_multi_fasta_preview()
             ):
-                # Multi-seq overview: tabs only here; zoom chrome lives in the
-                # overview panel beside the rail (same top as single-seq Annotation).
-                self._header_bar.set_header_zoom_mode("tabs")
+                # Multi-seq Overview: keep title-bar Actions (Default preview tab)
+                # in the same spot as Text; map −/+/Fit live in the overview strip.
+                self._header_bar.set_header_zoom_mode("preview")
             elif is_annotation:
                 # Single-seq Annotation: Actions on the Preview title bar (like Dotplot).
                 self._header_bar.set_header_zoom_mode("preview")
@@ -2953,12 +2978,23 @@ class PreviewTabWidget(QTabWidget):
             self._zoom_bar.set_default_preview_tab_visible(show_default_tab)
         if hasattr(self._zoom_bar, "set_multi_fasta_default_tabs"):
             self._zoom_bar.set_multi_fasta_default_tabs(is_multi_fasta)
+        ann_bar = self._annotation_zoom_bar
+        if ann_bar is not None:
+            try:
+                from shiboken6 import isValid
+
+                if not isValid(ann_bar):
+                    self._annotation_zoom_bar = None
+                    ann_bar = None
+            except Exception:
+                self._annotation_zoom_bar = None
+                ann_bar = None
         if (
             is_multi_overview_active
-            and self._annotation_zoom_bar is not None
-            and hasattr(self._annotation_zoom_bar, "set_multi_fasta_default_tabs")
+            and ann_bar is not None
+            and hasattr(ann_bar, "set_multi_fasta_default_tabs")
         ):
-            self._annotation_zoom_bar.set_multi_fasta_default_tabs(True)
+            ann_bar.set_multi_fasta_default_tabs(True)
         self._sync_text_tool_actions()
         self._sync_header_from_current_page()
         if isinstance(widget, FilePreviewPage):
@@ -3019,6 +3055,8 @@ class PreviewTabWidget(QTabWidget):
             widget.reload_from_disk()
         elif _switching_html_preview(widget.path, resolved):
             was_current = self.currentIndex() == index
+            # Unbind before deleteLater — Overview may own the shared zoom bar.
+            widget.release_shared_annotation_zoom_bar()
             self._forget_lru(widget)
             widget.teardown_html_preview()
             self.removeTab(index)
@@ -3180,6 +3218,7 @@ class PreviewTabWidget(QTabWidget):
         while self.count():
             widget = self.widget(0)
             if isinstance(widget, FilePreviewPage):
+                widget.release_shared_annotation_zoom_bar()
                 widget.teardown_html_preview()
             self.removeTab(0)
             if widget is not None:
@@ -3231,9 +3270,7 @@ class PreviewTabWidget(QTabWidget):
             widget.persist_annotation_view_for_session()
             key = str(widget.path)
             self._path_to_index.pop(key, None)
-            overview = getattr(widget, "_annotation_overview", None)
-            if overview is not None and hasattr(overview, "_unbind_header_zoom_bar"):
-                overview._unbind_header_zoom_bar()
+            widget.release_shared_annotation_zoom_bar()
             widget.teardown_html_preview()
         self.removeTab(index)
         if widget is not None:

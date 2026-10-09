@@ -10,11 +10,15 @@ DEFAULT_LTR_SIMILARITY_THRESHOLD = 0.6
 DEFAULT_TIR_SIMILARITY_THRESHOLD = 0.5
 
 
+DEFAULT_MIN_DISTANCE_TO_END = 1000
+
+
 @dataclass
 class TerminalRepeatSettings:
     min_length: int = 100
     max_length: int = 2000
     min_pair_distance: int = 100
+    min_distance_to_end: int = DEFAULT_MIN_DISTANCE_TO_END
     similarity_threshold: float = DEFAULT_LTR_SIMILARITY_THRESHOLD
 
 
@@ -97,6 +101,9 @@ def load_auto_annotation_settings() -> AutoAnnotationSettings:
         min_length=_get_int(s, f"{prefix}ltr_min_length", 100),
         max_length=_get_int(s, f"{prefix}ltr_max_length", 2000),
         min_pair_distance=_get_int(s, f"{prefix}ltr_min_pair_distance", 100),
+        min_distance_to_end=_get_int(
+            s, f"{prefix}ltr_min_distance_to_end", DEFAULT_MIN_DISTANCE_TO_END
+        ),
         similarity_threshold=_get_float(
             s, f"{prefix}ltr_similarity", DEFAULT_LTR_SIMILARITY_THRESHOLD
         ),
@@ -105,6 +112,9 @@ def load_auto_annotation_settings() -> AutoAnnotationSettings:
         min_length=_get_int(s, f"{prefix}tir_min_length", 20),
         max_length=_get_int(s, f"{prefix}tir_max_length", 500),
         min_pair_distance=_get_int(s, f"{prefix}tir_min_pair_distance", 50),
+        min_distance_to_end=_get_int(
+            s, f"{prefix}tir_min_distance_to_end", DEFAULT_MIN_DISTANCE_TO_END
+        ),
         similarity_threshold=_get_float(
             s, f"{prefix}tir_similarity", DEFAULT_TIR_SIMILARITY_THRESHOLD
         ),
@@ -145,10 +155,12 @@ def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
     s.setValue(f"{prefix}ltr_min_length", ltr.min_length)
     s.setValue(f"{prefix}ltr_max_length", ltr.max_length)
     s.setValue(f"{prefix}ltr_min_pair_distance", ltr.min_pair_distance)
+    s.setValue(f"{prefix}ltr_min_distance_to_end", ltr.min_distance_to_end)
     s.setValue(f"{prefix}ltr_similarity", ltr.similarity_threshold)
     s.setValue(f"{prefix}tir_min_length", tir.min_length)
     s.setValue(f"{prefix}tir_max_length", tir.max_length)
     s.setValue(f"{prefix}tir_min_pair_distance", tir.min_pair_distance)
+    s.setValue(f"{prefix}tir_min_distance_to_end", tir.min_distance_to_end)
     s.setValue(f"{prefix}tir_similarity", tir.similarity_threshold)
     s.setValue(f"{prefix}tandem_min_repeat_2", tandem.min_repeat_2)
     s.setValue(f"{prefix}tandem_min_repeat_3", tandem.min_repeat_3)

@@ -54,17 +54,11 @@ def test_round_trip_feature_coords() -> None:
     assert back.end == 4
 
 
-def test_annotate_one_record_projects_msa_features(tmp_path: Path) -> None:
-    from repeatviewer.backends.auto_annotation import AutoAnnotationMode
-    from repeatviewer.backends.te_annotation_batch import (
-        TeAnnotationOptions,
-        _annotate_one_record_fasta,
-    )
-    from repeatviewer.backends.auto_annotation_settings import (
-        load_auto_annotation_settings,
-    )
-    from repeatviewer.backends.similarity_annotation_settings import (
-        load_similarity_annotation_settings,
+def test_run_auto_annotations_projects_msa_features(tmp_path: Path) -> None:
+    from repeatviewer.backends.auto_annotation import (
+        AutoAnnotationMode,
+        AutoAnnotationResult,
+        run_auto_annotations,
     )
 
     gapped = "ATG---CCC"
@@ -75,39 +69,33 @@ def test_annotate_one_record_projects_msa_features(tmp_path: Path) -> None:
         "fasta",
     )
 
-    def _fake_auto(path, modes, **kwargs):
-        del modes, kwargs
-        # Detector saw ungapped ATGCCC (6 bp) — report ORF covering 1..6.
+    def _fake_one(path, mode, **kwargs):
+        del mode, kwargs
+        # Detector must see ungapped ATGCCC (6 bp).
         text = Path(path).read_text(encoding="utf-8")
         assert "ATG---CCC" not in text
         assert "ATGCCC" in text
-
-        class _R:
-            features = (
+        return AutoAnnotationResult(
+            features=(
                 SequenceFeature(start=1, end=6, name="orf1", feature_type="ORF"),
-            )
-
-        return _R()
+            ),
+            mode=AutoAnnotationMode.ORF,
+            message="orf ok",
+        )
 
     with patch(
-        "repeatviewer.backends.te_annotation_batch.run_auto_annotations",
-        side_effect=_fake_auto,
+        "repeatviewer.backends.auto_annotation.run_auto_annotation",
+        side_effect=_fake_one,
     ):
-        out = _annotate_one_record_fasta(
+        result = run_auto_annotations(
             fasta,
-            TeAnnotationOptions(auto_modes=(AutoAnnotationMode.ORF,)),
-            auto_cfg=load_auto_annotation_settings(),
-            sim_cfg=load_similarity_annotation_settings(),
-            use_blast=False,
+            (AutoAnnotationMode.ORF,),
             base_features=(),
-            cancel=None,
-            progress=None,
-            label="s1",
         )
-    assert len(out) == 1
+    assert len(result.features) == 1
     # Ungapped 1..6 → gapped ATG---CCC columns 1..9
-    assert out[0].start == 1
-    assert out[0].end == 9
+    assert result.features[0].start == 1
+    assert result.features[0].end == 9
 
 
 def test_project_features_list_noop_without_gaps() -> None:

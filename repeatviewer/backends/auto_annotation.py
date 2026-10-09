@@ -155,55 +155,72 @@ def run_auto_annotations(
     base_features: tuple[SequenceFeature, ...] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> MultiAutoAnnotationResult:
-    """Run one or more auto-annotation modules and append results on new tracks."""
+    """Run one or more auto-annotation modules and append results on new tracks.
+
+    MSA rows with gaps are ungapped for detection; coordinates are projected
+    back to alignment columns in the returned features.
+    """
     ordered = tuple(modes)
     if not ordered:
         return MultiAutoAnnotationResult((), (), "No auto-annotation modules selected.")
 
+    from repeatviewer.backends.msa_coordinates import prepare_msa_annotation_workspace
     from repeatviewer.backends.sequence_features import load_sequence_map_data
 
     data = load_sequence_map_data(fasta_path)
-    features = list(base_features if base_features is not None else data.features)
-    messages: list[str] = []
-    next_track = _next_track(features)
-    total = len(ordered)
-    if progress is not None:
-        progress(f"0/{total} starting")
-    for index, mode in enumerate(ordered, start=1):
+    incoming = tuple(base_features if base_features is not None else data.features)
+    workspace = prepare_msa_annotation_workspace(fasta_path, incoming)
+    try:
+        work_path = workspace.work_fasta
+        features = list(workspace.base_features)
+        messages: list[str] = []
+        if workspace.keep is not None and progress is not None:
+            progress("MSA: removed gaps for feature detection")
+        next_track = _next_track(features)
+        total = len(ordered)
         if progress is not None:
-            # Completed count before this mode: index-1.
-            progress(f"{index - 1}/{total} {mode.value}")
-        result = run_auto_annotation(fasta_path, mode, cancel=cancel, settings=settings)
-        if progress is not None:
-            progress(f"{index}/{total} {mode.value}")
-        if result.message.strip():
-            messages.append(result.message.strip())
-        existing = _features_for_mode(features, mode)
-        new_sigs = {_feature_signature(feat) for feat in result.features}
-        if existing and new_sigs == {_feature_signature(feat) for feat in existing}:
-            messages.append(f"{mode.value}: unchanged ({len(result.features)} feature(s)).")
-            continue
-        target_track = _target_track_for_auto_rerun(
-            features,
-            mode,
-            next_track=next_track,
-        )
-        features = _remove_features_for_auto_rerun(features, mode)
-        if result.features:
-            features = merge_auto_annotation_features(
-                features,
-                result.features,
-                result.mode,
-                track=target_track,
+            progress(f"0/{total} starting")
+        for index, mode in enumerate(ordered, start=1):
+            if progress is not None:
+                # Completed count before this mode: index-1.
+                progress(f"{index - 1}/{total} {mode.value}")
+            result = run_auto_annotation(
+                work_path, mode, cancel=cancel, settings=settings
             )
-            if not existing:
-                next_track += 1
-    summary = "\n".join(messages) if messages else "Auto annotation complete."
-    return MultiAutoAnnotationResult(
-        features=tuple(features),
-        modes=ordered,
-        message=summary,
-    )
+            if progress is not None:
+                progress(f"{index}/{total} {mode.value}")
+            if result.message.strip():
+                messages.append(result.message.strip())
+            existing = _features_for_mode(features, mode)
+            new_sigs = {_feature_signature(feat) for feat in result.features}
+            if existing and new_sigs == {_feature_signature(feat) for feat in existing}:
+                messages.append(
+                    f"{mode.value}: unchanged ({len(result.features)} feature(s))."
+                )
+                continue
+            target_track = _target_track_for_auto_rerun(
+                features,
+                mode,
+                next_track=next_track,
+            )
+            features = _remove_features_for_auto_rerun(features, mode)
+            if result.features:
+                features = merge_auto_annotation_features(
+                    features,
+                    result.features,
+                    result.mode,
+                    track=target_track,
+                )
+                if not existing:
+                    next_track += 1
+        summary = "\n".join(messages) if messages else "Auto annotation complete."
+        return MultiAutoAnnotationResult(
+            features=tuple(workspace.project_features(features)),
+            modes=ordered,
+            message=summary,
+        )
+    finally:
+        workspace.close()
 
 
 def merge_auto_annotation_features(

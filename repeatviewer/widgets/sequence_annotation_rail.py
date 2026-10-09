@@ -1133,11 +1133,11 @@ class SequenceAnnotationRail(QWidget):
             )
         )
 
+        # Job progress is shown on the main-window progress bar; keep a hidden
+        # label so set_annotation_job_status callers stay valid without showing
+        # grey status text in this rail.
         self.annotation_job_status = QLabel("", page)
-        self.annotation_job_status.setWordWrap(True)
-        self.annotation_job_status.setStyleSheet("color: palette(mid);")
         self.annotation_job_status.hide()
-        layout.addWidget(self.annotation_job_status)
 
         layout.addWidget(_h_divider(page))
         manual_section = _CollapsibleSection(
@@ -1704,11 +1704,18 @@ class SequenceAnnotationRail(QWidget):
             if section is not None:
                 section.setVisible(True)
         if overview:
+            self.manual_add_btn.setToolTip(
+                "Add the checked feature type on the selected region for "
+                "the selected sequence(s), or the rows inside a dragged "
+                "selection box."
+            )
             self.auto_ann_run_btn.setToolTip(
-                "Run feature detection on selected sequences (Ctrl+A for all)"
+                "Run feature detection on selected sequences, "
+                "or the whole open MSA when none are selected"
             )
             self.similarity_ann_run_btn.setToolTip(
-                "Run similarity annotation on selected sequences (Ctrl+A for all)"
+                "Run similarity annotation on selected sequences, "
+                "or the whole open MSA when none are selected"
             )
             # Same spin as single-seq annotation-row gap; in overview it spaces sequences.
             self._annotation_distance_label.setText("Sequence distance:")
@@ -1725,6 +1732,9 @@ class SequenceAnnotationRail(QWidget):
                 "Undo the last Delete (Ctrl+Z). Restores MSA and features."
             )
         else:
+            self.manual_add_btn.setToolTip(
+                "Add the checked feature type on the current sequence selection."
+            )
             self.auto_ann_run_btn.setToolTip("Run feature detection")
             self.similarity_ann_run_btn.setToolTip("Run similarity annotation")
             self._annotation_distance_label.setText("Annotation distance:")
@@ -2000,16 +2010,9 @@ class SequenceAnnotationRail(QWidget):
         self.status_label.setText(text or "")
 
     def set_annotation_job_status(self, text: str) -> None:
-        """Live progress for Feature detection / Similarity / Transfer on Annotation tab."""
-        msg = str(text or "").strip()
-        if self.annotation_job_status.text() == msg and (
-            self.annotation_job_status.isVisible() == bool(msg)
-        ):
-            return
-        self.annotation_job_status.setText(msg)
-        self.annotation_job_status.setVisible(bool(msg))
-        # Keep Display-tab status in sync for consistency.
-        self.status_label.setText(msg)
+        """Accept job progress text without showing it in the Annotation rail."""
+        self.annotation_job_status.setText(str(text or "").strip())
+        self.annotation_job_status.hide()
 
     def set_transfer_summary(self, text: str) -> None:
         """Transfer progress is shown on the map preview, not in the rail."""

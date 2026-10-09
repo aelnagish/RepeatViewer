@@ -92,11 +92,20 @@ def test_overview_annotation_tab_visible_and_wired(
     assert not rail._tab_buttons[SequenceAnnotationRail.TAB_ANNOTATIONS].isHidden()
     tip = rail.auto_ann_run_btn.toolTip().lower()
     assert "selected" in tip
+    assert "msa" in tip or "open" in tip
     assert not rail._annotation_sections["manual"].isHidden()
     assert not rail.show_annotation_track.isHidden()
     assert panel._auto_ann_checks
     assert callable(panel._on_auto_run_clicked)
     assert callable(panel._on_similarity_run_clicked)
+    # No name selection → Feature detection / Similarity target the whole MSA.
+    assert panel._selected_record_ids() == []
+    assert panel._target_record_ids_for_msa_job() == ["a", "b"]
+    tip_sim = rail.similarity_ann_run_btn.toolTip().lower()
+    assert "selected" in tip_sim
+    assert "msa" in tip_sim or "open" in tip_sim
+    panel._bars.set_selected_rows([1])
+    assert panel._target_record_ids_for_msa_job() == ["b"]
     # Same control-panel width as single-sequence Annotation.
     assert rail._module_width == 260
     panel.deleteLater()

@@ -97,6 +97,7 @@ from repeatviewer.backends.similarity_annotation import (
 from repeatviewer.backends.similarity_annotation_settings import (
     load_similarity_annotation_settings,
     save_similarity_annotation_settings,
+    similarity_feature_track_label,
 )
 from repeatviewer.backends.te_annotation_batch import (
     TeAnnotationOptions,
@@ -127,7 +128,9 @@ _FIND_HIT_FILL = QColor(245, 158, 11, 150)
 _FIND_CURRENT_FILL = QColor(37, 99, 235, 220)
 _FIND_HIT_BORDER = QColor(180, 83, 9, 230)
 _BAR_TOP_PAD = 3
-_FEAT_HEIGHT = 10
+_FEAT_HEIGHT = 12
+_FEAT_LABEL_MIN_WIDTH = 28.0
+_FEAT_LABEL_POINT_SIZE = 7
 _FEAT_GAP = 2
 _ROW_BOTTOM_PAD = 4
 _MIN_ROW_HEIGHT = 18
@@ -294,12 +297,27 @@ def _row_height(n_tracks: int) -> int:
     )
 
 
+def _feature_display_label(
+    feat: SequenceFeature,
+    *,
+    show_database_name: bool,
+) -> str:
+    base = str(feat.name or feat.feature_type or "").strip()
+    return similarity_feature_track_label(
+        base,
+        str(feat.feature_type or ""),
+        show_database_name=show_database_name,
+    )
+
+
 def _draw_arrow_feature(
     painter: QPainter,
     rect: QRectF,
     color: QColor,
     *,
     forward: bool,
+    label: str = "",
+    label_point_size: int = _FEAT_LABEL_POINT_SIZE,
 ) -> None:
     if rect.width() < 1.5 or rect.height() < 2:
         return
@@ -332,6 +350,17 @@ def _draw_arrow_feature(
     if body.width() > 0.5:
         painter.drawRect(body)
     painter.drawPolygon(arrow)
+    if label and rect.width() > _FEAT_LABEL_MIN_WIDTH:
+        painter.setPen(QColor("#ffffff"))
+        label_font = QFont(painter.font())
+        label_font.setPointSize(max(6, min(24, int(label_point_size))))
+        painter.setFont(label_font)
+        text_rect = rect.adjusted(3, 0, -3, 0)
+        if not forward:
+            text_rect = text_rect.adjusted(arrow_w * 0.4, 0, 0, 0)
+        else:
+            text_rect = text_rect.adjusted(0, 0, -arrow_w * 0.4, 0)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, label)
 
 
 def _tick_step_for_span(span_bp: float, bars_width_px: float, min_label_px: float) -> int:
@@ -628,6 +657,9 @@ class _BarsCanvas(QWidget):
         self._selected_rows: set[int] = set()
         # Selected annotation features as (row, flat_feature_index).
         self._selected_feats: set[tuple[int, int]] = set()
+        # Hovered feature for overflow label tip: (row, flat_feature_index).
+        self._hover_feat: tuple[int, int] | None = None
+        self._show_similarity_database_name = True
         self._ppb = 0.05
         self._bar_pad = 8
         self._min_viewport = QSize(120, 40)
@@ -688,6 +720,7 @@ class _BarsCanvas(QWidget):
         self._max_length = max((lengths.get(rid, 1) for rid in record_ids), default=1)
         self._selected_rows = set()
         self._selected_feats = set()
+        self._hover_feat = None
         self._region_sel = None
         self._regional_rows = None
         self._rubber = QRect()
@@ -742,6 +775,7 @@ class _BarsCanvas(QWidget):
         self._max_length = max(1, width)
         self._selected_rows = set()
         self._selected_feats = set()
+        self._hover_feat = None
         self._region_sel = None
         self._regional_rows = None
         self._rubber = QRect()
@@ -771,6 +805,7 @@ class _BarsCanvas(QWidget):
             rid: _pack_feature_tracks(list(self._features.get(rid) or []))
             for rid in self._record_ids
         }
+        self._hover_feat = None
         self._clear_drag_paint_cache()
         self._recompute_layout()
         self.update()
@@ -1522,6 +1557,60 @@ class _BarsCanvas(QWidget):
                 i += 1
         return None
 
+    def _feature_rect(self, row: int, flat_index: int) -> QRectF | None:
+        if not (0 <= row < len(self._record_ids)):
+            return None
+        rid = self._record_ids[row]
+        length = max(1, int(self._lengths.get(rid, 1)))
+        feat_y0 = self._feature_band_y0(row)
+        i = 0
+        for track_i, track in enumerate(self._tracks.get(rid) or []):
+            ty = feat_y0 + track_i * (_FEAT_HEIGHT + _FEAT_GAP)
+            for feat in track:
+                if i == flat_index:
+                    start = max(1, min(int(feat.start), length))
+                    end = max(1, min(int(feat.end), length))
+                    if start > end:
+                        start, end = end, start
+                    x0 = self._bar_pad + (start - 1) * self._ppb
+                    x1 = self._bar_pad + end * self._ppb
+                    return QRectF(x0, ty, max(2.0, x1 - x0), float(_FEAT_HEIGHT))
+                i += 1
+        return None
+
+    def _feature_full_label(self, feat: SequenceFeature) -> str:
+        label = _feature_display_label(
+            feat, show_database_name=self._show_similarity_database_name
+        )
+        extras: list[str] = []
+        if float(getattr(feat, "pident", 0) or 0) > 0 and "(" not in label:
+            extras.append(f"{float(feat.pident):.1f}% id")
+        subject = str(getattr(feat, "subject_id", "") or "").strip()
+        if subject and subject not in label:
+            extras.append(subject)
+        if extras:
+            return f"{label} ({', '.join(extras)})" if label else ", ".join(extras)
+        return label
+
+    def _feature_label_overflows(self, feat: SequenceFeature, rect: QRectF) -> bool:
+        label = self._feature_full_label(feat)
+        if not label:
+            return False
+        if rect.width() <= _FEAT_LABEL_MIN_WIDTH:
+            return True
+        label_font = QFont(self.font())
+        label_font.setPointSize(_FEAT_LABEL_POINT_SIZE)
+        fm = QFontMetrics(label_font)
+        available = max(0.0, rect.width() - 10.0)
+        return fm.horizontalAdvance(label) > available
+
+    def set_show_similarity_database_name(self, show: bool) -> None:
+        show = bool(show)
+        if show == self._show_similarity_database_name:
+            return
+        self._show_similarity_database_name = show
+        self.update()
+
     def _features_intersecting_rect(self, rubber: QRect) -> set[tuple[int, int]]:
         """Features whose arrows intersect the rubber-band (partial overlap OK)."""
         hits: set[tuple[int, int]] = set()
@@ -1694,6 +1783,8 @@ class _BarsCanvas(QWidget):
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            if self._hover_feat is not None:
+                self._hover_feat = None
             origin = self._drag_origin.toPoint()
             current = event.position().toPoint()
             rubber = QRect(origin, current).normalized()
@@ -1706,7 +1797,20 @@ class _BarsCanvas(QWidget):
                 self._update_rubber_overlay(rubber)
             event.accept()
             return
+        pos = event.position()
+        row = self._row_at_y(pos.y())
+        feat_i = self._hit_feature(row, pos.x(), pos.y()) if row >= 0 else None
+        hover = (row, feat_i) if feat_i is not None else None
+        if hover != self._hover_feat:
+            self._hover_feat = hover
+            self.update()
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._hover_feat is not None:
+            self._hover_feat = None
+            self.update()
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self._drag_origin is not None:
@@ -1955,6 +2059,8 @@ class _BarsCanvas(QWidget):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
                 painter.drawRect(rect)
+        if not live_preview:
+            self._paint_feature_hover_tip(painter)
         painter.end()
 
     def _paint_region_band(self, painter: QPainter, clip: QRect) -> None:
@@ -2028,8 +2134,19 @@ class _BarsCanvas(QWidget):
                         fc = _DEFAULT_FEAT
                 except Exception:
                     fc = _DEFAULT_FEAT
+                label = ""
+                if rect.width() > _FEAT_LABEL_MIN_WIDTH:
+                    label = _feature_display_label(
+                        feat,
+                        show_database_name=self._show_similarity_database_name,
+                    )
                 _draw_arrow_feature(
-                    painter, rect, fc, forward=feat.is_forward()
+                    painter,
+                    rect,
+                    fc,
+                    forward=feat.is_forward(),
+                    label=label,
+                    label_point_size=_FEAT_LABEL_POINT_SIZE,
                 )
                 if (row, flat_index) in self._selected_feats:
                     painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -2038,6 +2155,45 @@ class _BarsCanvas(QWidget):
                     )
                     painter.drawRect(rect.adjusted(-1, -1, 1, 1))
                 flat_index += 1
+
+    def _paint_feature_hover_tip(self, painter: QPainter) -> None:
+        hover = self._hover_feat
+        if hover is None or self._rubber_active:
+            return
+        row, flat_index = hover
+        feat = self._feature_by_flat_index(row, flat_index)
+        rect = self._feature_rect(row, flat_index)
+        if feat is None or rect is None:
+            return
+        full_label = self._feature_full_label(feat)
+        if not full_label or not self._feature_label_overflows(feat, rect):
+            return
+        tip_font = QFont(painter.font())
+        tip_font.setPointSize(8)
+        painter.setFont(tip_font)
+        fm = QFontMetrics(tip_font)
+        tip_w = min(
+            max(fm.horizontalAdvance(full_label) + 10, 40),
+            max(80, self.width() - 8),
+        )
+        tip_h = fm.height() + 6
+        tip_x = min(
+            max(4.0, rect.left()),
+            max(4.0, float(self.width()) - tip_w - 4.0),
+        )
+        tip_y = rect.bottom() + 3.0
+        if tip_y + tip_h > self.height() - 2:
+            tip_y = max(2.0, rect.top() - tip_h - 3.0)
+        tip_rect = QRectF(tip_x, tip_y, tip_w, tip_h)
+        painter.setPen(QPen(QColor("#555555"), 1))
+        painter.setBrush(QColor(255, 255, 255, 235))
+        painter.drawRoundedRect(tip_rect, 3, 3)
+        painter.setPen(QColor("#222222"))
+        painter.drawText(
+            tip_rect.adjusted(5, 0, -5, 0),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            full_label,
+        )
 
     def _paint_msa_rows(self, painter: QPainter, clip: QRect) -> None:
         """Column-aligned residue cells (visible rows/columns only)."""
@@ -2518,6 +2674,8 @@ class MultiSequenceOverviewPanel(QWidget):
     statusMessage = Signal(str)
     annotationsSaved = Signal(object)
     sequenceExtracted = Signal(object)
+    # Open cleaned / derived FASTA as an extra Preview tab (not replace).
+    openInAdditionalPreviewTab = Signal(object)
 
     def __init__(self, fasta_path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2669,6 +2827,9 @@ class MultiSequenceOverviewPanel(QWidget):
 
         self._auto_ann_settings = load_auto_annotation_settings()
         self._similarity_ann_settings = load_similarity_annotation_settings()
+        self._bars.set_show_similarity_database_name(
+            self._similarity_ann_settings.show_database_name_on_track
+        )
         self._ann_cancel = JobCancellation()
         self._ann_thread: QThread | None = None
         self._ann_worker: Worker | None = None
@@ -2834,6 +2995,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._safe_disconnect(bar.zoom_slider.valueChanged, self._on_zoom_slider_changed)
         self._safe_disconnect(bar.fit_requested, self._fit_bars)
         self._safe_disconnect(bar.select_requested, self._select_by_position)
+        self._safe_disconnect(bar.clean_requested, self._open_msa_clean_dialog)
         self._safe_disconnect(bar.consensus_requested, self._open_consensus_dialog)
         self._safe_disconnect(bar.extract_requested, self._extract_selected)
         self._safe_disconnect(bar.filter_text_changed, self._on_name_filter_edited)
@@ -2897,6 +3059,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
         bar.fit_requested.connect(self._fit_bars)
         bar.select_requested.connect(self._select_by_position)
+        bar.clean_requested.connect(self._open_msa_clean_dialog)
         bar.consensus_requested.connect(self._open_consensus_dialog)
         bar.extract_requested.connect(self._extract_selected)
         bar.filter_text_changed.connect(self._on_name_filter_edited)
@@ -3273,6 +3436,9 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         self._similarity_ann_settings = dialog.settings()
         save_similarity_annotation_settings(self._similarity_ann_settings)
+        self._bars.set_show_similarity_database_name(
+            self._similarity_ann_settings.show_database_name_on_track
+        )
         self.statusMessage.emit("Similarity annotation settings saved.")
 
     def _require_selected_record_ids(self, title: str) -> list[str] | None:
@@ -3287,6 +3453,31 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         return None
 
+    def _target_record_ids_for_msa_job(self) -> list[str]:
+        """Selected sequences, or every sequence in the open MSA when none are selected."""
+        ids = self._selected_record_ids()
+        if ids:
+            return ids
+        return list(self._record_ids)
+
+    def _target_record_ids_for_manual_add(self) -> list[str] | None:
+        """Name-selected sequences, or rows inside a regional MSA selection box.
+
+        Unlike Feature detection / Similarity, manual Add never broadcasts to the
+        whole MSA — the user must pick sequence(s) or drag a box on them.
+        """
+        ids = self._selected_record_ids()
+        if ids:
+            return ids
+        regional = self._bars.regional_rows()
+        if not regional:
+            return None
+        return [
+            self._record_ids[row]
+            for row in sorted(regional)
+            if 0 <= row < len(self._record_ids)
+        ]
+
     def _on_auto_run_clicked(self) -> None:
         if self._annotation_running():
             if self._ann_job_kind == "auto":
@@ -3300,8 +3491,13 @@ class MultiSequenceOverviewPanel(QWidget):
                 "Select at least one detector to run.",
             )
             return
-        target_ids = self._require_selected_record_ids("Feature detection")
+        target_ids = self._target_record_ids_for_msa_job()
         if not target_ids:
+            QMessageBox.information(
+                self,
+                "Feature detection",
+                "No sequences are loaded in this MSA.",
+            )
             return
         self._start_batch_annotation(
             TeAnnotationOptions(auto_modes=tuple(modes)),
@@ -3336,8 +3532,13 @@ class MultiSequenceOverviewPanel(QWidget):
                 "These databases are not ready to search:\n\n" + "\n\n".join(issues),
             )
             return
-        target_ids = self._require_selected_record_ids("Similarity annotation")
+        target_ids = self._target_record_ids_for_msa_job()
         if not target_ids:
+            QMessageBox.information(
+                self,
+                "Similarity annotation",
+                "No sequences are loaded in this MSA.",
+            )
             return
         self._start_batch_annotation(
             TeAnnotationOptions(similarity_databases=tuple(databases)),
@@ -4217,6 +4418,81 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_zoom_slider_from_ppb()
         self._sync_header_position_spins()
 
+    def _open_msa_clean_dialog(self) -> None:
+        """Open MSA clean parameters for the alignment shown in this overview."""
+        from repeatviewer.job_options import (
+            load_msa_clean_options,
+            save_msa_clean_options,
+        )
+        from repeatviewer.views.tool_dialogs import MsaCleanParamsDialog
+
+        if not self._path.is_file():
+            QMessageBox.warning(
+                self,
+                "MSA Clean",
+                f"Sequence file not found:\n{self._path}",
+            )
+            return
+        opts = load_msa_clean_options()
+        dialog = MsaCleanParamsDialog(initial=opts, parent=self)
+        if not dialog.exec():
+            return
+        opts = dialog.options()
+        save_msa_clean_options(opts)
+        if not dialog.should_run():
+            self.statusMessage.emit("MSA clean settings saved.")
+            return
+        self._run_msa_clean(dialog.selected_method(), opts)
+
+    def _run_msa_clean(self, method: str, opts=None) -> None:
+        """Clean the open MSA and open the result as an additional Preview tab."""
+        from repeatviewer.backends.curation import run_on_sequence
+        from repeatviewer.job_options import MsaCleanOptions, load_msa_clean_options
+
+        msa_opts = opts if isinstance(opts, MsaCleanOptions) else load_msa_clean_options()
+        method_id = str(method or "msa_clean").strip() or "msa_clean"
+        project = None
+        win = self.window()
+        if win is not None:
+            project = getattr(win, "_project", None)
+        if project is None:
+            QMessageBox.warning(
+                self,
+                "MSA Clean",
+                "Could not access the project to run MSA clean.",
+            )
+            return
+        self.statusMessage.emit(f"Cleaning {self._path.name}…")
+        try:
+            created = run_on_sequence(
+                method_id,
+                self._path,
+                project,
+                msa_clean_options=msa_opts,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface tool failures
+            QMessageBox.critical(self, "MSA Clean failed", str(exc))
+            return
+        paths = [
+            Path(p).expanduser().resolve()
+            for p in (created or [])
+            if Path(p).is_file()
+        ]
+        if not paths:
+            QMessageBox.warning(
+                self,
+                "MSA Clean",
+                "MSA clean finished but no output file was created.",
+            )
+            return
+        for path in paths:
+            self.sequenceExtracted.emit(path)
+            self.openInAdditionalPreviewTab.emit(path)
+        names = ", ".join(p.name for p in paths[:3])
+        if len(paths) > 3:
+            names += ", …"
+        self.statusMessage.emit(f"MSA clean finished · {names}")
+
     def _open_consensus_dialog(self) -> None:
         """Open Consensus parameters for the FASTA shown in this overview."""
         from repeatviewer.job_options import (
@@ -4609,8 +4885,15 @@ class MultiSequenceOverviewPanel(QWidget):
     def _on_add_feature_clicked(self) -> None:
         from repeatviewer.widgets.sequence_map_viewer import AddFeatureDialog
 
-        target_ids = self._require_selected_record_ids("Add feature")
+        target_ids = self._target_record_ids_for_manual_add()
         if not target_ids:
+            QMessageBox.information(
+                self,
+                "Add feature",
+                "Select one or more sequences (click names, or drag a box "
+                "on the tracks), then Add.\n\n"
+                "Tip: Ctrl+A (Cmd+A on Mac) selects all sequences.",
+            )
             return
         region = self._current_region_for_add()
         if region is None:
@@ -4618,7 +4901,7 @@ class MultiSequenceOverviewPanel(QWidget):
                 self,
                 "Add feature",
                 "Drag on the tracks to select a region (or set Position), "
-                "select one or more sequences, then Add.",
+                "then Add.",
             )
             return
         start, end = region

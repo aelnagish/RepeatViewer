@@ -1416,110 +1416,134 @@ def run_similarity_annotations(
     base_features: tuple[SequenceFeature, ...] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> SimilarityAnnotationResult:
-    """Run similarity annotation for each selected user database."""
+    """Run similarity annotation for each selected user database.
+
+    MSA rows with gaps are ungapped for BLAST/HMM/CDD; hit coordinates are
+    projected back to alignment columns in the returned features.
+    """
     if not databases:
         return SimilarityAnnotationResult((), "No databases selected.")
 
+    from repeatviewer.backends.msa_coordinates import prepare_msa_annotation_workspace
+
     cfg = settings or SimilarityAnnotationSettings()
+    incoming_base = base_features
+    if incoming_base is None:
+        incoming_base = tuple(load_sequence_map_data(fasta_path).features)
+    workspace = prepare_msa_annotation_workspace(fasta_path, incoming_base)
+    try:
+        data = load_sequence_map_data(workspace.work_fasta)
+        sequence = data.sequence
+        seq_id = data.sequence_id
+        features = list(workspace.base_features)
+        messages: list[str] = []
+        if workspace.keep is not None and progress is not None:
+            progress("MSA: removed gaps for similarity annotation")
+        track = _next_track(features)
 
-    data = load_sequence_map_data(fasta_path)
-    sequence = data.sequence
-    seq_id = data.sequence_id
-    features = list(base_features if base_features is not None else data.features)
-    messages: list[str] = []
-    track = _next_track(features)
+        needs_orfs = similarity_search_needs_orfs(databases)
+        orfs: tuple[SequenceFeature, ...] = ()
+        if needs_orfs:
+            try:
+                orf_result = _resolve_orfs_for_similarity(
+                    sequence_id=seq_id,
+                    sequence=sequence,
+                    features=features,
+                    orf_settings=orf_settings,
+                )
+                orfs = orf_result.features
+                if orf_result.message:
+                    messages.append(orf_result.message)
+            except RuntimeError as exc:
+                orfs = ()
+                messages.append(str(exc))
 
-    needs_orfs = similarity_search_needs_orfs(databases)
-    orfs: tuple[SequenceFeature, ...] = ()
-    if needs_orfs:
-        try:
-            orf_result = _resolve_orfs_for_similarity(
-                sequence_id=seq_id,
-                sequence=sequence,
-                features=features,
-                orf_settings=orf_settings,
-            )
-            orfs = orf_result.features
-            if orf_result.message:
-                messages.append(orf_result.message)
-        except RuntimeError as exc:
-            orfs = ()
-            messages.append(str(exc))
+        total = len(databases)
+        workers = _similarity_parallel_workers(total)
+        blast_threads = _similarity_blast_threads(total)
+        db_results: list[
+            tuple[SimilarityDatabaseRun, tuple[SequenceFeature, ...], str] | None
+        ] = [None] * total
+        completed = 0
 
-    total = len(databases)
-    workers = _similarity_parallel_workers(total)
-    blast_threads = _similarity_blast_threads(total)
-    db_results: list[tuple[SimilarityDatabaseRun, tuple[SequenceFeature, ...], str] | None] = [
-        None
-    ] * total
-    completed = 0
-
-    def _run_one(index: int, entry: SimilarityDatabaseRun) -> tuple[int, SimilarityDatabaseRun, tuple[SequenceFeature, ...], str]:
-        check_cancelled(cancel)
-        detected, msg = _annotate_single_similarity_database(
-            entry=entry,
-            sequence=sequence,
-            seq_id=seq_id,
-            orfs=orfs,
-            settings=cfg,
-            use_system_blast=use_system_blast,
-            blast_threads=blast_threads,
-            cancel=cancel,
-        )
-        return index, entry, detected, msg
-
-    if progress is not None:
-        progress(f"0/{total} starting")
-
-    if workers > 1 and total > 1:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [
-                pool.submit(_run_one, index, entry)
-                for index, entry in enumerate(databases)
-            ]
-            for future in as_completed(futures):
-                check_cancelled(cancel)
-                index, entry, detected, msg = future.result()
-                db_results[index] = (entry, detected, msg)
-                completed += 1
-                if progress is not None:
-                    # Completed count after each DB finishes.
-                    progress(f"{completed}/{total} {entry.database.name}")
-    else:
-        for index, entry in enumerate(databases):
+        def _run_one(
+            index: int, entry: SimilarityDatabaseRun
+        ) -> tuple[int, SimilarityDatabaseRun, tuple[SequenceFeature, ...], str]:
             check_cancelled(cancel)
-            if progress is not None:
-                progress(f"{index}/{total} {entry.database.name}")
-            _, _, detected, msg = _run_one(index, entry)
-            db_results[index] = (entry, detected, msg)
-            completed = index + 1
-            if progress is not None:
-                progress(f"{completed}/{total} {entry.database.name}")
+            detected, msg = _annotate_single_similarity_database(
+                entry=entry,
+                sequence=sequence,
+                seq_id=seq_id,
+                orfs=orfs,
+                settings=cfg,
+                use_system_blast=use_system_blast,
+                blast_threads=blast_threads,
+                cancel=cancel,
+            )
+            return index, entry, detected, msg
 
-    for index, result in enumerate(db_results):
-        if result is None:
-            continue
-        entry, detected, msg = result
-        db = entry.database
-        if msg:
-            messages.append(msg)
-        if not detected:
-            continue
-        color = entry.color or color_for_database_index(index, database_name=db.name)
-        existing = _domain_features_for_color(features, color)
-        new_sigs = {_domain_feature_signature(feat) for feat in detected}
-        old_sigs = {_domain_feature_signature(feat) for feat in existing}
-        if existing and new_sigs == old_sigs:
-            messages.append(f"{db.name}: unchanged ({len(detected)} hit(s)).")
-            continue
-        target_track = min(feat.track for feat in existing) if existing else track
-        features = _remove_domain_features_for_color(features, color)
-        features.extend(_stamp_features(detected, track=target_track, color=color))
-        if not existing:
-            track += 1
+        if progress is not None:
+            progress(f"0/{total} starting")
 
-    summary = "\n".join(messages) if messages else "Similarity annotation complete."
-    return SimilarityAnnotationResult(features=tuple(features), message=summary)
+        if workers > 1 and total > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(_run_one, index, entry)
+                    for index, entry in enumerate(databases)
+                ]
+                for future in as_completed(futures):
+                    check_cancelled(cancel)
+                    index, entry, detected, msg = future.result()
+                    db_results[index] = (entry, detected, msg)
+                    completed += 1
+                    if progress is not None:
+                        progress(f"{completed}/{total} {entry.database.name}")
+        else:
+            for index, entry in enumerate(databases):
+                check_cancelled(cancel)
+                if progress is not None:
+                    progress(f"{index}/{total} {entry.database.name}")
+                _, _, detected, msg = _run_one(index, entry)
+                db_results[index] = (entry, detected, msg)
+                completed = index + 1
+                if progress is not None:
+                    progress(f"{completed}/{total} {entry.database.name}")
+
+        for index, result in enumerate(db_results):
+            if result is None:
+                continue
+            entry, detected, msg = result
+            db = entry.database
+            if msg:
+                messages.append(msg)
+            if not detected:
+                continue
+            color = entry.color or color_for_database_index(
+                index, database_name=db.name
+            )
+            existing = _domain_features_for_color(features, color)
+            new_sigs = {_domain_feature_signature(feat) for feat in detected}
+            old_sigs = {_domain_feature_signature(feat) for feat in existing}
+            if existing and new_sigs == old_sigs:
+                messages.append(f"{db.name}: unchanged ({len(detected)} hit(s)).")
+                continue
+            target_track = min(feat.track for feat in existing) if existing else track
+            features = _remove_domain_features_for_color(features, color)
+            features.extend(
+                _stamp_features(detected, track=target_track, color=color)
+            )
+            if not existing:
+                track += 1
+
+        summary = (
+            "\n".join(messages) if messages else "Similarity annotation complete."
+        )
+        return SimilarityAnnotationResult(
+            features=tuple(workspace.project_features(features)),
+            message=summary,
+        )
+    finally:
+        workspace.close()
 
 
 def load_use_system_blast_from_settings() -> bool:

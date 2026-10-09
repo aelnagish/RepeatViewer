@@ -12,14 +12,7 @@ from Bio.SeqRecord import SeqRecord
 
 from repeatviewer.backends.auto_annotation import AutoAnnotationMode, run_auto_annotations
 from repeatviewer.backends.auto_annotation_settings import AutoAnnotationSettings, load_auto_annotation_settings
-from Bio.Seq import Seq
-
 from repeatviewer.backends.job_cancel import JobCancellation, check_cancelled
-from repeatviewer.backends.msa_coordinates import (
-    project_features_to_gapped,
-    project_features_to_ungapped,
-    ungap_sequence,
-)
 from repeatviewer.backends.sequence_features import (
     load_features_by_id_from_json,
     load_sequence_map_data,
@@ -128,76 +121,38 @@ def _annotate_one_record_fasta(
 ) -> list:
     """Run selected modules on one single-sequence FASTA; return feature list.
 
-    When the FASTA is an MSA row (contains ``-`` / ``.``), detectors run on the
-    ungapped sequence and returned coordinates are projected back to alignment
-    columns.
+    Gap stripping and MSA coordinate projection are handled inside
+    ``run_auto_annotations`` / ``run_similarity_annotations``.
     """
-    try:
-        raw_records = list(SeqIO.parse(str(record_fasta), "fasta"))
-    except (OSError, ValueError):
-        raw_records = []
-    raw_seq = str(raw_records[0].seq) if raw_records else ""
-    ungapped, keep = ungap_sequence(raw_seq)
-
-    work_fasta = record_fasta
-    base_for_tools = tuple(base_features)
-    tmp_dir_holder: tempfile.TemporaryDirectory | None = None
-    if keep is not None:
-        # Strip gaps for prediction; map existing features into ungapped space.
-        base_for_tools = tuple(
-            project_features_to_ungapped(list(base_features), keep)
-        )
-        tmp_dir_holder = tempfile.TemporaryDirectory(prefix="repeatviewer_ungap_")
-        tmp_dir = Path(tmp_dir_holder.name)
-        rid = str(raw_records[0].id) if raw_records else "seq"
-        temp_record = SeqRecord(
-            Seq(ungapped),
-            id=rid,
-            name=rid,
-            description=rid,
-        )
-        work_fasta = _write_single_record_temp_fasta(
-            temp_record, directory=tmp_dir, index=0
-        )
+    features: tuple = tuple(base_features)
+    if options.auto_modes:
         if progress is not None:
-            progress(f"MSA: removed gaps for {label} ({len(ungapped):,} bp)")
+            progress(f"Auto annotation: {label}")
+        auto_result = run_auto_annotations(
+            record_fasta,
+            options.auto_modes,
+            cancel=cancel,
+            settings=auto_cfg,
+            base_features=features,
+            progress=progress,
+        )
+        features = auto_result.features
 
-    try:
-        features: tuple = tuple(base_for_tools)
-        if options.auto_modes:
-            if progress is not None:
-                progress(f"Auto annotation: {label}")
-            auto_result = run_auto_annotations(
-                work_fasta,
-                options.auto_modes,
-                cancel=cancel,
-                settings=auto_cfg,
-                base_features=features,
-                progress=progress,
-            )
-            features = auto_result.features
-
-        if options.similarity_databases:
-            if progress is not None:
-                progress(f"Similarity annotation: {label}")
-            sim_result = run_similarity_annotations(
-                work_fasta,
-                options.similarity_databases,
-                settings=sim_cfg,
-                use_system_blast=use_blast,
-                orf_settings=auto_cfg.orf,
-                cancel=cancel,
-                base_features=features,
-                progress=progress,
-            )
-            features = sim_result.features
-        out = list(features)
-        if keep is not None:
-            out = project_features_to_gapped(out, keep)
-        return out
-    finally:
-        if tmp_dir_holder is not None:
-            tmp_dir_holder.cleanup()
+    if options.similarity_databases:
+        if progress is not None:
+            progress(f"Similarity annotation: {label}")
+        sim_result = run_similarity_annotations(
+            record_fasta,
+            options.similarity_databases,
+            settings=sim_cfg,
+            use_system_blast=use_blast,
+            orf_settings=auto_cfg.orf,
+            cancel=cancel,
+            base_features=features,
+            progress=progress,
+        )
+        features = sim_result.features
+    return list(features)
 
 
 def run_te_annotation_on_fasta(

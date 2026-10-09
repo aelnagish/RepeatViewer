@@ -32,25 +32,21 @@ def test_overview_zoom_bar_matches_single_seq_sizes(qapp: QApplication) -> None:
     assert _ZOOM_BTN_SIDE == ZOOM_SLIDER_HEIGHT
     # Actions lives on the Preview title bar in overview mode (not this bar).
     assert bar._actions_btn.isHidden()
-    # Select / Fit / Consensus live in overview host as QPushButtons with fixed height 20.
+    # Select / Fit / Clean / Cons live in overview host as QPushButtons with fixed height 20.
     from PySide6.QtWidgets import QPushButton
 
     labels = [
         w.text()
         for w in bar._overview_host.findChildren(QPushButton)
-        if w.text() in {"Select", "Fit", "Consensus"}
+        if w.text() in {"Select", "Fit", "Clean", "Cons"}
     ]
-    assert labels == ["Select", "Fit", "Consensus"]
+    assert labels == ["Select", "Fit", "Clean", "Cons"]
     heights = [
         w.height()
         for w in bar._overview_host.findChildren(QPushButton)
-        if w.text() in {"Select", "Fit", "Consensus"}
+        if w.text() in {"Select", "Fit", "Clean", "Cons"}
     ]
-    assert heights == [
-        _OVERVIEW_SELECT_FIT_HEIGHT,
-        _OVERVIEW_SELECT_FIT_HEIGHT,
-        _OVERVIEW_SELECT_FIT_HEIGHT,
-    ]
+    assert heights == [_OVERVIEW_SELECT_FIT_HEIGHT] * 4
     bar.close()
 
 
@@ -636,6 +632,44 @@ def test_overview_consensus_button_runs_con_generater(
     text = got[0].read_text(encoding="utf-8")
     assert ">consensus" in text
     panel.close()
+
+
+def test_overview_msa_clean_emits_additional_preview_tab(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from repeatviewer.job_options import MsaCleanOptions
+    from repeatviewer.project import RepeatViewerProject
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "aln.fa"
+    # Column 2 is mostly gaps → gappy clean should drop it with default settings.
+    fasta.write_text(
+        ">a\nA-GT\n>b\nA-GT\n>c\nA-GT\n>d\nA-GT\n>e\nACGT\n",
+        encoding="utf-8",
+    )
+    panel = MultiSequenceOverviewPanel(fasta)
+
+    # Attach a parent so window() exposes _project for run_on_sequence.
+    from PySide6.QtWidgets import QWidget
+
+    host = QWidget()
+    host._project = RepeatViewerProject()  # type: ignore[attr-defined]
+    panel.setParent(host)
+
+    extracted: list[Path] = []
+    tabs: list[Path] = []
+    panel.sequenceExtracted.connect(extracted.append)
+    panel.openInAdditionalPreviewTab.connect(tabs.append)
+    panel._run_msa_clean(
+        "msa_clean_gappy",
+        MsaCleanOptions(use_gappy_columns=True, use_divergence=False, use_gap_row=False),
+    )
+    assert len(extracted) == 1
+    assert extracted == tabs
+    assert extracted[0].is_file()
+    assert extracted[0].name.endswith("_gap.fa") or "_gap" in extracted[0].name
+    panel.close()
+    host.close()
 
 
 def test_scale_column_selection_shift_arrows_match_feature(

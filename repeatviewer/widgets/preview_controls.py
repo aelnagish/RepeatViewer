@@ -616,7 +616,7 @@ class PreviewZoomBar(QWidget):
 
         ``text`` — font-size (pt) spin + Reset / Edit text / Save text.
         ``media`` — % spin + Reset scale (HTML / PDF / image).
-        ``dotplot`` — Actions only; no size controls.
+        ``dotplot`` — Actions only; no size controls (Default preview tab when shown).
         """
         self._chrome_mode = mode
         show_percent = mode == "media"
@@ -637,12 +637,23 @@ class PreviewZoomBar(QWidget):
         else:
             self._reset_scale_action.setText("Reset scale")
             self._reset_scale_action.setToolTip("Restore default preview zoom (100%)")
+        self._sync_default_tab_separator()
 
     def set_default_preview_tab_visible(self, visible: bool) -> None:
         """Show Default preview tab only for FASTA files (not plain text/PDF/PNG/HTML)."""
         show = bool(visible)
         self._default_tab_action.setVisible(show)
-        self._default_tab_sep.setVisible(show)
+        self._sync_default_tab_separator()
+
+    def _sync_default_tab_separator(self) -> None:
+        """Hide the leading separator when Default preview tab is the only menu item."""
+        show_tab = self._default_tab_action.isVisible()
+        something_above = (
+            self._reset_scale_action.isVisible()
+            or self._edit_text_action.isVisible()
+            or self._save_text_action.isVisible()
+        )
+        self._default_tab_sep.setVisible(show_tab and something_above)
 
     def set_multi_fasta_default_tabs(self, enabled: bool) -> None:
         """Multi-seq: Default preview tab is Text / Overview (no Dotplot)."""
@@ -762,13 +773,14 @@ class AnnotationZoomBar(QWidget):
 
     Single-sequence Annotation: Actions menu (zoom lives on the map toolbar).
     Multi-sequence overview: same chrome as the map toolbar — −/+/slider,
-    Position, Select, Fit, Consensus.
+    Position, Select, Fit, Clean, Cons.
     """
 
     fit_mode_changed = Signal(str)
     reset_requested = Signal()
     fit_requested = Signal()
     select_requested = Signal()
+    clean_requested = Signal()
     consensus_requested = Signal()
     extract_requested = Signal()  # kept for callers; Extract is not on this bar
     filter_text_changed = Signal(str)
@@ -872,7 +884,17 @@ class AnnotationZoomBar(QWidget):
         fit_btn.clicked.connect(self.fit_requested.emit)
         self._fit_btn = fit_btn
 
-        consensus_btn = QPushButton("Consensus", self._overview_host)
+        clean_btn = QPushButton("Clean", self._overview_host)
+        clean_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        clean_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        clean_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        clean_btn.setToolTip(
+            "Clean this alignment (opens MSA clean parameters)"
+        )
+        clean_btn.clicked.connect(self.clean_requested.emit)
+        self._clean_btn = clean_btn
+
+        consensus_btn = QPushButton("Cons", self._overview_host)
         consensus_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
         consensus_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         consensus_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -902,6 +924,7 @@ class AnnotationZoomBar(QWidget):
             self._pos_end,
             select_btn,
             fit_btn,
+            clean_btn,
             consensus_btn,
         ):
             ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -926,7 +949,7 @@ class AnnotationZoomBar(QWidget):
         self.set_overview_mode(False)
 
     def set_overview_mode(self, enabled: bool) -> None:
-        """Show multi-seq −/+/Position/Select/Fit/Consensus; Actions stay on Preview title."""
+        """Show multi-seq −/+/Position/Select/Fit/Clean/Cons; Actions stay on Preview title."""
         self._overview_mode = bool(enabled)
         self._overview_host.setVisible(self._overview_mode)
         # Title-bar PreviewZoomBar owns Actions (aligned with "Preview"), matching
@@ -1498,10 +1521,22 @@ class PreviewHeaderBar(QWidget):
         show_annotation = mode == "annotation"
         tabs_only = mode == "tabs"
         self._preview_zoom_bar.setVisible(show_preview)
-        if self._annotation_zoom_bar is not None and not tabs_only:
-            self._annotation_zoom_bar.setVisible(show_annotation)
+        bar = self._annotation_zoom_bar
+        bar_alive = False
+        if bar is not None:
+            try:
+                from shiboken6 import isValid
+
+                bar_alive = bool(isValid(bar))
+            except Exception:
+                bar_alive = False
+            if not bar_alive:
+                self._annotation_zoom_bar = None
+                bar = None
+        if bar is not None and not tabs_only:
+            bar.setVisible(show_annotation)
         self._controls_host.setVisible(
-            show_annotation and self._annotation_zoom_bar is not None and not tabs_only
+            show_annotation and bar is not None and not tabs_only
         )
         self._update_bar_visibility()
 

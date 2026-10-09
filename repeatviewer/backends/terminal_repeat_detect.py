@@ -26,8 +26,6 @@ from repeatviewer.backends.auto_annotation_settings import (
 )
 from repeatviewer.backends.sequence_features import SequenceFeature
 
-TIR_ADJ = 50
-LTR_ADJ = 100
 MIN_LTR_LEN = 100
 MIN_TIR_LEN = 20
 DEFAULT_TERMINAL_REPEAT_WORD_SIZE = 11
@@ -127,13 +125,25 @@ def _pair_distance_ok(hit: pd.Series, *, min_pair_distance: int) -> bool:
     return s5 - q3 >= min_pair_distance
 
 
+def _terminal_ends_ok(hit: pd.Series, record_len: int, *, min_distance_to_end: int) -> bool:
+    """
+    Require the 5′ copy near the sequence start and the 3′ copy near the end.
+
+    ``min_distance_to_end`` is the maximum allowed gap (bp) from each terminus:
+    left copy start within that many bp of position 1, right copy end within
+    that many bp of ``record_len``.
+    """
+    allowed = max(0, int(min_distance_to_end))
+    left_gap = max(0, int(hit["qstart"]) - 1)
+    right_gap = max(0, record_len - int(hit["s_hi"]))
+    return left_gap <= allowed and right_gap <= allowed
+
+
 def _check_terminal_repeat(
     df: pd.DataFrame,
     record_len: int,
     *,
     repeat_mode: str = "both",
-    tir_adj: int = TIR_ADJ,
-    ltr_adj: int = LTR_ADJ,
     ltr_settings: TerminalRepeatSettings | None = None,
     tir_settings: TerminalRepeatSettings | None = None,
 ) -> tuple[str | None, pd.Series | None]:
@@ -142,7 +152,7 @@ def _check_terminal_repeat(
 
     Returns (repeat_type, winning_row) where repeat_type is ``LTR``, ``TIR``, or None.
     Unlike TEtrimmer, TIR is still evaluated when LTR-like hits exist but fail the
-    terminal-span threshold.
+    terminal-end proximity checks.
     """
     if df.empty:
         return None, None
@@ -157,8 +167,6 @@ def _check_terminal_repeat(
     )
 
     hits = _prepare_blast_hits(df)
-    span_min_ltr = max(0, record_len - ltr_adj)
-    span_min_tir = max(0, record_len - tir_adj)
 
     mode = repeat_mode.strip().upper()
     try_ltr = mode in {"BOTH", "LTR"}
@@ -181,8 +189,14 @@ def _check_terminal_repeat(
             df_ltr["score"] = df_ltr["send"] - df_ltr["qstart"]
             ltr_hit = df_ltr.loc[df_ltr["score"].idxmax()]
             if (
-                abs(int(ltr_hit["send"]) - int(ltr_hit["qstart"])) >= span_min_ltr
-                and _pair_distance_ok(ltr_hit, min_pair_distance=ltr_cfg.min_pair_distance)
+                _terminal_ends_ok(
+                    ltr_hit,
+                    record_len,
+                    min_distance_to_end=ltr_cfg.min_distance_to_end,
+                )
+                and _pair_distance_ok(
+                    ltr_hit, min_pair_distance=ltr_cfg.min_pair_distance
+                )
             ):
                 return "LTR", ltr_hit
 
@@ -208,7 +222,11 @@ def _check_terminal_repeat(
     df_tir["score"] = df_tir["s_hi"] - df_tir["qstart"]
     tir_hit = df_tir.loc[df_tir["score"].idxmax()]
     if (
-        abs(int(tir_hit["s_hi"]) - int(tir_hit["qstart"])) >= span_min_tir
+        _terminal_ends_ok(
+            tir_hit,
+            record_len,
+            min_distance_to_end=tir_cfg.min_distance_to_end,
+        )
         and _pair_distance_ok(tir_hit, min_pair_distance=tir_cfg.min_pair_distance)
     ):
         return "TIR", tir_hit
@@ -312,7 +330,7 @@ def detect_terminal_repeat_features(
             )
             if tir_candidates > 0:
                 message = (
-                    "No TIR passed terminal-span checks "
+                    "No TIR passed terminal-end checks "
                     f"({tir_candidates} inverted hit(s) were too short or not terminal)."
                 )
             else:
@@ -328,7 +346,7 @@ def detect_terminal_repeat_features(
             )
             if tir_candidates > 0:
                 message = (
-                    "No LTR or TIR passed TEtrimmer terminal-span checks "
+                    "No LTR or TIR passed terminal-end checks "
                     f"({tir_candidates} inverted hit(s) were too short or not terminal)."
                 )
             else:

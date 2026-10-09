@@ -60,3 +60,21 @@ def test_preview_zoom_bar_multi_fasta_default_tabs(qapp: QApplication) -> None:
     labels = [a.text() for a in submenu.actions() if a.isCheckable()]
     assert labels == ["Text", "Overview"]
     bar.deleteLater()
+
+
+def test_overview_actions_chrome_is_default_tab_only(qapp: QApplication) -> None:
+    """Overview title-bar Actions matches Dotplot: no font/%, only Default preview tab."""
+    bar = PreviewZoomBar()
+    bar.set_chrome_mode("dotplot")
+    bar.set_default_preview_tab_visible(True)
+    bar.set_multi_fasta_default_tabs(True)
+    assert not bar._actions_btn.isHidden()
+    assert bar._spin_cluster.isHidden()
+    assert bar._font_cluster.isHidden()
+    assert not bar._reset_scale_action.isVisible()
+    assert not bar._edit_text_action.isVisible()
+    assert not bar._save_text_action.isVisible()
+    assert not bar._default_tab_sep.isVisible()
+    assert bar._default_tab_action.isVisible()
+    bar.deleteLater()
+

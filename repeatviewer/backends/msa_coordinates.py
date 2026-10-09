@@ -6,7 +6,9 @@ then projected back onto the alignment (``-`` / ``.`` columns) for MSA display.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 from repeatviewer.backends.sequence_features import SequenceFeature
 
@@ -231,6 +233,77 @@ def project_features_to_ungapped(
         if mapped is not None:
             out.append(mapped)
     return out
+
+
+@dataclass
+class MsaAnnotationWorkspace:
+    """Temporary ungapped FASTA for detectors; project features back when done."""
+
+    work_fasta: Path
+    base_features: tuple[SequenceFeature, ...]
+    keep: list[int] | None
+    _tmp: object | None = None
+
+    def project_features(
+        self, features: list[SequenceFeature] | tuple[SequenceFeature, ...]
+    ) -> list[SequenceFeature]:
+        return project_features_to_gapped(list(features), self.keep)
+
+    def close(self) -> None:
+        tmp = self._tmp
+        self._tmp = None
+        if tmp is not None:
+            close = getattr(tmp, "cleanup", None)
+            if callable(close):
+                close()
+
+
+def prepare_msa_annotation_workspace(
+    fasta_path: Path,
+    base_features: Sequence[SequenceFeature] | None = None,
+) -> MsaAnnotationWorkspace:
+    """If ``fasta_path`` has gaps, write an ungapped temp FASTA for detectors.
+
+    Existing feature coordinates are mapped into ungapped space. Callers must
+    :meth:`MsaAnnotationWorkspace.project_features` on detector output and
+    :meth:`MsaAnnotationWorkspace.close` when finished.
+    """
+    import tempfile
+
+    from Bio import SeqIO
+    from Bio.Seq import Seq
+    from Bio.SeqRecord import SeqRecord
+
+    resolved = Path(fasta_path).expanduser().resolve()
+    base = tuple(base_features or ())
+    try:
+        records = list(SeqIO.parse(str(resolved), "fasta"))
+    except (OSError, ValueError):
+        records = []
+    if not records:
+        return MsaAnnotationWorkspace(
+            work_fasta=resolved, base_features=base, keep=None
+        )
+    raw_seq = str(records[0].seq)
+    ungapped, keep = ungap_sequence(raw_seq)
+    if keep is None:
+        return MsaAnnotationWorkspace(
+            work_fasta=resolved, base_features=base, keep=None
+        )
+    tmp = tempfile.TemporaryDirectory(prefix="repeatviewer_msa_annot_")
+    rid = str(records[0].id or "seq")
+    out = Path(tmp.name) / "ungapped.fa"
+    SeqIO.write(
+        SeqRecord(Seq(ungapped), id=rid, name=rid, description=rid),
+        str(out),
+        "fasta",
+    )
+    return MsaAnnotationWorkspace(
+        work_fasta=out,
+        base_features=tuple(project_features_to_ungapped(list(base), keep)),
+        keep=keep,
+        _tmp=tmp,
+    )
 
 
 def remove_alignment_columns(

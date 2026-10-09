@@ -5817,6 +5817,9 @@ class AutoAnnotationSettingsPanel(QWidget):
         min_distance = QSpinBox(self)
         min_distance.setRange(0, 1_000_000)
         min_distance.setValue(cfg.min_pair_distance)
+        min_distance_to_end = QSpinBox(self)
+        min_distance_to_end.setRange(0, 1_000_000)
+        min_distance_to_end.setValue(cfg.min_distance_to_end)
         similarity = QDoubleSpinBox(self)
         similarity.setRange(0.0, 1.0)
         similarity.setDecimals(2)
@@ -5846,8 +5849,21 @@ class AutoAnnotationSettingsPanel(QWidget):
             self._field_help(
                 self._sized_spin(min_distance),
                 f"Min distance between {repeat_kind}",
-                f"Minimum spacer between the two {repeat_kind} copies (bp). "
-                "Pairs closer than this are ignored.",
+                f"Minimum spacer between the two {repeat_kind} copies (bp), "
+                f"not the distance from the sequence ends. "
+                f"Pairs closer than this are ignored.",
+            ),
+        )
+        form.addRow(
+            "Min distance to end (bp):",
+            self._field_help(
+                self._sized_spin(min_distance_to_end),
+                f"{repeat_kind} min distance to end",
+                f"How close the {repeat_kind} pair must sit to the sequence "
+                f"termini (bp). The left (5′) copy must start within this "
+                f"distance of the beginning, and the right (3′) copy must end "
+                f"within this distance of the sequence end. Larger values "
+                f"allow more internal candidates; default 1000.",
             ),
         )
         form.addRow(
@@ -5862,7 +5878,9 @@ class AutoAnnotationSettingsPanel(QWidget):
         )
         if not hasattr(self, "_terminal_fields"):
             self._terminal_fields = []
-        self._terminal_fields.append((min_len, max_len, min_distance, similarity))
+        self._terminal_fields.append(
+            (min_len, max_len, min_distance, min_distance_to_end, similarity)
+        )
         return form
 
     def _tandem_repeat_form(self, cfg: TandemRepeatSettings) -> QFormLayout:
@@ -6042,15 +6060,16 @@ class AutoAnnotationSettingsPanel(QWidget):
 
     @staticmethod
     def _read_terminal_settings(
-        fields: tuple[QSpinBox, QSpinBox, QSpinBox, QDoubleSpinBox],
+        fields: tuple[QSpinBox, QSpinBox, QSpinBox, QSpinBox, QDoubleSpinBox],
         *,
         default_min: int,
     ) -> TerminalRepeatSettings:
-        min_len, max_len, min_distance, similarity = fields
+        min_len, max_len, min_distance, min_distance_to_end, similarity = fields
         return TerminalRepeatSettings(
             min_length=min_len.value() or default_min,
             max_length=max(max_len.value(), min_len.value()),
             min_pair_distance=min_distance.value(),
+            min_distance_to_end=min_distance_to_end.value(),
             similarity_threshold=similarity.value(),
         )
 
@@ -6339,8 +6358,6 @@ class SequenceMapPanel(QWidget):
         self._auto_row_container = self._rail
         self._sim_row_container = self._rail
         self._action_row_container = self._rail
-        self._annotation_job_status = self._rail.status_label
-
         self._auto_ann_all_check = self._rail.auto_ann_all_check
         self._auto_ann_run_btn = self._rail.auto_ann_run_btn
         self._auto_ann_settings_btn = self._rail.auto_ann_settings_btn
@@ -8508,15 +8525,10 @@ class SequenceMapPanel(QWidget):
     @Slot(str)
     def _set_annotation_job_status(self, text: str) -> None:
         msg = text.strip()
-        self._annotation_job_status.setText(msg)
-        if hasattr(self, "_rail"):
-            if hasattr(self._rail, "set_annotation_job_status"):
-                self._rail.set_annotation_job_status(msg)
-            else:
-                self._rail.set_status(msg)
+        if hasattr(self, "_rail") and hasattr(self._rail, "set_annotation_job_status"):
+            self._rail.set_annotation_job_status(msg)
 
     def _clear_annotation_job_status(self) -> None:
-        self._annotation_job_status.clear()
         if hasattr(self, "_rail") and hasattr(self._rail, "set_annotation_job_status"):
             self._rail.set_annotation_job_status("")
 
