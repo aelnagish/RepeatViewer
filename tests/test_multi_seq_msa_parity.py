@@ -141,16 +141,16 @@ def test_bars_select_all_and_region_without_zoom(qapp: QApplication) -> None:
     assert canvas.region_selection() is not None
     assert zoom_calls == []
 
-    # Click outside the selected band clears it.
+    # Click inside (or outside) the selected band clears it.
     sel = canvas.region_selection()
     assert sel is not None
-    outside_x = canvas.bp_to_x(sel[1] + 20)
-    canvas._drag_origin = QPointF(outside_x, 20)
+    inside_x = canvas.bp_to_x((sel[0] + sel[1]) / 2.0)
+    canvas._drag_origin = QPointF(inside_x, 20)
     canvas._rubber_active = False
     canvas._rubber = QRect()
     click = QMouseEvent(
         QMouseEvent.Type.MouseButtonRelease,
-        QPointF(outside_x, 20),
+        QPointF(inside_x, 20),
         Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,

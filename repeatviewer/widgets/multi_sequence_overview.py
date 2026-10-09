@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QPalette,
     QPdfWriter,
     QPen,
+    QPixmap,
     QPolygonF,
     QWheelEvent,
 )
@@ -512,6 +513,7 @@ class _BarsCanvas(QWidget):
         self._msa_mode = False
         self._msa_protein = False
         self._msa_colors: dict[str, tuple[str, str]] = {}
+        self._msa_qcolors: dict[str, tuple[QColor, QColor]] = {}
         self._msa_residue_height = _MSA_ROW_HEIGHT
         self._msa_font_pt = _DEFAULT_MSA_FONT_PT
         self._sequence_row_gap = 0  # pixels between sequences (Others → distance)
@@ -528,6 +530,8 @@ class _BarsCanvas(QWidget):
         self._drag_origin: QPointF | None = None
         self._rubber = QRect()
         self._rubber_active = False  # True only after drag exceeds threshold
+        self._rubber_prev = QRect()  # last overlay rect (for cheap partial updates)
+        self._drag_paint_cache: QPixmap | None = None
         self._pending_scroll_bp: float | None = None
         self._pending_anchor: tuple[float, float] | None = None
         # Edit > Find: hit ranges per record id, and the hit being shown.
@@ -552,6 +556,8 @@ class _BarsCanvas(QWidget):
         self._msa_mode = False
         self._msa_seqs = []
         self._msa_colors = {}
+        self._msa_qcolors = {}
+        self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
         self._lengths = dict(lengths)
         self._features = dict(features)
@@ -595,6 +601,8 @@ class _BarsCanvas(QWidget):
             if self._msa_protein
             else nucleotide_base_color_map()
         )
+        self._rebuild_msa_qcolor_cache()
+        self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
         width = len(sequences[0]) if sequences else 1
         self._lengths = {rid: width for rid in record_ids}
@@ -634,11 +642,13 @@ class _BarsCanvas(QWidget):
             rid: _pack_feature_tracks(list(self._features.get(rid) or []))
             for rid in self._record_ids
         }
+        self._clear_drag_paint_cache()
         self._recompute_layout()
         self.update()
 
     def set_show_annotation_track(self, enabled: bool) -> None:
         self._show_annotation_track = bool(enabled)
+        self._clear_drag_paint_cache()
         self._recompute_layout()
         self.update()
 
@@ -661,6 +671,7 @@ class _BarsCanvas(QWidget):
         glyph_h = max(fm.height(), fm.ascent() + fm.descent())
         self._msa_residue_height = max(1, int(glyph_h + 4))
         if self._msa_mode:
+            self._clear_drag_paint_cache()
             self._recompute_layout()
             self.update()
 
@@ -717,7 +728,56 @@ class _BarsCanvas(QWidget):
             if self._msa_protein
             else nucleotide_base_color_map()
         )
+        self._rebuild_msa_qcolor_cache()
+        self._clear_drag_paint_cache()
         self.update()
+
+    def _rebuild_msa_qcolor_cache(self) -> None:
+        cache: dict[str, tuple[QColor, QColor]] = {}
+        for key, pair in self._msa_colors.items():
+            bg = QColor(pair[0])
+            fg = QColor(pair[1])
+            if bg.isValid() and fg.isValid():
+                cache[key] = (bg, fg)
+                cache[key.upper()] = (bg, fg)
+                cache[key.lower()] = (bg, fg)
+        self._msa_qcolors = cache
+
+    def _clear_drag_paint_cache(self) -> None:
+        self._drag_paint_cache = None
+        self._rubber_prev = QRect()
+
+    def _capture_drag_paint_cache(self) -> None:
+        """Snapshot the MSA/bars under the rubber overlay for smooth dragging."""
+        w = max(1, self.width())
+        h = max(1, self.height())
+        pm = QPixmap(w, h)
+        pm.fill(self.palette().color(QPalette.ColorRole.Base))
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        clip = QRect(0, 0, w, h)
+        if self._msa_mode:
+            self._paint_msa_rows(painter, clip)
+        else:
+            self._paint_bar_rows(painter, clip)
+        painter.end()
+        self._drag_paint_cache = pm
+
+    def _update_rubber_overlay(self, rubber: QRect) -> None:
+        """Repaint only the band that changed while dragging a region."""
+        old = QRect(self._rubber_prev)
+        self._rubber = QRect(rubber)
+        self._rubber_active = True
+        new = QRect(rubber).normalized()
+        dirty = old.united(new)
+        # Full-height strips (dim overlay spans the viewport vertically).
+        if dirty.isNull():
+            self.update()
+        else:
+            left = max(0, dirty.left() - 2)
+            right = min(self.width(), dirty.right() + 2)
+            self.update(QRect(left, 0, max(1, right - left), self.height()))
+        self._rubber_prev = QRect(new)
 
     def pixels_per_base(self) -> float:
         return self._ppb
@@ -792,6 +852,7 @@ class _BarsCanvas(QWidget):
     def set_pixels_per_base(self, ppb: float) -> None:
         fit_ppb, max_ppb = self.zoom_bounds()
         self._ppb = max(fit_ppb, min(max_ppb, float(ppb)))
+        self._clear_drag_paint_cache()
         self._recompute_layout()
         self.update()
         self.zoomChanged.emit(self._ppb)
@@ -811,6 +872,7 @@ class _BarsCanvas(QWidget):
             self._pending_anchor = None
         self._pending_scroll_bp = None
         self._ppb = new
+        self._clear_drag_paint_cache()
         self._recompute_layout()
         self.update()
         self.zoomChanged.emit(self._ppb)
@@ -997,17 +1059,17 @@ class _BarsCanvas(QWidget):
             origin = self._drag_origin.toPoint()
             current = event.position().toPoint()
             rubber = QRect(origin, current).normalized()
-            # Only activate region-zoom UI after a real drag distance.
+            # Only activate region UI after a real drag distance.
             if rubber.width() >= _RUBBER_MIN_PX or rubber.height() >= _RUBBER_MIN_PX:
-                self._rubber = rubber
-                self._rubber_active = True
+                if not self._rubber_active:
+                    # Snapshot once; drag overlays blit the cache (smooth).
+                    self._capture_drag_paint_cache()
+                    self._selected_feat = None
+                # Defer row/name sync until release — only update the overlay.
                 rows = self._rows_in_y_range(rubber.top(), rubber.bottom())
                 if rows:
                     self._selected_rows = set(rows)
-                    self._selected_feat = None
-                    self.selectionChanged.emit()
-                    self.rowsChanged.emit()
-                self.update()
+                self._update_rubber_overlay(rubber)
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -1016,10 +1078,10 @@ class _BarsCanvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self._drag_origin is not None:
             rubber = QRect(self._rubber)
             active = self._rubber_active
-            click_pos = QPointF(event.position())
             self._drag_origin = None
             self._rubber = QRect()
             self._rubber_active = False
+            self._clear_drag_paint_cache()
             if active and (
                 rubber.width() >= _RUBBER_MIN_PX or rubber.height() >= _RUBBER_MIN_PX
             ):
@@ -1038,11 +1100,8 @@ class _BarsCanvas(QWidget):
                 end_i = max(start_i, int(math.ceil(end_bp)))
                 self.set_region_selection(start_i, end_i)
             elif self._region_sel is not None:
-                # Click outside the blue band clears the region (single-seq parity).
-                bp = max(1, int(math.floor(self.x_to_bp(click_pos.x()))) + 1)
-                a, b = self._region_sel
-                if bp < a or bp > b:
-                    self.set_region_selection(None)
+                # Plain click (inside or outside the blue band) clears the region.
+                self.set_region_selection(None)
             self.update()
             event.accept()
             return
@@ -1095,16 +1154,21 @@ class _BarsCanvas(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         clip = event.rect()
         base = self.palette().color(QPalette.ColorRole.Base)
-        painter.fillRect(clip, base)
-        if self._msa_mode:
-            self._paint_msa_rows(painter, clip)
+        # During rubber-band drag, blit the cached MSA and only redraw the overlay.
+        cache = self._drag_paint_cache
+        if self._rubber_active and cache is not None and not cache.isNull():
+            painter.drawPixmap(clip, cache, clip)
         else:
-            self._paint_bar_rows(painter, clip)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, not self._msa_mode)
+            painter.fillRect(clip, base)
+            if self._msa_mode:
+                self._paint_msa_rows(painter, clip)
+            else:
+                self._paint_bar_rows(painter, clip)
 
-        # Region-zoom overlay only after a real drag (not on click).
+        # Region overlay only after a real drag (not on click).
         if self._rubber_active and not self._rubber.isNull():
             x0 = self._rubber.left()
             x1 = max(x0 + 1, self._rubber.right())
@@ -1179,11 +1243,11 @@ class _BarsCanvas(QWidget):
         """Column-aligned residue cells (visible rows/columns only)."""
         sel_bg = _SELECTED_BG_DARK if _is_dark(self) else _SELECTED_BG_LIGHT
         ppb = max(self._ppb, 1e-12)
-        show_letters = ppb >= _MSA_LETTER_MIN_PPB
+        show_letters = ppb >= _MSA_LETTER_MIN_PPB and ppb >= 6
         c0 = max(0, int((clip.left() - self._bar_pad) / ppb) - 1)
         c1 = min(self._max_length, int((clip.right() - self._bar_pad) / ppb) + 2)
-        font = QFont(self.font())
         if show_letters:
+            font = QFont(self.font())
             font.setFamily("Menlo")
             font.setStyleHint(QFont.StyleHint.Monospace)
             font.setPointSize(max(2, min(36, int(self._msa_font_pt))))
@@ -1191,8 +1255,10 @@ class _BarsCanvas(QWidget):
         gap_fill = (
             QColor(70, 70, 70, 70) if _is_dark(self) else _MSA_GAP_FILL
         )
+        qcolors = self._msa_qcolors
         # Colored cell height matches letter metrics (set_msa_residue_size).
         residue_h = max(1, int(self._msa_residue_height))
+        painter.setPen(Qt.PenStyle.NoPen)
         for index, rid in enumerate(self._record_ids):
             top = self._row_tops[index]
             height = self._row_heights[index]
@@ -1202,27 +1268,40 @@ class _BarsCanvas(QWidget):
                 painter.fillRect(0, top, self.width(), height, sel_bg)
             seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
             y = top
-            for j in range(c0, c1):
+            # Coalesce same-residue runs when zoomed out (far fewer draw calls).
+            j = c0
+            while j < c1:
                 x = self._bar_pad + j * ppb
-                if x + ppb < clip.left() or x > clip.right():
+                if x + ppb < clip.left():
+                    j += 1
                     continue
+                if x > clip.right():
+                    break
                 ch = seq[j] if j < len(seq) else "-"
-                cell = QRectF(x, y, max(0.5, ppb), float(residue_h))
+                run_end = j + 1
+                if not show_letters:
+                    while run_end < c1:
+                        nxt = seq[run_end] if run_end < len(seq) else "-"
+                        if nxt != ch:
+                            break
+                        run_end += 1
+                span = run_end - j
+                cell = QRectF(x, y, max(0.5, ppb * span), float(residue_h))
                 if ch in "-.":
                     painter.fillRect(cell, gap_fill)
-                    continue
-                pair = self._msa_colors.get(ch) or self._msa_colors.get(ch.upper())
-                if pair is None:
-                    continue
-                bg_hex, fg_hex = pair
-                painter.fillRect(cell, QColor(bg_hex))
-                if show_letters and ppb >= 6:
-                    painter.setPen(QColor(fg_hex))
-                    painter.drawText(
-                        cell.toRect(),
-                        int(Qt.AlignmentFlag.AlignCenter),
-                        ch,
-                    )
+                else:
+                    pair = qcolors.get(ch)
+                    if pair is not None:
+                        painter.fillRect(cell, pair[0])
+                        if show_letters:
+                            painter.setPen(pair[1])
+                            painter.drawText(
+                                cell.toRect(),
+                                int(Qt.AlignmentFlag.AlignCenter),
+                                ch,
+                            )
+                            painter.setPen(Qt.PenStyle.NoPen)
+                j = run_end
             hits = self._find_hits.get(rid)
             if hits:
                 painter.setPen(QPen(_FIND_HIT_BORDER, 1))
@@ -2638,25 +2717,28 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.set_position_range(maximum, start=1, end=maximum)
 
     def _select_by_position(self) -> None:
-        """Zoom/scroll to the header Position range (same idea as single-seq Select)."""
+        """Zoom/scroll to the current region or Position spins (single-seq Select)."""
         bar = self._header_zoom_bar
         if bar is None:
             return
-        start = int(bar.pos_start.value())
-        end = int(bar.pos_end.value())
+        maximum = max(1, int(self._bars.max_length()))
+        # Prefer the blue MSA band when present — spins can lag or mismatch.
+        region = self._bars.region_selection()
+        if region is not None:
+            start, end = int(region[0]), int(region[1])
+        else:
+            start = int(bar.pos_start.value())
+            end = int(bar.pos_end.value())
         if end < start:
             start, end = end, start
-            bar.set_position_range(
-                max(1, int(self._bars.max_length())), start=start, end=end
-            )
-        maximum = max(1, int(self._bars.max_length()))
         start = max(1, min(maximum, start))
         end = max(start, min(maximum, end))
+        bar.set_position_range(maximum, start=start, end=end)
         self._bars.set_region_selection(start, end)
-        # Inclusive columns → half-open bp window used by zoom_to_bp_range.
+        # Inclusive columns → half-open window for zoom_to_bp_range.
         self._on_region_zoom(float(start - 1), float(end))
         self._sync_zoom_slider_from_ppb()
-        # Center the selected span in the viewport when possible.
+        # After zoom, scroll so the band is centered (pending scroll may be start-aligned).
         ppb = max(self._bars.pixels_per_base(), 1e-12)
         mid_x = self._bars.bar_pad() + ((start - 1 + end) / 2.0) * ppb
         vp_w = max(1, self._bars_scroll.viewport().width())
@@ -2664,6 +2746,7 @@ class MultiSequenceOverviewPanel(QWidget):
         hbar = self._bars_scroll.horizontalScrollBar()
         hbar.setValue(max(0, min(hbar.maximum(), target)))
         self._update_scale()
+        self._sync_names_column()
 
     def _fit_bars(self) -> None:
         # Keep the user's splitter ratio; only zoom tracks to the track viewport.
