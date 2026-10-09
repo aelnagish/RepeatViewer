@@ -68,11 +68,15 @@ class PathBrowseRow(QWidget):
         self._editing_full = False
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Container stays out of the tab chain; path edits only on click so
+        # opening a tool dialog does not park the cursor in Reference / MSA.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         self._path = line_edit if line_edit is not None else QLineEdit(self)
         if self._path.parent() is None:
             self._path.setParent(self)
         self._path.setObjectName("PathField")
+        self._path.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         if placeholder:
             self._path.setPlaceholderText(placeholder)
         self._path.setMinimumWidth(minimum_width)

@@ -1533,6 +1533,12 @@ class FolderTreeWidget(QTreeWidget):
         self._user_selecting = False
         self._active_folder_key: str | None = None
         self._drop_target_item: QTreeWidgetItem | None = None
+        # Track presses so chevron toggle does not fight Qt's double-click expand.
+        self._last_press_ms = 0.0
+        self._last_press_item: QTreeWidgetItem | None = None
+        self._last_press_pos = QPoint()
+        # True when the first press of a double-click already toggled the branch.
+        self._branch_toggled_on_press = False
 
     def drop_target_item(self) -> QTreeWidgetItem | None:
         """Folder row currently under an in-progress file drop, if any."""
@@ -1773,45 +1779,76 @@ class FolderTreeWidget(QTreeWidget):
             return
         self._emit_folder_for_item(current)
 
+    @staticmethod
+    def _item_has_branch(item: QTreeWidgetItem) -> bool:
+        return item.childCount() > 0 or (
+            item.childIndicatorPolicy()
+            == QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+        )
+
+    def _chevron_hit(self, item: QTreeWidgetItem, pos: QPoint) -> bool:
+        """True when ``pos`` is in the custom chevron / icon expand zone."""
+        index = self.indexFromItem(item)
+        opt = QStyleOptionViewItem()
+        opt.rect = self.visualRect(index)
+        delegate = self.itemDelegate()
+        if delegate is not None:
+            delegate.initStyleOption(opt, index)
+        deco = self.style().subElementRect(
+            QStyle.SubElement.SE_ItemViewItemDecoration,
+            opt,
+            self,
+        )
+        chevron_right = (
+            deco.right()
+            if deco.isValid() and deco.width() > 0
+            else opt.rect.left() + self.iconSize().width()
+        )
+        # When the row is selected Qt's view-item decoration metrics can
+        # shrink, making the chevron area feel "dead". Expand the hit
+        # region by a few pixels to keep expand/collapse responsive.
+        chevron_right = max(
+            chevron_right,
+            opt.rect.left() + self.iconSize().width() + 8,
+        )
+        return pos.x() <= chevron_right
+
+    def _is_second_click_of_double(
+        self, item: QTreeWidgetItem | None, pos: QPoint
+    ) -> bool:
+        """Same row within the double-click interval (position may drift)."""
+        del pos  # mixed chevron→label aiming often moves past startDragDistance
+        if item is None or item is not self._last_press_item:
+            return False
+        app = QApplication.instance()
+        interval = (
+            int(app.doubleClickInterval())
+            if app is not None
+            else 500
+        )
+        return (time.monotonic() * 1000.0) - self._last_press_ms <= interval
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         clicked_folder: Path | None = None
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
             item = self.itemAt(pos)
+            second_of_double = self._is_second_click_of_double(item, pos)
+            if not second_of_double:
+                self._branch_toggled_on_press = False
             if item is not None and not bool(item.data(0, ROLE_LAZY_PLACEHOLDER)):
-                index = self.indexFromItem(item)
-                opt = QStyleOptionViewItem()
-                opt.rect = self.visualRect(index)
-                delegate = self.itemDelegate()
-                if delegate is not None:
-                    delegate.initStyleOption(opt, index)
-                deco = self.style().subElementRect(
-                    QStyle.SubElement.SE_ItemViewItemDecoration,
-                    opt,
-                    self,
-                )
-                chevron_right = (
-                    deco.right()
-                    if deco.isValid() and deco.width() > 0
-                    else opt.rect.left() + self.iconSize().width()
-                )
-                # When the row is selected Qt's view-item decoration metrics can
-                # shrink, making the chevron area feel "dead". Expand the hit
-                # region by a few pixels to keep expand/collapse responsive.
-                chevron_right = max(
-                    chevron_right,
-                    opt.rect.left() + self.iconSize().width() + 8,
-                )
-                if pos.x() <= chevron_right:
-                    has_branch = item.childCount() > 0 or (
-                        item.childIndicatorPolicy()
-                        == QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
-                    )
-                    if has_branch:
+                if self._chevron_hit(item, pos):
+                    # Skip toggle on the second press of a double-click — that
+                    # press plus a second toggle used to expand then collapse.
+                    if self._item_has_branch(item) and not second_of_double:
                         item.setExpanded(not item.isExpanded())
+                        self._branch_toggled_on_press = True
                     # Chevron only — do not treat as a folder path click.
                 else:
                     clicked_folder = self._folder_path_for_item(item)
+            self._last_press_ms = time.monotonic() * 1000.0
+            self._last_press_item = item
+            self._last_press_pos = QPoint(pos)
         self._user_selecting = True
         try:
             super().mousePressEvent(event)
@@ -1819,6 +1856,24 @@ class FolderTreeWidget(QTreeWidget):
             self._user_selecting = False
         if clicked_folder is not None:
             self.folder_clicked.emit(clicked_folder)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        # Double-click toggles expand/collapse. If the first press already
+        # toggled via the chevron, keep that result (avoids expand→collapse).
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.position().toPoint())
+            if (
+                item is not None
+                and not bool(item.data(0, ROLE_LAZY_PLACEHOLDER))
+                and self._item_has_branch(item)
+            ):
+                if not self._branch_toggled_on_press:
+                    item.setExpanded(not item.isExpanded())
+                self._branch_toggled_on_press = False
+                event.accept()
+                return
+        self._branch_toggled_on_press = False
+        super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         self._user_selecting = True

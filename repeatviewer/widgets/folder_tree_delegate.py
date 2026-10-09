@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QRect, QModelIndex
-from PySide6.QtGui import QColor, QPainter, QPalette, QPen
+from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -233,6 +233,7 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
                 chevron_center_x=chevron_cx,
             )
 
+        paint_selected_icon = False
         if is_drop_target:
             # Same light-blue hover as mouse-over (not selection / not green).
             bg_rect = self._highlight_rect(opt, widget)
@@ -259,11 +260,31 @@ class FolderTreeItemDelegate(QStyledItemDelegate):
                 opt.palette.setBrush(QPalette.ColorRole.Text, sel_text)
                 opt.palette.setBrush(QPalette.ColorRole.WindowText, sel_text)
                 opt.palette.setBrush(QPalette.ColorRole.HighlightedText, sel_text)
+                # State_Selected was cleared so Qt would keep Normal (grey) chevrons;
+                # paint the Selected (white) pixmap so the arrow matches the text.
+                paint_selected_icon = not opt.icon.isNull()
             else:
                 painter.setBrush(_folder_hover_background(opt.palette))
                 painter.drawRoundedRect(bg_rect, 4, 4)
                 text = self._readable_text_brush(opt)
                 opt.palette.setBrush(QPalette.ColorRole.Text, text)
                 opt.palette.setBrush(QPalette.ColorRole.WindowText, text)
+
+        if paint_selected_icon:
+            style = widget.style() if widget is not None else QApplication.style()
+            deco = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemDecoration,
+                opt,
+                widget,
+            )
+            if deco.isValid() and deco.width() > 0:
+                opt.icon.paint(
+                    painter,
+                    deco,
+                    Qt.AlignmentFlag.AlignCenter,
+                    QIcon.Mode.Selected,
+                    QIcon.State.Off,
+                )
+                opt.icon = QIcon()
 
         super().paint(painter, opt, index)

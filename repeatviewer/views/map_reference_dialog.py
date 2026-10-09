@@ -811,6 +811,16 @@ class MapReferenceDialog(QDialog):
         if self._tab_bar.currentIndex() == self._TAB_OPTIONS:
             self._update_executable_status()
         QTimer.singleShot(0, lambda: self._resize_for_advanced(False))
+        # Don't leave the caret in Reference (or other path fields) on open —
+        # typing would silently rewrite the saved genome path.
+        QTimer.singleShot(0, self._clear_startup_path_focus)
+
+    def _clear_startup_path_focus(self) -> None:
+        focused = self.focusWidget()
+        if focused is None or focused.objectName() != "PathField":
+            return
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _sync_field_column(self) -> None:
         """Indent Inputs radios / Advanced checkboxes to the Settings field column."""

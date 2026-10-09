@@ -8,7 +8,7 @@ while Qt was still handling the click, so Cmd+click emptied it.
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QTreeWidgetItem
 
@@ -109,3 +109,76 @@ def test_multi_selection_offers_deleting_all(tree, monkeypatch):
     item_c = tree.topLevelItem(0).child(2)
     tree._show_context_menu(tree.visualItemRect(item_c).center())
     assert "Delete 2 folders" in labels
+
+
+def _branch_item(tree, tmp_path, name: str):
+    parent = tmp_path / name
+    parent.mkdir()
+    (parent / "child").mkdir()
+    item = QTreeWidgetItem([name])
+    item.setData(0, mw.ROLE_PATH, str(parent))
+    item.setChildIndicatorPolicy(
+        QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+    )
+    placeholder = QTreeWidgetItem([""])
+    placeholder.setData(0, mw.ROLE_LAZY_PLACEHOLDER, True)
+    item.addChild(placeholder)
+    tree.topLevelItem(0).addChild(item)
+    return item
+
+
+def test_double_click_toggles_folder_expand_collapse(tree, tmp_path):
+    """Label double-click expands, then collapses on the next double-click."""
+    item = _branch_item(tree, tmp_path, "nested")
+    item.setExpanded(False)
+    tree.resize(300, 300)
+    tree.show()
+
+    label_pos = tree.visualItemRect(item).center()
+    QTest.mouseDClick(tree.viewport(), Qt.MouseButton.LeftButton, M.NoModifier, label_pos)
+    QTest.qWait(10)
+    assert item.isExpanded() is True
+    QTest.mouseDClick(tree.viewport(), Qt.MouseButton.LeftButton, M.NoModifier, label_pos)
+    QTest.qWait(10)
+    assert item.isExpanded() is False
+
+
+def test_mixed_chevron_label_double_click_stays_expanded(tree, tmp_path):
+    """Chevron press then label double-click must not collapse (old race)."""
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import QPointF, QEvent
+
+    item = _branch_item(tree, tmp_path, "mixed")
+    item.setExpanded(False)
+    tree.resize(300, 300)
+    tree.show()
+
+    rect = tree.visualItemRect(item)
+    chevron_pos = QPoint(rect.left() + 4, rect.center().y())
+    label_pos = rect.center()
+
+    def _press(pos: QPoint) -> None:
+        ev = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(pos),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        tree.mousePressEvent(ev)
+
+    def _dbl(pos: QPoint) -> None:
+        ev = QMouseEvent(
+            QEvent.Type.MouseButtonDblClick,
+            QPointF(pos),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        tree.mouseDoubleClickEvent(ev)
+
+    _press(chevron_pos)  # expands via chevron
+    assert item.isExpanded() is True
+    _press(label_pos)  # second press of a double-click (must not toggle)
+    _dbl(label_pos)  # keep chevron result; do not collapse
+    assert item.isExpanded() is True
