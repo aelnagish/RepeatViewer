@@ -866,7 +866,7 @@ class FilePreviewPage(QWidget):
         return self._single_fasta_mode and self._fasta_stack.currentIndex() == 1
 
     def persist_annotation_view_for_session(self) -> None:
-        """Write the current annotation viewport to QSettings for restart restore."""
+        """Write the current annotation viewport to QSettings for later reopen."""
         if not _is_sequence_map_fasta(self.path):
             return
         panel = self._annotation_panel
@@ -2876,8 +2876,9 @@ class PreviewTabWidget(QTabWidget):
                 and widget.is_annotation_preview_active()
                 and widget.is_multi_fasta_preview()
             ):
-                # Multi-seq overview: −/+/Position/Select/Fit under the tab divider.
-                self._header_bar.set_header_zoom_mode("annotation")
+                # Multi-seq overview: tabs only here; zoom chrome lives in the
+                # overview panel beside the rail (same top as single-seq Annotation).
+                self._header_bar.set_header_zoom_mode("tabs")
             elif is_annotation:
                 # Single-seq Annotation: Actions on the Preview title bar (like Dotplot).
                 self._header_bar.set_header_zoom_mode("preview")
@@ -2916,26 +2917,48 @@ class PreviewTabWidget(QTabWidget):
             self._zoom_bar.set_zoom_kind(zoom_kind)
             kind_changed = previous != zoom_kind
 
-        show_preview_chrome = not is_cyto and not (
+        is_multi_fasta = isinstance(widget, FilePreviewPage) and (
+            widget.is_multi_fasta_preview()
+        )
+        is_multi_overview_active = (
             isinstance(widget, FilePreviewPage)
             and widget.is_annotation_preview_active()
-            and widget.is_multi_fasta_preview()
+            and is_multi_fasta
         )
+        show_preview_chrome = not is_cyto and not is_multi_overview_active
         for control in (
             self._zoom_bar._spin,
             getattr(self._zoom_bar, "_font_spin", None),
-            self._zoom_bar._actions_btn,
         ):
             if control is not None:
                 control.setEnabled(show_preview_chrome)
-        if (is_dotplot or single_annotation) and hasattr(self._zoom_bar, "_actions_btn"):
-            self._zoom_bar._actions_btn.setEnabled(True)
+        # Keep Actions enabled on multi-seq Overview (and Text) for default tab.
+        actions_enabled = (
+            show_preview_chrome
+            or is_dotplot
+            or single_annotation
+            or is_multi_fasta
+        ) and not is_cyto
+        if hasattr(self._zoom_bar, "_actions_btn"):
+            self._zoom_bar._actions_btn.setEnabled(actions_enabled)
+            self._zoom_bar._actions_btn.setVisible(True)
+        if is_multi_overview_active and hasattr(self._zoom_bar, "set_chrome_mode"):
+            # Title-bar Actions only (font/scale spins stay off).
+            self._zoom_bar.set_chrome_mode("dotplot")
         if hasattr(self._zoom_bar, "set_default_preview_tab_visible"):
-            # Only FASTA previews have Text / Annotation / Dotplot tabs.
+            # FASTA previews: Text / Annotation|Overview [/ Dotplot for single].
             show_default_tab = isinstance(widget, FilePreviewPage) and (
-                widget.is_single_fasta_preview()
+                widget.is_single_fasta_preview() or is_multi_fasta
             )
             self._zoom_bar.set_default_preview_tab_visible(show_default_tab)
+        if hasattr(self._zoom_bar, "set_multi_fasta_default_tabs"):
+            self._zoom_bar.set_multi_fasta_default_tabs(is_multi_fasta)
+        if (
+            is_multi_overview_active
+            and self._annotation_zoom_bar is not None
+            and hasattr(self._annotation_zoom_bar, "set_multi_fasta_default_tabs")
+        ):
+            self._annotation_zoom_bar.set_multi_fasta_default_tabs(True)
         self._sync_text_tool_actions()
         self._sync_header_from_current_page()
         if isinstance(widget, FilePreviewPage):
@@ -3205,6 +3228,7 @@ class PreviewTabWidget(QTabWidget):
         if ask and not self.confirm_leave_page(widget):
             return
         if isinstance(widget, FilePreviewPage):
+            widget.persist_annotation_view_for_session()
             key = str(widget.path)
             self._path_to_index.pop(key, None)
             overview = getattr(widget, "_annotation_overview", None)

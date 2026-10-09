@@ -58,27 +58,60 @@ _FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
     ("Annotation", DefaultFastaPreviewTab.ANNOTATION),
     ("Dotplot (Self)", DefaultFastaPreviewTab.DOTPLOT),
 )
+_MULTI_FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
+    ("Text", DefaultFastaPreviewTab.TEXT),
+    ("Overview", DefaultFastaPreviewTab.ANNOTATION),
+)
 
 
 def _add_default_fasta_tab_menu(parent_menu: QMenu) -> QAction:
     """Add Settings-equivalent default FASTA sub-tab chooser to an Actions menu."""
     submenu = parent_menu.addMenu("Default preview tab")
-    submenu.setToolTip(
-        "Sub-tab shown when you single-click a single-sequence FASTA file."
-    )
     group = QActionGroup(submenu)
     group.setExclusive(True)
-    for label, tab in _FASTA_DEFAULT_TAB_CHOICES:
-        action = QAction(label, submenu)
-        action.setCheckable(True)
-        action.setData(tab.value)
-        group.addAction(action)
-        submenu.addAction(action)
+    state = {"multi": False}
+
+    def _rebuild_actions() -> None:
+        for action in list(group.actions()):
+            group.removeAction(action)
+            submenu.removeAction(action)
+            action.deleteLater()
+        choices = (
+            _MULTI_FASTA_DEFAULT_TAB_CHOICES
+            if state["multi"]
+            else _FASTA_DEFAULT_TAB_CHOICES
+        )
+        for label, tab in choices:
+            action = QAction(label, submenu)
+            action.setCheckable(True)
+            action.setData(tab.value)
+            group.addAction(action)
+            submenu.addAction(action)
+        if state["multi"]:
+            submenu.setToolTip(
+                "Sub-tab shown when you single-click a multi-sequence FASTA file."
+            )
+        else:
+            submenu.setToolTip(
+                "Sub-tab shown when you single-click a single-sequence FASTA file."
+            )
+        _sync_checks()
 
     def _sync_checks() -> None:
         current = load_default_fasta_preview_tab().value
+        if state["multi"] and current == DefaultFastaPreviewTab.DOTPLOT.value:
+            current = DefaultFastaPreviewTab.ANNOTATION.value
+        matched = False
         for action in group.actions():
-            action.setChecked(action.data() == current)
+            checked = action.data() == current
+            action.setChecked(checked)
+            matched = matched or checked
+        if not matched and group.actions():
+            # Fall back to Overview/Annotation when saved tab is unavailable.
+            for action in group.actions():
+                if action.data() == DefaultFastaPreviewTab.ANNOTATION.value:
+                    action.setChecked(True)
+                    break
 
     def _on_chosen(action: QAction) -> None:
         try:
@@ -87,17 +120,46 @@ def _add_default_fasta_tab_menu(parent_menu: QMenu) -> QAction:
             return
         save_default_fasta_preview_tab(tab)
 
+    def set_multi_fasta_choices(enabled: bool) -> None:
+        enabled = bool(enabled)
+        if state["multi"] == enabled and group.actions():
+            _sync_checks()
+            return
+        state["multi"] = enabled
+        _rebuild_actions()
+
     submenu.aboutToShow.connect(_sync_checks)
     group.triggered.connect(_on_chosen)
-    _sync_checks()
-    return submenu.menuAction()
+    _rebuild_actions()
+    menu_action = submenu.menuAction()
+    menu_action.set_multi_fasta_choices = set_multi_fasta_choices  # type: ignore[attr-defined]
+    return menu_action
 
+# Title-bar PreviewZoomBar stays compact; overview map toolbar is taller.
 ZOOM_BAR_HEIGHT = 18
+OVERVIEW_TOOLBAR_HEIGHT = 28
 ZOOM_CONTROL_HEIGHT = 18
 ZOOM_SPIN_WIDTH = 56
 # Kept for sequence_map_viewer imports (embedded map toolbar height).
 ZOOM_SLIDER_HEIGHT = 22
 ANNOTATION_ZOOM_SLIDER_WIDTH = 120
+_OVERVIEW_POSITION_SPIN_WIDTH = 108
+_OVERVIEW_SELECT_FIT_HEIGHT = 20
+_ZOOM_BTN_SIDE = ZOOM_SLIDER_HEIGHT
+
+
+def _make_overview_zoom_button(text: str, parent: QWidget) -> QToolButton:
+    """Square −/+ control aligned with the overview zoom slider."""
+    btn = QToolButton(parent)
+    btn.setText(text)
+    btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    btn.setAutoRaise(False)
+    btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    side = int(_ZOOM_BTN_SIDE)
+    btn.setFixedSize(side, side)
+    btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    btn.setStyleSheet("QToolButton { padding: 0px; margin: 0px; }")
+    return btn
 
 
 def apply_annotation_zoom_slider_style(slider: QSlider) -> None:
@@ -582,6 +644,12 @@ class PreviewZoomBar(QWidget):
         self._default_tab_action.setVisible(show)
         self._default_tab_sep.setVisible(show)
 
+    def set_multi_fasta_default_tabs(self, enabled: bool) -> None:
+        """Multi-seq: Default preview tab is Text / Overview (no Dotplot)."""
+        setter = getattr(self._default_tab_action, "set_multi_fasta_choices", None)
+        if callable(setter):
+            setter(bool(enabled))
+
     def set_zoom_kind(self, kind: PreviewZoomKind | str) -> None:
         """Load the saved font size (text) or zoom % (media) for this kind."""
         try:
@@ -705,15 +773,17 @@ class AnnotationZoomBar(QWidget):
     filter_text_changed = Signal(str)
     filter_return_pressed = Signal()
 
-    _POSITION_SPIN_WIDTH = 96
+    _POSITION_SPIN_WIDTH = _OVERVIEW_POSITION_SPIN_WIDTH
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("PreviewZoomBar")
-        self.setFixedHeight(ZOOM_BAR_HEIGHT)
+        # Height matches single-seq AnnotationMapToolbar when hosting overview controls.
+        self.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(6, 2, 8, 2)
         layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         # Hidden spin kept for sequence-map bind API (embedded maps ignore it).
         self._spin = _make_zoom_percent_spin(
@@ -729,20 +799,16 @@ class AnnotationZoomBar(QWidget):
         self._overview_host = QWidget(self)
         self._overview_host.setObjectName("AnnotationOverviewControls")
         ov = QHBoxLayout(self._overview_host)
-        ov.setContentsMargins(0, 0, 0, 0)
+        # Same padding as SequenceMapWidget AnnotationMapToolbar.
+        ov.setContentsMargins(6, 2, 8, 2)
         ov.setSpacing(6)
+        ov.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        zoom_out = QToolButton(self._overview_host)
-        zoom_out.setText("−")
+        zoom_out = _make_overview_zoom_button("−", self._overview_host)
         zoom_out.setToolTip("Zoom out (Shift+scroll)")
-        zoom_out.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        zoom_out.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         zoom_out.clicked.connect(lambda: self._nudge_zoom_slider(-8))
-        zoom_in = QToolButton(self._overview_host)
-        zoom_in.setText("+")
+        zoom_in = _make_overview_zoom_button("+", self._overview_host)
         zoom_in.setToolTip("Zoom in (Shift+scroll)")
-        zoom_in.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        zoom_in.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         zoom_in.clicked.connect(lambda: self._nudge_zoom_slider(8))
 
         self._zoom_slider = QSlider(Qt.Orientation.Horizontal, self._overview_host)
@@ -751,7 +817,7 @@ class AnnotationZoomBar(QWidget):
         self._zoom_slider.setValue(0)
         self._zoom_slider.setFixedWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
         self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
-        self._zoom_slider.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
         self._zoom_slider.setToolTip(
             "Left: fit longest sequence in window. Right: maximum zoom-in."
         )
@@ -764,7 +830,7 @@ class AnnotationZoomBar(QWidget):
         self._pos_start.setValue(1)
         self._pos_start.setKeyboardTracking(False)
         self._pos_start.setFixedWidth(self._POSITION_SPIN_WIDTH)
-        self._pos_start.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._pos_start.setFixedHeight(18)  # same as AnnotationMapToolbar spins
         self._pos_start.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._pos_start.setGroupSeparatorShown(True)
         self._pos_start.setToolTip("1-based start position (column)")
@@ -777,28 +843,33 @@ class AnnotationZoomBar(QWidget):
         self._pos_end.setValue(1)
         self._pos_end.setKeyboardTracking(False)
         self._pos_end.setFixedWidth(self._POSITION_SPIN_WIDTH)
-        self._pos_end.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        self._pos_end.setFixedHeight(18)
         self._pos_end.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._pos_end.setGroupSeparatorShown(True)
         self._pos_end.setToolTip("1-based end position (column)")
         self._pos_end.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        # Same size / policy as single-seq AnnotationMapToolbar Select / Fit.
         select_btn = QPushButton("Select", self._overview_host)
-        select_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        select_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        select_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         select_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         select_btn.setToolTip(
             "Zoom to the Position range and center it in the window"
         )
         select_btn.clicked.connect(self.select_requested.emit)
+        self._select_btn = select_btn
 
         fit_btn = QPushButton("Fit", self._overview_host)
-        fit_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
+        fit_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        fit_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         fit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         fit_btn.setToolTip(
             "Fit the longest sequence to the visible width · "
-            "Drag on tracks to zoom a region"
+            "Drag on tracks to select a region"
         )
         fit_btn.clicked.connect(self.fit_requested.emit)
+        self._fit_btn = fit_btn
 
         # Hidden: overview name jump still available via bind API / Find.
         self._name_filter = QLineEdit(self._overview_host)
@@ -821,7 +892,13 @@ class AnnotationZoomBar(QWidget):
             fit_btn,
         ):
             ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(self._overview_host)
+        # Left-pack controls like AnnotationMapToolbar (stretch after Fit).
+        ov.addStretch(1)
+        self._overview_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._overview_host.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
+        layout.addWidget(self._overview_host, 1)
 
         self._actions_btn = _make_preview_actions_button(
             tooltip="Annotation actions",
@@ -829,17 +906,44 @@ class AnnotationZoomBar(QWidget):
         self._actions_menu = QMenu(self._actions_btn)
         self._default_tab_action = _add_default_fasta_tab_menu(self._actions_menu)
         self._actions_btn.setMenu(self._actions_menu)
-        layout.addWidget(self._actions_btn)
+        layout.addWidget(self._actions_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._block = False
         self._overview_mode = False
         self.set_overview_mode(False)
 
     def set_overview_mode(self, enabled: bool) -> None:
-        """Show multi-seq overview controls, or the single-seq Actions menu."""
+        """Show multi-seq −/+/Position/Select/Fit; Actions stay on the Preview title bar."""
         self._overview_mode = bool(enabled)
         self._overview_host.setVisible(self._overview_mode)
+        # Title-bar PreviewZoomBar owns Actions (aligned with "Preview"), matching
+        # single-seq Annotation. Hiding here avoids a second Actions clipped by the rail.
         self._actions_btn.setVisible(not self._overview_mode)
+        if self._overview_mode:
+            # Match AnnotationMapToolbar chrome identity for theme / sizing.
+            self.setObjectName("AnnotationMapToolbar")
+            self.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
+            # Zero outer margins — overview_host already matches map toolbar padding.
+            lay = self.layout()
+            if lay is not None:
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.setSpacing(0)
+        else:
+            self.setObjectName("PreviewZoomBar")
+            self.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
+            lay = self.layout()
+            if lay is not None:
+                lay.setContentsMargins(6, 2, 8, 2)
+                lay.setSpacing(6)
+        setter = getattr(self._default_tab_action, "set_multi_fasta_choices", None)
+        if callable(setter):
+            setter(self._overview_mode)
+
+    def set_multi_fasta_default_tabs(self, enabled: bool) -> None:
+        """Multi-seq: Default preview tab is Text / Overview (no Dotplot)."""
+        setter = getattr(self._default_tab_action, "set_multi_fasta_choices", None)
+        if callable(setter):
+            setter(bool(enabled))
 
     def is_overview_mode(self) -> bool:
         return self._overview_mode
@@ -1372,16 +1476,25 @@ class PreviewHeaderBar(QWidget):
         self._update_header_height()
 
     def set_header_zoom_mode(self, mode: str) -> None:
-        """Show preview zoom, annotation/overview controls, or hide both."""
+        """Show preview zoom, annotation/overview controls, or hide both.
+
+        ``tabs`` — FASTA tabs only; AnnotationZoomBar is hosted inside the
+        multi-seq overview panel (next to the rail), matching single-seq layout.
+        """
         show_preview = mode == "preview"
         show_annotation = mode == "annotation"
+        tabs_only = mode == "tabs"
         self._preview_zoom_bar.setVisible(show_preview)
-        if self._annotation_zoom_bar is not None:
+        if self._annotation_zoom_bar is not None and not tabs_only:
             self._annotation_zoom_bar.setVisible(show_annotation)
         self._controls_host.setVisible(
-            show_annotation and self._annotation_zoom_bar is not None
+            show_annotation and self._annotation_zoom_bar is not None and not tabs_only
         )
         self._update_bar_visibility()
+
+    def annotation_controls_host(self) -> QWidget:
+        """Parent that normally holds AnnotationZoomBar under the tab divider."""
+        return self._controls_host
 
     def set_fasta_tabs_visible(self, visible: bool) -> None:
         self._fasta_tabs.setVisible(visible)

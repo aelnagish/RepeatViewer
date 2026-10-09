@@ -507,6 +507,7 @@ class SequenceAnnotationRail(QWidget):
     findRequested = Signal(int)  # +1 next, -1 previous, 0 find all
 
     # Display / size signals (live apply).
+    showAnnotationTrackChanged = Signal(bool)
     showComplementChanged = Signal(bool)
     showTranslationChanged = Signal(bool)
     translationFramesChanged = Signal(object)  # frozenset[int]
@@ -690,6 +691,17 @@ class SequenceAnnotationRail(QWidget):
         layout.addWidget(self._tracks_divider)
         layout.addWidget(self._tracks_label)
 
+        self.show_annotation_track = QCheckBox("Show annotation track", page)
+        self.show_annotation_track.setChecked(True)
+        self.show_annotation_track.setToolTip(
+            "Show feature annotation tracks under each sequence "
+            "(including MSA residue rows)."
+        )
+        self.show_annotation_track.toggled.connect(
+            self.showAnnotationTrackChanged.emit
+        )
+        layout.addWidget(self.show_annotation_track)
+
         self.show_complement = QCheckBox("Show complement", page)
         self.show_complement.setToolTip(
             "Show the complementary strand under the forward sequence "
@@ -828,8 +840,8 @@ class SequenceAnnotationRail(QWidget):
         spin_expand = QSizePolicy.Policy.Expanding
         self.bases_font_label = QLabel("DNA/protein labels:", page)
         self.bases_zoomed_in = NoWheelSpinBox(page)
-        self.bases_zoomed_in.setRange(6, 36)
-        self.bases_zoomed_in.setValue(13)
+        self.bases_zoomed_in.setRange(2, 36)
+        self.bases_zoomed_in.setValue(6)  # single-seq default; MSA overview uses 4
         self.bases_zoomed_in.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
         self.bases_zoomed_in.setToolTip(
             "Point size of sequence letters when zoomed in enough to show "
@@ -892,7 +904,8 @@ class SequenceAnnotationRail(QWidget):
         sizes.addRow(self.bases_font_label, self.bases_zoomed_in)
         sizes.addRow("Annotation labels:", self.annotation_label_size)
         sizes.addRow("Annotation thickness:", self.annotation_thickness)
-        sizes.addRow("Annotation distance:", self.annotation_distance)
+        self._annotation_distance_label = QLabel("Annotation distance:", page)
+        sizes.addRow(self._annotation_distance_label, self.annotation_distance)
         layout.addLayout(sizes)
         layout.addStretch(1)
         return self._wrap_scroll(page)
@@ -1460,8 +1473,8 @@ class SequenceAnnotationRail(QWidget):
     def set_overview_display_mode(self, enabled: bool = True) -> None:
         """Adapt Display/Annotation for multi-sequence overview.
 
-        Keeps Annotation (feature detection / similarity run on every sequence).
-        Hides single-map-only track toggles, manual add, and transfer.
+        Keeps Annotation (manual add, transfer, feature detection / similarity).
+        Hides single-map-only complement/translation toggles.
         Module width matches the single-sequence Annotation rail.
         """
         overview = bool(enabled)
@@ -1471,30 +1484,39 @@ class SequenceAnnotationRail(QWidget):
             self.show_translation,
             self.translation_more_btn,
             self.split_tracks_by_source,
-            self._tracks_divider,
-            self._tracks_label,
         ):
             widget.setVisible(not overview)
+        # Keep Tracks header + annotation-track toggle in overview.
+        self._tracks_divider.setVisible(True)
+        self._tracks_label.setVisible(True)
+        self.show_annotation_track.setVisible(True)
         self._tab_buttons[self.TAB_ANNOTATIONS].setVisible(True)
         sections = getattr(self, "_annotation_sections", None) or {}
         for section_id in ("manual", "transfer"):
             section = sections.get(section_id)
             if section is not None:
-                section.setVisible(not overview)
+                section.setVisible(True)
         if overview:
             self.auto_ann_run_btn.setToolTip(
-                "Run feature detection on every sequence in this file"
+                "Run feature detection on selected sequences (Ctrl+A for all)"
             )
             self.similarity_ann_run_btn.setToolTip(
-                "Run similarity annotation on every sequence in this file"
+                "Run similarity annotation on selected sequences (Ctrl+A for all)"
             )
-            for btn in (self.delete_btn, self.restore_btn, self.export_btn):
-                btn.setVisible(False)
+            # Same spin as single-seq annotation-row gap; in overview it spaces sequences.
+            self._annotation_distance_label.setText("Sequence distance:")
+            self.annotation_distance.setToolTip(
+                "Vertical gap between sequences (pixels)."
+            )
         else:
             self.auto_ann_run_btn.setToolTip("Run feature detection")
             self.similarity_ann_run_btn.setToolTip("Run similarity annotation")
-            for btn in (self.delete_btn, self.restore_btn, self.export_btn):
-                btn.setVisible(True)
+            self._annotation_distance_label.setText("Annotation distance:")
+            self.annotation_distance.setToolTip(
+                "Vertical gap between annotation rows (pixels)."
+            )
+        for btn in (self.delete_btn, self.restore_btn, self.export_btn):
+            btn.setVisible(True)
         self._module_width = _MODULE_WIDTH
         self._apply_module_geometry()
 
@@ -1762,6 +1784,10 @@ class SequenceAnnotationRail(QWidget):
     def set_annotation_job_status(self, text: str) -> None:
         """Live progress for Feature detection / Similarity / Transfer on Annotation tab."""
         msg = str(text or "").strip()
+        if self.annotation_job_status.text() == msg and (
+            self.annotation_job_status.isVisible() == bool(msg)
+        ):
+            return
         self.annotation_job_status.setText(msg)
         self.annotation_job_status.setVisible(bool(msg))
         # Keep Display-tab status in sync for consistency.

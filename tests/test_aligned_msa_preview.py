@@ -90,7 +90,10 @@ def test_overview_annotation_tab_visible_and_wired(
     panel.load_path(path, msa_mode=False)
     rail = panel._rail
     assert not rail._tab_buttons[SequenceAnnotationRail.TAB_ANNOTATIONS].isHidden()
-    assert "every sequence" in rail.auto_ann_run_btn.toolTip().lower()
+    tip = rail.auto_ann_run_btn.toolTip().lower()
+    assert "selected" in tip
+    assert not rail._annotation_sections["manual"].isHidden()
+    assert not rail.show_annotation_track.isHidden()
     assert panel._auto_ann_checks
     assert callable(panel._on_auto_run_clicked)
     assert callable(panel._on_similarity_run_clicked)

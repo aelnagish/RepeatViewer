@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,7 +12,14 @@ from Bio.SeqRecord import SeqRecord
 
 from repeatviewer.backends.auto_annotation import AutoAnnotationMode, run_auto_annotations
 from repeatviewer.backends.auto_annotation_settings import AutoAnnotationSettings, load_auto_annotation_settings
+from Bio.Seq import Seq
+
 from repeatviewer.backends.job_cancel import JobCancellation, check_cancelled
+from repeatviewer.backends.msa_coordinates import (
+    project_features_to_gapped,
+    project_features_to_ungapped,
+    ungap_sequence,
+)
 from repeatviewer.backends.sequence_features import (
     load_features_by_id_from_json,
     load_sequence_map_data,
@@ -119,36 +126,78 @@ def _annotate_one_record_fasta(
     progress: Callable[[str], None] | None,
     label: str,
 ) -> list:
-    """Run selected modules on one single-sequence FASTA; return feature list."""
-    features: tuple = tuple(base_features)
-    if options.auto_modes:
-        if progress is not None:
-            progress(f"Auto annotation: {label}")
-        auto_result = run_auto_annotations(
-            record_fasta,
-            options.auto_modes,
-            cancel=cancel,
-            settings=auto_cfg,
-            base_features=features,
-            progress=progress,
-        )
-        features = auto_result.features
+    """Run selected modules on one single-sequence FASTA; return feature list.
 
-    if options.similarity_databases:
-        if progress is not None:
-            progress(f"Similarity annotation: {label}")
-        sim_result = run_similarity_annotations(
-            record_fasta,
-            options.similarity_databases,
-            settings=sim_cfg,
-            use_system_blast=use_blast,
-            orf_settings=auto_cfg.orf,
-            cancel=cancel,
-            base_features=features,
-            progress=progress,
+    When the FASTA is an MSA row (contains ``-`` / ``.``), detectors run on the
+    ungapped sequence and returned coordinates are projected back to alignment
+    columns.
+    """
+    try:
+        raw_records = list(SeqIO.parse(str(record_fasta), "fasta"))
+    except (OSError, ValueError):
+        raw_records = []
+    raw_seq = str(raw_records[0].seq) if raw_records else ""
+    ungapped, keep = ungap_sequence(raw_seq)
+
+    work_fasta = record_fasta
+    base_for_tools = tuple(base_features)
+    tmp_dir_holder: tempfile.TemporaryDirectory | None = None
+    if keep is not None:
+        # Strip gaps for prediction; map existing features into ungapped space.
+        base_for_tools = tuple(
+            project_features_to_ungapped(list(base_features), keep)
         )
-        features = sim_result.features
-    return list(features)
+        tmp_dir_holder = tempfile.TemporaryDirectory(prefix="repeatviewer_ungap_")
+        tmp_dir = Path(tmp_dir_holder.name)
+        rid = str(raw_records[0].id) if raw_records else "seq"
+        temp_record = SeqRecord(
+            Seq(ungapped),
+            id=rid,
+            name=rid,
+            description=rid,
+        )
+        work_fasta = _write_single_record_temp_fasta(
+            temp_record, directory=tmp_dir, index=0
+        )
+        if progress is not None:
+            progress(f"MSA: removed gaps for {label} ({len(ungapped):,} bp)")
+
+    try:
+        features: tuple = tuple(base_for_tools)
+        if options.auto_modes:
+            if progress is not None:
+                progress(f"Auto annotation: {label}")
+            auto_result = run_auto_annotations(
+                work_fasta,
+                options.auto_modes,
+                cancel=cancel,
+                settings=auto_cfg,
+                base_features=features,
+                progress=progress,
+            )
+            features = auto_result.features
+
+        if options.similarity_databases:
+            if progress is not None:
+                progress(f"Similarity annotation: {label}")
+            sim_result = run_similarity_annotations(
+                work_fasta,
+                options.similarity_databases,
+                settings=sim_cfg,
+                use_system_blast=use_blast,
+                orf_settings=auto_cfg.orf,
+                cancel=cancel,
+                base_features=features,
+                progress=progress,
+            )
+            features = sim_result.features
+        out = list(features)
+        if keep is not None:
+            out = project_features_to_gapped(out, keep)
+        return out
+    finally:
+        if tmp_dir_holder is not None:
+            tmp_dir_holder.cleanup()
 
 
 def run_te_annotation_on_fasta(
@@ -160,12 +209,16 @@ def run_te_annotation_on_fasta(
     use_system_blast: bool | None = None,
     cancel: JobCancellation | None = None,
     progress: Callable[[int, int, str], None] | None = None,
+    record_ids: Sequence[str] | None = None,
 ) -> list[Path]:
     """
     Run selected annotation modules on a FASTA (one or many sequences).
 
     Existing JSON sidecar features are kept and new detections are added on top.
     Returns paths to the JSON sidecar (and companion GFF3 when written).
+
+    When ``record_ids`` is set, only those sequences are annotated; other
+    records keep their existing features unchanged.
 
     ``progress(completed, total, label)`` is called after each sequence finishes
     (and once with completed=0 when work starts).
@@ -186,16 +239,25 @@ def run_te_annotation_on_fasta(
     )
 
     data = load_sequence_map_data(resolved)
-    record_ids = list(data.record_ids)
+    all_record_ids = list(data.record_ids)
     lengths = dict(data.lengths_by_id)
-    if not record_ids:
+    if not all_record_ids:
         raise ValueError(f"No sequences in {resolved.name}")
 
+    wanted: set[str] | None = None
+    if record_ids is not None:
+        wanted = {str(rid) for rid in record_ids if str(rid)}
+        annotate_ids = [rid for rid in all_record_ids if rid in wanted]
+        if not annotate_ids:
+            raise ValueError("None of the selected sequences were found in the FASTA.")
+    else:
+        annotate_ids = list(all_record_ids)
+
     # Prefer existing JSON; fall back to whatever load_sequence_map_data already merged.
-    json_feats = load_features_by_id_from_json(resolved, record_ids)
+    json_feats = load_features_by_id_from_json(resolved, all_record_ids)
     existing_by_id = {
         rid: list(json_feats.get(rid) or data.features_by_id.get(rid) or [])
-        for rid in record_ids
+        for rid in all_record_ids
     }
 
     def _detail_progress(message: str) -> None:
@@ -203,11 +265,15 @@ def run_te_annotation_on_fasta(
             return
         # Keep the last completed count; detail-only updates use completed=-1 sentinel
         # via a nested helper — callers that only care about sequence steps ignore this.
-        progress(-1, len(record_ids), message)
+        progress(-1, len(annotate_ids), message)
+
+    features_by_id = {
+        rid: list(existing_by_id.get(rid) or []) for rid in all_record_ids
+    }
 
     # Single-sequence path: annotate the file directly (no temp split).
-    if len(record_ids) == 1:
-        rid = record_ids[0]
+    if len(all_record_ids) == 1 and len(annotate_ids) == 1:
+        rid = annotate_ids[0]
         if progress is not None:
             progress(0, 1, resolved.name)
         features = _annotate_one_record_fasta(
@@ -221,22 +287,26 @@ def run_te_annotation_on_fasta(
             progress=_detail_progress,
             label=resolved.name,
         )
-        features_by_id = {rid: features}
+        features_by_id[rid] = features
         if progress is not None:
             progress(1, 1, resolved.name)
     else:
-        features_by_id = {rid: list(existing_by_id.get(rid) or []) for rid in record_ids}
         records = list(SeqIO.parse(str(resolved), "fasta"))
-        if len(records) != len(record_ids):
+        if len(records) != len(all_record_ids):
             # Uniquified ids vs raw headers: zip by index.
-            records = records[: len(record_ids)]
-        total = len(record_ids)
+            records = records[: len(all_record_ids)]
+        id_to_record = {
+            rid: rec
+            for rid, rec in zip(all_record_ids, records, strict=False)
+        }
+        total = len(annotate_ids)
         with tempfile.TemporaryDirectory(prefix="repeatviewer_teann_") as tmp:
             tmp_dir = Path(tmp)
-            for index, (rid, record) in enumerate(
-                zip(record_ids, records, strict=False)
-            ):
+            for index, rid in enumerate(annotate_ids):
                 check_cancelled(cancel)
+                record = id_to_record.get(rid)
+                if record is None:
+                    continue
                 if progress is not None:
                     progress(
                         index,
@@ -276,7 +346,7 @@ def run_te_annotation_on_fasta(
         resolved,
         features_by_id=features_by_id,
         lengths_by_id=lengths,
-        record_ids=record_ids,
+        record_ids=all_record_ids,
     )
     outputs = [json_path.resolve()]
     if gff_path is not None:

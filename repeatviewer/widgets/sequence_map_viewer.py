@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QTextEdit,
+    QToolButton,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -380,14 +381,29 @@ _FIND_HIT_BORDER = QColor(180, 83, 9, 230)
 _FEATURE_SELECTION_BORDER = QColor("#0b5cab")
 _FEATURE_SELECTION_OUTLINE = QColor("#ffffff")
 _FEATURE_SELECTION_OVERLAY = QColor(11, 92, 171, 120)
-_MIN_NUC_FONT_PT = 6
+_MIN_NUC_FONT_PT = 2
 _MAX_NUC_FONT_PT = 36
-_DEFAULT_NUC_FONT_PT = 13
-_ZOOM_BTN_SIZE = 28
-_ZOOM_BTN_HEIGHT = 24
+_DEFAULT_NUC_FONT_PT = 6
+# Square −/+ chrome matching zoom-slider height; glyph keeps default font size.
+_ZOOM_BTN_SIDE = ZOOM_SLIDER_HEIGHT
 _ANNOTATION_SIDE_PANEL_WIDTH = 108
 # Wide enough for "2,000,000" plus spin arrows without clipping.
 _POSITION_SPIN_WIDTH = 108
+
+
+def _make_zoom_button(text: str, parent: QWidget) -> QToolButton:
+    """Square −/+ control aligned with the zoom slider; default font size kept."""
+    btn = QToolButton(parent)
+    btn.setText(text)
+    btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    btn.setAutoRaise(False)
+    btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    side = int(_ZOOM_BTN_SIDE)
+    btn.setFixedSize(side, side)
+    btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    # padding/margin only — min/max width/height inflate size by ~2px on macOS.
+    btn.setStyleSheet("QToolButton { padding: 0px; margin: 0px; }")
+    return btn
 
 
 def _configure_position_spin(spin: QSpinBox) -> None:
@@ -2726,26 +2742,31 @@ class SequenceMapCanvas(QWidget):
     def _sequence_font_for_track(self, cell_h: float) -> QFont:
         """Letter font that fits the track height (shrink only if the cell is short)."""
         font = self._sequence_font()
-        max_h = max(8.0, float(cell_h) - 2.0)
+        max_h = max(1.0, float(cell_h) - 2.0)
         # Prefer tight bounding box — height() alone under-reports some macOS fonts
         # and left the bottom half of glyphs clipped.
-        for pt in range(max(6, int(self._font_point_size)), 5, -1):
+        min_pt = int(_MIN_NUC_FONT_PT)
+        for pt in range(max(min_pt, int(self._font_point_size)), min_pt - 1, -1):
             font.setPointSize(pt)
             fm = QFontMetrics(font)
             glyph_h = max(fm.height(), fm.ascent() + fm.descent())
             if glyph_h <= max_h:
                 return font
-        font.setPointSize(6)
+        font.setPointSize(min_pt)
         return font
 
     def _font_letter_cell_size(self) -> tuple[int, int]:
-        """Minimum monospace cell size for legible nucleotide / amino-acid letters."""
+        """Monospace cell size for nucleotide / amino-acid letters.
+
+        Height always tracks the Display DNA/protein label size (no fixed floor),
+        so shrinking the spin below ~8pt also shrinks the colored backgrounds.
+        """
         fm = QFontMetrics(self._sequence_font())
         sample = "ACDEFGHIKLMNPQRSTVWYBXZ*" if self._is_protein else "ACGTUN"
         cell_w = max(1, max(fm.horizontalAdvance(base) for base in sample))
         glyph_h = max(fm.height(), fm.ascent() + fm.descent())
-        cell_h = max(_SEQUENCE_ROW, glyph_h + 4)
-        return cell_w, max(1, cell_h)
+        cell_h = max(1, glyph_h + 4)
+        return cell_w, cell_h
 
     def shows_letters(self) -> bool:
         """True when zoomed in enough to draw A/C/G/T (or AA) glyphs.
@@ -3982,12 +4003,10 @@ class SequenceMapWidget(QWidget):
             tb.setSpacing(6)
             tb.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-            zoom_out_btn = QPushButton("−", toolbar)
-            zoom_out_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
+            zoom_out_btn = _make_zoom_button("−", toolbar)
             zoom_out_btn.setToolTip("Zoom out")
             zoom_out_btn.clicked.connect(self.zoom_out)
-            zoom_in_btn = QPushButton("+", toolbar)
-            zoom_in_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
+            zoom_in_btn = _make_zoom_button("+", toolbar)
             zoom_in_btn.setToolTip("Zoom in")
             zoom_in_btn.clicked.connect(self.zoom_in)
             self._zoom_slider = QSlider(Qt.Orientation.Horizontal, toolbar)
@@ -4038,19 +4057,17 @@ class SequenceMapWidget(QWidget):
             zoom_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
             zoom_strip = QWidget(self)
-            zoom_strip.setFixedHeight(_ZOOM_BTN_HEIGHT)
+            zoom_strip.setFixedHeight(_ZOOM_BTN_SIDE)
             zoom_strip.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             zoom_strip_layout = QHBoxLayout(zoom_strip)
             zoom_strip_layout.setContentsMargins(0, 0, 0, 0)
             zoom_strip_layout.setSpacing(4)
             zoom_strip_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-            zoom_out_btn = QPushButton("−", zoom_strip)
-            zoom_out_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
+            zoom_out_btn = _make_zoom_button("−", zoom_strip)
             zoom_out_btn.setToolTip("Zoom out")
             zoom_out_btn.clicked.connect(self.zoom_out)
-            zoom_in_btn = QPushButton("+", zoom_strip)
-            zoom_in_btn.setFixedSize(_ZOOM_BTN_SIZE, _ZOOM_BTN_HEIGHT)
+            zoom_in_btn = _make_zoom_button("+", zoom_strip)
             zoom_in_btn.setToolTip("Zoom in")
             zoom_in_btn.clicked.connect(self.zoom_in)
             self._zoom_slider = QSlider(Qt.Orientation.Horizontal, zoom_strip)
@@ -5019,20 +5036,28 @@ class SequenceMapWidget(QWidget):
         if self._data is None or self.is_too_long_for_display():
             return None
         sel = self.selection_range()
-        if sel is not None:
+        has_selection = sel is not None
+        if has_selection:
             start, end = int(sel[0]), int(sel[1])
         else:
             start, end = int(self._pos_start.value()), int(self._pos_end.value())
         return {
             "start": start,
             "end": end,
+            "has_selection": bool(has_selection),
             "ppb": float(self._canvas.pixels_per_bp()),
             "scroll_px": float(self._canvas.scroll_px()),
             "sequence_id": str(self._data.sequence_id or ""),
         }
 
-    def restore_view_state_for_session(self, state: dict) -> None:
-        """Reapply a snapshot from ``view_state_for_session`` (defers until visible)."""
+    def restore_view_state_for_session(
+        self, state: dict, *, _attempt: int = 0
+    ) -> None:
+        """Reapply zoom/scroll from ``view_state_for_session`` (defers until visible).
+
+        Restores the viewport the user left on, not the selection region. A saved
+        selection is re-highlighted without changing zoom/scroll.
+        """
         if self._data is None or self.is_too_long_for_display() or not state:
             return
         try:
@@ -5045,20 +5070,34 @@ class SequenceMapWidget(QWidget):
         end = max(1, min(seq_len, end))
         if end < start:
             start, end = end, start
-        span = end - start + 1
-        if span > 1 or (start == end and start > 1):
-            self.select_by_position(start, end)
-            return
         try:
             ppb = float(state.get("ppb") or 0.0)
         except (TypeError, ValueError):
             ppb = 0.0
-        if ppb <= 0:
-            return
         try:
             scroll_px = float(state.get("scroll_px") or 0.0)
         except (TypeError, ValueError):
             scroll_px = 0.0
+
+        # Legacy snapshots without usable zoom: fall back to fitting start/end.
+        if ppb <= 0:
+            span = end - start + 1
+            if span > 1 or (start == end and start > 1):
+                self.select_by_position(start, end)
+            return
+
+        viewport_w = self._scroll_viewport_width()
+        if (not self.isVisible() or viewport_w <= 20) and _attempt < 40:
+            QTimer.singleShot(
+                50,
+                lambda s=dict(state), a=_attempt + 1: self.restore_view_state_for_session(
+                    s, _attempt=a
+                ),
+            )
+            return
+
+        # Prevent a pending fit_window() from wiping the restored viewport.
+        self._layout_intent_generation += 1
         self._apply_zoom_ppb(
             max(_FIT_MIN_PPB, min(self._canvas.zoom_ppb_max(), ppb)),
             sync_slider=True,
@@ -5070,6 +5109,16 @@ class SequenceMapWidget(QWidget):
         self._hbar.setValue(int(scroll_px))
         self._canvas.set_scroll_px(scroll_px)
         self._sync_header_views()
+
+        has_selection = state.get("has_selection")
+        if has_selection is None:
+            # Older saves: treat a non-trivial range as a selection to highlight.
+            has_selection = (end - start + 1) > 1 or (start == end and start > 1)
+        if has_selection:
+            self._canvas.set_selection_range(start, end)
+            self._sync_position_spins(start, end)
+        else:
+            self._sync_position_spins(start, end)
         self.refresh_layout()
 
     def selected_feature_index(self) -> int | None:
@@ -6480,7 +6529,9 @@ class SequenceMapPanel(QWidget):
                 genetic_code=genetic_code,
             )
             rail.split_tracks_by_source.setChecked(_load_split_tracks_by_source())
-            rail.bases_zoomed_in.setValue(int(s.value("bases_zoomed_in", 13)))
+            rail.bases_zoomed_in.setValue(
+                int(s.value("bases_zoomed_in", _DEFAULT_NUC_FONT_PT))
+            )
             rail.bases_zoomed_out.setValue(int(s.value("bases_zoomed_out", 4)))
             rail.annotation_label_size.setValue(int(s.value("annotation_label_size", 7)))
             rail.annotation_thickness.setValue(int(s.value("annotation_thickness", 18)))
