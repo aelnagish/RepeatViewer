@@ -95,7 +95,7 @@ def test_overview_annotation_tab_visible_and_wired(
     assert callable(panel._on_auto_run_clicked)
     assert callable(panel._on_similarity_run_clicked)
     # Same control-panel width as single-sequence Annotation.
-    assert rail._module_width == 300
+    assert rail._module_width == 260
     panel.deleteLater()
 
 

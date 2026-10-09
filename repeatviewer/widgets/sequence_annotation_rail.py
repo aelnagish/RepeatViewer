@@ -84,7 +84,7 @@ _GENETIC_CODE_HELP = (
 )
 
 _RAIL_TAB_WIDTH = 24
-_MODULE_WIDTH = 300
+_MODULE_WIDTH = 260
 _TAB_BUTTON_HEIGHT_MIN = 36
 _TAB_PILL_RADIUS = 7
 _TAB_TEXT_PAD = 4  # vertical padding around rotated label
@@ -1168,34 +1168,24 @@ class SequenceAnnotationRail(QWidget):
         transfer_section.add_widget(source_label)
         transfer_section.add_widget(self.transfer_source_row)
 
-        xfer_form = QFormLayout()
-        xfer_form.setContentsMargins(0, 0, 0, 0)
-        xfer_form.setHorizontalSpacing(8)
-        xfer_form.setVerticalSpacing(6)
-        xfer_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
-        )
-        xfer_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        xfer_form.setFormAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-        )
-        xfer_form.addRow(
-            "Min identity:",
+        xfer_sliders = QVBoxLayout()
+        xfer_sliders.setContentsMargins(0, 0, 0, 0)
+        xfer_sliders.setSpacing(6)
+        xfer_sliders.addWidget(
             self._threshold_slider_field(
                 self.transfer_min_identity_slider,
                 self.transfer_min_identity_value_label,
-            ),
+                label="Identity",
+            )
         )
-        xfer_form.addRow(
-            "Min coverage:",
+        xfer_sliders.addWidget(
             self._threshold_slider_field(
                 self.transfer_min_coverage_slider,
                 self.transfer_min_coverage_value_label,
-            ),
+                label="Coverage",
+            )
         )
-        transfer_section.add_layout(xfer_form)
+        transfer_section.add_layout(xfer_sliders)
         transfer_section.add_widget(self.transfer_selected_only)
         transfer_section.add_widget(self.transfer_allow_reverse)
 
@@ -1638,7 +1628,7 @@ class SequenceAnnotationRail(QWidget):
         slider.setObjectName("annotationZoomSlider")
         slider.setRange(0, 100)
         slider.setValue(50)
-        slider.setMinimumWidth(120)
+        slider.setMinimumWidth(80)
         slider.setFixedHeight(18)
         slider.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
@@ -1659,11 +1649,27 @@ class SequenceAnnotationRail(QWidget):
         return slider, value_label
 
     @staticmethod
-    def _threshold_slider_field(slider: NoWheelSlider, value_label: QLabel) -> QWidget:
+    def _threshold_slider_field(
+        slider: NoWheelSlider,
+        value_label: QLabel,
+        *,
+        label: str = "",
+    ) -> QWidget:
         row = QWidget(slider.parentWidget())
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+        if label:
+            name = QLabel(label, row)
+            # Fixed column + right align so "Identity"/"Coverage" share an end
+            # edge and both slider tracks stay the same length.
+            fm = QFontMetrics(name.font())
+            name.setFixedWidth(fm.horizontalAdvance("Coverage") + 2)
+            name.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            name.setToolTip(f"Minimum {label.lower()} threshold")
+            layout.addWidget(name, 0)
         layout.addWidget(slider, 1)
         layout.addWidget(value_label, 0)
         return row
