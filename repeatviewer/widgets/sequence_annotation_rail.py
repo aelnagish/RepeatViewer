@@ -519,6 +519,7 @@ class SequenceAnnotationRail(QWidget):
     annotationLabelSizeChanged = Signal(int)
     annotationThicknessChanged = Signal(int)
     columnDistanceChanged = Signal(int)  # MSA overview: gap between residue columns
+    multiSequenceBackgroundChanged = Signal(bool)
     annotationDistanceChanged = Signal(int)
     sequenceNameSizeChanged = Signal(int)
     baseNumberSizeChanged = Signal(int)
@@ -802,6 +803,20 @@ class SequenceAnnotationRail(QWidget):
         color_form.addRow("Protein:", self.protein_scheme)
         layout.addLayout(color_form)
 
+        self.color_multi_sequence_background = QCheckBox(
+            "Color nucleotide/protein background", page
+        )
+        self.color_multi_sequence_background.setChecked(True)
+        self.color_multi_sequence_background.setToolTip(
+            "Checked: color each nucleotide/protein cell background. "
+            "Unchecked: use a plain background and color the letters."
+        )
+        self.color_multi_sequence_background.toggled.connect(
+            self.multiSequenceBackgroundChanged.emit
+        )
+        self.color_multi_sequence_background.hide()
+        layout.addWidget(self.color_multi_sequence_background)
+
         from repeatviewer.backends.msa_coordinates import (
             DEFAULT_MSA_DIVERGENCE_THRESHOLD,
             MSA_COLOR_ALL_BACKGROUNDS,
@@ -1033,6 +1048,7 @@ class SequenceAnnotationRail(QWidget):
         sizes.addRow(self._annotation_distance_label, self.annotation_distance)
         sizes.addRow(self._column_distance_label, self.column_distance)
         layout.addLayout(sizes)
+
         layout.addStretch(1)
         return self._wrap_scroll(page)
 
@@ -1684,15 +1700,9 @@ class SequenceAnnotationRail(QWidget):
             self.split_tracks_by_source,
         ):
             widget.setVisible(not overview)
-        # MSA coloring is overview-only (single-seq map has no multi-row conservation).
-        self.msa_coloring_label.setVisible(overview)
-        self.msa_coloring_header.setVisible(overview)
-        self.msa_coloring_mode_host.setVisible(overview)
-        self.msa_divergence_row.setVisible(overview)
-        if overview:
-            self._sync_msa_divergence_enabled()
-        self._column_distance_label.setVisible(overview)
-        self.column_distance.setVisible(overview)
+        self.set_msa_display_mode(getattr(self, "_msa_display_mode", False))
+        self._column_distance_label.setVisible(False)
+        self.column_distance.setVisible(False)
         # Keep Tracks header + annotation-track toggle in overview.
         self._tracks_divider.setVisible(True)
         self._tracks_label.setVisible(True)
@@ -1711,25 +1721,15 @@ class SequenceAnnotationRail(QWidget):
             )
             self.auto_ann_run_btn.setToolTip(
                 "Run feature detection on selected sequences, "
-                "or the whole open MSA when none are selected"
+                "or all open sequences when none are selected (Ctrl+A / Cmd+A selects all)"
             )
             self.similarity_ann_run_btn.setToolTip(
                 "Run similarity annotation on selected sequences, "
-                "or the whole open MSA when none are selected"
+                "or all open sequences when none are selected"
             )
-            # Same spin as single-seq annotation-row gap; in overview it spaces sequences.
             self._annotation_distance_label.setText("Sequence distance:")
             self.annotation_distance.setToolTip(
                 "Vertical gap between sequences (pixels)."
-            )
-            self.delete_btn.setToolTip(
-                "Delete: remove selected residues/columns, or selected "
-                "sequence(s). Shift+Delete: fill selection / selected "
-                "sequence(s) with gaps. Or delete a selected feature "
-                "(Esc clears the band first)."
-            )
-            self.restore_btn.setToolTip(
-                "Undo the last Delete (Ctrl+Z). Restores MSA and features."
             )
         else:
             self.manual_add_btn.setToolTip(
@@ -1741,12 +1741,38 @@ class SequenceAnnotationRail(QWidget):
             self.annotation_distance.setToolTip(
                 "Vertical gap between annotation rows (pixels)."
             )
-            self.delete_btn.setToolTip("Delete the selected feature.")
-            self.restore_btn.setToolTip("Undo the last feature Delete.")
         for btn in (self.delete_btn, self.restore_btn, self.export_btn):
             btn.setVisible(True)
         self._module_width = _MODULE_WIDTH
         self._apply_module_geometry()
+
+    def set_msa_display_mode(self, enabled: bool) -> None:
+        """Toggle controls that apply only to aligned residue columns."""
+        self._msa_display_mode = bool(enabled)
+        visible = bool(getattr(self, "_overview_mode", False)) and self._msa_display_mode
+        self.msa_coloring_label.setVisible(visible)
+        self.msa_coloring_header.setVisible(visible)
+        self.msa_coloring_mode_host.setVisible(visible)
+        self.msa_divergence_row.setVisible(visible)
+        self._column_distance_label.setVisible(False)
+        self.column_distance.setVisible(False)
+        self.color_multi_sequence_background.setVisible(
+            bool(getattr(self, "_overview_mode", False)) and not self._msa_display_mode
+        )
+        if visible:
+            self._sync_msa_divergence_enabled()
+            self.delete_btn.setToolTip(
+                "Delete: remove selected residues/columns, or selected "
+                "sequence(s). Shift+Delete: fill selection / selected "
+                "sequence(s) with gaps. Or delete a selected feature "
+                "(Esc clears the band first)."
+            )
+            self.restore_btn.setToolTip(
+                "Undo the last Delete (Ctrl+Z). Restores MSA and features."
+            )
+        else:
+            self.delete_btn.setToolTip("Delete the selected feature.")
+            self.restore_btn.setToolTip("Undo the last feature Delete.")
 
     def is_panel_collapsed(self) -> bool:
         return bool(self._panel_collapsed)

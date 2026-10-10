@@ -952,12 +952,21 @@ class AnnotationZoomBar(QWidget):
 
         self._block = False
         self._overview_mode = False
+        self._msa_mode = False
         self.set_overview_mode(False)
+
+    def set_msa_mode(self, enabled: bool) -> None:
+        """Show alignment-only actions only for a genuine aligned MSA."""
+        self._msa_mode = bool(enabled)
+        visible = self._overview_mode and self._msa_mode
+        self._clean_btn.setVisible(visible)
+        self._consensus_btn.setVisible(visible)
 
     def set_overview_mode(self, enabled: bool) -> None:
         """Show multi-seq −/+/Position/Select/Fit/Clean/Cons; Actions stay on Preview title."""
         self._overview_mode = bool(enabled)
         self._overview_host.setVisible(self._overview_mode)
+        self.set_msa_mode(self._msa_mode)
         # Title-bar PreviewZoomBar owns Actions (aligned with "Preview"), matching
         # single-seq Annotation. Hiding here avoids a second Actions clipped by the rail.
         self._actions_btn.setVisible(not self._overview_mode)

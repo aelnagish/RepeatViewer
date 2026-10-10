@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
@@ -68,7 +69,89 @@ def test_overview_load_path_unaligned_stays_bars(
     panel.load_path(path, msa_mode=False)
     assert panel.is_msa_mode() is False
     assert panel._bars.max_length() == 12
+    assert panel._bars.msa_sequences() == ["ACGT", "ACGTACGTACGT"]
+    assert panel._bars.zoom_bounds()[1] >= 8.0
+    panel._bars.set_pixels_per_base(8.0)
+    assert panel._bars._bar_shows_letters() is True
     panel.deleteLater()
+
+
+def test_unaligned_overview_hides_msa_only_controls(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from repeatviewer.widgets.preview_controls import AnnotationZoomBar
+
+    path = tmp_path / "multi.fa"
+    path.write_text(">a\nACGT\n>b\nACGTACGT\n")
+    panel = MultiSequenceOverviewPanel(path)
+    bar = AnnotationZoomBar()
+    panel.bind_annotation_zoom_bar(bar)
+    panel.load_path(path, msa_mode=False)
+    assert bar._clean_btn.isHidden()
+    assert bar._consensus_btn.isHidden()
+    assert panel._rail.msa_coloring_header.isHidden()
+    assert panel._rail.msa_coloring_mode_host.isHidden()
+    assert panel._rail.msa_divergence_row.isHidden()
+    assert panel._rail._column_distance_label.isHidden()
+    assert panel._rail.column_distance.isHidden()
+    assert not panel._rail.color_multi_sequence_background.isHidden()
+    assert panel._rail.color_multi_sequence_background.isChecked()
+    with patch.object(panel, "_save_overview_display_settings"):
+        panel._rail.color_multi_sequence_background.setChecked(False)
+    assert panel._bars.color_unaligned_background() is False
+    panel.deleteLater()
+    bar.deleteLater()
+
+
+def test_aligned_overview_shows_msa_only_controls(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from repeatviewer.widgets.preview_controls import AnnotationZoomBar
+
+    path = tmp_path / "aln.fa"
+    path.write_text(">a\nACGTACGT\n>b\nACGT--GT\n")
+    panel = MultiSequenceOverviewPanel(path)
+    bar = AnnotationZoomBar()
+    panel.bind_annotation_zoom_bar(bar)
+    panel.load_path(path, msa_mode=True)
+    assert not bar._clean_btn.isHidden()
+    assert not bar._consensus_btn.isHidden()
+    assert not panel._rail.msa_coloring_header.isHidden()
+    assert not panel._rail.msa_coloring_mode_host.isHidden()
+    assert not panel._rail.msa_divergence_row.isHidden()
+    assert panel._rail._column_distance_label.isHidden()
+    assert panel._rail.column_distance.isHidden()
+    assert panel._rail.color_multi_sequence_background.isHidden()
+    panel.deleteLater()
+    bar.deleteLater()
+
+
+def test_unaligned_overview_sequence_distance_defaults_to_two(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings("RepeatViewer", "RepeatViewer")
+    settings.beginGroup("annotation_overview_display")
+    had_value = settings.contains("multi_sequence_distance")
+    previous = settings.value("multi_sequence_distance")
+    settings.remove("multi_sequence_distance")
+    settings.endGroup()
+    try:
+        path = tmp_path / "multi.fa"
+        path.write_text(">a\nACGT\n>b\nACGTACGT\n")
+        panel = MultiSequenceOverviewPanel(path)
+        panel.load_path(path, msa_mode=False)
+        assert panel._rail.annotation_distance.value() == 2
+        assert panel._bars.sequence_row_gap() == 2
+        panel.deleteLater()
+    finally:
+        settings.beginGroup("annotation_overview_display")
+        if had_value:
+            settings.setValue("multi_sequence_distance", previous)
+        else:
+            settings.remove("multi_sequence_distance")
+        settings.endGroup()
 
 
 def test_overview_auto_detects_aligned_msa(qapp: QApplication, tmp_path: Path) -> None:

@@ -741,6 +741,27 @@ def load_aligned_fasta_rows(path: Path) -> tuple[list[str], list[str]]:
     return uniquify_record_ids(raw_ids), seqs
 
 
+def load_fasta_rows(path: Path) -> tuple[list[str], list[str]]:
+    """Load FASTA records without requiring equal sequence lengths.
+
+    Record ids are uniquified in the same way as the overview length loader.
+    """
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    raw_ids: list[str] = []
+    seqs: list[str] = []
+    for record in SeqIO.parse(str(resolved), "fasta"):
+        rid = str(record.id).strip()
+        if not rid:
+            continue
+        raw_ids.append(rid)
+        seqs.append(str(record.seq).upper())
+    if not raw_ids:
+        raise ValueError(f"No FASTA sequences found in {resolved.name}")
+    return uniquify_record_ids(raw_ids), seqs
+
+
 def write_aligned_fasta_rows(
     path: Path,
     record_ids: list[str],

@@ -77,10 +77,10 @@ from repeatviewer.backends.msa_coordinates import (
 )
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
-    fasta_record_lengths,
     feature_display_pack_key,
     is_aligned_fasta,
     load_aligned_fasta_rows,
+    load_fasta_rows,
     load_all_features_by_id,
     load_features_by_id_from_json,
     ordered_feature_pack_keys,
@@ -150,6 +150,7 @@ _MSA_LETTER_MIN_PPB = 7.5
 _MSA_ROW_HEIGHT = 18
 _DEFAULT_MSA_FONT_PT = 4
 _DEFAULT_MSA_SEQUENCE_DISTANCE = 0
+_DEFAULT_MULTI_SEQUENCE_DISTANCE = 2
 _DEFAULT_MSA_COLUMN_DISTANCE = 0
 _OVERVIEW_DISPLAY_SETTINGS_GROUP = "annotation_overview_display"
 _FEATURE_UNDO_LIMIT = 32
@@ -669,6 +670,7 @@ class _BarsCanvas(QWidget):
         self._msa_col_freqs: list[dict[str, float]] = []
         self._sequence_row_gap = 0  # pixels between sequences (Others → distance)
         self._column_distance = 0  # pixels between residue backgrounds
+        self._color_unaligned_background = True
         self._show_annotation_track = True
         self._region_sel: tuple[int, int] | None = None
         # When set, column band is limited to these rows (MSA regional drag).
@@ -734,12 +736,19 @@ class _BarsCanvas(QWidget):
         lengths: dict[str, int],
         features: dict[str, list[SequenceFeature]],
         *,
+        sequences: list[str] | None = None,
         fit_bars_width: int | None = None,
     ) -> None:
         self._msa_mode = False
-        self._msa_seqs = []
-        self._msa_colors = {}
-        self._msa_qcolors = {}
+        self._msa_seqs = list(sequences or [])
+        self._msa_protein = _guess_msa_is_protein(self._msa_seqs)
+        self._msa_colors = (
+            amino_acid_color_map() if self._msa_protein else nucleotide_base_color_map()
+        )
+        self._msa_qcolors = {
+            key: (QColor(bg), QColor(fg))
+            for key, (bg, fg) in self._msa_colors.items()
+        }
         self._msa_col_freqs = []
         self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
@@ -866,7 +875,7 @@ class _BarsCanvas(QWidget):
         fm = QFontMetrics(font)
         glyph_h = max(fm.height(), fm.ascent() + fm.descent())
         self._msa_residue_height = max(1, int(glyph_h + 4))
-        if self._msa_mode:
+        if self._msa_mode or self._msa_seqs:
             self._clear_drag_paint_cache()
             self._recompute_layout()
             self.update()
@@ -877,6 +886,17 @@ class _BarsCanvas(QWidget):
     def _msa_shows_letters(self) -> bool:
         ppb = max(self._ppb, 1e-12)
         return bool(self._msa_mode) and ppb >= _MSA_LETTER_MIN_PPB and ppb >= 6
+
+    def _bar_shows_letters(self) -> bool:
+        ppb = max(self._ppb, 1e-12)
+        has_rows = bool(not self._msa_mode and self._msa_seqs)
+        return has_rows and ppb >= _MSA_LETTER_MIN_PPB and ppb >= 6
+
+    def _row_letter_band_height(self) -> int:
+        base = max(1, int(self._msa_residue_height))
+        if not (self._msa_shows_letters() or self._bar_shows_letters()):
+            return base
+        return max(base, int(math.ceil(self._ppb)))
 
     def _msa_letter_band_height(self) -> int:
         """Residue-band height; at letter zoom grows with ``ppb`` so cells stay square."""
@@ -928,6 +948,17 @@ class _BarsCanvas(QWidget):
 
     def column_distance(self) -> int:
         return int(self._column_distance)
+
+    def set_color_unaligned_background(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._color_unaligned_background:
+            return
+        self._color_unaligned_background = enabled
+        self._clear_drag_paint_cache()
+        self.update()
+
+    def color_unaligned_background(self) -> bool:
+        return bool(self._color_unaligned_background)
 
     def region_selection(self) -> tuple[int, int] | None:
         return self._region_sel
@@ -1392,7 +1423,7 @@ class _BarsCanvas(QWidget):
             )
             / max(1, self._max_length),
         )
-        ceil = _MSA_MAX_PPB if self._msa_mode else _MAX_PPB
+        ceil = _MSA_MAX_PPB if (self._msa_mode or self._msa_seqs) else _MAX_PPB
         desired_max = max(ceil, fit_ppb * _MAX_ZOOM_OVER_FIT)
         return fit_ppb, max(fit_ppb, min(desired_max, geometry_limit))
 
@@ -1482,9 +1513,9 @@ class _BarsCanvas(QWidget):
         n_rows = len(self._record_ids)
         gap = max(0, int(self._sequence_row_gap))
         for i, rid in enumerate(self._record_ids):
-            if self._msa_mode:
+            if self._msa_mode or self._bar_shows_letters():
                 # Letter zoom: band grows with ppb so glyph/background stay in ratio.
-                h = int(self._msa_letter_band_height()) + self._msa_track_block_height(
+                h = int(self._row_letter_band_height()) + self._msa_track_block_height(
                     rid
                 )
             else:
@@ -1540,8 +1571,8 @@ class _BarsCanvas(QWidget):
 
     def _feature_band_y0(self, row: int) -> int:
         top = self._row_tops[row]
-        if self._msa_mode:
-            return top + int(self._msa_letter_band_height()) + 1
+        if self._msa_mode or self._bar_shows_letters():
+            return top + int(self._row_letter_band_height()) + 1
         return top + _BAR_TOP_PAD + _BAR_HEIGHT + 2
 
     def _y_in_annotation_band(self, row: int, y: float) -> bool:
@@ -2374,8 +2405,11 @@ class _BarsCanvas(QWidget):
         qcolors = self._msa_qcolors
         # At letter zoom, band grows with ppb (square cells); font scales to fill.
         residue_h = max(1, int(self._msa_letter_band_height()))
-        if show_letters:
-            painter.setFont(self._msa_letter_font_for_cell(ppb, float(residue_h)))
+        residue_font = (
+            self._msa_letter_font_for_cell(ppb, float(residue_h))
+            if show_letters
+            else None
+        )
         # Equal inset on all sides from Column distance (0 → backgrounds connect).
         _bg_margin = max(0.0, float(self._column_distance) * 0.5)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -2390,6 +2424,10 @@ class _BarsCanvas(QWidget):
                 painter.fillRect(0, top, self.width(), height, band)
             seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
             y = top
+            # Feature tracks change the painter font; restore the residue font
+            # for every row so later sequences do not inherit annotation text size.
+            if residue_font is not None:
+                painter.setFont(residue_font)
             # Coalesce same-residue runs when zoomed out (far fewer draw calls).
             j = c0
             while j < c1:
@@ -2511,6 +2549,14 @@ class _BarsCanvas(QWidget):
 
     def _paint_bar_rows(self, painter: QPainter, clip: QRect) -> None:
         sel_bg = _SELECTED_BG_DARK if _is_dark(self) else _SELECTED_BG_LIGHT
+        show_letters = self._bar_shows_letters()
+        ppb = max(self._ppb, 1e-12)
+        residue_h = max(1, int(self._row_letter_band_height()))
+        residue_font = (
+            self._msa_letter_font_for_cell(ppb, float(residue_h))
+            if show_letters
+            else None
+        )
 
         for index, rid in enumerate(self._record_ids):
             top = self._row_tops[index]
@@ -2524,12 +2570,42 @@ class _BarsCanvas(QWidget):
                 painter.fillRect(0, top, self.width(), height, sel_bg)
 
             length = max(1, int(self._lengths.get(rid, 1)))
-            bar_w = max(2.0, length * self._ppb)
-            bar_y = top + _BAR_TOP_PAD
-            painter.fillRect(
-                QRectF(self._bar_pad, bar_y, bar_w, _BAR_HEIGHT),
-                _bar_color(self, selected=selected),
-            )
+            bar_y = top if show_letters else top + _BAR_TOP_PAD
+            if show_letters:
+                # Feature tracks change the painter font; restore it per row.
+                if residue_font is not None:
+                    painter.setFont(residue_font)
+                seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
+                c0 = max(0, int((clip.left() - self._bar_pad) / ppb) - 1)
+                c1 = min(length, int((clip.right() - self._bar_pad) / ppb) + 2)
+                for column in range(c0, c1):
+                    ch = seq[column] if column < len(seq) else ""
+                    if not ch:
+                        continue
+                    cell = QRectF(
+                        self._bar_pad + column * ppb,
+                        bar_y,
+                        max(0.5, ppb),
+                        float(residue_h),
+                    )
+                    pair = self._msa_qcolors.get(ch)
+                    if pair is not None and self._color_unaligned_background:
+                        painter.fillRect(cell, pair[0])
+                    if pair is None:
+                        letter_color = self.palette().text().color()
+                    elif self._color_unaligned_background:
+                        letter_color = pair[1]
+                    else:
+                        letter_color = pair[0]
+                    painter.setPen(letter_color)
+                    painter.drawText(cell.toRect(), int(Qt.AlignmentFlag.AlignCenter), ch)
+                painter.setPen(Qt.PenStyle.NoPen)
+            else:
+                bar_w = max(2.0, length * self._ppb)
+                painter.fillRect(
+                    QRectF(self._bar_pad, bar_y, bar_w, _BAR_HEIGHT),
+                    _bar_color(self, selected=selected),
+                )
             hits = self._find_hits.get(rid)
             if hits:
                 current = self._find_current
@@ -2537,7 +2613,9 @@ class _BarsCanvas(QWidget):
                 for hit_start, hit_end in hits:
                     x0 = self._bar_pad + (hit_start - 1) * self._ppb
                     x1 = self._bar_pad + hit_end * self._ppb
-                    mark = QRectF(x0, bar_y - 2, max(3.0, x1 - x0), _BAR_HEIGHT + 4)
+                    mark_h = residue_h if show_letters else _BAR_HEIGHT + 4
+                    mark_y = bar_y if show_letters else bar_y - 2
+                    mark = QRectF(x0, mark_y, max(3.0, x1 - x0), mark_h)
                     is_current = current is not None and current == (rid, hit_start, hit_end)
                     painter.fillRect(mark, _FIND_CURRENT_FILL if is_current else _FIND_HIT_FILL)
                     painter.drawRect(mark)
@@ -3182,6 +3260,7 @@ class MultiSequenceOverviewPanel(QWidget):
         prev_owner = getattr(bar, "_bound_overview", None)
         if prev_owner is self and self._header_zoom_bar is bar:
             self._mount_zoom_bar_in_panel(bar)
+            bar.set_msa_mode(self.is_msa_mode())
             self._sync_header_position_spins()
             return
         if prev_owner is not None and prev_owner is not self:
@@ -3214,6 +3293,7 @@ class MultiSequenceOverviewPanel(QWidget):
 
         self._header_zoom_bar = bar
         bar._bound_overview = self
+        bar.set_msa_mode(self.is_msa_mode())
         self._mount_zoom_bar_in_panel(bar)
         self._zoom_slider = bar.zoom_slider
         self._name_filter = bar.name_filter
@@ -3234,6 +3314,38 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.filter_text_changed.connect(self._on_name_filter_edited)
         bar.filter_return_pressed.connect(self._on_name_filter_next)
         self._sync_header_position_spins()
+
+    def _sync_mode_specific_controls(self) -> None:
+        msa = self.is_msa_mode()
+        self._rail.set_msa_display_mode(msa)
+        settings = self._overview_display_settings()
+        try:
+            key = "sequence_distance" if msa else "multi_sequence_distance"
+            default = (
+                _DEFAULT_MSA_SEQUENCE_DISTANCE
+                if msa
+                else _DEFAULT_MULTI_SEQUENCE_DISTANCE
+            )
+            distance = max(0, min(40, int(settings.value(key, default))))
+            color_background = settings.value(
+                "multi_sequence_color_background", True, type=bool
+            )
+        finally:
+            settings.endGroup()
+        self._rail.annotation_distance.blockSignals(True)
+        try:
+            self._rail.annotation_distance.setValue(distance)
+        finally:
+            self._rail.annotation_distance.blockSignals(False)
+        self._bars.set_sequence_row_gap(distance)
+        self._rail.color_multi_sequence_background.blockSignals(True)
+        try:
+            self._rail.color_multi_sequence_background.setChecked(color_background)
+        finally:
+            self._rail.color_multi_sequence_background.blockSignals(False)
+        self._bars.set_color_unaligned_background(color_background)
+        if self._header_zoom_bar is not None:
+            self._header_zoom_bar.set_msa_mode(msa)
 
     def is_msa_mode(self) -> bool:
         return self._bars.is_msa_mode()
@@ -3268,13 +3380,20 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.basesZoomedInChanged.connect(self._on_bases_zoomed_in_changed)
         rail.annotationDistanceChanged.connect(self._on_sequence_row_gap_changed)
         rail.columnDistanceChanged.connect(self._on_column_distance_changed)
+        rail.multiSequenceBackgroundChanged.connect(
+            self._on_multi_sequence_background_changed
+        )
         rail.showAnnotationTrackChanged.connect(self._on_show_annotation_track_changed)
         self._load_overview_display_settings()
         bases = int(rail.bases_zoomed_in.value())
         self._bars.set_msa_residue_size(bases)
         self._names.set_label_point_size(bases)
         self._bars.set_sequence_row_gap(int(rail.annotation_distance.value()))
-        self._bars.set_column_distance(int(rail.column_distance.value()))
+        # Column spacing is no longer a user-facing MSA option.
+        self._bars.set_column_distance(0)
+        self._bars.set_color_unaligned_background(
+            rail.color_multi_sequence_background.isChecked()
+        )
         self._bars.set_msa_color_mode(rail.msa_coloring_mode_id())
         self._bars.set_msa_divergence_threshold(rail.msa_divergence_threshold())
         self._sync_auto_annotation_all_check()
@@ -3338,8 +3457,17 @@ class MultiSequenceOverviewPanel(QWidget):
         s = self._overview_display_settings()
         try:
             s.setValue("bases_zoomed_in", int(rail.bases_zoomed_in.value()))
-            s.setValue("sequence_distance", int(rail.annotation_distance.value()))
+            distance_key = (
+                "sequence_distance"
+                if self.is_msa_mode()
+                else "multi_sequence_distance"
+            )
+            s.setValue(distance_key, int(rail.annotation_distance.value()))
             s.setValue("column_distance", int(rail.column_distance.value()))
+            s.setValue(
+                "multi_sequence_color_background",
+                rail.color_multi_sequence_background.isChecked(),
+            )
             s.setValue("msa_coloring_mode", rail.msa_coloring_mode_id())
             s.setValue(
                 "msa_divergence_threshold",
@@ -3362,6 +3490,10 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _on_column_distance_changed(self, gap: int) -> None:
         self._bars.set_column_distance(int(gap))
+        self._save_overview_display_settings()
+
+    def _on_multi_sequence_background_changed(self, enabled: bool) -> None:
+        self._bars.set_color_unaligned_background(bool(enabled))
         self._save_overview_display_settings()
 
     def _on_show_annotation_track_changed(self, enabled: bool) -> None:
@@ -4392,17 +4524,20 @@ class MultiSequenceOverviewPanel(QWidget):
             self._load_msa_path()
             return
         try:
-            lengths = fasta_record_lengths(self._path)
+            record_ids, sequences = load_fasta_rows(self._path)
+            lengths = {
+                rid: len(seq) for rid, seq in zip(record_ids, sequences)
+            }
         except (OSError, ValueError) as exc:
             self._record_ids = []
             self._lengths = {}
             self._features = {}
             self._bars.set_data([], {}, {})
+            self._sync_mode_specific_controls()
             self._scale.set_scale(ppb=_ABS_MIN_PPB, max_length=1, bar_pad=8)
             self.statusMessage.emit(str(exc))
             return
 
-        record_ids = list(lengths.keys())
         # Prefer JSON sidecar (canonical store); fall back to companion GFF3.
         json_by_id = load_features_by_id_from_json(self._path, record_ids)
         gff = resolve_features_gff_path(self._path)
@@ -4437,7 +4572,14 @@ class MultiSequenceOverviewPanel(QWidget):
         tracks_w = max(200, total_w - self._name_width)
         self._splitter.setSizes([self._name_width, tracks_w])
         self._sync_viewport_fill()
-        self._bars.set_data(record_ids, lengths, features, fit_bars_width=None)
+        self._bars.set_data(
+            record_ids,
+            lengths,
+            features,
+            sequences=sequences,
+            fit_bars_width=None,
+        )
+        self._sync_mode_specific_controls()
         self._sync_names_column()
         self._update_scale()
         self._sync_header_position_spins()
@@ -4470,6 +4612,7 @@ class MultiSequenceOverviewPanel(QWidget):
             self._lengths = {}
             self._features = {}
             self._bars.set_data([], {}, {})
+            self._sync_mode_specific_controls()
             self._scale.set_scale(ppb=_ABS_MIN_PPB, max_length=1, bar_pad=8)
             self.statusMessage.emit(str(exc))
             return
@@ -4509,6 +4652,7 @@ class MultiSequenceOverviewPanel(QWidget):
             features=self._features,
             fit_bars_width=None,
         )
+        self._sync_mode_specific_controls()
         self._sync_names_column()
         self._update_scale()
         self._sync_header_position_spins()
