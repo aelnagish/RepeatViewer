@@ -27,7 +27,7 @@ def test_multi_fasta_default_tab_menu_text_and_overview(qapp: QApplication) -> N
     assert "Annotation" not in labels
 
 
-def test_single_fasta_default_tab_menu_keeps_annotation_dotplot(
+def test_single_fasta_default_tab_menu_keeps_overview_dotplot(
     qapp: QApplication,
 ) -> None:
     menu = QMenu()
@@ -36,7 +36,7 @@ def test_single_fasta_default_tab_menu_keeps_annotation_dotplot(
     submenu = action.menu()
     assert submenu is not None
     labels = [a.text() for a in submenu.actions() if a.isCheckable()]
-    assert labels == ["Text", "Annotation", "Dotplot (Self)"]
+    assert labels == ["Text", "Overview", "Dotplot (Self)"]
 
 
 def test_annotation_zoom_bar_hides_actions_in_overview_mode(

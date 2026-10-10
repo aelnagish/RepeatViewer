@@ -142,7 +142,7 @@ def test_unaligned_overview_sequence_distance_defaults_to_two(
         path.write_text(">a\nACGT\n>b\nACGTACGT\n")
         panel = MultiSequenceOverviewPanel(path)
         panel.load_path(path, msa_mode=False)
-        assert panel._rail.annotation_distance.value() == 2
+        assert panel._rail.sequence_distance.value() == 2
         assert panel._bars.sequence_row_gap() == 2
         panel.deleteLater()
     finally:

@@ -79,6 +79,7 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.widgets.spin_boxes import (
     NoWheelDoubleSpinBox as QDoubleSpinBox,
+    NoWheelSlider,
     NoWheelSpinBox as QSpinBox,
 )
 from repeatviewer.widgets.help_button import field_with_help
@@ -154,6 +155,8 @@ from repeatviewer.widgets.annotation_colors_dialog import (
 )
 from repeatviewer.widgets.sequence_annotation_rail import SequenceAnnotationRail
 from repeatviewer.widgets.preview_controls import (
+    ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
+    ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH,
     ANNOTATION_ZOOM_SLIDER_WIDTH,
     ZOOM_SLIDER_HEIGHT,
     apply_annotation_zoom_slider_style,
@@ -292,7 +295,8 @@ _IMAGE_MARKER_SIZE = 12  # cytogenetic-image dot on annotation features
 _ANNOT_MIN_VIEWPORT_HEIGHT = 56
 _OVERVIEW_SYNC_MS = 16
 _RULER_HEIGHT = 20
-_VIEWPORT_RULER_HEIGHT = 14
+# Room for number above a short tick centered on each nucleotide.
+_VIEWPORT_RULER_HEIGHT = 18
 _OVERVIEW_HEIGHT = 16
 # Bar-mode (zoomed-out) strip height. Letter mode sizes from the Display font.
 _SEQUENCE_ROW = 14
@@ -1164,18 +1168,26 @@ class SequenceScrollArea(QScrollArea):
 class ViewportRulerWidget(QWidget):
     """Position scale aligned with the visible sequence (scroll + zoom synced)."""
 
+    # Viewport-local x under the cursor + zoom-in flag (True=in, False=out).
+    zoomAtRequested = Signal(float, bool)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(_VIEWPORT_RULER_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(
+            "Click the scale bar to zoom to maximum at this position · "
+            "Right-click or Shift+click to fit"
+        )
         self._sequence = ""
         self._scroll_px = 0.0
         self._ppb = 1.0
         self._viewport_w = 200
-        self._font_point_size = 7
+        self._font_point_size = 8
 
     def set_font_point_size(self, point_size: int) -> None:
-        self._font_point_size = max(6, min(20, int(point_size)))
+        self._font_point_size = max(4, min(24, int(point_size)))
         self.update()
 
     def set_view(
@@ -1192,59 +1204,103 @@ class ViewportRulerWidget(QWidget):
         self._viewport_w = max(1, int(viewport_w))
         self.update()
 
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            zoom_in = not bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.zoomAtRequested.emit(float(event.position().x()), zoom_in)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.RightButton:
+            self.zoomAtRequested.emit(float(event.position().x()), False)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def paintEvent(self, event) -> None:  # noqa: N802
+        """Short ticks centered on nucleotides; numbers centered above the ticks."""
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.fillRect(self.rect(), _MAP_PAPER)
         seq_len = len(self._sequence)
         if seq_len <= 0:
             painter.end()
             return
-        ppb = self._ppb
-        scroll = self._scroll_px
-        vw = self._viewport_w
-        ruler_font = _monospace_font(point_size=self._font_point_size)
+        ppb = max(_FIT_MIN_PPB, float(self._ppb))
+        scroll = float(self._scroll_px)
+        vw = max(1, int(self._viewport_w))
+        ruler_font = _monospace_font(
+            point_size=max(4, min(24, int(self._font_point_size)))
+        )
         painter.setFont(ruler_font)
         fm = QFontMetrics(ruler_font)
-        painter.setPen(QColor("#666666"))
+        fg = QColor("#666666")
 
-        start_bp = max(1, int((scroll - _LEFT_MARGIN) / ppb) + 1)
-        end_bp = min(seq_len, int((scroll + vw - _LEFT_MARGIN) / ppb) + 1)
-        major_step = SequenceMapCanvas._nice_tick_step(seq_len, ppb, fm)
-        tick_step = major_step if major_step >= 5 else 5
-        min_label_w = fm.horizontalAdvance("00000") + 4
-        last_label_x = -1e9
+        origin = float(_LEFT_MARGIN)
+        start_bp = max(1.0, (scroll - origin) / ppb + 1.0)
+        end_bp = min(float(seq_len), (scroll - origin + float(vw)) / ppb + 1.0)
+        span = max(1.0, end_bp - start_bp)
+        sample = f"{int(end_bp)}"
+        min_label_px = fm.horizontalAdvance(sample) + 12
+        step = max(1, SequenceMapCanvas._nice_tick_step(max(1, int(span)), ppb, fm))
+        est = span * float(min_label_px) / max(1.0, float(vw))
+        if step < est:
+            step = max(
+                step,
+                SequenceMapCanvas._nice_tick_step(max(1, int(est * 4)), ppb, fm),
+            )
 
-        # Walk by tick_step (not every base) so multi-Mb fit views stay cheap.
-        tick_bps: list[int] = []
-        if start_bp == 1:
-            tick_bps.append(1)
-        first = ((start_bp + tick_step - 1) // tick_step) * tick_step
-        if first < 1:
-            first = tick_step
-        for bp in range(first, end_bp + 1, tick_step):
-            if bp != 1:
-                tick_bps.append(bp)
-        if end_bp >= seq_len and seq_len not in tick_bps:
-            tick_bps.append(seq_len)
+        # Number (top) → short tick → nucleotide.
+        tick_len = 3
+        tick_bottom = self.height() - 2
+        tick_top = tick_bottom - tick_len
+        label_baseline = max(fm.ascent() + 1, tick_top - 2)
 
-        for bp in tick_bps:
-            x = _bp_view_x(bp, scroll, ppb)
-            if x < _LEFT_MARGIN or x > vw - 4:
+        def _center_x(pos: float) -> float:
+            return origin + (pos - 0.5) * ppb - scroll
+
+        label_positions: list[int] = []
+        if start_bp <= 1.0 <= end_bp:
+            label_positions.append(1)
+        first = int(math.ceil(start_bp / step) * step)
+        if first < step:
+            first = step
+        for pos in range(first, int(end_bp) + 1, step):
+            if 1 <= pos <= seq_len and pos != 1:
+                label_positions.append(pos)
+
+        tick_start = max(1, int(math.floor(start_bp)))
+        tick_end = min(seq_len, int(math.ceil(end_bp)))
+        show_every_base = ppb >= 3.5
+        tick_positions = (
+            range(tick_start, tick_end + 1)
+            if show_every_base
+            else label_positions
+        )
+        painter.setPen(QPen(fg, 1))
+        for pos in tick_positions:
+            cx = _center_x(float(pos))
+            if cx < -2 or cx > vw + 2:
                 continue
-            if bp != seq_len:
-                # Tick from top down toward the nucleotide track.
-                painter.drawLine(int(x), 1, int(x), _VIEWPORT_RULER_HEIGHT - 3)
-            text = str(bp)
+            painter.drawLine(int(cx), tick_top, int(cx), tick_bottom)
+
+        last_label_right = -1.0e9
+        for pos in label_positions:
+            cx = _center_x(float(pos))
+            if cx < -2 or cx > vw + 2:
+                continue
+            text = str(pos)
             text_w = fm.horizontalAdvance(text)
-            # Skip labels that would clip off the right (end of sequence) or left edge.
-            label_x = int(x + 2)
-            if label_x < _LEFT_MARGIN or label_x + text_w > vw - 2:
-                continue
-            if x - last_label_x < min_label_w and bp != 1 and bp != seq_len:
-                continue
-            # Baseline flush to the bottom edge so the track sits under the numbers.
-            painter.drawText(label_x, _VIEWPORT_RULER_HEIGHT - 2, text)
-            last_label_x = x
+            label_left = cx - text_w / 2
+            if label_left < 0:
+                label_left = 0
+            label_right = label_left + text_w
+            if label_right > vw:
+                label_left = vw - text_w
+                label_right = label_left + text_w
+            if label_left >= last_label_right + 4 and label_right <= vw + 0.5:
+                painter.drawText(int(label_left), int(label_baseline), text)
+                last_label_right = label_right
         painter.end()
 
 
@@ -4174,7 +4230,7 @@ class SequenceMapWidget(QWidget):
             zoom_in_btn = _make_zoom_button("+", toolbar)
             zoom_in_btn.setToolTip("Zoom in")
             zoom_in_btn.clicked.connect(self.zoom_in)
-            self._zoom_slider = QSlider(Qt.Orientation.Horizontal, toolbar)
+            self._zoom_slider = NoWheelSlider(Qt.Orientation.Horizontal, toolbar)
             self._zoom_slider.setObjectName("annotationZoomSlider")
             self._zoom_slider.setRange(0, 100)
             self._zoom_slider.setValue(0)
@@ -4182,7 +4238,7 @@ class SequenceMapWidget(QWidget):
             self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
             self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
             self._zoom_slider.setToolTip(
-                "Left: fit full sequence in window. Right: maximum zoom-in."
+                "Click the bar: left = fit, right = maximum zoom. Drag to adjust."
             )
             apply_annotation_zoom_slider_style(self._zoom_slider)
             self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
@@ -4194,8 +4250,11 @@ class SequenceMapWidget(QWidget):
             _configure_position_spin(self._pos_end)
             for spin in (self._pos_start, self._pos_end):
                 spin.setFixedHeight(18)
+            # Match multi-seq Overview Select / Fit widths.
+            select_btn.setFixedWidth(ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH)
             select_btn.setFixedHeight(20)
             select_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            fit_btn.setFixedWidth(ANNOTATION_FIT_BUTTON_RENDERED_WIDTH)
             fit_btn.setFixedHeight(20)
             fit_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
@@ -4235,14 +4294,14 @@ class SequenceMapWidget(QWidget):
             zoom_in_btn = _make_zoom_button("+", zoom_strip)
             zoom_in_btn.setToolTip("Zoom in")
             zoom_in_btn.clicked.connect(self.zoom_in)
-            self._zoom_slider = QSlider(Qt.Orientation.Horizontal, zoom_strip)
+            self._zoom_slider = NoWheelSlider(Qt.Orientation.Horizontal, zoom_strip)
             self._zoom_slider.setObjectName("annotationZoomSlider")
             self._zoom_slider.setRange(0, 100)
             self._zoom_slider.setValue(0)
             self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
             self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
             self._zoom_slider.setToolTip(
-                "Left: fit full sequence in window. Right: maximum zoom-in."
+                "Click the bar: left = fit, right = maximum zoom. Drag to adjust."
             )
             self._zoom_slider.setSizePolicy(
                 QSizePolicy.Policy.Expanding,
@@ -4308,6 +4367,7 @@ class SequenceMapWidget(QWidget):
         self._canvas.featureActionRequested.connect(self._on_canvas_feature_action)
 
         self._ruler = ViewportRulerWidget(self)
+        self._ruler.zoomAtRequested.connect(self._on_ruler_zoom_at)
         self._annot_track = AnnotationTrackWidget(self)
         self._annot_track.selectionChanged.connect(self._on_annot_track_selection_changed)
         self._annot_track.clearRangeSelectionRequested.connect(
@@ -5079,6 +5139,36 @@ class SequenceMapWidget(QWidget):
         if self._zoom_slider is None:
             return
         self._zoom_slider.setValue(max(0, self._zoom_slider.value() - 8))
+
+    def _on_ruler_zoom_at(self, view_x: float, zoom_in: bool) -> None:
+        """Scale-bar click: jump to max zoom (or fit) centered on the click."""
+        if self._zoom_slider is None or self._data is None:
+            return
+        if self.is_too_long_for_display():
+            return
+        # Click → most zoom; right-click / Shift+click → fit (slider left).
+        new_val = 100 if zoom_in else 0
+        old_ppb = max(self._canvas.effective_ppb(), 1e-12)
+        scroll = float(self._hbar.value())
+        # 0-based bp under the click stays fixed in the viewport.
+        bp0 = (float(view_x) + scroll - float(_LEFT_MARGIN)) / old_ppb
+        new_ppb = self._slider_value_to_ppb(new_val)
+        fit_ppb, _ = self._slider_ppb_bounds()
+        reset_scroll = new_val <= 0 or new_ppb <= fit_ppb * 1.001
+        self._apply_zoom_ppb(
+            new_ppb,
+            sync_slider=True,
+            reset_scroll=reset_scroll,
+            previous_ppb=old_ppb,
+        )
+        if reset_scroll:
+            return
+        new_content_x = float(_LEFT_MARGIN) + bp0 * max(
+            self._canvas.effective_ppb(), 1e-12
+        )
+        target = int(round(new_content_x - float(view_x)))
+        self._hbar.setValue(max(0, min(self._hbar.maximum(), target)))
+        self._sync_overview_now()
 
     def _slider_ppb_bounds(self) -> tuple[float, float]:
         """Slider endpoints: left = fit entire sequence, right = max zoom-in."""
@@ -6732,7 +6822,7 @@ class SequenceMapPanel(QWidget):
             rail.annotation_thickness.setValue(int(s.value("annotation_thickness", 18)))
             rail.annotation_distance.setValue(int(s.value("annotation_distance", 0)))
             rail.sequence_name_size.setValue(int(s.value("sequence_name_size", 12)))
-            rail.base_number_size.setValue(int(s.value("base_number_size", 7)))
+            rail.base_number_size.setValue(int(s.value("base_number_size", 8)))
         finally:
             for widget in blockers:
                 widget.blockSignals(False)

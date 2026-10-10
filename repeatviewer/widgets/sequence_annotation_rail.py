@@ -521,6 +521,7 @@ class SequenceAnnotationRail(QWidget):
     columnDistanceChanged = Signal(int)  # MSA overview: gap between residue columns
     multiSequenceBackgroundChanged = Signal(bool)
     annotationDistanceChanged = Signal(int)
+    sequenceDistanceChanged = Signal(int)  # multi/MSA overview: gap between sequences
     sequenceNameSizeChanged = Signal(int)
     baseNumberSizeChanged = Signal(int)
     splitTracksBySourceChanged = Signal(bool)
@@ -714,28 +715,13 @@ class SequenceAnnotationRail(QWidget):
         self.show_complement.toggled.connect(self.showComplementChanged.emit)
         layout.addWidget(self.show_complement)
 
-        translation_row = QHBoxLayout()
-        translation_row.setContentsMargins(0, 0, 0, 0)
-        translation_row.setSpacing(8)
         self.show_translation = QCheckBox("Show translation", page)
         self.show_translation.setToolTip(
             "Show amino-acid translation rows under the sequence "
             "(only when zoomed in to individual nucleotides)."
         )
         self.show_translation.toggled.connect(self._on_show_translation_toggled)
-        translation_row.addWidget(self.show_translation)
-        self.translation_more_btn = QPushButton("Setting", page)
-        self.translation_more_btn.setEnabled(False)
-        self.translation_more_btn.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
-        )
-        self.translation_more_btn.setToolTip(
-            "Choose reading frames, three-letter amino acids, and genetic code."
-        )
-        self.translation_more_btn.clicked.connect(self._open_translation_settings)
-        translation_row.addWidget(self.translation_more_btn)
-        translation_row.addStretch(1)
-        layout.addLayout(translation_row)
+        layout.addWidget(self.show_translation)
 
         # Hidden frame checkboxes keep settings load/save and map wiring stable.
         self.frame_checks: dict[int, QCheckBox] = {}
@@ -747,7 +733,9 @@ class SequenceAnnotationRail(QWidget):
         self._translation_three_letter = False
         self._translation_genetic_code = 1
 
-        self.split_tracks_by_source = QCheckBox("Split tracks by source", page)
+        self.split_tracks_by_source = QCheckBox(
+            "Split annotation by source", page
+        )
         self.split_tracks_by_source.setToolTip(
             "When checked, features from different sources use separate visual "
             "tracks even if they share the same track number."
@@ -756,6 +744,22 @@ class SequenceAnnotationRail(QWidget):
             self.splitTracksBySourceChanged.emit
         )
         layout.addWidget(self.split_tracks_by_source)
+
+        # Left-aligned with the Tracks section header (below Split annotation).
+        self.translation_more_btn = QPushButton("Setting", page)
+        self.translation_more_btn.setEnabled(False)
+        self.translation_more_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.translation_more_btn.setToolTip(
+            "Choose reading frames, three-letter amino acids, and genetic code."
+        )
+        self.translation_more_btn.clicked.connect(self._open_translation_settings)
+        layout.addWidget(
+            self.translation_more_btn,
+            0,
+            Qt.AlignmentFlag.AlignLeft,
+        )
 
         layout.addWidget(_h_divider(page))
         layout.addWidget(_section_label("Color", page))
@@ -1015,6 +1019,28 @@ class SequenceAnnotationRail(QWidget):
             self.annotationDistanceChanged.emit
         )
 
+        self.base_number_size = NoWheelSpinBox(page)
+        self.base_number_size.setRange(4, 24)
+        self.base_number_size.setValue(8)
+        self.base_number_size.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
+        self.base_number_size.setToolTip(
+            "Font size for scale (base/residue position) labels."
+        )
+        self.base_number_size.valueChanged.connect(self.baseNumberSizeChanged.emit)
+
+        self.sequence_distance = NoWheelSpinBox(page)
+        self.sequence_distance.setRange(0, 40)
+        self.sequence_distance.setValue(0)
+        self.sequence_distance.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
+        self.sequence_distance.setToolTip(
+            "Vertical gap between sequences (pixels)."
+        )
+        self.sequence_distance.valueChanged.connect(self.sequenceDistanceChanged.emit)
+        self._sequence_distance_label = QLabel("Sequence distance:", page)
+        # Overview/MSA only — hidden for single-sequence map.
+        self._sequence_distance_label.setVisible(False)
+        self.sequence_distance.setVisible(False)
+
         self.column_distance = NoWheelSpinBox(page)
         self.column_distance.setRange(0, 40)
         self.column_distance.setValue(0)
@@ -1035,17 +1061,13 @@ class SequenceAnnotationRail(QWidget):
         self.sequence_name_size.hide()
         self.sequence_name_size.valueChanged.connect(self.sequenceNameSizeChanged.emit)
 
-        self.base_number_size = NoWheelSpinBox(page)
-        self.base_number_size.setRange(6, 20)
-        self.base_number_size.setValue(7)
-        self.base_number_size.hide()
-        self.base_number_size.valueChanged.connect(self.baseNumberSizeChanged.emit)
-
         sizes.addRow(self.bases_font_label, self.bases_zoomed_in)
         sizes.addRow("Annotation labels:", self.annotation_label_size)
         sizes.addRow("Annotation thickness:", self.annotation_thickness)
         self._annotation_distance_label = QLabel("Annotation distance:", page)
         sizes.addRow(self._annotation_distance_label, self.annotation_distance)
+        sizes.addRow("Scale labels:", self.base_number_size)
+        sizes.addRow(self._sequence_distance_label, self.sequence_distance)
         sizes.addRow(self._column_distance_label, self.column_distance)
         layout.addLayout(sizes)
 
@@ -1703,6 +1725,8 @@ class SequenceAnnotationRail(QWidget):
         self.set_msa_display_mode(getattr(self, "_msa_display_mode", False))
         self._column_distance_label.setVisible(False)
         self.column_distance.setVisible(False)
+        self._sequence_distance_label.setVisible(overview)
+        self.sequence_distance.setVisible(overview)
         # Keep Tracks header + annotation-track toggle in overview.
         self._tracks_divider.setVisible(True)
         self._tracks_label.setVisible(True)
@@ -1727,20 +1751,16 @@ class SequenceAnnotationRail(QWidget):
                 "Run similarity annotation on selected sequences, "
                 "or all open sequences when none are selected"
             )
-            self._annotation_distance_label.setText("Sequence distance:")
-            self.annotation_distance.setToolTip(
-                "Vertical gap between sequences (pixels)."
-            )
         else:
             self.manual_add_btn.setToolTip(
                 "Add the checked feature type on the current sequence selection."
             )
             self.auto_ann_run_btn.setToolTip("Run feature detection")
             self.similarity_ann_run_btn.setToolTip("Run similarity annotation")
-            self._annotation_distance_label.setText("Annotation distance:")
-            self.annotation_distance.setToolTip(
-                "Vertical gap between annotation rows (pixels)."
-            )
+        self._annotation_distance_label.setText("Annotation distance:")
+        self.annotation_distance.setToolTip(
+            "Vertical gap between annotation rows (pixels)."
+        )
         for btn in (self.delete_btn, self.restore_btn, self.export_btn):
             btn.setVisible(True)
         self._module_width = _MODULE_WIDTH

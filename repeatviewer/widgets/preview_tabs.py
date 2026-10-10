@@ -2614,10 +2614,8 @@ class PreviewTabWidget(QTabWidget):
                 self._header_bar.set_fasta_tab_visible(2, not multi)  # Dotplot (Self)
                 self._header_bar.set_fasta_tab_visible(3, has_images and not multi)
             if hasattr(self._header_bar, "set_fasta_tab_label"):
-                # Multi-seq shows length/feature overview; single-seq is the map.
-                self._header_bar.set_fasta_tab_label(
-                    1, "Overview" if multi else "Annotation"
-                )
+                # Same label for single-seq map and multi-seq overview.
+                self._header_bar.set_fasta_tab_label(1, "Overview")
             if multi and widget.current_fasta_tab_index() == 2:
                 widget.set_fasta_tab_index(1)
                 return

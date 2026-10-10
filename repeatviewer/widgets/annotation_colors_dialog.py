@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -338,17 +337,12 @@ class AnnotationElementColorsDialog(QDialog):
         self._font_point_size = int(font_point_size)
         self._split_tracks_by_source = bool(split_tracks_by_source)
 
-        color_box = QGroupBox("Element colors", self)
-        color_box_layout = QVBoxLayout(color_box)
-        color_box_layout.setContentsMargins(12, 12, 12, 12)
-        self._panel = AnnotationElementColorsPanel(color_box)
-        color_box_layout.addWidget(self._panel)
-
         body = QWidget(self)
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(12, 10, 12, 10)
         body_layout.setSpacing(12)
-        body_layout.addWidget(color_box)
+        self._panel = AnnotationElementColorsPanel(body)
+        body_layout.addWidget(self._panel)
         body_layout.addStretch(1)
 
         scroll = QScrollArea(self)

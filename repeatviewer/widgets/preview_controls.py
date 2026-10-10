@@ -51,11 +51,11 @@ from repeatviewer.widgets.preview_zoom import (
     save_preview_zoom_percent,
     wheel_zoom_delta_from_event,
 )
-from repeatviewer.widgets.spin_boxes import NoWheelSpinBox
+from repeatviewer.widgets.spin_boxes import NoWheelSlider, NoWheelSpinBox
 
 _FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
     ("Text", DefaultFastaPreviewTab.TEXT),
-    ("Annotation", DefaultFastaPreviewTab.ANNOTATION),
+    ("Overview", DefaultFastaPreviewTab.ANNOTATION),
     ("Dotplot (Self)", DefaultFastaPreviewTab.DOTPLOT),
 )
 _MULTI_FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
@@ -141,8 +141,9 @@ OVERVIEW_TOOLBAR_HEIGHT = 28
 # With the application stylesheet, the single-sequence AnnotationMapToolbar
 # renders at 26 px (22 px controls plus 2 px top/bottom margins).
 ANNOTATION_TOOLBAR_RENDERED_HEIGHT = 26
-# Rendered width of Select in the styled single-sequence Annotation toolbar.
+# Shared Select / Fit widths (recorded from multi-seq Overview toolbar).
 ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH = 55
+ANNOTATION_FIT_BUTTON_RENDERED_WIDTH = 37
 ZOOM_CONTROL_HEIGHT = 18
 ZOOM_SPIN_WIDTH = 56
 # Kept for sequence_map_viewer imports (embedded map toolbar height).
@@ -774,7 +775,7 @@ class PreviewZoomBar(QWidget):
 
 
 class AnnotationZoomBar(QWidget):
-    """Controls beside Text/Annotation tabs.
+    """Controls beside Text/Overview tabs.
 
     Single-sequence Annotation: Actions menu (zoom lives on the map toolbar).
     Multi-sequence overview: same chrome as the map toolbar — −/+/slider,
@@ -829,7 +830,7 @@ class AnnotationZoomBar(QWidget):
         zoom_in.setToolTip("Zoom in (Shift+scroll)")
         zoom_in.clicked.connect(lambda: self._nudge_zoom_slider(8))
 
-        self._zoom_slider = QSlider(Qt.Orientation.Horizontal, self._overview_host)
+        self._zoom_slider = NoWheelSlider(Qt.Orientation.Horizontal, self._overview_host)
         self._zoom_slider.setObjectName("annotationZoomSlider")
         self._zoom_slider.setRange(0, 100)
         self._zoom_slider.setValue(0)
@@ -837,7 +838,7 @@ class AnnotationZoomBar(QWidget):
         self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
         self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
         self._zoom_slider.setToolTip(
-            "Left: fit longest sequence in window. Right: maximum zoom-in."
+            "Click the bar: left = fit, right = maximum zoom. Drag to adjust."
         )
         apply_annotation_zoom_slider_style(self._zoom_slider)
 
@@ -867,7 +868,7 @@ class AnnotationZoomBar(QWidget):
         self._pos_end.setToolTip("1-based end position (column)")
         self._pos_end.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # Same size / policy as single-seq AnnotationMapToolbar Select / Fit.
+        # Shared Select / Fit widths with single-seq AnnotationMapToolbar.
         select_btn = QPushButton("Select", self._overview_host)
         select_btn.setFixedWidth(ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH)
         select_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
@@ -880,6 +881,7 @@ class AnnotationZoomBar(QWidget):
         self._select_btn = select_btn
 
         fit_btn = QPushButton("Fit", self._overview_host)
+        fit_btn.setFixedWidth(ANNOTATION_FIT_BUTTON_RENDERED_WIDTH)
         fit_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
         fit_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         fit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1411,7 +1413,7 @@ PREVIEW_HEADER_WITH_CONTROLS_HEIGHT = (
 
 
 class FastaTabStrip(QWidget):
-    """Text / Annotation / Dotplot / Cytogenetics switcher for the preview header."""
+    """Text / Overview / Dotplot / Cytogenetics switcher for the preview header."""
 
     tab_changed = Signal(int)
 
@@ -1426,7 +1428,7 @@ class FastaTabStrip(QWidget):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons: list[QPushButton] = []
-        for index, label in enumerate(("Text", "Annotation", "Dotplot (Self)", "Cytogenetics")):
+        for index, label in enumerate(("Text", "Overview", "Dotplot (Self)", "Cytogenetics")):
             btn = QPushButton(label)
             btn.setObjectName("FastaPreviewTab")
             btn.setCheckable(True)
@@ -1434,7 +1436,7 @@ class FastaTabStrip(QWidget):
             btn.setFixedHeight(FASTA_TAB_STRIP_HEIGHT)
             btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             # The selected tab is demi-bold in the stylesheet.  Measure that
-            # wider state up front so labels such as "Annotation" never get
+            # wider state up front so labels such as "Overview" never get
             # clipped when the font weight changes after layout.
             selected_font = btn.font()
             selected_font.setWeight(QFont.Weight.DemiBold)
@@ -1470,7 +1472,7 @@ class FastaTabStrip(QWidget):
 
 
 class PreviewHeaderBar(QWidget):
-    """FASTA Text / Annotation (or Overview) tabs; controls sit below the divider."""
+    """FASTA Text / Overview tabs; controls sit below the divider."""
 
     fasta_tab_changed = Signal(int)
 
@@ -1535,7 +1537,7 @@ class PreviewHeaderBar(QWidget):
             self.setFixedHeight(PREVIEW_HEADER_HEIGHT)
 
     def _update_bar_visibility(self) -> None:
-        # Header only shows for Text/Annotation tabs; text zoom lives on the title bar.
+        # Header only shows for Text/Overview tabs; text zoom lives on the title bar.
         self.setVisible(not self._fasta_tabs.isHidden())
         self._update_header_height()
 

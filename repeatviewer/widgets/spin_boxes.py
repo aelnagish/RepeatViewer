@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QStyle,
+    QStyleOptionSlider,
     QStyleOptionSpinBox,
 )
 
@@ -89,7 +90,56 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
 
 
 class NoWheelSlider(QSlider):
-    """Ignore wheel events so scrolling the panel does not change the value."""
+    """Ignore wheel events so scrolling the panel does not change the value.
+
+    Groove clicks jump the handle to the clicked position (AbsoluteSet), so the
+    right end of a zoom slider is maximum zoom — not a page-step nudge.
+    """
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802 (Qt API)
         event.ignore()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 (Qt API)
+        if event.button() == Qt.MouseButton.LeftButton and not self.isSliderDown():
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            style = self.style()
+            handle = style.subControlRect(
+                QStyle.ComplexControl.CC_Slider,
+                opt,
+                QStyle.SubControl.SC_SliderHandle,
+                self,
+            )
+            pos = event.position().toPoint()
+            if not handle.contains(pos):
+                groove = style.subControlRect(
+                    QStyle.ComplexControl.CC_Slider,
+                    opt,
+                    QStyle.SubControl.SC_SliderGroove,
+                    self,
+                )
+                if self.orientation() == Qt.Orientation.Horizontal:
+                    span = max(1, groove.width() - handle.width())
+                    x = pos.x() - groove.x() - handle.width() // 2
+                    value = QStyle.sliderValueFromPosition(
+                        self.minimum(),
+                        self.maximum(),
+                        max(0, min(span, x)),
+                        span,
+                        opt.upsideDown,
+                    )
+                else:
+                    span = max(1, groove.height() - handle.height())
+                    y = pos.y() - groove.y() - handle.height() // 2
+                    value = QStyle.sliderValueFromPosition(
+                        self.minimum(),
+                        self.maximum(),
+                        max(0, min(span, y)),
+                        span,
+                        opt.upsideDown,
+                    )
+                self.setSliderPosition(value)
+                self.setValue(value)
+                event.accept()
+                # Continue so dragging the handle from this point still works.
+        super().mousePressEvent(event)

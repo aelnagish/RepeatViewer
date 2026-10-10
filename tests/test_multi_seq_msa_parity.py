@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from repeatviewer.backends.sequence_features import SequenceFeature
 from repeatviewer.widgets.preview_controls import (
+    ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
     ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH,
     ANNOTATION_TOOLBAR_RENDERED_HEIGHT,
     ZOOM_SLIDER_HEIGHT,
@@ -87,8 +88,11 @@ def test_msa_toolbar_matches_rendered_single_sequence_control_sizes(
             for w in single._toolbar.findChildren(QPushButton)
             if w.text() == "Select"
         )
+        single_fit = next(
+            w for w in single._toolbar.findChildren(QPushButton) if w.text() == "Fit"
+        )
 
-        # Measurements recorded from the fully styled single-sequence toolbar.
+        # Shared Select / Fit widths recorded from multi-seq Overview.
         assert single._pos_start.size().width() == 108
         assert single._pos_start.size().height() == 20
         assert single_minus.size().width() == 22
@@ -99,6 +103,12 @@ def test_msa_toolbar_matches_rendered_single_sequence_control_sizes(
             == msa._select_btn.width()
             == ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH
             == 55
+        )
+        assert (
+            single_fit.width()
+            == msa._fit_btn.width()
+            == ANNOTATION_FIT_BUTTON_RENDERED_WIDTH
+            == 37
         )
 
         assert msa._pos_start.size() == single._pos_start.size()
@@ -555,6 +565,52 @@ def test_annotation_drag_selects_on_partial_overlap(qapp: QApplication) -> None:
     canvas.close()
 
 
+def test_delete_selected_features_not_column_region(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Feature picks set a column span; Delete must remove only those features."""
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "aln.fa"
+    fasta.write_text(
+        ">a\nACGTACGTAC\n>b\nACGTACGTAC\n>c\nACGTACGTAC\n",
+        encoding="utf-8",
+    )
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    panel._features = {
+        "a": [
+            SequenceFeature(start=2, end=5, name="ORF1", feature_type="ORF"),
+            SequenceFeature(start=6, end=8, name="ORF2", feature_type="ORF"),
+        ],
+        "b": [
+            SequenceFeature(start=3, end=7, name="ORF3", feature_type="ORF"),
+            SequenceFeature(start=4, end=6, name="Pfam", feature_type="domain"),
+        ],
+        "c": [
+            SequenceFeature(start=2, end=8, name="keep", feature_type="ORF"),
+        ],
+    }
+    panel._refresh_features_after_edit()
+    # Selecting features also mirrors their column span onto region_selection.
+    panel._bars._set_feature_selection({(0, 0), (1, 0), (1, 1)}, set_columns=True)
+    assert panel._bars.region_selection() is not None
+    assert len(panel._bars.selected_features()) == 3
+
+    panel._on_delete_clicked()
+    qapp.processEvents()
+
+    assert [f.name for f in panel._features["a"]] == ["ORF2"]
+    assert panel._features["b"] == []
+    assert [f.name for f in panel._features["c"]] == ["keep"]
+    assert panel._bars.msa_sequences() == ["ACGTACGTAC", "ACGTACGTAC", "ACGTACGTAC"]
+    assert panel._bars.selected_features() == []
+    panel.close()
+
+
 def test_msa_drag_keeps_regional_box_without_row_highlight(
     qapp: QApplication,
 ) -> None:
@@ -686,27 +742,47 @@ def test_delete_removes_shift_delete_fills_gaps(
     panel.close()
 
 
-def test_scale_click_selects_single_column(qapp: QApplication) -> None:
+def test_scale_click_zooms_at_position(qapp: QApplication) -> None:
     from repeatviewer.widgets.multi_sequence_overview import _ScaleRuler
 
     ruler = _ScaleRuler()
     ruler.resize(400, 28)
     ruler.set_scale(ppb=10.0, max_length=100, bar_pad=8)
-    ruler.set_scroll_x(0)
-    got: list[tuple[int, int]] = []
-    ruler.columnRegionSelected.connect(lambda a, b: got.append((a, b)))
-    # Click without drag near column 10 (x ≈ 8 + 9.5*10).
-    ruler._drag_origin_x = 8.0 + 9.5 * 10
+    ruler.set_scroll_x(20)
+    zooms: list[tuple[float, bool]] = []
+    selects: list[tuple[int, int]] = []
+    ruler.zoomAtRequested.connect(lambda x, inn: zooms.append((x, inn)))
+    ruler.columnRegionSelected.connect(lambda a, b: selects.append((a, b)))
+    # Click without drag — request max zoom at content x (scale_x + scroll).
+    click_x = 8.0 + 9.5 * 10
+    ruler._drag_origin_x = click_x
     ruler._rubber_active = False
     release = QMouseEvent(
         QMouseEvent.Type.MouseButtonRelease,
-        QPointF(8.0 + 9.5 * 10, 10),
+        QPointF(click_x, 10),
         Qt.MouseButton.LeftButton,
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
     )
     ruler.mouseReleaseEvent(release)
-    assert got == [(10, 10)]
+    assert selects == []
+    assert len(zooms) == 1
+    assert zooms[0][1] is True  # zoom_in → most zoom
+    assert abs(zooms[0][0] - (click_x + 20)) < 1e-6
+
+    # Shift+click → fit (zoom_in=False).
+    zooms.clear()
+    ruler._drag_origin_x = click_x
+    ruler._rubber_active = False
+    release_out = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(click_x, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+    )
+    ruler.mouseReleaseEvent(release_out)
+    assert zooms == [(click_x + 20, False)]
     ruler.close()
 
 

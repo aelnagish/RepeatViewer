@@ -480,7 +480,7 @@ class SettingsDialog(QDialog):
         self._fasta_default_tab = NoWheelComboBox()
         for label, tab in (
             ("Text", DefaultFastaPreviewTab.TEXT),
-            ("Annotation", DefaultFastaPreviewTab.ANNOTATION),
+            ("Overview", DefaultFastaPreviewTab.ANNOTATION),
             ("Dotplot (Self)", DefaultFastaPreviewTab.DOTPLOT),
         ):
             self._fasta_default_tab.addItem(label, tab.value)
