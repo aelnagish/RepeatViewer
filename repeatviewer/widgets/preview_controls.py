@@ -838,7 +838,8 @@ class AnnotationZoomBar(QWidget):
         self._zoom_slider.setMinimumWidth(ANNOTATION_ZOOM_SLIDER_WIDTH)
         self._zoom_slider.setFixedHeight(ZOOM_SLIDER_HEIGHT)
         self._zoom_slider.setToolTip(
-            "Click the bar: left = fit, right = maximum zoom. Drag to adjust."
+            "Click the bar: left = fit, right = maximum zoom. "
+            "Drag to adjust (keeps a selected region in place)."
         )
         apply_annotation_zoom_slider_style(self._zoom_slider)
 

@@ -26,6 +26,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QContextMenuEvent,
+    QCursor,
     QFont,
     QFontMetrics,
     QKeyEvent,
@@ -297,6 +298,8 @@ _OVERVIEW_SYNC_MS = 16
 _RULER_HEIGHT = 20
 # Room for number above a short tick centered on each nucleotide.
 _VIEWPORT_RULER_HEIGHT = 18
+# Ignore tiny moves on the scale (click = zoom; drag = select range).
+_RULER_RUBBER_MIN_PX = 4
 _OVERVIEW_HEIGHT = 16
 # Bar-mode (zoomed-out) strip height. Letter mode sizes from the Display font.
 _SEQUENCE_ROW = 14
@@ -1166,18 +1169,27 @@ class SequenceScrollArea(QScrollArea):
 
 
 class ViewportRulerWidget(QWidget):
-    """Position scale aligned with the visible sequence (scroll + zoom synced)."""
+    """Position scale aligned with the visible sequence (scroll + zoom synced).
+
+    Click → zoom at position (Shift/right-click → fit). Drag → select a bp range
+    (same as dragging on the sequence map).
+    """
 
     # Viewport-local x under the cursor + zoom-in flag (True=in, False=out).
     zoomAtRequested = Signal(float, bool)
+    # 1-based inclusive range from a completed scale drag.
+    regionSelected = Signal(int, int)
+    # Live range while dragging (for map/Position preview).
+    regionPreview = Signal(int, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(_VIEWPORT_RULER_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
         self.setToolTip(
             "Click the scale bar to zoom to maximum at this position · "
+            "Drag to select a region · "
             "Right-click or Shift+click to fit"
         )
         self._sequence = ""
@@ -1185,6 +1197,11 @@ class ViewportRulerWidget(QWidget):
         self._ppb = 1.0
         self._viewport_w = 200
         self._font_point_size = 8
+        self._region_sel: tuple[int, int] | None = None
+        self._drag_origin_x: float | None = None
+        self._drag_current_x: float | None = None
+        self._rubber_active = False
+        self._press_modifiers = Qt.KeyboardModifier.NoModifier
 
     def set_font_point_size(self, point_size: int) -> None:
         self._font_point_size = max(4, min(24, int(point_size)))
@@ -1204,10 +1221,49 @@ class ViewportRulerWidget(QWidget):
         self._viewport_w = max(1, int(viewport_w))
         self.update()
 
+    def set_region_selection(self, start: int | None, end: int | None = None) -> None:
+        """Mirror the map selection band onto the scale."""
+        if start is None:
+            if self._region_sel is None:
+                return
+            self._region_sel = None
+            self.update()
+            return
+        seq_len = max(1, len(self._sequence))
+        a = max(1, min(seq_len, int(start)))
+        b = max(1, min(seq_len, int(end if end is not None else start)))
+        if b < a:
+            a, b = b, a
+        new = (a, b)
+        if new == self._region_sel:
+            return
+        self._region_sel = new
+        self.update()
+
+    def _x_to_bp(self, x: float) -> int:
+        seq_len = max(1, len(self._sequence))
+        ppb = max(_FIT_MIN_PPB, float(self._ppb))
+        bp = int((float(x) + float(self._scroll_px) - float(_LEFT_MARGIN)) / ppb) + 1
+        return max(1, min(seq_len, bp))
+
+    def _bp_to_x(self, bp: float) -> float:
+        ppb = max(_FIT_MIN_PPB, float(self._ppb))
+        return float(_LEFT_MARGIN) + (float(bp) - 1.0) * ppb - float(self._scroll_px)
+
+    def _range_from_x(self, x0: float, x1: float) -> tuple[int, int]:
+        a = self._x_to_bp(x0)
+        b = self._x_to_bp(x1)
+        if b < a:
+            a, b = b, a
+        return a, b
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            zoom_in = not bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            self.zoomAtRequested.emit(float(event.position().x()), zoom_in)
+            self._drag_origin_x = float(event.position().x())
+            self._drag_current_x = self._drag_origin_x
+            self._rubber_active = False
+            self._press_modifiers = event.modifiers()
+            self.grabMouse()
             event.accept()
             return
         if event.button() == Qt.MouseButton.RightButton:
@@ -1215,6 +1271,56 @@ class ViewportRulerWidget(QWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (
+            self._drag_origin_x is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            # Prefer live cursor (coalesce backlog); fall back to the event x.
+            mapped = float(self.mapFromGlobal(QCursor.pos()).x())
+            self._drag_current_x = (
+                mapped if self.rect().adjusted(-80, -80, 80, 80).contains(
+                    int(mapped), int(self.height() // 2)
+                )
+                else float(event.position().x())
+            )
+            if abs(self._drag_current_x - self._drag_origin_x) >= _RULER_RUBBER_MIN_PX:
+                if not self._rubber_active:
+                    self._region_sel = None
+                self._rubber_active = True
+                start_i, end_i = self._range_from_x(
+                    self._drag_origin_x, self._drag_current_x
+                )
+                self.regionPreview.emit(start_i, end_i)
+                self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_origin_x is not None:
+            if QWidget.mouseGrabber() is self:
+                self.releaseMouse()
+            x0 = self._drag_origin_x
+            x1 = float(event.position().x())
+            active = self._rubber_active
+            mods = self._press_modifiers
+            self._drag_origin_x = None
+            self._drag_current_x = None
+            self._rubber_active = False
+            if active and abs(x1 - x0) >= _RULER_RUBBER_MIN_PX:
+                start_i, end_i = self._range_from_x(x0, x1)
+                self._region_sel = (start_i, end_i)
+                self.regionSelected.emit(start_i, end_i)
+            else:
+                # Click (no drag) → zoom at this position (Shift = fit).
+                zoom_in = not bool(mods & Qt.KeyboardModifier.ShiftModifier)
+                self.zoomAtRequested.emit(x1, zoom_in)
+            self.update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         """Short ticks centered on nucleotides; numbers centered above the ticks."""
@@ -1229,6 +1335,23 @@ class ViewportRulerWidget(QWidget):
         ppb = max(_FIT_MIN_PPB, float(self._ppb))
         scroll = float(self._scroll_px)
         vw = max(1, int(self._viewport_w))
+        # Selection / live rubber band under the ticks.
+        band: tuple[int, int] | None = self._region_sel
+        if (
+            self._rubber_active
+            and self._drag_origin_x is not None
+            and self._drag_current_x is not None
+        ):
+            band = self._range_from_x(self._drag_origin_x, self._drag_current_x)
+        if band is not None:
+            x0 = self._bp_to_x(band[0])
+            x1 = self._bp_to_x(band[1] + 1)
+            if x1 < x0:
+                x0, x1 = x1, x0
+            painter.fillRect(
+                QRectF(x0, 0.0, max(1.0, x1 - x0), float(self.height())),
+                _SELECTION_FILL,
+            )
         ruler_font = _monospace_font(
             point_size=max(4, min(24, int(self._font_point_size)))
         )
@@ -4368,6 +4491,8 @@ class SequenceMapWidget(QWidget):
 
         self._ruler = ViewportRulerWidget(self)
         self._ruler.zoomAtRequested.connect(self._on_ruler_zoom_at)
+        self._ruler.regionPreview.connect(self._on_ruler_region_preview)
+        self._ruler.regionSelected.connect(self._on_ruler_region_selected)
         self._annot_track = AnnotationTrackWidget(self)
         self._annot_track.selectionChanged.connect(self._on_annot_track_selection_changed)
         self._annot_track.clearRangeSelectionRequested.connect(
@@ -5170,6 +5295,19 @@ class SequenceMapWidget(QWidget):
         self._hbar.setValue(max(0, min(self._hbar.maximum(), target)))
         self._sync_overview_now()
 
+    def _on_ruler_region_preview(self, start: int, end: int) -> None:
+        """Live map + Position update while dragging on the scale."""
+        if self._data is None or self.is_too_long_for_display():
+            return
+        self._canvas.set_selection_range(int(start), int(end))
+
+    def _on_ruler_region_selected(self, start: int, end: int) -> None:
+        """Commit a range selection from a scale drag."""
+        if self._data is None or self.is_too_long_for_display():
+            return
+        self._canvas.set_selection_range(int(start), int(end))
+        self._canvas.setFocus(Qt.FocusReason.MouseFocusReason)
+
     def _slider_ppb_bounds(self) -> tuple[float, float]:
         """Slider endpoints: left = fit entire sequence, right = max zoom-in."""
         if self._data is None or not self._data.sequence:
@@ -5557,6 +5695,7 @@ class SequenceMapWidget(QWidget):
     def _on_selection_changed(self, start: int, end: int) -> None:
         self._sync_position_spins(start, end)
         self._annot_track.set_range_selection(start, end)
+        self._ruler.set_region_selection(start, end)
         if start == end:
             self.statusMessage.emit(f"Position: {start}")
             return
@@ -5566,6 +5705,7 @@ class SequenceMapWidget(QWidget):
 
     def _on_selection_cleared(self) -> None:
         self._annot_track.set_range_selection(None)
+        self._ruler.set_region_selection(None)
         self._sync_position_spins(1, 1)
         self.statusMessage.emit("Selection cleared")
 

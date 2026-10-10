@@ -5526,12 +5526,45 @@ class MultiSequenceOverviewPanel(QWidget):
             max(0, min(100, self._zoom_slider.value() + int(delta)))
         )
 
+    def _selection_zoom_anchor(self) -> tuple[float, float] | None:
+        """``(mid_bp_0based, viewport_x)`` for the selected region center.
+
+        Matches single-sequence: zoom in/out keeps the selection under the
+        same place in the window.
+        """
+        region = self._bars.region_selection()
+        if region is None:
+            return None
+        start, end = int(region[0]), int(region[1])
+        if start == end:
+            return None
+        mid_bp = float(start - 1 + end) / 2.0
+        mid_content_x = self._bars.bp_to_x(mid_bp)
+        hbar = self._bars_scroll.horizontalScrollBar()
+        view_x = float(mid_content_x) - float(hbar.value())
+        return mid_bp, view_x
+
+    def _scroll_to_keep_bp_at_viewport_x(self, bp: float, viewport_x: float) -> None:
+        """Scroll so sequence coordinate ``bp`` (0-based) sits at ``viewport_x``."""
+        new_x = self._bars.bp_to_x(float(bp))
+        hbar = self._bars_scroll.horizontalScrollBar()
+        target = int(round(new_x - float(viewport_x)))
+        hbar.setValue(max(0, min(hbar.maximum(), target)))
+
     def _on_zoom_slider_changed(self, value: int) -> None:
         if self._updating_zoom_slider:
             return
+        fit_ppb, _ = self._slider_ppb_bounds()
         ppb = self._slider_value_to_ppb(value)
+        reset_scroll = value <= 0 or ppb <= fit_ppb * 1.001
+        anchor = None if reset_scroll else self._selection_zoom_anchor()
         self._sync_viewport_fill()
         self._bars.set_pixels_per_base(ppb)
+        if reset_scroll:
+            self._bars_scroll.horizontalScrollBar().setValue(0)
+        elif anchor is not None:
+            mid_bp, view_x = anchor
+            self._scroll_to_keep_bp_at_viewport_x(mid_bp, view_x)
         self._sync_names_column()
         self._update_scale()
 
@@ -5599,9 +5632,16 @@ class MultiSequenceOverviewPanel(QWidget):
         )
 
     def _zoom_step(self, factor: float) -> None:
+        """Zoom from −/+ controls; prefer selected-region center when present."""
         vp = self._bars_scroll.viewport()
         hbar = self._bars_scroll.horizontalScrollBar()
-        anchor_x = hbar.value() + vp.width() / 2
+        anchor = self._selection_zoom_anchor()
+        if anchor is not None:
+            mid_bp, _view_x = anchor
+            # Content x of selection mid at the current zoom (before zoom_by).
+            anchor_x = self._bars.bp_to_x(float(mid_bp))
+        else:
+            anchor_x = hbar.value() + vp.width() / 2
         self._bars.zoom_by(factor, anchor_x=anchor_x)
 
     def _on_scale_zoom_at(self, content_x: float, zoom_in: bool) -> None:
@@ -5684,10 +5724,15 @@ class MultiSequenceOverviewPanel(QWidget):
                 delta = int(pixel.y()) or int(pixel.x())
             if delta != 0:
                 factor = _ZOOM_STEP if delta > 0 else 1.0 / _ZOOM_STEP
-                # Map viewport x → content x (include horizontal scroll).
-                anchor_x = float(event.position().x()) + float(
-                    self._bars_scroll.horizontalScrollBar().value()
-                )
+                # Prefer selected-region center (single-seq parity); else cursor.
+                sel_anchor = self._selection_zoom_anchor()
+                if sel_anchor is not None:
+                    mid_bp, _view_x = sel_anchor
+                    anchor_x = self._bars.bp_to_x(float(mid_bp))
+                else:
+                    anchor_x = float(event.position().x()) + float(
+                        self._bars_scroll.horizontalScrollBar().value()
+                    )
                 self._bars.zoom_by(factor, anchor_x=anchor_x)
             event.accept()
             return True
