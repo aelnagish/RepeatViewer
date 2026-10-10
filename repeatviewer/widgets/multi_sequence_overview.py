@@ -34,7 +34,6 @@ from PySide6.QtGui import (
     QPalette,
     QPdfWriter,
     QPen,
-    QPixmap,
     QPolygonF,
     QRegion,
     QWheelEvent,
@@ -191,9 +190,6 @@ _ZOOM_STEP = 1.08
 _SCALE_HEIGHT = 20
 # Ignore tiny moves (click / accidental jitter); keep low for responsive feel.
 _RUBBER_MIN_PX = 4
-# Recapture the drag paint cache when the rubber nears its edge.
-_DRAG_CACHE_EDGE_PX = 24
-_DRAG_CACHE_PAD_PX = 80
 
 
 def _msa_canvas_color(widget: QWidget) -> QColor:
@@ -654,57 +650,41 @@ class _NamesColumn(QWidget):
         painter.end()
 
 
-class _SelectionChromeOverlay(QWidget):
-    """Full-canvas overlay for selection chrome.
+class _SelectionChrome:
+    """Selection outline/wash painted on the MSA canvas (not a child overlay).
 
-    Stays sized to the MSA parent. Live drag uses outline-only + border dirty
-    rects so Qt does not re-composite a large translucent fill over residues
-    (that was the main source of selection lag).
+    A translucent child overlay + drag-cache blit caused white holes; clearing
+    that overlay caused a black canvas. Chrome is drawn in the host paintEvent
+    after residues so dirty strips always show real MSA pixels underneath.
     """
 
-    def __init__(self, parent: QWidget) -> None:
-        super().__init__(parent)
+    def __init__(self, host: QWidget) -> None:
+        self._host = host
         self._mode = ""  # "region" | "columns" | "rows"
         self._box = QRect()
         self._row_boxes: list[QRect] = []
         self._live = False  # True while dragging — outline only, no wash
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAutoFillBackground(False)
-        self.sync_to_parent()
-        self.show()
-        self.raise_()
-
-    def sync_to_parent(self) -> None:
-        parent = self.parentWidget()
-        if parent is None:
-            return
-        target = parent.rect()
-        if self.geometry() != target:
-            self.setGeometry(target)
 
     def _band_color(self) -> QColor:
-        return _REGION_BAND_DARK if _is_dark(self) else _REGION_BAND_LIGHT
+        return _REGION_BAND_DARK if _is_dark(self._host) else _REGION_BAND_LIGHT
 
     def _edge_color(self) -> QColor:
-        return QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
+        return QColor("#4ea1ff") if _is_dark(self._host) else QColor("#0b5cab")
 
     def _visible_clip(self) -> QRect:
-        """Prefer the parent's visible viewport — never dirty off-screen MSA."""
-        parent = self.parentWidget()
-        if parent is not None:
-            vis = parent.visibleRegion().boundingRect()
-            if not vis.isEmpty():
-                return vis.intersected(self.rect())
-        return self.rect()
+        host = self._host
+        vis = host.visibleRegion().boundingRect()
+        if not vis.isEmpty():
+            return vis.intersected(host.rect())
+        return host.rect()
+
+    def _request_update(self, dirty: QRegion) -> None:
+        if dirty.isEmpty():
+            return
+        self._host.update(dirty)
 
     def _border_dirty_region(self, *rects: QRect) -> QRegion:
-        """Dirty only outline strips — never the selection bbox.
-
-        Uniting edge strips into one QRect fills the whole selection (wide
-        column bands / full-width row boxes), which re-composites the MSA and
-        causes column/row drag lag. Keep strips as a QRegion instead.
-        """
+        """Dirty only outline strips — never the selection bbox interior."""
         region = QRegion()
         pad = 2
         for rect in rects:
@@ -745,60 +725,6 @@ class _SelectionChromeOverlay(QWidget):
         area = dirty.adjusted(-2, -2, 2, 2).intersected(self._visible_clip())
         return QRegion() if area.isNull() else QRegion(area)
 
-    def clear(self) -> None:
-        """Erase selection paint without hiding (hide would expose the MSA)."""
-        if not self._mode:
-            return
-        dirty = (
-            self._border_dirty_region(self._box, *self._row_boxes)
-            if self._live
-            else self._area_dirty_region(self._box, *self._row_boxes)
-        )
-        self._mode = ""
-        self._box = QRect()
-        self._row_boxes = []
-        self._live = False
-        if not dirty.isEmpty():
-            self.update(dirty)
-
-    def set_region_box(self, box: QRect | None, *, live: bool = False) -> None:
-        if box is None or box.isNull() or box.width() <= 0 or box.height() <= 0:
-            self.clear()
-            return
-        new = QRect(box).normalized()
-        if self._mode == "region" and self._box == new and self._live == live:
-            return
-        if live:
-            dirty = self._border_dirty_region(self._box, new, *self._row_boxes)
-        else:
-            dirty = self._area_dirty_region(self._box, new, *self._row_boxes)
-        self._mode = "region"
-        self._box = new
-        self._row_boxes = []
-        self._live = bool(live)
-        if not dirty.isEmpty():
-            self.update(dirty)
-
-    def set_column_band(self, band: QRect | None, *, live: bool = False) -> None:
-        if band is None or band.isNull() or band.width() <= 0:
-            self.clear()
-            return
-        new = QRect(band).normalized()
-        if self._mode == "columns" and self._box == new and self._live == live:
-            return
-        if live:
-            # Column live chrome is only the two vertical guides — skip top/bottom
-            # strips that would dirty the full band width on every mouse move.
-            dirty = self._column_edge_dirty_region(self._box, new)
-        else:
-            dirty = self._area_dirty_region(self._box, new, *self._row_boxes)
-        self._mode = "columns"
-        self._box = new
-        self._row_boxes = []
-        self._live = bool(live)
-        if not dirty.isEmpty():
-            self.update(dirty)
-
     def _column_edge_dirty_region(self, *rects: QRect) -> QRegion:
         """Dirty only left/right guides for live column selection."""
         region = QRegion()
@@ -820,6 +746,54 @@ class _SelectionChromeOverlay(QWidget):
             return QRegion()
         return region.intersected(QRegion(clip))
 
+    def clear(self) -> None:
+        if not self._mode:
+            return
+        dirty = (
+            self._border_dirty_region(self._box, *self._row_boxes)
+            if self._live
+            else self._area_dirty_region(self._box, *self._row_boxes)
+        )
+        self._mode = ""
+        self._box = QRect()
+        self._row_boxes = []
+        self._live = False
+        self._request_update(dirty)
+
+    def set_region_box(self, box: QRect | None, *, live: bool = False) -> None:
+        if box is None or box.isNull() or box.width() <= 0 or box.height() <= 0:
+            self.clear()
+            return
+        new = QRect(box).normalized()
+        if self._mode == "region" and self._box == new and self._live == live:
+            return
+        if live:
+            dirty = self._border_dirty_region(self._box, new, *self._row_boxes)
+        else:
+            dirty = self._area_dirty_region(self._box, new, *self._row_boxes)
+        self._mode = "region"
+        self._box = new
+        self._row_boxes = []
+        self._live = bool(live)
+        self._request_update(dirty)
+
+    def set_column_band(self, band: QRect | None, *, live: bool = False) -> None:
+        if band is None or band.isNull() or band.width() <= 0:
+            self.clear()
+            return
+        new = QRect(band).normalized()
+        if self._mode == "columns" and self._box == new and self._live == live:
+            return
+        if live:
+            dirty = self._column_edge_dirty_region(self._box, new)
+        else:
+            dirty = self._area_dirty_region(self._box, new, *self._row_boxes)
+        self._mode = "columns"
+        self._box = new
+        self._row_boxes = []
+        self._live = bool(live)
+        self._request_update(dirty)
+
     def set_row_boxes(self, boxes: list[QRect], *, live: bool = False) -> None:
         valid = [
             QRect(b).normalized()
@@ -839,24 +813,19 @@ class _SelectionChromeOverlay(QWidget):
         self._box = QRect()
         self._row_boxes = valid
         self._live = bool(live)
-        if not dirty.isEmpty():
-            self.update(dirty)
+        self._request_update(dirty)
 
-    def paintEvent(self, event) -> None:  # noqa: N802
+    def paint(self, painter: QPainter, clip: QRect) -> None:
         if not self._mode:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.setClipRect(event.rect())
         edge = self._edge_color()
         pen = QPen(edge, 1, Qt.PenStyle.DashLine)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(pen)
         if self._mode == "rows":
             for box in self._row_boxes:
-                if not box.intersects(event.rect()):
+                if not box.intersects(clip):
                     continue
-                # Committed row select: same wash as column bands.
                 if not self._live:
                     painter.fillRect(box, self._band_color())
                     painter.setPen(pen)
@@ -868,7 +837,7 @@ class _SelectionChromeOverlay(QWidget):
                 )
         elif self._mode == "columns":
             box = self._box
-            if box.intersects(event.rect()):
+            if box.intersects(clip):
                 if not self._live:
                     painter.fillRect(box, self._band_color())
                     painter.setPen(pen)
@@ -876,7 +845,7 @@ class _SelectionChromeOverlay(QWidget):
                 painter.drawLine(box.right(), box.top(), box.right(), box.bottom())
         else:
             box = self._box
-            if box.intersects(event.rect()):
+            if box.intersects(clip):
                 if not self._live:
                     painter.fillRect(box, self._band_color())
                     painter.setPen(pen)
@@ -886,7 +855,6 @@ class _SelectionChromeOverlay(QWidget):
                     max(1, box.width() - 1),
                     max(1, box.height() - 1),
                 )
-        painter.end()
 
 
 class _BarsCanvas(QWidget):
@@ -967,15 +935,10 @@ class _BarsCanvas(QWidget):
         self._resize_orig_end = 0
         self._rubber = QRect()
         self._rubber_active = False  # True only after drag exceeds threshold
-        self._rubber_prev = QRect()  # last overlay rect (for cheap partial updates)
-        self._drag_paint_cache: QPixmap | None = None
-        self._drag_cache_origin = QPoint(0, 0)
-        # Live selection previews (scale columns / name rows) drawn on the cache.
+        # Live selection previews (scale columns / name rows).
         self._preview_columns: tuple[int, int] | None = None
         self._preview_rows: set[int] | None = None
         self._live_row_snap: set[int] | None = None
-        self._preview_dirty = QRect()
-        self._cache_include_selection = True
         self._pending_scroll_bp: float | None = None
         self._pending_anchor: tuple[float, float] | None = None
         # Shift+Left / Shift+Right cycle: 0 = outer side, 1 = include feature edge.
@@ -989,8 +952,8 @@ class _BarsCanvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Minimum)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
-        # Live selection chrome lives here so drag never repaints the MSA.
-        self._chrome = _SelectionChromeOverlay(self)
+        # Selection chrome is painted in paintEvent after residues (no overlay).
+        self._chrome = _SelectionChrome(self)
 
     def is_msa_mode(self) -> bool:
         return bool(self._msa_mode)
@@ -1463,73 +1426,9 @@ class _BarsCanvas(QWidget):
         )
 
     def _clear_drag_paint_cache(self) -> None:
-        self._drag_paint_cache = None
-        self._drag_cache_origin = QPoint(0, 0)
-        self._rubber_prev = QRect()
+        """Drop live selection preview state (name kept for existing call sites)."""
         self._preview_columns = None
         self._preview_rows = None
-        self._preview_dirty = QRect()
-        self._cache_include_selection = True
-
-    def _capture_drag_paint_cache(self, *, include_selection: bool = True) -> None:
-        """Snapshot the visible MSA/bars under the rubber (viewport only)."""
-        vis = self.visibleRegion().boundingRect()
-        if vis.isEmpty():
-            vis = QRect(0, 0, max(1, self.width()), max(1, self.height()))
-        # Pad so the rubber can grow a bit without immediate recapture.
-        pad = _DRAG_CACHE_PAD_PX
-        vis = vis.adjusted(-pad, -pad, pad, pad).intersected(
-            QRect(0, 0, max(1, self.width()), max(1, self.height()))
-        )
-        if vis.isEmpty():
-            vis = QRect(0, 0, max(1, self.width()), max(1, self.height()))
-        self._cache_include_selection = bool(include_selection)
-        # Logical-size pixmap: cheap to capture/blit so rubber drag stays smooth.
-        pm = QPixmap(vis.size())
-        pm.fill(
-            _msa_canvas_color(self)
-            if self._msa_mode
-            else self.palette().color(QPalette.ColorRole.Base)
-        )
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.translate(-vis.left(), -vis.top())
-        if self._msa_mode:
-            self._paint_msa_rows(painter, vis)
-        else:
-            self._paint_bar_rows(painter, vis)
-        painter.end()
-        self._cache_include_selection = True
-        self._drag_paint_cache = pm
-        self._drag_cache_origin = vis.topLeft()
-
-    def _ensure_live_selection_cache(self) -> None:
-        """Bare MSA snapshot for column/row/region live chrome (no overlays)."""
-        if self._drag_paint_cache is not None:
-            return
-        self._capture_drag_paint_cache(include_selection=False)
-
-    def _live_chrome_active(self) -> bool:
-        """True while a translucent selection overlay is moving over the MSA."""
-        return bool(
-            self._chrome._live
-            or self._rubber_active
-            or self._preview_columns is not None
-            or self._preview_rows is not None
-        )
-
-    def _blit_drag_paint_cache(self, painter: QPainter, clip: QRect) -> bool:
-        """Blit the frozen MSA snapshot for ``clip`` (avoids residue re-rasterize)."""
-        cache = self._drag_paint_cache
-        if cache is None or cache.isNull():
-            return False
-        origin = self._drag_cache_origin
-        bounds = QRect(origin.x(), origin.y(), cache.width(), cache.height())
-        if not bounds.contains(clip):
-            return False
-        src = clip.translated(-origin.x(), -origin.y())
-        painter.drawPixmap(clip.topLeft(), cache, src)
-        return True
 
     def _column_band_rect(self, start: int, end: int) -> QRect:
         x0 = int(self.bp_to_x(start - 1))
@@ -1612,17 +1511,8 @@ class _BarsCanvas(QWidget):
     def _sync_row_selection_chrome(self) -> None:
         self._sync_selection_chrome()
 
-    def _update_preview_dirty(self, dirty: QRect) -> None:
-        area = dirty.adjusted(-3, -3, 3, 3).united(self._preview_dirty)
-        self._preview_dirty = QRect(dirty)
-        clipped = area.intersected(self.rect())
-        if clipped.isNull():
-            self.update()
-        else:
-            self.update(clipped)
-
     def _dismiss_committed_selection_visuals(self) -> None:
-        """Drop prior selection at drag start — overlay clear only, no MSA paint."""
+        """Drop prior selection at drag start — chrome clear only."""
         had_rows = bool(self._selected_rows)
         had_region = self._region_sel is not None or self._regional_rows is not None
         self._region_sel = None
@@ -1659,7 +1549,6 @@ class _BarsCanvas(QWidget):
         starting = self._preview_columns is None and not self._chrome._live
         if starting:
             self._dismiss_committed_selection_visuals()
-            self._ensure_live_selection_cache()
         self._preview_rows = None
         if self._letter_level_selection():
             start_i, end_i = self._columns_from_rubber(
@@ -1704,7 +1593,6 @@ class _BarsCanvas(QWidget):
             return
         if self._preview_rows is None:
             self._dismiss_committed_selection_visuals()
-            self._ensure_live_selection_cache()
         self._preview_rows = set(row_set)
         self._preview_columns = None
         boxes = self._row_selection_boxes(row_set)
@@ -1732,7 +1620,6 @@ class _BarsCanvas(QWidget):
             self._chrome.clear()
             self._preview_columns = None
             self._preview_rows = row_set
-            self._ensure_live_selection_cache()
             if had_rows or had_region:
                 self.rowsChanged.emit()
         else:
@@ -1754,7 +1641,7 @@ class _BarsCanvas(QWidget):
                 self._chrome.set_row_boxes(boxes, live=True)
             return
 
-        # Fit / overview: pixel-follow outline (snappy with MSA paint cache).
+        # Fit / overview: pixel-follow outline (no cell snap).
         self._live_row_snap = None
         a = int(min(y0, y1))
         b = int(max(y0, y1))
@@ -1782,48 +1669,6 @@ class _BarsCanvas(QWidget):
         self._chrome.clear()
         self._clear_drag_paint_cache()
 
-    def _region_band_color(self) -> QColor:
-        return _REGION_BAND_DARK if _is_dark(self) else _REGION_BAND_LIGHT
-
-    def _paint_live_selection_overlays(self, painter: QPainter, clip: QRect) -> None:
-        """Tint + dashed guides for the live selected region only."""
-        band = self._region_band_color()
-        edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
-        cols = self._preview_columns
-        if cols is not None:
-            start, end = cols
-            x0 = self.bp_to_x(start - 1)
-            x1 = self.bp_to_x(end)
-            width = max(1.0, x1 - x0)
-            painter.fillRect(
-                QRectF(x0, clip.top(), width, float(clip.height())),
-                band,
-            )
-            painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
-            painter.drawLine(int(x0), clip.top(), int(x0), clip.bottom())
-            painter.drawLine(int(x1), clip.top(), int(x1), clip.bottom())
-            painter.setPen(Qt.PenStyle.NoPen)
-        rows = self._preview_rows
-        if rows:
-            # Name-row drag: outline only (full-width tint would wash the MSA).
-            sorted_rows = sorted(r for r in rows if 0 <= r < len(self._row_tops))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
-            width = max(1, self.width() - 1)
-            i = 0
-            while i < len(sorted_rows):
-                start = sorted_rows[i]
-                end = start
-                while i + 1 < len(sorted_rows) and sorted_rows[i + 1] == end + 1:
-                    i += 1
-                    end = sorted_rows[i]
-                y0 = int(self._row_tops[start])
-                y1 = int(self._sequence_band_bottom(end))
-                if y1 >= clip.top() and y0 <= clip.bottom():
-                    painter.drawRect(0, y0, width, max(1, y1 - y0 - 1))
-                i += 1
-            painter.setPen(Qt.PenStyle.NoPen)
-
     def _sequence_band_height(self, row: int) -> int:
         """Height of the residue/bar band (excludes annotation tracks)."""
         if not (0 <= row < len(self._row_heights)):
@@ -1847,20 +1692,6 @@ class _BarsCanvas(QWidget):
         if not (0 <= row < len(self._row_tops)):
             return 0
         return int(self._row_tops[row] + self._sequence_band_height(row))
-
-    def _rubber_needs_cache_recapture(self, rubber: QRect) -> bool:
-        cache = self._drag_paint_cache
-        if cache is None or cache.isNull():
-            return True
-        origin = self._drag_cache_origin
-        bounds = QRect(origin.x(), origin.y(), cache.width(), cache.height())
-        inset = bounds.adjusted(
-            _DRAG_CACHE_EDGE_PX,
-            _DRAG_CACHE_EDGE_PX,
-            -_DRAG_CACHE_EDGE_PX,
-            -_DRAG_CACHE_EDGE_PX,
-        )
-        return not inset.contains(rubber.normalized())
 
     def _pane_to_matrix(self, x: float, y: float) -> tuple[int, int]:
         """Map pane pixels → ``(column, row)`` like AliView (cell-snapped).
@@ -1906,8 +1737,6 @@ class _BarsCanvas(QWidget):
         rect = QRect(rubber).normalized()
         if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
             return
-        if not self._rubber_active:
-            self._ensure_live_selection_cache()
         # Matrix selection for commit (and for letter-level chrome).
         c0, r0 = self._pane_to_matrix(rect.left(), rect.top())
         c1, r1 = self._pane_to_matrix(rect.right(), rect.bottom())
@@ -1956,22 +1785,14 @@ class _BarsCanvas(QWidget):
         if 0 <= vx < vw and 0 <= vy < vh:
             return
         margin = 28
-        scrolled = False
         if vx < 0:
             hbar.setValue(max(hbar.minimum(), hbar.value() + vx - margin))
-            scrolled = True
         elif vx >= vw:
             hbar.setValue(min(hbar.maximum(), hbar.value() + (vx - vw) + margin))
-            scrolled = True
         if vy < 0:
             vbar.setValue(max(vbar.minimum(), vbar.value() + vy - margin))
-            scrolled = True
         elif vy >= vh:
             vbar.setValue(min(vbar.maximum(), vbar.value() + (vy - vh) + margin))
-            scrolled = True
-        # Viewport moved — refresh the frozen MSA snapshot used during live chrome.
-        if scrolled and self._live_chrome_active():
-            self._capture_drag_paint_cache(include_selection=False)
 
     def _rubber_paint_box(self, rubber: QRect) -> QRect:
         """Pixel box for feature/annotation rubber (not cell-snapped)."""
@@ -2900,19 +2721,9 @@ class _BarsCanvas(QWidget):
             return
         super().wheelEvent(event)
 
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._chrome.sync_to_parent()
-
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         clip = event.rect()
-        # Live selection chrome is a translucent child — Qt asks this parent to
-        # repaint under dirty strips. Blit a one-shot MSA snapshot instead of
-        # re-rasterizing residues (main fit-view column/row drag lag).
-        if self._live_chrome_active() and self._blit_drag_paint_cache(painter, clip):
-            painter.end()
-            return
         base = (
             _msa_canvas_color(self)
             if self._msa_mode
@@ -2924,48 +2735,11 @@ class _BarsCanvas(QWidget):
             self._paint_msa_rows(painter, clip)
         else:
             self._paint_bar_rows(painter, clip)
+        # Chrome on top of real residues — never a translucent overlay / cache blit.
+        self._chrome.paint(painter, clip)
         if not self._rubber_active:
             self._paint_feature_hover_tip(painter)
         painter.end()
-
-    def _paint_region_band(self, painter: QPainter, clip: QRect) -> None:
-        """Committed selection: tint + dashed box (or column guides) on the region only."""
-        sel = self._region_sel
-        if sel is None:
-            return
-        start, end = sel
-        x0 = self.bp_to_x(start - 1)
-        x1 = self.bp_to_x(end)
-        if x1 < clip.left() or x0 > clip.right():
-            return
-        band = self._region_band_color()
-        edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
-        width = max(1.0, x1 - x0)
-        regional = self._regional_rows
-        if regional is not None:
-            sorted_rows = sorted(
-                r for r in regional if 0 <= r < len(self._row_tops)
-            )
-            if not sorted_rows:
-                return
-            y0 = float(self._row_tops[sorted_rows[0]])
-            y1 = float(self._sequence_band_bottom(sorted_rows[-1]))
-            if y1 >= clip.top() and y0 <= clip.bottom():
-                box = QRectF(x0, y0, width, max(1.0, y1 - y0))
-                painter.fillRect(box, band)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
-                painter.drawRect(box)
-            painter.setPen(Qt.PenStyle.NoPen)
-            return
-        painter.fillRect(
-            QRectF(x0, clip.top(), width, float(clip.height())),
-            band,
-        )
-        painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
-        painter.drawLine(int(x0), clip.top(), int(x0), clip.bottom())
-        painter.drawLine(int(x1), clip.top(), int(x1), clip.bottom())
-        painter.setPen(Qt.PenStyle.NoPen)
 
     def _paint_feature_tracks(
         self,
