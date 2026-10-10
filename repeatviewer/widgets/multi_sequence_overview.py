@@ -722,17 +722,20 @@ class _SelectionChrome:
             dirty = rect if dirty.isNull() else dirty.united(rect)
         if dirty.isNull():
             return QRegion()
-        area = dirty.adjusted(-2, -2, 2, 2).intersected(self._visible_clip())
+        # Pad past the dashed pen so right/bottom edges never leave a hairline.
+        area = dirty.adjusted(-4, -4, 4, 4).intersected(self._visible_clip())
         return QRegion() if area.isNull() else QRegion(area)
 
     def _column_edge_dirty_region(self, *rects: QRect) -> QRegion:
-        """Dirty only left/right guides for live column selection."""
+        """Dirty left/right guides for live column selection (plus edge travel)."""
         region = QRegion()
-        pad = 2
+        pad = 4
+        valid: list[QRect] = []
         for rect in rects:
             if rect is None or rect.isNull() or rect.width() <= 0:
                 continue
             r = rect.normalized()
+            valid.append(r)
             top = r.top() - pad
             height = r.height() + 2 * pad
             region = region.united(
@@ -741,6 +744,17 @@ class _SelectionChrome:
             region = region.united(
                 QRegion(QRect(r.right() - pad, top, 2 * pad + 1, height))
             )
+        # Cover pixels between old/new guide x so opaque strip updates leave no trail.
+        if len(valid) >= 2:
+            o, n = valid[0], valid[-1]
+            top = min(o.top(), n.top()) - pad
+            bottom = max(o.bottom(), n.bottom()) + pad
+            height = max(1, bottom - top)
+            for a, b in ((o.left(), n.left()), (o.right(), n.right())):
+                x0, x1 = (a, b) if a <= b else (b, a)
+                region = region.united(
+                    QRegion(QRect(x0 - pad, top, x1 - x0 + 2 * pad + 1, height))
+                )
         clip = self._visible_clip()
         if clip.isNull() or region.isEmpty():
             return QRegion()
@@ -749,11 +763,8 @@ class _SelectionChrome:
     def clear(self) -> None:
         if not self._mode:
             return
-        dirty = (
-            self._border_dirty_region(self._box, *self._row_boxes)
-            if self._live
-            else self._area_dirty_region(self._box, *self._row_boxes)
-        )
+        # Always area-erase — border-only left white hairlines under opaque paint.
+        dirty = self._area_dirty_region(self._box, *self._row_boxes)
         self._mode = ""
         self._box = QRect()
         self._row_boxes = []
@@ -767,10 +778,10 @@ class _SelectionChrome:
         new = QRect(box).normalized()
         if self._mode == "region" and self._box == new and self._live == live:
             return
-        if live:
-            dirty = self._border_dirty_region(self._box, new, *self._row_boxes)
-        else:
-            dirty = self._area_dirty_region(self._box, new, *self._row_boxes)
+        # Live regional moves must dirty old∪new. Border-only strips are filled
+        # white then auto-clipped; at fit zoom MSA cells do not cover every
+        # pixel in those strips, which left a white line on the box's right edge.
+        dirty = self._area_dirty_region(self._box, new, *self._row_boxes)
         self._mode = "region"
         self._box = new
         self._row_boxes = []
@@ -805,10 +816,7 @@ class _SelectionChrome:
             return
         if self._mode == "rows" and self._row_boxes == valid and self._live == live:
             return
-        if live:
-            dirty = self._border_dirty_region(self._box, *self._row_boxes, *valid)
-        else:
-            dirty = self._area_dirty_region(self._box, *self._row_boxes, *valid)
+        dirty = self._area_dirty_region(self._box, *self._row_boxes, *valid)
         self._mode = "rows"
         self._box = QRect()
         self._row_boxes = valid
@@ -866,6 +874,8 @@ class _BarsCanvas(QWidget):
     zoomChanged = Signal(float)
     regionZoomRequested = Signal(float, float)  # kept for Fit/Select zoom helpers
     regionSelectionChanged = Signal(object)  # tuple[int,int] | None (1-based inclusive)
+    # Prior chrome dismissed at drag start — clear scale band without resetting Position.
+    selectionVisualsDismissed = Signal()
     # Live regional drag: (start, end, rows) while dragging; None when cleared.
     regionDragPreview = Signal(object)
     rowsChanged = Signal()  # layout / selection updated — refresh names column
@@ -907,7 +917,7 @@ class _BarsCanvas(QWidget):
         self._temp_matrix_sel: tuple[int, int, int, int] | None = None
         self._drag_preview_timer = QTimer(self)
         self._drag_preview_timer.setSingleShot(True)
-        self._drag_preview_timer.setInterval(50)  # Position spins only (~20 Hz)
+        self._drag_preview_timer.setInterval(50)  # Position + name highlight (~20 Hz)
         self._drag_preview_timer.timeout.connect(self._flush_region_drag_preview)
         self._row_tops: list[int] = []
         self._row_heights: list[int] = []
@@ -1522,9 +1532,10 @@ class _BarsCanvas(QWidget):
         self._temp_matrix_sel = None
         self._reset_edge_expand_phase()
         self._chrome.clear()
+        # Clear scale band immediately; do not emit regionSelectionChanged(None)
+        # (that would also reset Position spins mid-drag).
+        self.selectionVisualsDismissed.emit()
         # Keep name column in sync when starting a different selection kind.
-        # Do not emit regionSelectionChanged(None) here — that resets Position spins
-        # mid-drag; scale clears its own band, and commit emits the new region.
         if had_rows or had_region:
             self.rowsChanged.emit()
 
@@ -1732,6 +1743,25 @@ class _BarsCanvas(QWidget):
         """True when residues are drawn as letters — snap selection to cell edges."""
         return bool(self._msa_shows_letters() or self._bar_shows_letters())
 
+    def _schedule_region_drag_preview(self, c0: int, c1: int, r0: int, r1: int) -> None:
+        """Throttle Position spins + name-column highlight during regional drag."""
+        if r1 < r0:
+            r0, r1 = r1, r0
+        rows = list(range(int(r0), int(r1) + 1))
+        pending = (int(c0), int(c1), rows)
+        if self._drag_preview_pending == pending:
+            return
+        if (
+            self._drag_preview_pending is None
+            and self._drag_preview_columns == (pending[0], pending[1])
+            and self._drag_preview_rows == set(rows)
+        ):
+            return
+        self._drag_preview_pending = pending
+        if not self._drag_preview_timer.isActive():
+            self._flush_region_drag_preview()
+            self._drag_preview_timer.start()
+
     def _set_live_region_rubber(self, rubber: QRect) -> None:
         """Live rubber: cell-snapped at nucleotide zoom, else pixel-follow."""
         rect = QRect(rubber).normalized()
@@ -1745,7 +1775,8 @@ class _BarsCanvas(QWidget):
         if r1 < r0:
             r0, r1 = r1, r0
         self._temp_matrix_sel = (c0, c1, r0, r1)
-        self._drag_preview_rows = None
+        # Live Position + sequence names (scale stays clear for regional).
+        self._schedule_region_drag_preview(c0, c1, r0, r1)
         if self._letter_level_selection():
             box = self._matrix_selection_box(c0, c1, r0, r1)
             if box.isNull():
@@ -2492,7 +2523,7 @@ class _BarsCanvas(QWidget):
                 self._preview_columns = None
                 self._preview_rows = None
             if self._drag_kind == "region":
-                # Pixel-follow outline (no Position/name/scale work) — snappy.
+                # Pixel-follow outline; Position + names throttle via drag preview.
                 self._set_live_region_rubber(rubber)
             else:
                 if not self._rubber_active:
@@ -2524,9 +2555,14 @@ class _BarsCanvas(QWidget):
             return
         start_i, end_i, rows = pending
         self._drag_preview_pending = None
-        if self._drag_preview_columns == (start_i, end_i):
+        row_set = {int(r) for r in rows}
+        if (
+            self._drag_preview_columns == (start_i, end_i)
+            and self._drag_preview_rows == row_set
+        ):
             return
         self._drag_preview_columns = (start_i, end_i)
+        self._drag_preview_rows = row_set
         self.regionDragPreview.emit((start_i, end_i, rows))
 
     def _clear_region_drag_preview(self) -> None:
@@ -2724,6 +2760,9 @@ class _BarsCanvas(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         clip = event.rect()
+        # Include neighboring columns so sub-pixel MSA cells cover strip edges
+        # (avoids a 1px white line along the selection's right border).
+        paint_clip = clip.adjusted(-2, 0, 2, 0).intersected(self.rect())
         base = (
             _msa_canvas_color(self)
             if self._msa_mode
@@ -2732,7 +2771,7 @@ class _BarsCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, not self._msa_mode)
         painter.fillRect(clip, base)
         if self._msa_mode:
-            self._paint_msa_rows(painter, clip)
+            self._paint_msa_rows(painter, paint_clip if not paint_clip.isNull() else clip)
         else:
             self._paint_bar_rows(painter, clip)
         # Chrome on top of real residues — never a translucent overlay / cache blit.
@@ -2881,7 +2920,11 @@ class _BarsCanvas(QWidget):
                             break
                         run_end += 1
                 span = run_end - j
-                cell = QRectF(x, y, max(0.5, ppb * span), float(residue_h))
+                # Cover [x, next_x). When zoomed out, span at least 1 logical px so
+                # partial dirty strips (selection edges) cannot leave white hairlines.
+                x_next = self._bar_pad + run_end * ppb
+                width = max(x_next - x, 1.0 if not show_letters else max(0.5, ppb * span))
+                cell = QRectF(x, y, width, float(residue_h))
                 if ch in "-.":
                     # Gaps stay on the white canvas (no grey cell fill).
                     if show_letters:
@@ -3156,7 +3199,7 @@ class _ScaleRuler(QWidget):
                     # Drop the prior scale highlight as soon as the new drag starts.
                     self._region_sel = None
                 self._rubber_active = True
-                # Pixel-follow MSA chrome (snap columns + Position on release).
+                # Pixel-follow MSA chrome; Position spins update via the panel.
                 self.columnPixelPreview.emit(self._drag_origin_x, self._drag_current_x)
                 # Cheap local scale guides only (widget is short).
                 self.update()
@@ -3452,6 +3495,9 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.zoomChanged.connect(self._on_zoom_changed)
         self._bars.regionZoomRequested.connect(self._on_region_zoom)
         self._bars.regionSelectionChanged.connect(self._on_region_selection_changed)
+        self._bars.selectionVisualsDismissed.connect(
+            self._on_selection_visuals_dismissed
+        )
         self._bars.regionDragPreview.connect(self._on_region_drag_preview)
         self._scale.columnRegionSelected.connect(self._on_scale_column_region)
         self._scale.columnRegionPreview.connect(self._on_scale_column_preview)
@@ -3473,6 +3519,12 @@ class MultiSequenceOverviewPanel(QWidget):
         # Zoom / Position / Select / Fit live on AnnotationZoomBar (same row as
         # Text / Annotation). Keep hidden locals until bind, and for standalone use.
         self._header_zoom_bar = None
+        # Throttle Position spin updates while dragging the scale (~20 Hz).
+        self._scale_preview_pending: tuple[int, int] | None = None
+        self._scale_preview_timer = QTimer(self)
+        self._scale_preview_timer.setSingleShot(True)
+        self._scale_preview_timer.setInterval(50)
+        self._scale_preview_timer.timeout.connect(self._flush_scale_preview_positions)
         from repeatviewer.widgets.spin_boxes import NoWheelSlider
 
         self._zoom_slider = NoWheelSlider(Qt.Orientation.Horizontal, self)
@@ -4030,9 +4082,13 @@ class MultiSequenceOverviewPanel(QWidget):
     def _select_all_sequences(self) -> None:
         self._bars.select_all_rows()
 
+    def _on_selection_visuals_dismissed(self) -> None:
+        """Regional/column/row drag started — drop scale highlight only."""
+        self._scale.set_region_selection(None)
+
     def _on_region_selection_changed(self, region: object) -> None:
-        # Keep the bottom scale highlight in sync with the MSA column band.
-        if region is None:
+        # Scale band is for full-height column selects only — not MSA regional boxes.
+        if region is None or self._bars.is_regional_selection():
             self._scale.set_region_selection(None)
         else:
             try:
@@ -4054,7 +4110,7 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.set_position_range(maximum, start=start, end=end)
 
     def _on_region_drag_preview(self, payload: object) -> None:
-        """Live Position spins while dragging (scale/names update on commit)."""
+        """Live Position spins + name highlights while dragging a regional box."""
         if payload is None:
             return
         try:
@@ -4063,10 +4119,11 @@ class MultiSequenceOverviewPanel(QWidget):
         except (TypeError, ValueError):
             return
         bar = self._header_zoom_bar
-        if bar is None or not hasattr(bar, "set_position_range"):
-            return
-        maximum = max(1, int(self._bars.max_length()))
-        bar.set_position_range(maximum, start=start_i, end=end_i)
+        if bar is not None and hasattr(bar, "set_position_range"):
+            maximum = max(1, int(self._bars.max_length()))
+            bar.set_position_range(maximum, start=start_i, end=end_i)
+        # Sequences under the rubber (scale band stays off for regional).
+        self._sync_names_column()
 
     def select_all_sequences(self) -> None:
         """Public hook for Edit → Select All."""
@@ -6168,7 +6225,7 @@ class MultiSequenceOverviewPanel(QWidget):
             bar.set_position_range(maximum, start=int(start), end=int(end))
 
     def _flush_scale_preview_positions(self) -> None:
-        pending = getattr(self, "_scale_preview_pending", None)
+        pending = self._scale_preview_pending
         if pending is None:
             return
         start, end = pending
@@ -6178,7 +6235,7 @@ class MultiSequenceOverviewPanel(QWidget):
             bar.set_position_range(maximum, start=start, end=end)
 
     def _on_scale_column_pixel_preview(self, x0: float, x1: float) -> None:
-        """Pixel-follow column guides while dragging the scale (no Position churn)."""
+        """Pixel-follow column guides + live Position spins while dragging the scale."""
         scroll = int(self._bars_scroll.horizontalScrollBar().value())
         # Scale x is viewport-local; bars chrome uses content coordinates.
         cx0 = float(x0) + scroll
@@ -6188,6 +6245,14 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars._ensure_drag_point_visible(  # type: ignore[attr-defined]
             QPoint(int(cx1), 0)
         )
+        start_i, end_i = self._scale._columns_from_x_range(float(x0), float(x1))
+        if self._scale_preview_pending == (start_i, end_i):
+            return
+        self._scale_preview_pending = (start_i, end_i)
+        # Immediate first update, then coalesce further moves (~20 Hz).
+        if not self._scale_preview_timer.isActive():
+            self._flush_scale_preview_positions()
+            self._scale_preview_timer.start()
 
     def _on_scale_column_preview(self, region: object) -> None:
         """Snapped column preview (legacy); prefer pixel preview while dragging."""
