@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QRectF, QSettings, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -98,9 +98,9 @@ _SETTINGS_COLLAPSED_KEY = "panel_collapsed"
 _DEFAULT_TAB_INDEX = 1
 _COLLAPSED_RAIL_WIDTH = _RAIL_TAB_WIDTH
 _ANNOTATION_SECTION_IDS = (
-    "manual",
     "feature_detection",
     "similarity",
+    "manual",
     "transfer",
 )
 
@@ -628,13 +628,36 @@ class SequenceAnnotationRail(QWidget):
             page.setFixedWidth(width)
             page.setMinimumWidth(0)
             page.setMaximumWidth(width)
-            if isinstance(page, QScrollArea):
-                body = page.widget()
+            # Top-level scroll pages, or nested scroll (Annotation footer shell).
+            scrolls = (
+                [page]
+                if isinstance(page, QScrollArea)
+                else page.findChildren(QScrollArea)
+            )
+            for scroll in scrolls:
+                scroll.setFixedWidth(width)
+                scroll.setMinimumWidth(0)
+                scroll.setMaximumWidth(width)
+                body = scroll.widget()
                 if body is not None:
                     body.setMinimumWidth(0)
                     body.setMaximumWidth(width)
         if not self._panel_collapsed:
             self.setFixedWidth(self._expanded_rail_width())
+
+    def _fill_rail_surface(self, widget: QWidget) -> None:
+        """Paint with palette Window (same as a plain page before the footer split)."""
+        widget.setAutoFillBackground(True)
+        color = self.palette().color(QPalette.ColorRole.Window)
+        pal = widget.palette()
+        pal.setColor(QPalette.ColorRole.Window, color)
+        pal.setColor(QPalette.ColorRole.Base, color)
+        widget.setPalette(pal)
+
+    @staticmethod
+    def _clear_rail_surface(widget: QWidget) -> None:
+        """Let a parent-painted shell show through (no white header/footer strips)."""
+        widget.setAutoFillBackground(False)
 
     def _wrap_scroll(self, body: QWidget) -> QScrollArea:
         # Never let page contents force the rail wider than the module column.
@@ -657,8 +680,10 @@ class SequenceAnnotationRail(QWidget):
             QSizePolicy.Policy.Expanding,
         )
         scroll.setWidget(body)
-        # Keep page content as wide as the viewport (minus scrollbar when shown).
-        scroll.viewport().setAutoFillBackground(False)
+        # Same surface as other rail pages (Display / Find / Others).
+        self._fill_rail_surface(scroll)
+        self._fill_rail_surface(scroll.viewport())
+        self._fill_rail_surface(body)
         scroll.viewport().setMinimumWidth(0)
         return scroll
 
@@ -1171,37 +1196,45 @@ class SequenceAnnotationRail(QWidget):
         return row, run_btn, more_btn
 
     def _build_annotations_page(self) -> QWidget:
+        # Shell: header + scrollable sections + fixed footer (Delete/Restore/…).
+        shell = QWidget()
+        shell.setObjectName("annotationRailShell")
+        shell.setMinimumWidth(0)
+        shell.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
+        self._fill_rail_surface(shell)
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        header = QWidget(shell)
+        header.setObjectName("annotationRailHeader")
+        header.setMinimumWidth(0)
+        self._clear_rail_surface(header)
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(10, 10, 10, 6)
+        header_layout.setSpacing(0)
+        header_layout.addWidget(_section_label("Annotations", header))
+        shell_layout.addWidget(header, 0)
+        # Rule between title and Feature detection (inset like page content).
+        title_rule_host = QWidget(shell)
+        self._clear_rail_surface(title_rule_host)
+        title_rule_layout = QVBoxLayout(title_rule_host)
+        title_rule_layout.setContentsMargins(10, 0, 10, 0)
+        title_rule_layout.setSpacing(0)
+        title_rule_layout.addWidget(_h_divider(title_rule_host))
+        shell_layout.addWidget(title_rule_host, 0)
+
         page = QWidget()
         page.setMinimumWidth(0)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 8, 10, 10)
         layout.setSpacing(8)
-        layout.addWidget(_section_label("Annotations", page))
-        layout.addWidget(_h_divider(page))
 
         # Hidden compatibility alias — Add moved to "Manually add feature" below.
         self.add_feature_btn = QPushButton("Add", page)
         self.add_feature_btn.hide()
-
-        self.delete_btn = self._full_width_button("Delete", page)
-        self.delete_btn.clicked.connect(self.deleteClicked.emit)
-        self.restore_btn = self._full_width_button("Restore", page)
-        self.restore_btn.clicked.connect(self.restoreClicked.emit)
-        self.export_btn = self._full_width_button("Export", page)
-        self.export_btn.clicked.connect(self.exportClicked.emit)
-        self.save_btn = self._full_width_button("Save", page)
-        self.save_btn.clicked.connect(self.saveClicked.emit)
-        layout.addWidget(
-            self._two_column_buttons(
-                [
-                    self.delete_btn,
-                    self.restore_btn,
-                    self.export_btn,
-                    self.save_btn,
-                ],
-                page,
-            )
-        )
 
         # Job progress is shown on the main-window progress bar; keep a hidden
         # label so set_annotation_job_status callers stay valid without showing
@@ -1209,45 +1242,6 @@ class SequenceAnnotationRail(QWidget):
         self.annotation_job_status = QLabel("", page)
         self.annotation_job_status.hide()
 
-        layout.addWidget(_h_divider(page))
-        manual_section = _CollapsibleSection(
-            "Manually add feature", page, expanded=False
-        )
-        self.manual_feature_host = QWidget(manual_section)
-        self.manual_feature_host.setMinimumWidth(0)
-        self.manual_feature_flow = _FlowLayout(self.manual_feature_host, spacing=6)
-        self.manual_feature_host.setLayout(self.manual_feature_flow)
-        self.manual_feature_checks: dict[str, QCheckBox] = {}
-        self._manual_feature_exclusive = False
-        manual_section.add_widget(self.manual_feature_host)
-        self.manual_add_btn = QPushButton("Add", manual_section)
-        self.manual_add_btn.setFixedWidth(52)
-        self.manual_add_btn.setToolTip(
-            "Add the checked feature type on the current sequence selection."
-        )
-        self.manual_add_btn.clicked.connect(self.addFeatureClicked.emit)
-        self.manual_feature_settings_btn = QPushButton("Setting", manual_section)
-        self.manual_feature_settings_btn.setFixedWidth(64)
-        self.manual_feature_settings_btn.setToolTip(
-            "Manage which feature types appear in the list."
-        )
-        self.manual_feature_settings_btn.clicked.connect(
-            self.addFeatureSettingsClicked.emit
-        )
-        manual_btn_row = QHBoxLayout()
-        manual_btn_row.setContentsMargins(0, 0, 0, 0)
-        manual_btn_row.setSpacing(6)
-        manual_btn_row.addWidget(self.manual_add_btn, 0)
-        manual_btn_row.addWidget(self.manual_feature_settings_btn, 0)
-        manual_btn_row.addStretch(1)
-        manual_section.add_layout(manual_btn_row)
-        layout.addWidget(manual_section)
-        # Hidden combo kept for tests / legacy callers.
-        self.manual_feature_combo = QComboBox(page)
-        self.manual_feature_combo.hide()
-        self.populate_manual_feature_types()
-
-        layout.addWidget(_h_divider(page))
         feature_section = _CollapsibleSection(
             "Feature detection", page, expanded=False
         )
@@ -1306,6 +1300,44 @@ class SequenceAnnotationRail(QWidget):
         )
         similarity_section.add_widget(sim_btn_row)
         layout.addWidget(similarity_section)
+
+        layout.addWidget(_h_divider(page))
+        manual_section = _CollapsibleSection(
+            "Manually add feature", page, expanded=False
+        )
+        self.manual_feature_host = QWidget(manual_section)
+        self.manual_feature_host.setMinimumWidth(0)
+        self.manual_feature_flow = _FlowLayout(self.manual_feature_host, spacing=6)
+        self.manual_feature_host.setLayout(self.manual_feature_flow)
+        self.manual_feature_checks: dict[str, QCheckBox] = {}
+        self._manual_feature_exclusive = False
+        manual_section.add_widget(self.manual_feature_host)
+        self.manual_add_btn = QPushButton("Add", manual_section)
+        self.manual_add_btn.setFixedWidth(52)
+        self.manual_add_btn.setToolTip(
+            "Add the checked feature type on the current sequence selection."
+        )
+        self.manual_add_btn.clicked.connect(self.addFeatureClicked.emit)
+        self.manual_feature_settings_btn = QPushButton("Setting", manual_section)
+        self.manual_feature_settings_btn.setFixedWidth(64)
+        self.manual_feature_settings_btn.setToolTip(
+            "Manage which feature types appear in the list."
+        )
+        self.manual_feature_settings_btn.clicked.connect(
+            self.addFeatureSettingsClicked.emit
+        )
+        manual_btn_row = QHBoxLayout()
+        manual_btn_row.setContentsMargins(0, 0, 0, 0)
+        manual_btn_row.setSpacing(6)
+        manual_btn_row.addWidget(self.manual_add_btn, 0)
+        manual_btn_row.addWidget(self.manual_feature_settings_btn, 0)
+        manual_btn_row.addStretch(1)
+        manual_section.add_layout(manual_btn_row)
+        layout.addWidget(manual_section)
+        # Hidden combo kept for tests / legacy callers.
+        self.manual_feature_combo = QComboBox(page)
+        self.manual_feature_combo.hide()
+        self.populate_manual_feature_types()
 
         layout.addWidget(_h_divider(page))
         transfer_section = _CollapsibleSection(
@@ -1425,7 +1457,46 @@ class SequenceAnnotationRail(QWidget):
             section.expandedChanged.connect(self._save_rail_ui_state)
 
         layout.addStretch(1)
-        return self._wrap_scroll(page)
+        scroll = self._wrap_scroll(page)
+        # Transparent scroll so shell Window fill is continuous with header/footer.
+        self._clear_rail_surface(scroll)
+        self._clear_rail_surface(scroll.viewport())
+        self._clear_rail_surface(page)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+        shell_layout.addWidget(scroll, 1)
+
+        # Fixed footer — stays visible while the sections above scroll.
+        footer = QWidget(shell)
+        footer.setMinimumWidth(0)
+        footer.setObjectName("annotationRailFooter")
+        self._clear_rail_surface(footer)
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(10, 8, 10, 10)
+        footer_layout.setSpacing(8)
+        footer_layout.addWidget(_h_divider(footer))
+        self.delete_btn = self._full_width_button("Delete", footer)
+        self.delete_btn.clicked.connect(self.deleteClicked.emit)
+        self.restore_btn = self._full_width_button("Restore", footer)
+        self.restore_btn.clicked.connect(self.restoreClicked.emit)
+        self.export_btn = self._full_width_button("Export", footer)
+        self.export_btn.clicked.connect(self.exportClicked.emit)
+        self.save_btn = self._full_width_button("Save", footer)
+        self.save_btn.clicked.connect(self.saveClicked.emit)
+        footer_layout.addWidget(
+            self._two_column_buttons(
+                [
+                    self.delete_btn,
+                    self.restore_btn,
+                    self.export_btn,
+                    self.save_btn,
+                ],
+                footer,
+            )
+        )
+        shell_layout.addWidget(footer, 0)
+        return shell
 
     def _build_find_page(self) -> QWidget:
         page = QWidget()

@@ -460,8 +460,11 @@ class _NamesColumn(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
 
     def set_label_point_size(self, point_size: int) -> None:
-        """Name labels use DNA/protein size + 1 (clamped)."""
-        self._label_point_size = max(2, min(36, int(point_size) + 1))
+        """Name labels use DNA/protein size + 1 (clamped).
+
+        Cap matches zoomed-in MSA letter fonts (see ``_msa_letter_font_for_cell``).
+        """
+        self._label_point_size = max(2, min(96, int(point_size) + 1))
         self.update()
 
     def label_point_size(self) -> int:
@@ -1239,6 +1242,19 @@ class _BarsCanvas(QWidget):
                 hi = mid - 1
         font.setPointSize(best)
         return font
+
+    def effective_letter_point_size(self) -> int:
+        """Configured residue font, or the larger in-cell size when zoomed for letters."""
+        base = max(2, int(self._msa_font_pt))
+        if not (self._msa_shows_letters() or self._bar_shows_letters()):
+            return base
+        cell_w = max(float(self._ppb), 1e-12)
+        cell_h = float(
+            self._msa_letter_band_height()
+            if self._msa_mode
+            else self._row_letter_band_height()
+        )
+        return max(base, int(self._msa_letter_font_for_cell(cell_w, cell_h).pointSize()))
 
     def set_sequence_row_gap(self, gap: int) -> None:
         """Vertical gap between sequences (Others → Sequence distance)."""
@@ -4042,8 +4058,16 @@ class MultiSequenceOverviewPanel(QWidget):
         if self._hbar_shim.height() != h:
             self._hbar_shim.setFixedHeight(h)
 
+    def _sync_name_label_size_to_letters(self) -> None:
+        """Grow sequence-name labels with zoomed-in nucleotide letters."""
+        letter_pt = self._bars.effective_letter_point_size()
+        desired = max(2, min(96, letter_pt + 1))
+        if self._names.label_point_size() != desired:
+            self._names.set_label_point_size(letter_pt)
+
     def _sync_names_column(self) -> None:
         self._sync_hbar_shim()
+        self._sync_name_label_size_to_letters()
         width = max(80, self._names_scroll.viewport().width() or self._name_width)
         # Match bars content; both viewports share the same height thanks to shims.
         content_h = max(
