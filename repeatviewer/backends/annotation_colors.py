@@ -19,6 +19,7 @@ ANNOTATION_FEATURE_TYPE_LABELS: tuple[tuple[str, str], ...] = (
     ("LTR", "LTR"),
     ("TIR", "TIR"),
     ("ORF", "ORF"),
+    ("TSD", "TSD"),
     ("Tandem", "tandem repeat"),
     ("PBS", "PBS"),
     ("PPT", "PPT"),

@@ -9558,10 +9558,13 @@ class OrfPredictionParamsDialog(QDialog):
         for_run: bool = True,
         parent=None,
     ) -> None:
-        from repeatviewer.backends.auto_annotation_settings import OrfSettings as _OrfSettings
+        from repeatviewer.backends.auto_annotation_settings import (
+            OrfSettings as _OrfSettings,
+            normalize_orf_frames,
+        )
 
         super().__init__(parent)
-        self.setWindowTitle("ORF Prediction settings")
+        self.setWindowTitle("ORF Prediction settings (orfipy)")
         self.setMinimumWidth(420)
         opts = initial or _OrfSettings()
         self._OrfSettings = _OrfSettings
@@ -9579,6 +9582,39 @@ class OrfPredictionParamsDialog(QDialog):
         self._alt_starts.setText(opts.alternative_start_codons)
         self._alt_starts.setToolTip("Optional extra start codons (comma- or space-separated).")
 
+        selected = set(normalize_orf_frames(opts.frames))
+        frames_inner = QWidget(self)
+        frames_inner.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        frames_grid = QGridLayout(frames_inner)
+        frames_grid.setContentsMargins(0, 0, 0, 0)
+        frames_grid.setHorizontalSpacing(4)
+        frames_grid.setVerticalSpacing(2)
+        self._frame_checks: dict[int, QCheckBox] = {}
+        for col, frame in enumerate((1, 2, 3)):
+            frames_grid.setColumnStretch(col, 0)
+            fwd = QCheckBox(f"Frame {frame}", frames_inner)
+            fwd.setToolTip(f"Forward reading frame {frame}")
+            fwd.setChecked(frame in selected)
+            self._frame_checks[frame] = fwd
+            frames_grid.addWidget(fwd, 0, col, Qt.AlignmentFlag.AlignLeft)
+            rev = QCheckBox(f"Reverse {frame}", frames_inner)
+            rev.setToolTip(f"Reverse reading frame {frame}")
+            rev.setChecked((-frame) in selected)
+            self._frame_checks[-frame] = rev
+            frames_grid.addWidget(rev, 1, col, Qt.AlignmentFlag.AlignLeft)
+        frames_host = QWidget(self)
+        frames_host.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        frames_host.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        frames_host_layout = QHBoxLayout(frames_host)
+        frames_host_layout.setContentsMargins(0, 0, 0, 0)
+        frames_host_layout.setSpacing(0)
+        frames_host_layout.addWidget(
+            frames_inner,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+        )
+        frames_host_layout.addStretch(1)
+
         def _bp_row(spin: QSpinBox) -> QWidget:
             row = QWidget(self)
             layout = QHBoxLayout(row)
@@ -9589,13 +9625,34 @@ class OrfPredictionParamsDialog(QDialog):
             layout.addStretch()
             return row
 
+        self._alt_starts.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
         form.addRow("Min ORF length:", _bp_row(self._min_len))
         form.addRow("Max ORF length:", _bp_row(self._max_len))
-        form.addRow("Add other start codons:", self._alt_starts)
+        form.addRow(
+            "Add other start codons:",
+            field_with_help(
+                self._alt_starts,
+                "Other start codons",
+                "Optional extra start codons (comma- or space-separated), "
+                "e.g. <b>TTG, CTG</b>, in addition to ATG.",
+                parent=self,
+            ),
+        )
+        form.addRow(
+            "Reading frames:",
+            field_with_help(
+                frames_host,
+                "Reading frames",
+                "Keep ORFs from these orfipy reading frames "
+                "(Frame 1–3 forward, Reverse 1–3). "
+                "Default is all six frames.",
+                parent=self,
+            ),
+        )
 
         restore = QPushButton("Restore Defaults", self)
         restore.clicked.connect(self._restore_defaults)
@@ -9614,16 +9671,27 @@ class OrfPredictionParamsDialog(QDialog):
         return dialog_should_run(self)
 
     def _restore_defaults(self) -> None:
+        from repeatviewer.backends.auto_annotation_settings import DEFAULT_ORF_FRAMES
+
         defaults = self._OrfSettings()
         self._min_len.setValue(defaults.min_length)
         self._max_len.setValue(defaults.max_length)
         self._alt_starts.setText(defaults.alternative_start_codons)
+        selected = set(DEFAULT_ORF_FRAMES)
+        for frame, check in self._frame_checks.items():
+            check.setChecked(frame in selected)
 
     def options(self):
+        from repeatviewer.backends.auto_annotation_settings import normalize_orf_frames
+
+        frames = normalize_orf_frames(
+            tuple(frame for frame, check in self._frame_checks.items() if check.isChecked())
+        )
         return self._OrfSettings(
             min_length=self._min_len.value(),
             max_length=max(self._max_len.value(), self._min_len.value()),
             alternative_start_codons=self._alt_starts.text().strip(),
+            frames=frames,
         )
 
 

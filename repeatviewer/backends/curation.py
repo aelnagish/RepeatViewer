@@ -1115,7 +1115,7 @@ def run_on_sequence(
             cancel=cancel,
             progress=sequence_progress,
         )
-        created.extend(str(p) for p in outs)
+        created.extend(str(p) for p in outs.output_paths)
 
     elif func_name == "reverse_complement":
         created.append(str(write_reverse_complement_fasta(seq_path)))

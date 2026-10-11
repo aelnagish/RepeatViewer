@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-from repeatviewer.backends.auto_annotation_settings import OrfSettings
+from repeatviewer.backends.auto_annotation_settings import (
+    DEFAULT_ORF_FRAMES,
+    OrfSettings,
+    normalize_orf_frames,
+)
 from repeatviewer.backends.sequence_features import SequenceFeature
 
 try:
     import orfipy_core
 except ImportError:  # pragma: no cover - optional at import time
     orfipy_core = None  # type: ignore[assignment]
+
+_ORF_FRAME_RE = re.compile(r"ORF_frame=(-?\d+)")
 
 
 @dataclass(frozen=True)
@@ -48,6 +55,30 @@ def parse_start_codons(settings: OrfSettings | None = None) -> list[str]:
         if len(codon) == 3 and codon not in codons:
             codons.append(codon)
     return codons
+
+
+def _orfipy_strand_arg(frames: tuple[int, ...]) -> str:
+    """Map selected frames to orfipy's strand flag (f / r / b)."""
+    has_fwd = any(frame > 0 for frame in frames)
+    has_rev = any(frame < 0 for frame in frames)
+    if has_fwd and has_rev:
+        return "b"
+    if has_rev:
+        return "r"
+    return "f"
+
+
+def _parse_orf_frame(description: str, start: int, strand: str) -> int:
+    """Read orfipy's ORF_frame, with a start-position fallback."""
+    match = _ORF_FRAME_RE.search(str(description or ""))
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            pass
+    # Fallback when description lacks ORF_frame (should be rare).
+    offset = (int(start) % 3) + 1
+    return -offset if str(strand).strip() == "-" else offset
 
 
 def _orfipy_to_feature(
@@ -88,31 +119,48 @@ def detect_orf_features(
     min_len = max(1, int(cfg.min_length))
     max_len = max(min_len, int(cfg.max_length))
     starts = parse_start_codons(cfg)
+    frames = normalize_orf_frames(cfg.frames)
+    frame_set = set(frames)
+    strand_arg = _orfipy_strand_arg(frames)
 
     features: list[SequenceFeature] = []
     index = 0
-    for start, stop, strand, _description in orfipy_core.orfs(
+    for start, stop, strand, description in orfipy_core.orfs(
         seq,
         name=sequence_id or "Seq",
         minlen=min_len,
         maxlen=max_len,
-        strand="b",
+        strand=strand_arg,
         starts=starts,
     ):
+        frame = _parse_orf_frame(description, start, strand)
+        if frame not in frame_set:
+            continue
         index += 1
         feat = _orfipy_to_feature(start, stop, strand, index=index)
         if feat is not None:
             features.append(feat)
 
+    frame_label = ",".join(str(frame) for frame in frames)
+    start_label = ", ".join(starts)
     if not features:
-        start_label = ", ".join(starts)
         return OrfDetectResult(
             (),
-            f"No ORFs found (length {min_len}–{max_len} bp, starts: {start_label}).",
+            f"No ORFs found with orfipy (length {min_len}–{max_len} bp, "
+            f"frames {frame_label}, starts: {start_label}).",
         )
 
-    start_label = ", ".join(starts)
     return OrfDetectResult(
         tuple(features),
-        f"Detected {len(features)} ORF(s) ({min_len}–{max_len} bp, starts: {start_label}).",
+        f"Detected {len(features)} ORF(s) with orfipy "
+        f"({min_len}–{max_len} bp, frames {frame_label}, starts: {start_label}).",
     )
+
+
+__all__ = [
+    "DEFAULT_ORF_FRAMES",
+    "OrfDetectResult",
+    "detect_orf_features",
+    "orfipy_available",
+    "parse_start_codons",
+]

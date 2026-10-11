@@ -1,4 +1,4 @@
-"""Dispatch auto-annotation jobs (LTR, TIR, tandem repeat, ORF)."""
+"""Dispatch auto-annotation jobs (LTR, TIR, tandem repeat, ORF, TSD)."""
 
 from __future__ import annotations
 
@@ -26,9 +26,11 @@ class AutoAnnotationMode(str, Enum):
     TIR = "TIR"
     TANDEM = "tandem repeat"
     ORF = "ORF"
+    TSD = "TSD"
 
 
 _AUTO_ORF_NAME = re.compile(r"^ORF\d+$")
+_AUTO_TSD_NAME = re.compile(r"^TSD_")
 
 
 @dataclass(frozen=True)
@@ -81,12 +83,18 @@ def _is_auto_generated_orf(feat: SequenceFeature) -> bool:
     return feat.feature_type == "ORF" and bool(_AUTO_ORF_NAME.match(feat.name or ""))
 
 
+def _is_auto_generated_tsd(feat: SequenceFeature) -> bool:
+    return feat.feature_type == "TSD" and bool(_AUTO_TSD_NAME.match(feat.name or ""))
+
+
 def _remove_features_for_auto_rerun(
     features: list[SequenceFeature],
     mode: AutoAnnotationMode,
 ) -> list[SequenceFeature]:
     if mode == AutoAnnotationMode.ORF:
         return [feat for feat in features if not _is_auto_generated_orf(feat)]
+    if mode == AutoAnnotationMode.TSD:
+        return [feat for feat in features if not _is_auto_generated_tsd(feat)]
     feature_type = _auto_mode_feature_type(mode)
     has_manual = any(feat.track == 0 for feat in _features_for_mode(features, mode))
     if has_manual:
@@ -108,6 +116,14 @@ def _target_track_for_auto_rerun(
     if mode == AutoAnnotationMode.ORF:
         auto_existing = [feat for feat in existing if _is_auto_generated_orf(feat)]
         manual_existing = [feat for feat in existing if not _is_auto_generated_orf(feat)]
+        if auto_existing:
+            return min(feat.track for feat in auto_existing)
+        if manual_existing:
+            return _next_track(features)
+        return next_track
+    if mode == AutoAnnotationMode.TSD:
+        auto_existing = [feat for feat in existing if _is_auto_generated_tsd(feat)]
+        manual_existing = [feat for feat in existing if not _is_auto_generated_tsd(feat)]
         if auto_existing:
             return min(feat.track for feat in auto_existing)
         if manual_existing:
@@ -273,6 +289,14 @@ def run_auto_annotation(
             features=orfs.features,
             mode=mode,
             message=orfs.message,
+        )
+
+    if mode == AutoAnnotationMode.TSD:
+        # TSD needs the full MSA; batch annotation runs it on the multi-FASTA.
+        return AutoAnnotationResult(
+            features=(),
+            mode=mode,
+            message="TSD detection runs on the full MSA (see batch annotation).",
         )
 
     terminal = auto_annotate_terminal_repeats(

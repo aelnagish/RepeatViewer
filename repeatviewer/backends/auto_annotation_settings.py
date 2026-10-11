@@ -39,11 +39,46 @@ class TandemRepeatSettings:
     atr_max_extend: int = 500
 
 
+# Reading frames used by orfipy ORF detection (+1..+3 / -1..-3).
+DEFAULT_ORF_FRAMES: tuple[int, ...] = (1, 2, 3, -1, -2, -3)
+
+
+def normalize_orf_frames(frames: object) -> tuple[int, ...]:
+    """Keep only valid frames, preserve +1..+3 then -1..-3 order."""
+    allowed = set(DEFAULT_ORF_FRAMES)
+    chosen: set[int] = set()
+    if isinstance(frames, str):
+        tokens = frames.replace(",", " ").split()
+        for token in tokens:
+            try:
+                value = int(token)
+            except ValueError:
+                continue
+            if value in allowed:
+                chosen.add(value)
+    elif isinstance(frames, (set, frozenset, list, tuple)):
+        for item in frames:
+            try:
+                value = int(item)
+            except (TypeError, ValueError):
+                continue
+            if value in allowed:
+                chosen.add(value)
+    if not chosen:
+        return DEFAULT_ORF_FRAMES
+    return tuple(frame for frame in DEFAULT_ORF_FRAMES if frame in chosen)
+
+
 @dataclass
 class OrfSettings:
     min_length: int = 30
     max_length: int = 10_000
     alternative_start_codons: str = ""
+    # Which reading frames to keep (orfipy ORF_frame values).
+    frames: tuple[int, ...] = DEFAULT_ORF_FRAMES
+
+    def __post_init__(self) -> None:
+        self.frames = normalize_orf_frames(self.frames)
 
 
 @dataclass
@@ -138,6 +173,7 @@ def load_auto_annotation_settings() -> AutoAnnotationSettings:
         min_length=_get_int(s, f"{prefix}orf_min_length", 30),
         max_length=_get_int(s, f"{prefix}orf_max_length", 10_000),
         alternative_start_codons=str(s.value(f"{prefix}orf_alt_starts", "") or ""),
+        frames=normalize_orf_frames(s.value(f"{prefix}orf_frames", "")),
     )
     return AutoAnnotationSettings(ltr=ltr, tir=tir, tandem=tandem, orf=orf)
 
@@ -178,6 +214,10 @@ def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
     s.setValue(f"{prefix}orf_min_length", orf.min_length)
     s.setValue(f"{prefix}orf_max_length", orf.max_length)
     s.setValue(f"{prefix}orf_alt_starts", orf.alternative_start_codons.strip())
+    s.setValue(
+        f"{prefix}orf_frames",
+        ",".join(str(frame) for frame in normalize_orf_frames(orf.frames)),
+    )
 
 
 def load_orf_prediction_settings() -> OrfSettings:
@@ -188,6 +228,7 @@ def load_orf_prediction_settings() -> OrfSettings:
         min_length=_get_int(s, f"{prefix}min_length", 30),
         max_length=_get_int(s, f"{prefix}max_length", 10_000),
         alternative_start_codons=str(s.value(f"{prefix}alt_starts", "") or ""),
+        frames=normalize_orf_frames(s.value(f"{prefix}frames", "")),
     )
 
 
@@ -197,3 +238,7 @@ def save_orf_prediction_settings(settings: OrfSettings) -> None:
     s.setValue(f"{prefix}min_length", settings.min_length)
     s.setValue(f"{prefix}max_length", settings.max_length)
     s.setValue(f"{prefix}alt_starts", settings.alternative_start_codons.strip())
+    s.setValue(
+        f"{prefix}frames",
+        ",".join(str(frame) for frame in normalize_orf_frames(settings.frames)),
+    )

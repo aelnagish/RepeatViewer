@@ -1018,18 +1018,19 @@ class SequenceAnnotationRail(QWidget):
         self.bases_zoomed_out.valueChanged.connect(self.basesZoomedOutChanged.emit)
 
         self.annotation_label_size = NoWheelSpinBox(page)
-        self.annotation_label_size.setRange(6, 24)
+        self.annotation_label_size.setRange(0, 24)
         self.annotation_label_size.setValue(7)
         self.annotation_label_size.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
         self.annotation_label_size.setToolTip(
-            "Font size for labels on annotation bars (e.g. ORF / LTR / Pfam names)."
+            "Font size for labels on annotation bars (e.g. ORF / LTR / Pfam names). "
+            "0 hides labels."
         )
         self.annotation_label_size.valueChanged.connect(
             self.annotationLabelSizeChanged.emit
         )
 
         self.annotation_thickness = NoWheelSpinBox(page)
-        self.annotation_thickness.setRange(8, 40)
+        self.annotation_thickness.setRange(2, 40)
         self.annotation_thickness.setValue(18)
         self.annotation_thickness.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
         self.annotation_thickness.setToolTip(

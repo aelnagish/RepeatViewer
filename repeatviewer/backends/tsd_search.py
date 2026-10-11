@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import collections
 from collections import defaultdict
+from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
 
 import numpy as np
 from Bio import AlignIO
 from sklearn.cluster import DBSCAN
+
+from repeatviewer.backends.sequence_features import (
+    REPEATVIEWER_INTERNAL_SOURCE,
+    SequenceFeature,
+)
 
 
 def get_nt_radius_indices(sequence, center_idx, nt_radius, direction="both"):
@@ -47,6 +53,237 @@ def calculate_jaccard_similarity(seq1, seq2):
     return len(set1.intersection(set2)) / len(set1.union(set2))
 
 
+@dataclass(frozen=True)
+class TsdFlankHit:
+    """One TSD pair on a single MSA row (0-based inclusive MSA columns)."""
+
+    seq_id: str
+    left_start: int
+    left_end: int
+    right_start: int
+    right_end: int
+    tsd_seq: str
+    te_start: int
+    te_end: int
+
+
+def resolve_tsd_boundaries(
+    aln_len: int,
+    left_boundary: int,
+    right_boundary: int,
+    nt_radius: int,
+) -> tuple[int, int]:
+    """Return MSA TE-body columns. ``0, 0`` means auto (leave flank windows)."""
+    if aln_len <= 1:
+        return 0, max(0, aln_len - 1)
+    left = int(left_boundary)
+    right = int(right_boundary)
+    if left > 0 or right > 0:
+        l = max(0, min(left, aln_len - 1))
+        r = right if right > 0 else aln_len - 1
+        r = max(0, min(r, aln_len - 1))
+        if r < l:
+            l, r = r, l
+        return l, r
+    pad = max(1, int(nt_radius))
+    if aln_len <= 2 * pad + 8:
+        pad = max(1, aln_len // 10)
+    return pad, max(pad, aln_len - pad - 1)
+
+
+def _scan_record_tsd_hits(
+    seq_str: str,
+    *,
+    seq_id: str,
+    left_boundary: int,
+    right_boundary: int,
+    nt_radius: int,
+    k_min: int,
+) -> list[TsdFlankHit]:
+    """Per-sequence TSD scan (no cross-sequence filtering or clustering)."""
+    all_nt_pos = [i for i, char in enumerate(seq_str) if char != "-"]
+    if len(all_nt_pos) < 2 * k_min:
+        return []
+    nt_to_msa = {i: col for i, col in enumerate(all_nt_pos)}
+    msa_to_nt = {col: i for i, col in enumerate(all_nt_pos)}
+
+    l_col_start, l_col_end = get_nt_radius_indices(
+        seq_str, left_boundary, nt_radius, direction="left"
+    )
+    r_col_start, r_col_end = get_nt_radius_indices(
+        seq_str, right_boundary, nt_radius, direction="right"
+    )
+
+    l_nt_pos_map = [c for c in range(l_col_start, l_col_end) if seq_str[c] != "-"]
+    r_nt_pos_map = [c for c in range(r_col_start, r_col_end) if seq_str[c] != "-"]
+    if len(l_nt_pos_map) < k_min or len(r_nt_pos_map) < k_min:
+        return []
+
+    k = k_min
+    left_kmers_seeds: dict[str, list[int]] = defaultdict(list)
+    for i in range(len(l_nt_pos_map) - k + 1):
+        kmer_cols = l_nt_pos_map[i : i + k]
+        kmer = "".join(seq_str[c] for c in kmer_cols)
+        left_kmers_seeds[kmer].append(i)
+
+    record_unique_hits: set[tuple[int, int, int, int]] = set()
+    # te_coords -> (flank cols, tsd_seq)
+    longest: dict[tuple[int, int], tuple[tuple[int, int, int, int], str]] = {}
+
+    for j in range(len(r_nt_pos_map) - k + 1):
+        kmer_cols_r = r_nt_pos_map[j : j + k]
+        kmer = "".join(seq_str[c] for c in kmer_cols_r)
+        if kmer not in left_kmers_seeds:
+            continue
+
+        for seed_idx_l in left_kmers_seeds[kmer]:
+            l_shift = 0
+            while seed_idx_l - l_shift - 1 >= 0 and j - l_shift - 1 >= 0:
+                char_l = seq_str[l_nt_pos_map[seed_idx_l - l_shift - 1]]
+                char_r = seq_str[r_nt_pos_map[j - l_shift - 1]]
+                if char_l == char_r:
+                    l_shift += 1
+                else:
+                    break
+
+            r_shift = 0
+            while (
+                seed_idx_l + k + r_shift < len(l_nt_pos_map)
+                and j + k + r_shift < len(r_nt_pos_map)
+            ):
+                char_l = seq_str[l_nt_pos_map[seed_idx_l + k + r_shift]]
+                char_r = seq_str[r_nt_pos_map[j + k + r_shift]]
+                if char_l == char_r:
+                    r_shift += 1
+                else:
+                    break
+
+            l_indices = l_nt_pos_map[seed_idx_l - l_shift : seed_idx_l + k + r_shift]
+            r_indices = r_nt_pos_map[j - l_shift : j + k + r_shift]
+            if not l_indices or not r_indices:
+                continue
+            hit_coords = (l_indices[0], l_indices[-1], r_indices[0], r_indices[-1])
+            if hit_coords in record_unique_hits:
+                continue
+            record_unique_hits.add(hit_coords)
+
+            last_nt_l_col = l_indices[-1]
+            nt_idx_l = msa_to_nt[last_nt_l_col]
+            if nt_idx_l + 1 not in nt_to_msa:
+                continue
+            te_start_col = nt_to_msa[nt_idx_l + 1]
+            first_nt_r_col = r_indices[0]
+            nt_idx_r = msa_to_nt[first_nt_r_col]
+            if nt_idx_r - 1 not in nt_to_msa:
+                continue
+            te_end_col = nt_to_msa[nt_idx_r - 1]
+            final_kmer_seq = "".join(seq_str[c] for c in l_indices)
+            if len(final_kmer_seq) >= 5 and len(set(final_kmer_seq.lower())) == 1:
+                continue
+
+            te_key = (te_start_col, te_end_col)
+            prev = longest.get(te_key)
+            if prev is None or len(final_kmer_seq) > len(prev[1]):
+                longest[te_key] = (hit_coords, final_kmer_seq)
+
+    hits: list[TsdFlankHit] = []
+    for (te_start, te_end), (flanks, tsd_seq) in longest.items():
+        l0, l1, r0, r1 = flanks
+        hits.append(
+            TsdFlankHit(
+                seq_id=seq_id,
+                left_start=l0,
+                left_end=l1,
+                right_start=r0,
+                right_end=r1,
+                tsd_seq=tsd_seq,
+                te_start=te_start,
+                te_end=te_end,
+            )
+        )
+    return hits
+
+
+def scan_tsds_per_sequence(
+    file_path: str | Path,
+    left_boundary: int,
+    right_boundary: int,
+    *,
+    nt_radius: int = 100,
+    k_min: int = 4,
+    record_ids: list[str] | None = None,
+) -> list[TsdFlankHit]:
+    """Scan each MSA row for TSDs; no cross-sequence filter or clustering."""
+    alignment = AlignIO.read(str(file_path), "fasta")
+    if not alignment:
+        return []
+    aln_len = len(alignment[0])
+    left, right = resolve_tsd_boundaries(
+        aln_len, left_boundary, right_boundary, nt_radius
+    )
+    hits: list[TsdFlankHit] = []
+    for index, record in enumerate(alignment):
+        if record_ids is not None and index < len(record_ids):
+            seq_id = record_ids[index]
+        else:
+            seq_id = str(record.id)
+        hits.extend(
+            _scan_record_tsd_hits(
+                str(record.seq),
+                seq_id=seq_id,
+                left_boundary=left,
+                right_boundary=right,
+                nt_radius=nt_radius,
+                k_min=k_min,
+            )
+        )
+    return hits
+
+
+def detect_tsd_features_by_id(
+    file_path: str | Path,
+    *,
+    record_ids: list[str] | None = None,
+    left_boundary: int = 0,
+    right_boundary: int = 0,
+    nt_radius: int = 100,
+    k_min: int = 4,
+) -> dict[str, list[SequenceFeature]]:
+    """Per-sequence TSD flanks as annotation features (1-based MSA columns).
+
+    No TSD cluster calculation — each sequence's hits are annotated independently.
+    """
+    hits = scan_tsds_per_sequence(
+        file_path,
+        left_boundary,
+        right_boundary,
+        nt_radius=nt_radius,
+        k_min=k_min,
+        record_ids=record_ids,
+    )
+    by_id: dict[str, list[SequenceFeature]] = {}
+    for hit in hits:
+        name = f"TSD_{hit.tsd_seq.upper()}"
+        left = SequenceFeature(
+            start=hit.left_start + 1,
+            end=hit.left_end + 1,
+            name=name,
+            feature_type="TSD",
+            strand="+",
+            source=REPEATVIEWER_INTERNAL_SOURCE,
+        )
+        right = SequenceFeature(
+            start=hit.right_start + 1,
+            end=hit.right_end + 1,
+            name=name,
+            feature_type="TSD",
+            strand="+",
+            source=REPEATVIEWER_INTERNAL_SOURCE,
+        )
+        by_id.setdefault(hit.seq_id, []).extend([left, right])
+    return by_id
+
+
 def identify_tsds_with_boundary_logic(
     file_path,
     left_boundary,
@@ -55,107 +292,17 @@ def identify_tsds_with_boundary_logic(
     k_min=4,
     k_max=7,
 ):
-    alignment = AlignIO.read(file_path, "fasta")
-    location_hits = defaultdict(list)
-
-    for record in alignment:
-        seq_str = str(record.seq)
-
-        all_nt_pos = [i for i, char in enumerate(seq_str) if char != "-"]
-        nt_to_msa = {i: col for i, col in enumerate(all_nt_pos)}
-        msa_to_nt = {col: i for i, col in enumerate(all_nt_pos)}
-
-        l_col_start, l_col_end = get_nt_radius_indices(
-            seq_str, left_boundary, nt_radius, direction="left"
-        )
-        r_col_start, r_col_end = get_nt_radius_indices(
-            seq_str, right_boundary, nt_radius, direction="right"
-        )
-
-        l_nt_pos_map = [c for c in range(l_col_start, l_col_end) if seq_str[c] != "-"]
-        r_nt_pos_map = [c for c in range(r_col_start, r_col_end) if seq_str[c] != "-"]
-
-        k = k_min
-        left_kmers_seeds = defaultdict(list)
-
-        for i in range(len(l_nt_pos_map) - k + 1):
-            kmer_cols = l_nt_pos_map[i : i + k]
-            kmer = "".join(seq_str[c] for c in kmer_cols)
-            left_kmers_seeds[kmer].append(i)
-
-        record_unique_hits = set()
-        record_hits = defaultdict(list)
-
-        for j in range(len(r_nt_pos_map) - k + 1):
-            kmer_cols_r = r_nt_pos_map[j : j + k]
-            kmer = "".join(seq_str[c] for c in kmer_cols_r)
-
-            if kmer not in left_kmers_seeds:
-                continue
-
-            for seed_idx_l in left_kmers_seeds[kmer]:
-                l_shift = 0
-                while seed_idx_l - l_shift - 1 >= 0 and j - l_shift - 1 >= 0:
-                    char_l = seq_str[l_nt_pos_map[seed_idx_l - l_shift - 1]]
-                    char_r = seq_str[r_nt_pos_map[j - l_shift - 1]]
-                    if char_l == char_r:
-                        l_shift += 1
-                    else:
-                        break
-
-                r_shift = 0
-                while (
-                    seed_idx_l + k + r_shift < len(l_nt_pos_map)
-                    and j + k + r_shift < len(r_nt_pos_map)
-                ):
-                    char_l = seq_str[l_nt_pos_map[seed_idx_l + k + r_shift]]
-                    char_r = seq_str[r_nt_pos_map[j + k + r_shift]]
-                    if char_l == char_r:
-                        r_shift += 1
-                    else:
-                        break
-
-                l_indices = l_nt_pos_map[seed_idx_l - l_shift : seed_idx_l + k + r_shift]
-                r_indices = r_nt_pos_map[j - l_shift : j + k + r_shift]
-                hit_coords = (l_indices[0], l_indices[-1], r_indices[0], r_indices[-1])
-
-                if hit_coords in record_unique_hits:
-                    continue
-                record_unique_hits.add(hit_coords)
-
-                last_nt_l_col = l_indices[-1]
-                nt_idx_l = msa_to_nt[last_nt_l_col]
-
-                if nt_idx_l + 1 not in nt_to_msa:
-                    continue
-
-                te_start_col = nt_to_msa[nt_idx_l + 1]
-                first_nt_r_col = r_indices[0]
-                nt_idx_r = msa_to_nt[first_nt_r_col]
-
-                if nt_idx_r - 1 not in nt_to_msa:
-                    continue
-
-                te_end_col = nt_to_msa[nt_idx_r - 1]
-                final_kmer_seq = "".join(seq_str[c] for c in l_indices)
-                if len(final_kmer_seq) >= 5 and len(set(final_kmer_seq.lower())) == 1:
-                    continue
-
-                record_hits[record.id].append(((te_start_col, te_end_col), final_kmer_seq))
-
-        for rec_id, hits in record_hits.items():
-            longest_hits_tracker = {}
-            for coords, seq in hits:
-                if coords not in longest_hits_tracker or len(seq) > len(
-                    longest_hits_tracker[coords][1]
-                ):
-                    longest_hits_tracker[coords] = (coords, seq)
-            record_hits[rec_id] = list(longest_hits_tracker.values())
-
-        for rec_id, hits in record_hits.items():
-            for coords, seq in hits:
-                location_hits[coords].append((rec_id, seq))
-
+    """Legacy aggregator used by Tools → TSD search (keeps cluster pipeline)."""
+    del k_max  # retained for TEtrimmer API compatibility
+    location_hits: dict[tuple[int, int], list[tuple[str, str]]] = defaultdict(list)
+    for hit in scan_tsds_per_sequence(
+        file_path,
+        left_boundary,
+        right_boundary,
+        nt_radius=nt_radius,
+        k_min=k_min,
+    ):
+        location_hits[(hit.te_start, hit.te_end)].append((hit.seq_id, hit.tsd_seq))
     return location_hits
 
 

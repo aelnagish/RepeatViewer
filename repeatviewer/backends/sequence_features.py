@@ -762,27 +762,23 @@ def load_fasta_rows(path: Path) -> tuple[list[str], list[str]]:
     return uniquify_record_ids(raw_ids), seqs
 
 
-def write_aligned_fasta_rows(
+def write_fasta_rows(
     path: Path,
     record_ids: list[str],
     sequences: list[str],
     *,
     line_width: int = 60,
 ) -> None:
-    """Overwrite ``path`` with aligned FASTA rows (same order as ``record_ids``).
+    """Overwrite ``path`` with FASTA rows (same order as ``record_ids``).
 
-    Duplicate-display ids (``name#2``, …) are written back as the original
-    FASTA token when siblings still include the base name.
+    Lengths may differ (multi-sequence). Duplicate-display ids (``name#2``, …)
+    are written back as the original FASTA token when siblings still include
+    the base name.
     """
     if len(record_ids) != len(sequences):
         raise ValueError("record_ids and sequences length mismatch")
     if not sequences:
         raise ValueError("No sequences to write")
-    width = len(sequences[0])
-    if width <= 0:
-        raise ValueError("Alignment has zero columns.")
-    if any(len(s) != width for s in sequences):
-        raise ValueError("Sequences have different lengths; cannot write MSA.")
     resolved = Path(path).expanduser().resolve()
     siblings = list(record_ids)
     wrap = max(0, int(line_width))
@@ -796,6 +792,24 @@ def write_aligned_fasta_rows(
             for i in range(0, len(seq), wrap):
                 chunks.append(f"{seq[i : i + wrap]}\n")
     resolved.write_text("".join(chunks), encoding="utf-8")
+
+
+def write_aligned_fasta_rows(
+    path: Path,
+    record_ids: list[str],
+    sequences: list[str],
+    *,
+    line_width: int = 60,
+) -> None:
+    """Overwrite ``path`` with aligned FASTA rows (equal lengths required)."""
+    if not sequences:
+        raise ValueError("No sequences to write")
+    width = len(sequences[0])
+    if width <= 0:
+        raise ValueError("Alignment has zero columns.")
+    if any(len(s) != width for s in sequences):
+        raise ValueError("Sequences have different lengths; cannot write MSA.")
+    write_fasta_rows(path, record_ids, sequences, line_width=line_width)
 
 
 def _fasta_lengths_and_single_sequence(

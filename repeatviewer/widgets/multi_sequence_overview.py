@@ -23,6 +23,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QContextMenuEvent,
     QCursor,
     QFont,
     QFontMetrics,
@@ -39,6 +40,7 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
     QFileDialog,
@@ -46,6 +48,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QScrollArea,
     QSizePolicy,
@@ -90,6 +93,7 @@ from repeatviewer.backends.sequence_features import (
     resolve_sidecar_path,
     save_annotations_multi,
     write_aligned_fasta_rows,
+    write_fasta_rows,
 )
 from repeatviewer.backends.similarity_annotation import (
     SimilarityDatabaseRun,
@@ -379,10 +383,11 @@ def _draw_arrow_feature(
     if body.width() > 0.5:
         painter.drawRect(body)
     painter.drawPolygon(arrow)
-    if label and rect.width() > _FEAT_LABEL_MIN_WIDTH:
+    pt = max(0, min(24, int(label_point_size)))
+    if label and pt > 0 and rect.width() > _FEAT_LABEL_MIN_WIDTH:
         painter.setPen(QColor("#ffffff"))
         label_font = QFont(painter.font())
-        label_font.setPointSize(max(6, min(24, int(label_point_size))))
+        label_font.setPointSize(pt)
         painter.setFont(label_font)
         text_rect = rect.adjusted(3, 0, -3, 0)
         if not forward:
@@ -437,6 +442,7 @@ class _NamesColumn(QWidget):
     rowsDragSelected = Signal(object)  # list[int] on drag release (commit)
     selectAllRequested = Signal()
     deleteRequested = Signal()  # Delete / Backspace (macOS name focus)
+    contextMenuRequested = Signal(QPoint, int)  # global pos, row under cursor
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -522,6 +528,11 @@ class _NamesColumn(QWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
+        row = self._row_at_y(event.pos().y())
+        self.contextMenuRequested.emit(event.globalPos(), int(row))
+        event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
@@ -907,6 +918,7 @@ class _BarsCanvas(QWidget):
     zoomChanged = Signal(float)
     regionZoomRequested = Signal(float, float)  # kept for Fit/Select zoom helpers
     regionSelectionChanged = Signal(object)  # tuple[int,int] | None (1-based inclusive)
+    contextMenuRequested = Signal(QPoint)  # global pos
     # Prior chrome dismissed at drag start — clear scale band without resetting Position.
     selectionVisualsDismissed = Signal()
     # Live regional drag: (start, end, rows) while dragging; None when cleared.
@@ -1239,7 +1251,7 @@ class _BarsCanvas(QWidget):
 
     def set_feature_bar_height(self, height: int) -> None:
         """Vertical height of annotation feature bars (Others → Annotation thickness)."""
-        new = max(8, min(40, int(height)))
+        new = max(2, min(40, int(height)))
         if new == self._feat_height:
             return
         self._feat_height = new
@@ -1262,7 +1274,7 @@ class _BarsCanvas(QWidget):
         return int(self._feat_gap)
 
     def set_feature_label_point_size(self, point_size: int) -> None:
-        new = max(6, min(24, int(point_size)))
+        new = max(0, min(24, int(point_size)))
         if new == self._feat_label_point_size:
             return
         self._feat_label_point_size = new
@@ -2369,6 +2381,38 @@ class _BarsCanvas(QWidget):
                 i += 1
         return None
 
+    def flat_indices_for_annotation(
+        self,
+        row: int,
+        start: int,
+        end: int,
+        label: str = "",
+    ) -> list[int]:
+        """Flat feature indices on ``row`` matching a Find annotation hit."""
+        if not (0 <= row < len(self._record_ids)):
+            return []
+        rid = self._record_ids[row]
+        a, b = sorted((int(start), int(end)))
+        needle = str(label or "").strip()
+        matches: list[int] = []
+        flat_i = 0
+        for track in self._tracks.get(rid) or []:
+            for feat in track:
+                fa, fb = sorted((int(feat.start), int(feat.end)))
+                if fa == a and fb == b:
+                    name = str(feat.name or "")
+                    ftype = str(feat.feature_type or "")
+                    if (
+                        not needle
+                        or needle == name
+                        or needle == ftype
+                        or needle.lower() in name.lower()
+                        or needle.lower() in ftype.lower()
+                    ):
+                        matches.append(flat_i)
+                flat_i += 1
+        return matches
+
     def _feature_rect(self, row: int, flat_index: int) -> QRectF | None:
         if not (0 <= row < len(self._record_ids)):
             return None
@@ -2480,7 +2524,7 @@ class _BarsCanvas(QWidget):
 
     def _feature_label_overflows(self, feat: SequenceFeature, rect: QRectF) -> bool:
         label = self._feature_full_label(feat)
-        if not label:
+        if not label or self._feat_label_point_size <= 0:
             return False
         if rect.width() <= _FEAT_LABEL_MIN_WIDTH:
             return True
@@ -2678,6 +2722,10 @@ class _BarsCanvas(QWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
+        self.contextMenuRequested.emit(event.globalPos())
+        event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
@@ -3008,7 +3056,10 @@ class _BarsCanvas(QWidget):
                 except Exception:
                     fc = _DEFAULT_FEAT
                 label = ""
-                if rect.width() > _FEAT_LABEL_MIN_WIDTH:
+                if (
+                    self._feat_label_point_size > 0
+                    and rect.width() > _FEAT_LABEL_MIN_WIDTH
+                ):
                     label = _feature_display_label(
                         feat,
                         show_database_name=self._show_similarity_database_name,
@@ -3705,6 +3756,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._record_ids: list[str] = []
         self._lengths: dict[str, int] = {}
         self._features: dict[str, list[SequenceFeature]] = {}
+        self._annotations_dirty = False
         self._did_initial_fit = False
         self._name_width = _NAME_COLUMN_DEFAULT
         self._syncing_scroll = False
@@ -3712,6 +3764,11 @@ class MultiSequenceOverviewPanel(QWidget):
         self._search_hits: list[int] = []
         self._search_hit_index = -1
         self._updating_zoom_slider = False
+        # Debounce Fit-zoom reflow when the rail, splitter, or window changes width.
+        self._viewport_refit_timer = QTimer(self)
+        self._viewport_refit_timer.setSingleShot(True)
+        self._viewport_refit_timer.setInterval(0)
+        self._viewport_refit_timer.timeout.connect(self._refit_after_viewport_change)
 
         self._names = _NamesColumn(self)
         self._names_scroll = QScrollArea(self)
@@ -3787,6 +3844,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._names.rowsDragSelected.connect(self._on_name_rows_dragged)
         self._names.selectAllRequested.connect(self._select_all_sequences)
         self._names.deleteRequested.connect(self._on_delete_clicked)
+        self._names.contextMenuRequested.connect(self._on_names_context_menu)
+        self._bars.contextMenuRequested.connect(self._on_bars_context_menu)
         # Bars owns the vertical scrollbar; names stays synced. Wheel over either
         # pane uses pixelDelta (trackpad) or a gentle mouse-wheel step.
         self._names_scroll.viewport().installEventFilter(self)
@@ -3944,9 +4003,39 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _on_splitter_moved(self, _pos: int = 0, _index: int = 0) -> None:
         self._name_width = self._current_name_width()
-        self._sync_names_column()
+        self._schedule_viewport_refit()
+
+    def _on_rail_panel_collapsed_changed(self, _collapsed: bool) -> None:
+        """Rail hide/show changes track width without resizing this widget."""
+        self._schedule_viewport_refit()
+
+    def _schedule_viewport_refit(self) -> None:
+        self._viewport_refit_timer.start()
+
+    def _is_near_fit_zoom(self) -> bool:
+        """True when the view is at (or past) whole-alignment Fit zoom."""
+        if not self._record_ids:
+            return False
+        if int(self._zoom_slider.value()) <= 1:
+            return True
+        fit_ppb, _ = self._slider_ppb_bounds()
+        return float(self._bars.pixels_per_base()) <= fit_ppb * 1.02
+
+    def _refit_after_viewport_change(self) -> None:
+        """Keep Fit-zoom tracks edge-to-edge after rail / splitter / window resize."""
+        if not self._record_ids or not self.isVisible():
+            return
+        if not self._did_initial_fit:
+            self._try_initial_fit()
+            return
+        near_fit = self._is_near_fit_zoom()
+        if near_fit:
+            self._fit_bars()
+            return
         self._sync_viewport_fill()
+        self._sync_names_column()
         self._update_scale()
+        self._sync_zoom_slider_from_ppb()
 
     def _sync_hbar_shim(self) -> None:
         h = max(12, self._bars_scroll.horizontalScrollBar().sizeHint().height())
@@ -4199,6 +4288,11 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         rail.showAnnotationTrackChanged.connect(self._on_show_annotation_track_changed)
         rail.sequenceSortChanged.connect(self._on_sequence_sort_changed)
+        rail.findRequested.connect(self._on_rail_find_requested)
+        rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
+        self._find_items: list = []
+        self._find_index: int = -1
+        self._find_key: object | None = None
         self._load_overview_display_settings()
         bases = int(rail.bases_zoomed_in.value())
         self._bars.set_msa_residue_size(bases)
@@ -4254,9 +4348,9 @@ class MultiSequenceOverviewPanel(QWidget):
             s.endGroup()
         bases = max(2, min(36, bases))
         distance = max(0, min(40, distance))
-        ann_thickness = max(8, min(40, ann_thickness))
+        ann_thickness = max(2, min(40, ann_thickness))
         ann_distance = max(0, min(40, ann_distance))
-        ann_labels = max(6, min(24, ann_labels))
+        ann_labels = max(0, min(24, ann_labels))
         scale_labels = max(4, min(24, scale_labels))
         col_distance = max(0, min(40, col_distance))
         for widget in (
@@ -4790,6 +4884,12 @@ class MultiSequenceOverviewPanel(QWidget):
         cancel = self._ann_cancel
         job_ids = list(target_ids)
 
+        # Snapshot current (possibly unsaved) features so the worker does not
+        # discard Preview edits by reloading only the on-disk JSON.
+        base_features = {
+            rid: list(feats) for rid, feats in self._features.items()
+        }
+
         def _job(*, progress=None):
             def _prog(completed: int, total: int, label: str) -> None:
                 if progress is None:
@@ -4810,6 +4910,8 @@ class MultiSequenceOverviewPanel(QWidget):
                 cancel=cancel,
                 progress=_prog,
                 record_ids=job_ids,
+                persist=False,
+                base_features_by_id=base_features,
             )
 
         worker = Worker(_job, progress=True)
@@ -4856,17 +4958,23 @@ class MultiSequenceOverviewPanel(QWidget):
 
     @Slot(object)
     def _on_batch_annotation_finished(self, result: object) -> None:
+        from repeatviewer.backends.te_annotation_batch import TeAnnotationBatchResult
+
         self._clear_annotation_job_status()
         kind = "Feature detection" if self._ann_job_kind == "auto" else "Similarity"
-        if isinstance(result, list) and result:
-            self.statusMessage.emit(
-                f"{kind} finished for selected sequences · saved {Path(result[0]).name}"
-            )
-        else:
-            self.statusMessage.emit(f"{kind} finished for selected sequences.")
-        was_msa = self.is_msa_mode()
-        self.load_path(self._path, msa_mode=was_msa)
-        self.annotationsSaved.emit(self._path)
+        if not isinstance(result, TeAnnotationBatchResult):
+            self.statusMessage.emit(f"{kind} finished with an unexpected result.")
+            return
+        self._push_feature_undo_snapshot()
+        # Apply in memory only — same as single-sequence until the user clicks Save.
+        for rid in self._record_ids:
+            self._features[rid] = list(result.features_by_id.get(rid) or [])
+        self._annotations_dirty = True
+        self._refresh_features_after_edit()
+        self.statusMessage.emit(
+            f"{kind} finished for selected sequences. "
+            "Click Save to write changes to disk."
+        )
 
     @Slot(str)
     def _on_batch_annotation_error(self, message: str) -> None:
@@ -5417,6 +5525,10 @@ class MultiSequenceOverviewPanel(QWidget):
             f"Unsupported export format: {suffix!r}. Use .svg, .png, or .pdf.",
         )
 
+    def is_dirty(self) -> bool:
+        """True when feature detection / similarity results are not yet saved."""
+        return bool(self._annotations_dirty)
+
     def _save_overview_annotations(self) -> None:
         if not self._record_ids:
             return
@@ -5430,6 +5542,7 @@ class MultiSequenceOverviewPanel(QWidget):
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Save annotations", str(exc))
             return
+        self._annotations_dirty = False
         self.statusMessage.emit(f"Saved annotations · {json_path.name}")
         self.annotationsSaved.emit(self._path)
 
@@ -5440,7 +5553,7 @@ class MultiSequenceOverviewPanel(QWidget):
         aligned residue rows instead of length bars.
         """
         self._path = path.expanduser().resolve()
-        self._bars.set_find_hits({}, None)  # hits belong to the previous file
+        self.clear_find_hits()  # hits belong to the previous file
         use_msa = bool(msa_mode) if msa_mode is not None else is_aligned_fasta(self._path)
         if use_msa:
             self._load_msa_path()
@@ -5454,6 +5567,7 @@ class MultiSequenceOverviewPanel(QWidget):
             self._record_ids = []
             self._lengths = {}
             self._features = {}
+            self._annotations_dirty = False
             self._bars.set_data([], {}, {})
             self._sync_mode_specific_controls()
             self._scale.set_scale(ppb=_ABS_MIN_PPB, max_length=1, bar_pad=8)
@@ -5485,6 +5599,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._record_ids = record_ids
         self._lengths = lengths
         self._features = features
+        self._annotations_dirty = False
         self._did_initial_fit = False
         self._search_needle = ""
         self._search_hits = []
@@ -5534,6 +5649,7 @@ class MultiSequenceOverviewPanel(QWidget):
             self._record_ids = []
             self._lengths = {}
             self._features = {}
+            self._annotations_dirty = False
             self._bars.set_data([], {}, {})
             self._sync_mode_specific_controls()
             self._scale.set_scale(ppb=_ABS_MIN_PPB, max_length=1, bar_pad=8)
@@ -5560,6 +5676,7 @@ class MultiSequenceOverviewPanel(QWidget):
                     self._features[rid] = json_feats if not current else current
         else:
             self._features = {rid: [] for rid in record_ids}
+        self._annotations_dirty = False
         self._did_initial_fit = False
         self._search_needle = ""
         self._search_hits = []
@@ -6009,10 +6126,14 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.setValue(bar.value() - int(delta_x))
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        bars_vp = self._bars_scroll.viewport()
+        # Track viewport width changes from rail collapse (parent size unchanged).
+        if obj is bars_vp and event.type() == QEvent.Type.Resize:
+            self._schedule_viewport_refit()
+            return super().eventFilter(obj, event)
         if event.type() != QEvent.Type.Wheel or not isinstance(event, QWheelEvent):
             return super().eventFilter(obj, event)
         names_vp = self._names_scroll.viewport()
-        bars_vp = self._bars_scroll.viewport()
         if obj not in (names_vp, bars_vp):
             return super().eventFilter(obj, event)
         mods = event.modifiers() | QGuiApplication.keyboardModifiers()
@@ -6078,6 +6199,144 @@ class MultiSequenceOverviewPanel(QWidget):
 
     # ------------------------------------------------ Edit > Find / Go To
 
+    def _on_rail_find_requested(self, direction: int) -> None:
+        """Find tab: next / previous / find-all across multi-seq or MSA overview."""
+        from PySide6.QtWidgets import QApplication
+
+        from repeatviewer.backends.find_in_file import find_in_fasta
+        from repeatviewer.backends.motif_search import parse_position, query_problem
+
+        query = self._rail.find_query.text().strip()
+        if not query:
+            self._rail.set_find_status("Type something to find.")
+            self.statusMessage.emit("Type something to find.")
+            self._rail.find_query.setFocus()
+            return
+        position = parse_position(query)
+        if position is not None and (
+            position[0] is not None or not any(c.isalpha() for c in query)
+        ):
+            name, start, end = position
+            problem = self.go_to_find_position(name, start, end)
+            where = f"{start:,}" if start == end else f"{start:,}-{end:,}"
+            msg = problem or (
+                f"Went to position {where}"
+                + (f" of {name}" if name else "")
+                + "."
+            )
+            self._rail.set_find_status(msg)
+            self.statusMessage.emit(msg)
+            return
+
+        request = self._rail.find_request()
+        if request.in_sequence:
+            problem = query_problem(query, request.options)
+            if problem and not request.in_names and not request.in_annotations:
+                self._rail.set_find_status(problem)
+                self.statusMessage.emit(problem)
+                return
+        try:
+            path = Path(self._path).expanduser().resolve()
+            stat = path.stat()
+        except OSError:
+            self._rail.set_find_status("The file is no longer there.")
+            self.statusMessage.emit("The file is no longer there.")
+            return
+        key = (str(path), stat.st_mtime_ns, request)
+        if self._find_key != key or not self._find_items:
+            features = self.features_by_id() if request.in_annotations else None
+            try:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                result = find_in_fasta(path, request, features_by_id=features)
+            except (OSError, ValueError) as exc:
+                msg = f"Could not search: {exc}"
+                self._rail.set_find_status(msg)
+                self.statusMessage.emit(msg)
+                return
+            finally:
+                QApplication.restoreOverrideCursor()
+            self._find_items = list(result.items)
+            self._find_key = key
+            self._find_index = -1
+            if result.sequence_skipped and not self._find_items:
+                self._rail.set_find_status(result.sequence_skipped)
+                self.statusMessage.emit(result.sequence_skipped)
+                self.clear_find_hits()
+                return
+            if not self._find_items:
+                self._rail.set_find_status("No matches.")
+                self.statusMessage.emit("No matches.")
+                self.clear_find_hits()
+                self._find_key = key
+                return
+
+        if direction == 0:
+            self._find_index = 0
+        else:
+            step = 1 if direction >= 0 else -1
+            if self._find_index < 0:
+                self._find_index = 0 if step > 0 else len(self._find_items) - 1
+            else:
+                self._find_index = (self._find_index + step) % len(self._find_items)
+
+        item = self._find_items[self._find_index]
+        if item.kind == "annotation":
+            # Select every matching annotation (so Delete can remove them all).
+            # Do not paint sequence find-hit underlays or a column band.
+            ann_hits = [h for h in self._find_items if h.kind == "annotation"]
+            ok = self.show_find_hit(
+                item.seq_id,
+                item.start,
+                item.end,
+                {},
+                select_annotations=ann_hits,
+            )
+        else:
+            hits_by_id: dict[str, list[tuple[int, int]]] = {}
+            for hit in self._find_items:
+                if hit.kind == "sequence":
+                    hits_by_id.setdefault(hit.seq_id, []).append((hit.start, hit.end))
+            ok = self.show_find_hit(
+                item.seq_id,
+                item.start,
+                item.end,
+                hits_by_id or {item.seq_id: [(item.start, item.end)]},
+                whole_sequence=(item.kind == "name"),
+            )
+        if not ok:
+            self._rail.set_find_status("Could not show that hit.")
+            self.statusMessage.emit("Could not show that hit.")
+            return
+        kind = item.kind
+        label = f" ({item.label})" if item.label else ""
+        msg = (
+            f"{self._find_index + 1} of {len(self._find_items)} — "
+            f"{item.seq_id}:{item.start:,}-{item.end:,} [{kind}]{label}"
+        )
+        self._rail.set_find_status(msg)
+        self.statusMessage.emit(msg)
+
+    def go_to_find_position(
+        self, seq_id: str | None, start: int, end: int
+    ) -> str | None:
+        """Jump to a typed position (optional ``name:start-end``)."""
+        rid = seq_id or self.selected_record_id()
+        if not rid:
+            return (
+                "This file has several sequences: type the name too, "
+                "e.g. scaffold_5:1000-2000."
+            )
+        row = self._row_for_id(rid)
+        if row < 0:
+            return f'There is no sequence "{rid}" in {Path(self._path).name}.'
+        rid = self._record_ids[row]
+        length = self.record_length(rid)
+        if length and start > length:
+            return f"Position {start:,} is past the end of {rid} ({length:,} bp)."
+        end = min(end, length) if length else end
+        self.show_find_hit(rid, start, end, self._bars._find_hits)
+        return None
+
     def record_ids(self) -> list[str]:
         return list(self._record_ids)
 
@@ -6110,13 +6369,44 @@ class MultiSequenceOverviewPanel(QWidget):
         hits_by_id: dict[str, list[tuple[int, int]]],
         *,
         whole_sequence: bool = False,
+        select_annotations: list | None = None,
     ) -> bool:
-        """Select the record, scroll to it and zoom to [start, end]. False if unknown."""
+        """Scroll/zoom to a Find hit. Annotation hits select features only."""
         row = self._row_for_id(seq_id)
         if row < 0:
             return False
         rid = self._record_ids[row]
+
+        if select_annotations is not None:
+            feats: set[tuple[int, int]] = set()
+            for hit in select_annotations:
+                hit_row = self._row_for_id(getattr(hit, "seq_id", "") or "")
+                if hit_row < 0:
+                    continue
+                for flat_i in self._bars.flat_indices_for_annotation(
+                    hit_row,
+                    int(getattr(hit, "start", start)),
+                    int(getattr(hit, "end", end)),
+                    str(getattr(hit, "label", "") or ""),
+                ):
+                    feats.add((hit_row, flat_i))
+            # Annotation search: select features only — no sequence underlays,
+            # no column band, no sequence-row selection.
+            self._bars.set_find_hits({}, None)
+            self._bars.set_selected_rows([])
+            if self._bars.region_selection() is not None:
+                self._bars.set_region_selection(None)
+            self._bars._set_feature_selection(feats, set_columns=False)
+            self._sync_names_column()
+            self._scroll_to_row(row)
+            span = max(1, int(end) - int(start) + 1)
+            context = max(3 * span, 60)
+            center = (int(start) + int(end)) / 2.0
+            self._on_region_zoom(max(0.0, center - context / 2.0), center + context / 2.0)
+            return True
+
         self._bars.set_find_hits(hits_by_id, (rid, int(start), int(end)))
+        self._bars.clear_feature_selection(repaint=False)
         self._bars.set_selected_rows([row])
         self._sync_names_column()
         self._scroll_to_row(row)
@@ -6131,6 +6421,9 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def clear_find_hits(self) -> None:
         self._bars.set_find_hits({}, None)
+        self._find_items = []
+        self._find_index = -1
+        self._find_key = None
 
     def add_features_and_save(self, new_by_id: dict[str, list[SequenceFeature]]) -> bool:
         """Append features per record and save the annotations (JSON sidecar)."""
@@ -6619,6 +6912,285 @@ class MultiSequenceOverviewPanel(QWidget):
                 ids.append(self._record_ids[row])
         return ids
 
+    def _on_names_context_menu(self, global_pos: QPoint, row: int) -> None:
+        if row >= 0 and row not in self._bars.selected_row_set():
+            self._bars.set_selected_rows([row])
+            self._sync_names_column()
+        self._show_overview_context_menu(global_pos)
+
+    def _on_bars_context_menu(self, global_pos: QPoint) -> None:
+        self._show_overview_context_menu(global_pos)
+
+    def _build_overview_context_menu(self) -> QMenu:
+        """Right-click menu aligned with single-sequence map (plus Rename)."""
+        menu = QMenu(self)
+        menu.setObjectName("OverviewSequenceMenu")
+        region = self._bars.region_selection()
+        selected_rows = self._bars.selected_rows()
+        # Name-column / whole-sequence selection (not a regional matrix box).
+        sequence_sel = bool(selected_rows) and not self._bars.is_regional_selection()
+
+        add_action = menu.addAction("Add feature…")
+        add_action.triggered.connect(self._on_add_feature_clicked)
+
+        if sequence_sel:
+            menu.addSeparator()
+            rename = menu.addAction("Rename sequence")
+            rename.setEnabled(len(selected_rows) == 1)
+            rename.triggered.connect(self._rename_selected_sequence)
+
+        menu.addSeparator()
+        copy_seq = menu.addAction("Copy Sequence")
+        extract = menu.addAction("Extract Sequence")
+        if region is not None:
+            start, end = region
+            copy_seq.triggered.connect(
+                lambda _c=False, a=start, b=end: self._copy_region_sequence(a, b)
+            )
+            extract.triggered.connect(
+                lambda _c=False, a=start, b=end: self._extract_region_sequence(a, b)
+            )
+        elif sequence_sel:
+            copy_seq.triggered.connect(self._copy_selected_sequences)
+            extract.triggered.connect(self._extract_selected)
+        else:
+            copy_seq.setEnabled(False)
+            extract.setEnabled(False)
+        return menu
+
+    def _show_overview_context_menu(self, global_pos: QPoint) -> None:
+        self._build_overview_context_menu().exec(global_pos)
+
+    def _rename_selected_sequence(self) -> None:
+        """Rename one selected sequence in the FASTA and annotation sidecar."""
+        from repeatviewer.backends.sequence_features import fasta_id_token
+        from repeatviewer.widgets.file_conflict import prompt_rename_text
+
+        rows = self._bars.selected_rows()
+        if len(rows) != 1:
+            return
+        row = int(rows[0])
+        if not (0 <= row < len(self._record_ids)):
+            return
+        old_id = self._record_ids[row]
+        new_text, ok = prompt_rename_text(
+            self,
+            title="Rename sequence",
+            label="New sequence name:",
+            initial=old_id,
+        )
+        if not ok:
+            return
+        new_id = fasta_id_token(new_text)
+        if not new_id:
+            QMessageBox.warning(self, "Rename sequence", "Enter a sequence name.")
+            return
+        if new_id == old_id:
+            return
+        if new_id in self._record_ids:
+            QMessageBox.warning(
+                self,
+                "Rename sequence",
+                f'“{new_id}” is already used by another sequence.',
+            )
+            return
+        try:
+            sequences = list(self._bars.msa_sequences())
+            if len(sequences) != len(self._record_ids):
+                _ids, sequences = load_fasta_rows(self._path)
+            if len(sequences) != len(self._record_ids):
+                raise ValueError(
+                    "FASTA record count no longer matches the overview."
+                )
+            new_ids = list(self._record_ids)
+            new_ids[row] = new_id
+            if self._bars.is_msa_mode():
+                write_aligned_fasta_rows(self._path, new_ids, sequences)
+            else:
+                write_fasta_rows(self._path, new_ids, sequences)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Rename sequence", str(exc))
+            return
+
+        feats = list(self._features.pop(old_id, []) or [])
+        self._features[new_id] = feats
+        length = int(self._lengths.pop(old_id, self._lengths.get(new_id, 0)))
+        self._lengths[new_id] = length
+        self._record_ids = new_ids
+        keep_ppb = self._bars.pixels_per_base()
+        keep_region = self._bars.region_selection()
+        if self._bars.is_msa_mode():
+            self._bars.set_msa_data(
+                new_ids,
+                sequences,
+                features=self._features,
+            )
+            self._bars.set_pixels_per_base(keep_ppb)
+        else:
+            self._bars.set_data(
+                new_ids,
+                self._lengths,
+                self._features,
+                sequences=sequences,
+                fit_bars_width=None,
+            )
+            self._bars.set_pixels_per_base(keep_ppb)
+        self._bars.set_selected_rows([row])
+        if keep_region is not None:
+            self._bars.set_region_selection(keep_region[0], keep_region[1])
+        self._sync_names_column()
+        self._update_scale()
+        try:
+            json_path, _gff = save_annotations_multi(
+                self._path,
+                features_by_id=self._features,
+                lengths_by_id=self._lengths,
+                record_ids=list(self._record_ids),
+            )
+            self.annotationsSaved.emit(json_path)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Rename sequence",
+                f"Sequence renamed, but annotations could not be saved:\n{exc}",
+            )
+            return
+        self.statusMessage.emit(f"Renamed “{old_id}” → “{new_id}”")
+
+    def _copy_region_sequence(self, start: int, end: int) -> None:
+        """Copy the selected region from target sequence(s) to the clipboard."""
+        targets = self._target_record_ids_for_manual_add()
+        if not targets:
+            QMessageBox.information(
+                self,
+                "Copy Sequence",
+                "Select one or more sequences (click names, or drag a box "
+                "on the tracks), then Copy Sequence.",
+            )
+            return
+        lo, hi = (start, end) if start <= end else (end, start)
+        chunks: list[str] = []
+        total = 0
+        try:
+            for rid in targets:
+                seq = self._sequence_text_for_id(rid)
+                frag = seq[lo - 1 : hi]
+                if not frag:
+                    continue
+                total += len(frag)
+                if len(targets) == 1:
+                    chunks.append(frag)
+                else:
+                    chunks.append(f">{rid}\n{frag}")
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Copy Sequence", str(exc))
+            return
+        if not chunks:
+            QMessageBox.warning(self, "Copy Sequence", "The selection is empty.")
+            return
+        QApplication.clipboard().setText("\n".join(chunks))
+        unit = "aa" if self._bars.is_msa_mode() and self._bars._msa_protein else "bp"
+        self.statusMessage.emit(
+            f"Copied {total:,} {unit} ({lo:,}-{hi:,}) from "
+            f"{len(targets):,} sequence{'s' if len(targets) != 1 else ''}"
+        )
+
+    def _copy_selected_sequences(self) -> None:
+        """Copy whole selected sequence(s) to the clipboard as FASTA text."""
+        ids = self._selected_record_ids()
+        if not ids:
+            return
+        chunks: list[str] = []
+        try:
+            for rid in ids:
+                seq = self._sequence_text_for_id(rid)
+                chunks.append(f">{rid}\n{seq}")
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Copy Sequence", str(exc))
+            return
+        QApplication.clipboard().setText("\n".join(chunks))
+        self.statusMessage.emit(
+            f"Copied {len(ids):,} sequence{'s' if len(ids) != 1 else ''} to the clipboard"
+        )
+
+    def _extract_region_sequence(self, start: int, end: int) -> None:
+        """Extract the selected region from target sequence(s) to a new FASTA."""
+        from repeatviewer.widgets.sequence_map_viewer import _ExtractSequenceDialog
+
+        targets = self._target_record_ids_for_manual_add()
+        if not targets:
+            QMessageBox.information(
+                self,
+                "Extract Sequence",
+                "Select one or more sequences (click names, or drag a box "
+                "on the tracks), then Extract Sequence.",
+            )
+            return
+        lo, hi = (start, end) if start <= end else (end, start)
+        primary = targets[0]
+        try:
+            primary_seq = self._sequence_text_for_id(primary)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Extract Sequence", str(exc))
+            return
+        seq_len = max(1, len(primary_seq))
+        dialog = _ExtractSequenceDialog(
+            sequence_id=primary if len(targets) == 1 else f"{len(targets)}_sequences",
+            sequence_length=seq_len,
+            start=lo,
+            end=min(hi, seq_len),
+            default_name=f"{primary}_{lo}_{hi}",
+            reverse=False,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen_start, chosen_end, name, reverse = dialog.values()
+        from repeatviewer.backends.dotplot import reverse_complement
+
+        safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
+        out_path = self._path.parent / f"{safe}.fasta"
+        if out_path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Extract Sequence",
+                f"{out_path.name} already exists. Overwrite it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        lines: list[str] = []
+        try:
+            for rid in targets:
+                seq = self._sequence_text_for_id(rid)
+                a = max(1, min(int(chosen_start), len(seq)))
+                b = max(1, min(int(chosen_end), len(seq)))
+                if b < a:
+                    a, b = b, a
+                frag = seq[a - 1 : b]
+                if reverse:
+                    frag = reverse_complement(frag)
+                strand = "-" if reverse else "+"
+                header = (
+                    f">{name}"
+                    if len(targets) == 1
+                    else f">{name}_{rid}"
+                )
+                lines.append(f">{header} {rid}:{a}-{b}({strand})")
+                for offset in range(0, len(frag), 60):
+                    lines.append(frag[offset : offset + 60])
+            out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Extract Sequence", str(exc))
+            return
+        self.sequenceExtracted.emit(out_path)
+        self.statusMessage.emit(
+            f"Extracted {chosen_start:,}-{chosen_end:,} from "
+            f"{len(targets):,} sequence{'s' if len(targets) != 1 else ''} → "
+            f"{out_path.name}"
+        )
+
     def _extract_selected(self) -> None:
         from repeatviewer.backends.sequence_compose import (
             SequenceComposeError,
@@ -6767,9 +7339,4 @@ class MultiSequenceOverviewPanel(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._sync_hbar_shim()
-        self._sync_viewport_fill()
-        if self._record_ids and not self._did_initial_fit:
-            self._try_initial_fit()
-        else:
-            self._sync_names_column()
-            self._update_scale()
+        self._schedule_viewport_refit()

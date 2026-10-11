@@ -1777,11 +1777,25 @@ class FilePreviewPage(QWidget):
     def show_find_item(self, item, hits_by_id: dict[str, list[tuple[int, int]]]) -> bool:
         """Show one Find hit in the Annotation view. False if it cannot be shown."""
         view = self._show_annotation_for_find()
-        whole = getattr(item, "kind", "") == "name"
+        kind = getattr(item, "kind", "") or ""
+        whole = kind == "name"
+        ann = [item] if kind == "annotation" else None
         if self._multi_fasta_mode:
-            return view.show_find_hit(item.seq_id, item.start, item.end, hits_by_id, whole_sequence=whole)
+            return view.show_find_hit(
+                item.seq_id,
+                item.start,
+                item.end,
+                hits_by_id,
+                whole_sequence=whole,
+                select_annotations=ann,
+            )
         return view.show_find_hit(
-            item.seq_id, item.start, item.end, hits_by_id.get(item.seq_id, []), whole_sequence=whole
+            item.seq_id,
+            item.start,
+            item.end,
+            hits_by_id.get(item.seq_id, []),
+            whole_sequence=whole,
+            select_annotations=ann,
         )
 
     def clear_find_hits(self) -> None:

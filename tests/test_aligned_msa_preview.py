@@ -280,3 +280,157 @@ def test_rail_switch_tab_while_expanded_keeps_panel(qapp: QApplication) -> None:
     assert rail.is_panel_collapsed() is False
     assert rail._stack.currentIndex() == SequenceAnnotationRail.TAB_FIND
     rail.deleteLater()
+
+
+def test_msa_overview_find_tab_locates_motif(qapp: QApplication, tmp_path: Path) -> None:
+    """Find next/prev on the overview rail must search multi/MSA FASTA."""
+    path = tmp_path / "find_msa.fa"
+    path.write_text(
+        ">seqA\nACGTGTACGT\n"
+        ">seqB\nTTTTTTTTTT\n"
+        ">seqC\nCCCTGTCCCC\n"
+    )
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    qapp.processEvents()
+    assert panel._bars.is_msa_mode()
+    rail = panel._rail
+    rail.find_query.setText("TGT")
+    rail.find_in_names.setChecked(False)
+    rail.find_in_annotations.setChecked(False)
+    rail.find_reverse_complement.setChecked(False)
+    rail.findRequested.emit(1)
+    qapp.processEvents()
+    assert len(panel._find_items) >= 2
+    assert panel._find_index == 0
+    assert panel._bars._find_current is not None
+    assert panel._bars._find_current[0] in {"seqA", "seqC"}
+    first = panel._find_index
+    rail.findRequested.emit(1)
+    qapp.processEvents()
+    assert panel._find_index != first or len(panel._find_items) == 1
+    panel.close()
+
+
+def test_msa_overview_find_annotation_selects_features_not_sequences(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Annotation-name Find selects matching features, not sequence rows."""
+    from repeatviewer.backends.sequence_features import SequenceFeature
+
+    path = tmp_path / "find_ann.fa"
+    path.write_text(">seqA\nACGTACGTACGTACGTACGT\n>seqB\nACGTACGTACGTACGTACGT\n")
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    qapp.processEvents()
+    panel._features = {
+        "seqA": [SequenceFeature(start=5, end=10, name="Gvch2", feature_type="domain")],
+        "seqB": [SequenceFeature(start=2, end=4, name="other", feature_type="ORF")],
+    }
+    panel._bars.set_features_in_place(panel._features)
+    panel._bars.set_selected_rows([1])  # prior sequence selection should be cleared
+    qapp.processEvents()
+
+    rail = panel._rail
+    rail.find_query.setText("Gvch2")
+    rail.find_in_sequence.setChecked(False)
+    rail.find_in_names.setChecked(False)
+    rail.find_in_annotations.setChecked(True)
+    rail.findRequested.emit(1)
+    qapp.processEvents()
+
+    assert panel._find_items
+    assert panel._find_items[0].kind == "annotation"
+    assert panel._bars.selected_rows() == []
+    assert panel._bars.selected_features() == [(0, 0)]
+    # Annotation Find must not paint sequence underlays or a column band.
+    assert panel._bars._find_hits == {}
+    assert panel._bars.region_selection() is None
+    panel.close()
+
+
+def test_msa_overview_find_all_annotations_selects_every_match(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Find all on annotation names selects every match for bulk delete."""
+    from repeatviewer.backends.sequence_features import SequenceFeature
+
+    path = tmp_path / "find_all_ann.fa"
+    path.write_text(
+        ">seqA\nACGTACGTACGTACGTACGT\n"
+        ">seqB\nACGTACGTACGTACGTACGT\n"
+        ">seqC\nACGTACGTACGTACGTACGT\n"
+    )
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    qapp.processEvents()
+    panel._features = {
+        "seqA": [SequenceFeature(start=2, end=5, name="LTR5", feature_type="LTR")],
+        "seqB": [SequenceFeature(start=3, end=8, name="LTR3", feature_type="LTR")],
+        "seqC": [SequenceFeature(start=1, end=4, name="ORF1", feature_type="ORF")],
+    }
+    panel._bars.set_features_in_place(panel._features)
+    qapp.processEvents()
+
+    rail = panel._rail
+    rail.find_query.setText("LTR")
+    rail.find_in_sequence.setChecked(False)
+    rail.find_in_names.setChecked(False)
+    rail.find_in_annotations.setChecked(True)
+    rail.findRequested.emit(0)  # Find all
+    qapp.processEvents()
+
+    selected = set(panel._bars.selected_features())
+    assert selected == {(0, 0), (1, 0)}
+    assert panel._bars._find_hits == {}
+    assert panel._bars.region_selection() is None
+    panel.close()
+
+
+def test_msa_overview_context_menu_has_rename_for_sequence_selection(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Right-click menu: Rename when a sequence row is selected."""
+    path = tmp_path / "ctx.fa"
+    path.write_text(">seqA\nACGTACGT\n>seqB\nGGGGGGGG\n")
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    panel._bars.set_selected_rows([0])
+    qapp.processEvents()
+
+    menu = panel._build_overview_context_menu()
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert "Add feature…" in texts
+    assert "Rename sequence" in texts
+    assert "Copy Sequence" in texts
+    assert "Extract Sequence" in texts
+    rename = next(a for a in menu.actions() if a.text() == "Rename sequence")
+    assert rename.isEnabled() is True
+
+    # Region-only selection: no Rename.
+    panel._bars.set_selected_rows([])
+    panel._bars.set_region_selection(2, 4)
+    menu2 = panel._build_overview_context_menu()
+    texts2 = [a.text() for a in menu2.actions() if not a.isSeparator()]
+    assert "Rename sequence" not in texts2
+    panel.close()
+
+
+def test_msa_overview_rename_sequence_writes_fasta(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    path = tmp_path / "rename.fa"
+    path.write_text(">oldName\nACGTACGT\n>other\nTTTTTTTT\n")
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    panel._bars.set_selected_rows([0])
+    with patch(
+        "repeatviewer.widgets.file_conflict.prompt_rename_text",
+        return_value=("newName", True),
+    ):
+        panel._rename_selected_sequence()
+    text = path.read_text()
+    assert ">newName\n" in text
+    assert ">oldName\n" not in text
+    assert panel.record_ids()[0] == "newName"
+    panel.close()

@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QCursor,
     QFont,
     QFontMetrics,
+    QGuiApplication,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
@@ -83,10 +84,16 @@ from repeatviewer.widgets.spin_boxes import (
     NoWheelSlider,
     NoWheelSpinBox as QSpinBox,
 )
-from repeatviewer.widgets.help_button import field_with_help
+from repeatviewer.widgets.help_button import field_with_help, make_help_button
 
 # Match TOOL_PARAMS_FIELD_WIDTH (BLAST / Align Settings).
 _SETTINGS_FIELD_WIDTH = 260
+# Shared label column so LTR / TIR / Tandem / ORF forms line up vertically.
+_SETTINGS_LABEL_WIDTH = 210
+
+# Shift+scroll / trackpad pinch zoom (same factor as MSA / multi-sequence).
+_MAP_ZOOM_STEP = 1.08
+_MAP_PINCH_DELTA_PER_STEP = 0.04
 
 from repeatviewer.backends.auto_annotation import (
     AutoAnnotationMode,
@@ -831,10 +838,11 @@ def _draw_directed_feature(
     if body.width() > 0.5:
         painter.drawRect(body)
     painter.drawPolygon(arrow)
-    if label and rect.width() > 28:
+    pt = max(0, min(24, int(label_point_size)))
+    if label and pt > 0 and rect.width() > 28:
         painter.setPen(QColor("#ffffff"))
         label_font = QFont(painter.font())
-        label_font.setPointSize(max(6, min(24, int(label_point_size))))
+        label_font.setPointSize(pt)
         painter.setFont(label_font)
         text_rect = rect.adjusted(3, 0, -3, 0)
         if not forward:
@@ -1156,9 +1164,14 @@ def _horizontal_wheel_delta(event: QWheelEvent, *, scroll_step: int) -> int:
 
 
 class SequenceScrollArea(QScrollArea):
-    """Scroll area that pans horizontally from trackpad / Shift+wheel input."""
+    """Scroll area that pans horizontally from trackpad swipe (not Shift+wheel)."""
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        # Shift+wheel is zoom (handled by SequenceMapWidget); do not remap to pan.
+        mods = event.modifiers() | QGuiApplication.keyboardModifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            super().wheelEvent(event)
+            return
         hbar = self.horizontalScrollBar()
         delta_x = _horizontal_wheel_delta(event, scroll_step=hbar.singleStep() * 3)
         if delta_x != 0 and hbar.maximum() > 0:
@@ -1742,7 +1755,7 @@ class AnnotationTrackWidget(QWidget):
         self.update()
 
     def set_feature_bar_height(self, height: int) -> None:
-        self._feature_bar_height = float(max(8, min(40, int(height))))
+        self._feature_bar_height = float(max(2, min(40, int(height))))
         self._refresh_geometry_from_layout()
 
     def set_track_gap(self, gap: int) -> None:
@@ -1764,7 +1777,7 @@ class AnnotationTrackWidget(QWidget):
             self.update()
 
     def set_label_point_size(self, point_size: int) -> None:
-        self._label_point_size = max(6, min(24, int(point_size)))
+        self._label_point_size = max(0, min(24, int(point_size)))
         self.update()
 
     def set_show_similarity_database_name(self, show: bool) -> None:
@@ -1775,7 +1788,7 @@ class AnnotationTrackWidget(QWidget):
         self.update()
 
     def _feature_track_label(self, feat: SequenceFeature, rect_width: float, min_width: float) -> str:
-        if rect_width <= min_width:
+        if self._label_point_size <= 0 or rect_width <= min_width:
             return ""
         base = feat.name or feat.feature_type
         return similarity_feature_track_label(
@@ -1830,9 +1843,10 @@ class AnnotationTrackWidget(QWidget):
 
     def _label_overflows(self, feat: SequenceFeature, rect: QRectF) -> bool:
         label = self._feature_full_label(feat)
-        if not label or rect.width() <= 28:
-            return bool(label) and rect.width() <= 28
-        fm = QFontMetrics(self.font())
+        if not label or self._label_point_size <= 0:
+            return False
+        if rect.width() <= 28:
+            return True
         label_font = QFont(self.font())
         label_font.setPointSize(self._label_point_size)
         fm = QFontMetrics(label_font)
@@ -2925,7 +2939,8 @@ class SequenceMapCanvas(QWidget):
         self.update()
 
     def _feature_track_label(self, feat: SequenceFeature, rect_width: float, min_width: float) -> str:
-        if rect_width <= min_width:
+        label_pt = getattr(self, "_label_point_size", None)
+        if (label_pt is not None and int(label_pt) <= 0) or rect_width <= min_width:
             return ""
         base = feat.name or feat.feature_type
         return similarity_feature_track_label(
@@ -4344,6 +4359,7 @@ class SequenceMapWidget(QWidget):
         self._annotation_header_zoom_bar = None
         self._annotation_side_panel: QWidget | None = None
         self._toolbar: QWidget | None = None
+        self._pinch_accum = 0.0
         zoom_row: QHBoxLayout | None = None
 
         # Shared position / font / stats controls (parented into toolbar or side panel).
@@ -4700,6 +4716,18 @@ class SequenceMapWidget(QWidget):
         self._ruler.installEventFilter(self)
         self._overview.installEventFilter(self)
         self._header.installEventFilter(self)
+        # Needed for trackpad pinch (ZoomNativeGesture) to reach the filter.
+        for _w in (
+            self._canvas,
+            self._canvas_row,
+            self._sequence_block,
+            self._annot_track,
+            self._annot_scroll.viewport(),
+            self._ruler,
+            self._overview,
+            self._header,
+        ):
+            _w.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
@@ -4741,7 +4769,8 @@ class SequenceMapWidget(QWidget):
             self._annot_scroll.viewport(),
         ):
             QTimer.singleShot(0, self._layout_sync_timer.start)
-        if event.type() == QEvent.Type.Wheel and watched in (
+
+        zoom_surfaces = (
             self._canvas,
             self._canvas_row,
             self._annot_track,
@@ -4751,9 +4780,29 @@ class SequenceMapWidget(QWidget):
             self._overview,
             self._header,
             self._sequence_block,
+        )
+
+        # Trackpad pinch → zoom (same path as Preview / Dotplot).
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and watched in zoom_surfaces
+            and isinstance(event, QNativeGestureEvent)
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
         ):
+            if self._apply_pinch_zoom(float(event.value()), watched, event):
+                event.accept()
+                return True
+
+        if event.type() == QEvent.Type.Wheel and watched in zoom_surfaces:
             wheel = event
             if isinstance(wheel, QWheelEvent):
+                mods = wheel.modifiers() | QGuiApplication.keyboardModifiers()
+                if mods & Qt.KeyboardModifier.ShiftModifier:
+                    # Always consume so Shift+scroll never remaps to horizontal pan.
+                    self._apply_shift_wheel_zoom(wheel, watched)
+                    wheel.accept()
+                    return True
+                # Plain two-finger swipe: horizontal pan (not zoom).
                 delta_x = _horizontal_wheel_delta(
                     wheel,
                     scroll_step=max(1, self._hbar.singleStep() * 3),
@@ -4763,11 +4812,76 @@ class SequenceMapWidget(QWidget):
                     return True
         return super().eventFilter(watched, event)
 
+    def _event_to_canvas_x(self, watched, event) -> float:
+        """Map an event position into SequenceMapCanvas local x."""
+        if hasattr(event, "globalPosition"):
+            try:
+                global_pt = event.globalPosition().toPoint()
+                return float(self._canvas.mapFromGlobal(global_pt).x())
+            except Exception:
+                pass
+        if watched is self._canvas and hasattr(event, "position"):
+            return float(event.position().x())
+        return float(self._canvas.width()) * 0.5
+
+    def _apply_shift_wheel_zoom(self, wheel: QWheelEvent, watched) -> bool:
+        """Shift+scroll zoom: one ×1.08 step per event (MSA / multi-seq parity)."""
+        if self._data is None or self.is_too_long_for_display():
+            return False
+        # Same delta extraction as MultiSequenceOverview / _BarsCanvas.
+        delta = wheel.angleDelta().y()
+        if delta == 0:
+            delta = wheel.angleDelta().x()
+        pixel = wheel.pixelDelta()
+        if delta == 0 and not pixel.isNull():
+            delta = int(pixel.y()) or int(pixel.x())
+        if delta == 0:
+            return False
+        factor = _MAP_ZOOM_STEP if delta > 0 else 1.0 / _MAP_ZOOM_STEP
+        self._zoom_by_at_view_x(factor, self._event_to_canvas_x(watched, wheel))
+        return True
+
+    def _apply_pinch_zoom(self, magnification: float, watched, event) -> bool:
+        """Accumulate trackpad pinch magnification into discrete zoom steps."""
+        if self._data is None or self.is_too_long_for_display():
+            return False
+        self._pinch_accum += float(magnification)
+        steps = int(self._pinch_accum / _MAP_PINCH_DELTA_PER_STEP)
+        if steps == 0:
+            return True
+        self._pinch_accum -= steps * _MAP_PINCH_DELTA_PER_STEP
+        factor = _MAP_ZOOM_STEP ** steps
+        self._zoom_by_at_view_x(factor, self._event_to_canvas_x(watched, event))
+        return True
+
+    def _zoom_by_at_view_x(self, factor: float, view_x: float) -> None:
+        """Multiply current ppb by ``factor``, keeping the bp under ``view_x`` fixed."""
+        if self._data is None or self.is_too_long_for_display():
+            return
+        if factor <= 0:
+            return
+        old_ppb = max(self._canvas.effective_ppb(), 1e-12)
+        scroll = float(self._hbar.value())
+        bp0 = (float(view_x) + scroll - float(_LEFT_MARGIN)) / old_ppb
+        fit_ppb, max_ppb = self._slider_ppb_bounds()
+        new_ppb = max(fit_ppb, min(max_ppb, old_ppb * float(factor)))
+        if abs(new_ppb - old_ppb) < 1e-12:
+            return
+        self._apply_zoom_ppb(new_ppb, sync_slider=True, previous_ppb=old_ppb)
+        new_ppb = max(self._canvas.effective_ppb(), 1e-12)
+        new_content_x = float(_LEFT_MARGIN) + bp0 * new_ppb
+        target = int(round(new_content_x - float(view_x)))
+        self._hbar.setValue(max(0, min(self._hbar.maximum(), target)))
+        self._sync_overview_now()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._layout_sync_timer.start()
         if self._fit_retries > 0:
             QTimer.singleShot(0, self.fit_window)
+        else:
+            # Rail collapse/expand and window resize: re-fit when still at Fit zoom.
+            QTimer.singleShot(0, self._ensure_fitted_to_viewport)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -4778,6 +4892,17 @@ class SequenceMapWidget(QWidget):
     def refresh_layout(self) -> None:
         self._sync_header_views()
         self._ensure_fitted_to_viewport()
+
+    def _is_near_fit_zoom(self) -> bool:
+        """True when the view is at (or past) whole-sequence Fit zoom."""
+        if self._data is None or not self._data.sequence:
+            return False
+        if self._zoom_slider is not None and int(self._zoom_slider.value()) <= 1:
+            return True
+        fit_ppb, _ = self._slider_ppb_bounds()
+        cur = float(self._canvas.effective_ppb())
+        # After the viewport grows, current ppb is below the new fit target.
+        return cur <= fit_ppb * 1.02
 
     def _sync_header_views(self) -> None:
         self._canvas.sync_viewport_from_widget()
@@ -4801,10 +4926,10 @@ class SequenceMapWidget(QWidget):
         return 120
 
     def _ensure_fitted_to_viewport(self) -> None:
-        """Re-fit when the sequence strip is much narrower than the panel."""
+        """Re-fit when Fit-zoom content no longer matches the viewport width."""
         if self._data is None or not self._data.sequence:
             return
-        if not self.isVisible():
+        if not self.isVisible() or self.is_too_long_for_display():
             return
         viewport_w = self._scroll_viewport_width()
         panel_w = max(self.width(), self._sequence_block.width())
@@ -4814,6 +4939,15 @@ class SequenceMapWidget(QWidget):
                 QTimer.singleShot(50, self._ensure_fitted_to_viewport)
             return
         content_w = self._canvas.content_pixel_width()
+        # At Fit zoom, keep the sequence edge-to-edge when the rail toggles or
+        # the window resizes (content_w ≈ old viewport; new viewport differs).
+        if (
+            content_w > 0
+            and self._is_near_fit_zoom()
+            and (content_w < viewport_w * 0.98 or content_w > viewport_w * 1.02)
+        ):
+            self.fit_window()
+            return
         # Tiny first-open fit: content fills only a sliver of the panel.
         if content_w > 0 and content_w < viewport_w * 0.55:
             self.fit_window()
@@ -6230,7 +6364,7 @@ class AutoAnnotationSettingsPanel(QWidget):
         layout.addLayout(self._tandem_repeat_form(settings.tandem or TandemRepeatSettings()))
         layout.addWidget(_settings_separator())
 
-        layout.addWidget(self._section_title("ORF"))
+        layout.addWidget(self._section_title("ORF (orfipy)"))
         layout.addLayout(self._orf_form(settings.orf or OrfSettings()))
 
         self._ltr_fields = self._terminal_fields[0]
@@ -6247,19 +6381,39 @@ class AutoAnnotationSettingsPanel(QWidget):
 
     def _sized_spin(self, spin: QSpinBox | QDoubleSpinBox) -> QSpinBox | QDoubleSpinBox:
         spin.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         return spin
+
+    def _sized_line_edit(self, edit: QLineEdit) -> QLineEdit:
+        edit.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return edit
 
     def _field_help(self, field: QWidget, title: str, help_text: str) -> QWidget:
         """``?`` after the value control (BLAST Settings style)."""
         return field_with_help(field, title, help_text, parent=self)
 
-    def _terminal_repeat_form(self, cfg: TerminalRepeatSettings, repeat_kind: str) -> QFormLayout:
+    def _settings_form(self) -> QFormLayout:
         form = QFormLayout()
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(4)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        return form
+
+    def _form_label(self, text: str) -> QLabel:
+        """Fixed-width label so every section shares the same field-column edge."""
+        lab = QLabel(text, self)
+        lab.setFixedWidth(_SETTINGS_LABEL_WIDTH)
+        lab.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        return lab
+
+    def _terminal_repeat_form(self, cfg: TerminalRepeatSettings, repeat_kind: str) -> QFormLayout:
+        form = self._settings_form()
         min_len = QSpinBox(self)
         min_len.setRange(1, 1_000_000)
         min_len.setValue(cfg.min_length)
@@ -6278,7 +6432,7 @@ class AutoAnnotationSettingsPanel(QWidget):
         similarity.setSingleStep(0.05)
         similarity.setValue(cfg.similarity_threshold)
         form.addRow(
-            "Min length (bp):",
+            self._form_label("Min length (bp):"),
             self._field_help(
                 self._sized_spin(min_len),
                 f"{repeat_kind} min length",
@@ -6288,7 +6442,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         form.addRow(
-            "Max length (bp):",
+            self._form_label("Max length (bp):"),
             self._field_help(
                 self._sized_spin(max_len),
                 f"{repeat_kind} max length",
@@ -6297,7 +6451,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         form.addRow(
-            f"Min distance between {repeat_kind} (bp):",
+            self._form_label(f"Min distance between {repeat_kind} (bp):"),
             self._field_help(
                 self._sized_spin(min_distance),
                 f"Min distance between {repeat_kind}",
@@ -6307,7 +6461,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         form.addRow(
-            "Min distance to end (bp):",
+            self._form_label("Min distance to end (bp):"),
             self._field_help(
                 self._sized_spin(min_distance_to_end),
                 f"{repeat_kind} min distance to end",
@@ -6319,7 +6473,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         form.addRow(
-            "Similarity threshold:",
+            self._form_label("Similarity threshold:"),
             self._field_help(
                 self._sized_spin(similarity),
                 f"{repeat_kind} similarity threshold",
@@ -6336,12 +6490,7 @@ class AutoAnnotationSettingsPanel(QWidget):
         return form
 
     def _tandem_repeat_form(self, cfg: TandemRepeatSettings) -> QFormLayout:
-        form = QFormLayout()
-        form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(4)
+        form = self._settings_form()
 
         fields: list[QSpinBox] = []
         for motif_size in (2, 3, 4, 5):
@@ -6349,7 +6498,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             spin.setRange(1, 1000)
             spin.setValue(getattr(cfg, f"min_repeat_{motif_size}"))
             form.addRow(
-                f"Min repeat number ({motif_size}-motif):",
+                self._form_label(f"Min repeat number ({motif_size}-motif):"),
                 self._field_help(
                     self._sized_spin(spin),
                     f"Min repeat number ({motif_size}-motif)",
@@ -6362,7 +6511,7 @@ class AutoAnnotationSettingsPanel(QWidget):
         spin_6.setRange(1, 1000)
         spin_6.setValue(cfg.min_repeat_6)
         form.addRow(
-            "Min repeat number (≥ 6-motif):",
+            self._form_label("Min repeat number (≥ 6-motif):"),
             self._field_help(
                 self._sized_spin(spin_6),
                 "Min repeat number (≥ 6-motif)",
@@ -6372,23 +6521,6 @@ class AutoAnnotationSettingsPanel(QWidget):
         )
         fields.append(spin_6)
         self._tandem_field_list = fields
-
-        approximate_cb = QCheckBox("Enable approximate tandem repeat", self)
-        approximate_cb.setChecked(cfg.enable_approximate)
-        # Tick aligns with field column (left edge of number boxes); text to the right.
-        form.addRow(
-            "",
-            field_with_help(
-                approximate_cb,
-                "Approximate tandem repeat",
-                "Run pytrf ATRFinder to detect imperfect repeats with "
-                "mismatches. ATR runs before exact STR/GTR so long approximate "
-                "blocks are kept.",
-                parent=self,
-                stretch=True,
-            ),
-        )
-        self._tandem_approximate_cb = approximate_cb
 
         atr_identity = QDoubleSpinBox(self)
         atr_identity.setRange(0.0, 1.0)
@@ -6403,7 +6535,7 @@ class AutoAnnotationSettingsPanel(QWidget):
         atr_max_errors.setValue(cfg.atr_max_errors)
 
         form.addRow(
-            "Approx. min identity:",
+            self._form_label("Approx. min identity:"),
             self._field_help(
                 self._sized_spin(atr_identity),
                 "Approx. min identity",
@@ -6412,7 +6544,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         form.addRow(
-            "Approx. min motif (bp):",
+            self._form_label("Approx. min motif (bp):"),
             self._field_help(
                 self._sized_spin(atr_min_motif),
                 "Approx. min motif",
@@ -6420,7 +6552,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         form.addRow(
-            "Approx. max errors:",
+            self._form_label("Approx. max errors:"),
             self._field_help(
                 self._sized_spin(atr_max_errors),
                 "Approx. max errors",
@@ -6429,6 +6561,23 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         self._tandem_approximate_fields = (atr_identity, atr_min_motif, atr_max_errors)
+
+        approximate_cb = QCheckBox("Enable approximate tandem repeat", self)
+        approximate_cb.setChecked(cfg.enable_approximate)
+        # Keep the enable tick after its Approx.* parameters.
+        form.addRow(
+            self._form_label(""),
+            field_with_help(
+                approximate_cb,
+                "Approximate tandem repeat",
+                "Run pytrf ATRFinder to detect imperfect repeats with "
+                "mismatches. ATR runs before exact STR/GTR so long approximate "
+                "blocks are kept.",
+                parent=self,
+                stretch=True,
+            ),
+        )
+        self._tandem_approximate_cb = approximate_cb
         approximate_cb.toggled.connect(self._sync_tandem_approximate_fields)
         self._sync_tandem_approximate_fields(cfg.enable_approximate)
 
@@ -6439,12 +6588,12 @@ class AutoAnnotationSettingsPanel(QWidget):
             widget.setEnabled(enabled)
 
     def _orf_form(self, cfg: OrfSettings) -> QFormLayout:
-        form = QFormLayout()
-        form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        from repeatviewer.backends.auto_annotation_settings import (
+            DEFAULT_ORF_FRAMES,
+            normalize_orf_frames,
         )
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(4)
+
+        form = self._settings_form()
         min_len = QSpinBox(self)
         min_len.setRange(3, 1_000_000)
         min_len.setValue(cfg.min_length)
@@ -6454,9 +6603,8 @@ class AutoAnnotationSettingsPanel(QWidget):
         alt_starts = QLineEdit(self)
         alt_starts.setPlaceholderText("e.g. TTG, CTG")
         alt_starts.setText(cfg.alternative_start_codons)
-        alt_starts.setFixedWidth(_SETTINGS_FIELD_WIDTH)
         form.addRow(
-            "Min ORF length (bp):",
+            self._form_label("Min ORF length (bp):"),
             self._field_help(
                 self._sized_spin(min_len),
                 "Min ORF length",
@@ -6465,7 +6613,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         form.addRow(
-            "Max ORF length (bp):",
+            self._form_label("Max ORF length (bp):"),
             self._field_help(
                 self._sized_spin(max_len),
                 "Max ORF length",
@@ -6473,16 +6621,72 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         form.addRow(
-            "Add other start codons:",
+            self._form_label("Add other start codons:"),
             self._field_help(
-                alt_starts,
+                self._sized_line_edit(alt_starts),
                 "Other start codons",
                 "Optional extra start codons (comma- or space-separated), "
                 "e.g. <b>TTG, CTG</b>, in addition to ATG.",
             ),
         )
+
+        selected = set(normalize_orf_frames(cfg.frames))
+        # Compact checkbox grid packed left inside a field-width host so the
+        # ``?`` lines up with start-codon / spin rows (without stretching gaps).
+        frames_inner = QWidget(self)
+        frames_inner.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        frames_grid = QGridLayout(frames_inner)
+        frames_grid.setContentsMargins(0, 0, 0, 0)
+        frames_grid.setHorizontalSpacing(4)
+        frames_grid.setVerticalSpacing(2)
+        frame_checks: dict[int, QCheckBox] = {}
+        for col, frame in enumerate((1, 2, 3)):
+            frames_grid.setColumnStretch(col, 0)
+            fwd = QCheckBox(f"Frame {frame}", frames_inner)
+            fwd.setToolTip(f"Forward reading frame {frame}")
+            fwd.setChecked(frame in selected)
+            frame_checks[frame] = fwd
+            frames_grid.addWidget(fwd, 0, col, Qt.AlignmentFlag.AlignLeft)
+            rev = QCheckBox(f"Reverse {frame}", frames_inner)
+            rev.setToolTip(f"Reverse reading frame {frame}")
+            rev.setChecked((-frame) in selected)
+            frame_checks[-frame] = rev
+            frames_grid.addWidget(rev, 1, col, Qt.AlignmentFlag.AlignLeft)
+        frames_host = QWidget(self)
+        frames_host.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        frames_host.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        frames_host_layout = QHBoxLayout(frames_host)
+        frames_host_layout.setContentsMargins(0, 0, 0, 0)
+        frames_host_layout.setSpacing(0)
+        frames_host_layout.addWidget(
+            frames_inner,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+        )
+        frames_host_layout.addStretch(1)
+        form.addRow(
+            self._form_label("Reading frames:"),
+            self._field_help(
+                frames_host,
+                "Reading frames",
+                "Keep ORFs from these orfipy reading frames "
+                "(Frame 1–3 forward, Reverse 1–3). "
+                "Default is all six frames.",
+            ),
+        )
+        self._orf_frame_checks = frame_checks
+        self._orf_default_frames = DEFAULT_ORF_FRAMES
         self._orf_field_list = (min_len, max_len, alt_starts)
         return form
+
+    def _selected_orf_frames(self) -> tuple[int, ...]:
+        from repeatviewer.backends.auto_annotation_settings import normalize_orf_frames
+
+        checks = getattr(self, "_orf_frame_checks", {})
+        chosen = tuple(
+            frame for frame, check in checks.items() if check.isChecked()
+        )
+        return normalize_orf_frames(chosen)
 
     def settings(self) -> AutoAnnotationSettings:
         ltr = self._read_terminal_settings(self._ltr_fields, default_min=100)
@@ -6507,6 +6711,7 @@ class AutoAnnotationSettingsPanel(QWidget):
             min_length=min_len.value(),
             max_length=max(max_len.value(), min_len.value()),
             alternative_start_codons=alt_starts.text().strip(),
+            frames=self._selected_orf_frames(),
         )
         return AutoAnnotationSettings(ltr=ltr, tir=tir, tandem=tandem, orf=orf)
 
@@ -6536,10 +6741,23 @@ class AutoAnnotationSettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Feature detection settings")
+        self.setMinimumWidth(520)
         self._panel = AutoAnnotationSettingsPanel(settings, self)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(self._panel)
+        # Cap height so the dense LTR/TIR/Tandem/ORF form scrolls on small screens.
+        screen = QApplication.primaryScreen()
+        max_h = 640
+        if screen is not None:
+            max_h = max(420, min(720, int(screen.availableGeometry().height() * 0.75)))
+        scroll.setMaximumHeight(max_h)
+
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
-        layout.addWidget(self._panel)
+        layout.addWidget(scroll, stretch=1)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -6863,6 +7081,7 @@ class SequenceMapPanel(QWidget):
                 "(click the field first to replace an existing path). Or use Browse."
             )
         self._rail.findRequested.connect(self._on_rail_find_requested)
+        self._rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
         self._find_items: list = []
         self._find_index: int = -1
         self._find_key: object | None = None
@@ -7416,6 +7635,7 @@ class SequenceMapPanel(QWidget):
         hits: list[tuple[int, int]],
         *,
         whole_sequence: bool = False,
+        select_annotations: list | None = None,
     ) -> bool:
         """Highlight ``hits`` and select/show [start, end] of ``seq_id``. False if not shown."""
         if self._map.data() is None:
@@ -7424,6 +7644,25 @@ class SequenceMapPanel(QWidget):
             return False
         if self._map.data() is None or self._map.is_too_long_for_display():
             return False
+        if select_annotations is not None:
+            indices = self._feature_indices_for_annotation_hits(select_annotations)
+            # Annotation search: select features only (no find underlays / base band).
+            self._map.set_find_hits([])
+            self._map._canvas.clear_selection()
+            # Scroll/zoom without treating the hit as a base selection.
+            a, b = sorted((int(start), int(end)))
+            self._map._scroll_to_bp_range(a, b)
+            span = max(1, b - a + 1)
+            viewport_w = self._map._scroll_viewport_width()
+            usable_w = max(1.0, float(viewport_w - _LEFT_MARGIN - _RIGHT_MARGIN))
+            visible_bp = usable_w / max(self._map._canvas.pixels_per_bp(), 1e-9)
+            if span > 0.9 * visible_bp:
+                target_ppb = usable_w / max(3 * span, 60)
+                target_ppb = max(_FIT_MIN_PPB, min(self._map._canvas.zoom_ppb_max(), target_ppb))
+                self._map._apply_zoom_ppb(target_ppb, sync_slider=True)
+                self._map._scroll_to_bp_range(a, b)
+            self._map.set_selected_features(indices)
+            return True
         self._map.set_find_hits(hits)
         if whole_sequence:
             self._map.fit_window()
@@ -7432,11 +7671,43 @@ class SequenceMapPanel(QWidget):
             self._map.show_region(start, end)
         return True
 
+    def _feature_indices_for_annotation_hits(self, hits: list) -> set[int]:
+        """Map Find annotation hits to indices in the active sequence feature list."""
+        features = self._map.features()
+        if not features or not hits:
+            return set()
+        indices: set[int] = set()
+        for hit in hits:
+            a, b = sorted(
+                (int(getattr(hit, "start", 0)), int(getattr(hit, "end", 0)))
+            )
+            needle = str(getattr(hit, "label", "") or "").strip()
+            for index, feat in enumerate(features):
+                fa, fb = sorted((int(feat.start), int(feat.end)))
+                if fa != a or fb != b:
+                    continue
+                name = str(feat.name or "")
+                ftype = str(feat.feature_type or "")
+                if (
+                    not needle
+                    or needle == name
+                    or needle == ftype
+                    or needle.lower() in name.lower()
+                    or needle.lower() in ftype.lower()
+                ):
+                    indices.add(index)
+        return indices
+
     def clear_find_hits(self) -> None:
         self._map.set_find_hits([])
         self._find_items = []
         self._find_index = -1
         self._find_key = None
+
+    def _on_rail_panel_collapsed_changed(self, _collapsed: bool) -> None:
+        """After the control rail hides/shows, re-fit if still at Fit zoom."""
+        # Wait for the layout pass so the map has its new width.
+        QTimer.singleShot(0, self._map.refresh_layout)
 
     def _on_rail_find_requested(self, direction: int) -> None:
         """Find tab: Geneious-style next / previous / find-all on this FASTA."""
@@ -7523,16 +7794,25 @@ class SequenceMapPanel(QWidget):
         seq_hits = [
             (h.start, h.end)
             for h in self._find_items
-            if h.seq_id == item.seq_id and h.kind == "sequence"
+            if h.seq_id == item.seq_id and h.kind in {"sequence", "annotation"}
         ]
-        whole = item.kind in {"name", "annotation"}
-        ok = self.show_find_hit(
-            item.seq_id,
-            item.start,
-            item.end,
-            seq_hits or [(item.start, item.end)],
-            whole_sequence=whole,
-        )
+        if item.kind == "annotation":
+            ann_hits = [h for h in self._find_items if h.kind == "annotation"]
+            ok = self.show_find_hit(
+                item.seq_id,
+                item.start,
+                item.end,
+                [],
+                select_annotations=ann_hits,
+            )
+        else:
+            ok = self.show_find_hit(
+                item.seq_id,
+                item.start,
+                item.end,
+                seq_hits or [(item.start, item.end)],
+                whole_sequence=(item.kind == "name"),
+            )
         if not ok:
             self._rail.set_find_status("Could not show that hit.")
             return
