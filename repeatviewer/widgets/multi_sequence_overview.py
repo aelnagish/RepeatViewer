@@ -66,12 +66,9 @@ from repeatviewer.backends.job_cancel import JobCancellation
 from repeatviewer.backends.msa_coordinates import (
     DEFAULT_MSA_DIVERGENCE_THRESHOLD,
     MSA_COLOR_ALL_BACKGROUNDS,
-    MSA_COLOR_CONSERVATION_GREY,
     column_residue_frequencies,
     drop_features_overlapping_region,
-    letter_is_conserved,
     mask_rows_region,
-    msa_conservation_greyscale_colors,
     msa_residue_fill_background,
     normalize_msa_color_mode,
     normalize_msa_divergence_threshold,
@@ -153,7 +150,7 @@ _MSA_MAX_PPB = 16.0
 _MSA_LETTER_MIN_PPB = 7.5
 _MSA_ROW_HEIGHT = 18
 _DEFAULT_MSA_FONT_PT = 4
-_DEFAULT_MSA_SEQUENCE_DISTANCE = 0
+_DEFAULT_MSA_SEQUENCE_DISTANCE = 1
 _DEFAULT_MULTI_SEQUENCE_DISTANCE = 2
 _DEFAULT_MSA_COLUMN_DISTANCE = 0
 _OVERVIEW_DISPLAY_SETTINGS_GROUP = "annotation_overview_display"
@@ -242,8 +239,13 @@ def _wheel_delta_x(event: QWheelEvent, *, scroll_step: int = 40) -> int:
 
 
 def _bar_color(widget: QWidget) -> QColor:
-    # Soft slate — keep bars readable without dominating the features.
-    return QColor("#9aa3ad") if _is_dark(widget) else QColor("#b0b6be")
+    # Soft slate for multi-sequence overview bars.
+    return QColor("#b4bac2") if _is_dark(widget) else QColor("#d8dce1")
+
+
+def _msa_plain_bar_color(widget: QWidget) -> QColor:
+    """Light grey for MSA overview when scheme leaves a residue uncoloured."""
+    return QColor("#b8b8b8") if _is_dark(widget) else QColor("#d0d0d0")
 
 
 def _split_tracks_by_source_pref() -> bool:
@@ -907,7 +909,8 @@ class _BarsCanvas(QWidget):
         self._column_distance = 0  # pixels between residue backgrounds
         self._color_unaligned_background = True
         self._show_annotation_track = True
-        self._connect_gaps_with_line = False
+        # Stable load order for “Original order” sorting.
+        self._original_index: list[int] = []
         self._region_sel: tuple[int, int] | None = None
         # When set, column band is limited to these rows (MSA regional drag).
         # ``None`` means full-height column selection (scale / feature).
@@ -988,7 +991,9 @@ class _BarsCanvas(QWidget):
         self._msa_seqs = list(sequences or [])
         self._msa_protein = _guess_msa_is_protein(self._msa_seqs)
         self._msa_colors = (
-            amino_acid_color_map() if self._msa_protein else nucleotide_base_color_map()
+            amino_acid_color_map()
+            if self._msa_protein
+            else nucleotide_base_color_map("multi")
         )
         self._msa_qcolors = {
             key: (QColor(bg), QColor(fg))
@@ -997,6 +1002,7 @@ class _BarsCanvas(QWidget):
         self._msa_col_freqs = []
         self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
+        self._original_index = list(range(len(self._record_ids)))
         self._lengths = dict(lengths)
         self._features = dict(features)
         self._tracks = {
@@ -1044,12 +1050,13 @@ class _BarsCanvas(QWidget):
         self._msa_colors = (
             amino_acid_color_map()
             if self._msa_protein
-            else nucleotide_base_color_map()
+            else nucleotide_base_color_map("msa")
         )
         self._rebuild_msa_qcolor_cache()
         self._rebuild_msa_conservation()
         self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
+        self._original_index = list(range(len(self._record_ids)))
         width = len(sequences[0]) if sequences else 1
         self._lengths = {rid: width for rid in record_ids}
         feat_map = dict(features or {})
@@ -1105,18 +1112,6 @@ class _BarsCanvas(QWidget):
         self._clear_drag_paint_cache()
         self._recompute_layout()
         self.update()
-
-    def set_connect_gaps_with_line(self, enabled: bool) -> None:
-        """Draw thin black lines through MSA gaps when zoomed out (overview)."""
-        new = bool(enabled)
-        if new == self._connect_gaps_with_line:
-            return
-        self._connect_gaps_with_line = new
-        self._clear_drag_paint_cache()
-        self.update()
-
-    def connect_gaps_with_line(self) -> bool:
-        return bool(self._connect_gaps_with_line)
 
     def show_annotation_track(self) -> bool:
         return bool(self._show_annotation_track)
@@ -1371,15 +1366,91 @@ class _BarsCanvas(QWidget):
         self.selectionChanged.emit()
         self.rowsChanged.emit()
 
-    def refresh_msa_colors(self) -> None:
-        """Reload Annotation residue palettes after Display color settings change."""
-        if not self._msa_mode:
+    def permute_rows(self, order: list[int]) -> None:
+        """Reorder all row-parallel state by ``order`` (permutation of 0..n-1)."""
+        n = len(self._record_ids)
+        if n <= 1:
             return
-        invalidate_residue_color_maps()
+        if sorted(order) != list(range(n)):
+            return
+        if order == list(range(n)):
+            return
+
+        def _perm(items: list):
+            return [items[i] for i in order]
+
+        self._record_ids = _perm(self._record_ids)
+        if self._msa_seqs:
+            self._msa_seqs = _perm(self._msa_seqs)
+        if len(self._original_index) == n:
+            self._original_index = _perm(self._original_index)
+        else:
+            self._original_index = list(range(n))
+        inv = {old: new for new, old in enumerate(order)}
+        self._selected_rows = {inv[r] for r in self._selected_rows if r in inv}
+        if self._regional_rows is not None:
+            self._regional_rows = {inv[r] for r in self._regional_rows if r in inv}
+        self._selected_feats = {
+            (inv[r], f) for r, f in self._selected_feats if r in inv
+        }
+        self._find_hits = {
+            rid: list(hits)
+            for rid, hits in self._find_hits.items()
+            if rid in set(self._record_ids)
+        }
+        self._hover_feat = None
+        self._clear_drag_paint_cache()
+        self._recompute_layout()
+        self._sync_selection_chrome()
+        self.update()
+        self.rowsChanged.emit()
+        self.selectionChanged.emit()
+
+    def sort_rows(self, mode: str) -> None:
+        """Sort display rows: ``original``, ``name``, or ``selected_columns``."""
+        n = len(self._record_ids)
+        if n <= 1:
+            return
+        key_mode = str(mode or "original").strip().lower()
+        indices = list(range(n))
+        if key_mode == "name":
+            indices.sort(key=lambda i: self._record_ids[i].casefold())
+        elif key_mode == "selected_columns":
+            if not self._msa_mode or not self._msa_seqs:
+                return
+            region = self._region_sel
+            if region is None:
+                return
+            start, end = region
+            c0 = max(0, int(start) - 1)
+            c1 = max(c0, int(end))
+
+            def _col_key(i: int) -> tuple:
+                seq = self._msa_seqs[i] if i < len(self._msa_seqs) else ""
+                chunk = seq[c0:c1]
+                # Gaps sort after letters so conserved blocks group first.
+                return tuple(ch if ch not in "-." else "~" for ch in chunk)
+
+            indices.sort(key=_col_key)
+        else:
+            # Original load order.
+            if len(self._original_index) == n:
+                indices.sort(key=lambda i: self._original_index[i])
+            else:
+                return
+        self.permute_rows(indices)
+
+    def _nucleotide_color_context(self) -> str:
+        return "msa" if self._msa_mode else "multi"
+
+    def refresh_msa_colors(self) -> None:
+        """Reload residue palettes after Display color settings change."""
+        ctx = self._nucleotide_color_context()
+        invalidate_residue_color_maps(ctx)
         self._msa_colors = (
             amino_acid_color_map()
             if self._msa_protein
-            else nucleotide_base_color_map()
+            else nucleotide_base_color_map(ctx)
         )
         self._rebuild_msa_qcolor_cache()
         self._clear_drag_paint_cache()
@@ -1432,17 +1503,12 @@ class _BarsCanvas(QWidget):
         self._msa_qcolors = cache
 
     def _msa_should_fill_background(self, col: int, ch: str) -> bool:
-        """Whether the residue cell background should be painted for ``ch``.
+        """Whether the residue uses the scheme colour (vs overview light-grey).
 
-        Most MSA schemes gate fill only at letter zoom; zoomed-out overview
-        always fills residue bars. Conservation greyscale always fills.
+        Applies at overview and letter zoom. Gaps never fill.
         """
         if ch in "-.":
             return False
-        if self._msa_color_mode == MSA_COLOR_CONSERVATION_GREY:
-            return True
-        if not self._msa_shows_letters():
-            return True
         freqs = (
             self._msa_col_freqs[col]
             if 0 <= col < len(self._msa_col_freqs)
@@ -1459,20 +1525,23 @@ class _BarsCanvas(QWidget):
         """Background/foreground colours for a non-gap residue cell."""
         if ch in "-.":
             return None
-        if self._msa_color_mode == MSA_COLOR_CONSERVATION_GREY:
-            freqs = (
-                self._msa_col_freqs[col]
-                if 0 <= col < len(self._msa_col_freqs)
-                else None
-            )
-            conserved = letter_is_conserved(
-                freqs, ch, threshold=self._msa_divergence_threshold
-            )
-            bg_hex, fg_hex = msa_conservation_greyscale_colors(
-                conserved=conserved, dark=_is_dark(self)
-            )
-            return (QColor(bg_hex), QColor(fg_hex))
         return self._msa_qcolors.get(ch)
+
+    def _msa_overview_fill_color(self, col: int, ch: str) -> QColor | None:
+        """Solid fill for a zoomed-out MSA residue, or ``None`` for a gap.
+
+        Scheme-coloured cells use the residue palette (or conservation
+        greyscale). Cells the scheme leaves uncoloured use the same light
+        grey as multi-sequence overview bars.
+        """
+        if ch in "-.":
+            return None
+        if self._msa_should_fill_background(col, ch):
+            pair = self._msa_residue_paint_pair(col, ch)
+            if pair is not None:
+                return pair[0]
+            return _msa_plain_bar_color(self)
+        return _msa_plain_bar_color(self)
 
     def _clear_drag_paint_cache(self) -> None:
         """Drop live selection preview state (name kept for existing call sites)."""
@@ -2975,28 +3044,22 @@ class _BarsCanvas(QWidget):
                 ch = seq[j] if j < len(seq) else "-"
                 fill_bg = self._msa_should_fill_background(j, ch)
                 paint_pair = self._msa_residue_paint_pair(j, ch)
+                overview_fill = (
+                    None
+                    if show_letters
+                    else self._msa_overview_fill_color(j, ch)
+                )
                 run_end = j + 1
                 # Coalesce only when columns share one fill/colour (distance 0).
                 if not show_letters and self._column_distance <= 0:
                     while run_end < c1:
                         nxt = seq[run_end] if run_end < len(seq) else "-"
-                        if self._msa_color_mode == MSA_COLOR_CONSERVATION_GREY:
-                            nxt_pair = self._msa_residue_paint_pair(run_end, nxt)
-                            if paint_pair is None or nxt_pair is None:
-                                if paint_pair is not nxt_pair:
-                                    break
-                            elif (
-                                paint_pair[0].rgba() != nxt_pair[0].rgba()
-                            ):
+                        nxt_fill = self._msa_overview_fill_color(run_end, nxt)
+                        if overview_fill is None or nxt_fill is None:
+                            if overview_fill is not nxt_fill:
                                 break
-                        else:
-                            if nxt != ch:
-                                break
-                            if (
-                                self._msa_should_fill_background(run_end, nxt)
-                                != fill_bg
-                            ):
-                                break
+                        elif overview_fill.rgba() != nxt_fill.rgba():
+                            break
                         run_end += 1
                 span = run_end - j
                 # Cover [x, next_x). When zoomed out, span at least 1 logical px so
@@ -3019,8 +3082,8 @@ class _BarsCanvas(QWidget):
                             "-",
                         )
                         painter.setPen(Qt.PenStyle.NoPen)
-                    elif self._connect_gaps_with_line:
-                        # Overview only: thin backbone through gaps between residues.
+                    else:
+                        # Overview: thin backbone through gaps between residues.
                         y_mid = float(y) + float(residue_h) * 0.5
                         gap_line = (
                             QColor("#e0e0e0")
@@ -3034,6 +3097,19 @@ class _BarsCanvas(QWidget):
                             QPointF(x, y_mid), QPointF(x + width, y_mid)
                         )
                         painter.setPen(Qt.PenStyle.NoPen)
+                elif not show_letters:
+                    # Overview: scheme colour or multi-seq light-grey backbone.
+                    if overview_fill is not None:
+                        m = _bg_margin
+                        if m > 0 and (
+                            cell.width() > 2.0 * m + 0.5
+                            and cell.height() > 2.0 * m + 0.5
+                        ):
+                            painter.fillRect(
+                                cell.adjusted(m, m, -m, -m), overview_fill
+                            )
+                        else:
+                            painter.fillRect(cell, overview_fill)
                 else:
                     pair = paint_pair if paint_pair is not None else qcolors.get(ch)
                     if pair is not None:
@@ -3048,20 +3124,26 @@ class _BarsCanvas(QWidget):
                                 )
                             else:
                                 painter.fillRect(cell, pair[0])
-                        if show_letters:
-                            if self._msa_color_mode == MSA_COLOR_CONSERVATION_GREY:
-                                painter.setPen(pair[1] if fill_bg else pair[0])
-                            else:
-                                # Coloured background → black letter; no fill → residue colour.
-                                painter.setPen(
-                                    QColor("#111111") if fill_bg else pair[0]
-                                )
-                            painter.drawText(
-                                cell.toRect(),
-                                int(Qt.AlignmentFlag.AlignCenter),
-                                ch,
+                        if fill_bg:
+                            # Black or white from background luminance for readability.
+                            from repeatviewer.widgets.residue_color_grid import (
+                                ResidueColorGrid,
                             )
-                            painter.setPen(Qt.PenStyle.NoPen)
+
+                            painter.setPen(
+                                QColor(
+                                    ResidueColorGrid.contrast_text_color(pair[0])
+                                )
+                            )
+                        else:
+                            # No fill → residue colour as the letter.
+                            painter.setPen(pair[0])
+                        painter.drawText(
+                            cell.toRect(),
+                            int(Qt.AlignmentFlag.AlignCenter),
+                            ch,
+                        )
+                        painter.setPen(Qt.PenStyle.NoPen)
                 j = run_end
             hits = self._find_hits.get(rid)
             if hits:
@@ -3170,8 +3252,9 @@ class _BarsCanvas(QWidget):
 class _ScaleRuler(QWidget):
     """Horizontal bp scale under the tracks only.
 
-    Drag horizontally here to select MSA columns without changing sequence rows.
-    The selected column band is painted on the scale to match the MSA overlay.
+    Click selects one column; drag selects a column range; double-click zooms
+    to maximum at that position. The selected column band is painted on the
+    scale to match the MSA overlay.
     """
 
     columnRegionSelected = Signal(int, int)  # 1-based inclusive start, end
@@ -3191,12 +3274,14 @@ class _ScaleRuler(QWidget):
         self._drag_origin_x: float | None = None
         self._drag_current_x: float | None = None
         self._rubber_active = False
+        self._suppress_click_select = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
         self.setToolTip(
-            "Click the scale bar to zoom to maximum at this position · "
-            "Right-click or Shift+click to fit · "
-            "Drag to select columns"
+            "Click to select a column · "
+            "Double-click to zoom to maximum at this position · "
+            "Drag to select columns · "
+            "Right-click or Shift+click to fit"
         )
         # Focus so Shift+Left/Right (column edge expand) works after scale select.
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -3271,6 +3356,7 @@ class _ScaleRuler(QWidget):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            self._suppress_click_select = False
             self._drag_origin_x = float(event.position().x())
             self._drag_current_x = self._drag_origin_x
             self._rubber_active = False
@@ -3304,6 +3390,20 @@ class _ScaleRuler(QWidget):
             return
         super().mouseMoveEvent(event)
 
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Suppress the trailing release so it does not re-select a column.
+            self._suppress_click_select = True
+            self._drag_origin_x = None
+            self._drag_current_x = None
+            self._rubber_active = False
+            if QWidget.mouseGrabber() is self:
+                self.releaseMouse()
+            self._emit_zoom_at(float(event.position().x()), zoom_in=True)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self._drag_origin_x is not None:
             if QWidget.mouseGrabber() is self:
@@ -3315,16 +3415,32 @@ class _ScaleRuler(QWidget):
             self._drag_origin_x = None
             self._drag_current_x = None
             self._rubber_active = False
+            if self._suppress_click_select:
+                self._suppress_click_select = False
+                self.update()
+                event.accept()
+                return
             if active and abs(x1 - x0) >= _RUBBER_MIN_PX:
                 start_i, end_i = self._columns_from_x_range(x0, x1)
                 self._region_sel = (start_i, end_i)
                 self.columnRegionSelected.emit(start_i, end_i)
+            elif mods & Qt.KeyboardModifier.ShiftModifier:
+                # Shift+click → fit (zoom out) at this position.
+                self._emit_zoom_at(x1, zoom_in=False)
             else:
-                # Click (no drag) → zoom at this position (Shift = zoom out).
-                zoom_in = not bool(mods & Qt.KeyboardModifier.ShiftModifier)
-                self._emit_zoom_at(x1, zoom_in=zoom_in)
+                # Click (no drag) → select the column under the cursor.
+                start_i, end_i = self._columns_from_x_range(x1, x1)
+                self._region_sel = (start_i, end_i)
+                self.columnRegionSelected.emit(start_i, end_i)
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.update()
+            event.accept()
+            return
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._suppress_click_select
+        ):
+            self._suppress_click_select = False
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -3714,9 +3830,6 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_show_annotation_track(
             bool(self._rail.show_annotation_track.isChecked())
         )
-        self._bars.set_connect_gaps_with_line(
-            bool(self._rail.connect_gaps_with_line.isChecked())
-        )
 
         # Same 1px map↔rail divider as single-seq AnnotationMapWindow.
         from repeatviewer.widgets.sequence_map_viewer import _MAP_RAIL_DIVIDER
@@ -3948,6 +4061,8 @@ class MultiSequenceOverviewPanel(QWidget):
     def _sync_mode_specific_controls(self) -> None:
         msa = self.is_msa_mode()
         self._rail.set_msa_display_mode(msa)
+        self._rail.set_nucleotide_color_context("msa" if msa else "multi")
+        self._rail.sync_color_scheme_combos()
         settings = self._overview_display_settings()
         try:
             key = "sequence_distance" if msa else "multi_sequence_distance"
@@ -4018,7 +4133,7 @@ class MultiSequenceOverviewPanel(QWidget):
             self._on_multi_sequence_background_changed
         )
         rail.showAnnotationTrackChanged.connect(self._on_show_annotation_track_changed)
-        rail.connectGapsWithLineChanged.connect(self._on_connect_gaps_with_line_changed)
+        rail.sequenceSortChanged.connect(self._on_sequence_sort_changed)
         self._load_overview_display_settings()
         bases = int(rail.bases_zoomed_in.value())
         self._bars.set_msa_residue_size(bases)
@@ -4045,7 +4160,7 @@ class MultiSequenceOverviewPanel(QWidget):
         return s
 
     def _load_overview_display_settings(self) -> None:
-        """MSA/overview defaults: DNA/protein labels 4, sequence/column distance 0."""
+        """MSA/overview defaults: DNA/protein labels 4, MSA sequence distance 1."""
         rail = self._rail
         s = self._overview_display_settings()
         try:
@@ -4069,11 +4184,7 @@ class MultiSequenceOverviewPanel(QWidget):
                     DEFAULT_MSA_DIVERGENCE_THRESHOLD,
                 )
             )
-            connect_gaps = s.value("connect_gaps_with_line", False)
-            if isinstance(connect_gaps, str):
-                connect_gaps = connect_gaps.strip().lower() in {"1", "true", "yes"}
-            else:
-                connect_gaps = bool(connect_gaps)
+            sort_mode = str(s.value("sequence_sort_mode", "original") or "original")
         finally:
             s.endGroup()
         bases = max(2, min(36, bases))
@@ -4091,7 +4202,6 @@ class MultiSequenceOverviewPanel(QWidget):
             rail.annotation_label_size,
             rail.base_number_size,
             rail.column_distance,
-            rail.connect_gaps_with_line,
         ):
             widget.blockSignals(True)
         try:
@@ -4102,7 +4212,6 @@ class MultiSequenceOverviewPanel(QWidget):
             rail.annotation_label_size.setValue(ann_labels)
             rail.base_number_size.setValue(scale_labels)
             rail.column_distance.setValue(col_distance)
-            rail.connect_gaps_with_line.setChecked(bool(connect_gaps))
         finally:
             for widget in (
                 rail.bases_zoomed_in,
@@ -4112,14 +4221,13 @@ class MultiSequenceOverviewPanel(QWidget):
                 rail.annotation_label_size,
                 rail.base_number_size,
                 rail.column_distance,
-                rail.connect_gaps_with_line,
             ):
                 widget.blockSignals(False)
         rail.set_msa_coloring_mode(msa_mode)
         rail.set_msa_divergence_threshold(msa_div)
         self._bars.set_msa_color_mode(msa_mode)
         self._bars.set_msa_divergence_threshold(msa_div)
-        self._bars.set_connect_gaps_with_line(bool(connect_gaps))
+        rail.set_sequence_sort_mode(sort_mode)
 
     def _save_overview_display_settings(self) -> None:
         rail = self._rail
@@ -4146,10 +4254,7 @@ class MultiSequenceOverviewPanel(QWidget):
                 "msa_divergence_threshold",
                 float(rail.msa_divergence_threshold()),
             )
-            s.setValue(
-                "connect_gaps_with_line",
-                bool(rail.connect_gaps_with_line.isChecked()),
-            )
+            s.setValue("sequence_sort_mode", rail.sequence_sort_mode())
         finally:
             s.endGroup()
 
@@ -4196,9 +4301,10 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_show_annotation_track(bool(enabled))
         self._sync_names_column()
 
-    def _on_connect_gaps_with_line_changed(self, enabled: bool) -> None:
-        self._bars.set_connect_gaps_with_line(bool(enabled))
+    def _on_sequence_sort_changed(self, mode: str) -> None:
+        self._bars.sort_rows(str(mode or "original"))
         self._save_overview_display_settings()
+        self._sync_names_column()
 
     def _select_all_sequences(self) -> None:
         self._bars.select_all_rows()
@@ -4216,6 +4322,8 @@ class MultiSequenceOverviewPanel(QWidget):
                 self._scale.set_region_selection(int(region[0]), int(region[1]))  # type: ignore[index]
             except (TypeError, ValueError, IndexError):
                 self._scale.set_region_selection(None)
+        # Selected-column sort is one-shot from the Sorting combo — do not
+        # re-order rows every time the column selection changes.
         bar = self._header_zoom_bar
         if bar is None or not hasattr(bar, "set_position_range"):
             return
@@ -4267,9 +4375,13 @@ class MultiSequenceOverviewPanel(QWidget):
             AnnotationElementColorsDialog,
         )
 
-        dialog = AnnotationElementColorsDialog(parent=self)
+        dialog = AnnotationElementColorsDialog(
+            parent=self,
+            nucleotide_color_context=self._rail.nucleotide_color_context(),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._rail.sync_color_scheme_combos()
         self._on_residue_colors_changed()
 
     def _annotation_running(self) -> bool:
@@ -5325,6 +5437,7 @@ class MultiSequenceOverviewPanel(QWidget):
             fit_bars_width=None,
         )
         self._sync_mode_specific_controls()
+        self._bars.sort_rows(self._rail.sequence_sort_mode())
         self._sync_names_column()
         self._update_scale()
         self._sync_header_position_spins()
@@ -5398,6 +5511,8 @@ class MultiSequenceOverviewPanel(QWidget):
             fit_bars_width=None,
         )
         self._sync_mode_specific_controls()
+        # Apply saved sort after rows are loaded (original order until then).
+        self._bars.sort_rows(self._rail.sequence_sort_mode())
         self._sync_names_column()
         self._update_scale()
         self._sync_header_position_spins()

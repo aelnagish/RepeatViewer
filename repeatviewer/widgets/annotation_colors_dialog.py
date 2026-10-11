@@ -41,7 +41,6 @@ from repeatviewer.backends.msa_plot import (
     AMINO_ACID_CATEGORIES,
     AMINO_ACID_COLOR_PRESETS,
     DEFAULT_AMINO_ACID_COLORS,
-    DEFAULT_NUCLEOTIDE_COLORS,
     NUCLEOTIDE_CATEGORIES,
     NUCLEOTIDE_COLOR_PRESETS,
 )
@@ -51,10 +50,11 @@ from repeatviewer.widgets.preview_zoom import (
     default_amino_acid_backgrounds,
     default_nucleotide_backgrounds,
     load_custom_amino_acid_backgrounds,
-    load_custom_nucleotide_backgrounds,
-    save_color_blind_nucleotide_scheme,
+    nucleotide_palette_colors,
+    normalize_nucleotide_color_context,
     save_custom_amino_acid_backgrounds,
     save_custom_nucleotide_backgrounds,
+    save_nucleotide_scheme,
 )
 from repeatviewer.widgets.residue_color_grid import ResidueColorGrid
 
@@ -116,9 +116,13 @@ class AnnotationElementColorsPanel(QWidget):
         parent: QWidget | None = None,
         *,
         show_residue_colors: bool = True,
+        nucleotide_color_context: str = "single",
     ) -> None:
         super().__init__(parent)
         self._show_residue_colors = bool(show_residue_colors)
+        self._nucleotide_color_context = normalize_nucleotide_color_context(
+            nucleotide_color_context
+        )
         databases = load_similarity_annotation_databases()
 
         body_layout = QVBoxLayout(self)
@@ -130,8 +134,7 @@ class AnnotationElementColorsPanel(QWidget):
         if self._show_residue_colors:
             # --- Nucleotides (MSA figure-2 style) ---
             body_layout.addWidget(self._section_label("Nucleotide colors"))
-            nuc_colors = dict(DEFAULT_NUCLEOTIDE_COLORS)
-            nuc_colors.update(load_custom_nucleotide_backgrounds())
+            nuc_colors = nucleotide_palette_colors(self._nucleotide_color_context)
             if "U" in nuc_colors:
                 nuc_colors["T"] = nuc_colors["U"]
             self._nuc_grid = ResidueColorGrid(
@@ -152,6 +155,7 @@ class AnnotationElementColorsPanel(QWidget):
                     "Wong / Paul Tol palette (same as Annotation → nucleotide "
                     "Color-blind)"
                 ),
+                "All black": "A, T, U, G, and C use a black background",
             }
             for label, palette in NUCLEOTIDE_COLOR_PRESETS:
                 btn = QPushButton(label, self)
@@ -249,8 +253,8 @@ class AnnotationElementColorsPanel(QWidget):
         if self._nuc_grid is None:
             return
         self._nuc_grid.set_colors(colors)
-        # Keep the Annotation sequence-view scheme flag in sync with this preset.
-        save_color_blind_nucleotide_scheme(name == "Color-blind")
+        # Persist only for this display context (single / multi / MSA).
+        save_nucleotide_scheme(self._nucleotide_color_context, name)
 
     def _section_label(self, text: str) -> QLabel:
         label = QLabel(f"<b>{text}</b>")
@@ -260,7 +264,7 @@ class AnnotationElementColorsPanel(QWidget):
     def restore_defaults(self) -> None:
         if self._nuc_grid is not None:
             self._nuc_grid.set_colors(default_nucleotide_backgrounds())
-            save_color_blind_nucleotide_scheme(False)
+            save_nucleotide_scheme(self._nucleotide_color_context, "Default")
         if self._aa_grid is not None:
             self._aa_grid.set_colors(default_amino_acid_backgrounds())
         defaults = default_feature_type_colors()
@@ -305,7 +309,10 @@ class AnnotationElementColorsPanel(QWidget):
         save_feature_type_colors(self.new_feature_type_colors())
         save_similarity_database_colors(self.new_database_colors())
         if self._show_residue_colors:
-            save_custom_nucleotide_backgrounds(self.new_nucleotide_backgrounds())
+            save_custom_nucleotide_backgrounds(
+                self.new_nucleotide_backgrounds(),
+                self._nucleotide_color_context,
+            )
             save_custom_amino_acid_backgrounds(self.new_amino_acid_backgrounds())
 
 
@@ -324,6 +331,7 @@ class AnnotationElementColorsDialog(QDialog):
         split_tracks_by_source: bool = True,
         min_font_pt: int = 6,
         max_font_pt: int = 36,
+        nucleotide_color_context: str = "single",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Annotation settings")
@@ -341,7 +349,10 @@ class AnnotationElementColorsDialog(QDialog):
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(12, 10, 12, 10)
         body_layout.setSpacing(12)
-        self._panel = AnnotationElementColorsPanel(body)
+        self._panel = AnnotationElementColorsPanel(
+            body,
+            nucleotide_color_context=nucleotide_color_context,
+        )
         body_layout.addWidget(self._panel)
         body_layout.addStretch(1)
 

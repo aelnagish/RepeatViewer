@@ -107,13 +107,11 @@ def test_column_residue_frequencies_and_threshold() -> None:
     from repeatviewer.backends.msa_coordinates import (
         MSA_COLOR_ALL_BACKGROUNDS,
         MSA_COLOR_BG_WHEN_CONSERVED,
-        MSA_COLOR_CONSERVATION_GREY,
         MSA_COLOR_LETTERS_ONLY,
         MSA_COLOR_NO_BG_WHEN_CONSERVED,
         column_conservation_mask,
         column_residue_frequencies,
         letter_is_conserved,
-        msa_conservation_greyscale_colors,
         msa_residue_fill_background,
         normalize_msa_color_mode,
         normalize_msa_divergence_threshold,
@@ -175,26 +173,7 @@ def test_column_residue_frequencies_and_threshold() -> None:
         column_freqs=freqs_mix,
         threshold=0.4,
     )
-    assert msa_residue_fill_background(
-        MSA_COLOR_CONSERVATION_GREY,
-        residue="A",
-        column_freqs=freqs_mix,
-        threshold=0.4,
-    )
-    assert msa_residue_fill_background(
-        MSA_COLOR_CONSERVATION_GREY,
-        residue="T",
-        column_freqs=freqs_mix,
-        threshold=0.4,
-    )
-    assert normalize_msa_color_mode(MSA_COLOR_CONSERVATION_GREY) == (
-        MSA_COLOR_CONSERVATION_GREY
-    )
-    assert msa_conservation_greyscale_colors(conserved=True, dark=False) == (
-        "#d0d0d0",
-        "#111111",
-    )
-    assert msa_conservation_greyscale_colors(conserved=False, dark=False) == (
-        "#000000",
-        "#ffffff",
+    # Retired conservation_grey settings migrate to Color all.
+    assert normalize_msa_color_mode("conservation_grey") == (
+        MSA_COLOR_ALL_BACKGROUNDS
     )

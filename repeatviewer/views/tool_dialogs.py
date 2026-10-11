@@ -13584,6 +13584,7 @@ class MsaPlotDialog(QDialog):
         nuc_tips = {
             "Default": "Standard A/C/G/T colours",
             "Color-blind": "Wong / Paul Tol palette (same as Annotation → nucleotide Color-blind)",
+            "All black": "A, T, U, G, and C use a black background",
         }
         for label, palette in NUCLEOTIDE_COLOR_PRESETS:
             btn = QPushButton(label, self)

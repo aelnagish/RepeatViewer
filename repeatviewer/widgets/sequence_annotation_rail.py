@@ -43,10 +43,10 @@ from repeatviewer.backends.msa_plot import (
 )
 from repeatviewer.widgets.help_button import field_with_help, make_help_button
 from repeatviewer.widgets.preview_zoom import (
-    load_color_blind_nucleotide_scheme,
-    save_color_blind_nucleotide_scheme,
+    load_nucleotide_scheme_name,
+    normalize_nucleotide_color_context,
     save_custom_amino_acid_backgrounds,
-    save_custom_nucleotide_backgrounds,
+    save_nucleotide_scheme,
 )
 from repeatviewer.widgets.path_browse import PathBrowseRow
 from repeatviewer.widgets.preview_controls import apply_annotation_zoom_slider_style
@@ -510,7 +510,7 @@ class SequenceAnnotationRail(QWidget):
 
     # Display / size signals (live apply).
     showAnnotationTrackChanged = Signal(bool)
-    connectGapsWithLineChanged = Signal(bool)
+    sequenceSortChanged = Signal(str)  # original | name | selected_columns
     showComplementChanged = Signal(bool)
     showTranslationChanged = Signal(bool)
     translationFramesChanged = Signal(object)  # frozenset[int]
@@ -539,6 +539,7 @@ class SequenceAnnotationRail(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self._module_width = _MODULE_WIDTH
         self._overview_mode = False
+        self._nucleotide_color_context = "single"
         self._panel_collapsed = False
         self._active_tab = _DEFAULT_TAB_INDEX
         self._updating_tabs = False
@@ -708,16 +709,31 @@ class SequenceAnnotationRail(QWidget):
         )
         layout.addWidget(self.show_annotation_track)
 
-        self.connect_gaps_with_line = QCheckBox("Connect gaps with line", page)
-        self.connect_gaps_with_line.setChecked(False)
-        self.connect_gaps_with_line.setToolTip(
-            "In the zoomed-out MSA overview, draw a thin black line through "
-            "alignment gaps so sequence segments stay visually connected."
+        sort_row = QWidget(page)
+        sort_layout = QHBoxLayout(sort_row)
+        sort_layout.setContentsMargins(0, 2, 0, 2)
+        sort_layout.setSpacing(6)
+        self.sequence_sort_label = QLabel("Sorting:", sort_row)
+        self.sequence_sort = QComboBox(sort_row)
+        self.sequence_sort.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self.connect_gaps_with_line.toggled.connect(
-            self.connectGapsWithLineChanged.emit
+        self.sequence_sort.setToolTip(
+            "Reorder overview sequences. "
+            "Original order is the file / MSA load order. "
+            "Sequence name sorts alphabetically. "
+            "Selected column (MSA only) sorts once by residues in the "
+            "currently selected column range — changing the selection "
+            "does not re-sort until you choose Selected column again."
         )
-        layout.addWidget(self.connect_gaps_with_line)
+        # activated: re-choosing the same option (e.g. Selected column) re-applies.
+        self.sequence_sort.activated.connect(self._on_sequence_sort_changed)
+        sort_layout.addWidget(self.sequence_sort_label, 0)
+        sort_layout.addWidget(self.sequence_sort, 1)
+        layout.addWidget(sort_row)
+        self.sequence_sort_row = sort_row
+        self._populate_sequence_sort_options(msa=False)
+        self.sequence_sort_row.setVisible(False)
 
         self.show_complement = QCheckBox("Show complement", page)
         self.show_complement.setToolTip(
@@ -840,30 +856,27 @@ class SequenceAnnotationRail(QWidget):
         )
 
         _MSA_SCHEME_HELP = (
-            "Controls coloured residue backgrounds in the MSA "
-            "(nucleotide and protein). Most schemes apply at "
-            "letter/nucleotide zoom; zoomed-out overview fills residue "
-            "bars with the residue palette unless Conservation "
-            "(grey / black) is selected.<br><br>"
-            "<b>No background</b><br>"
-            "Show coloured letters on white cells.<br><br>"
-            "<b>Color all background</b><br>"
-            "Fill every residue cell with its colour.<br><br>"
-            "<b>Color conserved background</b><br>"
-            "Fill only letters that meet the divergence threshold in "
-            "their column.<br><br>"
-            "<b>Color divergent background</b><br>"
-            "Fill only letters below the divergence threshold.<br><br>"
-            "<b>Conservation (grey / black)</b><br>"
-            "Paint conserved residues grey and divergent residues black "
-            "(overview bars and letter zoom). Uses the Divergence "
-            "threshold.<br><br>"
+            "Controls residue colouring in the MSA (nucleotide and protein) "
+            "at overview and letter zoom.<br><br>"
+            "<b>No color</b><br>"
+            "Overview: light-grey sequence bars. Letter zoom: coloured "
+            "letters on white cells.<br><br>"
+            "<b>Color all</b><br>"
+            "Fill every residue with its nucleotide/protein colour.<br><br>"
+            "<b>Color conserved</b><br>"
+            "Colour only letters that meet the divergence threshold; "
+            "other residues stay light grey (overview) or unfilled "
+            "(letter zoom).<br><br>"
+            "<b>Color divergent</b><br>"
+            "Colour only letters below the divergence threshold; "
+            "conserved residues stay light grey (overview) or unfilled "
+            "(letter zoom).<br><br>"
             "<b>Divergence</b><br>"
             "A letter is conserved when it occupies at least this fraction "
             "of the non-gap residues in its column. For example, "
             "<b>0.40</b> means a letter present in ≥40% of sequences "
-            "(ignoring gaps) counts as conserved. Applies to conserved, "
-            "divergent, and conservation greyscale modes."
+            "(ignoring gaps) counts as conserved. Applies to conserved "
+            "and divergent modes."
         )
 
         self.msa_coloring_label = QLabel("MSA color scheme:", page)
@@ -1048,7 +1061,7 @@ class SequenceAnnotationRail(QWidget):
 
         self.sequence_distance = NoWheelSpinBox(page)
         self.sequence_distance.setRange(0, 40)
-        self.sequence_distance.setValue(0)
+        self.sequence_distance.setValue(1)
         self.sequence_distance.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
         self.sequence_distance.setToolTip(
             "Vertical gap between sequences (pixels)."
@@ -1621,13 +1634,23 @@ class SequenceAnnotationRail(QWidget):
         self._emit_translation_frames()
         self.translationOptionsChanged.emit()
 
+    def nucleotide_color_context(self) -> str:
+        return normalize_nucleotide_color_context(self._nucleotide_color_context)
+
+    def set_nucleotide_color_context(self, context: str) -> None:
+        """Use independent nucleotide colours for single / multi / MSA displays."""
+        ctx = normalize_nucleotide_color_context(context)
+        if ctx == self._nucleotide_color_context:
+            return
+        self._nucleotide_color_context = ctx
+        self.sync_color_scheme_combos()
+
     def sync_color_scheme_combos(self) -> None:
         """Match scheme dropdowns to the currently saved residue palettes."""
-        nuc_name = (
-            "Color-blind"
-            if load_color_blind_nucleotide_scheme()
-            else "Default"
-        )
+        nuc_name = load_nucleotide_scheme_name(self.nucleotide_color_context())
+        if nuc_name == "Custom":
+            # Keep a named preset selected when possible; Custom has no combo row.
+            nuc_name = "Default"
         idx = self.nucleotide_scheme.findText(nuc_name)
         self.nucleotide_scheme.blockSignals(True)
         self.nucleotide_scheme.setCurrentIndex(max(0, idx))
@@ -1636,9 +1659,8 @@ class SequenceAnnotationRail(QWidget):
     def _on_nucleotide_scheme_changed(self, index: int) -> None:
         if index < 0 or index >= len(NUCLEOTIDE_COLOR_PRESETS):
             return
-        name, palette = NUCLEOTIDE_COLOR_PRESETS[index]
-        save_custom_nucleotide_backgrounds(dict(palette))
-        save_color_blind_nucleotide_scheme(name == "Color-blind")
+        name, _palette = NUCLEOTIDE_COLOR_PRESETS[index]
+        save_nucleotide_scheme(self.nucleotide_color_context(), name)
         self.residueColorsChanged.emit()
 
     def _on_protein_scheme_changed(self, index: int) -> None:
@@ -1647,6 +1669,42 @@ class SequenceAnnotationRail(QWidget):
         _name, palette = AMINO_ACID_COLOR_PRESETS[index]
         save_custom_amino_acid_backgrounds(dict(palette))
         self.residueColorsChanged.emit()
+
+    def _populate_sequence_sort_options(self, *, msa: bool) -> None:
+        """Original / name for all overviews; selected columns only for MSA."""
+        current = self.sequence_sort_mode()
+        self.sequence_sort.blockSignals(True)
+        self.sequence_sort.clear()
+        self.sequence_sort.addItem("Original order", "original")
+        self.sequence_sort.addItem("Sequence name", "name")
+        if msa:
+            self.sequence_sort.addItem("Selected column", "selected_columns")
+        idx = self.sequence_sort.findData(current)
+        if idx < 0 and current == "selected_columns" and not msa:
+            idx = 0
+        self.sequence_sort.setCurrentIndex(max(0, idx))
+        self.sequence_sort.blockSignals(False)
+
+    def sequence_sort_mode(self) -> str:
+        data = self.sequence_sort.currentData()
+        text = str(data or "original").strip().lower()
+        if text in {"original", "name", "selected_columns"}:
+            return text
+        return "original"
+
+    def set_sequence_sort_mode(self, mode: str) -> None:
+        key = str(mode or "original").strip().lower()
+        idx = self.sequence_sort.findData(key)
+        if idx < 0:
+            idx = 0
+        if self.sequence_sort.currentIndex() == idx:
+            return
+        self.sequence_sort.blockSignals(True)
+        self.sequence_sort.setCurrentIndex(idx)
+        self.sequence_sort.blockSignals(False)
+
+    def _on_sequence_sort_changed(self, _index: int = 0) -> None:
+        self.sequenceSortChanged.emit(self.sequence_sort_mode())
 
     def _on_msa_coloring_mode_changed(self, checked: bool = True) -> None:
         if not checked:
@@ -1707,7 +1765,6 @@ class SequenceAnnotationRail(QWidget):
     def _sync_msa_divergence_enabled(self) -> None:
         from repeatviewer.backends.msa_coordinates import (
             MSA_COLOR_BG_WHEN_CONSERVED,
-            MSA_COLOR_CONSERVATION_GREY,
             MSA_COLOR_NO_BG_WHEN_CONSERVED,
         )
 
@@ -1718,7 +1775,6 @@ class SequenceAnnotationRail(QWidget):
         enabled = mode in (
             MSA_COLOR_BG_WHEN_CONSERVED,
             MSA_COLOR_NO_BG_WHEN_CONSERVED,
-            MSA_COLOR_CONSERVATION_GREY,
         )
         row.setEnabled(enabled)
 
@@ -1751,10 +1807,18 @@ class SequenceAnnotationRail(QWidget):
         self._tracks_divider.setVisible(True)
         self._tracks_label.setVisible(True)
         self.show_annotation_track.setVisible(True)
-        # Gap connectors apply only to zoomed-out MSA residue rows.
-        self.connect_gaps_with_line.setVisible(
-            overview and bool(getattr(self, "_msa_display_mode", False))
-        )
+        self.sequence_sort_row.setVisible(overview)
+        if overview:
+            self._populate_sequence_sort_options(
+                msa=bool(getattr(self, "_msa_display_mode", False))
+            )
+            self.set_nucleotide_color_context(
+                "msa"
+                if bool(getattr(self, "_msa_display_mode", False))
+                else "multi"
+            )
+        else:
+            self.set_nucleotide_color_context("single")
         self._tab_buttons[self.TAB_ANNOTATIONS].setVisible(True)
         sections = getattr(self, "_annotation_sections", None) or {}
         for section_id in ("manual", "transfer"):
@@ -1798,12 +1862,17 @@ class SequenceAnnotationRail(QWidget):
         self.msa_coloring_header.setVisible(visible)
         self.msa_coloring_mode_host.setVisible(visible)
         self.msa_divergence_row.setVisible(visible)
-        self.connect_gaps_with_line.setVisible(visible)
         self._column_distance_label.setVisible(False)
         self.column_distance.setVisible(False)
         self.color_multi_sequence_background.setVisible(
             bool(getattr(self, "_overview_mode", False)) and not self._msa_display_mode
         )
+        if bool(getattr(self, "_overview_mode", False)):
+            self.sequence_sort_row.setVisible(True)
+            self.set_nucleotide_color_context(
+                "msa" if self._msa_display_mode else "multi"
+            )
+            self._populate_sequence_sort_options(msa=self._msa_display_mode)
         if visible:
             self._sync_msa_divergence_enabled()
             self.delete_btn.setToolTip(

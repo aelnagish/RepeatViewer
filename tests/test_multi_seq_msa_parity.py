@@ -221,11 +221,11 @@ def test_overview_rail_keeps_add_transfer_and_track_toggle(qapp: QApplication) -
     rail.set_overview_display_mode(True)
     assert not rail.show_annotation_track.isHidden()
     assert rail.show_annotation_track.isChecked()
-    # Gap connectors are MSA-only (under Show annotation track).
-    assert rail.connect_gaps_with_line.isHidden()
+    # Sort options: multi-seq has original/name; MSA also has selected columns.
+    assert not rail.sequence_sort_row.isHidden()
+    assert rail.sequence_sort.findData("selected_columns") < 0
     rail.set_msa_display_mode(True)
-    assert not rail.connect_gaps_with_line.isHidden()
-    assert not rail.connect_gaps_with_line.isChecked()
+    assert rail.sequence_sort.findData("selected_columns") >= 0
     assert rail.show_complement.isHidden()
     sections = rail._annotation_sections
     assert not sections["manual"].isHidden()
@@ -239,48 +239,7 @@ def test_overview_rail_keeps_add_transfer_and_track_toggle(qapp: QApplication) -
     rail.close()
 
 
-def test_msa_conservation_greyscale_overview_colors(qapp: QApplication) -> None:
-    from PySide6.QtCore import QPoint
-    from PySide6.QtGui import QColor, QImage, QPainter
-
-    from repeatviewer.backends.msa_coordinates import MSA_COLOR_CONSERVATION_GREY
-    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
-
-    canvas = _BarsCanvas()
-    canvas.resize(400, 100)
-    # Col0: A,A,C → A conserved (≥0.4), C divergent. Pad so overview stays zoomed out.
-    pad = "A" * 80
-    canvas.set_msa_data(
-        ["a", "b", "c"],
-        ["A" + pad, "A" + pad, "C" + pad],
-    )
-    canvas.set_pixels_per_base(4.0)
-    assert not canvas._msa_shows_letters()
-    canvas.set_msa_color_mode(MSA_COLOR_CONSERVATION_GREY)
-    canvas.set_msa_divergence_threshold(0.4)
-
-    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
-    img.fill(QColor("white"))
-    painter = QPainter(img)
-    canvas.render(painter, QPoint())
-    painter.end()
-
-    # Row 0, col 0 (A conserved) → grey
-    x0 = int(canvas.bar_pad() + 0.5 * canvas.pixels_per_base())
-    y0 = int(canvas.row_tops()[0] + canvas._msa_letter_band_height() * 0.5)
-    grey = img.pixelColor(x0, y0)
-    assert abs(grey.red() - 0xD0) < 8
-    assert abs(grey.green() - 0xD0) < 8
-
-    # Row 2, col 0 (C divergent) → black
-    y2 = int(canvas.row_tops()[2] + canvas._msa_letter_band_height() * 0.5)
-    black = img.pixelColor(x0, y2)
-    assert black.red() < 20 and black.green() < 20 and black.blue() < 20
-
-
-def test_msa_connect_gaps_with_line_paints_overview_backbone(
-    qapp: QApplication,
-) -> None:
+def test_msa_overview_always_paints_gap_backbone(qapp: QApplication) -> None:
     from PySide6.QtCore import QPoint
     from PySide6.QtGui import QColor, QImage, QPainter
 
@@ -292,7 +251,6 @@ def test_msa_connect_gaps_with_line_paints_overview_backbone(
     canvas.set_msa_data(["a"], [seq])
     canvas.set_pixels_per_base(4.0)
     assert not canvas._msa_shows_letters()
-    canvas.set_connect_gaps_with_line(True)
 
     img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
     img.fill(QColor("white"))
@@ -305,14 +263,62 @@ def test_msa_connect_gaps_with_line_paints_overview_backbone(
     pix = img.pixelColor(x, y)
     assert pix.red() < 40 and pix.green() < 40 and pix.blue() < 40
 
-    canvas.set_connect_gaps_with_line(False)
-    img2 = QImage(canvas.size(), QImage.Format.Format_ARGB32)
-    img2.fill(QColor("white"))
-    painter2 = QPainter(img2)
-    canvas.render(painter2, QPoint())
-    painter2.end()
-    pix2 = img2.pixelColor(x, y)
-    assert pix2.red() > 240 and pix2.green() > 240 and pix2.blue() > 240
+
+def test_msa_sort_by_name_and_original(qapp: QApplication) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.set_msa_data(
+        ["c_seq", "a_seq", "b_seq"],
+        ["AAA", "CCC", "GGG"],
+    )
+    canvas.sort_rows("name")
+    assert canvas.record_ids() == ["a_seq", "b_seq", "c_seq"]
+    canvas.sort_rows("original")
+    assert canvas.record_ids() == ["c_seq", "a_seq", "b_seq"]
+
+
+def test_msa_sort_by_selected_columns(qapp: QApplication) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.set_msa_data(
+        ["r1", "r2", "r3"],
+        ["AAA", "CCC", "AAC"],
+    )
+    canvas.set_region_selection(1, 2)
+    canvas.sort_rows("selected_columns")
+    assert canvas.record_ids()[0] == "r1"
+    assert canvas.record_ids()[1] == "r3"
+    assert canvas.record_ids()[2] == "r2"
+
+
+def test_sorting_label_and_selected_column_is_oneshot(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+    from repeatviewer.widgets.sequence_annotation_rail import SequenceAnnotationRail
+
+    rail = SequenceAnnotationRail()
+    rail.set_overview_display_mode(True)
+    rail.set_msa_display_mode(True)
+    assert rail.sequence_sort_label.text() == "Sorting:"
+    assert rail.sequence_sort.findText("Selected column") >= 0
+    assert rail.sequence_sort.findText("Selected columns") < 0
+    rail.close()
+
+    fasta = tmp_path / "sort_oneshot.fa"
+    fasta.write_text(">r1\nAAA\n>r2\nCCC\n>r3\nAAC\n")
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.load_path(fasta, msa_mode=True)
+    panel._rail.set_sequence_sort_mode("selected_columns")
+    panel._bars.set_region_selection(1, 2)
+    panel._bars.sort_rows("selected_columns")
+    order_after_sort = list(panel._bars.record_ids())
+    # Column click / region change must not re-sort while mode stays selected.
+    panel._on_region_selection_changed((3, 3))
+    assert panel._bars.record_ids() == order_after_sort
+    panel.deleteLater()
 
 
 def test_bars_select_all_and_region_without_zoom(qapp: QApplication) -> None:
@@ -872,7 +878,9 @@ def test_delete_removes_shift_delete_fills_gaps(
     panel.close()
 
 
-def test_scale_click_zooms_at_position(qapp: QApplication) -> None:
+def test_scale_click_selects_column_double_click_zooms(
+    qapp: QApplication,
+) -> None:
     from repeatviewer.widgets.multi_sequence_overview import _ScaleRuler
 
     ruler = _ScaleRuler()
@@ -883,7 +891,7 @@ def test_scale_click_zooms_at_position(qapp: QApplication) -> None:
     selects: list[tuple[int, int]] = []
     ruler.zoomAtRequested.connect(lambda x, inn: zooms.append((x, inn)))
     ruler.columnRegionSelected.connect(lambda a, b: selects.append((a, b)))
-    # Click without drag — request max zoom at content x (scale_x + scroll).
+    # Click without drag — select the column under the cursor.
     click_x = 8.0 + 9.5 * 10
     ruler._drag_origin_x = click_x
     ruler._rubber_active = False
@@ -895,13 +903,30 @@ def test_scale_click_zooms_at_position(qapp: QApplication) -> None:
         Qt.KeyboardModifier.NoModifier,
     )
     ruler.mouseReleaseEvent(release)
+    assert zooms == []
+    expected = ruler._columns_from_x_range(click_x, click_x)
+    assert selects == [expected]
+    assert expected[0] == expected[1]
+
+    # Double-click → zoom to max at content x (scale_x + scroll).
+    zooms.clear()
+    selects.clear()
+    dbl = QMouseEvent(
+        QMouseEvent.Type.MouseButtonDblClick,
+        QPointF(click_x, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    ruler.mouseDoubleClickEvent(dbl)
     assert selects == []
     assert len(zooms) == 1
-    assert zooms[0][1] is True  # zoom_in → most zoom
+    assert zooms[0][1] is True
     assert abs(zooms[0][0] - (click_x + 20)) < 1e-6
 
     # Shift+click → fit (zoom_in=False).
     zooms.clear()
+    ruler._suppress_click_select = False
     ruler._drag_origin_x = click_x
     ruler._rubber_active = False
     release_out = QMouseEvent(

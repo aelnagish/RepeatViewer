@@ -298,7 +298,7 @@ _OVERVIEW_SYNC_MS = 16
 _RULER_HEIGHT = 20
 # Room for number above a short tick centered on each nucleotide.
 _VIEWPORT_RULER_HEIGHT = 18
-# Ignore tiny moves on the scale (click = zoom; drag = select range).
+# Ignore tiny moves on the scale (click = select; drag = select range).
 _RULER_RUBBER_MIN_PX = 4
 _OVERVIEW_HEIGHT = 16
 # Bar-mode (zoomed-out) strip height. Letter mode sizes from the Display font.
@@ -1171,8 +1171,8 @@ class SequenceScrollArea(QScrollArea):
 class ViewportRulerWidget(QWidget):
     """Position scale aligned with the visible sequence (scroll + zoom synced).
 
-    Click → zoom at position (Shift/right-click → fit). Drag → select a bp range
-    (same as dragging on the sequence map).
+    Click → select position/column; double-click → zoom to max; drag → range;
+    Shift/right-click → fit.
     """
 
     # Viewport-local x under the cursor + zoom-in flag (True=in, False=out).
@@ -1188,7 +1188,8 @@ class ViewportRulerWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
         self.setToolTip(
-            "Click the scale bar to zoom to maximum at this position · "
+            "Click to select a position · "
+            "Double-click to zoom to maximum at this position · "
             "Drag to select a region · "
             "Right-click or Shift+click to fit"
         )
@@ -1202,6 +1203,7 @@ class ViewportRulerWidget(QWidget):
         self._drag_current_x: float | None = None
         self._rubber_active = False
         self._press_modifiers = Qt.KeyboardModifier.NoModifier
+        self._suppress_click_select = False
 
     def set_font_point_size(self, point_size: int) -> None:
         self._font_point_size = max(4, min(24, int(point_size)))
@@ -1259,6 +1261,7 @@ class ViewportRulerWidget(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            self._suppress_click_select = False
             self._drag_origin_x = float(event.position().x())
             self._drag_current_x = self._drag_origin_x
             self._rubber_active = False
@@ -1298,6 +1301,19 @@ class ViewportRulerWidget(QWidget):
             return
         super().mouseMoveEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._suppress_click_select = True
+            self._drag_origin_x = None
+            self._drag_current_x = None
+            self._rubber_active = False
+            if QWidget.mouseGrabber() is self:
+                self.releaseMouse()
+            self.zoomAtRequested.emit(float(event.position().x()), True)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self._drag_origin_x is not None:
             if QWidget.mouseGrabber() is self:
@@ -1309,15 +1325,31 @@ class ViewportRulerWidget(QWidget):
             self._drag_origin_x = None
             self._drag_current_x = None
             self._rubber_active = False
+            if self._suppress_click_select:
+                self._suppress_click_select = False
+                self.update()
+                event.accept()
+                return
             if active and abs(x1 - x0) >= _RULER_RUBBER_MIN_PX:
                 start_i, end_i = self._range_from_x(x0, x1)
                 self._region_sel = (start_i, end_i)
                 self.regionSelected.emit(start_i, end_i)
+            elif mods & Qt.KeyboardModifier.ShiftModifier:
+                # Shift+click → fit (zoom out) at this position.
+                self.zoomAtRequested.emit(x1, False)
             else:
-                # Click (no drag) → zoom at this position (Shift = fit).
-                zoom_in = not bool(mods & Qt.KeyboardModifier.ShiftModifier)
-                self.zoomAtRequested.emit(x1, zoom_in)
+                # Click (no drag) → select the position/column under the cursor.
+                start_i, end_i = self._range_from_x(x1, x1)
+                self._region_sel = (start_i, end_i)
+                self.regionSelected.emit(start_i, end_i)
             self.update()
+            event.accept()
+            return
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._suppress_click_select
+        ):
+            self._suppress_click_select = False
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -3450,8 +3482,14 @@ class SequenceMapCanvas(QWidget):
             painter.save()
             painter.setClipRect(cell)
             painter.setFont(self._sequence_font_for_track(cell.height()))
-            # Coloured background → black letter (matches MSA letter style).
-            painter.setPen(QColor("#111111") if self._color_bases else fg)
+            if self._color_bases:
+                from repeatviewer.widgets.residue_color_grid import ResidueColorGrid
+
+                painter.setPen(
+                    QColor(ResidueColorGrid.contrast_text_color(bg))
+                )
+            else:
+                painter.setPen(fg)
             painter.drawText(cell, Qt.AlignmentFlag.AlignCenter, base)
             painter.restore()
 
@@ -3726,11 +3764,18 @@ class SequenceMapCanvas(QWidget):
                         _draw_cell_separator(painter, cell)
                         if letter_font is not None:
                             painter.setFont(letter_font)
-                            painter.setPen(
-                                QColor("#111111")
-                                if self._color_bases
-                                else QColor("#222222")
-                            )
+                            if self._color_bases:
+                                from repeatviewer.widgets.residue_color_grid import (
+                                    ResidueColorGrid,
+                                )
+
+                                painter.setPen(
+                                    QColor(
+                                        ResidueColorGrid.contrast_text_color(bg)
+                                    )
+                                )
+                            else:
+                                painter.setPen(QColor("#222222"))
                             painter.drawText(
                                 cell, Qt.AlignmentFlag.AlignCenter, letter
                             )
@@ -3764,11 +3809,18 @@ class SequenceMapCanvas(QWidget):
                                 pt = max(5, int(letter_font.pointSizeF() * 0.72))
                                 font.setPointSize(pt)
                             painter.setFont(font)
-                            painter.setPen(
-                                QColor("#111111")
-                                if self._color_bases
-                                else QColor("#222222")
-                            )
+                            if self._color_bases:
+                                from repeatviewer.widgets.residue_color_grid import (
+                                    ResidueColorGrid,
+                                )
+
+                                painter.setPen(
+                                    QColor(
+                                        ResidueColorGrid.contrast_text_color(bg)
+                                    )
+                                )
+                            else:
+                                painter.setPen(QColor("#222222"))
                             painter.drawText(
                                 cell, Qt.AlignmentFlag.AlignCenter, label
                             )
@@ -7142,6 +7194,7 @@ class SequenceMapPanel(QWidget):
             split_tracks_by_source=self._map.split_tracks_by_source(),
             min_font_pt=_MIN_NUC_FONT_PT,
             max_font_pt=_MAX_NUC_FONT_PT,
+            nucleotide_color_context="single",
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return

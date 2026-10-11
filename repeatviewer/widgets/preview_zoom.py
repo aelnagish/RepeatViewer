@@ -283,31 +283,34 @@ _LEGACY_ALIVIEW_ACGT: dict[str, str] = {
 
 
 # Hot path (Annotation color bar) must not reopen QSettings per base.
-_nucleotide_color_map_cache: dict[str, tuple[str, str]] | None = None
+# Per-context caches: single-sequence map, multi-sequence overview, MSA overview.
+_nucleotide_color_map_cache: dict[str, dict[str, tuple[str, str]]] = {}
 _amino_acid_color_map_cache: dict[str, tuple[str, str]] | None = None
 
+# Independent nucleotide palettes for each sequence display mode.
+NUCLEOTIDE_COLOR_CONTEXTS: tuple[str, ...] = ("single", "multi", "msa")
+_NUCLEOTIDE_SCHEME_NAMES: frozenset[str] = frozenset(
+    {"Default", "Color-blind", "All black", "Custom"}
+)
+_NUCLEOTIDE_SCHEME_CORE: tuple[str, ...] = ("A", "C", "G", "T", "U")
+_NUCLEOTIDE_CONTEXTS_MIGRATED_KEY = "nucleotide_contexts_migrated_v1"
 
-def invalidate_residue_color_maps() -> None:
+
+def normalize_nucleotide_color_context(context: str | None) -> str:
+    key = str(context or "single").strip().lower()
+    if key in NUCLEOTIDE_COLOR_CONTEXTS:
+        return key
+    return "single"
+
+
+def invalidate_residue_color_maps(context: str | None = None) -> None:
     """Drop cached nucleotide / amino-acid palettes (call after color settings change)."""
     global _nucleotide_color_map_cache, _amino_acid_color_map_cache
-    _nucleotide_color_map_cache = None
+    if context is None:
+        _nucleotide_color_map_cache = {}
+    else:
+        _nucleotide_color_map_cache.pop(normalize_nucleotide_color_context(context), None)
     _amino_acid_color_map_cache = None
-
-
-def load_color_blind_nucleotide_scheme() -> bool:
-    s = QSettings()
-    s.beginGroup(PREVIEW_SETTINGS_GROUP)
-    enabled = bool(s.value("color_blind_nucleotide_scheme", False))
-    s.endGroup()
-    return enabled
-
-
-def save_color_blind_nucleotide_scheme(enabled: bool) -> None:
-    s = QSettings()
-    s.beginGroup(PREVIEW_SETTINGS_GROUP)
-    s.setValue("color_blind_nucleotide_scheme", bool(enabled))
-    s.endGroup()
-    invalidate_residue_color_maps()
 
 
 def _scheme_base_colors() -> dict[str, tuple[str, str]]:
@@ -317,75 +320,253 @@ def _scheme_base_colors() -> dict[str, tuple[str, str]]:
 
 
 def _strip_legacy_aliview_overrides(colors: dict[str, str]) -> dict[str, str]:
-    """Drop old AliView ACGT custom values so MSA Default is the true default."""
+    """Drop a full legacy AliView ACGT set so MSA Default is the true default.
+
+    Only strip when A/C/G/T all match the old AliView palette together.
+    Per-base stripping wrongly removed G from the All-black preset
+    (legacy AliView G was also ``#000000``).
+    """
     cleaned = dict(colors)
-    for base, legacy in _LEGACY_ALIVIEW_ACGT.items():
-        if cleaned.get(base, "").upper() == legacy.upper():
+    cores = ("A", "C", "G", "T")
+    if all(
+        cleaned.get(base, "").upper() == _LEGACY_ALIVIEW_ACGT[base].upper()
+        for base in cores
+    ):
+        for base in (*cores, "U"):
             cleaned.pop(base, None)
     return cleaned
 
 
-def load_custom_nucleotide_backgrounds() -> dict[str, str]:
-    """Load custom nucleotide colours (full alphabet JSON).
+def _normalize_tu_colors(colors: dict[str, str]) -> dict[str, str]:
+    cleaned = dict(colors)
+    if "U" in cleaned:
+        cleaned["T"] = cleaned["U"]
+    elif "T" in cleaned:
+        cleaned["U"] = cleaned["T"]
+    return cleaned
 
-    Read-only: do not write/remove settings here — the Annotation color bar
-    calls into this path thousands of times when the palette is uncached.
-    Legacy per-base keys are stripped in ``save_custom_nucleotide_backgrounds``.
-    """
+
+def _parse_nucleotide_colors_json(raw: object) -> dict[str, str]:
     import json
-
-    s = QSettings()
-    s.beginGroup(PREVIEW_SETTINGS_GROUP)
-    raw = s.value("nucleotide_colors_json", "")
-    s.endGroup()
 
     custom: dict[str, str] = {}
     text = str(raw or "").strip()
-    if text:
-        try:
-            decoded = json.loads(text)
-        except (json.JSONDecodeError, TypeError):
-            decoded = None
-        if isinstance(decoded, dict):
-            for key, value in decoded.items():
-                color = str(value).strip()
-                if key and color.startswith("#") and len(color) >= 4:
-                    custom[str(key).upper()] = color
-    custom = _strip_legacy_aliview_overrides(custom)
-    if "U" in custom:
-        custom["T"] = custom["U"]
-    elif "T" in custom:
-        custom["U"] = custom["T"]
-    return custom
+    if not text:
+        return custom
+    try:
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return custom
+    if not isinstance(decoded, dict):
+        return custom
+    for key, value in decoded.items():
+        color = str(value).strip()
+        if key and color.startswith("#") and len(color) >= 4:
+            custom[str(key).upper()] = color
+    return _normalize_tu_colors(_strip_legacy_aliview_overrides(custom))
 
 
-def save_custom_nucleotide_backgrounds(colors: dict[str, str]) -> None:
-    import json
-
+def _clean_nucleotide_color_dict(colors: dict[str, str]) -> dict[str, str]:
     cleaned: dict[str, str] = {}
     for key, value in colors.items():
         color = str(value).strip()
         if key and color.startswith("#") and len(color) >= 4:
             cleaned[str(key).upper()] = color
-    if "U" in cleaned:
-        cleaned["T"] = cleaned["U"]
-    elif "T" in cleaned:
-        cleaned["U"] = cleaned["T"]
+    return _normalize_tu_colors(cleaned)
 
+
+def match_nucleotide_scheme_name(colors: dict[str, str]) -> str | None:
+    """Return a preset name when ``colors`` match that preset on A/C/G/T/U."""
+    from repeatviewer.backends.msa_plot import NUCLEOTIDE_COLOR_PRESETS
+
+    cleaned = _clean_nucleotide_color_dict(colors)
+    if not cleaned:
+        return "Default"
+    for name, palette in NUCLEOTIDE_COLOR_PRESETS:
+        if all(
+            cleaned.get(base, "").upper() == str(palette.get(base, "")).upper()
+            for base in _NUCLEOTIDE_SCHEME_CORE
+        ):
+            return name
+    return None
+
+
+def _nucleotide_preset_palette(name: str) -> dict[str, str]:
+    from repeatviewer.backends.msa_plot import (
+        DEFAULT_NUCLEOTIDE_COLORS,
+        NUCLEOTIDE_COLOR_PRESETS,
+    )
+
+    for preset_name, palette in NUCLEOTIDE_COLOR_PRESETS:
+        if preset_name == name:
+            return dict(palette)
+    return dict(DEFAULT_NUCLEOTIDE_COLORS)
+
+
+def _nucleotide_scheme_key(context: str) -> str:
+    return f"nucleotide_scheme_{context}"
+
+
+def _nucleotide_colors_key(context: str) -> str:
+    return f"nucleotide_colors_json_{context}"
+
+
+def _write_nucleotide_context_settings(
+    context: str,
+    scheme: str,
+    colors: dict[str, str] | None,
+) -> None:
+    import json
+
+    ctx = normalize_nucleotide_color_context(context)
+    name = str(scheme or "Default").strip()
+    if name not in _NUCLEOTIDE_SCHEME_NAMES:
+        name = "Default"
+    cleaned = _clean_nucleotide_color_dict(colors or {})
     s = QSettings()
     s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    s.setValue(_nucleotide_scheme_key(ctx), name)
     for base in ("A", "C", "G", "T"):
         s.remove(f"nucleotide_{base}_bg")
-    if cleaned:
-        s.setValue("nucleotide_colors_json", json.dumps(cleaned, sort_keys=True))
+        s.remove(f"nucleotide_{base}_bg_{ctx}")
+    if name == "Custom" and cleaned:
+        s.setValue(_nucleotide_colors_key(ctx), json.dumps(cleaned, sort_keys=True))
     else:
-        s.remove("nucleotide_colors_json")
+        s.remove(_nucleotide_colors_key(ctx))
     s.endGroup()
-    invalidate_residue_color_maps()
+    invalidate_residue_color_maps(ctx)
 
 
-def clear_custom_nucleotide_backgrounds() -> None:
-    save_custom_nucleotide_backgrounds({})
+def _infer_legacy_nucleotide_scheme(
+    *,
+    color_blind: bool,
+    custom: dict[str, str],
+) -> tuple[str, dict[str, str]]:
+    """Map pre-context settings to (scheme name, custom colors to store)."""
+    from repeatviewer.backends.msa_plot import (
+        DEFAULT_NUCLEOTIDE_COLORS,
+        NUCLEOTIDE_COLORS_COLORBLIND,
+    )
+
+    if color_blind:
+        base = dict(NUCLEOTIDE_COLORS_COLORBLIND)
+    else:
+        base = dict(DEFAULT_NUCLEOTIDE_COLORS)
+    if not custom:
+        return ("Color-blind" if color_blind else "Default"), {}
+    merged = dict(base)
+    merged.update(custom)
+    matched = match_nucleotide_scheme_name(merged)
+    if matched is not None:
+        return matched, {}
+    return "Custom", merged
+
+
+def _ensure_nucleotide_context_migration() -> None:
+    """Copy legacy global nucleotide settings into per-context keys once."""
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    migrated = bool(s.value(_NUCLEOTIDE_CONTEXTS_MIGRATED_KEY, False))
+    if migrated:
+        s.endGroup()
+        return
+    raw = s.value("nucleotide_colors_json", "")
+    color_blind = bool(s.value("color_blind_nucleotide_scheme", False))
+    s.endGroup()
+
+    custom = _parse_nucleotide_colors_json(raw)
+    scheme, store = _infer_legacy_nucleotide_scheme(
+        color_blind=color_blind, custom=custom
+    )
+    for ctx in NUCLEOTIDE_COLOR_CONTEXTS:
+        _write_nucleotide_context_settings(ctx, scheme, store)
+
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    s.setValue(_NUCLEOTIDE_CONTEXTS_MIGRATED_KEY, True)
+    s.endGroup()
+
+
+def load_nucleotide_scheme_name(context: str = "single") -> str:
+    """Saved preset name for a display context (Default / Color-blind / All black / Custom)."""
+    _ensure_nucleotide_context_migration()
+    ctx = normalize_nucleotide_color_context(context)
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    name = str(s.value(_nucleotide_scheme_key(ctx), "Default") or "Default").strip()
+    s.endGroup()
+    if name in _NUCLEOTIDE_SCHEME_NAMES:
+        return name
+    return "Default"
+
+
+def save_nucleotide_scheme(
+    context: str,
+    name: str,
+    colors: dict[str, str] | None = None,
+) -> None:
+    """Persist a named preset or Custom palette for one display context."""
+    _ensure_nucleotide_context_migration()
+    label = str(name or "Default").strip()
+    if label == "Custom":
+        cleaned = _clean_nucleotide_color_dict(colors or {})
+        matched = match_nucleotide_scheme_name(cleaned) if cleaned else "Default"
+        if matched is not None:
+            _write_nucleotide_context_settings(context, matched, None)
+        else:
+            _write_nucleotide_context_settings(context, "Custom", cleaned)
+        return
+    if label not in _NUCLEOTIDE_SCHEME_NAMES:
+        label = "Default"
+    _write_nucleotide_context_settings(context, label, None)
+
+
+def load_color_blind_nucleotide_scheme(context: str = "single") -> bool:
+    """Back-compat: True when the context scheme is Color-blind."""
+    return load_nucleotide_scheme_name(context) == "Color-blind"
+
+
+def save_color_blind_nucleotide_scheme(
+    enabled: bool, context: str = "single"
+) -> None:
+    """Back-compat: set Color-blind or Default for one context."""
+    save_nucleotide_scheme(
+        context, "Color-blind" if enabled else "Default"
+    )
+
+
+def load_custom_nucleotide_backgrounds(context: str = "single") -> dict[str, str]:
+    """Load Custom-palette colours for a display context (empty for named presets).
+
+    Read-only: do not write/remove settings here — the Annotation color bar
+    calls into this path thousands of times when the palette is uncached.
+    """
+    _ensure_nucleotide_context_migration()
+    ctx = normalize_nucleotide_color_context(context)
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    raw = s.value(_nucleotide_colors_key(ctx), "")
+    s.endGroup()
+    return _parse_nucleotide_colors_json(raw)
+
+
+def save_custom_nucleotide_backgrounds(
+    colors: dict[str, str], context: str = "single"
+) -> None:
+    """Save a full palette for one context (matches a preset when possible)."""
+    _ensure_nucleotide_context_migration()
+    cleaned = _clean_nucleotide_color_dict(colors)
+    if not cleaned:
+        save_nucleotide_scheme(context, "Default")
+        return
+    matched = match_nucleotide_scheme_name(cleaned)
+    if matched is not None:
+        save_nucleotide_scheme(context, matched)
+    else:
+        save_nucleotide_scheme(context, "Custom", cleaned)
+
+
+def clear_custom_nucleotide_backgrounds(context: str = "single") -> None:
+    save_nucleotide_scheme(context, "Default")
 
 
 def default_nucleotide_backgrounds() -> dict[str, str]:
@@ -395,30 +576,31 @@ def default_nucleotide_backgrounds() -> dict[str, str]:
     return dict(DEFAULT_NUCLEOTIDE_COLORS)
 
 
-def nucleotide_base_color_map() -> dict[str, tuple[str, str]]:
-    """Return bg/fg hex colors for nucleotide letters in the Annotation view."""
-    global _nucleotide_color_map_cache
-    if _nucleotide_color_map_cache is not None:
-        return _nucleotide_color_map_cache
-
-    from repeatviewer.backends.msa_plot import (
-        DEFAULT_NUCLEOTIDE_COLORS,
-        NUCLEOTIDE_COLORS_COLORBLIND,
-    )
-
-    if load_color_blind_nucleotide_scheme():
-        merged = dict(NUCLEOTIDE_COLORS_COLORBLIND)
+def nucleotide_palette_colors(context: str = "single") -> dict[str, str]:
+    """Resolved background hex colours for one display context."""
+    ctx = normalize_nucleotide_color_context(context)
+    scheme = load_nucleotide_scheme_name(ctx)
+    if scheme == "Custom":
+        merged = default_nucleotide_backgrounds()
+        merged.update(load_custom_nucleotide_backgrounds(ctx))
     else:
-        merged = dict(DEFAULT_NUCLEOTIDE_COLORS)
-    merged.update(load_custom_nucleotide_backgrounds())
-    if "U" in merged:
-        merged["T"] = merged["U"]
-    elif "T" in merged:
-        merged["U"] = merged["T"]
-    _nucleotide_color_map_cache = {
+        merged = _nucleotide_preset_palette(scheme)
+    return _normalize_tu_colors(merged)
+
+
+def nucleotide_base_color_map(context: str = "single") -> dict[str, tuple[str, str]]:
+    """Return bg/fg hex colors for nucleotide letters in one display context."""
+    ctx = normalize_nucleotide_color_context(context)
+    cached = _nucleotide_color_map_cache.get(ctx)
+    if cached is not None:
+        return cached
+
+    merged = nucleotide_palette_colors(ctx)
+    resolved = {
         base: (bg, _contrast_fg_for_bg(bg)) for base, bg in merged.items()
     }
-    return _nucleotide_color_map_cache
+    _nucleotide_color_map_cache[ctx] = resolved
+    return resolved
 
 
 def _contrast_fg_for_bg(bg_hex: str) -> str:

@@ -79,7 +79,15 @@ def test_clustal_is_default_amino_palette() -> None:
     names = [label for label, _palette in AMINO_ACID_COLOR_PRESETS]
     assert names == ["Clustal", "Zappo", "Taylor"]
     nuc_names = [label for label, _palette in NUCLEOTIDE_COLOR_PRESETS]
-    assert nuc_names == ["Default", "Color-blind"]
+    assert nuc_names == ["Default", "Color-blind", "All black"]
+    all_black = dict(dict(NUCLEOTIDE_COLOR_PRESETS)["All black"])
+    for base in "ATUGC":
+        assert all_black[base] == "#000000"
+    # All-black G must survive load (legacy AliView G was also #000000).
+    from repeatviewer.widgets.preview_zoom import _strip_legacy_aliview_overrides
+
+    kept = _strip_legacy_aliview_overrides(all_black)
+    assert kept["G"] == "#000000"
     assert AMINO_ACID_COLORS_CLUSTAL["P"] == "#FFFF00"
     assert AMINO_ACID_COLORS_CLUSTAL["A"] == "#80A0F0"
 

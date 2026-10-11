@@ -154,6 +154,34 @@ def test_unaligned_overview_sequence_distance_defaults_to_two(
         settings.endGroup()
 
 
+def test_msa_overview_sequence_distance_defaults_to_one(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings("RepeatViewer", "RepeatViewer")
+    settings.beginGroup("annotation_overview_display")
+    had_value = settings.contains("sequence_distance")
+    previous = settings.value("sequence_distance")
+    settings.remove("sequence_distance")
+    settings.endGroup()
+    try:
+        path = tmp_path / "aln.fa"
+        path.write_text(">a\nACGT\n>b\nACGT\n")
+        panel = MultiSequenceOverviewPanel(path)
+        panel.load_path(path, msa_mode=True)
+        assert panel._rail.sequence_distance.value() == 1
+        assert panel._bars.sequence_row_gap() == 1
+        panel.deleteLater()
+    finally:
+        settings.beginGroup("annotation_overview_display")
+        if had_value:
+            settings.setValue("sequence_distance", previous)
+        else:
+            settings.remove("sequence_distance")
+        settings.endGroup()
+
+
 def test_overview_auto_detects_aligned_msa(qapp: QApplication, tmp_path: Path) -> None:
     path = tmp_path / "aln.fa"
     path.write_text(">x\nAAAA----\n>y\nAAAATTTT\n")

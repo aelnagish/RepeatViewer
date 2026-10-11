@@ -59,6 +59,16 @@ NUCLEOTIDE_COLORS_COLORBLIND: dict[str, str] = {
     **{letter: "#FFFFFF" for letter in _NUCLEOTIDE_AMBIGUITY_LETTERS},
 }
 
+# A/T/U/G/C solid black; other letters keep Default greys / white.
+NUCLEOTIDE_COLORS_ALL_BLACK: dict[str, str] = {
+    **NUCLEOTIDE_COLORS_DEFAULT,
+    "A": "#000000",
+    "C": "#000000",
+    "G": "#000000",
+    "T": "#000000",
+    "U": "#000000",
+}
+
 # Categories for the nucleotide colour picker.
 # Ambiguity is two rows so the dialog stays at TOOL_PARAMS_DIALOG_WIDTH.
 _NUCLEOTIDE_AMBIGUITY_ROW1 = _NUCLEOTIDE_AMBIGUITY_LETTERS[:6]
@@ -177,6 +187,7 @@ DEFAULT_AMINO_ACID_COLORS = AMINO_ACID_COLORS_CLUSTAL
 NUCLEOTIDE_COLOR_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
     ("Default", NUCLEOTIDE_COLORS_DEFAULT),
     ("Color-blind", NUCLEOTIDE_COLORS_COLORBLIND),
+    ("All black", NUCLEOTIDE_COLORS_ALL_BLACK),
 )
 
 AMINO_ACID_COLOR_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
