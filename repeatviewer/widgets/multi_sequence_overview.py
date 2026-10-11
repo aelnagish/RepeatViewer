@@ -34,6 +34,7 @@ from PySide6.QtGui import (
     QPalette,
     QPdfWriter,
     QPen,
+    QPixmap,
     QPolygonF,
     QRegion,
     QWheelEvent,
@@ -677,7 +678,17 @@ class _SelectionChrome:
         return QColor("#4ea1ff") if _is_dark(self._host) else QColor("#0b5cab")
 
     def _visible_clip(self) -> QRect:
+        """Visible content rect — prefer the scroll viewport when available.
+
+        ``visibleRegion()`` on a tall content widget can briefly cover the full
+        canvas during updates, which made column-band dirties span every row.
+        """
         host = self._host
+        clamp = getattr(host, "scroll_viewport_rect", None)
+        if callable(clamp):
+            vis = clamp()
+            if not vis.isEmpty():
+                return vis
         vis = host.visibleRegion().boundingRect()
         if not vis.isEmpty():
             return vis.intersected(host.rect())
@@ -765,11 +776,27 @@ class _SelectionChrome:
             return QRegion()
         return region.intersected(QRegion(clip))
 
+    def _erase_dirty_for_current(self) -> QRegion:
+        """Cheapest dirty region that still erases the current chrome correctly."""
+        if not self._mode:
+            return QRegion()
+        if self._mode == "columns":
+            # Live column guides are edge-only; committed wash needs the band.
+            if self._live:
+                return self._column_edge_dirty_region(self._box)
+            return self._area_dirty_region(self._box)
+        if self._mode == "rows":
+            # Live row outline → border strips; committed wash → full row area.
+            if self._live:
+                return self._border_dirty_region(*self._row_boxes)
+            return self._area_dirty_region(*self._row_boxes)
+        # Regional: small box; area dirty matches live+committed (wash/hairlines).
+        return self._area_dirty_region(self._box)
+
     def clear(self) -> None:
         if not self._mode:
             return
-        # Always area-erase — border-only left white hairlines under opaque paint.
-        dirty = self._area_dirty_region(self._box, *self._row_boxes)
+        dirty = self._erase_dirty_for_current()
         self._mode = ""
         self._box = QRect()
         self._row_boxes = []
@@ -786,7 +813,8 @@ class _SelectionChrome:
         # Live regional moves must dirty old∪new. Border-only strips are filled
         # white then auto-clipped; at fit zoom MSA cells do not cover every
         # pixel in those strips, which left a white line on the box's right edge.
-        dirty = self._area_dirty_region(self._box, new, *self._row_boxes)
+        dirty = self._erase_dirty_for_current()
+        dirty = dirty.united(self._area_dirty_region(new))
         self._mode = "region"
         self._box = new
         self._row_boxes = []
@@ -800,10 +828,13 @@ class _SelectionChrome:
         new = QRect(band).normalized()
         if self._mode == "columns" and self._box == new and self._live == live:
             return
+        dirty = self._erase_dirty_for_current()
         if live:
-            dirty = self._column_edge_dirty_region(self._box, new)
+            # Same cheap path as live regional: edge strips only.
+            dirty = dirty.united(self._column_edge_dirty_region(new))
         else:
-            dirty = self._area_dirty_region(self._box, new, *self._row_boxes)
+            # Committed wash (unchanged look) — one band recomposite.
+            dirty = dirty.united(self._area_dirty_region(new))
         self._mode = "columns"
         self._box = new
         self._row_boxes = []
@@ -821,7 +852,13 @@ class _SelectionChrome:
             return
         if self._mode == "rows" and self._row_boxes == valid and self._live == live:
             return
-        dirty = self._area_dirty_region(self._box, *self._row_boxes, *valid)
+        dirty = self._erase_dirty_for_current()
+        if live:
+            # Outline-only while dragging — avoid full-width MSA recomposite.
+            dirty = dirty.united(self._border_dirty_region(*valid))
+        else:
+            # Committed wash (unchanged look).
+            dirty = dirty.united(self._area_dirty_region(*valid))
         self._mode = "rows"
         self._box = QRect()
         self._row_boxes = valid
@@ -971,6 +1008,68 @@ class _BarsCanvas(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         # Selection chrome is painted in paintEvent after residues (no overlay).
         self._chrome = _SelectionChrome(self)
+        # Viewport-sized MSA underlay so column/row chrome updates blit instead
+        # of re-rasterizing every residue under the wash.
+        self._msa_underlay: QPixmap | None = None
+        self._msa_underlay_origin = QPoint()
+        self._msa_underlay_valid = False
+
+    def scroll_viewport_rect(self) -> QRect:
+        """This canvas's content rect currently shown in the scroll viewport."""
+        parent = self.parent()
+        if parent is None:
+            vis = self.visibleRegion().boundingRect()
+            return vis if not vis.isEmpty() else self.rect()
+        area = parent.parent()
+        if not isinstance(area, QScrollArea):
+            vis = self.visibleRegion().boundingRect()
+            return vis if not vis.isEmpty() else self.rect()
+        vp = area.viewport()
+        if vp is None:
+            return self.rect()
+        top_left = self.mapFrom(vp, QPoint(0, 0))
+        return QRect(top_left, vp.size()).intersected(self.rect())
+
+    def _invalidate_msa_underlay(self) -> None:
+        self._msa_underlay_valid = False
+        self._msa_underlay = None
+
+    def _ensure_msa_underlay(self, need: QRect) -> bool:
+        """Build/reuse a pixmap of MSA residues (no selection chrome)."""
+        if not self._msa_mode:
+            return False
+        need = need.intersected(self.rect())
+        if need.isEmpty():
+            return False
+        covered = QRect(
+            self._msa_underlay_origin,
+            self._msa_underlay.size() if self._msa_underlay is not None else QSize(),
+        )
+        if (
+            self._msa_underlay_valid
+            and self._msa_underlay is not None
+            and covered.contains(need)
+        ):
+            return True
+        area = self.scroll_viewport_rect()
+        if area.isEmpty():
+            area = need
+        else:
+            area = area.united(need).intersected(self.rect())
+        if area.isEmpty():
+            return False
+        pm = QPixmap(area.size())
+        if pm.isNull():
+            return False
+        pm.fill(_msa_canvas_color(self))
+        painter = QPainter(pm)
+        painter.translate(-area.topLeft())
+        self._paint_msa_rows(painter, area)
+        painter.end()
+        self._msa_underlay = pm
+        self._msa_underlay_origin = QPoint(area.topLeft())
+        self._msa_underlay_valid = True
+        return True
 
     def is_msa_mode(self) -> bool:
         return bool(self._msa_mode)
@@ -1458,6 +1557,7 @@ class _BarsCanvas(QWidget):
         )
         self._rebuild_msa_qcolor_cache()
         self._clear_drag_paint_cache()
+        self._invalidate_msa_underlay()
         self.update()
 
     def set_msa_color_mode(self, mode: str) -> None:
@@ -1468,6 +1568,7 @@ class _BarsCanvas(QWidget):
         self._msa_color_mode = new
         if self._msa_mode:
             self._clear_drag_paint_cache()
+            self._invalidate_msa_underlay()
             self.update()
 
     def msa_color_mode(self) -> str:
@@ -1481,6 +1582,7 @@ class _BarsCanvas(QWidget):
         self._msa_divergence_threshold = new
         if self._msa_mode:
             self._clear_drag_paint_cache()
+            self._invalidate_msa_underlay()
             self.update()
 
     def msa_divergence_threshold(self) -> float:
@@ -1795,15 +1897,15 @@ class _BarsCanvas(QWidget):
         self._chrome.set_row_boxes([box], live=True)
 
     def finish_live_selection_preview(self) -> None:
-        """Drop live selection chrome after commit or cancel.
+        """End live preview flags before commit.
 
-        Does not repaint the MSA — callers restore chrome via
-        ``set_selected_rows`` / ``set_region_selection`` / ``_sync_row_selection_chrome``.
+        Leaves chrome in place so commit can upgrade live→committed in one
+        paint (clear-then-rebuild was the column/row click lag vs regional).
+        Cancel paths that need a blank canvas should call ``_chrome.clear()``.
         """
         self._preview_columns = None
         self._preview_rows = None
         self._live_row_snap = None
-        self._chrome.clear()
         self._clear_drag_paint_cache()
 
     def _sequence_band_height(self, row: int) -> int:
@@ -2030,12 +2132,13 @@ class _BarsCanvas(QWidget):
     def selected_features(self) -> list[tuple[int, int]]:
         return sorted(self._selected_feats)
 
-    def clear_feature_selection(self) -> None:
+    def clear_feature_selection(self, *, repaint: bool = True) -> None:
         if not self._selected_feats:
             return
         self._selected_feats = set()
         self._reset_edge_expand_phase()
-        self.update()
+        if repaint:
+            self.update()
 
     def _reset_edge_expand_phase(self) -> None:
         self._edge_expand_phase = {"left": 0, "right": 0}
@@ -2135,6 +2238,7 @@ class _BarsCanvas(QWidget):
         """Edit > Find hits drawn on the bars ({} clears)."""
         self._find_hits = {rid: list(ranges) for rid, ranges in (hits_by_id or {}).items()}
         self._find_current = current
+        self._invalidate_msa_underlay()
         self.update()
 
     def set_selected_rows(self, rows: list[int] | set[int]) -> None:
@@ -2173,6 +2277,7 @@ class _BarsCanvas(QWidget):
         )
 
     def _recompute_layout(self) -> None:
+        self._invalidate_msa_underlay()
         self._row_tops = []
         self._row_heights = []
         y = 0
@@ -2923,10 +3028,18 @@ class _BarsCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, not self._msa_mode)
         painter.fillRect(clip, base)
         if self._msa_mode:
-            self._paint_msa_rows(painter, paint_clip if not paint_clip.isNull() else clip)
+            target = paint_clip if not paint_clip.isNull() else clip
+            # Selection chrome updates reuse a viewport underlay (blit + wash)
+            # instead of re-rasterizing residues under every column click.
+            if self._ensure_msa_underlay(target):
+                origin = self._msa_underlay_origin
+                src = target.translated(-origin.x(), -origin.y())
+                painter.drawPixmap(target, self._msa_underlay, src)
+            else:
+                self._paint_msa_rows(painter, target)
         else:
             self._paint_bar_rows(painter, clip)
-        # Chrome on top of real residues — never a translucent overlay / cache blit.
+        # Chrome on top of residue pixels (underlay or live paint).
         self._chrome.paint(painter, clip)
         if not self._rubber_active:
             self._paint_feature_hover_tip(painter)
@@ -6513,16 +6626,14 @@ class MultiSequenceOverviewPanel(QWidget):
             timer.stop()
         self._scale_preview_pending = None
         self._bars.finish_live_selection_preview()
-        # Pure column select: clear feature chrome so Shift+arrows use this span.
-        self._bars.clear_feature_selection()
+        # Clear feature picks without a full-canvas repaint — column chrome
+        # update below covers the visible change.
+        self._bars.clear_feature_selection(repaint=False)
         self._bars.set_region_selection(int(start), int(end))
         # Keep name-column highlights from a prior sequence-row select.
         self._sync_names_column()
         self._bars.setFocus(Qt.FocusReason.MouseFocusReason)
-        bar = self._header_zoom_bar
-        if bar is not None and hasattr(bar, "set_position_range"):
-            maximum = max(1, int(self._bars.max_length()))
-            bar.set_position_range(maximum, start=int(start), end=int(end))
+        # Position spins update via regionSelectionChanged (avoid double work).
 
     def _flush_scale_preview_positions(self) -> None:
         pending = self._scale_preview_pending
