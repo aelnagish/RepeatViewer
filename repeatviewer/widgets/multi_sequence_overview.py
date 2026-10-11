@@ -1281,7 +1281,12 @@ class _BarsCanvas(QWidget):
         *,
         keep_expand_anchor: bool = False,
     ) -> None:
-        """Full-height column selection (scale / feature). Clears regional rows."""
+        """Full-height column selection (scale / feature).
+
+        Keeps name-selected sequences so the name-column highlight remains after
+        a column select. MSA chrome shows the column band (not row wash).
+        Clears a prior regional matrix box only.
+        """
         if start is None:
             if self._region_sel is None and self._regional_rows is None:
                 return
@@ -1299,19 +1304,18 @@ class _BarsCanvas(QWidget):
             a, b = b, a
         new = (a, b)
         same_band = new == self._region_sel and self._regional_rows is None
-        rows_changed = bool(self._selected_rows)
-        if same_band and not rows_changed:
+        if same_band:
             return
+        had_regional = self._regional_rows is not None
         self._region_sel = new
         self._regional_rows = None
-        self._selected_rows = set()
+        # Keep ``_selected_rows`` so sequence names stay highlighted.
         if not keep_expand_anchor:
             self._reset_edge_expand_phase()
         self._sync_selection_chrome()
-        if not same_band:
-            self.regionSelectionChanged.emit(new)
-        if rows_changed:
-            self.selectionChanged.emit()
+        self.regionSelectionChanged.emit(new)
+        if had_regional:
+            # Names were driven by regional_rows; refresh to whole-row select.
             self.rowsChanged.emit()
 
     def set_regional_selection(
@@ -1647,6 +1651,20 @@ class _BarsCanvas(QWidget):
         if had_rows or had_region:
             self.rowsChanged.emit()
 
+    def _begin_column_selection_preview(self) -> None:
+        """Start live column guides without clearing name-selected sequences."""
+        had_regional = self._regional_rows is not None
+        self._region_sel = None
+        self._regional_rows = None
+        self._selected_feats = set()
+        self._temp_matrix_sel = None
+        self._preview_rows = None
+        self._reset_edge_expand_phase()
+        self._chrome.clear()
+        self.selectionVisualsDismissed.emit()
+        if had_regional:
+            self.rowsChanged.emit()
+
     def set_column_selection_preview(self, start: int, end: int) -> None:
         """Committed-style column preview from 1-based columns (snapped)."""
         maximum = max(1, int(self._max_length))
@@ -1658,7 +1676,7 @@ class _BarsCanvas(QWidget):
         if new == self._preview_columns:
             return
         if self._preview_columns is None:
-            self._dismiss_committed_selection_visuals()
+            self._begin_column_selection_preview()
         self._preview_columns = new
         self._preview_rows = None
         self._chrome.set_column_band(self._column_band_rect(a, b), live=True)
@@ -1667,7 +1685,7 @@ class _BarsCanvas(QWidget):
         """Live column guides; cell-snapped at nucleotide zoom, else pixel-follow."""
         starting = self._preview_columns is None and not self._chrome._live
         if starting:
-            self._dismiss_committed_selection_visuals()
+            self._begin_column_selection_preview()
         self._preview_rows = None
         if self._letter_level_selection():
             start_i, end_i = self._columns_from_rubber(
@@ -6498,7 +6516,7 @@ class MultiSequenceOverviewPanel(QWidget):
         # Pure column select: clear feature chrome so Shift+arrows use this span.
         self._bars.clear_feature_selection()
         self._bars.set_region_selection(int(start), int(end))
-        # Ensure name-column sequence highlights are gone (mutually exclusive).
+        # Keep name-column highlights from a prior sequence-row select.
         self._sync_names_column()
         self._bars.setFocus(Qt.FocusReason.MouseFocusReason)
         bar = self._header_zoom_bar

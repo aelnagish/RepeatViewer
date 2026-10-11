@@ -293,6 +293,34 @@ def test_msa_sort_by_selected_columns(qapp: QApplication) -> None:
     assert canvas.record_ids()[2] == "r2"
 
 
+def test_column_select_keeps_name_row_highlights(qapp: QApplication) -> None:
+    """After sequence-row select, column select keeps name highlights.
+
+    MSA chrome switches to the column band (no row wash); regional select
+    still clears whole-row names.
+    """
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.set_msa_data(
+        ["a", "b", "c"],
+        ["ACGTACGT", "ACGTACGT", "ACGTACGT"],
+    )
+    canvas._select_row_click(1, Qt.KeyboardModifier.NoModifier)
+    assert canvas.selected_rows() == [1]
+    canvas.set_region_selection(2, 4)
+    assert canvas.selected_rows() == [1]
+    assert canvas.region_selection() == (2, 4)
+    assert canvas.regional_rows() is None
+    # Column chrome, not sequence-row MSA wash.
+    assert canvas._chrome._mode == "columns"
+
+    canvas.set_regional_selection(1, 3, {0, 1})
+    assert canvas.is_regional_selection()
+    assert canvas.selected_rows() == []
+    canvas.close()
+
+
 def test_sorting_label_and_selected_column_is_oneshot(
     qapp: QApplication, tmp_path: Path
 ) -> None:
@@ -648,7 +676,7 @@ def test_annotation_drag_selects_on_partial_overlap(qapp: QApplication) -> None:
     assert (1, 0) in canvas.selected_features()
     assert canvas.region_selection() == (2, 8)
     assert canvas.regional_rows() is None
-    assert canvas.selected_rows() == []  # column select clears name rows
+    assert canvas.selected_rows() == []  # feature→column does not invent name rows
     canvas.close()
 
 
