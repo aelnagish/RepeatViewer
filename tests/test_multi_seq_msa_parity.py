@@ -293,36 +293,6 @@ def test_msa_sort_by_selected_columns(qapp: QApplication) -> None:
     assert canvas.record_ids()[2] == "r2"
 
 
-def test_column_select_reuses_msa_underlay(qapp: QApplication) -> None:
-    """Column chrome updates blit a cached MSA underlay (no full re-rasterize)."""
-    from PySide6.QtWidgets import QScrollArea
-
-    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
-
-    scroll = QScrollArea()
-    canvas = _BarsCanvas()
-    scroll.setWidget(canvas)
-    canvas.resize(600, 2000)
-    scroll.resize(400, 300)
-    scroll.show()
-    qapp.processEvents()
-    canvas.set_msa_data(
-        [f"s{i}" for i in range(80)],
-        ["ACGTACGTAC"] * 80,
-    )
-    canvas.set_pixels_per_base(4.0)
-    canvas.repaint()
-    qapp.processEvents()
-    assert canvas._msa_underlay_valid
-    first = canvas._msa_underlay
-    canvas.set_region_selection(3, 3)
-    qapp.processEvents()
-    assert canvas._msa_underlay_valid
-    assert canvas._msa_underlay is first
-    scroll.close()
-    canvas.close()
-
-
 def test_column_commit_upgrades_live_chrome_without_erase(
     qapp: QApplication,
 ) -> None:
@@ -339,6 +309,29 @@ def test_column_commit_upgrades_live_chrome_without_erase(
     assert canvas._chrome._mode == "columns"
     canvas.set_region_selection(3, 4)
     assert canvas._chrome._mode == "columns"
+    assert canvas._chrome._live is False
+    canvas.close()
+
+
+def test_column_selection_uses_edge_guides_not_wash(
+    qapp: QApplication,
+) -> None:
+    """Column chrome is full-height vertical guides (edge dirty, no wash band)."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.set_msa_data(
+        [f"s{i}" for i in range(40)],
+        ["ACGTACGTAC"] * 40,
+    )
+    canvas.set_pixels_per_base(4.0)
+    canvas.set_region_selection(2, 2)
+    qapp.processEvents()
+    assert canvas._chrome._mode == "columns"
+    band = canvas._chrome._box
+    assert band.top() == 0
+    assert band.height() == canvas.height()
+    # Committed columns stay on the edge-only path (same as live guides).
     assert canvas._chrome._live is False
     canvas.close()
 

@@ -34,7 +34,6 @@ from PySide6.QtGui import (
     QPalette,
     QPdfWriter,
     QPen,
-    QPixmap,
     QPolygonF,
     QRegion,
     QWheelEvent,
@@ -659,9 +658,11 @@ class _NamesColumn(QWidget):
 class _SelectionChrome:
     """Selection outline/wash painted on the MSA canvas (not a child overlay).
 
-    A translucent child overlay + drag-cache blit caused white holes; clearing
-    that overlay caused a black canvas. Chrome is drawn in the host paintEvent
-    after residues so dirty strips always show real MSA pixels underneath.
+    A translucent child overlay paints an opaque black slab on macOS and hides
+    the MSA. Chrome is drawn in the host paintEvent after residues.
+
+    Column selection uses vertical edge dirty only (no full-band wash
+    recomposite) so it stays as cheap as a regional box without an overlay.
     """
 
     def __init__(self, host: QWidget) -> None:
@@ -781,10 +782,8 @@ class _SelectionChrome:
         if not self._mode:
             return QRegion()
         if self._mode == "columns":
-            # Live column guides are edge-only; committed wash needs the band.
-            if self._live:
-                return self._column_edge_dirty_region(self._box)
-            return self._area_dirty_region(self._box)
+            # Columns are vertical guides only — never a full-band MSA recomposite.
+            return self._column_edge_dirty_region(self._box)
         if self._mode == "rows":
             # Live row outline → border strips; committed wash → full row area.
             if self._live:
@@ -828,13 +827,9 @@ class _SelectionChrome:
         new = QRect(band).normalized()
         if self._mode == "columns" and self._box == new and self._live == live:
             return
+        # Always edge strips: vertical guides to the bottom, no full-band wash.
         dirty = self._erase_dirty_for_current()
-        if live:
-            # Same cheap path as live regional: edge strips only.
-            dirty = dirty.united(self._column_edge_dirty_region(new))
-        else:
-            # Committed wash (unchanged look) — one band recomposite.
-            dirty = dirty.united(self._area_dirty_region(new))
+        dirty = dirty.united(self._column_edge_dirty_region(new))
         self._mode = "columns"
         self._box = new
         self._row_boxes = []
@@ -854,10 +849,8 @@ class _SelectionChrome:
             return
         dirty = self._erase_dirty_for_current()
         if live:
-            # Outline-only while dragging — avoid full-width MSA recomposite.
             dirty = dirty.united(self._border_dirty_region(*valid))
         else:
-            # Committed wash (unchanged look).
             dirty = dirty.united(self._area_dirty_region(*valid))
         self._mode = "rows"
         self._box = QRect()
@@ -888,9 +881,7 @@ class _SelectionChrome:
         elif self._mode == "columns":
             box = self._box
             if box.intersects(clip):
-                if not self._live:
-                    painter.fillRect(box, self._band_color())
-                    painter.setPen(pen)
+                # Vertical guides only (no wash) — cheap edge dirties, no overlay.
                 painter.drawLine(box.left(), box.top(), box.left(), box.bottom())
                 painter.drawLine(box.right(), box.top(), box.right(), box.bottom())
         else:
@@ -1008,11 +999,6 @@ class _BarsCanvas(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         # Selection chrome is painted in paintEvent after residues (no overlay).
         self._chrome = _SelectionChrome(self)
-        # Viewport-sized MSA underlay so column/row chrome updates blit instead
-        # of re-rasterizing every residue under the wash.
-        self._msa_underlay: QPixmap | None = None
-        self._msa_underlay_origin = QPoint()
-        self._msa_underlay_valid = False
 
     def scroll_viewport_rect(self) -> QRect:
         """This canvas's content rect currently shown in the scroll viewport."""
@@ -1029,47 +1015,6 @@ class _BarsCanvas(QWidget):
             return self.rect()
         top_left = self.mapFrom(vp, QPoint(0, 0))
         return QRect(top_left, vp.size()).intersected(self.rect())
-
-    def _invalidate_msa_underlay(self) -> None:
-        self._msa_underlay_valid = False
-        self._msa_underlay = None
-
-    def _ensure_msa_underlay(self, need: QRect) -> bool:
-        """Build/reuse a pixmap of MSA residues (no selection chrome)."""
-        if not self._msa_mode:
-            return False
-        need = need.intersected(self.rect())
-        if need.isEmpty():
-            return False
-        covered = QRect(
-            self._msa_underlay_origin,
-            self._msa_underlay.size() if self._msa_underlay is not None else QSize(),
-        )
-        if (
-            self._msa_underlay_valid
-            and self._msa_underlay is not None
-            and covered.contains(need)
-        ):
-            return True
-        area = self.scroll_viewport_rect()
-        if area.isEmpty():
-            area = need
-        else:
-            area = area.united(need).intersected(self.rect())
-        if area.isEmpty():
-            return False
-        pm = QPixmap(area.size())
-        if pm.isNull():
-            return False
-        pm.fill(_msa_canvas_color(self))
-        painter = QPainter(pm)
-        painter.translate(-area.topLeft())
-        self._paint_msa_rows(painter, area)
-        painter.end()
-        self._msa_underlay = pm
-        self._msa_underlay_origin = QPoint(area.topLeft())
-        self._msa_underlay_valid = True
-        return True
 
     def is_msa_mode(self) -> bool:
         return bool(self._msa_mode)
@@ -1557,7 +1502,6 @@ class _BarsCanvas(QWidget):
         )
         self._rebuild_msa_qcolor_cache()
         self._clear_drag_paint_cache()
-        self._invalidate_msa_underlay()
         self.update()
 
     def set_msa_color_mode(self, mode: str) -> None:
@@ -1568,7 +1512,6 @@ class _BarsCanvas(QWidget):
         self._msa_color_mode = new
         if self._msa_mode:
             self._clear_drag_paint_cache()
-            self._invalidate_msa_underlay()
             self.update()
 
     def msa_color_mode(self) -> str:
@@ -1582,7 +1525,6 @@ class _BarsCanvas(QWidget):
         self._msa_divergence_threshold = new
         if self._msa_mode:
             self._clear_drag_paint_cache()
-            self._invalidate_msa_underlay()
             self.update()
 
     def msa_divergence_threshold(self) -> float:
@@ -1708,7 +1650,7 @@ class _BarsCanvas(QWidget):
         return QRect(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
 
     def _sync_selection_chrome(self) -> None:
-        """Committed selection on the overlay only — never rasterize MSA cells."""
+        """Committed selection chrome (column = edge guides; region/row = wash)."""
         if (
             self._preview_columns is not None
             or self._preview_rows is not None
@@ -2238,7 +2180,6 @@ class _BarsCanvas(QWidget):
         """Edit > Find hits drawn on the bars ({} clears)."""
         self._find_hits = {rid: list(ranges) for rid, ranges in (hits_by_id or {}).items()}
         self._find_current = current
-        self._invalidate_msa_underlay()
         self.update()
 
     def set_selected_rows(self, rows: list[int] | set[int]) -> None:
@@ -2277,7 +2218,6 @@ class _BarsCanvas(QWidget):
         )
 
     def _recompute_layout(self) -> None:
-        self._invalidate_msa_underlay()
         self._row_tops = []
         self._row_heights = []
         y = 0
@@ -3028,18 +2968,12 @@ class _BarsCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, not self._msa_mode)
         painter.fillRect(clip, base)
         if self._msa_mode:
-            target = paint_clip if not paint_clip.isNull() else clip
-            # Selection chrome updates reuse a viewport underlay (blit + wash)
-            # instead of re-rasterizing residues under every column click.
-            if self._ensure_msa_underlay(target):
-                origin = self._msa_underlay_origin
-                src = target.translated(-origin.x(), -origin.y())
-                painter.drawPixmap(target, self._msa_underlay, src)
-            else:
-                self._paint_msa_rows(painter, target)
+            self._paint_msa_rows(
+                painter, paint_clip if not paint_clip.isNull() else clip
+            )
         else:
             self._paint_bar_rows(painter, clip)
-        # Chrome on top of residue pixels (underlay or live paint).
+        # Selection wash/guides on top of residue pixels.
         self._chrome.paint(painter, clip)
         if not self._rubber_active:
             self._paint_feature_hover_tip(painter)
