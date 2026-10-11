@@ -9996,6 +9996,20 @@ class MainWindow(QMainWindow):
                 dialog.raise_()
             except RuntimeError:
                 continue
+        self._raise_preview_duplicate_windows()
+
+    def _raise_preview_duplicate_windows(self) -> None:
+        """Keep Actions → Duplicate window copies above the main window."""
+        tabs = getattr(self, "_preview_tabs", None)
+        windows = getattr(tabs, "_duplicate_windows", None) if tabs is not None else None
+        if not windows:
+            return
+        for win in list(windows):
+            try:
+                if win.isVisible():
+                    win.raise_()
+            except RuntimeError:
+                continue
 
     def _present_te_viz_dialog(self, dialog: QDialog, on_accept) -> None:
         """Show a non-modal TE settings dialog so the Files panel stays clickable."""

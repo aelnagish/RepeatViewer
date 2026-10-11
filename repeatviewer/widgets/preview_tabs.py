@@ -2459,6 +2459,14 @@ class PreviewTabWidget(QTabWidget):
             self._zoom_bar.edit_text_requested.connect(self._on_edit_text_requested)
         if hasattr(self._zoom_bar, "save_text_requested"):
             self._zoom_bar.save_text_requested.connect(self._on_save_text_requested)
+        if hasattr(self._zoom_bar, "duplicate_window_requested"):
+            self._zoom_bar.duplicate_window_requested.connect(self.open_duplicate_window)
+        if self._annotation_zoom_bar is not None and hasattr(
+            self._annotation_zoom_bar, "duplicate_window_requested"
+        ):
+            self._annotation_zoom_bar.duplicate_window_requested.connect(
+                self.open_duplicate_window
+            )
         self._save_text_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self._save_text_shortcut.activated.connect(self._on_save_text_requested)
         from repeatviewer.widgets.preview_controls import PreviewWheelZoomFilter
@@ -2478,6 +2486,7 @@ class PreviewTabWidget(QTabWidget):
         self.tabCloseRequested.connect(self._close_tab)
         self._path_to_index: dict[str, int] = {}
         self._lru_order: list[int] = []  # id(FilePreviewPage), most recent first
+        self._duplicate_windows: list[QWidget] = []
         self._external_tab_bar_host: QWidget | None = None
         self._title_tab_bar: PreviewFileTabBar | None = None
         self._tab_bar_sync_guard = False
@@ -3139,6 +3148,34 @@ class PreviewTabWidget(QTabWidget):
         for page in pages:
             if not self.confirm_leave_page(page):
                 return False
+        return True
+
+    def open_duplicate_window(self) -> bool:
+        """Open a floating Preview window for the current file (Actions menu)."""
+        widget = self.currentWidget()
+        if not isinstance(widget, FilePreviewPage):
+            return False
+        path = widget.path.expanduser().resolve()
+        if not path.is_file():
+            return False
+        from repeatviewer.widgets.preview_duplicate_window import PreviewDuplicateWindow
+
+        # Parent to the main window so app quit closes these; keep a Python
+        # reference so WA_DeleteOnClose windows are not garbage-collected early.
+        host = self.window()
+        win = PreviewDuplicateWindow(widget, source_tabs=self, parent=host)
+        self._duplicate_windows.append(win)
+
+        def _forget(*_args, window=win) -> None:
+            try:
+                self._duplicate_windows.remove(window)
+            except ValueError:
+                pass
+
+        win.destroyed.connect(_forget)
+        win.show()
+        win.raise_()
+        win.activateWindow()
         return True
 
     def open_file(self, path: Path, *, replace: bool = False) -> bool:

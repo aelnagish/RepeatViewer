@@ -556,6 +556,7 @@ class PreviewZoomBar(QWidget):
     fit_mode_changed = Signal(str)
     edit_text_requested = Signal()
     save_text_requested = Signal()
+    duplicate_window_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -602,6 +603,15 @@ class PreviewZoomBar(QWidget):
         self._actions_menu.addAction(self._save_text_action)
         self._default_tab_sep = self._actions_menu.addSeparator()
         self._default_tab_action = _add_default_fasta_tab_menu(self._actions_menu)
+        self._duplicate_sep = self._actions_menu.addSeparator()
+        self._duplicate_action = QAction("Duplicate window", self._actions_menu)
+        self._duplicate_action.setToolTip(
+            "Open a separate Preview window for this file. "
+            "It stays open until you close it and is not replaced when you "
+            "click other sequences."
+        )
+        self._duplicate_action.triggered.connect(self.duplicate_window_requested.emit)
+        self._actions_menu.addAction(self._duplicate_action)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
 
@@ -652,7 +662,7 @@ class PreviewZoomBar(QWidget):
         self._sync_default_tab_separator()
 
     def _sync_default_tab_separator(self) -> None:
-        """Hide the leading separator when Default preview tab is the only menu item."""
+        """Hide separators when neighboring Actions items are hidden."""
         show_tab = self._default_tab_action.isVisible()
         something_above = (
             self._reset_scale_action.isVisible()
@@ -660,6 +670,7 @@ class PreviewZoomBar(QWidget):
             or self._save_text_action.isVisible()
         )
         self._default_tab_sep.setVisible(show_tab and something_above)
+        self._duplicate_sep.setVisible(show_tab or something_above)
 
     def set_multi_fasta_default_tabs(self, enabled: bool) -> None:
         """Multi-seq: Default preview tab is Text / Overview (no Dotplot)."""
@@ -791,6 +802,7 @@ class AnnotationZoomBar(QWidget):
     extract_requested = Signal()  # kept for callers; Extract is not on this bar
     filter_text_changed = Signal(str)
     filter_return_pressed = Signal()
+    duplicate_window_requested = Signal()
 
     _POSITION_SPIN_WIDTH = _OVERVIEW_POSITION_SPIN_WIDTH
 
@@ -950,6 +962,15 @@ class AnnotationZoomBar(QWidget):
         )
         self._actions_menu = QMenu(self._actions_btn)
         self._default_tab_action = _add_default_fasta_tab_menu(self._actions_menu)
+        self._actions_menu.addSeparator()
+        self._duplicate_action = QAction("Duplicate window", self._actions_menu)
+        self._duplicate_action.setToolTip(
+            "Open a separate Preview window for this file. "
+            "It stays open until you close it and is not replaced when you "
+            "click other sequences."
+        )
+        self._duplicate_action.triggered.connect(self.duplicate_window_requested.emit)
+        self._actions_menu.addAction(self._duplicate_action)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
