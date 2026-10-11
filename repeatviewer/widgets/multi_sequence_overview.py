@@ -66,9 +66,12 @@ from repeatviewer.backends.job_cancel import JobCancellation
 from repeatviewer.backends.msa_coordinates import (
     DEFAULT_MSA_DIVERGENCE_THRESHOLD,
     MSA_COLOR_ALL_BACKGROUNDS,
+    MSA_COLOR_CONSERVATION_GREY,
     column_residue_frequencies,
     drop_features_overlapping_region,
+    letter_is_conserved,
     mask_rows_region,
+    msa_conservation_greyscale_colors,
     msa_residue_fill_background,
     normalize_msa_color_mode,
     normalize_msa_divergence_threshold,
@@ -904,6 +907,7 @@ class _BarsCanvas(QWidget):
         self._column_distance = 0  # pixels between residue backgrounds
         self._color_unaligned_background = True
         self._show_annotation_track = True
+        self._connect_gaps_with_line = False
         self._region_sel: tuple[int, int] | None = None
         # When set, column band is limited to these rows (MSA regional drag).
         # ``None`` means full-height column selection (scale / feature).
@@ -1101,6 +1105,18 @@ class _BarsCanvas(QWidget):
         self._clear_drag_paint_cache()
         self._recompute_layout()
         self.update()
+
+    def set_connect_gaps_with_line(self, enabled: bool) -> None:
+        """Draw thin black lines through MSA gaps when zoomed out (overview)."""
+        new = bool(enabled)
+        if new == self._connect_gaps_with_line:
+            return
+        self._connect_gaps_with_line = new
+        self._clear_drag_paint_cache()
+        self.update()
+
+    def connect_gaps_with_line(self) -> bool:
+        return bool(self._connect_gaps_with_line)
 
     def show_annotation_track(self) -> bool:
         return bool(self._show_annotation_track)
@@ -1309,9 +1325,11 @@ class _BarsCanvas(QWidget):
         end: int,
         rows: list[int] | set[int],
     ) -> None:
-        """Keep selection as the dragged MSA box (columns × rows only).
+        """Keep selection as the dragged MSA box (columns × rows).
 
-        Does not highlight whole sequence rows in the name column — only the box.
+        Name-column and scale highlights follow ``rows`` and ``[start, end]``.
+        Whole-sequence ``selected_rows`` stay clear so tools treat this as a
+        regional matrix selection, not a full-row select.
         """
         maximum = max(1, int(self._max_length))
         a = max(1, min(maximum, int(start)))
@@ -1416,11 +1434,13 @@ class _BarsCanvas(QWidget):
     def _msa_should_fill_background(self, col: int, ch: str) -> bool:
         """Whether the residue cell background should be painted for ``ch``.
 
-        MSA color scheme / divergence rules apply only at nucleotide (letter)
-        zoom. Zoomed-out overview always fills residue backgrounds.
+        Most MSA schemes gate fill only at letter zoom; zoomed-out overview
+        always fills residue bars. Conservation greyscale always fills.
         """
         if ch in "-.":
             return False
+        if self._msa_color_mode == MSA_COLOR_CONSERVATION_GREY:
+            return True
         if not self._msa_shows_letters():
             return True
         freqs = (
@@ -1434,6 +1454,25 @@ class _BarsCanvas(QWidget):
             column_freqs=freqs,
             threshold=self._msa_divergence_threshold,
         )
+
+    def _msa_residue_paint_pair(self, col: int, ch: str) -> tuple[QColor, QColor] | None:
+        """Background/foreground colours for a non-gap residue cell."""
+        if ch in "-.":
+            return None
+        if self._msa_color_mode == MSA_COLOR_CONSERVATION_GREY:
+            freqs = (
+                self._msa_col_freqs[col]
+                if 0 <= col < len(self._msa_col_freqs)
+                else None
+            )
+            conserved = letter_is_conserved(
+                freqs, ch, threshold=self._msa_divergence_threshold
+            )
+            bg_hex, fg_hex = msa_conservation_greyscale_colors(
+                conserved=conserved, dark=_is_dark(self)
+            )
+            return (QColor(bg_hex), QColor(fg_hex))
+        return self._msa_qcolors.get(ch)
 
     def _clear_drag_paint_cache(self) -> None:
         """Drop live selection preview state (name kept for existing call sites)."""
@@ -1704,6 +1743,42 @@ class _BarsCanvas(QWidget):
             return 0
         return int(self._row_tops[row] + self._sequence_band_height(row))
 
+    def _nearest_row_at_y(self, y: float) -> int:
+        """Row for ``y`` when outside a hit band (inter-row gap or past ends).
+
+        Gaps between sequences are not part of any row. Mapping them to the
+        last row made regional drags suddenly select every sequence below.
+        """
+        tops = self._row_tops
+        heights = self._row_heights
+        n = len(tops)
+        if n <= 0:
+            return -1
+        if y < tops[0]:
+            return 0
+        last = n - 1
+        last_bottom = tops[last] + heights[last]
+        if y >= last_bottom:
+            return last
+        # Binary search the gap / band containing y.
+        lo, hi = 0, last
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            top = tops[mid]
+            bottom = top + heights[mid]
+            if y < top:
+                hi = mid - 1
+            elif y >= bottom:
+                # In gap after ``mid``, or further down.
+                if mid < last and y < tops[mid + 1]:
+                    mid_dist = y - bottom
+                    next_dist = tops[mid + 1] - y
+                    return mid if mid_dist <= next_dist else mid + 1
+                lo = mid + 1
+            else:
+                return mid
+        return max(0, min(last, lo))
+
     def _pane_to_matrix(self, x: float, y: float) -> tuple[int, int]:
         """Map pane pixels → ``(column, row)`` like AliView (cell-snapped).
 
@@ -1713,11 +1788,8 @@ class _BarsCanvas(QWidget):
         col = int(math.floor(self.x_to_bp(x))) + 1
         col = max(1, min(maximum, col))
         row = self._row_at_y(y)
-        if row < 0 and self._row_tops:
-            if y < self._row_tops[0]:
-                row = 0
-            else:
-                row = len(self._row_tops) - 1
+        if row < 0:
+            row = self._nearest_row_at_y(y)
         return col, max(0, row)
 
     def _matrix_selection_box(
@@ -1763,11 +1835,11 @@ class _BarsCanvas(QWidget):
             self._drag_preview_timer.start()
 
     def _set_live_region_rubber(self, rubber: QRect) -> None:
-        """Live rubber: cell-snapped at nucleotide zoom, else pixel-follow."""
+        """Live rubber snapped to MSA cells so the box matches selected rows."""
         rect = QRect(rubber).normalized()
         if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
             return
-        # Matrix selection for commit (and for letter-level chrome).
+        # Matrix selection for commit and chrome (overview + letter zoom).
         c0, r0 = self._pane_to_matrix(rect.left(), rect.top())
         c1, r1 = self._pane_to_matrix(rect.right(), rect.bottom())
         if c1 < c0:
@@ -1775,29 +1847,22 @@ class _BarsCanvas(QWidget):
         if r1 < r0:
             r0, r1 = r1, r0
         self._temp_matrix_sel = (c0, c1, r0, r1)
-        # Live Position + sequence names (scale stays clear for regional).
+        # Live Position + sequence names while dragging.
         self._schedule_region_drag_preview(c0, c1, r0, r1)
-        if self._letter_level_selection():
-            box = self._matrix_selection_box(c0, c1, r0, r1)
-            if box.isNull():
-                return
-            if (
-                self._rubber_active
-                and self._chrome._mode == "region"
-                and self._chrome._box == box
-                and self._chrome._live
-            ):
-                return
-            self._rubber_active = True
-            self._rubber = box
-            self._chrome.set_region_box(box, live=True)
+        box = self._matrix_selection_box(c0, c1, r0, r1)
+        if box.isNull():
             return
-        if self._rubber_active and rect == self._rubber:
+        if (
+            self._rubber_active
+            and self._chrome._mode == "region"
+            and self._chrome._box == box
+            and self._chrome._live
+        ):
             return
         self._rubber_active = True
-        self._rubber = rect
+        self._rubber = box
         # Outline-only + border dirty — avoids MSA recomposite under a wash.
-        self._chrome.set_region_box(rect, live=True)
+        self._chrome.set_region_box(box, live=True)
 
     def _ensure_drag_point_visible(self, point: QPoint) -> None:
         """Scroll only when the pointer is outside the viewport (cheap no-op inside)."""
@@ -2909,15 +2974,29 @@ class _BarsCanvas(QWidget):
                     break
                 ch = seq[j] if j < len(seq) else "-"
                 fill_bg = self._msa_should_fill_background(j, ch)
+                paint_pair = self._msa_residue_paint_pair(j, ch)
                 run_end = j + 1
-                # Coalesce only when columns share one fill (distance 0).
+                # Coalesce only when columns share one fill/colour (distance 0).
                 if not show_letters and self._column_distance <= 0:
                     while run_end < c1:
                         nxt = seq[run_end] if run_end < len(seq) else "-"
-                        if nxt != ch:
-                            break
-                        if self._msa_should_fill_background(run_end, nxt) != fill_bg:
-                            break
+                        if self._msa_color_mode == MSA_COLOR_CONSERVATION_GREY:
+                            nxt_pair = self._msa_residue_paint_pair(run_end, nxt)
+                            if paint_pair is None or nxt_pair is None:
+                                if paint_pair is not nxt_pair:
+                                    break
+                            elif (
+                                paint_pair[0].rgba() != nxt_pair[0].rgba()
+                            ):
+                                break
+                        else:
+                            if nxt != ch:
+                                break
+                            if (
+                                self._msa_should_fill_background(run_end, nxt)
+                                != fill_bg
+                            ):
+                                break
                         run_end += 1
                 span = run_end - j
                 # Cover [x, next_x). When zoomed out, span at least 1 logical px so
@@ -2940,8 +3019,23 @@ class _BarsCanvas(QWidget):
                             "-",
                         )
                         painter.setPen(Qt.PenStyle.NoPen)
+                    elif self._connect_gaps_with_line:
+                        # Overview only: thin backbone through gaps between residues.
+                        y_mid = float(y) + float(residue_h) * 0.5
+                        gap_line = (
+                            QColor("#e0e0e0")
+                            if _is_dark(self)
+                            else QColor("#000000")
+                        )
+                        pen = QPen(gap_line, 1)
+                        pen.setCosmetic(True)
+                        painter.setPen(pen)
+                        painter.drawLine(
+                            QPointF(x, y_mid), QPointF(x + width, y_mid)
+                        )
+                        painter.setPen(Qt.PenStyle.NoPen)
                 else:
-                    pair = qcolors.get(ch)
+                    pair = paint_pair if paint_pair is not None else qcolors.get(ch)
                     if pair is not None:
                         if fill_bg:
                             m = _bg_margin
@@ -2955,10 +3049,13 @@ class _BarsCanvas(QWidget):
                             else:
                                 painter.fillRect(cell, pair[0])
                         if show_letters:
-                            # Coloured background → black letter; no fill → residue colour.
-                            painter.setPen(
-                                QColor("#111111") if fill_bg else pair[0]
-                            )
+                            if self._msa_color_mode == MSA_COLOR_CONSERVATION_GREY:
+                                painter.setPen(pair[1] if fill_bg else pair[0])
+                            else:
+                                # Coloured background → black letter; no fill → residue colour.
+                                painter.setPen(
+                                    QColor("#111111") if fill_bg else pair[0]
+                                )
                             painter.drawText(
                                 cell.toRect(),
                                 int(Qt.AlignmentFlag.AlignCenter),
@@ -3617,6 +3714,9 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_show_annotation_track(
             bool(self._rail.show_annotation_track.isChecked())
         )
+        self._bars.set_connect_gaps_with_line(
+            bool(self._rail.connect_gaps_with_line.isChecked())
+        )
 
         # Same 1px map↔rail divider as single-seq AnnotationMapWindow.
         from repeatviewer.widgets.sequence_map_viewer import _MAP_RAIL_DIVIDER
@@ -3683,8 +3783,11 @@ class MultiSequenceOverviewPanel(QWidget):
             self._bars.content_height(),
             self._bars_scroll.viewport().height(),
         )
-        # Name highlight only for sequence-row selection (not column/regional).
+        # Name highlight: whole-row select, regional rows, or live drag preview.
         highlight = self._bars.selected_row_set()
+        regional = self._bars.regional_rows()
+        if regional:
+            highlight = highlight | regional
         drag_rows = self._bars.drag_preview_rows()
         if drag_rows:
             highlight = highlight | drag_rows
@@ -3915,6 +4018,7 @@ class MultiSequenceOverviewPanel(QWidget):
             self._on_multi_sequence_background_changed
         )
         rail.showAnnotationTrackChanged.connect(self._on_show_annotation_track_changed)
+        rail.connectGapsWithLineChanged.connect(self._on_connect_gaps_with_line_changed)
         self._load_overview_display_settings()
         bases = int(rail.bases_zoomed_in.value())
         self._bars.set_msa_residue_size(bases)
@@ -3965,6 +4069,11 @@ class MultiSequenceOverviewPanel(QWidget):
                     DEFAULT_MSA_DIVERGENCE_THRESHOLD,
                 )
             )
+            connect_gaps = s.value("connect_gaps_with_line", False)
+            if isinstance(connect_gaps, str):
+                connect_gaps = connect_gaps.strip().lower() in {"1", "true", "yes"}
+            else:
+                connect_gaps = bool(connect_gaps)
         finally:
             s.endGroup()
         bases = max(2, min(36, bases))
@@ -3982,6 +4091,7 @@ class MultiSequenceOverviewPanel(QWidget):
             rail.annotation_label_size,
             rail.base_number_size,
             rail.column_distance,
+            rail.connect_gaps_with_line,
         ):
             widget.blockSignals(True)
         try:
@@ -3992,6 +4102,7 @@ class MultiSequenceOverviewPanel(QWidget):
             rail.annotation_label_size.setValue(ann_labels)
             rail.base_number_size.setValue(scale_labels)
             rail.column_distance.setValue(col_distance)
+            rail.connect_gaps_with_line.setChecked(bool(connect_gaps))
         finally:
             for widget in (
                 rail.bases_zoomed_in,
@@ -4001,12 +4112,14 @@ class MultiSequenceOverviewPanel(QWidget):
                 rail.annotation_label_size,
                 rail.base_number_size,
                 rail.column_distance,
+                rail.connect_gaps_with_line,
             ):
                 widget.blockSignals(False)
         rail.set_msa_coloring_mode(msa_mode)
         rail.set_msa_divergence_threshold(msa_div)
         self._bars.set_msa_color_mode(msa_mode)
         self._bars.set_msa_divergence_threshold(msa_div)
+        self._bars.set_connect_gaps_with_line(bool(connect_gaps))
 
     def _save_overview_display_settings(self) -> None:
         rail = self._rail
@@ -4032,6 +4145,10 @@ class MultiSequenceOverviewPanel(QWidget):
             s.setValue(
                 "msa_divergence_threshold",
                 float(rail.msa_divergence_threshold()),
+            )
+            s.setValue(
+                "connect_gaps_with_line",
+                bool(rail.connect_gaps_with_line.isChecked()),
             )
         finally:
             s.endGroup()
@@ -4079,6 +4196,10 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_show_annotation_track(bool(enabled))
         self._sync_names_column()
 
+    def _on_connect_gaps_with_line_changed(self, enabled: bool) -> None:
+        self._bars.set_connect_gaps_with_line(bool(enabled))
+        self._save_overview_display_settings()
+
     def _select_all_sequences(self) -> None:
         self._bars.select_all_rows()
 
@@ -4087,8 +4208,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._scale.set_region_selection(None)
 
     def _on_region_selection_changed(self, region: object) -> None:
-        # Scale band is for full-height column selects only — not MSA regional boxes.
-        if region is None or self._bars.is_regional_selection():
+        # Scale band follows column span for full-height and regional selects.
+        if region is None:
             self._scale.set_region_selection(None)
         else:
             try:
@@ -4110,7 +4231,7 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.set_position_range(maximum, start=start, end=end)
 
     def _on_region_drag_preview(self, payload: object) -> None:
-        """Live Position spins + name highlights while dragging a regional box."""
+        """Live Position spins + name/scale highlights while dragging a regional box."""
         if payload is None:
             return
         try:
@@ -4122,7 +4243,8 @@ class MultiSequenceOverviewPanel(QWidget):
         if bar is not None and hasattr(bar, "set_position_range"):
             maximum = max(1, int(self._bars.max_length()))
             bar.set_position_range(maximum, start=start_i, end=end_i)
-        # Sequences under the rubber (scale band stays off for regional).
+        # Live scale band for the column span (matches committed regional select).
+        self._scale.set_region_selection(start_i, end_i)
         self._sync_names_column()
 
     def select_all_sequences(self) -> None:

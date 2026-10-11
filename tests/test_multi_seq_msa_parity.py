@@ -221,6 +221,11 @@ def test_overview_rail_keeps_add_transfer_and_track_toggle(qapp: QApplication) -
     rail.set_overview_display_mode(True)
     assert not rail.show_annotation_track.isHidden()
     assert rail.show_annotation_track.isChecked()
+    # Gap connectors are MSA-only (under Show annotation track).
+    assert rail.connect_gaps_with_line.isHidden()
+    rail.set_msa_display_mode(True)
+    assert not rail.connect_gaps_with_line.isHidden()
+    assert not rail.connect_gaps_with_line.isChecked()
     assert rail.show_complement.isHidden()
     sections = rail._annotation_sections
     assert not sections["manual"].isHidden()
@@ -232,6 +237,82 @@ def test_overview_rail_keeps_add_transfer_and_track_toggle(qapp: QApplication) -
     assert not rail.restore_btn.isHidden()
     assert not rail.export_btn.isHidden()
     rail.close()
+
+
+def test_msa_conservation_greyscale_overview_colors(qapp: QApplication) -> None:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from repeatviewer.backends.msa_coordinates import MSA_COLOR_CONSERVATION_GREY
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(400, 100)
+    # Col0: A,A,C → A conserved (≥0.4), C divergent. Pad so overview stays zoomed out.
+    pad = "A" * 80
+    canvas.set_msa_data(
+        ["a", "b", "c"],
+        ["A" + pad, "A" + pad, "C" + pad],
+    )
+    canvas.set_pixels_per_base(4.0)
+    assert not canvas._msa_shows_letters()
+    canvas.set_msa_color_mode(MSA_COLOR_CONSERVATION_GREY)
+    canvas.set_msa_divergence_threshold(0.4)
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(QColor("white"))
+    painter = QPainter(img)
+    canvas.render(painter, QPoint())
+    painter.end()
+
+    # Row 0, col 0 (A conserved) → grey
+    x0 = int(canvas.bar_pad() + 0.5 * canvas.pixels_per_base())
+    y0 = int(canvas.row_tops()[0] + canvas._msa_letter_band_height() * 0.5)
+    grey = img.pixelColor(x0, y0)
+    assert abs(grey.red() - 0xD0) < 8
+    assert abs(grey.green() - 0xD0) < 8
+
+    # Row 2, col 0 (C divergent) → black
+    y2 = int(canvas.row_tops()[2] + canvas._msa_letter_band_height() * 0.5)
+    black = img.pixelColor(x0, y2)
+    assert black.red() < 20 and black.green() < 20 and black.blue() < 20
+
+
+def test_msa_connect_gaps_with_line_paints_overview_backbone(
+    qapp: QApplication,
+) -> None:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(400, 80)
+    seq = "AAAA" + ("-" * 20) + "TTTT"
+    canvas.set_msa_data(["a"], [seq])
+    canvas.set_pixels_per_base(4.0)
+    assert not canvas._msa_shows_letters()
+    canvas.set_connect_gaps_with_line(True)
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(QColor("white"))
+    painter = QPainter(img)
+    canvas.render(painter, QPoint())
+    painter.end()
+
+    x = int(canvas.bar_pad() + 14 * canvas.pixels_per_base())
+    y = int(canvas.row_tops()[0] + canvas._msa_letter_band_height() * 0.5)
+    pix = img.pixelColor(x, y)
+    assert pix.red() < 40 and pix.green() < 40 and pix.blue() < 40
+
+    canvas.set_connect_gaps_with_line(False)
+    img2 = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img2.fill(QColor("white"))
+    painter2 = QPainter(img2)
+    canvas.render(painter2, QPoint())
+    painter2.end()
+    pix2 = img2.pixelColor(x, y)
+    assert pix2.red() > 240 and pix2.green() > 240 and pix2.blue() > 240
 
 
 def test_bars_select_all_and_region_without_zoom(qapp: QApplication) -> None:
@@ -611,7 +692,28 @@ def test_delete_selected_features_not_column_region(
     panel.close()
 
 
-def test_msa_drag_keeps_regional_box_without_row_highlight(
+def test_msa_pane_to_matrix_gap_does_not_jump_to_last_row(
+    qapp: QApplication,
+) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(400, 400)
+    canvas.set_msa_data(
+        ["a", "b", "c", "d", "e"],
+        ["ACGTACGTAC"] * 5,
+    )
+    canvas.set_sequence_row_gap(12)
+    canvas.set_pixels_per_base(4.0)
+    # y in the gap between row 1 and row 2 — must not clamp to last row.
+    gap_y = canvas.row_tops()[1] + canvas.row_heights()[1] + 4
+    assert canvas._row_at_y(gap_y) < 0
+    _col, row = canvas._pane_to_matrix(canvas.bar_pad() + 8, gap_y)
+    assert row in (1, 2)
+    assert row != len(canvas.record_ids()) - 1
+
+
+def test_msa_regional_select_snaps_box_and_keeps_matrix_rows(
     qapp: QApplication,
 ) -> None:
     from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
@@ -632,10 +734,17 @@ def test_msa_drag_keeps_regional_box_without_row_highlight(
     bot1 = canvas.row_tops()[1] + canvas.row_heights()[1] - 1
     x0 = canvas.bp_to_x(2.0)
     x1 = canvas.bp_to_x(6.0)
+    # Partial-pixel rubber still snaps to full sequence bands of rows 0–1.
+    canvas._set_live_region_rubber(
+        QRect(int(x0), int(top0 + 2), int(x1 - x0), int((bot1 - top0) // 2))
+    )
+    assert canvas._temp_matrix_sel is not None
+    c0, c1, r0, r1 = canvas._temp_matrix_sel
+    snapped = canvas._matrix_selection_box(c0, c1, r0, r1)
+    assert canvas._rubber == snapped
     canvas._drag_origin = QPointF(x0, top0)
     canvas._drag_kind = "region"
     canvas._rubber_active = True
-    canvas._rubber = QRect(int(x0), int(top0), int(x1 - x0), int(bot1 - top0))
     release = QMouseEvent(
         QMouseEvent.Type.MouseButtonRelease,
         QPointF(x1, bot1),
@@ -648,9 +757,30 @@ def test_msa_drag_keeps_regional_box_without_row_highlight(
     assert canvas.is_regional_selection()
     assert canvas.region_selection() is not None
     assert canvas.regional_rows() == {0, 1}
-    # Regional select clears prior name-column row selection.
+    # Regional select clears prior whole-row selection (names use regional_rows).
     assert canvas.selected_rows() == []
     canvas.close()
+
+
+def test_msa_regional_select_highlights_names_and_scale(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import (
+        MultiSequenceOverviewPanel,
+    )
+
+    fasta = tmp_path / "reg.fa"
+    fasta.write_text(">a\nACGTACGTAC\n>b\nACGTACGTAC\n>c\nACGTACGTAC\n")
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.load_path(fasta, msa_mode=True)
+    panel.show()
+    qapp.processEvents()
+    panel._bars.set_regional_selection(3, 7, {0, 1})
+    qapp.processEvents()
+    panel._sync_names_column()
+    assert panel._names._selected_rows == {0, 1}
+    assert panel._scale._region_sel == (3, 7)
+    panel.close()
 
 
 def test_scale_shows_column_selection_band(qapp: QApplication) -> None:

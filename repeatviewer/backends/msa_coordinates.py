@@ -15,20 +15,25 @@ from repeatviewer.backends.sequence_features import SequenceFeature
 # Same gap alphabet as motif Find ("Allow gaps in sequence").
 GAP_CHARS = frozenset("-.")
 
-# MSA residue paint modes (Display → Color). Apply to nucleotide and protein
-# at letter/nucleotide zoom only; zoomed-out overview always fills backgrounds.
+# MSA residue paint modes (Display → Color).
+# Most schemes control background fill at letter/nucleotide zoom; zoomed-out
+# overview still fills residue bars with the nucleotide/protein palette.
+# Conservation greyscale also recolors the zoomed-out overview bars.
 MSA_COLOR_ALL_BACKGROUNDS = "all_backgrounds"
 MSA_COLOR_LETTERS_ONLY = "letters_only"
 # Fill letters whose column frequency is below the divergence threshold.
 MSA_COLOR_NO_BG_WHEN_CONSERVED = "no_bg_when_conserved"
 # Fill letters whose column frequency meets the divergence threshold.
 MSA_COLOR_BG_WHEN_CONSERVED = "bg_when_conserved"
+# Conserved residues grey, divergent black (overview + letter zoom).
+MSA_COLOR_CONSERVATION_GREY = "conservation_grey"
 
 MSA_COLOR_MODE_CHOICES: tuple[tuple[str, str], ...] = (
     (MSA_COLOR_LETTERS_ONLY, "No background"),
     (MSA_COLOR_ALL_BACKGROUNDS, "Color all background"),
     (MSA_COLOR_BG_WHEN_CONSERVED, "Color conserved background"),
     (MSA_COLOR_NO_BG_WHEN_CONSERVED, "Color divergent background"),
+    (MSA_COLOR_CONSERVATION_GREY, "Conservation (grey / black)"),
 )
 
 MSA_COLOR_MODE_IDS = frozenset(mode_id for mode_id, _label in MSA_COLOR_MODE_CHOICES)
@@ -130,6 +135,9 @@ def msa_residue_fill_background(
     normalized = normalize_msa_color_mode(mode)
     if normalized == MSA_COLOR_ALL_BACKGROUNDS:
         return True
+    if normalized == MSA_COLOR_CONSERVATION_GREY:
+        # Always fill; colour (grey vs black) is chosen by the painter.
+        return True
     if normalized == MSA_COLOR_LETTERS_ONLY:
         return False
     if column_freqs is not None:
@@ -146,6 +154,24 @@ def msa_residue_fill_background(
     if normalized == MSA_COLOR_BG_WHEN_CONSERVED:
         return conserved
     return True
+
+
+def msa_conservation_greyscale_colors(
+    *,
+    conserved: bool,
+    dark: bool = False,
+) -> tuple[str, str]:
+    """Return ``(background, foreground)`` hex colours for conservation greyscale.
+
+    Conserved → grey; divergent → black (light theme) / near-white (dark theme).
+    """
+    if dark:
+        if conserved:
+            return ("#c8c8c8", "#111111")
+        return ("#f0f0f0", "#111111")
+    if conserved:
+        return ("#d0d0d0", "#111111")
+    return ("#000000", "#ffffff")
 
 
 def sequence_has_gaps(sequence: str) -> bool:

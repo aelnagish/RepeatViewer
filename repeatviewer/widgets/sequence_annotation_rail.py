@@ -510,6 +510,7 @@ class SequenceAnnotationRail(QWidget):
 
     # Display / size signals (live apply).
     showAnnotationTrackChanged = Signal(bool)
+    connectGapsWithLineChanged = Signal(bool)
     showComplementChanged = Signal(bool)
     showTranslationChanged = Signal(bool)
     translationFramesChanged = Signal(object)  # frozenset[int]
@@ -707,6 +708,17 @@ class SequenceAnnotationRail(QWidget):
         )
         layout.addWidget(self.show_annotation_track)
 
+        self.connect_gaps_with_line = QCheckBox("Connect gaps with line", page)
+        self.connect_gaps_with_line.setChecked(False)
+        self.connect_gaps_with_line.setToolTip(
+            "In the zoomed-out MSA overview, draw a thin black line through "
+            "alignment gaps so sequence segments stay visually connected."
+        )
+        self.connect_gaps_with_line.toggled.connect(
+            self.connectGapsWithLineChanged.emit
+        )
+        layout.addWidget(self.connect_gaps_with_line)
+
         self.show_complement = QCheckBox("Show complement", page)
         self.show_complement.setToolTip(
             "Show the complementary strand under the forward sequence "
@@ -829,8 +841,10 @@ class SequenceAnnotationRail(QWidget):
 
         _MSA_SCHEME_HELP = (
             "Controls coloured residue backgrounds in the MSA "
-            "(nucleotide and protein) at letter/nucleotide zoom. "
-            "Zoomed-out overview always fills residue backgrounds.<br><br>"
+            "(nucleotide and protein). Most schemes apply at "
+            "letter/nucleotide zoom; zoomed-out overview fills residue "
+            "bars with the residue palette unless Conservation "
+            "(grey / black) is selected.<br><br>"
             "<b>No background</b><br>"
             "Show coloured letters on white cells.<br><br>"
             "<b>Color all background</b><br>"
@@ -840,12 +854,16 @@ class SequenceAnnotationRail(QWidget):
             "their column.<br><br>"
             "<b>Color divergent background</b><br>"
             "Fill only letters below the divergence threshold.<br><br>"
+            "<b>Conservation (grey / black)</b><br>"
+            "Paint conserved residues grey and divergent residues black "
+            "(overview bars and letter zoom). Uses the Divergence "
+            "threshold.<br><br>"
             "<b>Divergence</b><br>"
             "A letter is conserved when it occupies at least this fraction "
             "of the non-gap residues in its column. For example, "
             "<b>0.40</b> means a letter present in ≥40% of sequences "
-            "(ignoring gaps) counts as conserved. Applies to conserved "
-            "and divergent modes only."
+            "(ignoring gaps) counts as conserved. Applies to conserved, "
+            "divergent, and conservation greyscale modes."
         )
 
         self.msa_coloring_label = QLabel("MSA color scheme:", page)
@@ -1689,6 +1707,7 @@ class SequenceAnnotationRail(QWidget):
     def _sync_msa_divergence_enabled(self) -> None:
         from repeatviewer.backends.msa_coordinates import (
             MSA_COLOR_BG_WHEN_CONSERVED,
+            MSA_COLOR_CONSERVATION_GREY,
             MSA_COLOR_NO_BG_WHEN_CONSERVED,
         )
 
@@ -1699,6 +1718,7 @@ class SequenceAnnotationRail(QWidget):
         enabled = mode in (
             MSA_COLOR_BG_WHEN_CONSERVED,
             MSA_COLOR_NO_BG_WHEN_CONSERVED,
+            MSA_COLOR_CONSERVATION_GREY,
         )
         row.setEnabled(enabled)
 
@@ -1731,6 +1751,10 @@ class SequenceAnnotationRail(QWidget):
         self._tracks_divider.setVisible(True)
         self._tracks_label.setVisible(True)
         self.show_annotation_track.setVisible(True)
+        # Gap connectors apply only to zoomed-out MSA residue rows.
+        self.connect_gaps_with_line.setVisible(
+            overview and bool(getattr(self, "_msa_display_mode", False))
+        )
         self._tab_buttons[self.TAB_ANNOTATIONS].setVisible(True)
         sections = getattr(self, "_annotation_sections", None) or {}
         for section_id in ("manual", "transfer"):
@@ -1774,6 +1798,7 @@ class SequenceAnnotationRail(QWidget):
         self.msa_coloring_header.setVisible(visible)
         self.msa_coloring_mode_host.setVisible(visible)
         self.msa_divergence_row.setVisible(visible)
+        self.connect_gaps_with_line.setVisible(visible)
         self._column_distance_label.setVisible(False)
         self.column_distance.setVisible(False)
         self.color_multi_sequence_background.setVisible(
