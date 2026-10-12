@@ -9,9 +9,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QRect, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -24,7 +26,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QStyle,
     QStyledItemDelegate,
+    QStyleOptionButton,
     QStyleOptionViewItem,
     QTabBar,
     QTableWidget,
@@ -87,12 +91,53 @@ _NAME_HELP = (
 _ANNOTATION_NAME_HELP = (
     "<b>Annotation name</b> is the short label shown on the Annotation tab "
     f"(maximum {ANNOTATION_NAME_MAX_LENGTH} characters). "
-    "Leave it empty if you do not use this database for annotation. "
-    "When you check “Use for annotation”, it defaults to Name (truncated to "
-    f"{ANNOTATION_NAME_MAX_LENGTH})."
+    "Leave it empty if you do not show this database in the annotation control panel. "
+    "When you check “Display in the annotation control panel”, it defaults to Name "
+    f"(truncated to {ANNOTATION_NAME_MAX_LENGTH})."
 )
-_USE_FOR_ANNOTATION_HELP = (
+_DISPLAY_IN_ANNOTATION_HELP = (
     f"An Annotation name is required (max {ANNOTATION_NAME_MAX_LENGTH} characters)."
+)
+_HMM_SETUP_HELP = (
+    "<b>How to add an HMM database</b><br><br>"
+    "HMM databases are profile libraries used by HMMER "
+    "(for example Pfam protein families).<br><br>"
+    "1. Obtain an HMM profile file ending in <code>.hmm</code> "
+    "(example: <code>Pfam-A.hmm</code>).<br>"
+    "2. Choose <b>HMM Protein</b> for protein profiles (Pfam) or "
+    "<b>HMM DNA</b> for nucleotide profiles.<br>"
+    "3. Set <b>Path</b> to the <code>.hmm</code> file "
+    "(Browse, or click it in Files).<br>"
+    "4. Click <b>OK</b>. On first prepare, RepeatViewer indexes the file "
+    "with <code>hmmpress</code> (creates <code>.h3m</code> / <code>.h3f</code> / "
+    "<code>.h3i</code> / <code>.h3p</code> beside it). Large libraries such as "
+    "Pfam can take several minutes."
+)
+_CDD_SETUP_HELP = (
+    "<b>How to add a CDD database</b><br><br>"
+    "1. Download either the full source package or a preformatted subset:<br>"
+    "• Full source: "
+    '<a href="https://ftp.ncbi.nlm.nih.gov/pub/mmdb/cdd/cdd.tar.gz">'
+    "cdd.tar.gz</a> (look for <code>Cdd.pn</code>)<br>"
+    "• Preformatted subsets (ready to search): "
+    '<a href="https://ftp.ncbi.nlm.nih.gov/pub/mmdb/cdd/little_endian/">'
+    "little_endian/</a> "
+    "(e.g. <code>Pfam_LE.tar.gz</code>, <code>Smart_LE.tar.gz</code>, "
+    "<code>Cdd_LE.tar.gz</code> — look for <code>Pfam.pal</code>, "
+    "<code>Smart.pal</code>, <code>Cdd.pal</code>, …)<br>"
+    "(FTP index / README: "
+    '<a href="https://ftp.ncbi.nlm.nih.gov/pub/mmdb/cdd/">'
+    "ftp.ncbi.nlm.nih.gov/pub/mmdb/cdd/</a>)<br><br>"
+    "2. Extract into a folder on your computer "
+    "(several GB free disk space recommended for the full set).<br>"
+    "3. Confirm the folder contains a recognized marker — "
+    "<code>Cdd.pn</code> / <code>Pfam.pn</code> / … (source) or "
+    "<code>Cdd.pal</code> / <code>Pfam.pal</code> / … (preformatted).<br>"
+    "4. Set <b>Path</b> above to that folder (use <b>Browse</b>, or click the "
+    "folder in Folders / a <code>.pn</code> / <code>.pal</code> file in Files). "
+    "Name defaults to the folder name (same rule as other database types).<br>"
+    "5. Click <b>OK</b>. Source packages run <code>makeprofiledb</code> once "
+    "on first prepare (can take a long time); preformatted LE sets skip that step."
 )
 _SET_AS_MAIN_GENOME_HELP = (
     "Marks the selected FASTA DNA file as the reference genome. "
@@ -182,6 +227,90 @@ class _MiddleElideDelegate(QStyledItemDelegate):
     def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:  # noqa: N802
         super().initStyleOption(option, index)
         option.textElideMode = Qt.TextElideMode.ElideMiddle
+
+
+def _is_checked_state(state: object) -> bool:
+    """True when model CheckStateRole means checked (PySide6 enum or int)."""
+    if state is None:
+        return False
+    if state is Qt.CheckState.Checked or state == Qt.CheckState.Checked:
+        return True
+    try:
+        return int(state) == Qt.CheckState.Checked.value  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+
+
+class _CenteredCheckDelegate(QStyledItemDelegate):
+    """Paint Annotation checkboxes centered in the cell (macOS leaves them left)."""
+
+    def _check_rect(self, option: QStyleOptionViewItem) -> QRect:
+        style = option.widget.style() if option.widget is not None else QApplication.style()
+        indicator = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemCheckIndicator, option, option.widget
+        )
+        size = indicator.size()
+        if not size.isValid() or size.width() <= 0:
+            size = style.sizeFromContents(
+                QStyle.ContentsType.CT_CheckBox,
+                QStyleOptionButton(),
+                size,
+                option.widget,
+            )
+        x = option.rect.x() + (option.rect.width() - size.width()) // 2
+        y = option.rect.y() + (option.rect.height() - size.height()) // 2
+        return QRect(x, y, size.width(), size.height())
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        # Background / selection without the default left-aligned check.
+        opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+
+        state = index.data(Qt.ItemDataRole.CheckStateRole)
+        if state is None:
+            return
+        button = QStyleOptionButton()
+        button.rect = self._check_rect(opt)
+        button.state = QStyle.StateFlag.State_Enabled
+        if opt.state & QStyle.StateFlag.State_MouseOver:
+            button.state |= QStyle.StateFlag.State_MouseOver
+        if opt.state & QStyle.StateFlag.State_Selected:
+            button.state |= QStyle.StateFlag.State_Selected
+        if _is_checked_state(state):
+            button.state |= QStyle.StateFlag.State_On
+        else:
+            button.state |= QStyle.StateFlag.State_Off
+        style.drawPrimitive(
+            QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck,
+            button,
+            painter,
+            opt.widget,
+        )
+
+    def editorEvent(self, event, model, option, index):  # noqa: N802
+        del option
+        if not (index.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return False
+        if not (index.flags() & Qt.ItemFlag.ItemIsEnabled):
+            return False
+        if event.type() not in {
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseButtonDblClick,
+        }:
+            return False
+        if not isinstance(event, QMouseEvent):
+            return False
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        nxt = (
+            Qt.CheckState.Unchecked
+            if _is_checked_state(index.data(Qt.ItemDataRole.CheckStateRole))
+            else Qt.CheckState.Checked
+        )
+        return model.setData(index, nxt, Qt.ItemDataRole.CheckStateRole)
 
 
 class _EditableNameDelegate(_MiddleElideDelegate):
@@ -323,6 +452,18 @@ def _genome_path_key(path: Path) -> str:
         return str(path.expanduser())
 
 
+def _default_db_name_from_path(path: Path) -> str:
+    """Default Name: file stem, or folder basename (same for every database type)."""
+    path = Path(path)
+    try:
+        if path.is_dir():
+            return path.name
+    except OSError:
+        pass
+    # Prefer stem for files; fall back to basename if there is no suffix.
+    return path.stem or path.name
+
+
 def _path_status_genome(path: Path) -> str:
     try:
         return "Ready" if path.expanduser().is_file() else "Missing"
@@ -450,7 +591,9 @@ class AddDatabaseDialog(QDialog):
         self.setMinimumWidth(640)
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        # Stay above RepeatViewer via parent stacking — never WindowStaysOnTopHint
+        # (that covers Safari and every other app).
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         self._project = project
         self._section = section  # opener tab (hint for initial type only)
         self._result_genome: ManagedGenome | None = None
@@ -492,12 +635,14 @@ class AddDatabaseDialog(QDialog):
         )
         self._path = self._path_row.line_edit()
 
-        self._show_annotation = QCheckBox("Use for annotation", self)
+        self._show_annotation = QCheckBox(
+            "Display in the annotation control panel", self
+        )
         self._as_main = QCheckBox("Set as reference genome", self)
         self._show_annotation_row = field_with_help(
             self._show_annotation,
-            "Use for annotation",
-            _USE_FOR_ANNOTATION_HELP,
+            "Display in the annotation control panel",
+            _DISPLAY_IN_ANNOTATION_HELP,
             parent=self,
         )
         self._as_main_row = field_with_help(
@@ -506,6 +651,27 @@ class AddDatabaseDialog(QDialog):
             _SET_AS_MAIN_GENOME_HELP,
             parent=self,
         )
+        self._hmm_help = QLabel(self)
+        self._hmm_help.setWordWrap(True)
+        self._hmm_help.setTextFormat(Qt.TextFormat.RichText)
+        self._hmm_help.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
+        self._hmm_help.setText(_HMM_SETUP_HELP)
+        self._hmm_help.setObjectName("HmmSetupHelp")
+        self._hmm_help.hide()
+
+        self._cdd_help = QLabel(self)
+        self._cdd_help.setWordWrap(True)
+        self._cdd_help.setTextFormat(Qt.TextFormat.RichText)
+        self._cdd_help.setOpenExternalLinks(True)
+        self._cdd_help.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
+        self._cdd_help.setText(_CDD_SETUP_HELP)
+        self._cdd_help.setObjectName("CddSetupHelp")
+        self._cdd_help.hide()
+        self._help_sized_kinds: set[str] = set()
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -526,6 +692,8 @@ class AddDatabaseDialog(QDialog):
         )
         form.addRow("Path:", self._path_row)
         form.addRow("", self._show_annotation_row)
+        form.addRow("", self._hmm_help)
+        form.addRow("", self._cdd_help)
         form.addRow("", self._as_main_row)
 
         self._buttons = QDialogButtonBox(
@@ -573,14 +741,29 @@ class AddDatabaseDialog(QDialog):
         is_cdd = kind == DB_KIND_CDD
 
         self._as_main_row.setVisible(is_dna)
+        self._hmm_help.setVisible(is_hmm)
+        self._cdd_help.setVisible(is_cdd)
         if not is_dna:
             self._as_main.setChecked(False)
 
-        if is_hmm or is_cdd:
+        if (is_hmm or is_cdd) and not self._show_annotation.isChecked():
             self._show_annotation.setChecked(True)
-        if is_cdd and not self._name.text().strip():
-            self._name.setText("CDD")
+        self._maybe_fill_name_from_path()
         self._sync_annotation_name_hint()
+        # Grow once per help panel; avoid adjustSize on every type change (laggy).
+        help_key = "hmm" if is_hmm else "cdd" if is_cdd else ""
+        if help_key and help_key not in self._help_sized_kinds:
+            self._help_sized_kinds.add(help_key)
+            QTimer.singleShot(0, self._ensure_setup_help_size)
+
+    def _ensure_setup_help_size(self) -> None:
+        if not (self._hmm_help.isVisible() or self._cdd_help.isVisible()):
+            return
+        hint = self.sizeHint()
+        self.resize(
+            max(self.width(), hint.width()),
+            max(self.height(), hint.height()),
+        )
 
     def _sync_annotation_name_hint(self, _checked: bool = False) -> None:
         if self._show_annotation.isChecked():
@@ -598,12 +781,9 @@ class AddDatabaseDialog(QDialog):
         path_text = self._path.text().strip()
         if not path_text:
             return
-        path = Path(path_text)
-        if self._current_kind() == DB_KIND_CDD:
-            if not self._name.text().strip():
-                self._name.setText(path.name or "CDD")
-            return
-        self._name.setText(path.stem)
+        suggested = _default_db_name_from_path(Path(path_text))
+        if suggested:
+            self._name.setText(suggested)
 
     def apply_path_from_panel(self, path: Path) -> bool:
         resolved = path.expanduser().resolve()
@@ -616,7 +796,9 @@ class AddDatabaseDialog(QDialog):
                     return False
             self._path.setText(str(resolved))
             if not self._name.text().strip():
-                self._name.setText("CDD")
+                suggested = _default_db_name_from_path(resolved)
+                if suggested:
+                    self._name.setText(suggested)
             self._keep_in_front()
             return True
         if not resolved.is_file():
@@ -626,7 +808,7 @@ class AddDatabaseDialog(QDialog):
                 return False
         self._path.setText(str(resolved))
         if not self._name.text().strip():
-            self._name.setText(resolved.stem)
+            self._name.setText(_default_db_name_from_path(resolved))
         if resolved.suffix.lower() == ".faa" and kind == DB_KIND_FASTA_DNA:
             idx = self._type.findData(DB_KIND_FASTA_PROTEIN)
             if idx >= 0:
@@ -643,7 +825,9 @@ class AddDatabaseDialog(QDialog):
             return False
         self._path.setText(str(resolved))
         if not self._name.text().strip():
-            self._name.setText("CDD")
+            suggested = _default_db_name_from_path(resolved)
+            if suggested:
+                self._name.setText(suggested)
         self._keep_in_front()
         return True
 
@@ -717,10 +901,9 @@ class AddDatabaseDialog(QDialog):
         want_main = self._as_main.isChecked() and kind == DB_KIND_FASTA_DNA
 
         if kind == DB_KIND_CDD:
-            if not path.is_dir():
-                QMessageBox.warning(
-                    self, self.windowTitle(), f"CDD directory not found:\n{path}"
-                )
+            problem = describe_database_problem("cdd", path)
+            if problem:
+                QMessageBox.warning(self, self.windowTitle(), problem)
                 return
         elif not path.is_file():
             QMessageBox.warning(self, self.windowTitle(), f"File not found:\n{path}")
@@ -848,7 +1031,7 @@ AddReferenceDialog = AddDatabaseDialog
 
 
 class ManageReferencesDialog(QDialog):
-    """Manage Database — BLAST | HMM | Others."""
+    """Manage Database — BLAST | HMM | CDD."""
 
     references_changed = Signal()
     # Emitted when the user clicks Select (BlastDatabase | Path | UserDatabase).
@@ -872,9 +1055,11 @@ class ManageReferencesDialog(QDialog):
         # Independent floating window with a normal title bar (movable).
         # Avoid parenting under another modal dialog — on macOS that becomes a
         # non-draggable sheet sharing the host's title.
+        # Stack above RepeatViewer via parent only — never WindowStaysOnTopHint
+        # (global always-on-top covers every other application).
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         self._project = project
         self._add_dialog: AddDatabaseDialog | None = None
         self._rows: list[_RefRow] = []
@@ -897,7 +1082,7 @@ class ManageReferencesDialog(QDialog):
         self._section_bar.setDrawBase(False)
         self._section_bar.addTab("BLAST database")
         self._section_bar.addTab("HMM database")
-        self._section_bar.addTab("Others")
+        self._section_bar.addTab("CDD")
         section = _section_from_role(self._legacy_role)
         self._section_bar.setCurrentIndex({"blast": 0, "hmm": 1, "others": 2}[section])
 
@@ -906,15 +1091,19 @@ class ManageReferencesDialog(QDialog):
         self._scope_filter = self._section_bar
         self._type_filter = self._section_bar
 
-        tab_row = QHBoxLayout()
-        tab_row.setContentsMargins(0, 0, 0, 0)
-        tab_row.addWidget(self._section_bar, 0, Qt.AlignmentFlag.AlignLeft)
-        tab_row.addStretch(1)
-
         self._search = QLineEdit(self)
         self._search.setPlaceholderText("Search name, annotation, type, or path…")
         self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(280)
+        self._search.setMaximumWidth(280)
         self._search.textChanged.connect(self._on_search_changed)
+
+        tab_row = QHBoxLayout()
+        tab_row.setContentsMargins(0, 0, 0, 0)
+        tab_row.setSpacing(12)
+        tab_row.addWidget(self._section_bar, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        tab_row.addStretch(1)
+        tab_row.addWidget(self._search, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         self._table = QTableWidget(0, _COL_COUNT, self)
         self._table.setHorizontalHeaderLabels(
@@ -936,9 +1125,11 @@ class ManageReferencesDialog(QDialog):
             max_length=ANNOTATION_NAME_MAX_LENGTH,
             empty_display="-",
         )
+        self._check_delegate = _CenteredCheckDelegate(self._table)
         self._table.setItemDelegateForColumn(_COL_NAME, self._name_delegate)
         self._table.setItemDelegateForColumn(_COL_ANN_NAME, self._ann_name_delegate)
         self._table.setItemDelegateForColumn(_COL_PATH, self._elide_delegate)
+        self._table.setItemDelegateForColumn(_COL_ANNOTATION, self._check_delegate)
         header = self._table.horizontalHeader()
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
@@ -954,6 +1145,11 @@ class ManageReferencesDialog(QDialog):
         header.resizeSection(_COL_PATH, 200)
         header.setSectionResizeMode(_COL_TIME, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(_COL_ANNOTATION, QHeaderView.ResizeMode.ResizeToContents)
+        ann_header = self._table.horizontalHeaderItem(_COL_ANNOTATION)
+        if ann_header is not None:
+            ann_header.setTextAlignment(
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+            )
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1001,7 +1197,6 @@ class ManageReferencesDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(tab_row)
-        layout.addWidget(self._search)
         layout.addWidget(self._table, 1)
         layout.addLayout(btn_row)
         layout.addWidget(self._current_label)
@@ -1169,13 +1364,14 @@ class ManageReferencesDialog(QDialog):
         if not any(db.db_type == DATABASE_TYPE_CDD for db in self._project.user_databases):
             cdd_dirs = load_cdd_dirs_from_settings()
             if cdd_dirs:
+                cdd_name = _default_db_name_from_path(cdd_dirs[0]) or cdd_dirs[0].name
                 self._project.user_databases.append(
                     UserDatabase(
-                        name="CDD",
+                        name=cdd_name,
                         path=cdd_dirs[0],
                         db_type=DATABASE_TYPE_CDD,
                         show_in_annotation=True,
-                        annotation_name="CDD",
+                        annotation_name=cdd_name,
                     )
                 )
                 self._project.cdd_dirs = [cdd_dirs[0]]
@@ -1245,144 +1441,160 @@ class ManageReferencesDialog(QDialog):
         return _genome_path_key(current) == _genome_path_key(path)
 
     def _build_rows(self) -> list[_RefRow]:
+        # Only build/status-check the active tab — readiness checks on every
+        # BLAST/HMM/CDD entry made tab switching laggy.
+        section = self._current_section()
+        want_blast = section == "blast" or self._legacy_role in {"blast", "genome"}
+        want_hmm = section == "hmm" or self._legacy_role == "annotation"
+        want_cdd = not want_blast and not want_hmm
+
         rows: list[_RefRow] = []
         blast_paths = {
             _genome_path_key(db.source_fasta) for db in self._project.blast_databases
         }
         # FASTA user DBs keyed by path so genome-only rows can share Annotation state.
         fasta_ann_by_path: dict[str, UserDatabase] = {}
-        other_user_dbs: list[UserDatabase] = []
+        hmm_dbs: list[UserDatabase] = []
+        cdd_dbs: list[UserDatabase] = []
         for db in self._project.user_databases:
             if db.kind in _BLAST_KINDS:
                 fasta_ann_by_path[_genome_path_key(db.path)] = db
-            else:
-                other_user_dbs.append(db)
+            elif db.kind in _HMM_KINDS:
+                hmm_dbs.append(db)
+            elif db.kind in _OTHER_KINDS:
+                cdd_dbs.append(db)
 
-        for db in self._project.blast_databases:
-            path_key = _genome_path_key(db.source_fasta)
-            linked = fasta_ann_by_path.pop(path_key, None)
-            show_ann = bool(db.show_in_annotation) or (
-                linked.show_in_annotation if linked is not None else False
-            )
-            ann_name = normalize_annotation_name(
-                db.annotation_name
-                or (linked.annotation_name if linked is not None else "")
-            )
-            rows.append(
-                _RefRow(
-                    name=db.name,
-                    annotation_name=ann_name,
-                    kind=db.kind,
-                    path_display=str(db.source_fasta),
-                    status=_path_status_blast(db),
-                    created_at=db.created_at,
-                    show_in_annotation=show_ann,
-                    is_main=(
-                        db.molecule_type == BLAST_MOLECULE_NUCL
-                        and self._is_main_genome(db.source_fasta)
-                    ),
-                    blast=db,
-                    annotation=linked,
+        if want_blast:
+            for db in self._project.blast_databases:
+                path_key = _genome_path_key(db.source_fasta)
+                linked = fasta_ann_by_path.pop(path_key, None)
+                show_ann = bool(db.show_in_annotation) or (
+                    linked.show_in_annotation if linked is not None else False
                 )
-            )
-
-        # Legacy managed genomes without a matching BLAST row still appear on BLAST tab.
-        for g in self._project.managed_genomes:
-            key = _genome_path_key(g.path)
-            if key in blast_paths:
-                continue
-            linked = fasta_ann_by_path.pop(key, None)
-            rows.append(
-                _RefRow(
-                    name=g.name,
-                    annotation_name=normalize_annotation_name(
-                        linked.annotation_name if linked is not None else ""
-                    ),
-                    kind=g.kind,
-                    path_display=str(g.path),
-                    status=_path_status_genome(g.path),
-                    created_at=g.created_at,
-                    show_in_annotation=(
-                        linked.show_in_annotation if linked is not None else False
-                    ),
-                    is_main=self._is_main_genome(g.path),
-                    genome=g,
-                    annotation=linked,
-                )
-            )
-
-        # Remaining FASTA user DBs that are neither genomes nor BLAST sources.
-        for db in fasta_ann_by_path.values():
-            rows.append(
-                _RefRow(
-                    name=db.name,
-                    annotation_name=normalize_annotation_name(db.annotation_name),
-                    kind=db.kind,
-                    path_display=str(db.path),
-                    status=_path_status_annotation(db),
-                    created_at=db.created_at,
-                    show_in_annotation=db.show_in_annotation,
-                    is_main=False,
-                    annotation=db,
-                )
-            )
-
-        for db in other_user_dbs:
-            rows.append(
-                _RefRow(
-                    name=db.name,
-                    annotation_name=normalize_annotation_name(db.annotation_name),
-                    kind=db.kind,
-                    path_display=str(db.path),
-                    status=_path_status_annotation(db),
-                    created_at=db.created_at,
-                    show_in_annotation=db.show_in_annotation,
-                    is_main=False,
-                    annotation=db,
-                )
-            )
-
-        from repeatviewer.database_settings import load_cdd_dirs_from_settings
-
-        if not any(db.db_type == DATABASE_TYPE_CDD for db in self._project.user_databases):
-            cdd_dirs = load_cdd_dirs_from_settings()
-            if cdd_dirs:
-                cdd = UserDatabase(
-                    name="CDD",
-                    path=cdd_dirs[0],
-                    db_type=DATABASE_TYPE_CDD,
-                    show_in_annotation=True,
-                    annotation_name="CDD",
+                ann_name = normalize_annotation_name(
+                    db.annotation_name
+                    or (linked.annotation_name if linked is not None else "")
                 )
                 rows.append(
                     _RefRow(
-                        name=cdd.name,
-                        annotation_name=cdd.annotation_name,
-                        kind=cdd.kind,
-                        path_display=str(cdd.path),
-                        status=_path_status_annotation(cdd),
-                        created_at=cdd.created_at,
-                        show_in_annotation=True,
-                        is_main=False,
-                        annotation=cdd,
+                        name=db.name,
+                        annotation_name=ann_name,
+                        kind=db.kind,
+                        path_display=str(db.source_fasta),
+                        status=_path_status_blast(db),
+                        created_at=db.created_at,
+                        show_in_annotation=show_ann,
+                        is_main=(
+                            db.molecule_type == BLAST_MOLECULE_NUCL
+                            and self._is_main_genome(db.source_fasta)
+                        ),
+                        blast=db,
+                        annotation=linked,
                     )
                 )
 
-        section = self._current_section()
-        if section == "blast" or self._legacy_role in {"blast", "genome"}:
-            rows = [
-                r
-                for r in rows
-                if r.blast is not None
-                or r.genome is not None
-                or (r.annotation is not None and r.kind in _BLAST_KINDS)
-            ]
-        elif section == "hmm" or self._legacy_role == "annotation":
-            rows = [r for r in rows if r.annotation is not None and r.kind in _HMM_KINDS]
-        else:
-            rows = [
-                r for r in rows if r.annotation is not None and r.kind in _OTHER_KINDS
-            ]
+            # Legacy managed genomes without a matching BLAST row.
+            for g in self._project.managed_genomes:
+                key = _genome_path_key(g.path)
+                if key in blast_paths:
+                    continue
+                linked = fasta_ann_by_path.pop(key, None)
+                rows.append(
+                    _RefRow(
+                        name=g.name,
+                        annotation_name=normalize_annotation_name(
+                            linked.annotation_name if linked is not None else ""
+                        ),
+                        kind=g.kind,
+                        path_display=str(g.path),
+                        status=_path_status_genome(g.path),
+                        created_at=g.created_at,
+                        show_in_annotation=(
+                            linked.show_in_annotation if linked is not None else False
+                        ),
+                        is_main=self._is_main_genome(g.path),
+                        genome=g,
+                        annotation=linked,
+                    )
+                )
+
+            # Remaining FASTA user DBs that are neither genomes nor BLAST sources.
+            for db in fasta_ann_by_path.values():
+                rows.append(
+                    _RefRow(
+                        name=db.name,
+                        annotation_name=normalize_annotation_name(db.annotation_name),
+                        kind=db.kind,
+                        path_display=str(db.path),
+                        status=_path_status_annotation(db),
+                        created_at=db.created_at,
+                        show_in_annotation=db.show_in_annotation,
+                        is_main=False,
+                        annotation=db,
+                    )
+                )
+
+        if want_hmm:
+            for db in hmm_dbs:
+                rows.append(
+                    _RefRow(
+                        name=db.name,
+                        annotation_name=normalize_annotation_name(db.annotation_name),
+                        kind=db.kind,
+                        path_display=str(db.path),
+                        status=_path_status_annotation(db),
+                        created_at=db.created_at,
+                        show_in_annotation=db.show_in_annotation,
+                        is_main=False,
+                        annotation=db,
+                    )
+                )
+
+        if want_cdd:
+            for db in cdd_dbs:
+                rows.append(
+                    _RefRow(
+                        name=db.name,
+                        annotation_name=normalize_annotation_name(db.annotation_name),
+                        kind=db.kind,
+                        path_display=str(db.path),
+                        status=_path_status_annotation(db),
+                        created_at=db.created_at,
+                        show_in_annotation=db.show_in_annotation,
+                        is_main=False,
+                        annotation=db,
+                    )
+                )
+
+            from repeatviewer.database_settings import load_cdd_dirs_from_settings
+
+            if not any(db.db_type == DATABASE_TYPE_CDD for db in self._project.user_databases):
+                cdd_dirs = load_cdd_dirs_from_settings()
+                if cdd_dirs:
+                    cdd_name = (
+                        _default_db_name_from_path(cdd_dirs[0]) or cdd_dirs[0].name
+                    )
+                    cdd = UserDatabase(
+                        name=cdd_name,
+                        path=cdd_dirs[0],
+                        db_type=DATABASE_TYPE_CDD,
+                        show_in_annotation=True,
+                        annotation_name=cdd_name,
+                    )
+                    rows.append(
+                        _RefRow(
+                            name=cdd.name,
+                            annotation_name=cdd.annotation_name,
+                            kind=cdd.kind,
+                            path_display=str(cdd.path),
+                            status=_path_status_annotation(cdd),
+                            created_at=cdd.created_at,
+                            show_in_annotation=True,
+                            is_main=False,
+                            annotation=cdd,
+                        )
+                    )
+
         # Hide entries that are not ready (no Status column).
         return [r for r in rows if r.status == "Ready"]
 
@@ -1452,6 +1664,9 @@ class ManageReferencesDialog(QDialog):
                 | Qt.ItemFlag.ItemIsSelectable
                 | Qt.ItemFlag.ItemIsUserCheckable
             )
+            check_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+            )
             check_item.setCheckState(
                 Qt.CheckState.Checked
                 if row.show_in_annotation
@@ -1483,7 +1698,7 @@ class ManageReferencesDialog(QDialog):
                 ):
                     label = db.name
                     break
-        self._current_label.setText(f"Reference genome: {label} — {genome}")
+        self._current_label.setText(f"Reference genome: {label}")
         self._current_label.setToolTip(str(genome))
 
     def _selected_rows(self) -> list[_RefRow]:

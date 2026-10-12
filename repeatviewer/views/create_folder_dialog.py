@@ -128,8 +128,8 @@ class CreateFolderDialog(QDialog):
         # Non-modal so Folder-panel clicks can fill Create under.
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        # Stay above the main window while still allowing folder clicks.
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        # Parent stacking keeps us above RepeatViewer; never global always-on-top.
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
 
         start = initial_destination
         if start is None and destinations:

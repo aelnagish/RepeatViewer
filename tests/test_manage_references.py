@@ -1,4 +1,4 @@
-"""Persistence and smoke tests for Manage Database (BLAST / HMM / Others)."""
+"""Persistence and smoke tests for Manage Database (BLAST / HMM / CDD)."""
 
 from __future__ import annotations
 
@@ -109,13 +109,13 @@ def test_user_database_type_and_annotation_roundtrip(isolated_settings, tmp_path
     assert len(loaded) == 2
     by_name = {d.name: d for d in loaded}
     assert by_name["PubLib"].display_type_label == "FASTA Protein"
-    assert by_name["PubLib"].annotation_name == "Public library"
+    assert by_name["PubLib"].annotation_name == "Public lib"  # max 10 chars
     assert by_name["Hidden"].display_type_label == "HMM Protein"
     assert by_name["Hidden"].show_in_annotation is False
     assert by_name["PubLib"].created_at.startswith("2026-01-02")
 
     visible = load_similarity_annotation_databases()
-    assert [d.name for d in visible] == ["Public library"]
+    assert [d.name for d in visible] == ["Public lib"]
 
 
 def test_legacy_user_database_defaults(isolated_settings, tmp_path) -> None:
@@ -158,9 +158,9 @@ def test_blast_database_kind_and_time(isolated_settings, tmp_path) -> None:
     assert len(loaded) == 1
     assert loaded[0].display_type_label == "FASTA DNA"
     assert loaded[0].created_at.startswith("2026-09-28")
-    assert loaded[0].annotation_name == "GenomeAnnot"
+    assert loaded[0].annotation_name == "GenomeAnno"  # max 10 chars
     visible = load_similarity_annotation_databases()
-    assert any(d.name == "GenomeAnnot" for d in visible)
+    assert any(d.name == "GenomeAnno" for d in visible)
 
 
 def test_managed_genomes_roundtrip(isolated_settings, tmp_path) -> None:
@@ -219,7 +219,7 @@ def test_manage_database_dialog_smoke(qapp, isolated_settings, tmp_path, monkeyp
     assert dialog._section_bar.count() == 3
     assert dialog._section_bar.tabText(0) == "BLAST database"
     assert dialog._section_bar.tabText(1) == "HMM database"
-    assert dialog._section_bar.tabText(2) == "Others"
+    assert dialog._section_bar.tabText(2) == "CDD"
     assert dialog._section_bar.expanding() is False
     assert dialog._section_bar.drawBase() is False
     assert dialog._table.columnCount() == 6
@@ -342,25 +342,25 @@ def test_cdd_annotation_name_persists(isolated_settings, tmp_path, qapp, monkeyp
     dialog._legacy_role = "all"
     dialog._populate()
     assert dialog._table.rowCount() == 1
-    assert dialog._table.item(0, 0).text() == "CDD"
-    # Promoted on open with Annotation name filled.
-    assert dialog._table.item(0, 1).text() == "CDD"
+    # Default Name / Annotation name = folder basename (same as other DB types).
+    assert dialog._table.item(0, 0).text() == "cdd"
+    assert dialog._table.item(0, 1).text() == "cdd"
     assert dialog._table.item(0, 5).checkState() == Qt.CheckState.Checked
 
     loaded = load_user_databases_from_settings()
     assert any(
-        db.db_type == "CDD" and db.annotation_name == "CDD" and db.show_in_annotation
+        db.db_type == "CDD" and db.annotation_name == "cdd" and db.show_in_annotation
         for db in loaded
     )
     dialog.close()
 
-    # Reopen — Annotation name must still be CDD, not "-".
+    # Reopen — Annotation name must still be the folder name, not "-".
     dialog2 = ManageReferencesDialog(RepeatViewerProject())
     dialog2._section_bar.setCurrentIndex(2)
     dialog2._legacy_role = "all"
     dialog2._populate()
     assert dialog2._table.rowCount() == 1
-    assert dialog2._table.item(0, 1).text() == "CDD"
+    assert dialog2._table.item(0, 1).text() == "cdd"
     dialog2.close()
 
 

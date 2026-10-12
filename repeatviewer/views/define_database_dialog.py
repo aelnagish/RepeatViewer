@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
 )
 
 from repeatviewer.backends.database_prepare import (
-    CDD_MARKER,
+    CDD_PAL_NAMES,
+    CDD_PN_NAMES,
     collect_prepare_targets,
     describe_database_problem,
     hmm_indexing_available,
@@ -61,7 +62,8 @@ def resolve_panel_database_path(path: Path) -> tuple[str, Path] | None:
     path = path.expanduser().resolve()
     if not path.is_file():
         return None
-    if path.name.lower() == CDD_MARKER.lower():
+    known_cdd = {n.lower() for n in CDD_PN_NAMES} | {n.lower() for n in CDD_PAL_NAMES}
+    if path.name.lower() in known_cdd:
         return ("cdd", path.parent)
     suffix = path.suffix.lower()
     if suffix == ".hmm":

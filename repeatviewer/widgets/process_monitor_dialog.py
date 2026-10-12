@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, Qt, Slot
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -62,14 +62,25 @@ class ProcessMonitorDialog(QDialog):
         self.raise_()
         self.activateWindow()
 
+    def _is_scrolled_to_bottom(self) -> bool:
+        bar = self._log.verticalScrollBar()
+        # Near bottom (small slack) → keep following new output.
+        return bar.maximum() <= 0 or bar.value() >= bar.maximum() - 8
+
     def append_line(self, text: str) -> None:
         if text is None:
             return
         line = str(text).rstrip("\r\n")
+        bar = self._log.verticalScrollBar()
+        stick = self._is_scrolled_to_bottom()
+        saved = bar.value()
         self._log.appendPlainText(line)
-        cursor = self._log.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self._log.setTextCursor(cursor)
+        if stick:
+            # Follow new lines only when the user was already at the bottom.
+            bar.setValue(bar.maximum())
+        else:
+            # User scrolled up — keep that position (don't jump).
+            bar.setValue(saved)
 
     def mark_finished(self, ok: bool, detail: str = "") -> None:
         if ok:

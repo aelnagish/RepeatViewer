@@ -173,15 +173,16 @@ def load_similarity_annotation_databases() -> list[UserDatabase]:
     for db in load_user_databases_from_settings():
         if db.db_type == DATABASE_TYPE_CDD:
             return databases
+    cdd_name = cdd_dir.name or "CDD"
     return [
         *databases,
         UserDatabase(
-            name="CDD",
+            name=cdd_name,
             path=cdd_dir,
             db_type=DATABASE_TYPE_CDD,
             scope=DATABASE_SCOPE_PUBLIC,
             show_in_annotation=True,
-            annotation_name="CDD",
+            annotation_name=cdd_name,
         ),
     ]
 

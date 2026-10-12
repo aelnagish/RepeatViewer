@@ -991,7 +991,8 @@ class SettingsDialog(QDialog):
         # Parent stays this Preferences dialog so the manager remains interactive
         # while Preferences is ApplicationModal; flags/behavior match BLAST's manager.
         dialog = BlastDatabaseManagerDialog(self._project, parent=self)
-        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        # Parent stacking only — never WindowStaysOnTopHint (covers other apps).
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         self._blast_manager_dialog = dialog

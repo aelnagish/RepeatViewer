@@ -380,7 +380,8 @@ class GenomeDialog(QDialog):
         self.setMinimumWidth(760)
         self._project = project
         self.setAcceptDrops(True)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        # Parent stacking only — never WindowStaysOnTopHint (covers other apps).
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
 
         self._genome = QComboBox()
         self._genome.setEditable(True)

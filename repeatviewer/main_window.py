@@ -7612,6 +7612,7 @@ class MainWindow(QMainWindow):
             dialog.setWindowTitle("Manage Database")
             dialog.exec()
             return
+        self._configure_app_floating_dialog(dialog)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -10009,6 +10010,9 @@ class MainWindow(QMainWindow):
             "_blast_params_dialog",
             "_hmmer_params_dialog",
             "_find_dialog",
+            "_manage_references_dialog",
+            "_define_database_dialog",
+            "_plugin_run_dialog",
         ):
             dialog = getattr(self, attr, None)
             if dialog is None:

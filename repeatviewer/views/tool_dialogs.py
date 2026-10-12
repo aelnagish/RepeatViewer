@@ -5464,6 +5464,7 @@ class HmmerParamsDialog(QDialog):
         dialog = ManageReferencesDialog(project, host, role_filter="annotation")
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         self._define_database_dialog = dialog
         dialog.references_changed.connect(
             lambda: self._populate_database_combo(
@@ -8584,7 +8585,7 @@ _TE_ANN_FEATURE_DETECTION_HELP = (
     "<b>TIR</b>: terminal inverted repeats (typical of DNA transposons).<br>"
     "<b>Tandem</b>: tandem / satellite-style repeats.<br>"
     "<b>ORF</b>: open reading frames.<br>"
-    "<b>All</b>: select or clear every detector above.<br><br>"
+    "<b>All</b>: select or clear every detector.<br><br>"
     "Thresholds (lengths, similarity, …) are under <b>Advanced Settings</b> → "
     "Feature detection settings."
 )
@@ -8823,6 +8824,13 @@ class TeAnnotationDialog(QDialog):
 
         auto_checks_row = QHBoxLayout()
         auto_checks_row.setSpacing(10)
+        self._auto_ann_all_check = QCheckBox("All", feature_section)
+        self._auto_ann_all_check.setToolTip(
+            "Select or clear all Feature detection modules"
+        )
+        self._auto_ann_all_check.toggled.connect(self._on_auto_all_toggled)
+        auto_checks_row.addWidget(self._auto_ann_all_check)
+
         self._auto_ann_checks: dict = {}
         for label, mode in (
             ("LTR", AutoAnnotationMode.LTR),
@@ -8836,12 +8844,6 @@ class TeAnnotationDialog(QDialog):
             self._auto_ann_checks[mode] = check
             auto_checks_row.addWidget(check)
 
-        self._auto_ann_all_check = QCheckBox("All", feature_section)
-        self._auto_ann_all_check.setToolTip(
-            "Select or clear all Feature detection modules"
-        )
-        self._auto_ann_all_check.toggled.connect(self._on_auto_all_toggled)
-        auto_checks_row.addWidget(self._auto_ann_all_check)
         auto_checks_row.addStretch(1)
         feature_outer.addLayout(auto_checks_row)
         self._sync_auto_all_check()
@@ -8882,7 +8884,7 @@ class TeAnnotationDialog(QDialog):
             self._similarity_ann_all_check.hide()
             self._db_flow.hide()
         else:
-            flow_items: list[QWidget] = []
+            flow_items: list[QWidget] = [self._similarity_ann_all_check]
             for index, entry in enumerate(databases):
                 check = self._make_similarity_db_check(
                     entry,
@@ -8892,7 +8894,6 @@ class TeAnnotationDialog(QDialog):
                 )
                 self._similarity_db_rows.append((entry, check))
                 flow_items.append(check)
-            flow_items.append(self._similarity_ann_all_check)
             self._db_flow.set_items(flow_items)
             sim_outer.addWidget(self._db_flow)
         self._sync_similarity_all_check()

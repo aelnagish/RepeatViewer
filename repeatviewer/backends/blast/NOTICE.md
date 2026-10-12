@@ -1,12 +1,21 @@
 # Bundled NCBI BLAST+ executables
 
-The platform-specific `blastn`, `blastp`, `makeblastdb`, `makeprofiledb`, and
-`rpstblastn` executables in this directory are redistributed from NCBI BLAST+.
+The platform-specific `blastn`, `blastp`, `blastx`, `makeblastdb`,
+`makeprofiledb`, and `rpstblastn` executables in this directory are
+redistributed from NCBI BLAST+.
 
-The bundled `blastp` executables were extracted from the official NCBI BLAST+
-2.15.0 x86-64 archives:
+## macOS (`*_mac`)
 
-- `ncbi-blast-2.15.0+-x64-macosx.tar.gz`
+Apple Silicon (arm64) binaries from NCBI BLAST+ **2.17.0**:
+
+- `ncbi-blast-2.17.0+-aarch64-macosx.tar.gz`
+
+Source: <https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/>
+
+## Linux (`*_linux`) and Windows (`*.exe`)
+
+From NCBI BLAST+ **2.15.0** x86-64 archives:
+
 - `ncbi-blast-2.15.0+-x64-linux.tar.gz`
 - `ncbi-blast-2.15.0+-x64-win64.tar.gz`
 

@@ -49,7 +49,8 @@ class AddAnnotationDialog(QDialog):
         self.setMinimumWidth(480)
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        # Parent stacking only — never WindowStaysOnTopHint (covers other apps).
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         self._fasta_path = fasta_path.expanduser().resolve()
         self._start_dir = (
             self._fasta_path.parent if self._fasta_path.parent.is_dir() else Path.home()

@@ -134,7 +134,8 @@ class AddBlastDatabaseDialog(QDialog):
         self.setMinimumWidth(480)
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        # Parent stacking only — never WindowStaysOnTopHint (covers other apps).
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         self._existing_names = {n.strip().lower() for n in existing_names}
         self._use_system_blast = use_system_blast
         self._result_db: BlastDatabase | None = None

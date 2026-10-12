@@ -1,0 +1,47 @@
+---
+description: >-
+  Never use WindowStaysOnTopHint / global always-on-top. Dialogs may stack above
+  RepeatViewer only (parent + raise). Trigger: always on top, stays on top,
+  WindowStaysOnTopHint, floating dialog above Safari.
+alwaysApply: true
+---
+
+# No global always-on-top windows
+
+**Never** make a dialog or tool window stay in front of *all* applications
+(Safari, Finder, Terminal, …). That is `Qt.WindowType.WindowStaysOnTopHint`.
+
+If a window must stay visible while the user clicks Folders/Files inside
+RepeatViewer, keep it in front of **RepeatViewer only**.
+
+## Required pattern
+
+1. Parent the dialog to the main window (or the relevant RepeatViewer widget).
+2. Use normal stacking: `show()` / `raise_()` / `activateWindow()` when opening
+   or when RepeatViewer is activated again.
+3. Explicitly clear the global hint when configuring floating dialogs:
+
+```python
+dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+dialog.setModal(False)
+dialog.setWindowModality(Qt.WindowModality.NonModal)
+```
+
+Canonical helper: `MainWindow._configure_app_floating_dialog` in
+`repeatviewer/main_window.py`.
+
+## Do not
+
+- `setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)` on any dialog,
+  manager, or tool window.
+- Use other OS “always on top” / “floating utility over everything” flags as a
+  substitute for parenting.
+- “Fix” a dialog disappearing behind RepeatViewer by enabling global
+  always-on-top — parent + `raise_()` instead.
+
+## Allowed
+
+- `ApplicationModal` / `WindowModal` for true modal prompts (blocks RepeatViewer
+  only, not the whole desktop as always-on-top).
+- Non-modal floating dialogs parented to RepeatViewer that the user can leave
+  open while using Folders/Files.

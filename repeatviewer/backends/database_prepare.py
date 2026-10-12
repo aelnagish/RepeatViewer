@@ -33,7 +33,21 @@ def _run_logged(cmd, *, inputs=(), **kwargs):
         check=bool(kwargs.get("check", False)),
     )
 
+# Full CDD marker (preferred) plus NCBI subset / LE set stems.
 CDD_MARKER = "Cdd.pn"
+CDD_PROFILE_PREFIX = "cdd_profile"
+CDD_SET_STEMS = (
+    "Cdd",
+    "Cdd_NCBI",
+    "Pfam",
+    "Smart",
+    "Cog",
+    "Kog",
+    "Prk",
+    "Tigr",
+)
+CDD_PN_NAMES = tuple(f"{stem}.pn" for stem in CDD_SET_STEMS)
+CDD_PAL_NAMES = tuple(f"{stem}.pal" for stem in CDD_SET_STEMS)
 CDD_INDEX_MINUTES = 20
 
 
@@ -71,8 +85,69 @@ def _bundled_or_system(exe: str, *, use_system_blast: bool) -> str:
     )
 
 
+def _cdd_child_by_names(cdd_dir: Path, names: tuple[str, ...]) -> Path | None:
+    """Return the first existing file among ``names``, preferring order.
+
+    Probes known filenames directly (no ``iterdir``) so large preformatted LE
+    folders stay fast when Manage Database switches tabs.
+    """
+    cdd_dir = cdd_dir.expanduser().resolve()
+    if not cdd_dir.is_dir():
+        return None
+    for name in names:
+        candidate = cdd_dir / name
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def find_cdd_pn(cdd_dir: Path) -> Path | None:
+    """Locate a CDD / subset profile list (``Cdd.pn``, ``Pfam.pn``, …)."""
+    return _cdd_child_by_names(cdd_dir, CDD_PN_NAMES)
+
+
+def find_cdd_preformatted_prefix(cdd_dir: Path) -> Path | None:
+    """Locate a preformatted NCBI LE RPS-BLAST alias (``Cdd.pal``, ``Pfam.pal``, …).
+
+    Returns the ``-db`` prefix path (stem without ``.pal``).
+    """
+    pal = _cdd_child_by_names(cdd_dir, CDD_PAL_NAMES)
+    if pal is None:
+        return None
+    return pal.with_suffix("")
+
+
+def suggest_cdd_database_name(cdd_dir: Path) -> str:
+    """Display name from NCBI set stem (Pfam, Cdd, …) or the folder name."""
+    cdd_dir = cdd_dir.expanduser().resolve()
+    pn = find_cdd_pn(cdd_dir)
+    if pn is not None:
+        return pn.stem
+    pref = find_cdd_preformatted_prefix(cdd_dir)
+    if pref is not None:
+        return pref.name
+    return cdd_dir.name or ""
+
+
+def cdd_index_is_ready(cdd_dir: Path) -> bool:
+    """True when RepeatViewer-built ``cdd_profile`` or a preformatted LE set is present."""
+    cdd_dir = cdd_dir.expanduser().resolve()
+    if not cdd_dir.is_dir():
+        return False
+    if find_cdd_preformatted_prefix(cdd_dir) is not None:
+        return True
+    return check_cdd_index_files(str(cdd_dir))
+
+
 def cdd_database_present(cdd_dir: Path) -> bool:
-    return (cdd_dir.expanduser().resolve() / CDD_MARKER).is_file()
+    """True for source (``.pn``) or preformatted LE (``.pal``) CDD / subset folders."""
+    cdd_dir = cdd_dir.expanduser().resolve()
+    if not cdd_dir.is_dir():
+        return False
+    return find_cdd_pn(cdd_dir) is not None or find_cdd_preformatted_prefix(cdd_dir) is not None
 
 
 def blast_index_file(seq_path: Path, *, protein: bool) -> Path:
@@ -155,7 +230,7 @@ def database_search_readiness(db: UserDatabase) -> str | None:
         if not _fasta_blast_index_ready(path, protein=False):
             return "DNA database is not indexed. Use File → Manage Database."
     elif kind == "cdd":
-        if not check_cdd_index_files(str(path)):
+        if not cdd_index_is_ready(path):
             return "CDD database is not indexed. Use File → Manage Database."
     elif kind == "hmm":
         if not _hmm_prepare_ready(path):
@@ -202,7 +277,7 @@ def prepare_index_is_ready(kind: str, path: Path) -> bool:
     """Whether database preparation can be skipped (Define database → OK)."""
     path = path.expanduser().resolve()
     if kind == "cdd":
-        return path.is_dir() and check_cdd_index_files(str(path))
+        return path.is_dir() and cdd_index_is_ready(path)
     if kind == "protein":
         return _fasta_blast_index_ready(path, protein=True)
     if kind == "dna":
@@ -215,7 +290,7 @@ def prepare_index_is_ready(kind: str, path: Path) -> bool:
 def index_is_ready(kind: str, path: Path) -> bool:
     path = path.expanduser().resolve()
     if kind == "cdd":
-        return path.is_dir() and check_cdd_index_files(str(path))
+        return path.is_dir() and cdd_index_is_ready(path)
     if kind == "protein":
         return _fasta_blast_index_ready(path, protein=True)
     if kind == "dna":
@@ -235,9 +310,12 @@ def describe_database_problem(kind: str, path: Path) -> str | None:
         if not path.is_dir():
             return f"CDD directory not found:\n{path}"
         if not cdd_database_present(path):
+            markers = ", ".join(CDD_PN_NAMES[:3]) + ", …"
+            pals = ", ".join(CDD_PAL_NAMES[:3]) + ", …"
             return (
                 f"CDD database files were not found in:\n{path}\n\n"
-                f"Expected file: {CDD_MARKER}"
+                f"Expected a source list ({markers}) or a preformatted "
+                f"NCBI LE alias ({pals})."
             )
         return None
     if not path.is_file():
@@ -286,12 +364,22 @@ def build_cdd_profile_index(
     problem = describe_database_problem("cdd", cdd_dir)
     if problem:
         raise FileNotFoundError(problem)
-    if check_cdd_index_files(str(cdd_dir)):
-        return cdd_dir / "cdd_profile"
 
-    cdd_pn = cdd_dir / CDD_MARKER
+    # Preformatted NCBI LE packages (Pfam_LE, Cdd_LE, …) are already searchable.
+    preformatted = find_cdd_preformatted_prefix(cdd_dir)
+    if preformatted is not None:
+        return preformatted
+
+    out_prefix = cdd_dir / CDD_PROFILE_PREFIX
+    if check_cdd_index_files(str(cdd_dir)):
+        return out_prefix
+
+    cdd_pn = find_cdd_pn(cdd_dir)
+    if cdd_pn is None:
+        raise FileNotFoundError(
+            f"CDD profile list (.pn) was not found in:\n{cdd_dir}"
+        )
     makeprofiledb = _bundled_or_system("makeprofiledb", use_system_blast=use_system_blast)
-    out_prefix = cdd_dir / "cdd_profile"
     cmd = [
         makeprofiledb,
         "-in",
@@ -635,14 +723,17 @@ def prepare_database_target(
 
 
 def prepared_cdd_prefix(cdd_dir: Path | None) -> Path | None:
-    """Return cdd_profile prefix path when CDD dir and index are ready."""
+    """Return RPS-BLAST ``-db`` prefix when the CDD / subset folder is ready."""
     if cdd_dir is None:
         return None
     cdd_dir = cdd_dir.expanduser().resolve()
     if not cdd_database_present(cdd_dir):
         return None
+    preformatted = find_cdd_preformatted_prefix(cdd_dir)
+    if preformatted is not None:
+        return preformatted
     if check_cdd_index_files(str(cdd_dir)):
-        return cdd_dir / "cdd_profile"
+        return cdd_dir / CDD_PROFILE_PREFIX
     return None
 
 

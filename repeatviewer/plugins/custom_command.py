@@ -572,9 +572,9 @@ class UserCommandPlugin(RepeatViewerPlugin):
             parent._plugin_run_dialog = dialog
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
-        # Keep the runtime dialog above the main window while the user
-        # clicks files/paths in the panel.
-        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        # Parent stacking keeps the dialog above RepeatViewer while the user
+        # clicks files/paths — never WindowStaysOnTopHint (covers other apps).
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         loop = QEventLoop()
         dialog.finished.connect(loop.quit)
         dialog.show()
