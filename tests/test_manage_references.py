@@ -375,3 +375,143 @@ def test_add_blast_name_defaults_to_filename(qapp, tmp_path) -> None:
     dialog._maybe_fill_name_from_path()
     name = dialog._name.text().strip() or Path(dialog._path.text().strip()).stem
     assert name == "MyLibrary"
+
+
+def test_untoggle_multiple_annotations_survives_blast_reload(
+    qapp, isolated_settings, tmp_path, monkeypatch
+) -> None:
+    """Regression: reloading blast_databases between toggles must not drop later unticks."""
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.blast_database_is_ready",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.prepare_index_is_ready",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.describe_database_problem",
+        lambda *_a, **_k: None,
+    )
+    fa1 = tmp_path / "a.fa"
+    fa2 = tmp_path / "b.fa"
+    fa1.write_text(">a\nATGC\n")
+    fa2.write_text(">b\nATGC\n")
+    blasts = [
+        BlastDatabase(
+            name="DB_A",
+            source_fasta=fa1,
+            db_prefix_path=tmp_path / "a_db",
+            molecule_type=BLAST_MOLECULE_NUCL,
+            created_at="2026-01-01T00:00:00",
+            show_in_annotation=True,
+            annotation_name="AnnA",
+        ),
+        BlastDatabase(
+            name="DB_B",
+            source_fasta=fa2,
+            db_prefix_path=tmp_path / "b_db",
+            molecule_type=BLAST_MOLECULE_NUCL,
+            created_at="2026-01-02T00:00:00",
+            show_in_annotation=True,
+            annotation_name="AnnB",
+        ),
+    ]
+    save_blast_databases_to_settings(blasts)
+    project = RepeatViewerProject(blast_databases=list(blasts))
+    dialog = ManageReferencesDialog(project)
+    dialog._section_bar.setCurrentIndex(0)
+    dialog._legacy_role = "all"
+    dialog._populate()
+    assert dialog._table.rowCount() == 2
+
+    # First untick persists, then simulate main-window reload that replaces
+    # project.blast_databases with fresh objects (orphaning row.blast refs).
+    from repeatviewer.database_settings import (
+        load_similarity_annotation_databases,
+        reload_blast_databases_into_project,
+    )
+
+    row0 = dialog._table.item(0, 5)
+    row1 = dialog._table.item(1, 5)
+    assert row0 is not None and row1 is not None
+    row0.setCheckState(Qt.CheckState.Unchecked)
+    reload_blast_databases_into_project(project)
+    row1.setCheckState(Qt.CheckState.Unchecked)
+
+    visible = {d.name for d in load_similarity_annotation_databases()}
+    assert "AnnA" not in visible
+    assert "AnnB" not in visible
+    dialog.close()
+
+
+def test_add_rejects_duplicate_name(qapp, tmp_path, monkeypatch) -> None:
+    hmm = tmp_path / "a.hmm"
+    hmm.write_text("HMMER3/f\n")
+    other = tmp_path / "b.hmm"
+    other.write_text("HMMER3/f\n")
+    project = RepeatViewerProject(
+        user_databases=[
+            UserDatabase(
+                name="Taken",
+                path=hmm,
+                db_type=DATABASE_TYPE_PROTEIN,
+                is_hmm=True,
+                created_at="2026-01-01T00:00:00",
+                show_in_annotation=True,
+                annotation_name="AnnA",
+            )
+        ]
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.QMessageBox.warning",
+        lambda *_a, **_k: warnings.append(_a[2] if len(_a) > 2 else ""),
+    )
+    dialog = AddDatabaseDialog(
+        project, initial_kind=DB_KIND_HMM_PROTEIN, section="hmm"
+    )
+    dialog._name.setText("Taken")
+    dialog._ann_name.setText("AnnB")
+    dialog._path.setText(str(other))
+    dialog._show_annotation.setChecked(True)
+    dialog._on_ok()
+    assert dialog.result() != int(QDialog.DialogCode.Accepted)
+    assert dialog.result_annotation() is None
+    assert any("unique Name" in msg for msg in warnings)
+
+
+def test_add_rejects_duplicate_annotation_name(qapp, tmp_path, monkeypatch) -> None:
+    hmm = tmp_path / "a.hmm"
+    hmm.write_text("HMMER3/f\n")
+    other = tmp_path / "b.hmm"
+    other.write_text("HMMER3/f\n")
+    project = RepeatViewerProject(
+        user_databases=[
+            UserDatabase(
+                name="First",
+                path=hmm,
+                db_type=DATABASE_TYPE_PROTEIN,
+                is_hmm=True,
+                created_at="2026-01-01T00:00:00",
+                show_in_annotation=True,
+                annotation_name="SharedAnn",
+            )
+        ]
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "repeatviewer.views.manage_references_dialog.QMessageBox.warning",
+        lambda *_a, **_k: warnings.append(_a[2] if len(_a) > 2 else ""),
+    )
+    dialog = AddDatabaseDialog(
+        project, initial_kind=DB_KIND_HMM_PROTEIN, section="hmm"
+    )
+    dialog._name.setText("Second")
+    dialog._ann_name.setText("SharedAnn")
+    dialog._path.setText(str(other))
+    dialog._show_annotation.setChecked(True)
+    dialog._on_ok()
+    assert dialog.result() != int(QDialog.DialogCode.Accepted)
+    assert dialog.result_annotation() is None
+    assert any("unique Annotation name" in msg for msg in warnings)

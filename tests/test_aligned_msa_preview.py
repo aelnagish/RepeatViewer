@@ -434,3 +434,26 @@ def test_msa_overview_rename_sequence_writes_fasta(
     assert ">oldName\n" not in text
     assert panel.record_ids()[0] == "newName"
     panel.close()
+
+
+def test_overview_splitter_keeps_names_flush_with_tracks(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Widening the names|tracks splitter must not leave a blank gap."""
+    path = tmp_path / "aln.fa"
+    path.write_text(">seqA\nACGTACGTAC\n>seqB\nACGTACGTAC\n")
+    panel = MultiSequenceOverviewPanel(path)
+    panel.resize(900, 400)
+    panel.show()
+    panel.load_path(path, msa_mode=True)
+    qapp.processEvents()
+    panel._fit_bars()
+    qapp.processEvents()
+
+    total = sum(panel._splitter.sizes()) or 800
+    panel._splitter.setSizes([360, max(200, total - 360)])
+    panel._on_splitter_moved()
+    qapp.processEvents()
+
+    assert panel._names.width() == panel._names_viewport_width()
+    panel.close()

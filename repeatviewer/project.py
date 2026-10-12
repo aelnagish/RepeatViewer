@@ -50,7 +50,7 @@ DB_KIND_LABELS = {
 }
 
 # Display name on the Annotation tab (optional unless show_in_annotation).
-ANNOTATION_NAME_MAX_LENGTH = 15
+ANNOTATION_NAME_MAX_LENGTH = 10
 
 REFERENCE_ROLE_GENOME = "genome"
 REFERENCE_ROLE_ANNOTATION = "annotation"

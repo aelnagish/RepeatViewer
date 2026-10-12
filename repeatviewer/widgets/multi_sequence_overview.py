@@ -118,7 +118,10 @@ from repeatviewer.widgets.preview_zoom import (
     invalidate_residue_color_maps,
     nucleotide_base_color_map,
 )
-from repeatviewer.widgets.sequence_annotation_rail import SequenceAnnotationRail
+from repeatviewer.widgets.sequence_annotation_rail import (
+    SequenceAnnotationRail,
+    SimilarityDatabaseCheck,
+)
 from repeatviewer.workers.base import Worker
 
 _AUTO_ANNOTATION_MODES: tuple[tuple[str, AutoAnnotationMode], ...] = (
@@ -450,6 +453,8 @@ class _NamesColumn(QWidget):
         self._row_tops: list[int] = []
         self._row_heights: list[int] = []
         self._selected_rows: set[int] = set()
+        # Column/Position selection guides (widget X), synced with the MSA band.
+        self._guide_xs: tuple[int, ...] = ()
         self._label_point_size = _DEFAULT_MSA_FONT_PT
         self._drag_origin: QPointF | None = None
         self._dragging = False
@@ -489,6 +494,7 @@ class _NamesColumn(QWidget):
         self.setMinimumWidth(80)
         self.setMinimumHeight(h)
         self.resize(w, h)
+        # Width changed — remap stored guide fractions via parent if needed.
         self.update()
 
     def set_selected_rows(self, rows: set[int]) -> None:
@@ -496,6 +502,40 @@ class _NamesColumn(QWidget):
         if new == self._selected_rows:
             return
         self._selected_rows = new
+        self.update()
+
+    def set_position_guides(
+        self,
+        start: int | None,
+        end: int | None = None,
+        *,
+        maximum: int = 1,
+    ) -> None:
+        """Draw dashed vertical Position guides behind the sequence names.
+
+        ``start``/``end`` are 1-based inclusive columns (same as Position spins).
+        Guides are mapped across the name-column width so they move when Position
+        changes, matching the MSA selection lines.
+        """
+        if start is None or int(maximum) <= 0:
+            if self._guide_xs:
+                self._guide_xs = ()
+                self.update()
+            return
+        maximum = max(1, int(maximum))
+        a = max(1, min(maximum, int(start)))
+        b = max(1, min(maximum, int(end if end is not None else start)))
+        if b < a:
+            a, b = b, a
+        span = max(1, self.width() - 1)
+        x0 = int(round((a - 1) / maximum * span))
+        x1 = int(round(b / maximum * span))
+        x0 = max(0, min(span, x0))
+        x1 = max(0, min(span, x1))
+        new = (x0,) if x0 == x1 else (x0, x1)
+        if new == self._guide_xs:
+            return
+        self._guide_xs = new
         self.update()
 
     def _label_font(self) -> QFont:
@@ -663,6 +703,12 @@ class _NamesColumn(QWidget):
                 int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                 label,
             )
+
+        if self._guide_xs:
+            edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
+            painter.setPen(QPen(edge, 1, Qt.PenStyle.DashLine))
+            for x in self._guide_xs:
+                painter.drawLine(int(x), clip.top(), int(x), clip.bottom())
 
         painter.setPen(QPen(mid, 1))
         painter.drawLine(self.width() - 1, clip.top(), self.width() - 1, clip.bottom())
@@ -4019,6 +4065,9 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _on_splitter_moved(self, _pos: int = 0, _index: int = 0) -> None:
         self._name_width = self._current_name_width()
+        # Keep the names widget flush with the pane so widening the splitter
+        # does not leave a blank strip between labels and tracks.
+        self._sync_names_column_width()
         self._schedule_viewport_refit()
 
     def _on_rail_panel_collapsed_changed(self, _collapsed: bool) -> None:
@@ -4065,10 +4114,23 @@ class MultiSequenceOverviewPanel(QWidget):
         if self._names.label_point_size() != desired:
             self._names.set_label_point_size(letter_pt)
 
+    def _names_viewport_width(self) -> int:
+        return max(80, self._names_scroll.viewport().width() or self._name_width)
+
+    def _sync_names_column_width(self) -> None:
+        """Resize the names widget to the splitter pane (no blank gap to tracks)."""
+        width = self._names_viewport_width()
+        if self._names.width() == width:
+            return
+        height = max(_MIN_ROW_HEIGHT, self._names.height())
+        self._names.resize(width, height)
+        self._sync_name_position_guides(self._bars.region_selection())
+        self._names.update()
+
     def _sync_names_column(self) -> None:
         self._sync_hbar_shim()
         self._sync_name_label_size_to_letters()
-        width = max(80, self._names_scroll.viewport().width() or self._name_width)
+        width = self._names_viewport_width()
         # Match bars content; both viewports share the same height thanks to shims.
         content_h = max(
             self._bars.content_height(),
@@ -4088,13 +4150,15 @@ class MultiSequenceOverviewPanel(QWidget):
         record_ids = self._bars.record_ids()
         tops = self._bars.row_tops()
         heights = self._bars.row_heights()
-        # During rubber drag only the highlight set changes — skip geometry rebuild.
+        # During rubber drag only the highlight set changes — skip geometry rebuild
+        # unless the splitter pane width changed (would leave a blank gap).
         target_h = max(_MIN_ROW_HEIGHT, int(content_h))
         if (
             record_ids == self._names._record_ids
             and tops == self._names._row_tops
             and heights == self._names._row_heights
             and self._names.minimumHeight() == target_h
+            and self._names.width() == width
         ):
             self._names.set_selected_rows(highlight)
             return
@@ -4106,6 +4170,8 @@ class MultiSequenceOverviewPanel(QWidget):
             width=width,
             content_height=content_h,
         )
+        # Remap Position guides after a width change.
+        self._sync_name_position_guides(self._bars.region_selection())
 
     @staticmethod
     def _safe_disconnect(signal, slot) -> None:
@@ -4163,6 +4229,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._safe_disconnect(bar.zoom_slider.valueChanged, self._on_zoom_slider_changed)
         self._safe_disconnect(bar.fit_requested, self._fit_bars)
         self._safe_disconnect(bar.select_requested, self._select_by_position)
+        self._safe_disconnect(bar.pos_start.valueChanged, self._on_position_spin_changed)
+        self._safe_disconnect(bar.pos_end.valueChanged, self._on_position_spin_changed)
         self._safe_disconnect(bar.clean_requested, self._open_msa_clean_dialog)
         self._safe_disconnect(bar.consensus_requested, self._open_consensus_dialog)
         self._safe_disconnect(bar.extract_requested, self._extract_selected)
@@ -4229,6 +4297,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
         bar.fit_requested.connect(self._fit_bars)
         bar.select_requested.connect(self._select_by_position)
+        bar.pos_start.valueChanged.connect(self._on_position_spin_changed)
+        bar.pos_end.valueChanged.connect(self._on_position_spin_changed)
         bar.clean_requested.connect(self._open_msa_clean_dialog)
         bar.consensus_requested.connect(self._open_consensus_dialog)
         bar.extract_requested.connect(self._extract_selected)
@@ -4495,6 +4565,20 @@ class MultiSequenceOverviewPanel(QWidget):
     def _on_selection_visuals_dismissed(self) -> None:
         """Regional/column/row drag started — drop scale highlight only."""
         self._scale.set_region_selection(None)
+        self._sync_name_position_guides(None)
+
+    def _sync_name_position_guides(self, region: object) -> None:
+        """Keep dashed Position guides behind sequence names in sync with the MSA."""
+        maximum = max(1, int(self._bars.max_length()))
+        if region is None:
+            self._names.set_position_guides(None, maximum=maximum)
+            return
+        try:
+            start, end = int(region[0]), int(region[1])  # type: ignore[index]
+        except (TypeError, ValueError, IndexError):
+            self._names.set_position_guides(None, maximum=maximum)
+            return
+        self._names.set_position_guides(start, end, maximum=maximum)
 
     def _on_region_selection_changed(self, region: object) -> None:
         # Scale band follows column span for full-height and regional selects.
@@ -4505,6 +4589,7 @@ class MultiSequenceOverviewPanel(QWidget):
                 self._scale.set_region_selection(int(region[0]), int(region[1]))  # type: ignore[index]
             except (TypeError, ValueError, IndexError):
                 self._scale.set_region_selection(None)
+        self._sync_name_position_guides(region)
         # Selected-column sort is one-shot from the Sorting combo — do not
         # re-order rows every time the column selection changes.
         bar = self._header_zoom_bar
@@ -4536,6 +4621,7 @@ class MultiSequenceOverviewPanel(QWidget):
             bar.set_position_range(maximum, start=start_i, end=end_i)
         # Live scale band for the column span (matches committed regional select).
         self._scale.set_region_selection(start_i, end_i)
+        self._sync_name_position_guides((start_i, end_i))
         self._sync_names_column()
 
     def select_all_sequences(self) -> None:
@@ -4662,16 +4748,17 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _make_similarity_db_check(self, entry, index: int) -> QCheckBox:
         color = similarity_database_color(entry.name, index)
-        check = QCheckBox(entry.name, self._rail.similarity_db_host)
+        check = SimilarityDatabaseCheck(
+            entry.name, index, color, self._rail.similarity_db_host
+        )
         readiness = database_search_readiness(entry)
-        tooltip = f"{entry.display_type_label}\n{entry.path}"
+        tooltip = f"{index + 1}. {entry.name}\n{entry.display_type_label}\n{entry.path}"
         if readiness is not None:
             tooltip += f"\n\nNot ready: {readiness}"
             check.setChecked(False)
         else:
             check.setChecked(True)
         check.setToolTip(tooltip)
-        check.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
         check.toggled.connect(self._on_similarity_db_check_toggled)
         return check
 
@@ -4749,14 +4836,26 @@ class MultiSequenceOverviewPanel(QWidget):
         dialog = SimilarityAnnotationSettingsDialog(
             self._similarity_ann_settings, parent=self
         )
+        dialog.manageDatabaseClicked.connect(
+            lambda: self._on_manage_database_clicked(host=dialog)
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._refresh_similarity_database_rows()
             return
         self._similarity_ann_settings = dialog.settings()
         save_similarity_annotation_settings(self._similarity_ann_settings)
         self._bars.set_show_similarity_database_name(
             self._similarity_ann_settings.show_database_name_on_track
         )
+        self._refresh_similarity_database_rows()
         self.statusMessage.emit("Similarity annotation settings saved.")
+
+    def _on_manage_database_clicked(self, host: QWidget | None = None) -> None:
+        window = self.window()
+        opener = getattr(window, "_open_manage_references", None)
+        if callable(opener):
+            opener(role_filter="blast", host=host)
+        self._refresh_similarity_database_rows()
 
     def _require_selected_record_ids(self, title: str) -> list[str] | None:
         ids = self._selected_record_ids()
@@ -4870,6 +4969,28 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         self._ann_cancel.request()
         self._set_annotation_job_status("Stopping annotation…")
+        win = self._main_window_for_job_progress()
+        if win is not None and hasattr(win, "_task_progress") and win._task_progress:
+            win._task_progress.update(
+                getattr(win, "_job_work_steps", 0), "Stopping…"
+            )
+        # Keep Run as Stop until the worker exits; disable only the status Stop.
+        if win is not None and getattr(win, "_stop_btn", None) is not None:
+            win._stop_btn.setEnabled(False)
+
+    def cancel_auto_annotation(self) -> bool:
+        """Request cancellation of a running Overview feature-detection job."""
+        if not self._annotation_running() or self._ann_job_kind != "auto":
+            return False
+        self._stop_annotation_job()
+        return True
+
+    def cancel_similarity_annotation(self) -> bool:
+        """Request cancellation of a running Overview similarity job."""
+        if not self._annotation_running() or self._ann_job_kind != "similarity":
+            return False
+        self._stop_annotation_job()
+        return True
 
     def _start_batch_annotation(
         self,
@@ -5467,23 +5588,72 @@ class MultiSequenceOverviewPanel(QWidget):
         self._persist_overview_features()
         self.statusMessage.emit("Restored previous feature state.")
 
+    def _open_exported_file(self, path: Path) -> None:
+        """Open a successful export in Preview (or the system viewer as fallback)."""
+        resolved = path.expanduser().resolve()
+        if not resolved.is_file():
+            return
+        window = self.window()
+        opener = getattr(window, "_auto_open_outputs", None)
+        if callable(opener):
+            try:
+                opener([resolved])
+                return
+            except Exception:
+                pass
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
+
     def _export_overview_view(self) -> None:
         """Export the names + tracks overview (same formats as single-seq Export)."""
-        out, _filter = QFileDialog.getSaveFileName(
-            self,
-            "Export overview",
-            str(self._path.with_suffix(".svg")),
-            "SVG (*.svg);;PNG (*.png);;PDF (*.pdf)",
+        from repeatviewer.views.export_annotation_view_dialog import (
+            ExportAnnotationViewDialog,
         )
-        if not out:
+
+        dialog = ExportAnnotationViewDialog(
+            source_path=self._path,
+            title="Export overview",
+            name_tag="overview",
+            default_format="pdf",
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        out_path = Path(out)
-        widget = self._splitter
-        size = widget.size()
-        if size.width() <= 0 or size.height() <= 0:
-            size = widget.sizeHint()
-        width = max(1, int(size.width()))
-        height = max(1, int(size.height()))
+        out_path = dialog.chosen_path()
+        if out_path is None:
+            return
+        dpi = max(50, min(600, int(dialog.dpi())))
+        scale = max(1.0, float(dpi) / 96.0)
+
+        # Tight figure: scale + sequence content (not the tall empty scroll viewport).
+        scale_h = max(1, int(self._scale.height() or self._scale.sizeHint().height()))
+        body_h = max(1, int(self._bars.content_height()))
+        names_w = max(1, int(self._names_scroll.width() or self._name_width))
+        tracks_w = max(1, int(self._bars_scroll.width() or 200))
+        handle_w = max(0, int(self._splitter.handleWidth()))
+        width = max(1, names_w + handle_w + tracks_w)
+        height = scale_h + body_h
+
+        def _paint_overview(painter: QPainter) -> None:
+            from PySide6.QtGui import QRegion
+
+            # Names column: scale shim + names (clipped to content height).
+            self._scale_shim.render(painter, QPoint(0, 0))
+            self._names.render(
+                painter,
+                QPoint(0, scale_h),
+                QRegion(QRect(0, 0, names_w, body_h)),
+            )
+            x = names_w + handle_w
+            self._scale.render(painter, QPoint(x, 0))
+            self._bars.render(
+                painter,
+                QPoint(x, scale_h),
+                QRegion(QRect(0, 0, tracks_w, body_h)),
+            )
+
         suffix = out_path.suffix.lower()
         if suffix == ".svg":
             try:
@@ -5499,20 +5669,28 @@ class MultiSequenceOverviewPanel(QWidget):
             gen.setFileName(str(out_path))
             gen.setSize(QSize(width, height))
             gen.setViewBox(QRect(0, 0, width, height))
-            gen.setResolution(96)
+            gen.setResolution(dpi)
             painter = QPainter(gen)
             try:
-                widget.render(painter, QPoint(0, 0))
+                _paint_overview(painter)
             finally:
                 painter.end()
             self.statusMessage.emit(f"Exported overview → {out_path.name}")
+            self._open_exported_file(out_path)
             return
 
-        img = QImage(QSize(width, height), QImage.Format.Format_ARGB32)
+        pixel = QSize(
+            max(1, int(round(width * scale))),
+            max(1, int(round(height * scale))),
+        )
+        img = QImage(pixel, QImage.Format.Format_ARGB32)
         img.fill(Qt.GlobalColor.transparent)
         painter = QPainter(img)
         try:
-            widget.render(painter, QPoint(0, 0))
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.scale(scale, scale)
+            _paint_overview(painter)
         finally:
             painter.end()
 
@@ -5521,26 +5699,23 @@ class MultiSequenceOverviewPanel(QWidget):
                 QMessageBox.warning(self, "Export", "Could not save PNG.")
                 return
             self.statusMessage.emit(f"Exported overview → {out_path.name}")
+            self._open_exported_file(out_path)
             return
 
         if suffix == ".pdf":
-            writer = QPdfWriter(str(out_path))
-            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-            writer.setResolution(96)
-            pdf_painter = QPainter(writer)
-            try:
-                page_rect = writer.pageRect()
-                scaled = img.scaled(
-                    page_rect.size().toSize(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                x = page_rect.x() + (page_rect.width() - scaled.width()) // 2
-                y = page_rect.y() + (page_rect.height() - scaled.height()) // 2
-                pdf_painter.drawImage(QPoint(x, y), scaled)
-            finally:
-                pdf_painter.end()
+            from repeatviewer.views.export_annotation_view_dialog import (
+                write_view_image_pdf,
+            )
+
+            write_view_image_pdf(
+                out_path,
+                img,
+                dpi=dpi,
+                content_width=width,
+                content_height=height,
+            )
             self.statusMessage.emit(f"Exported overview → {out_path.name}")
+            self._open_exported_file(out_path)
             return
 
         QMessageBox.warning(
@@ -5752,7 +5927,27 @@ class MultiSequenceOverviewPanel(QWidget):
         if bar is None or not hasattr(bar, "set_position_range"):
             return
         maximum = max(1, int(self._bars.max_length()))
-        bar.set_position_range(maximum, start=1, end=maximum)
+        region = self._bars.region_selection()
+        if region is not None:
+            start, end = int(region[0]), int(region[1])
+            bar.set_position_range(maximum, start=start, end=end)
+        else:
+            bar.set_position_range(maximum, start=1, end=maximum)
+
+    def _on_position_spin_changed(self, _value: int = 0) -> None:
+        """Keep the MSA selection band in sync when Position spins change."""
+        bar = self._header_zoom_bar
+        if bar is None:
+            return
+        maximum = max(1, int(self._bars.max_length()))
+        start = int(bar.pos_start.value())
+        end = int(bar.pos_end.value())
+        if end < start:
+            start, end = end, start
+        start = max(1, min(maximum, start))
+        end = max(start, min(maximum, end))
+        self._bars.set_region_selection(start, end)
+        self._sync_name_position_guides((start, end))
 
     def _select_by_position(self) -> None:
         """Zoom/scroll to the current region or Position spins (single-seq Select)."""
@@ -6881,6 +7076,7 @@ class MultiSequenceOverviewPanel(QWidget):
         # update below covers the visible change.
         self._bars.clear_feature_selection(repaint=False)
         self._bars.set_region_selection(int(start), int(end))
+        self._sync_name_position_guides((int(start), int(end)))
         # Keep name-column highlights from a prior sequence-row select.
         self._sync_names_column()
         self._bars.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -6895,6 +7091,7 @@ class MultiSequenceOverviewPanel(QWidget):
         if bar is not None and hasattr(bar, "set_position_range"):
             maximum = max(1, int(self._bars.max_length()))
             bar.set_position_range(maximum, start=start, end=end)
+        self._sync_name_position_guides((start, end))
 
     def _on_scale_column_pixel_preview(self, x0: float, x1: float) -> None:
         """Pixel-follow column guides + live Position spins while dragging the scale."""
@@ -6908,6 +7105,7 @@ class MultiSequenceOverviewPanel(QWidget):
             QPoint(int(cx1), 0)
         )
         start_i, end_i = self._scale._columns_from_x_range(float(x0), float(x1))
+        self._sync_name_position_guides((start_i, end_i))
         if self._scale_preview_pending == (start_i, end_i):
             return
         self._scale_preview_pending = (start_i, end_i)

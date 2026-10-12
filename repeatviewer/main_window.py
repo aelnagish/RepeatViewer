@@ -7552,10 +7552,18 @@ class MainWindow(QMainWindow):
         pick_callback=None,
         pick_mode: bool = False,
         compatible=None,
+        host: QWidget | None = None,
     ) -> None:
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDialog
+
         from repeatviewer.views.manage_references_dialog import ManageReferencesDialog
 
         use_pick = bool(pick_mode or pick_callback is not None)
+        # Always parent to the main window so Manage gets its own movable title
+        # bar. Parenting under Similarity settings turns it into a macOS sheet.
+        nested_under_modal = isinstance(host, QDialog) and host.isModal()
+
         existing = self._manage_references_dialog
         if existing is not None and existing.isVisible():
             if role_filter != "all":
@@ -7588,6 +7596,22 @@ class MainWindow(QMainWindow):
                 role_filter=role_filter,
                 compatible=compatible,
             )
+        if nested_under_modal:
+            # Nested ApplicationModal + exec keeps Manage interactive under
+            # Similarity settings, with a normal draggable title bar (not a sheet).
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+            dialog.setWindowFlags(
+                Qt.WindowType.Window
+                | Qt.WindowType.WindowTitleHint
+                | Qt.WindowType.WindowSystemMenuHint
+                | Qt.WindowType.WindowCloseButtonHint
+                | Qt.WindowType.WindowMinMaxButtonsHint
+            )
+            dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+            dialog.setModal(True)
+            dialog.setWindowTitle("Manage Database")
+            dialog.exec()
+            return
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -7601,7 +7625,13 @@ class MainWindow(QMainWindow):
         self._persist_workspace()
         if self._preview_tabs is not None:
             self._preview_tabs.refresh_similarity_databases()
-        self._refresh_open_tool_database_lists()
+        # While Manage Database is open it owns project.blast_databases via
+        # live row object references. Reloading here would orphan those refs
+        # so only the first Annotation untick would persist. Tool dropdowns
+        # refresh when the dialog closes (_on_manage_references_finished).
+        manage = self._manage_references_dialog
+        if manage is None or not manage.isVisible():
+            self._refresh_open_tool_database_lists()
 
     def _on_manage_references_finished(self, result: int) -> None:
         del result
@@ -16448,6 +16478,9 @@ class MainWindow(QMainWindow):
         """Stop currently running background job/map build."""
         # Annotation panel jobs (feature detection / similarity) use the same
         # status-bar progress + Stop button as BLAST.
+        from repeatviewer.widgets.multi_sequence_overview import (
+            MultiSequenceOverviewPanel,
+        )
         from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
 
         for panel in self.findChildren(SequenceMapPanel):
@@ -16456,6 +16489,13 @@ class MainWindow(QMainWindow):
                 or panel.cancel_similarity_annotation()
                 or panel.cancel_transfer_annotation()
             ):
+                self._set_status_message("Stopping…", 8000)
+                if self._stop_btn is not None:
+                    self._stop_btn.setEnabled(False)
+                return
+
+        for panel in self.findChildren(MultiSequenceOverviewPanel):
+            if panel.cancel_auto_annotation() or panel.cancel_similarity_annotation():
                 self._set_status_message("Stopping…", 8000)
                 if self._stop_btn is not None:
                     self._stop_btn.setEnabled(False)

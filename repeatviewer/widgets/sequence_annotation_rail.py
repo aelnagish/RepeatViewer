@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QStyle,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -241,6 +242,195 @@ def _h_divider(parent: QWidget | None = None) -> QFrame:
     line.setFrameShadow(QFrame.Shadow.Sunken)
     line.setFixedHeight(2)
     return line
+
+
+def _page_title_with_rule(title: str, parent: QWidget) -> tuple[QWidget, QFrame]:
+    """Page title + rule at the same height as the Annotations header line.
+
+    Title sits with a 6px pad below (matching Annotations); the rule follows
+    with no extra gap so Find / Display / Others match Annotations.
+    """
+    host = QWidget(parent)
+    host.setMinimumWidth(0)
+    column = QVBoxLayout(host)
+    column.setContentsMargins(0, 0, 0, 0)
+    column.setSpacing(0)
+    title_wrap = QWidget(host)
+    title_layout = QVBoxLayout(title_wrap)
+    title_layout.setContentsMargins(0, 0, 0, 6)
+    title_layout.setSpacing(0)
+    title_layout.addWidget(_section_label(title, title_wrap))
+    column.addWidget(title_wrap)
+    rule = _h_divider(host)
+    column.addWidget(rule)
+    return host, rule
+
+
+class SimilarityDatabaseCheck(QCheckBox):
+    """Numbered similarity DB checkbox; label elides to a column cell width."""
+
+    def __init__(
+        self,
+        name: str,
+        index: int,
+        color: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._full_name = str(name)
+        self._index = max(0, int(index))
+        self._cell_width = 0
+        self.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.setMinimumWidth(0)
+        self.setText(self._full_label())
+
+    @property
+    def full_name(self) -> str:
+        return self._full_name
+
+    @property
+    def database_index(self) -> int:
+        return self._index
+
+    def set_cell_width(self, width: int) -> None:
+        """Fixed column width from the two-row grid; drives name elision."""
+        width = max(0, int(width))
+        if width == self._cell_width:
+            self._refresh_label()
+            return
+        self._cell_width = width
+        if width > 0:
+            self.setFixedWidth(width)
+        self._refresh_label()
+
+    def max_name_letters(self) -> int:
+        """Approx. max name characters that fit in the current column (excl. ``N. ``)."""
+        available = self._text_available_width()
+        if available <= 0:
+            return len(self._full_name)
+        fm = self.fontMetrics()
+        prefix_w = fm.horizontalAdvance(f"{self._index + 1}. ")
+        room = max(0, available - prefix_w)
+        if room <= 0:
+            return 0
+        # Use average advance of the real name when possible.
+        sample = self._full_name or "M"
+        avg = max(1.0, fm.horizontalAdvance(sample) / max(1, len(sample)))
+        return max(0, int(room / avg))
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._refresh_label()
+
+    def _full_label(self) -> str:
+        return f"{self._index + 1}. {self._full_name}"
+
+    def _text_available_width(self) -> int:
+        width = self._cell_width or self.width()
+        if width <= 0:
+            return 0
+        style = self.style()
+        indicator = style.pixelMetric(
+            QStyle.PixelMetric.PM_IndicatorWidth, None, self
+        )
+        spacing = style.pixelMetric(
+            QStyle.PixelMetric.PM_CheckBoxLabelSpacing, None, self
+        )
+        return max(0, width - indicator - spacing - 4)
+
+    def _refresh_label(self) -> None:
+        full = self._full_label()
+        available = self._text_available_width()
+        if available <= 0:
+            text = full
+        else:
+            fm = self.fontMetrics()
+            if fm.horizontalAdvance(full) <= available:
+                text = full
+            else:
+                number = str(self._index + 1)
+                prefix = f"{number}. "
+                prefix_w = fm.horizontalAdvance(prefix)
+                if prefix_w + fm.horizontalAdvance("…") > available:
+                    text = number
+                else:
+                    elided = fm.elidedText(
+                        self._full_name,
+                        Qt.TextElideMode.ElideRight,
+                        max(0, available - prefix_w),
+                    )
+                    text = number if not elided or elided == "…" else prefix + elided
+        if text != self.text():
+            self.setText(text)
+
+
+class SimilarityDatabaseGrid(QWidget):
+    """Column-aligned grid: exactly two databases per row (names elide to width)."""
+
+    _H_SPACING = 6
+    _V_SPACING = 2
+    _COLUMNS = 2
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumWidth(0)
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(self._H_SPACING)
+        self._grid.setVerticalSpacing(self._V_SPACING)
+        self._widgets: list[QWidget] = []
+
+    def clear_widgets(self) -> None:
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._widgets.clear()
+
+    def add_widget(self, widget: QWidget) -> None:
+        widget.setParent(self)
+        self._widgets.append(widget)
+        self._reflow()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._reflow_column_widths()
+
+    def _column_count(self) -> int:
+        return self._COLUMNS if self._widgets else 1
+
+    def _reflow(self) -> None:
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(self)
+        cols = self._column_count()
+        for index, widget in enumerate(self._widgets):
+            # Row-major: two databases per row.
+            self._grid.addWidget(widget, index // cols, index % cols)
+        for col in range(cols):
+            self._grid.setColumnStretch(col, 1)
+        self._reflow_column_widths()
+
+    def _reflow_column_widths(self) -> None:
+        checks = [w for w in self._widgets if isinstance(w, SimilarityDatabaseCheck)]
+        if not checks:
+            return
+        cols = self._column_count()
+        avail = max(0, self.width())
+        if avail <= 0:
+            return
+        gaps = self._H_SPACING * max(0, cols - 1)
+        cell = max(48, (avail - gaps) // cols)
+        for check in checks:
+            check.set_cell_width(cell)
 
 
 class _FlowLayout(QLayout):
@@ -503,7 +693,6 @@ class SequenceAnnotationRail(QWidget):
     transferRequested = Signal()
     transferThresholdChanged = Signal()
     transferSourceChanged = Signal()
-    manageDatabaseClicked = Signal()
     tabChanged = Signal(int)
     panelCollapsedChanged = Signal(bool)
     findRequested = Signal(int)  # +1 next, -1 previous, 0 find all
@@ -644,6 +833,17 @@ class SequenceAnnotationRail(QWidget):
                     body.setMaximumWidth(width)
         if not self._panel_collapsed:
             self.setFixedWidth(self._expanded_rail_width())
+        self._refresh_similarity_db_labels()
+
+    def _refresh_similarity_db_labels(self) -> None:
+        host = getattr(self, "similarity_db_host", None)
+        if isinstance(host, SimilarityDatabaseGrid):
+            host._reflow_column_widths()
+            return
+        if host is None:
+            return
+        for check in host.findChildren(SimilarityDatabaseCheck):
+            check._refresh_label()
 
     def _fill_rail_surface(self, widget: QWidget) -> None:
         """Paint with palette Window (same as a plain page before the footer split)."""
@@ -700,7 +900,8 @@ class SequenceAnnotationRail(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
-        layout.addWidget(_section_label("Display", page))
+        display_title, self._tracks_divider = _page_title_with_rule("Display", page)
+        layout.addWidget(display_title)
 
         # Keep sequence switcher widgets for multi-record wiring, but do not show
         # them on the Display panel (overview / Find cover that job).
@@ -718,9 +919,7 @@ class SequenceAnnotationRail(QWidget):
         self.seq_count_label.setStyleSheet("color: palette(mid);")
         self.seq_count_label.hide()
 
-        self._tracks_divider = _h_divider(page)
         self._tracks_label = _section_label("Tracks", page)
-        layout.addWidget(self._tracks_divider)
         layout.addWidget(self._tracks_label)
 
         self.show_annotation_track = QCheckBox("Show annotation track", page)
@@ -1009,7 +1208,8 @@ class SequenceAnnotationRail(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
-        layout.addWidget(_section_label("Others", page))
+        others_title, _others_rule = _page_title_with_rule("Others", page)
+        layout.addWidget(others_title)
         layout.addWidget(_section_label("Size", page))
 
         sizes = QFormLayout()
@@ -1277,14 +1477,11 @@ class SequenceAnnotationRail(QWidget):
             "Similarity annotation", page, expanded=False
         )
         self.similarity_ann_all_check = QCheckBox(
-            "All databases", similarity_section
+            "All", similarity_section
         )
         similarity_section.add_widget(self.similarity_ann_all_check)
-        self.similarity_db_host = QWidget(similarity_section)
-        self.similarity_db_host.setMinimumWidth(0)
-        self.similarity_db_layout = QVBoxLayout(self.similarity_db_host)
-        self.similarity_db_layout.setContentsMargins(0, 0, 0, 0)
-        self.similarity_db_layout.setSpacing(2)
+        # Two-row column-aligned grid; name length caps from panel width.
+        self.similarity_db_host = SimilarityDatabaseGrid(similarity_section)
         similarity_section.add_widget(self.similarity_db_host)
         sim_btn_row, self.similarity_ann_run_btn, self.similarity_ann_settings_btn = (
             self._compact_run_more_row(
@@ -1503,8 +1700,8 @@ class SequenceAnnotationRail(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
-        layout.addWidget(_section_label("Find", page))
-        layout.addWidget(_h_divider(page))
+        find_title, _find_rule = _page_title_with_rule("Find", page)
+        layout.addWidget(find_title)
 
         self.find_query = QLineEdit(page)
         self.find_query.setPlaceholderText("Sequence or name…")
@@ -2248,15 +2445,26 @@ class SequenceAnnotationRail(QWidget):
         return Path(path)
 
     def clear_similarity_db_checks(self) -> None:
-        while self.similarity_db_layout.count():
-            item = self.similarity_db_layout.takeAt(0)
+        host = self.similarity_db_host
+        if isinstance(host, SimilarityDatabaseGrid):
+            host.clear_widgets()
+            return
+        layout = getattr(self, "similarity_db_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
 
     def add_similarity_db_widget(self, widget: QWidget) -> None:
-        widget.setParent(self.similarity_db_host)
+        host = self.similarity_db_host
+        if isinstance(host, SimilarityDatabaseGrid):
+            host.add_widget(widget)
+            return
+        widget.setParent(host)
         self.similarity_db_layout.addWidget(widget)
 
     def add_similarity_db_check(self, check: QCheckBox) -> None:

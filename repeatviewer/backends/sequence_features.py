@@ -445,6 +445,21 @@ def features_gff_path(fasta_path: Path) -> Path:
     return path.parent / f"{path.stem}.RV.gff3"
 
 
+def export_annotation_path(fasta_path: Path, fmt: str = "gff3") -> Path:
+    """Export Annotation default: ``{fasta.name}_RV.gff3`` (keeps original extension).
+
+    Example: ``reads.fa`` → ``reads.fa_RV.gff3`` / ``.gtf`` / ``.bed``.
+    """
+    path = _resolved_fasta_path(fasta_path)
+    key = str(fmt or "gff3").lower()
+    suffix = {
+        "gff3": "_RV.gff3",
+        "gtf": "_RV.gtf",
+        "bed": "_RV.bed",
+    }.get(key, "_RV.gff3")
+    return path.parent / f"{path.name}{suffix}"
+
+
 def legacy_features_gff_path(fasta_path: Path) -> Path:
     """Older GFF3 name that duplicated the ``.fa`` suffix."""
     path = _resolved_fasta_path(fasta_path)
@@ -455,6 +470,11 @@ def legacy_stem_features_gff_path(fasta_path: Path) -> Path:
     """Previous canonical name ``{stem}.features.gff3`` (pre-.RV.gff3)."""
     path = _resolved_fasta_path(fasta_path)
     return path.parent / f"{path.stem}.features.gff3"
+
+
+def legacy_name_rv_gff_path(fasta_path: Path) -> Path:
+    """Export-style name ``{fasta.name}_RV.gff3`` (keeps original extension)."""
+    return export_annotation_path(fasta_path, "gff3")
 
 
 def resolve_sidecar_path(fasta_path: Path) -> Path | None:
@@ -475,6 +495,7 @@ def resolve_sidecar_path(fasta_path: Path) -> Path | None:
 def resolve_features_gff_path(fasta_path: Path) -> Path | None:
     for candidate in (
         features_gff_path(fasta_path),
+        legacy_name_rv_gff_path(fasta_path),
         legacy_stem_features_gff_path(fasta_path),
         legacy_features_gff_path(fasta_path),
     ):

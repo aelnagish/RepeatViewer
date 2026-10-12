@@ -92,7 +92,7 @@ _ANNOTATION_NAME_HELP = (
     f"{ANNOTATION_NAME_MAX_LENGTH})."
 )
 _USE_FOR_ANNOTATION_HELP = (
-    "An Annotation name is required (max 15 characters)."
+    f"An Annotation name is required (max {ANNOTATION_NAME_MAX_LENGTH} characters)."
 )
 _SET_AS_MAIN_GENOME_HELP = (
     "Marks the selected FASTA DNA file as the reference genome. "
@@ -249,6 +249,59 @@ class _EditableNameDelegate(_MiddleElideDelegate):
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _existing_database_names(
+    project: RepeatViewerProject,
+    *,
+    exclude_name: str | None = None,
+) -> set[str]:
+    """Lowercased Name values across BLAST, user/HMM/CDD, and managed genomes."""
+    skip = (exclude_name or "").strip().lower()
+    names: set[str] = set()
+    for db in project.blast_databases:
+        key = db.name.strip().lower()
+        if key and key != skip:
+            names.add(key)
+    for db in project.user_databases:
+        key = db.name.strip().lower()
+        if key and key != skip:
+            names.add(key)
+    for genome in project.managed_genomes:
+        key = genome.name.strip().lower()
+        if key and key != skip:
+            names.add(key)
+    return names
+
+
+def _existing_annotation_names(
+    project: RepeatViewerProject,
+    *,
+    exclude_annotation_name: str | None = None,
+) -> set[str]:
+    """Lowercased non-empty Annotation names across BLAST and user databases."""
+    skip = normalize_annotation_name(exclude_annotation_name).lower()
+    names: set[str] = set()
+    for db in project.blast_databases:
+        key = normalize_annotation_name(db.annotation_name).lower()
+        if key and key != skip:
+            names.add(key)
+    for db in project.user_databases:
+        key = normalize_annotation_name(db.annotation_name).lower()
+        if key and key != skip:
+            names.add(key)
+    return names
+
+
+def _name_clash_message(name: str) -> str:
+    return f"The name “{name}” is already used. Choose a unique Name."
+
+
+def _annotation_name_clash_message(ann_name: str) -> str:
+    return (
+        f"The annotation name “{ann_name}” is already used. "
+        "Choose a unique Annotation name."
+    )
 
 
 def _format_time(value: str) -> str:
@@ -647,6 +700,19 @@ class AddDatabaseDialog(QDialog):
             ann_name = normalize_annotation_name(name)
             self._ann_name.setText(ann_name)
 
+        if name.lower() in _existing_database_names(self._project):
+            QMessageBox.warning(
+                self, self.windowTitle(), _name_clash_message(name)
+            )
+            return
+        if ann_name and ann_name.lower() in _existing_annotation_names(self._project):
+            QMessageBox.warning(
+                self,
+                self.windowTitle(),
+                _annotation_name_clash_message(ann_name),
+            )
+            return
+
         stamp = _now_iso()
         want_main = self._as_main.isChecked() and kind == DB_KIND_FASTA_DNA
 
@@ -661,14 +727,6 @@ class AddDatabaseDialog(QDialog):
             return
 
         if kind in _HMM_KINDS or kind == DB_KIND_CDD:
-            existing = {db.name.lower() for db in self._project.user_databases}
-            if name.lower() in existing:
-                QMessageBox.warning(
-                    self,
-                    self.windowTitle(),
-                    f"A database named “{name}” already exists.",
-                )
-                return
             db_type, is_hmm = user_fields_from_kind(kind)
             self._result_annotation = UserDatabase(
                 name=name,
@@ -687,14 +745,6 @@ class AddDatabaseDialog(QDialog):
             return
 
         # FASTA DNA / Protein → BLAST tab (always build an index).
-        existing_names = {db.name.lower() for db in self._project.blast_databases}
-        if name.lower() in existing_names:
-            QMessageBox.warning(
-                self,
-                self.windowTitle(),
-                f"A BLAST database named “{name}” already exists.",
-            )
-            return
         molecule_type = (
             BLAST_MOLECULE_NUCL if kind == DB_KIND_FASTA_DNA else BLAST_MOLECULE_PROT
         )
@@ -819,6 +869,9 @@ class ManageReferencesDialog(QDialog):
         self.setWindowTitle("Manage Database")
         self.setMinimumWidth(960)
         self.setMinimumHeight(420)
+        # Independent floating window with a normal title bar (movable).
+        # Avoid parenting under another modal dialog — on macOS that becomes a
+        # non-draggable sheet sharing the host's title.
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
@@ -930,6 +983,10 @@ class ManageReferencesDialog(QDialog):
         self._remove_btn.clicked.connect(self._remove_selected)
         self._set_main_btn.clicked.connect(self._set_main_reference)
 
+        self._save_btn = QPushButton("Save", self)
+        self._save_btn.setDefault(True)
+        self._save_btn.clicked.connect(self.accept)
+
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._add_btn)
         btn_row.addWidget(self._remove_btn)
@@ -937,15 +994,10 @@ class ManageReferencesDialog(QDialog):
         btn_row.addWidget(self._set_main_btn)
         btn_row.addWidget(self._set_main_help)
         btn_row.addStretch(1)
+        btn_row.addWidget(self._save_btn)
 
         self._current_label = QLabel(self)
         self._current_label.setWordWrap(True)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        close_btn = buttons.button(QDialogButtonBox.StandardButton.Close)
-        if close_btn is not None:
-            close_btn.clicked.connect(self.accept)
 
         layout = QVBoxLayout(self)
         layout.addLayout(tab_row)
@@ -953,7 +1005,6 @@ class ManageReferencesDialog(QDialog):
         layout.addWidget(self._table, 1)
         layout.addLayout(btn_row)
         layout.addWidget(self._current_label)
-        layout.addWidget(buttons)
 
         self._section_bar.currentChanged.connect(self._on_section_changed)
         self._reload_from_settings()
@@ -1597,6 +1648,34 @@ class ManageReferencesDialog(QDialog):
             self._project.cdd_dirs = [db.path]
         return db
 
+    def _rebind_blast(self, row: _RefRow) -> BlastDatabase | None:
+        """Return the live BlastDatabase for *row*, rebinding if the list was replaced."""
+        blast = row.blast
+        if blast is None:
+            return None
+        if any(db is blast for db in self._project.blast_databases):
+            return blast
+        key = _genome_path_key(blast.source_fasta)
+        for db in self._project.blast_databases:
+            if _genome_path_key(db.source_fasta) == key or db.name == row.name:
+                row.blast = db
+                return db
+        return blast
+
+    def _rebind_user_db(self, row: _RefRow) -> UserDatabase | None:
+        """Return the live UserDatabase for *row*, rebinding if the list was replaced."""
+        annotation = row.annotation
+        if annotation is None:
+            return None
+        if any(db is annotation for db in self._project.user_databases):
+            return annotation
+        key = _genome_path_key(annotation.path)
+        for db in self._project.user_databases:
+            if _genome_path_key(db.path) == key or db.name == row.name:
+                row.annotation = db
+                return db
+        return annotation
+
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         col = item.column()
         row_idx = item.row()
@@ -1628,27 +1707,30 @@ class ManageReferencesDialog(QDialog):
                 self._table.blockSignals(False)
             return ann
 
-        if row.blast is not None:
+        blast = self._rebind_blast(row)
+        if blast is not None:
             if checked:
-                raw = row.blast.annotation_name or row.blast.name
-                row.blast.annotation_name = _set_ann_name(raw)
-            row.blast.show_in_annotation = checked
+                raw = blast.annotation_name or blast.name
+                blast.annotation_name = _set_ann_name(raw)
+            blast.show_in_annotation = checked
             row.show_in_annotation = checked
-            if row.annotation is not None:
-                row.annotation = self._ensure_user_db_tracked(row.annotation)
+            annotation = self._rebind_user_db(row)
+            if annotation is not None:
+                row.annotation = self._ensure_user_db_tracked(annotation)
                 row.annotation.show_in_annotation = checked
                 if checked:
-                    row.annotation.annotation_name = row.blast.annotation_name
+                    row.annotation.annotation_name = blast.annotation_name
             self._persist_all()
             return
 
-        if row.annotation is not None:
+        annotation = self._rebind_user_db(row)
+        if annotation is not None:
             if checked:
-                raw = row.annotation.annotation_name or row.annotation.name
-                row.annotation.annotation_name = _set_ann_name(raw)
-            row.annotation.show_in_annotation = checked
+                raw = annotation.annotation_name or annotation.name
+                annotation.annotation_name = _set_ann_name(raw)
+            annotation.show_in_annotation = checked
             row.show_in_annotation = checked
-            row.annotation = self._ensure_user_db_tracked(row.annotation)
+            row.annotation = self._ensure_user_db_tracked(annotation)
             self._persist_all()
             return
 
@@ -1682,33 +1764,17 @@ class ManageReferencesDialog(QDialog):
             return
         if new_name == row.name:
             return
-        if row.blast is not None:
-            clash = any(
-                db is not row.blast and db.name.lower() == new_name.lower()
-                for db in self._project.blast_databases
+        if new_name.lower() in _existing_database_names(
+            self._project, exclude_name=row.name
+        ):
+            self._revert_name_cell(item, row.name)
+            QMessageBox.warning(
+                self, "Manage Database", _name_clash_message(new_name)
             )
-            if clash:
-                self._revert_name_cell(item, row.name)
-                QMessageBox.warning(
-                    self,
-                    "Manage Database",
-                    f"A BLAST database named “{new_name}” already exists.",
-                )
-                return
+            return
+        if row.blast is not None:
             row.blast.name = new_name
         elif row.annotation is not None:
-            clash = any(
-                db is not row.annotation and db.name.lower() == new_name.lower()
-                for db in self._project.user_databases
-            )
-            if clash:
-                self._revert_name_cell(item, row.name)
-                QMessageBox.warning(
-                    self,
-                    "Manage Database",
-                    f"A database named “{new_name}” already exists.",
-                )
-                return
             row.annotation = self._ensure_user_db_tracked(row.annotation)
             row.annotation.name = new_name
         elif row.genome is not None:
@@ -1738,6 +1804,16 @@ class ManageReferencesDialog(QDialog):
             item.setText(new_ann if new_ann else "-")
             item.setData(Qt.ItemDataRole.UserRole, new_ann)
             self._table.blockSignals(False)
+            return
+        if new_ann and new_ann.lower() in _existing_annotation_names(
+            self._project, exclude_annotation_name=row.annotation_name
+        ):
+            self._revert_annotation_name_cell(item, row.annotation_name)
+            QMessageBox.warning(
+                self,
+                "Manage Database",
+                _annotation_name_clash_message(new_ann),
+            )
             return
         row.annotation_name = new_ann
         if row.blast is not None:
@@ -1772,6 +1848,14 @@ class ManageReferencesDialog(QDialog):
         self._table.blockSignals(True)
         item.setText(name)
         item.setData(Qt.ItemDataRole.UserRole, name)
+        self._table.blockSignals(False)
+
+    def _revert_annotation_name_cell(
+        self, item: QTableWidgetItem, ann_name: str
+    ) -> None:
+        self._table.blockSignals(True)
+        item.setText(ann_name if ann_name else "-")
+        item.setData(Qt.ItemDataRole.UserRole, ann_name)
         self._table.blockSignals(False)
 
     def _persist_all(self) -> None:

@@ -65,6 +65,7 @@ def find_companion_gff(sequence_path: Path) -> Path | None:
     name = sequence_path.name
     candidates = [
         folder / f"{stem}.RV.gff3",
+        folder / f"{name}_RV.gff3",
         folder / f"{stem}.features.gff3",
         folder / f"{name}.features.gff3",
         folder / f"{name}.RV.gff3",

@@ -41,6 +41,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QRegion,
     QShortcut,
     QPageSize,
     QPdfWriter,
@@ -161,7 +162,10 @@ from repeatviewer.widgets.annotation_colors_dialog import (
     AddFeatureButtonsDialog,
     AnnotationElementColorsDialog,
 )
-from repeatviewer.widgets.sequence_annotation_rail import SequenceAnnotationRail
+from repeatviewer.widgets.sequence_annotation_rail import (
+    SequenceAnnotationRail,
+    SimilarityDatabaseCheck,
+)
 from repeatviewer.widgets.preview_controls import (
     ANNOTATION_FIT_BUTTON_RENDERED_WIDTH,
     ANNOTATION_SELECT_BUTTON_RENDERED_WIDTH,
@@ -4213,6 +4217,9 @@ class _ExtractSequenceDialog(QDialog):
     The range starts at whatever was selected on the map but stays editable,
     so a selection made by dragging can be tidied up to exact coordinates
     without going back and re-selecting.
+
+    When the Name still matches the auto ``{prefix}_{start}_{end}`` pattern,
+    editing Start/End updates the Name so the output file tracks the range.
     """
 
     def __init__(
@@ -4232,12 +4239,14 @@ class _ExtractSequenceDialog(QDialog):
 
         self._start = QSpinBox(self)
         self._start.setRange(1, self._sequence_length)
-        self._start.setValue(max(1, min(int(start), self._sequence_length)))
+        start_i = max(1, min(int(start), self._sequence_length))
+        self._start.setValue(start_i)
         self._start.setGroupSeparatorShown(True)
 
         self._end = QSpinBox(self)
         self._end.setRange(1, self._sequence_length)
-        self._end.setValue(max(1, min(int(end), self._sequence_length)))
+        end_i = max(1, min(int(end), self._sequence_length))
+        self._end.setValue(end_i)
         self._end.setGroupSeparatorShown(True)
 
         for box in (self._start, self._end):
@@ -4255,6 +4264,10 @@ class _ExtractSequenceDialog(QDialog):
         self._name = QLineEdit(default_name, self)
         self._name.setFixedWidth(260)
         self._name.selectAll()
+        # Auto-sync Name with Start/End when it still matches ``prefix_start_end``.
+        self._name_prefix = self._prefix_from_ranged_name(default_name, start_i, end_i)
+        self._last_auto_name = default_name if self._name_prefix is not None else ""
+        self._name_user_edited = self._name_prefix is None
 
         self._summary = QLabel(self)
         self._summary.setStyleSheet("color: palette(mid);")
@@ -4288,10 +4301,43 @@ class _ExtractSequenceDialog(QDialog):
         layout.addWidget(self._summary)
         layout.addWidget(self._buttons)
 
-        self._start.valueChanged.connect(self._sync)
-        self._end.valueChanged.connect(self._sync)
+        self._start.valueChanged.connect(self._on_range_changed)
+        self._end.valueChanged.connect(self._on_range_changed)
         self._strand.currentIndexChanged.connect(self._sync)
+        self._name.textEdited.connect(self._on_name_edited)
         self._name.textChanged.connect(self._sync)
+        self._sync()
+
+    @staticmethod
+    def _ranged_name(prefix: str, start: int, end: int) -> str:
+        return f"{prefix}_{int(start)}_{int(end)}"
+
+    @classmethod
+    def _prefix_from_ranged_name(
+        cls, name: str, start: int, end: int
+    ) -> str | None:
+        text = str(name or "")
+        suffix = f"_{int(start)}_{int(end)}"
+        if text.endswith(suffix) and len(text) > len(suffix):
+            return text[: -len(suffix)]
+        return None
+
+    def _on_name_edited(self, _text: str = "") -> None:
+        self._name_user_edited = True
+
+    def _on_range_changed(self, _value: int = 0) -> None:
+        if (
+            not self._name_user_edited
+            and self._name_prefix is not None
+            and self._name.text() == self._last_auto_name
+        ):
+            auto = self._ranged_name(
+                self._name_prefix, self._start.value(), self._end.value()
+            )
+            self._name.blockSignals(True)
+            self._name.setText(auto)
+            self._name.blockSignals(False)
+            self._last_auto_name = auto
         self._sync()
 
     def _sync(self) -> None:
@@ -6782,15 +6828,6 @@ class SimilarityAnnotationSettingsPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        intro = QLabel(
-            "These E-value and output limits apply only to Similarity annotation. "
-            "They do not change TE-Aid, genome BLAST, or other tools in RepeatViewer.",
-            self,
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-        layout.addWidget(_settings_separator())
-
         form = QFormLayout()
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -6863,13 +6900,33 @@ class SimilarityAnnotationSettingsPanel(QWidget):
             field_with_help(
                 self._max_hits,
                 "Maximum hits per database",
-                "Maximum total hits shown per database. When more hits pass "
-                f"filtering, {APP_DISPLAY_NAME} first removes shorter fully "
-                "nested overlaps when their E-value is not better than the "
-                "covering hit (including equal E=0), then merges partially "
-                "overlapping groups (keeping the highest score in each group), "
-                "then keeps the top hits by score. Protein and DNA searches "
-                "use the same rule.",
+                (
+                    f"Caps how many hits from <b>one database</b> are kept on the "
+                    f"track after search (default 10). Protein and DNA searches "
+                    f"use the same steps.<br><br>"
+                    f"<b>How filtering works</b> (in order):<br>"
+                    f"1. <b>Same span</b> — If two hits cover exactly the same "
+                    f"coordinates, keep the one with the higher bit score.<br>"
+                    f"2. <b>Fully nested</b> — If a shorter hit lies completely "
+                    f"inside a longer one and its E-value is not better "
+                    f"(≥ covering hit, including both E=0), drop the shorter "
+                    f"hit.<br>"
+                    f"3. <b>Partial overlap</b> (only if still over the limit) — "
+                    f"Hits that overlap only partly are grouped; keep the "
+                    f"highest bit-score hit in each group.<br>"
+                    f"4. <b>Top N by score</b> (only if still over the limit) — "
+                    f"Keep the best-scoring hits until this maximum is reached."
+                    f"<br><br>"
+                    f"<b>Examples</b> (max = 2):<br>"
+                    f"• Nested: long hit 100–500 (E=1e−40) and short hit 200–250 "
+                    f"(E=1e−10) → short is dropped (worse E and fully inside).<br>"
+                    f"• Nested exception: long 100–500 (E=1e−5) and short 200–250 "
+                    f"(E=1e−40) → both kept (short has a better E-value).<br>"
+                    f"• Partial overlap: A 100–200 (score 80), B 150–250 "
+                    f"(score 120), C 400–500 (score 50) and still above the "
+                    f"limit → A and B form one group (keep B); C is separate → "
+                    f"kept hits are B and C, then capped to the top 2 by score."
+                ),
                 parent=self,
             ),
         )
@@ -6924,6 +6981,8 @@ class SimilarityAnnotationSettingsPanel(QWidget):
 class SimilarityAnnotationSettingsDialog(QDialog):
     """Configure similarity-annotation search thresholds."""
 
+    manageDatabaseClicked = Signal()
+
     def __init__(
         self,
         settings: SimilarityAnnotationSettings,
@@ -6935,12 +6994,23 @@ class SimilarityAnnotationSettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
         layout.addWidget(self._panel)
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(8)
+        manage_btn = QPushButton("Manage database", self)
+        manage_btn.setToolTip(
+            "Open Manage Database to add or edit similarity databases"
+        )
+        manage_btn.clicked.connect(self.manageDatabaseClicked.emit)
+        footer.addWidget(manage_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        footer.addStretch(1)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        footer.addWidget(buttons, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(footer)
 
     def settings(self) -> SimilarityAnnotationSettings:
         return self._panel.settings()
@@ -7069,7 +7139,6 @@ class SequenceMapPanel(QWidget):
         self._rail.transfer_allow_reverse.toggled.connect(
             self._on_transfer_reverse_changed
         )
-        self._rail.manageDatabaseClicked.connect(self._on_manage_database_clicked)
         self._rail.transfer_target_browse.clicked.connect(self._on_transfer_browse_target)
         self._transfer_path_armed = False
         if hasattr(self._rail, "transfer_source_row"):
@@ -8155,12 +8224,15 @@ class SequenceMapPanel(QWidget):
             return
 
         sequence = data.sequence
+        lo = min(int(start), int(end))
+        hi = max(int(start), int(end))
+        base = _safe_filename_part(data.sequence_id) or self._path.stem or "sequence"
         dialog = _ExtractSequenceDialog(
             sequence_id=data.sequence_id,
             sequence_length=len(sequence),
-            start=min(int(start), int(end)),
-            end=max(int(start), int(end)),
-            default_name=self._next_extraction_name(data.sequence_id),
+            start=lo,
+            end=hi,
+            default_name=f"{base}_{lo}_{hi}",
             reverse=False,
             parent=self,
         )
@@ -8364,12 +8436,13 @@ class SequenceMapPanel(QWidget):
         finally:
             tgt.blockSignals(False)
 
-    def _on_manage_database_clicked(self) -> None:
+    def _on_manage_database_clicked(self, host: QWidget | None = None) -> None:
         # Transfer Source uses Browse; Manage Database remains for Similarity DBs.
+        # Pass the modal settings dialog as host so Manage is not frozen under it.
         window = self.window()
         opener = getattr(window, "_open_manage_references", None)
         if callable(opener):
-            opener(role_filter="blast")
+            opener(role_filter="blast", host=host)
         self.refresh_similarity_databases()
 
     def _on_transfer_source_picked(self, payload) -> None:
@@ -9534,7 +9607,11 @@ class SequenceMapPanel(QWidget):
     def _open_similarity_annotation_settings(self) -> None:
         self._similarity_ann_settings = load_similarity_annotation_settings()
         dialog = SimilarityAnnotationSettingsDialog(self._similarity_ann_settings, parent=self)
+        dialog.manageDatabaseClicked.connect(
+            lambda: self._on_manage_database_clicked(host=dialog)
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.refresh_similarity_databases()
             return
         self._similarity_ann_settings = dialog.settings()
         save_similarity_annotation_settings(self._similarity_ann_settings)
@@ -9542,6 +9619,7 @@ class SequenceMapPanel(QWidget):
             self._similarity_ann_settings.show_database_name_on_track
         )
         self._broadcast_shared_annotation_settings_changed()
+        self.refresh_similarity_databases()
         self.statusMessage.emit("Similarity annotation settings saved.")
 
     def _current_similarity_annotation_settings(self) -> SimilarityAnnotationSettings:
@@ -9552,20 +9630,17 @@ class SequenceMapPanel(QWidget):
 
     def _make_similarity_db_check(self, entry: UserDatabase, index: int) -> QCheckBox:
         color = similarity_database_color(entry.name, index)
-        check = QCheckBox(entry.name, self._rail.similarity_db_host)
+        check = SimilarityDatabaseCheck(
+            entry.name, index, color, self._rail.similarity_db_host
+        )
         readiness = database_search_readiness(entry)
-        tooltip = f"{entry.display_type_label}\n{entry.path}"
+        tooltip = f"{index + 1}. {entry.name}\n{entry.display_type_label}\n{entry.path}"
         if readiness is not None:
             tooltip += f"\n\nNot ready: {readiness}"
             check.setChecked(False)
         else:
             check.setChecked(True)
         check.setToolTip(tooltip)
-        check.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
-        check.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
         check.toggled.connect(self._on_similarity_db_check_toggled)
         return check
 
@@ -9928,32 +10003,99 @@ class SequenceMapPanel(QWidget):
     def _export_gff(self) -> None:
         self._save_annotations(silent=True)
 
+    def _open_exported_file(self, path: Path) -> None:
+        """Open a successful export in Preview (or the system viewer as fallback)."""
+        resolved = path.expanduser().resolve()
+        if not resolved.is_file():
+            return
+        window = self.window()
+        opener = getattr(window, "_auto_open_outputs", None)
+        if callable(opener):
+            try:
+                opener([resolved])
+                return
+            except Exception:
+                pass
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
+
+    def _annotation_view_export_layout(
+        self,
+    ) -> tuple[QWidget | None, QWidget | None, QWidget | None, int, int, int, int]:
+        """Header, canvas row, annot track, and tight export geometry.
+
+        Uses annotation *content* height (not the viewport-stretched empty fill
+        below feature rows) so PDF/PNG/SVG exports have no large blank footer.
+        """
+        widget = self._map
+        header = getattr(widget, "_header", None)
+        canvas_row = getattr(widget, "_canvas_row", None)
+        annot_track = getattr(widget, "_annot_track", None)
+        if header is None or canvas_row is None or annot_track is None:
+            return None, None, None, 0, 0, 0, 0
+
+        def _h(w: QWidget) -> int:
+            h = int(w.height())
+            if h <= 0:
+                h = int(w.sizeHint().height())
+            return max(1, h)
+
+        def _w(w: QWidget) -> int:
+            width = int(w.width())
+            if width <= 0:
+                width = int(w.sizeHint().width())
+            return max(1, width)
+
+        header_h = _h(header)
+        canvas_h = _h(canvas_row)
+        annot_h = max(1, int(annot_track.content_height()))
+        width = max(_w(header), _w(canvas_row), _w(annot_track))
+        height = header_h + canvas_h + annot_h
+        return header, canvas_row, annot_track, width, height, header_h, canvas_h
+
     def _export_annotation_view_to_file(
         self,
         out_path: Path,
-    ) -> None:
-        """Export the current SequenceMapWidget view to disk."""
+        *,
+        dpi: int = 400,
+    ) -> bool:
+        """Export the current SequenceMapWidget view to disk. Return True on success."""
         widget = self._map
-        header = getattr(widget, "_header", None)
-        seq_block = getattr(widget, "_sequence_block", None)
-        # Compose: [header (overview+ruler)] + [main sequence/annotation block]
-        if header is not None and seq_block is not None:
-            header_size = header.rect().size()
-            if header_size.width() <= 0 or header_size.height() <= 0:
-                header_size = header.sizeHint()
-            seq_size = seq_block.rect().size()
-            if seq_size.width() <= 0 or seq_size.height() <= 0:
-                seq_size = seq_block.sizeHint()
-            width = max(1, int(max(header_size.width(), seq_size.width())))
-            height = max(1, int(header_size.height() + seq_size.height()))
-            export_sizes = (width, height, header_size.height())
-        else:
-            export_sizes = (max(1, int(widget.rect().width())), max(1, int(widget.rect().height())), 0)
-        width, height, header_h = export_sizes
+        (
+            header,
+            canvas_row,
+            annot_track,
+            width,
+            height,
+            header_h,
+            canvas_h,
+        ) = self._annotation_view_export_layout()
+        if header is None or width <= 0 or height <= 0:
+            width = max(1, int(widget.rect().width()))
+            height = max(1, int(widget.rect().height()))
+            header = canvas_row = annot_track = None
+            header_h = canvas_h = 0
         if width <= 0 or height <= 0:
             QMessageBox.information(self, "Export", "Nothing to export (empty view).")
-            return
+            return False
         size = QSize(width, height)
+        dpi = max(50, min(600, int(dpi)))
+        scale = max(1.0, float(dpi) / 96.0)
+
+        def _paint_view(painter: QPainter) -> None:
+            if header is not None and canvas_row is not None and annot_track is not None:
+                y = 0
+                header.render(painter, QPoint(0, y))
+                y += int(header_h)
+                canvas_row.render(painter, QPoint(0, y))
+                y += int(canvas_h)
+                # Track widget may be taller than content (fills the Preview pane).
+                source = QRect(0, 0, int(width), int(annot_track.content_height()))
+                annot_track.render(painter, QPoint(0, y), QRegion(source))
+            else:
+                widget.render(painter, QPoint(0, 0))
 
         suffix = out_path.suffix.lower()
         if suffix == ".svg":
@@ -9965,76 +10107,82 @@ class SequenceMapPanel(QWidget):
                     "Export",
                     "SVG export needs PySide6 QtSvg module. Install it and retry.",
                 )
-                return
+                return False
 
             gen = QSvgGenerator()
             gen.setFileName(str(out_path))
             gen.setSize(size)
             gen.setViewBox(QRect(0, 0, size.width(), size.height()))
-            gen.setResolution(96)
+            gen.setResolution(dpi)
             painter = QPainter(gen)
             try:
-                if header is not None and seq_block is not None:
-                    header.render(painter, QPoint(0, 0))
-                    seq_block.render(painter, QPoint(0, int(header_h)))
-                else:
-                    widget.render(painter, QPoint(0, 0))
+                _paint_view(painter)
             finally:
                 painter.end()
-            return
+            return True
 
-        # Render once (PNG-friendly) then reuse for PNG/PDF.
-        img = QImage(size, QImage.Format.Format_ARGB32)
+        # Render at DPI scale for PNG/PDF sharpness.
+        pixel = QSize(
+            max(1, int(round(size.width() * scale))),
+            max(1, int(round(size.height() * scale))),
+        )
+        img = QImage(pixel, QImage.Format.Format_ARGB32)
         img.fill(Qt.GlobalColor.transparent)
         painter = QPainter(img)
         try:
-            if header is not None and seq_block is not None:
-                header.render(painter, QPoint(0, 0))
-                seq_block.render(painter, QPoint(0, int(header_h)))
-            else:
-                widget.render(painter, QPoint(0, 0))
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.scale(scale, scale)
+            _paint_view(painter)
         finally:
             painter.end()
 
         if suffix == ".png":
             if not img.save(str(out_path), "PNG"):
                 QMessageBox.warning(self, "Export", "Could not save PNG.")
-            return
+                return False
+            return True
 
         if suffix == ".pdf":
-            writer = QPdfWriter(str(out_path))
-            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-            writer.setResolution(96)
-            pdf_painter = QPainter(writer)
-            try:
-                page_rect = writer.pageRect()
-                scaled = img.scaled(
-                    page_rect.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                x = page_rect.x() + (page_rect.width() - scaled.width()) // 2
-                y = page_rect.y() + (page_rect.height() - scaled.height()) // 2
-                pdf_painter.drawImage(QPoint(x, y), scaled)
-            finally:
-                pdf_painter.end()
-            return
+            from repeatviewer.views.export_annotation_view_dialog import (
+                write_view_image_pdf,
+            )
+
+            write_view_image_pdf(
+                out_path,
+                img,
+                dpi=dpi,
+                content_width=size.width(),
+                content_height=size.height(),
+            )
+            return True
 
         QMessageBox.warning(
             self,
             "Export",
             f"Unsupported export format: {suffix!r}. Use .svg, .png, or .pdf.",
         )
+        return False
 
     def _export_annotation_view(self) -> None:
-        out, _filter = QFileDialog.getSaveFileName(
-            self,
-            "Export annotation view",
-            str(self._path.with_suffix(".svg")),
-            "SVG (*.svg);;PNG (*.png);;PDF (*.pdf)",
+        from repeatviewer.views.export_annotation_view_dialog import (
+            ExportAnnotationViewDialog,
         )
-        if not out:
+
+        dialog = ExportAnnotationViewDialog(
+            source_path=self._path,
+            title="Export annotation view",
+            name_tag="annotation",
+            default_format="pdf",
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self._export_annotation_view_to_file(Path(out))
+        out = dialog.chosen_path()
+        if out is None:
+            return
+        if self._export_annotation_view_to_file(out, dpi=dialog.dpi()):
+            self.statusMessage.emit(f"Exported annotation view → {out.name}")
+            self._open_exported_file(out)
         # Avoid letting focus fall back to the left Files panel after export.
         QTimer.singleShot(0, self._map.setFocus)

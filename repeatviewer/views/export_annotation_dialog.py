@@ -21,10 +21,10 @@ from PySide6.QtWidgets import (
 
 from repeatviewer.backends.sequence_features import (
     duplicate_original_sequence_ids,
+    export_annotation_path,
     export_features_bed_multi,
     export_features_gff_multi,
     export_features_gtf_multi,
-    features_gff_path,
     load_features_by_id_from_json,
     load_sequence_map_data,
     resolve_sidecar_path,
@@ -197,11 +197,8 @@ class ExportAnnotationDialog(QDialog):
             self._features_by_id = json_feats
 
     def _default_out(self, fmt: str) -> Path:
-        if fmt == "gff3":
-            return features_gff_path(self._fasta)
-        if fmt == "gtf":
-            return self._fasta.parent / f"{self._fasta.stem}.RV.gtf"
-        return self._fasta.parent / f"{self._fasta.stem}.RV.bed"
+        # Keep the FASTA extension in the basename: query.fa_RV.gff3
+        return export_annotation_path(self._fasta, fmt)
 
     def _current_fmt(self) -> str:
         return str(self._type.currentData() or "gff3")
