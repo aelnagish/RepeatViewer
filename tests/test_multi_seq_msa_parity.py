@@ -686,21 +686,124 @@ def test_msa_scale_double_click_zooms_to_three_quarter(
     panel.close()
 
 
+def test_msa_name_splitter_can_shrink_to_index_only(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Names splitter can shrink until only ``N.`` fits (not full ids)."""
+    from repeatviewer.widgets.multi_sequence_overview import (
+        MultiSequenceOverviewPanel,
+        _name_column_min_width,
+    )
+    from PySide6.QtGui import QFont, QFontMetrics
+
+    fasta = tmp_path / "aln.fa"
+    fasta.write_text(
+        ">chr1:100-200(+)\nACGT\n>chr2:300-400(-)\nACGT\n",
+        encoding="utf-8",
+    )
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.resize(900, 500)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+
+    font = QFont(panel.font())
+    font.setPointSize(max(2, int(panel._names.label_point_size())))
+    floor = _name_column_min_width(QFontMetrics(font), 2)
+    assert floor < 120
+    assert panel._names_scroll.minimumWidth() <= floor + 2
+
+    tracks = max(200, panel._splitter.sizes()[1] if panel._splitter.sizes() else 400)
+    panel._splitter.setSizes([floor, tracks])
+    qapp.processEvents()
+    panel._on_splitter_moved()
+    qapp.processEvents()
+    assert panel._current_name_width() <= floor + 4
+    # At the min pane width, the index prefix still fits.
+    from repeatviewer.widgets.multi_sequence_overview import _NAME_PAD
+
+    fm = QFontMetrics(panel._names._label_font())
+    avail = max(1, floor - 2 * _NAME_PAD)
+    assert fm.horizontalAdvance("2.") <= avail
+    panel.close()
+
+
+def test_msa_single_column_selection_anchors_zoom(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """One selected column anchors zoom like a multi-column span."""
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "aln.fa"
+    fasta.write_text(
+        ">s1\n" + ("ACGT" * 200) + "\n>s2\n" + ("ACGT" * 200) + "\n",
+        encoding="utf-8",
+    )
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.resize(900, 500)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    panel._fit_bars()
+    qapp.processEvents()
+
+    # Single column 400.
+    panel._bars.set_region_selection(400, 400)
+    qapp.processEvents()
+    single = panel._selection_zoom_anchor()
+    assert single is not None
+    mid_bp, _view_x = single
+    assert mid_bp == pytest.approx(399.5)  # center of column 400
+
+    # Multi-column span mid matches prior behavior.
+    panel._bars.set_region_selection(400, 410)
+    multi = panel._selection_zoom_anchor()
+    assert multi is not None
+    assert multi[0] == pytest.approx((399 + 410) / 2.0)
+
+    # Zoom step keeps the single-column center in the viewport.
+    panel._bars.set_region_selection(400, 400)
+    before = panel._selection_zoom_anchor()
+    assert before is not None
+    mid_before, view_x_before = before
+    panel._zoom_step(1.5)
+    qapp.processEvents()
+    mid_content = panel._bars.bp_to_x(mid_before)
+    hbar = panel._bars_scroll.horizontalScrollBar()
+    view_x_after = float(mid_content) - float(hbar.value())
+    assert view_x_after == pytest.approx(view_x_before, abs=2.0)
+    panel.close()
+
+
 def test_msa_letter_background_square_connects_rows(qapp: QApplication) -> None:
     """Letter fill is a full-band square; gap 0 → adjacent rows touch vertically."""
     from repeatviewer.widgets.multi_sequence_overview import (
         _BarsCanvas,
+        _MSA_LETTER_BG_MAX_WIDTH_SCALE,
         _MSA_LETTER_BG_SCALE,
         _msa_letter_bg_rect,
         _msa_letter_size_metrics,
     )
 
     letter_h, letter_ppb = _msa_letter_size_metrics(10)
-    bg = _msa_letter_bg_rect(0.0, 0.0, letter_ppb, float(letter_h))
+    bg = _msa_letter_bg_rect(
+        0.0, 0.0, letter_ppb, float(letter_h), letter_side=float(letter_h)
+    )
     assert abs(bg.width() - bg.height()) < 1e-9
     assert bg.width() == pytest.approx(min(letter_ppb, letter_h) * _MSA_LETTER_BG_SCALE)
     assert bg.top() == pytest.approx(0.0)
     assert bg.bottom() == pytest.approx(float(letter_h))
+
+    # Slider ¾→4/4: width only grows to 3× size-10; height unchanged.
+    wide_ppb = letter_ppb * _MSA_LETTER_BG_MAX_WIDTH_SCALE
+    wide = _msa_letter_bg_rect(
+        0.0, 0.0, wide_ppb, float(letter_h), letter_side=float(letter_h)
+    )
+    assert wide.height() == pytest.approx(float(letter_h))
+    assert wide.width() == pytest.approx(letter_ppb * _MSA_LETTER_BG_MAX_WIDTH_SCALE)
+    assert wide.width() == pytest.approx(3.0 * bg.width())
 
     canvas = _BarsCanvas()
     canvas.show()
@@ -714,13 +817,23 @@ def test_msa_letter_background_square_connects_rows(qapp: QApplication) -> None:
     # Residue bands abut when Sequence distance is 0.
     assert canvas.row_tops()[1] == canvas.row_tops()[0] + canvas._msa_letter_band_height()
     r0 = _msa_letter_bg_rect(
-        0.0, float(canvas.row_tops()[0]), letter_ppb, float(letter_h)
+        0.0,
+        float(canvas.row_tops()[0]),
+        letter_ppb,
+        float(letter_h),
+        letter_side=float(letter_h),
     )
     r1 = _msa_letter_bg_rect(
-        0.0, float(canvas.row_tops()[1]), letter_ppb, float(letter_h)
+        0.0,
+        float(canvas.row_tops()[1]),
+        letter_ppb,
+        float(letter_h),
+        letter_side=float(letter_h),
     )
     assert r0.bottom() == pytest.approx(r1.top())
-    # Past size-10: band stays fixed so horizontal gaps open.
+    # Max zoom reaches 3× size-10 so fills can widen; band height stays fixed.
+    _fit, max_ppb = canvas.zoom_bounds()
+    assert max_ppb >= letter_ppb * _MSA_LETTER_BG_MAX_WIDTH_SCALE - 1e-6
     canvas._ppb = letter_ppb * 2.0
     canvas._recompute_layout()
     assert canvas._msa_letter_band_height() == letter_h

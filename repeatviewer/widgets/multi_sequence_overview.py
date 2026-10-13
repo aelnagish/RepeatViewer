@@ -146,7 +146,16 @@ _FEAT_GAP = 2
 _MIN_ROW_HEIGHT = _BAR_V_PAD + _BAR_HEIGHT + _BAR_V_PAD
 _NAME_COLUMN_DEFAULT = 200
 _NAME_COLUMN_MAX = 220
+# Narrowest splitter pane: enough for the row index ("12.") without the name.
+_NAME_COLUMN_MIN = 28
 _NAME_PAD = 8
+
+
+def _name_column_min_width(fm: QFontMetrics, n_sequences: int) -> int:
+    """Width that still shows ``N.`` for the largest row index."""
+    digits = max(1, len(str(max(1, int(n_sequences)))))
+    sample = f"{'9' * digits}."
+    return max(_NAME_COLUMN_MIN, int(fm.horizontalAdvance(sample) + 2 * _NAME_PAD))
 _SELECTED_BG_LIGHT = QColor(11, 92, 171, 36)
 _SELECTED_BG_DARK = QColor(80, 160, 255, 48)
 _DEFAULT_FEAT = QColor("#c0392b")
@@ -161,9 +170,10 @@ _MSA_ROW_HEIGHT = 18
 # 3/4 position target this DNA/protein extent; further zoom only widens ppb.
 _MSA_LETTER_SIZE_PT = 10
 _MSA_ZOOM_LETTER_SLIDER = 75  # 3/4 of 0–100 slider
-# Letter-mode fill is a centered square of min(cell_w, cell_h).
+# Letter-mode fill: full-band square at slider ¾; width grows to 3× by 4/4.
 # Scale 1.0 → when Sequence distance is 0, row edges touch vertically.
 _MSA_LETTER_BG_SCALE = 1.0
+_MSA_LETTER_BG_MAX_WIDTH_SCALE = 3.0  # bg width at slider max / width at ¾
 _DEFAULT_MSA_FONT_PT = _MSA_LETTER_SIZE_PT
 _DEFAULT_TRACK_HEIGHT = 4  # Others → Track height (1–10); 10 == size-10 band
 _DEFAULT_MSA_SEQUENCE_DISTANCE = 1
@@ -192,14 +202,48 @@ def _msa_letter_size_metrics(point_size: int = _MSA_LETTER_SIZE_PT) -> tuple[int
     return band, ppb
 
 
-def _msa_letter_bg_rect(x: float, y: float, cell_w: float, cell_h: float) -> QRectF:
-    """Centered square fill inside a residue cell (smaller than the cell)."""
-    side = max(1.0, min(float(cell_w), float(cell_h)) * _MSA_LETTER_BG_SCALE)
+def _msa_letter_bg_rect(
+    x: float,
+    y: float,
+    cell_w: float,
+    cell_h: float,
+    *,
+    letter_side: float | None = None,
+) -> QRectF:
+    """Centered residue fill for letter zoom.
+
+    At size-10 (slider ¾) the fill is a square of ``letter_side``. From ¾→max
+    only width grows, up to ``_MSA_LETTER_BG_MAX_WIDTH_SCALE``×, so the colour
+    extends into the wider cell; height stays at the size-10 side.
+    """
+    cell_w = max(0.5, float(cell_w))
+    cell_h = max(0.5, float(cell_h))
+    if letter_side is None:
+        side = max(1.0, min(cell_w, cell_h) * _MSA_LETTER_BG_SCALE)
+        return QRectF(
+            float(x) + (cell_w - side) * 0.5,
+            float(y) + (cell_h - side) * 0.5,
+            side,
+            side,
+        )
+    side = max(1.0, float(letter_side) * _MSA_LETTER_BG_SCALE)
+    if cell_w <= side + 1e-9:
+        # Approaching size-10: keep a square inside the cell.
+        s = max(1.0, min(cell_w, cell_h) * _MSA_LETTER_BG_SCALE)
+        return QRectF(
+            float(x) + (cell_w - s) * 0.5,
+            float(y) + (cell_h - s) * 0.5,
+            s,
+            s,
+        )
+    # Past ¾: widen only (cap at 3× size-10 and at the column pitch).
+    bg_w = max(side, min(cell_w, side * _MSA_LETTER_BG_MAX_WIDTH_SCALE))
+    bg_h = side
     return QRectF(
-        float(x) + (float(cell_w) - side) * 0.5,
-        float(y) + (float(cell_h) - side) * 0.5,
-        side,
-        side,
+        float(x) + (cell_w - bg_w) * 0.5,
+        float(y) + (cell_h - bg_h) * 0.5,
+        bg_w,
+        bg_h,
     )
 
 
@@ -535,9 +579,10 @@ class _NamesColumn(QWidget):
         self._row_tops = list(tops)
         self._row_heights = list(heights)
         self._selected_rows = set(selected)
-        w = max(80, int(width))
+        min_w = _name_column_min_width(QFontMetrics(self._label_font()), len(record_ids))
+        w = max(min_w, int(width))
         h = max(_MIN_ROW_HEIGHT, int(content_height))
-        self.setMinimumWidth(80)
+        self.setMinimumWidth(min_w)
         self.setMinimumHeight(h)
         self.resize(w, h)
         self.update()
@@ -717,14 +762,28 @@ class _NamesColumn(QWidget):
             selected = index in self._selected_rows
             if selected:
                 painter.fillRect(0, top, self.width(), height, sel_bg)
-            numbered = f"{index + 1}. {rid}"
-            label = _elide_middle(fm, numbered, self.width() - 2 * _NAME_PAD)
+            prefix = f"{index + 1}."
+            numbered = f"{prefix} {rid}"
+            # Prefer keeping ``N.`` when the splitter is dragged narrow.
+            avail = max(0, self.width() - 2 * _NAME_PAD)
+            if fm.horizontalAdvance(numbered) <= avail:
+                label = numbered
+            elif fm.horizontalAdvance(prefix) <= avail:
+                name_budget = max(0, avail - fm.horizontalAdvance(prefix))
+                tail = fm.elidedText(
+                    f" {rid}", Qt.TextElideMode.ElideRight, name_budget
+                )
+                label = prefix + (tail if tail and tail != "…" else "")
+            else:
+                label = fm.elidedText(
+                    prefix, Qt.TextElideMode.ElideRight, avail
+                )
             text_h = fm.height()
             # Center on the row band (MSA residue / bar strip), not the gap below.
             text_y = int(top + max(0, (height - text_h) / 2))
             painter.setPen(text_color)
             painter.drawText(
-                QRect(_NAME_PAD, text_y, self.width() - 2 * _NAME_PAD, text_h),
+                QRect(_NAME_PAD, text_y, avail, text_h),
                 int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                 label,
             )
@@ -2361,7 +2420,15 @@ class _BarsCanvas(QWidget):
             )
             / max(1, self._max_length),
         )
-        ceil = _MSA_MAX_PPB if (self._msa_mode or self._msa_seqs) else _MAX_PPB
+        if self._msa_mode or self._msa_seqs:
+            # Max zoom must reach 3× size-10 ppb so slider ¾→4/4 can widen fills.
+            _band, letter_ppb = _msa_letter_size_metrics(_MSA_LETTER_SIZE_PT)
+            ceil = max(
+                _MSA_MAX_PPB,
+                float(letter_ppb) * _MSA_LETTER_BG_MAX_WIDTH_SCALE,
+            )
+        else:
+            ceil = _MAX_PPB
         desired_max = max(ceil, fit_ppb * _MAX_ZOOM_OVER_FIT)
         return fit_ppb, max(fit_ppb, min(desired_max, geometry_limit))
 
@@ -3512,12 +3579,13 @@ class _BarsCanvas(QWidget):
         c0 = max(0, int((clip.left() - self._bar_pad) / ppb) - 1)
         c1 = min(self._max_length, int((clip.right() - self._bar_pad) / ppb) + 2)
         qcolors = self._msa_qcolors
+        letter_side = float(_msa_letter_size_metrics(_MSA_LETTER_SIZE_PT)[0])
         residue_font = (
             self._msa_letter_font_for_cell(ppb, float(residue_h))
             if show_letters
             else None
         )
-        # Overview: Column distance insets. Letter mode: centered square fill.
+        # Overview: Column distance insets. Letter mode: square→wide fill.
         _bg_margin = max(0.0, float(self._column_distance) * 0.5)
         painter.setPen(Qt.PenStyle.NoPen)
         for index, rid in enumerate(self._record_ids):
@@ -3613,13 +3681,17 @@ class _BarsCanvas(QWidget):
                 else:
                     pair = paint_pair if paint_pair is not None else qcolors.get(ch)
                     if pair is not None:
-                        # One column per letter cell (span==1); square fill centered.
+                        # One column per letter; square at ¾, wider toward max.
                         letter_cell = QRectF(
                             x, y, max(0.5, ppb), float(residue_h)
                         )
                         if fill_bg:
                             bg = _msa_letter_bg_rect(
-                                x, y, max(0.5, ppb), float(residue_h)
+                                x,
+                                y,
+                                max(0.5, ppb),
+                                float(residue_h),
+                                letter_side=letter_side,
                             )
                             painter.fillRect(bg, pair[0])
                             # Black or white from background luminance for readability.
@@ -3673,6 +3745,7 @@ class _BarsCanvas(QWidget):
         show_letters = self._bar_shows_letters()
         ppb = max(self._ppb, 1e-12)
         residue_h = max(1, int(self._row_letter_band_height()))
+        letter_side = float(_msa_letter_size_metrics(_MSA_LETTER_SIZE_PT)[0])
         residue_font = (
             self._msa_letter_font_for_cell(ppb, float(residue_h))
             if show_letters
@@ -3709,7 +3782,11 @@ class _BarsCanvas(QWidget):
                     if pair is not None and self._color_unaligned_background:
                         painter.fillRect(
                             _msa_letter_bg_rect(
-                                cell.x(), cell.y(), cell_w, float(residue_h)
+                                cell.x(),
+                                cell.y(),
+                                cell_w,
+                                float(residue_h),
+                                letter_side=letter_side,
                             ),
                             pair[0],
                         )
@@ -4171,7 +4248,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._names_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self._names_scroll.setMinimumWidth(120)
+        self._names_scroll.setMinimumWidth(_NAME_COLUMN_MIN)
 
         self._bars = _BarsCanvas(self)
         self._bars_scroll = QScrollArea(self)
@@ -4375,6 +4452,7 @@ class MultiSequenceOverviewPanel(QWidget):
         font = QFont(self.font())
         font.setPointSize(max(2, int(self._names.label_point_size())))
         fm = QFontMetrics(font)
+        floor = _name_column_min_width(fm, len(self._record_ids))
         widest = 0
         for index, rid in enumerate(self._record_ids[:500]):
             widest = max(
@@ -4384,12 +4462,13 @@ class MultiSequenceOverviewPanel(QWidget):
         cap = _NAME_COLUMN_MAX
         if viewport_width and viewport_width > 100:
             # At most ~22% of the overview content (names | tracks), not the rail.
-            cap = min(cap, max(120, int(viewport_width * 0.22)))
-        return max(120, min(cap, natural))
+            cap = min(cap, max(floor, int(viewport_width * 0.22)))
+        return max(floor, min(cap, natural))
 
     def _current_name_width(self) -> int:
         sizes = self._splitter.sizes()
-        if sizes and sizes[0] > 40:
+        floor = _NAME_COLUMN_MIN
+        if sizes and sizes[0] >= floor:
             return int(sizes[0])
         return self._name_width
 
@@ -4451,10 +4530,21 @@ class MultiSequenceOverviewPanel(QWidget):
             self._names.set_label_point_size(letter_pt)
 
     def _names_viewport_width(self) -> int:
-        return max(80, self._names_scroll.viewport().width() or self._name_width)
+        font = QFont(self.font())
+        font.setPointSize(max(2, int(self._names.label_point_size())))
+        floor = _name_column_min_width(QFontMetrics(font), len(self._record_ids))
+        return max(
+            floor,
+            self._names_scroll.viewport().width() or self._name_width,
+        )
 
     def _sync_names_column_width(self) -> None:
         """Resize the names widget to the splitter pane (no blank gap to tracks)."""
+        font = QFont(self.font())
+        font.setPointSize(max(2, int(self._names.label_point_size())))
+        floor = _name_column_min_width(QFontMetrics(font), len(self._record_ids))
+        if self._names_scroll.minimumWidth() != floor:
+            self._names_scroll.setMinimumWidth(floor)
         width = self._names_viewport_width()
         if self._names.width() == width:
             return
@@ -6698,15 +6788,16 @@ class MultiSequenceOverviewPanel(QWidget):
     def _selection_zoom_anchor(self) -> tuple[float, float] | None:
         """``(mid_bp_0based, viewport_x)`` for the selected region center.
 
-        Matches single-sequence: zoom in/out keeps the selection under the
-        same place in the window.
+        One column or a multi-column span: zoom in/out keeps the selection
+        center under the same place in the window (same as multi-column).
         """
         region = self._bars.region_selection()
         if region is None:
             return None
         start, end = int(region[0]), int(region[1])
-        if start == end:
-            return None
+        if end < start:
+            start, end = end, start
+        # Single column: mid of that base; multi: mid of the inclusive span.
         mid_bp = float(start - 1 + end) / 2.0
         mid_content_x = self._bars.bp_to_x(mid_bp)
         hbar = self._bars_scroll.horizontalScrollBar()
