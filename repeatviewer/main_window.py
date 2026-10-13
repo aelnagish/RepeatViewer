@@ -2477,10 +2477,15 @@ class MainWindow(QMainWindow):
         self._status_file_link.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextBrowserInteraction
         )
+        # Cap width so long names cannot push the progress bar off-screen.
+        self._status_file_link.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
+        self._status_file_link.setMinimumWidth(0)
         self._status_file_link.linkActivated.connect(self._on_status_file_link_activated)
         self._status_file_link.hide()
         # Left-side temporary widget: replaces status text when a file is selected.
-        status.addWidget(self._status_file_link)
+        status.addWidget(self._status_file_link, 0)
         self._status_link_restore_timer = QTimer(self)
         self._status_link_restore_timer.setSingleShot(True)
         self._status_link_restore_timer.timeout.connect(self._restore_status_file_link)
@@ -3165,6 +3170,27 @@ class MainWindow(QMainWindow):
         if self._task_progress is not None:
             self._task_progress.reset()
 
+    def _status_file_link_max_width(self) -> int:
+        """At most the left half of the window — leaves room for progress/Stop."""
+        return max(120, int(self.width() // 2))
+
+    def _refresh_status_file_link_text(self) -> None:
+        """Middle-elide the linked filename to the left half of the window."""
+        path = self._status_linked_file
+        if path is None:
+            return
+        max_w = self._status_file_link_max_width()
+        self._status_file_link.setMaximumWidth(max_w)
+        name = path.name
+        # Slight inset so the link underline does not force a horizontal scroll.
+        text_w = max(40, max_w - 12)
+        elided = self._status_file_link.fontMetrics().elidedText(
+            name, Qt.TextElideMode.ElideMiddle, text_w
+        )
+        safe_name = elided.replace("&", "&amp;").replace("<", "&lt;")
+        self._status_file_link.setText(f'<a href="reveal">{safe_name}</a>')
+        self._status_file_link.setToolTip(f"Show in file manager\n{path}")
+
     def _set_status_file_link(self, path: Path | None) -> None:
         """Replace the left status text with a clickable filename (Finder link)."""
         self._status_link_restore_timer.stop()
@@ -3172,6 +3198,7 @@ class MainWindow(QMainWindow):
             self._status_linked_file = None
             self._status_file_link.hide()
             self._status_file_link.clear()
+            self._status_file_link.setMaximumWidth(16777215)
             self._update_status()
             return
         try:
@@ -3180,12 +3207,11 @@ class MainWindow(QMainWindow):
             self._status_linked_file = None
             self._status_file_link.hide()
             self._status_file_link.clear()
+            self._status_file_link.setMaximumWidth(16777215)
             self._update_status()
             return
         self._status_linked_file = resolved
-        safe_name = resolved.name.replace("&", "&amp;").replace("<", "&lt;")
-        self._status_file_link.setText(f'<a href="reveal">{safe_name}</a>')
-        self._status_file_link.setToolTip(f"Show in file manager\n{resolved}")
+        self._refresh_status_file_link_text()
         # Clear status text first — showing both causes the stacked/overlap glitch.
         self.statusBar().clearMessage()
         self._status_file_link.show()
@@ -3196,11 +3222,17 @@ class MainWindow(QMainWindow):
             return
         if self.statusBar().currentMessage():
             return
+        self._refresh_status_file_link_text()
         self._status_file_link.show()
 
     def _on_status_file_link_activated(self, _href: str) -> None:
         if self._status_linked_file is not None:
             reveal_in_file_manager(self._status_linked_file)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().resizeEvent(event)
+        if self._status_linked_file is not None and self._status_file_link.isVisible():
+            self._refresh_status_file_link_text()
 
     def _set_status_message(
         self,
@@ -15491,6 +15523,30 @@ class MainWindow(QMainWindow):
                     DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
                 )
             )
+        elif func_name == "extend":
+            extend_opts = job_kwargs.get("extend") or self._extend_options
+            show_log = bool(
+                getattr(extend_opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW)
+            )
+            close_when_finished = bool(
+                getattr(
+                    extend_opts,
+                    "close_process_window_when_finished",
+                    DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+                )
+            )
+        elif func_name.startswith("msa_clean"):
+            msa_opts = job_kwargs.get("msa_clean_options") or self._msa_clean_options
+            show_log = bool(
+                getattr(msa_opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW)
+            )
+            close_when_finished = bool(
+                getattr(
+                    msa_opts,
+                    "close_process_window_when_finished",
+                    DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+                )
+            )
         worker = FunctionWorker(
             self._run_function_job,
             func_name,
@@ -16471,11 +16527,28 @@ class MainWindow(QMainWindow):
         if func_name != "teaid":
             self._set_status_message(summary, 12000, override_file_link=True)
 
+        warnings = [
+            str(w).strip() for w in (result.get("warnings") or []) if str(w).strip()
+        ]
         if failures and not cancelled:
             msg = summary + "\n\nFailures:\n" + "\n".join(failures[:8])
             if len(failures) > 8:
                 msg += "\n..."
+            if warnings:
+                msg += "\n\nReminders:\n" + "\n".join(warnings[:8])
+                if len(warnings) > 8:
+                    msg += "\n..."
             QMessageBox.warning(self, "Function completed with issues", msg)
+        elif warnings and not cancelled:
+            # Soft reminders (e.g. MSA Extend kept some names unchanged).
+            # Use informative text so only the short headline is bold on macOS.
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setWindowTitle(f"{title} reminder")
+            box.setText(warnings[0])
+            if len(warnings) > 1:
+                box.setInformativeText("\n".join(warnings[1:12]))
+            box.exec()
 
     @Slot(str)
     def _on_worker_failed(self, error: str) -> None:

@@ -668,6 +668,113 @@ def fasta_header_to_bed(input_file, output_file):
     return output_file
 
 
+def parse_extend_coordinate_header(
+    header: str,
+) -> tuple[str, int, int, str] | None:
+    """Parse ``chrom:start-end(strand)`` from a FASTA header (first token)."""
+    name = str(header or "").strip().lstrip(">").split()[0] if header else ""
+    if not name or ":" not in name:
+        return None
+    try:
+        scaffold, rest = name.rsplit(":", 1)
+        if not scaffold or "(" not in rest or ")" not in rest:
+            return None
+        range_part, strand_part = rest.split("(", 1)
+        strand = strand_part.split(")", 1)[0].strip() or "+"
+        start_s, end_s = range_part.split("-", 1)
+        start = int(start_s)
+        end = int(end_s)
+    except (TypeError, ValueError):
+        return None
+    if end < start:
+        return None
+    if strand not in {"+", "-"}:
+        strand = "+"
+    return scaffold, start, end, strand
+
+
+def extend_sequences_by_header(
+    input_fasta: str,
+    genome_fasta: str,
+    left_extension: int,
+    right_extension: int,
+    chrom_sizes: dict[str, int],
+    output_fasta: str,
+) -> tuple[int, list[str]]:
+    """Extend sequences whose names encode genome coordinates.
+
+    Extends every header that can be resolved in ``chrom_sizes`` / the genome
+    FASTA. Sequences that cannot be extended are written unchanged and their
+    names are returned for a short reminder.
+
+    Returns ``(extended_count, kept_original_names)``.
+    Raises ``RuntimeError`` when the input FASTA has no sequences.
+    """
+    left_extension = max(0, int(left_extension))
+    right_extension = max(0, int(right_extension))
+    genome = _load_genome_records_cached(genome_fasta)
+    extended = 0
+    kept_original: list[str] = []
+    seen_bed: set[str] = set()
+    total = 0
+
+    with open(output_fasta, "w") as out_fasta:
+        for record in SeqIO.parse(input_fasta, "fasta"):
+            total += 1
+            header_id = str(record.id or "").strip() or f"sequence_{total}"
+            parsed = parse_extend_coordinate_header(header_id)
+            write_original = False
+            if parsed is None:
+                write_original = True
+            else:
+                chrom, start, end, strand = parsed
+                chrom_len = chrom_sizes.get(chrom)
+                if chrom_len is None or chrom not in genome:
+                    write_original = True
+                else:
+                    if strand == "+":
+                        new_start = max(0, start - left_extension)
+                        new_end = min(chrom_len, end + right_extension)
+                    else:
+                        new_start = max(0, start - right_extension)
+                        new_end = min(chrom_len, end + left_extension)
+                    bed_key = f"{chrom}:{new_start}-{new_end}({strand})"
+                    if bed_key in seen_bed:
+                        # Same extended interval already written; keep this copy
+                        # of the input as-is so the sequence is not dropped.
+                        write_original = True
+                    else:
+                        seen_bed.add(bed_key)
+                        sequence = genome[chrom].seq[new_start:new_end]
+                        if strand == "-":
+                            sequence = sequence.reverse_complement()
+                        SeqIO.write(
+                            SeqRecord(sequence, id=bed_key, description=""),
+                            out_fasta,
+                            "fasta",
+                        )
+                        extended += 1
+            if write_original:
+                kept_original.append(header_id)
+                desc = str(record.description or "").strip()
+                if desc == header_id:
+                    desc = ""
+                SeqIO.write(
+                    SeqRecord(record.seq, id=header_id, description=desc),
+                    out_fasta,
+                    "fasta",
+                )
+
+    if total <= 0:
+        raise RuntimeError("No sequences found in the input FASTA.")
+    if extended <= 0:
+        raise RuntimeError(
+            "No sequences could be extended from their names "
+            f"(kept {len(kept_original)} unchanged)."
+        )
+    return extended, kept_original
+
+
 # Avoid to use bedtools slop and getfasta to make it compatible with Windows system
 def extend_bed_regions(
     bed_file, left_extension, right_extension, chrom_sizes, output_bed
@@ -676,6 +783,8 @@ def extend_bed_regions(
         for line in infile:
             parts = line.strip().split()
             chrom, start, end, strand = parts[0], int(parts[1]), int(parts[2]), parts[5]
+            if chrom not in chrom_sizes:
+                continue
 
             # Adjust extensions based on strand
             if strand == '+':

@@ -1795,6 +1795,9 @@ class _BarsCanvas(QWidget):
         )
         self._rebuild_msa_qcolor_cache()
         self._clear_drag_paint_cache()
+        # Nucleotide/protein palette changes must redraw the cached MSA layer;
+        # otherwise colors only update after toggling MSA color scheme.
+        self._invalidate_msa_layer_cache()
         self.update()
 
     def set_msa_color_mode(self, mode: str) -> None:
@@ -4878,6 +4881,9 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.exportClicked.connect(self._export_overview_view)
         self._bars.deleteRequested.connect(self._on_delete_clicked)
         rail.addFeatureClicked.connect(self._on_add_feature_clicked)
+        rail.addFeatureSettingsClicked.connect(
+            self._open_add_feature_buttons_settings
+        )
         rail.transferRequested.connect(self._on_transfer_annotations_clicked)
         rail.trackHeightChanged.connect(self._on_track_height_changed)
         rail.annotationThicknessChanged.connect(self._on_annotation_thickness_changed)
@@ -5149,7 +5155,20 @@ class MultiSequenceOverviewPanel(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._rail.sync_color_scheme_combos()
+        self._rail.refresh_feature_detect_check_colors()
+        self._rail.refresh_manual_feature_check_colors()
         self._on_residue_colors_changed()
+
+    def _open_add_feature_buttons_settings(self) -> None:
+        from repeatviewer.widgets.annotation_colors_dialog import (
+            AddFeatureButtonsDialog,
+        )
+
+        dialog = AddFeatureButtonsDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._rail.populate_manual_feature_types(dialog.buttons())
+        self.statusMessage.emit("Feature types updated.")
 
     def _annotation_running(self) -> bool:
         thread = self._ann_thread
@@ -5287,7 +5306,7 @@ class MultiSequenceOverviewPanel(QWidget):
                 "No similarity databases configured.", self._rail.similarity_db_host
             )
             empty.setStyleSheet("color: palette(mid);")
-            empty.setWordWrap(True)
+            empty.setWordWrap(False)
             self._rail.add_similarity_db_widget(empty)
             self._sync_similarity_annotation_all_check()
             return

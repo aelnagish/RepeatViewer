@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QProgressBar, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QSizePolicy,
+    QWidget,
+)
+
+_PROGRESS_BAR_WIDTH = 200
+# Keep the running-status label from crowding the bar off the status strip.
+_PROGRESS_LABEL_MAX_WIDTH = 320
 
 
 def iter_job_progress_hosts(widget: QWidget) -> list[QWidget]:
@@ -77,26 +88,42 @@ class TaskProgressPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        # Minimum: never shrink below label+bar; Prefer so status bar keeps us.
+        self.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred
+        )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 4, 0)
         layout.setSpacing(8)
 
         self._label = QLabel("")
-        self._label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
+        self._label.setMinimumWidth(0)
+        self._label.setMaximumWidth(_PROGRESS_LABEL_MAX_WIDTH)
 
         self._bar = QProgressBar()
         self._bar.setTextVisible(True)
         self._bar.setMinimum(0)
         self._bar.setMaximum(1)
         self._bar.setValue(0)
-        self._bar.setFixedWidth(200)
+        self._bar.setFixedWidth(_PROGRESS_BAR_WIDTH)
+        self._bar.setMinimumWidth(_PROGRESS_BAR_WIDTH)
         self._bar.setFixedHeight(16)
+        self._bar.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
 
-        layout.addWidget(self._label)
-        layout.addWidget(self._bar)
+        layout.addWidget(self._label, 0)
+        layout.addWidget(self._bar, 0)
 
         self._job_title = ""
         self._total = 1
+        self._detail = ""
         self.hide()
 
     def start(self, job_title: str, total: int) -> None:
@@ -131,7 +158,26 @@ class TaskProgressPanel(QWidget):
     def reset(self) -> None:
         self._bar.setValue(0)
         self._label.clear()
+        self._detail = ""
         self.hide()
 
     def _set_running_label(self, filename: str) -> None:
-        self._label.setText(format_job_status_label(self._job_title, filename))
+        self._detail = str(filename or "")
+        text = format_job_status_label(self._job_title, self._detail)
+        max_w = max(40, self._label.maximumWidth() - 4)
+        elided = self._label.fontMetrics().elidedText(
+            text, Qt.TextElideMode.ElideMiddle, max_w
+        )
+        self._label.setText(elided)
+        self._label.setToolTip(text if elided != text else "")
+
+    def sizeHint(self):  # noqa: N802
+        from PySide6.QtCore import QSize
+
+        # Always reserve the full progress bar plus capped label.
+        return QSize(_PROGRESS_LABEL_MAX_WIDTH + _PROGRESS_BAR_WIDTH + 24, 22)
+
+    def minimumSizeHint(self):  # noqa: N802
+        from PySide6.QtCore import QSize
+
+        return QSize(_PROGRESS_BAR_WIDTH + 100, 22)

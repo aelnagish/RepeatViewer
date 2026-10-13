@@ -22,6 +22,18 @@ def _default_tool_threads() -> int:
 
 DEFAULT_EXTEND_LEFT = 1000
 DEFAULT_EXTEND_RIGHT = 1000
+# Preset lengths for the MSA Extend left/right editable dropdowns.
+EXTEND_LENGTH_PRESETS: tuple[int, ...] = (
+    0,
+    100,
+    200,
+    300,
+    500,
+    1000,
+    2000,
+    5000,
+    10_000,
+)
 EXTEND_RIGHT_CLICK_RUN = "run"
 EXTEND_RIGHT_CLICK_DIALOG = "dialog"
 EXTEND_RIGHT_CLICK_ACTIONS = (EXTEND_RIGHT_CLICK_RUN, EXTEND_RIGHT_CLICK_DIALOG)
@@ -223,6 +235,8 @@ class ExtendOptions:
     genome_path: str | None = None
     # Toolbar right-click behaviour: run with saved settings, or open dialog.
     right_click_action: str = EXTEND_RIGHT_CLICK_RUN
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
 
 DEFAULT_TSD_LEFT_BOUNDARY = 0
@@ -934,6 +948,8 @@ class MsaCleanOptions:
     divergence: DivergenceRowOptions = field(default_factory=DivergenceRowOptions)
     gap_row: GapRowOptions = field(default_factory=GapRowOptions)
     right_click_action: str = MSA_CLEAN_RIGHT_CLICK_COMBINED
+    show_process_window: bool = DEFAULT_SHOW_PROCESS_WINDOW
+    close_process_window_when_finished: bool = DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED
 
     def __post_init__(self) -> None:
         valid = [method for method in self.method_order if method in DEFAULT_MSA_CLEAN_ORDER]
@@ -974,6 +990,13 @@ def load_msa_clean_options() -> MsaCleanOptions:
     )
     if right_click_action not in MSA_CLEAN_RIGHT_CLICK_ACTIONS:
         right_click_action = MSA_CLEAN_RIGHT_CLICK_COMBINED
+    show_process_window = _to_bool(
+        s.value("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW
+    )
+    close_process_window_when_finished = _to_bool(
+        s.value("close_process_window_when_finished"),
+        DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+    )
     opts = MsaCleanOptions(
         use_divergence=use_divergence,
         use_gap_row=use_gap_row,
@@ -998,6 +1021,8 @@ def load_msa_clean_options() -> MsaCleanOptions:
             window_size=int(s.value("gap_row_window_size", DEFAULT_GAP_ROW_WINDOW_SIZE)),
         ),
         right_click_action=right_click_action,
+        show_process_window=show_process_window,
+        close_process_window_when_finished=close_process_window_when_finished,
     )
     s.endGroup()
     return opts
@@ -1284,6 +1309,13 @@ def load_extend_options() -> ExtendOptions:
         pan_genome_name=str(pan_name).strip() if pan_name else None,
         genome_path=str(genome_path).strip() if genome_path else None,
         right_click_action=right_click_action,
+        show_process_window=_to_bool(
+            v.get("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW
+        ),
+        close_process_window_when_finished=_to_bool(
+            v.get("close_process_window_when_finished"),
+            DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
+        ),
     )
 
 
@@ -1296,6 +1328,10 @@ def save_extend_options(opts: ExtendOptions) -> None:
             "pan_genome_name": opts.pan_genome_name or "",
             "genome_path": opts.genome_path or "",
             "right_click_action": opts.right_click_action,
+            "show_process_window": opts.show_process_window,
+            "close_process_window_when_finished": (
+                opts.close_process_window_when_finished
+            ),
         },
     )
 
@@ -2279,6 +2315,11 @@ def save_msa_clean_options(opts: MsaCleanOptions) -> None:
             if opts.right_click_action in MSA_CLEAN_RIGHT_CLICK_ACTIONS
             else MSA_CLEAN_RIGHT_CLICK_COMBINED
         ),
+    )
+    s.setValue("show_process_window", opts.show_process_window)
+    s.setValue(
+        "close_process_window_when_finished",
+        opts.close_process_window_when_finished,
     )
     g = opts.gappy
     s.setValue("gappy_gap_threshold", g.gap_threshold)

@@ -1,0 +1,35 @@
+---
+description: MSA Overview letter zoom — square at ¾, flush columns at max
+globs: repeatviewer/widgets/multi_sequence_overview.py
+alwaysApply: false
+---
+
+# MSA letter zoom column fills
+
+When editing Overview MSA letter rendering (`_msa_letter_bg_rect`,
+`zoom_bounds`, letter paint paths):
+
+## Zoom behaviour
+
+| Slider | Fill |
+|--------|------|
+| ~¾ (size-10) | Square residue background |
+| ¾ → max | Width follows the column pitch; height stays size-10 |
+| Max | Columns are **flush** — no white gutters between neighbouring letters |
+
+## Required
+
+- Past the square stage, letter backgrounds must span the **full** column
+  width (`cell_w`), not a capped inset that leaves gaps at max zoom.
+- MSA max zoom should target about **3×** the size-10 `ppb`
+  (`_MSA_LETTER_BG_MAX_WIDTH_SCALE`), not a larger over-fit ceiling that
+  reintroduces gutters.
+- Helpers live in `multi_sequence_overview.py`: `_msa_letter_bg_rect`,
+  `_msa_letter_size_metrics`, `_MSA_LETTER_*` constants.
+
+## Do not
+
+- Cap fill width below `cell_w` once past size-10 (that creates the white
+  column gaps at max zoom).
+- “Fix” max zoom by only raising `_MSA_MAX_PPB` without keeping fills
+  flush to the column pitch.

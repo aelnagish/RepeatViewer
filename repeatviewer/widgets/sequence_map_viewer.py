@@ -7713,6 +7713,8 @@ class SequenceMapPanel(QWidget):
                 dialog.new_database_colors(),
             )
         self._rail.sync_color_scheme_combos()
+        self._rail.refresh_feature_detect_check_colors()
+        self._rail.refresh_manual_feature_check_colors()
         self._map.refresh_nucleotide_colors()
         self._map.update()
         self._broadcast_shared_annotation_settings_changed()
@@ -8537,6 +8539,9 @@ class SequenceMapPanel(QWidget):
         self._rebuild_add_feature_buttons()
         self.refresh_similarity_databases()
         self.refresh_nucleotide_colors()
+        if rail is not None:
+            rail.refresh_feature_detect_check_colors()
+            rail.refresh_manual_feature_check_colors()
         self._map.update()
 
     def _broadcast_shared_annotation_settings_changed(self) -> None:
@@ -9885,7 +9890,7 @@ class SequenceMapPanel(QWidget):
         if not databases:
             empty = QLabel("No similarity databases configured.", self._rail.similarity_db_host)
             empty.setStyleSheet("color: palette(mid);")
-            empty.setWordWrap(True)
+            empty.setWordWrap(False)
             self._rail.add_similarity_db_widget(empty)
             self._sync_similarity_annotation_all_check()
             return

@@ -484,6 +484,7 @@ from repeatviewer.job_options import (
     CONSENSUS_RIGHT_CLICK_DIALOG,
     DEFAULT_EXTEND_LEFT,
     DEFAULT_EXTEND_RIGHT,
+    EXTEND_LENGTH_PRESETS,
     EXTEND_RIGHT_CLICK_RUN,
     EXTEND_RIGHT_CLICK_DIALOG,
     FASTGA_RIGHT_CLICK_RUN,
@@ -5712,6 +5713,46 @@ class HmmerParamsDialog(QDialog):
         )
 
 
+def _make_extend_length_combo(
+    initial: int, parent: QWidget | None = None
+) -> QComboBox:
+    """Editable dropdown: pick a preset length or type a custom bp value."""
+    combo = QComboBox(parent)
+    combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    combo.setSizeAdjustPolicy(
+        QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+    )
+    combo.setMinimumContentsLength(8)
+    for value in EXTEND_LENGTH_PRESETS:
+        combo.addItem(f"{value} bp", int(value))
+    value = max(0, min(500_000, int(initial)))
+    index = combo.findData(value)
+    if index >= 0:
+        combo.setCurrentIndex(index)
+    else:
+        combo.setEditText(f"{value} bp")
+    combo.setToolTip(
+        "Choose a preset length or type a custom number of base pairs "
+        "(digits, optionally with a bp suffix)."
+    )
+    return combo
+
+
+def _extend_length_from_combo(combo: QComboBox) -> int:
+    text = (combo.currentText() or "").strip().lower().replace(",", "")
+    for suffix in (" bp", "bp"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].strip()
+            break
+    if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+        return max(0, min(500_000, int(text)))
+    data = combo.currentData()
+    if isinstance(data, int):
+        return max(0, min(500_000, data))
+    return 0
+
+
 class ExtendParamsDialog(QDialog):
     """Extend MSA ends.
 
@@ -5740,14 +5781,8 @@ class ExtendParamsDialog(QDialog):
         # genome_history kept for call-site compatibility; Genome list uses BLAST DBs.
         _ = genome_history
 
-        self._left = QSpinBox()
-        self._left.setRange(0, 500_000)
-        self._left.setValue(opts.left)
-        self._left.setSuffix(" bp")
-        self._right = QSpinBox()
-        self._right.setRange(0, 500_000)
-        self._right.setValue(opts.right)
-        self._right.setSuffix(" bp")
+        self._left = _make_extend_length_combo(opts.left, self)
+        self._right = _make_extend_length_combo(opts.right, self)
 
         self._pan_genome = QComboBox()
         self._pan_genome_names = list(pan_genome_names or [])
@@ -5788,20 +5823,45 @@ class ExtendParamsDialog(QDialog):
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="MSA Extend",
+                checked=bool(opts.show_process_window),
+                close_when_finished=bool(opts.close_process_window_when_finished),
+            )
+        )
+
         options_tab = QWidget(self)
+        options_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         options_layout = QVBoxLayout(options_tab)
-        options_layout.setContentsMargins(16, 14, 16, 14)
-        options_layout.setSpacing(14)
+        options_layout.setContentsMargins(12, 10, 12, 10)
+        options_layout.setSpacing(10)
+        options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
-        options_layout.addStretch(1)
+        options_layout.addWidget(process_box)
 
         self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        self._tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         params_tab = QWidget(self)
+        params_tab.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         params_form = QFormLayout(params_tab)
-        params_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        params_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        params_form.setContentsMargins(12, 10, 12, 10)
+        params_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        params_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
         params_form.setHorizontalSpacing(12)
-        params_form.setVerticalSpacing(10)
+        params_form.setVerticalSpacing(8)
         if self._pan_genome_names:
             params_form.addRow("Pan-genome:", self._pan_genome)
         else:
@@ -5819,17 +5879,90 @@ class ExtendParamsDialog(QDialog):
         )
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._tabs)
-        layout.addWidget(self._button_box)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tabs, 0)
+        layout.addWidget(self._button_box, 0)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._on_tab_changed(self._tabs.currentIndex())
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # Dialog polish may call adjustSize(); re-fit to the active tab after that.
+        QTimer.singleShot(0, self._fit_to_current_tab)
+
+    def _on_tab_changed(self, _tab_index: int) -> None:
+        self._fit_to_current_tab()
+
+    def _fit_to_current_tab(self) -> None:
+        """Size the dialog to the active tab only (QTabWidget otherwise uses max of all)."""
+        page = self._tabs.currentWidget()
+        if page is None:
+            return
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        pin_tool_tabs_height(self._tabs, None)
+        page.ensurePolished()
+        page.adjustSize()
+        root = page.layout()
+        if root is not None:
+            root.invalidate()
+            root.activate()
+        page_hint = page.minimumSizeHint().expandedTo(page.sizeHint())
+        content_h = page_hint.height()
+        if root is not None:
+            content_h = max(
+                content_h,
+                root.totalMinimumSize().height(),
+                root.totalSizeHint().height(),
+            )
+        pin_tool_tabs_height(self._tabs, content_h)
+        tab_bar_h = max(24, self._tabs.tabBar().sizeHint().height())
+        tabs_h = tab_bar_h + content_h + 8
+        buttons_h = self._button_box.sizeHint().height()
+        margins = self.layout().contentsMargins()
+        spacing = self.layout().spacing()
+        height = (
+            tabs_h
+            + buttons_h
+            + margins.top()
+            + margins.bottom()
+            + spacing
+            + 4
+        )
+        width = max(
+            420,
+            page_hint.width() + margins.left() + margins.right() + 24,
+            self._button_box.sizeHint().width() + margins.left() + margins.right(),
+        )
+        self.setMinimumWidth(width)
+        self.setMaximumHeight(height)
+        self.resize(width, height)
+        self.setMaximumHeight(16777215)
 
     def should_run(self) -> bool:
         return dialog_should_run(self)
 
     def _restore_defaults(self) -> None:
-        self._left.setValue(DEFAULT_EXTEND_LEFT)
-        self._right.setValue(DEFAULT_EXTEND_RIGHT)
+        defaults = ExtendOptions()
+        left_index = self._left.findData(DEFAULT_EXTEND_LEFT)
+        if left_index >= 0:
+            self._left.setCurrentIndex(left_index)
+        else:
+            self._left.setEditText(f"{DEFAULT_EXTEND_LEFT} bp")
+        right_index = self._right.findData(DEFAULT_EXTEND_RIGHT)
+        if right_index >= 0:
+            self._right.setCurrentIndex(right_index)
+        else:
+            self._right.setEditText(f"{DEFAULT_EXTEND_RIGHT} bp")
         self._genome_row.reset_to_default()
         self._right_click_buttons[EXTEND_RIGHT_CLICK_RUN].setChecked(True)
+        self._show_process_window.setChecked(defaults.show_process_window)
+        self._close_process_window.setChecked(
+            defaults.close_process_window_when_finished
+        )
+        self._close_process_window.setEnabled(self._show_process_window.isChecked())
 
     def options(self) -> ExtendOptions:
         pan_name = None
@@ -5844,11 +5977,13 @@ class ExtendParamsDialog(QDialog):
                 right_click_action = value
                 break
         return ExtendOptions(
-            left=self._left.value(),
-            right=self._right.value(),
+            left=_extend_length_from_combo(self._left),
+            right=_extend_length_from_combo(self._right),
             pan_genome_name=pan_name,
             genome_path=genome_path,
             right_click_action=right_click_action,
+            show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=self._close_process_window.isChecked(),
         )
 
 
@@ -8586,8 +8721,9 @@ _TE_ANN_FEATURE_DETECTION_HELP = (
     "<b>ORF</b>: open reading frames.<br>"
     "<b>All</b>: select or clear every detector.<br><br>"
     "Thresholds (lengths, similarity, …) are under <b>Advanced Settings</b> → "
-    "Feature detection settings. Threads and the process window are under "
-    "<b>Settings</b> on this page (shared with Similarity annotation)."
+    "Feature detection settings. Threads are under <b>Settings</b> on this page "
+    "(shared with Similarity annotation). The process window is under "
+    "<b>Options</b>."
 )
 _TE_ANN_SIMILARITY_HELP = (
     "Search selected protein / DNA / HMM / CDD databases for similarity hits "
@@ -8595,8 +8731,9 @@ _TE_ANN_SIMILARITY_HELP = (
     "Add or edit databases in <b>File → Manage Database</b>. "
     "<b>All</b> selects or clears every listed database.<br><br>"
     "E-value and hit limits are under <b>Advanced Settings</b> → "
-    "Similarity annotation settings. Threads and the process window are under "
-    "<b>Settings</b> on this page (shared with Feature detection)."
+    "Similarity annotation settings. Threads are under <b>Settings</b> on this "
+    "page (shared with Feature detection). The process window is under "
+    "<b>Options</b>."
 )
 
 
@@ -8846,6 +8983,7 @@ class TeAnnotationDialog(QDialog):
             check.toggled.connect(self._on_auto_check_toggled)
             self._auto_ann_checks[mode] = check
             auto_checks_row.addWidget(check)
+        self._refresh_feature_detect_check_colors()
 
         auto_checks_row.addStretch(1)
         feature_outer.addLayout(auto_checks_row)
@@ -9009,26 +9147,27 @@ class TeAnnotationDialog(QDialog):
         form.addRow(sim_section)
         form.addRow(_form_section_separator())
 
-        # Settings: shared Threads + process window (not Advanced).
-        run_threads, run_show, run_close = load_annotation_run_options()
+        # Settings: Threads only (process window lives on Options, like BLAST).
+        run_threads, _run_show, _run_close = load_annotation_run_options()
         settings_section = QWidget(basic)
         settings_outer = QVBoxLayout(settings_section)
         settings_outer.setContentsMargins(0, 0, 0, 0)
         settings_outer.setSpacing(6)
         settings_outer.addWidget(_section_title_label("Settings", settings_section))
-        settings_form = QFormLayout()
-        settings_form.setContentsMargins(0, 0, 0, 0)
-        settings_form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        settings_form.setHorizontalSpacing(12)
-        settings_form.setVerticalSpacing(4)
         self._threads = QSpinBox(settings_section)
         self._threads.setRange(1, 256)
         self._threads.setValue(max(1, int(run_threads)))
         self._threads.setFixedWidth(260)
-        settings_form.addRow(
-            "Threads:",
+        threads_row = QWidget(settings_section)
+        threads_row_layout = QHBoxLayout(threads_row)
+        threads_row_layout.setContentsMargins(0, 0, 0, 0)
+        threads_row_layout.setSpacing(8)
+        threads_label = QLabel("Threads:", threads_row)
+        threads_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        threads_row_layout.addWidget(threads_label, 0, Qt.AlignmentFlag.AlignLeft)
+        threads_row_layout.addWidget(
             field_with_help(
                 self._threads,
                 "Threads",
@@ -9037,38 +9176,11 @@ class TeAnnotationDialog(QDialog):
                 "sequences run at once is Preferences → Max. parallel jobs. "
                 f"Default is {default_annotation_threads()}.",
             ),
+            0,
+            Qt.AlignmentFlag.AlignLeft,
         )
-        self._show_process_window = QCheckBox(
-            "Show process window while run", settings_section
-        )
-        self._show_process_window.setChecked(bool(run_show))
-        self._close_process_window = QCheckBox(
-            "Close process window when finished", settings_section
-        )
-        self._close_process_window.setChecked(bool(run_close))
-        self._close_process_window.setEnabled(self._show_process_window.isChecked())
-        self._show_process_window.toggled.connect(self._close_process_window.setEnabled)
-        settings_form.addRow(
-            "",
-            field_with_help(
-                self._show_process_window,
-                "Show process window",
-                "Open a live process window while Sequence Annotation runs. "
-                "Shared with Feature detection and Similarity annotation.",
-                stretch=True,
-            ),
-        )
-        settings_form.addRow(
-            "",
-            field_with_help(
-                self._close_process_window,
-                "Close process window when finished",
-                "Close the process window automatically after a successful run. "
-                "Shared with Feature detection and Similarity annotation.",
-                stretch=True,
-            ),
-        )
-        settings_outer.addLayout(settings_form)
+        threads_row_layout.addStretch(1)
+        settings_outer.addWidget(threads_row)
         form.addRow(settings_section)
 
         params_root.addWidget(basic)
@@ -9106,12 +9218,22 @@ class TeAnnotationDialog(QDialog):
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="Sequence Annotation",
+                checked=bool(_run_show),
+                close_when_finished=bool(_run_close),
+            )
+        )
+
         options_tab = QWidget(self)
         options_layout = QVBoxLayout(options_tab)
         options_layout.setContentsMargins(16, 14, 16, 14)
         options_layout.setSpacing(14)
         options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
+        options_layout.addWidget(process_box)
         options_layout.addStretch(1)
         options_tab.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
@@ -9400,6 +9522,13 @@ class TeAnnotationDialog(QDialog):
             color = self._similarity_database_color(entry.name, index)
             check.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
 
+    def _refresh_feature_detect_check_colors(self) -> None:
+        from repeatviewer.backends.annotation_colors import feature_type_color
+
+        for mode, check in self._auto_ann_checks.items():
+            color = feature_type_color(mode.value)
+            check.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
+
     def _on_auto_check_toggled(self, _checked: bool) -> None:
         if self._auto_all_updating:
             return
@@ -9548,6 +9677,7 @@ class TeAnnotationDialog(QDialog):
         save_similarity_annotation_settings(sim)
         self._colors_panel.save()
         self._refresh_similarity_db_checkbox_colors()
+        self._refresh_feature_detect_check_colors()
 
     def job_options(self) -> TeAnnotationJobOptions:
         auto_modes = tuple(
@@ -11035,6 +11165,15 @@ class MsaCleanParamsDialog(QDialog):
         if not any(b.isChecked() for b in self._right_click_buttons.values()):
             self._right_click_buttons[MSA_CLEAN_RIGHT_CLICK_COMBINED].setChecked(True)
 
+        process_box, self._show_process_window, self._close_process_window = (
+            make_process_output_box(
+                self,
+                tool_name="MSA Clean",
+                checked=bool(opts.show_process_window),
+                close_when_finished=bool(opts.close_process_window_when_finished),
+            )
+        )
+
         options_tab = QWidget(self)
         options_tab.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
@@ -11045,6 +11184,7 @@ class MsaCleanParamsDialog(QDialog):
         options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
         options_layout.addWidget(combined_box)
+        options_layout.addWidget(process_box)
         options_layout.addStretch(1)
         self._options_tab = options_tab
 
@@ -11372,6 +11512,11 @@ class MsaCleanParamsDialog(QDialog):
         self._method_order.blockSignals(False)
         self._fit_method_list_height()
         self._right_click_buttons[MSA_CLEAN_RIGHT_CLICK_COMBINED].setChecked(True)
+        self._show_process_window.setChecked(defaults.show_process_window)
+        self._close_process_window.setChecked(
+            defaults.close_process_window_when_finished
+        )
+        self._close_process_window.setEnabled(self._show_process_window.isChecked())
         for selected in (
             self._gappy_input_selected,
             self._div_input_selected,
@@ -11409,6 +11554,8 @@ class MsaCleanParamsDialog(QDialog):
                 window_size=self._row_gap_window.value(),
             ),
             right_click_action=right_click_action,
+            show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=self._close_process_window.isChecked(),
         )
 
 

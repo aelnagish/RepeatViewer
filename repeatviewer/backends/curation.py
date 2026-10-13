@@ -34,9 +34,8 @@ from repeatviewer.backends.gui_functions import (
     blast as run_blast,
     check_database,
     effective_flexidot_filetype,
-    extend_bed_regions,
+    extend_sequences_by_header,
     extract_fasta_from_bed,
-    fasta_header_to_bed,
     process_bed_lines,
     run_flexidot,
 )
@@ -658,8 +657,13 @@ def run_on_sequence(
     orf_prediction_settings=None,
     cancel: JobCancellation | None = None,
     sequence_progress: SequenceProgressCallback | None = None,
+    warnings_out: list[str] | None = None,
 ) -> list[str]:
-    """Run one tool on one FASTA. Returns list of created output paths (strings)."""
+    """Run one tool on one FASTA. Returns list of created output paths (strings).
+
+    Soft reminders (e.g. partially skipped MSA Extend sequences) are appended to
+    ``warnings_out`` when provided; they do not fail the job.
+    """
     seq_path = seq_path.expanduser().resolve()
     out_dir = seq_path.parent
     created: list[str] = []
@@ -822,17 +826,22 @@ def run_on_sequence(
 
         base = kept_input_name(seq_path)
         tag = f"{label_suffix}_L{left}_R{right}"
-        in_bed = out_dir / f"{base}{tag}_hdr.bed"
-        ext_bed = out_dir / f"{base}{tag}.bed"
         ext_fa = out_dir / f"{base}{tag}.fa"
-        fasta_header_to_bed(str(seq_path), str(in_bed))
-        extend_bed_regions(str(in_bed), left, right, chrom_sizes, str(ext_bed))
-        extract_fasta_from_bed(str(active_genome), str(ext_bed), str(ext_fa))
-        for bed_path in (in_bed, ext_bed):
-            try:
-                bed_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _extended_n, kept_original = extend_sequences_by_header(
+            str(seq_path),
+            str(active_genome),
+            left,
+            right,
+            chrom_sizes,
+            str(ext_fa),
+        )
+        if kept_original and warnings_out is not None:
+            # Short reminder for the UI: count only (names stay in the FASTA).
+            n = len(kept_original)
+            warnings_out.append(
+                f"{n} sequence{'s' if n != 1 else ''} could not be extended "
+                "and were kept unchanged."
+            )
         created.append(str(ext_fa))
 
     elif func_name == "teaid":
@@ -1195,6 +1204,7 @@ def run_batch(
 ) -> dict:
     seq_list = list(seq_files)
     failures: list[str] = []
+    warnings: list[str] = []
     created_outputs: list[str] = []
     source_files: list[str] = []
     os_type = platform.system()
@@ -1347,8 +1357,8 @@ def run_batch(
         genome_label: str,
         genome_path: Path | None,
         units: int,
-    ) -> tuple[Path, str, list[str], str | None, int, int]:
-        """Returns path, label, outs, error, units, sequences_reported."""
+    ) -> tuple[Path, str, list[str], str | None, int, int, list[str]]:
+        """Returns path, label, outs, error, units, sequences_reported, warnings."""
         last_reported = 0
 
         def _sequence_progress(completed: int, total: int, label: str) -> None:
@@ -1368,6 +1378,7 @@ def run_batch(
         try:
             with process_log_sink(log_sink):
                 check_cancelled(cancel)
+                item_warnings: list[str] = []
                 outs = run_on_sequence(
                     func_name,
                     seq_path,
@@ -1399,12 +1410,21 @@ def run_batch(
                     sequence_progress=(
                         _sequence_progress if pass_sequence_progress else None
                     ),
+                    warnings_out=item_warnings,
                 )
-            return seq_path, genome_label, outs, None, units, last_reported
+            return (
+                seq_path,
+                genome_label,
+                outs,
+                None,
+                units,
+                last_reported,
+                item_warnings,
+            )
         except JobCancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            return seq_path, genome_label, [], str(exc), units, last_reported
+            return seq_path, genome_label, [], str(exc), units, last_reported, []
 
     def _record_finished(
         seq_path: Path,
@@ -1413,6 +1433,7 @@ def run_batch(
         error: str | None,
         units: int,
         reported: int,
+        item_warnings: list[str] | None = None,
     ) -> None:
         nonlocal completed_count
         label = f" ({genome_label})" if genome_label else ""
@@ -1434,6 +1455,8 @@ def run_batch(
         else:
             created_outputs.extend(outs)
             source_files.append(str(seq_path.resolve()))
+            if item_warnings:
+                warnings.extend(item_warnings)
             if on_outputs_ready is not None and outs:
                 try:
                     on_outputs_ready(list(outs))
@@ -1445,6 +1468,7 @@ def run_batch(
             "func_name": func_name,
             "total": total_units,
             "failures": failures,
+            "warnings": warnings,
             "created_outputs": created_outputs,
             "source_files": source_files,
             "cancelled": True,
@@ -1461,10 +1485,12 @@ def run_batch(
                     completed_count,
                     f"{display_name}: {seq_path.name}{label}",
                 )
-                path, glabel, outs, error, units_out, reported = _run_single(
-                    seq_path, genome_label, genome_path, units
+                path, glabel, outs, error, units_out, reported, item_warn = (
+                    _run_single(seq_path, genome_label, genome_path, units)
                 )
-                _record_finished(path, glabel, outs, error, units_out, reported)
+                _record_finished(
+                    path, glabel, outs, error, units_out, reported, item_warn
+                )
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [
@@ -1475,13 +1501,23 @@ def run_batch(
                 ]
                 for future in as_completed(futures):
                     try:
-                        path, label, outs, error, units_out, reported = future.result()
+                        (
+                            path,
+                            label,
+                            outs,
+                            error,
+                            units_out,
+                            reported,
+                            item_warn,
+                        ) = future.result()
                     except JobCancelledError:
                         for pending in futures:
                             pending.cancel()
                         # Keep outputs from work items that already finished.
                         raise
-                    _record_finished(path, label, outs, error, units_out, reported)
+                    _record_finished(
+                        path, label, outs, error, units_out, reported, item_warn
+                    )
     except JobCancelledError:
         # Return whatever finished so the UI can show partial Online BLAST (etc.).
         return _cancelled_result()
@@ -1492,6 +1528,7 @@ def run_batch(
         "func_name": func_name,
         "total": total_units,
         "failures": failures,
+        "warnings": warnings,
         "created_outputs": created_outputs,
         "source_files": source_files,
     }
