@@ -157,12 +157,50 @@ _MAX_PPB = 4.0
 _MSA_MAX_PPB = 16.0
 _MSA_LETTER_MIN_PPB = 7.5
 _MSA_ROW_HEIGHT = 18
-_DEFAULT_MSA_FONT_PT = 4
+# Fixed letter size for MSA/multi Overview: scale double-click and zoom-slider
+# 3/4 position target this DNA/protein extent; further zoom only widens ppb.
+_MSA_LETTER_SIZE_PT = 10
+_MSA_ZOOM_LETTER_SLIDER = 75  # 3/4 of 0–100 slider
+# Letter-mode fill is a centered square of min(cell_w, cell_h).
+# Scale 1.0 → when Sequence distance is 0, row edges touch vertically.
+_MSA_LETTER_BG_SCALE = 1.0
+_DEFAULT_MSA_FONT_PT = _MSA_LETTER_SIZE_PT
+_DEFAULT_TRACK_HEIGHT = 4  # Others → Track height (1–10); 10 == size-10 band
 _DEFAULT_MSA_SEQUENCE_DISTANCE = 1
 _DEFAULT_MULTI_SEQUENCE_DISTANCE = 2
 _DEFAULT_MSA_COLUMN_DISTANCE = 0
 _OVERVIEW_DISPLAY_SETTINGS_GROUP = "annotation_overview_display"
 _FEATURE_UNDO_LIMIT = 32
+
+
+def _msa_letter_size_metrics(point_size: int = _MSA_LETTER_SIZE_PT) -> tuple[int, float]:
+    """Return ``(residue_band_px, target_ppb)`` for a DNA/protein letter size.
+
+    ``target_ppb`` is the horizontal scale where cells are square for that
+    letter size (also the zoom-slider 3/4 / scale double-click anchor).
+    """
+    pt = max(2, min(36, int(point_size)))
+    font = QFont()
+    font.setFamily("Menlo")
+    font.setStyleHint(QFont.StyleHint.Monospace)
+    font.setPointSize(pt)
+    fm = QFontMetrics(font)
+    glyph_h = max(fm.height(), fm.ascent() + fm.descent())
+    # Tight band so size-10 cells stay compact; fill uses ``_MSA_LETTER_BG_SCALE``.
+    band = max(1, int(glyph_h + 2))
+    ppb = float(max(_MSA_LETTER_MIN_PPB, band))
+    return band, ppb
+
+
+def _msa_letter_bg_rect(x: float, y: float, cell_w: float, cell_h: float) -> QRectF:
+    """Centered square fill inside a residue cell (smaller than the cell)."""
+    side = max(1.0, min(float(cell_w), float(cell_h)) * _MSA_LETTER_BG_SCALE)
+    return QRectF(
+        float(x) + (float(cell_w) - side) * 0.5,
+        float(y) + (float(cell_h) - side) * 0.5,
+        side,
+        side,
+    )
 
 
 def _clone_features_by_id(
@@ -1011,10 +1049,13 @@ class _BarsCanvas(QWidget):
         self._msa_colors: dict[str, tuple[str, str]] = {}
         self._msa_qcolors: dict[str, tuple[QColor, QColor]] = {}
         self._msa_residue_height = _MSA_ROW_HEIGHT
-        self._msa_font_pt = _DEFAULT_MSA_FONT_PT
+        self._msa_font_pt = _MSA_LETTER_SIZE_PT
+        self._track_height_level = _DEFAULT_TRACK_HEIGHT
         self._msa_color_mode = MSA_COLOR_ALL_BACKGROUNDS
         self._msa_divergence_threshold = DEFAULT_MSA_DIVERGENCE_THRESHOLD
         self._msa_col_freqs: list[dict[str, float]] = []
+        # Apply default track height → overview band pixels.
+        self._apply_track_height_to_residue_band()
         self._sequence_row_gap = 0  # pixels between sequences (Others → Sequence distance)
         self._feat_height = _FEAT_HEIGHT
         self._feat_gap = _FEAT_GAP
@@ -1300,24 +1341,51 @@ class _BarsCanvas(QWidget):
         return bool(self._show_annotation_track)
 
     def set_msa_residue_size(self, point_size: int) -> None:
-        """DNA/protein label size → MSA residue band height and letter font.
+        """Legacy hook: MSA letter size is fixed at ``_MSA_LETTER_SIZE_PT``.
 
-        Height always matches the monospace glyph box (same idea as single-seq
-        letter cells) — no fixed pixel floor.
+        Overview vertical sizing uses ``set_track_height`` (1–10). Kept so older
+        callers/tests do not break; values other than 10 are ignored for layout
+        except as a temporary override of the letter font floor.
         """
         pt = max(2, min(36, int(point_size)))
         self._msa_font_pt = pt
-        font = QFont(self.font())
-        font.setFamily("Menlo")
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setPointSize(pt)
-        fm = QFontMetrics(font)
-        glyph_h = max(fm.height(), fm.ascent() + fm.descent())
-        self._msa_residue_height = max(1, int(glyph_h + 4))
+        self._apply_track_height_to_residue_band()
         if self._msa_mode or self._msa_seqs:
             self._clear_drag_paint_cache()
             self._recompute_layout()
             self.update()
+
+    def set_track_height(self, level: int) -> None:
+        """Others → Track height (1–10).
+
+        Level 10 matches the squeezed-row height at DNA/protein size 10
+        (zoom-slider 3/4). Level 1 is the thinnest overview track.
+        """
+        new = max(1, min(10, int(level)))
+        if new == self._track_height_level:
+            return
+        self._track_height_level = new
+        self._msa_font_pt = _MSA_LETTER_SIZE_PT
+        self._apply_track_height_to_residue_band()
+        if self._msa_mode or self._msa_seqs or self._record_ids:
+            self._clear_drag_paint_cache()
+            self._recompute_layout()
+            self.update()
+
+    def track_height(self) -> int:
+        return int(self._track_height_level)
+
+    def letter_size_anchor_metrics(self) -> tuple[int, float]:
+        """Band px and ppb for DNA/protein size 10 (slider 3/4 target)."""
+        return _msa_letter_size_metrics(_MSA_LETTER_SIZE_PT)
+
+    def _apply_track_height_to_residue_band(self) -> None:
+        full_h, _ = _msa_letter_size_metrics(_MSA_LETTER_SIZE_PT)
+        lo = max(2, min(4, max(2, full_h // 10)))
+        level = max(1, min(10, int(self._track_height_level)))
+        self._msa_residue_height = max(
+            lo, int(round(lo + (full_h - lo) * (level - 1) / 9.0))
+        )
 
     def msa_residue_height(self) -> int:
         return int(self._msa_residue_height)
@@ -1332,26 +1400,29 @@ class _BarsCanvas(QWidget):
         return has_rows and ppb >= _MSA_LETTER_MIN_PPB and ppb >= 6
 
     def _row_letter_band_height(self) -> int:
-        base = max(1, int(self._msa_residue_height))
+        """Sequence band height: Track height when squeezed; square up to size-10."""
         if not (self._msa_shows_letters() or self._bar_shows_letters()):
-            return base
-        return max(base, int(math.ceil(self._ppb)))
+            return max(1, int(self._msa_residue_height))
+        letter_h, _ = _msa_letter_size_metrics(_MSA_LETTER_SIZE_PT)
+        # Cap at size-10 band so further zoom only widens horizontal gaps.
+        return max(1, min(letter_h, int(round(self._ppb))))
 
     def _msa_letter_band_height(self) -> int:
-        """Residue-band height; at letter zoom grows with ``ppb`` so cells stay square."""
-        base = max(1, int(self._msa_residue_height))
+        """Residue-band height; square cells up to size-10, then fixed height."""
         if not self._msa_shows_letters():
-            return base
-        return max(base, int(math.ceil(self._ppb)))
+            return max(1, int(self._msa_residue_height))
+        letter_h, _ = _msa_letter_size_metrics(_MSA_LETTER_SIZE_PT)
+        return max(1, min(letter_h, int(round(self._ppb))))
 
     def _msa_letter_font_for_cell(self, cell_w: float, cell_h: float) -> QFont:
-        """Font that fills most of the cell (figure-2 letter-to-background ratio)."""
+        """Font sized to the letter background square (not the full cell)."""
         font = QFont(self.font())
         font.setFamily("Menlo")
         font.setStyleHint(QFont.StyleHint.Monospace)
-        # ~9% margin each side → letter occupies ~82% of the shorter cell edge.
-        target = max(2.0, min(float(cell_w), float(cell_h)) * 0.82)
-        lo = max(2, int(self._msa_font_pt))
+        # Fit inside the square fill (~82% of bg side).
+        bg = min(float(cell_w), float(cell_h)) * _MSA_LETTER_BG_SCALE
+        target = max(2.0, bg * 0.82)
+        lo = max(2, int(self._msa_font_pt), _MSA_LETTER_SIZE_PT)
         hi = min(96, max(lo, int(math.ceil(target)) + 2))
         best = lo
         while lo <= hi:
@@ -1368,10 +1439,13 @@ class _BarsCanvas(QWidget):
         return font
 
     def effective_letter_point_size(self) -> int:
-        """Configured residue font, or the larger in-cell size when zoomed for letters."""
-        base = max(2, int(self._msa_font_pt))
+        """Letter font at current zoom; floor is DNA/protein size 10 for MSA.
+
+        At Fit (squeezed), returns Track height so names can use height+1.
+        """
+        base = max(2, int(self._msa_font_pt), _MSA_LETTER_SIZE_PT)
         if not (self._msa_shows_letters() or self._bar_shows_letters()):
-            return base
+            return max(2, int(self._track_height_level))
         cell_w = max(float(self._ppb), 1e-12)
         cell_h = float(
             self._msa_letter_band_height()
@@ -2402,8 +2476,9 @@ class _BarsCanvas(QWidget):
         n_rows = len(self._record_ids)
         gap = max(0, int(self._sequence_row_gap))
         for i, rid in enumerate(self._record_ids):
-            if self._msa_mode or self._bar_shows_letters():
-                # Letter zoom: band grows with ppb so glyph/background stay in ratio.
+            if self._msa_mode or self._msa_seqs:
+                # MSA / multi-seq: Track height when squeezed; square band up to
+                # size-10 (slider ¾). Past that, height stays fixed.
                 h = int(self._row_letter_band_height()) + self._msa_track_block_height(
                     rid
                 )
@@ -3424,7 +3499,7 @@ class _BarsCanvas(QWidget):
         """Column-aligned residue cells (visible rows/columns only)."""
         ppb = max(self._ppb, 1e-12)
         show_letters = self._msa_shows_letters()
-        # At letter zoom, band grows with ppb (square cells); font scales to fill.
+        # Letter zoom: square band up to size-10; further zoom widens ppb only.
         residue_h = max(1, int(self._msa_letter_band_height()))
         if not show_letters and ppb < _MSA_PIXEL_SAMPLE_PPB:
             self._paint_msa_rows_pixel_sample(
@@ -3442,7 +3517,7 @@ class _BarsCanvas(QWidget):
             if show_letters
             else None
         )
-        # Equal inset on all sides from Column distance (0 → backgrounds connect).
+        # Overview: Column distance insets. Letter mode: centered square fill.
         _bg_margin = max(0.0, float(self._column_distance) * 0.5)
         painter.setPen(Qt.PenStyle.NoPen)
         for index, rid in enumerate(self._record_ids):
@@ -3538,18 +3613,15 @@ class _BarsCanvas(QWidget):
                 else:
                     pair = paint_pair if paint_pair is not None else qcolors.get(ch)
                     if pair is not None:
+                        # One column per letter cell (span==1); square fill centered.
+                        letter_cell = QRectF(
+                            x, y, max(0.5, ppb), float(residue_h)
+                        )
                         if fill_bg:
-                            m = _bg_margin
-                            if m > 0 and (
-                                cell.width() > 2.0 * m + 0.5
-                                and cell.height() > 2.0 * m + 0.5
-                            ):
-                                painter.fillRect(
-                                    cell.adjusted(m, m, -m, -m), pair[0]
-                                )
-                            else:
-                                painter.fillRect(cell, pair[0])
-                        if fill_bg:
+                            bg = _msa_letter_bg_rect(
+                                x, y, max(0.5, ppb), float(residue_h)
+                            )
+                            painter.fillRect(bg, pair[0])
                             # Black or white from background luminance for readability.
                             from repeatviewer.widgets.residue_color_grid import (
                                 ResidueColorGrid,
@@ -3564,7 +3636,7 @@ class _BarsCanvas(QWidget):
                             # No fill → residue colour as the letter.
                             painter.setPen(pair[0])
                         painter.drawText(
-                            cell.toRect(),
+                            letter_cell.toRect(),
                             int(Qt.AlignmentFlag.AlignCenter),
                             ch,
                         )
@@ -3626,15 +3698,21 @@ class _BarsCanvas(QWidget):
                     ch = seq[column] if column < len(seq) else ""
                     if not ch:
                         continue
+                    cell_w = max(0.5, ppb)
                     cell = QRectF(
                         self._bar_pad + column * ppb,
                         bar_y,
-                        max(0.5, ppb),
+                        cell_w,
                         float(residue_h),
                     )
                     pair = self._msa_qcolors.get(ch)
                     if pair is not None and self._color_unaligned_background:
-                        painter.fillRect(cell, pair[0])
+                        painter.fillRect(
+                            _msa_letter_bg_rect(
+                                cell.x(), cell.y(), cell_w, float(residue_h)
+                            ),
+                            pair[0],
+                        )
                     if pair is None:
                         letter_color = self.palette().text().color()
                     elif self._color_unaligned_background:
@@ -4644,7 +4722,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.deleteRequested.connect(self._on_delete_clicked)
         rail.addFeatureClicked.connect(self._on_add_feature_clicked)
         rail.transferRequested.connect(self._on_transfer_annotations_clicked)
-        rail.basesZoomedInChanged.connect(self._on_bases_zoomed_in_changed)
+        rail.trackHeightChanged.connect(self._on_track_height_changed)
         rail.annotationThicknessChanged.connect(self._on_annotation_thickness_changed)
         rail.annotationDistanceChanged.connect(self._on_annotation_distance_changed)
         rail.annotationLabelSizeChanged.connect(self._on_annotation_label_size_changed)
@@ -4662,9 +4740,9 @@ class MultiSequenceOverviewPanel(QWidget):
         self._find_index: int = -1
         self._find_key: object | None = None
         self._load_overview_display_settings()
-        bases = int(rail.bases_zoomed_in.value())
-        self._bars.set_msa_residue_size(bases)
-        self._names.set_label_point_size(bases)
+        track_h = int(rail.track_height.value())
+        self._bars.set_track_height(track_h)
+        self._names.set_label_point_size(track_h)  # names store height+1
         self._bars.set_feature_bar_height(int(rail.annotation_thickness.value()))
         self._bars.set_feature_gap(int(rail.annotation_distance.value()))
         self._bars.set_feature_label_point_size(int(rail.annotation_label_size.value()))
@@ -4687,11 +4765,16 @@ class MultiSequenceOverviewPanel(QWidget):
         return s
 
     def _load_overview_display_settings(self) -> None:
-        """MSA/overview defaults: DNA/protein labels 4, MSA sequence distance 1."""
+        """MSA/overview defaults: Track height 4, MSA sequence distance 1."""
         rail = self._rail
         s = self._overview_display_settings()
         try:
-            bases = int(s.value("bases_zoomed_in", _DEFAULT_MSA_FONT_PT))
+            # Prefer track_height; migrate old bases_zoomed_in into 1–10 if needed.
+            if s.contains("track_height"):
+                track_h = int(s.value("track_height", _DEFAULT_TRACK_HEIGHT))
+            else:
+                legacy = int(s.value("bases_zoomed_in", _DEFAULT_TRACK_HEIGHT))
+                track_h = max(1, min(10, legacy if legacy <= 10 else _DEFAULT_TRACK_HEIGHT))
             distance = int(
                 s.value("sequence_distance", _DEFAULT_MSA_SEQUENCE_DISTANCE)
             )
@@ -4714,7 +4797,7 @@ class MultiSequenceOverviewPanel(QWidget):
             sort_mode = str(s.value("sequence_sort_mode", "original") or "original")
         finally:
             s.endGroup()
-        bases = max(2, min(36, bases))
+        track_h = max(1, min(10, track_h))
         distance = max(0, min(40, distance))
         ann_thickness = max(2, min(40, ann_thickness))
         ann_distance = max(0, min(40, ann_distance))
@@ -4722,7 +4805,7 @@ class MultiSequenceOverviewPanel(QWidget):
         scale_labels = max(4, min(24, scale_labels))
         col_distance = max(0, min(40, col_distance))
         for widget in (
-            rail.bases_zoomed_in,
+            rail.track_height,
             rail.sequence_distance,
             rail.annotation_thickness,
             rail.annotation_distance,
@@ -4732,7 +4815,7 @@ class MultiSequenceOverviewPanel(QWidget):
         ):
             widget.blockSignals(True)
         try:
-            rail.bases_zoomed_in.setValue(bases)
+            rail.track_height.setValue(track_h)
             rail.sequence_distance.setValue(distance)
             rail.annotation_thickness.setValue(ann_thickness)
             rail.annotation_distance.setValue(ann_distance)
@@ -4741,7 +4824,7 @@ class MultiSequenceOverviewPanel(QWidget):
             rail.column_distance.setValue(col_distance)
         finally:
             for widget in (
-                rail.bases_zoomed_in,
+                rail.track_height,
                 rail.sequence_distance,
                 rail.annotation_thickness,
                 rail.annotation_distance,
@@ -4760,7 +4843,7 @@ class MultiSequenceOverviewPanel(QWidget):
         rail = self._rail
         s = self._overview_display_settings()
         try:
-            s.setValue("bases_zoomed_in", int(rail.bases_zoomed_in.value()))
+            s.setValue("track_height", int(rail.track_height.value()))
             distance_key = (
                 "sequence_distance"
                 if self.is_msa_mode()
@@ -4785,10 +4868,10 @@ class MultiSequenceOverviewPanel(QWidget):
         finally:
             s.endGroup()
 
-    def _on_bases_zoomed_in_changed(self, point_size: int) -> None:
-        pt = int(point_size)
-        self._bars.set_msa_residue_size(pt)
-        self._names.set_label_point_size(pt)
+    def _on_track_height_changed(self, level: int) -> None:
+        lvl = max(1, min(10, int(level)))
+        self._bars.set_track_height(lvl)
+        self._names.set_label_point_size(lvl)  # names store height+1
         self._save_overview_display_settings()
         self._sync_names_column()
 
@@ -6542,29 +6625,59 @@ class MultiSequenceOverviewPanel(QWidget):
     def _slider_ppb_bounds(self) -> tuple[float, float]:
         return self._bars.zoom_bounds(self._bars_viewport_width())
 
+    def _letter_anchor_ppb(self) -> float:
+        """ppb at DNA/protein size 10 — zoom-slider 3/4 position."""
+        fit_ppb, max_ppb = self._slider_ppb_bounds()
+        _band, target = self._bars.letter_size_anchor_metrics()
+        return max(fit_ppb, min(max_ppb, float(target)))
+
+    @staticmethod
+    def _interp_ppb(lo: float, hi: float, u: float) -> float:
+        u = max(0.0, min(1.0, float(u)))
+        if hi <= lo + 1e-15:
+            return lo
+        if hi / lo > 50:
+            return math.exp(math.log(lo) + u * (math.log(hi) - math.log(lo)))
+        return lo + (hi - lo) * u
+
+    @staticmethod
+    def _ppb_unit(lo: float, hi: float, ppb: float) -> float:
+        ppb = max(lo, min(hi, float(ppb)))
+        if hi <= lo + 1e-15:
+            return 0.0
+        if hi / lo > 50:
+            return (math.log(ppb) - math.log(lo)) / (math.log(hi) - math.log(lo))
+        return (ppb - lo) / (hi - lo)
+
     def _slider_value_to_ppb(self, value: int) -> float:
+        """Map slider 0→fit, 75→DNA/protein size 10, 100→max (wider nucleotide gaps)."""
         fit_ppb, max_ppb = self._slider_ppb_bounds()
         if max_ppb <= fit_ppb + 1e-15:
             return fit_ppb
+        letter = self._letter_anchor_ppb()
         t = max(0, min(100, int(value))) / 100.0
-        if max_ppb / fit_ppb > 50:
-            log_fit = math.log(fit_ppb)
-            log_max = math.log(max_ppb)
-            return math.exp(log_fit + t * (log_max - log_fit))
-        return fit_ppb + (max_ppb - fit_ppb) * t
+        pivot = _MSA_ZOOM_LETTER_SLIDER / 100.0
+        if t <= pivot:
+            return self._interp_ppb(fit_ppb, letter, t / pivot)
+        return self._interp_ppb(letter, max_ppb, (t - pivot) / (1.0 - pivot))
 
     def _ppb_to_slider_value(self, ppb: float) -> int:
         fit_ppb, max_ppb = self._slider_ppb_bounds()
         ppb = max(fit_ppb, min(max_ppb, float(ppb)))
         if max_ppb <= fit_ppb + 1e-15:
             return 0
-        if max_ppb / fit_ppb > 50:
-            log_fit = math.log(fit_ppb)
-            log_max = math.log(max_ppb)
-            t = (math.log(ppb) - log_fit) / (log_max - log_fit)
-        else:
-            t = (ppb - fit_ppb) / (max_ppb - fit_ppb)
-        return int(round(max(0.0, min(1.0, t)) * 100))
+        letter = self._letter_anchor_ppb()
+        pivot = _MSA_ZOOM_LETTER_SLIDER / 100.0
+        if ppb <= letter + 1e-12:
+            u = self._ppb_unit(fit_ppb, letter, ppb)
+            return int(round(max(0.0, min(1.0, u)) * _MSA_ZOOM_LETTER_SLIDER))
+        u = self._ppb_unit(letter, max_ppb, ppb)
+        return int(
+            round(
+                _MSA_ZOOM_LETTER_SLIDER
+                + max(0.0, min(1.0, u)) * (100 - _MSA_ZOOM_LETTER_SLIDER)
+            )
+        )
 
     def _sync_zoom_slider_from_ppb(self) -> None:
         if self._updating_zoom_slider:
@@ -6701,11 +6814,17 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.zoom_by(factor, anchor_x=anchor_x)
 
     def _on_scale_zoom_at(self, content_x: float, zoom_in: bool) -> None:
-        """Scale-bar click: jump to max zoom (or fit) centered on the click."""
+        """Scale double-click: DNA/protein size 10 at slider 3/4; right-click → Fit.
+
+        Zooming further past 3/4 (slider / −+) only increases horizontal
+        nucleotide spacing (``ppb``), keeping the size-10 letter floor.
+        """
         slider = self._zoom_slider
         old_ppb = max(self._bars.pixels_per_base(), 1e-12)
-        # Click → most zoom; right-click / Shift+click → fit (slider left).
-        new_val = 100 if zoom_in else 0
+        # Double-click → size-10 / 3/4 slider; right-click → fit.
+        new_val = _MSA_ZOOM_LETTER_SLIDER if zoom_in else 0
+        if zoom_in:
+            self._bars.set_msa_residue_size(_MSA_LETTER_SIZE_PT)
         if slider is not None:
             if int(slider.value()) == new_val:
                 # Already at target zoom — still re-center on the click.
@@ -6717,8 +6836,8 @@ class MultiSequenceOverviewPanel(QWidget):
                 return
             new_ppb = self._slider_value_to_ppb(new_val)
         else:
-            fit_ppb, max_ppb = self._bars.zoom_bounds(self._bars_viewport_width())
-            new_ppb = max_ppb if zoom_in else fit_ppb
+            fit_ppb, _max_ppb = self._bars.zoom_bounds(self._bars_viewport_width())
+            new_ppb = self._letter_anchor_ppb() if zoom_in else fit_ppb
         factor = float(new_ppb) / old_ppb
         self._bars.zoom_by(factor, anchor_x=float(content_x))
 

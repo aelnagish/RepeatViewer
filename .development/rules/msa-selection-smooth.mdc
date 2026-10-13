@@ -1,77 +1,121 @@
 ---
 description: >-
-  Keep MSA / Overview selection dragging smooth — SelectionChrome edge dirties,
-  no overlay wash, throttled Position/name updates. Do not regress this.
-globs: repeatviewer/widgets/multi_sequence_overview.py,repeatviewer/widgets/preview_controls.py
+  Canonical MSA / Overview smooth display + selection rules. Do not regress
+  viewport cache, HiDPI blit, pixel sampling, or edge-only live chrome.
+globs: >-
+  repeatviewer/widgets/multi_sequence_overview.py,repeatviewer/widgets/preview_controls.py,repeatviewer/widgets/sequence_map_viewer.py,tests/test_multi_seq_msa_parity.py
 alwaysApply: false
 ---
 
-# MSA selection must stay smooth
+# MSA / Overview must stay smooth
 
-**Canonical code:** `_SelectionChrome` and `_BarsCanvas` selection paths in
+**Canonical code:** `_BarsCanvas`, `_SelectionChrome`, `_NamesColumn`, and
+`MultiSequenceOverviewPanel` in
 `repeatviewer/widgets/multi_sequence_overview.py`.
 
-The current drag/select behavior is intentionally fast. Treat regressions
-(jank, full-canvas flicker, black overlay slabs) as bugs.
+**Do not replace, weaken, or “simplify away” this architecture.** Treat jank,
+half-drawn Retina blits, white slabs after PDF→MSA, full-canvas flicker, or
+black overlay slabs as bugs.
 
-## Hard rules
+Single-sequence Annotation (`SequenceMapCanvas._seq_layer_cache`) and AliView’s
+paint-visible-only approach are the reference: **cache residues, paint selection
+on top, sample per pixel when zoomed out.**
 
-1. **No child overlay for selection chrome.** Paint guides/wash in the host
+---
+
+## Hard rules — residue display
+
+1. **Viewport residue pixmap cache.** Keep `_msa_layer_cache` for the visible
+   scroll viewport **without** selection chrome.
+   - Rebuild on zoom / scroll / data / color / layout only
+     (`_invalidate_msa_layer_cache` / `_msa_layer_serial`).
+   - **Never** invalidate or rebuild the residue cache as part of column, row,
+     regional, or feature **selection** updates.
+   - Selection paint = **blit cache** + chrome wash/outlines.
+
+2. **HiDPI blit (Retina).** When drawing `_msa_layer_cache`, call
+   `painter.drawPixmap(vis.topLeft(), cache)` with a clip — **never** pass a
+   source `QRect` into `drawPixmap` on a DPR>1 pixmap. Qt/PySide treats that
+   source in *device* pixels and draws only the top-left half of the MSA
+   (same bug SequenceMapCanvas documents for letter cache).
+
+3. **Fit / overview = one sample per screen pixel.** When
+   `ppb < _MSA_PIXEL_SAMPLE_PPB` (1.0) and letters are off, paint via
+   `_paint_msa_rows_pixel_sample` — cost O(rows × viewport_width), **not**
+   O(rows × alignment_length). Do not walk every column of a ~15k MSA at Fit.
+
+4. **Feature selection borders stay off the residue cache.** Bake features
+   without selection outlines into the cache
+   (`paint_feature_selection=False`); draw selected-feature borders after the
+   blit (`_paint_feature_selection_outlines`).
+
+5. **Panel show / PDF → MSA refit.** On `MultiSequenceOverviewPanel.showEvent`,
+   invalidate the residue cache and call `_after_panel_shown` (refit + full
+   update). Never adopt a collapsed scroll viewport (~0–40px) while the panel
+   is hidden — `_sync_viewport_fill` / `set_viewport_min_size` must ignore
+   tiny sizes so MSA does not shrink into a corner with white around it.
+
+---
+
+## Hard rules — selection chrome
+
+6. **No child overlay widget for selection.** Paint guides/wash in the host
    `paintEvent` after residues (`_SelectionChrome.paint`). A translucent child
-   widget paints an opaque black slab on macOS and hides the MSA.
+   overlay paints an opaque black slab on macOS and hides the MSA.
 
-2. **Live drag = outline only.** While `_live` is True, draw dashed guides /
-   box borders — **never** a translucent wash that forces MSA recomposite under
-   the selection.
+7. **Live drag = outline only.** While `_chrome._live` is True, draw dashed
+   guides / box borders — **never** a translucent wash that forces MSA
+   recomposite under the selection during drag.
 
-3. **Viewport residue cache (single-sequence / AliView strategy).** Keep an
-   `_msa_layer_cache` pixmap of the visible viewport *without* selection chrome.
-   Rebuild on zoom/scroll/data only. Selection paint must **blit the cache** then
-   draw wash — never re-walk 15k columns to fill a blue band. At fit zoom
-   (`ppb < 1`) use `_paint_msa_rows_pixel_sample` (one sample per screen pixel).
+8. **Live column dirties = edge strips only.** Use
+   `_column_edge_dirty_region` (left/right guides at old and new x). Never fill
+   the span between old→new edges. Never `update()` the full column band or
+   whole canvas for live column drags.
 
-4. **Column selection dirties edge strips only (while live).** Use
-   `_column_edge_dirty_region` (left/right guides at old and new x only).
-   **Never** fill the span between old→new edges (that recomposes the whole
-   band). **Never** `update()` the full column band or whole canvas for column
-   drags.
+9. **Clip dirties to the visible viewport.** Prefer `scroll_viewport_rect()` /
+   `_visible_clip()`. Do not dirty the full tall content height when only the
+   viewport is on screen.
 
-5. **Clip dirties to the visible viewport.** Prefer
-   `scroll_viewport_rect()` / `_visible_clip()`. Do not dirty the full tall
-   content height when only the viewport is on screen.
+10. **Paint each `event.region()` rect, not `event.rect()`.** The bounding box
+    of edge dirties spans the selection; iterating strips keeps drag cheap.
 
-6. **Paint each `event.region()` rect, not `event.rect()`.** The bounding box of
-   edge dirties spans the selection; iterating strips keeps column/row drag as
-   cheap as a small regional box.
+11. **Throttle Position + name highlights during drag (~20 Hz).** Chrome
+    geometry may follow the pointer every move; Position spins and name-column
+    wash go through `_schedule_region_drag_preview` /
+    `_drag_preview_timer` / `_NamesColumn._drag_highlight_timer` (50 ms).
 
-7. **Throttle Position + name-column work during drag (~20 Hz).** Chrome geometry
-   may follow the pointer every move; Position spins and name-column highlight
-   go through `_schedule_region_drag_preview` / `_drag_preview_timer` /
-   `_NamesColumn._drag_highlight_timer` (50 ms). Do not push spins or rebuild
-   the names column on every mouse move.
+12. **Zoom-aware follow.** Letter zoom: snap chrome to cell edges. Fit /
+    overview: **pixel-follow** the rubber (no per-cell snap).
 
-8. **Zoom-aware follow.** Nucleotide / letter zoom: snap chrome to cell edges.
-   Fit / overview zoom: **pixel-follow** the rubber (no per-cell snap) so the
-   outline tracks the cursor smoothly.
+13. **Name-column row click commits on release, not press.** Press-commit
+    flashes the first row on trackpad / three-finger drag before the range.
 
-9. **Name-column row click commits on release**, not press — otherwise
-   trackpad/three-finger drag flashes the press row before the range.
+---
 
 ## Do not
 
-- Reintroduce a `QWidget` overlay (or `WA_TransparentForMouseEvents` glass) for
-  selection highlighting.
-- Call `self.update()` with no region (full repaint) on selection move.
-- Fill a full-band wash while dragging columns.
-- Sync Position spins, scale guides, and name highlights synchronously on every
-  `mouseMoveEvent` without the drag-preview throttle.
-- Clear and rebuild MSA residue caches as part of selection chrome updates.
+- Reintroduce a `QWidget` selection overlay / glass pane.
+- Pass a source rectangle to `drawPixmap` for `_msa_layer_cache` on HiDPI.
+- Rebuild `_msa_layer_cache` (or call `_paint_msa_rows` over a wide band) just
+  to show blue selection wash.
+- Walk every MSA column at Fit zoom instead of pixel sampling.
+- Call bare `self.update()` (full canvas) on selection move / feature click.
+- Fill a full-band wash while `_live` column drag is active.
+- Sync Position spins, scale guides, and name highlights on every
+  `mouseMoveEvent` without the 50 ms throttle.
+- Let hidden-panel / PDF-tab resize set `_min_viewport` to a collapsed size.
+- Clear-then-rebuild chrome on live→committed when an in-place upgrade works.
 
-## When changing selection code
+---
 
-- Prefer extending `_SelectionChrome` dirty helpers over new update strategies.
-- If both a visual fix and a performance shortcut conflict, keep the cheap dirty
-  path and fix painting within those strips (see regional live `set_region_box`
-  comments about white edge trails).
-- After edits, drag column, row, and regional selections at fit zoom and at
-  letter zoom — both must stay fluid with no full-canvas flicker.
+## When changing MSA Overview code
+
+- Prefer extending `_SelectionChrome` dirty helpers and the viewport cache over
+  new paint strategies.
+- If a visual fix conflicts with performance, keep the cheap path (cache blit,
+  edge dirty, pixel sample) and fix painting within it.
+- After edits, verify:
+  - Column / row / regional / feature select at **Fit** and **letter** zoom
+  - Long MSA (~15k cols) selection stays fluid
+  - PDF Preview → back to MSA Overview fills the pane (no half-draw, no corner)
+  - Trackpad name-column drag does not flash the press row

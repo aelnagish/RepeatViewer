@@ -558,8 +558,11 @@ def test_bars_select_all_and_region_without_zoom(qapp: QApplication) -> None:
     canvas.close()
 
 
-def test_msa_residue_size_and_annotation_track(qapp: QApplication) -> None:
-    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+def test_msa_track_height_and_annotation_track(qapp: QApplication) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import (
+        _BarsCanvas,
+        _msa_letter_size_metrics,
+    )
 
     canvas = _BarsCanvas()
     canvas.show()
@@ -575,20 +578,23 @@ def test_msa_residue_size_and_annotation_track(qapp: QApplication) -> None:
         ["ACGTACGTAC", "ACGTACGTAC"],
         features=feats,
     )
-    canvas.set_msa_residue_size(10)
+    # Bypass zoom clamp so we stay below letter-zoom ppb; Track height owns the band.
+    canvas._ppb = 0.4
+    canvas.set_track_height(1)
     h_small = canvas.msa_residue_height()
+    canvas._recompute_layout()
     tops_small = list(canvas.row_heights())
-    canvas.set_msa_residue_size(20)
+    canvas.set_track_height(10)
+    full_h, _ = _msa_letter_size_metrics(10)
+    assert canvas.msa_residue_height() == full_h
     assert canvas.msa_residue_height() > h_small
     assert canvas.row_heights()[0] > tops_small[0]
 
-    # Height keeps shrinking down to the minimum label size (2pt).
-    canvas.set_msa_residue_size(8)
-    h8 = canvas.msa_residue_height()
-    canvas.set_msa_residue_size(2)
-    h2 = canvas.msa_residue_height()
-    assert h2 < h8
-    assert h2 >= 1
+    canvas.set_track_height(5)
+    h5 = canvas.msa_residue_height()
+    canvas.set_track_height(2)
+    assert canvas.msa_residue_height() < h5
+    assert canvas.msa_residue_height() >= 1
 
     # Sequence distance opens a gap between rows (tops move apart).
     canvas.set_sequence_row_gap(0)
@@ -606,23 +612,119 @@ def test_msa_residue_size_and_annotation_track(qapp: QApplication) -> None:
     canvas.close()
 
 
-def test_msa_name_label_tracks_dna_protein_size(qapp: QApplication, tmp_path: Path) -> None:
-    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+def test_msa_name_label_tracks_track_height(qapp: QApplication, tmp_path: Path) -> None:
+    from repeatviewer.widgets.multi_sequence_overview import (
+        MultiSequenceOverviewPanel,
+        _msa_letter_size_metrics,
+    )
 
+    # Long enough that Fit stays below letter-zoom ppb.
+    seq = "ACGT" * 500
     fasta = tmp_path / "aln.fa"
-    fasta.write_text(">s1\nACGTACGT\n>s2\nACGTACGT\n", encoding="utf-8")
+    fasta.write_text(f">s1\n{seq}\n>s2\n{seq}\n", encoding="utf-8")
     panel = MultiSequenceOverviewPanel(fasta)
+    panel.resize(800, 400)
     panel.show()
     qapp.processEvents()
     panel.load_path(fasta, msa_mode=True)
     qapp.processEvents()
-    panel._rail.bases_zoomed_in.setValue(12)
+    panel._rail.set_overview_display_mode(True)
+    panel._fit_bars()
     qapp.processEvents()
-    assert panel._names.label_point_size() == 13  # nucleotide size + 1
-    panel._rail.bases_zoomed_in.setValue(4)
+    assert panel._bars.pixels_per_base() < 6.0
+    # Widget flags (page may be off-stack so isVisible() is False).
+    assert not panel._rail.track_height.isHidden()
+    assert panel._rail.bases_zoomed_in.isHidden()
+    panel._rail.track_height.setValue(10)
     qapp.processEvents()
-    assert panel._names.label_point_size() == 5
+    assert panel._bars.track_height() == 10
+    full_h, _ = _msa_letter_size_metrics(10)
+    assert panel._bars.msa_residue_height() == full_h
+    assert panel._names.label_point_size() == 11  # set_label_point_size(10) → +1
+    panel._rail.track_height.setValue(3)
+    qapp.processEvents()
+    assert panel._names.label_point_size() == 4  # set_label_point_size(3) → +1
     panel.close()
+
+
+def test_msa_scale_double_click_zooms_to_three_quarter(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Scale double-click → DNA/protein size 10 at zoom-slider ¾."""
+    from repeatviewer.widgets.multi_sequence_overview import (
+        MultiSequenceOverviewPanel,
+        _MSA_ZOOM_LETTER_SLIDER,
+    )
+
+    fasta = tmp_path / "aln.fa"
+    fasta.write_text(">s1\n" + ("ACGT" * 200) + "\n>s2\n" + ("ACGT" * 200) + "\n", encoding="utf-8")
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.resize(900, 500)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    panel._fit_bars()
+    qapp.processEvents()
+    assert panel._zoom_slider.value() <= 5
+    mid_x = panel._bars.bp_to_x(400.0)
+    panel._on_scale_zoom_at(mid_x, True)
+    qapp.processEvents()
+    assert abs(panel._zoom_slider.value() - _MSA_ZOOM_LETTER_SLIDER) <= 2
+    letter_ppb = panel._letter_anchor_ppb()
+    assert abs(panel._bars.pixels_per_base() - letter_ppb) / letter_ppb < 0.05
+    # Slider mapping: ¾ = size 10; 100 is at or past that (wider when max allows).
+    assert panel._slider_value_to_ppb(_MSA_ZOOM_LETTER_SLIDER) == pytest.approx(
+        letter_ppb, rel=0.02
+    )
+    assert panel._slider_value_to_ppb(100) >= panel._slider_value_to_ppb(
+        _MSA_ZOOM_LETTER_SLIDER
+    ) - 1e-9
+    # At ¾: residue band matches ppb → square cells.
+    band = panel._bars._msa_letter_band_height()
+    assert abs(band - panel._bars.pixels_per_base()) <= 1.0
+    panel.close()
+
+
+def test_msa_letter_background_square_connects_rows(qapp: QApplication) -> None:
+    """Letter fill is a full-band square; gap 0 → adjacent rows touch vertically."""
+    from repeatviewer.widgets.multi_sequence_overview import (
+        _BarsCanvas,
+        _MSA_LETTER_BG_SCALE,
+        _msa_letter_bg_rect,
+        _msa_letter_size_metrics,
+    )
+
+    letter_h, letter_ppb = _msa_letter_size_metrics(10)
+    bg = _msa_letter_bg_rect(0.0, 0.0, letter_ppb, float(letter_h))
+    assert abs(bg.width() - bg.height()) < 1e-9
+    assert bg.width() == pytest.approx(min(letter_ppb, letter_h) * _MSA_LETTER_BG_SCALE)
+    assert bg.top() == pytest.approx(0.0)
+    assert bg.bottom() == pytest.approx(float(letter_h))
+
+    canvas = _BarsCanvas()
+    canvas.show()
+    qapp.processEvents()
+    canvas.set_msa_data(["s1", "s2"], ["ACGTACGTAC", "ACGTACGTAC"])
+    canvas.set_sequence_row_gap(0)
+    canvas._ppb = letter_ppb
+    canvas._recompute_layout()
+    assert canvas._msa_shows_letters()
+    assert canvas._msa_letter_band_height() == letter_h
+    # Residue bands abut when Sequence distance is 0.
+    assert canvas.row_tops()[1] == canvas.row_tops()[0] + canvas._msa_letter_band_height()
+    r0 = _msa_letter_bg_rect(
+        0.0, float(canvas.row_tops()[0]), letter_ppb, float(letter_h)
+    )
+    r1 = _msa_letter_bg_rect(
+        0.0, float(canvas.row_tops()[1]), letter_ppb, float(letter_h)
+    )
+    assert r0.bottom() == pytest.approx(r1.top())
+    # Past size-10: band stays fixed so horizontal gaps open.
+    canvas._ppb = letter_ppb * 2.0
+    canvas._recompute_layout()
+    assert canvas._msa_letter_band_height() == letter_h
+    canvas.close()
 
 
 def test_add_features_keeps_msa_mode(qapp: QApplication, tmp_path: Path) -> None:

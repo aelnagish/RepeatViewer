@@ -706,6 +706,7 @@ class SequenceAnnotationRail(QWidget):
     translationOptionsChanged = Signal()  # three-letter / genetic code
     basesZoomedInChanged = Signal(int)
     basesZoomedOutChanged = Signal(int)
+    trackHeightChanged = Signal(int)  # MSA/multi overview: Track height 1–10
     annotationLabelSizeChanged = Signal(int)
     annotationThicknessChanged = Signal(int)
     columnDistanceChanged = Signal(int)  # MSA overview: gap between residue columns
@@ -1227,13 +1228,28 @@ class SequenceAnnotationRail(QWidget):
         self.bases_font_label = QLabel("DNA/protein labels:", page)
         self.bases_zoomed_in = NoWheelSpinBox(page)
         self.bases_zoomed_in.setRange(2, 36)
-        self.bases_zoomed_in.setValue(6)  # single-seq default; MSA overview uses 4
+        self.bases_zoomed_in.setValue(6)  # single-seq default
         self.bases_zoomed_in.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
         self.bases_zoomed_in.setToolTip(
             "Point size of sequence letters when zoomed in enough to show "
             "individual bases (DNA) or residues (protein)."
         )
         self.bases_zoomed_in.valueChanged.connect(self.basesZoomedInChanged.emit)
+
+        # MSA / multi-sequence Overview: replaces DNA/protein labels.
+        self.track_height_label = QLabel("Track height:", page)
+        self.track_height = NoWheelSpinBox(page)
+        self.track_height.setRange(1, 10)
+        self.track_height.setValue(4)
+        self.track_height.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
+        self.track_height.setToolTip(
+            "Vertical height of each squeezed sequence track (1–10). "
+            "10 matches the track height at DNA/protein size 10 "
+            "(zoom slider at ¾). Scale double-click zooms to that size."
+        )
+        self.track_height.valueChanged.connect(self.trackHeightChanged.emit)
+        self.track_height_label.setVisible(False)
+        self.track_height.setVisible(False)
 
         # Kept for settings / map wiring; not shown on Others.
         self.bases_zoomed_out = NoWheelSpinBox(page)
@@ -1319,6 +1335,7 @@ class SequenceAnnotationRail(QWidget):
         self.sequence_name_size.valueChanged.connect(self.sequenceNameSizeChanged.emit)
 
         sizes.addRow(self.bases_font_label, self.bases_zoomed_in)
+        sizes.addRow(self.track_height_label, self.track_height)
         sizes.addRow("Annotation labels:", self.annotation_label_size)
         sizes.addRow("Annotation thickness:", self.annotation_thickness)
         self._annotation_distance_label = QLabel("Annotation distance:", page)
@@ -2067,6 +2084,11 @@ class SequenceAnnotationRail(QWidget):
             self.split_tracks_by_source,
         ):
             widget.setVisible(not overview)
+        # Single-seq keeps DNA/protein labels; MSA/multi use Track height.
+        self.bases_font_label.setVisible(not overview)
+        self.bases_zoomed_in.setVisible(not overview)
+        self.track_height_label.setVisible(overview)
+        self.track_height.setVisible(overview)
         self.set_msa_display_mode(getattr(self, "_msa_display_mode", False))
         self._column_distance_label.setVisible(False)
         self.column_distance.setVisible(False)
