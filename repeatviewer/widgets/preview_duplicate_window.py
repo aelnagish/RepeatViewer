@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QTimer, Slot
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QPushButton,
+    QSizePolicy,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from repeatviewer.ui.window_geometry import ensure_widget_on_screen
 from repeatviewer.widgets.preview_controls import (
@@ -12,6 +19,7 @@ from repeatviewer.widgets.preview_controls import (
     PreviewZoomBar,
 )
 from repeatviewer.widgets.preview_tabs import FilePreviewPage, PreviewTabWidget
+from repeatviewer.widgets.task_progress import TaskProgressPanel
 
 
 class PreviewDuplicateWindow(QWidget):
@@ -96,6 +104,24 @@ class PreviewDuplicateWindow(QWidget):
         layout.addWidget(self._zoom_host)
         layout.addWidget(self._header)
         layout.addWidget(self._tabs, stretch=1)
+
+        # Local status strip: Overview/Annotation jobs must show progress here when
+        # this window is on another screen (MainWindow's bar is not visible there).
+        self._job_running = False
+        self._job_work_steps = 1
+        self._status_bar = QStatusBar(self)
+        self._status_bar.setSizeGripEnabled(False)
+        self._status_bar.setFixedHeight(26)
+        self._task_progress = TaskProgressPanel()
+        self._status_bar.addPermanentWidget(self._task_progress, 1)
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setToolTip("Stop the currently running job")
+        self._stop_btn.setMaximumHeight(22)
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.clicked.connect(self._stop_current_job)
+        self._status_bar.addPermanentWidget(self._stop_btn)
+        self._status_bar.hide()
+        layout.addWidget(self._status_bar)
 
         # Keep a weak snapshot of source overview features so the duplicate can
         # mirror in-memory annotations if disk sidecars are empty.
@@ -209,3 +235,82 @@ class PreviewDuplicateWindow(QWidget):
         self._expand_zoom_host()
         if hasattr(self._zoom_bar, "set_chrome_mode"):
             self._zoom_bar.set_chrome_mode("text")
+
+    @staticmethod
+    def _running_job_title(job_title: str) -> str:
+        title = str(job_title or "job").strip() or "job"
+        if title.lower().startswith("running "):
+            return title if title.endswith("…") else f"{title}…"
+        return f"Running {title}…"
+
+    @staticmethod
+    def _parse_progress_filename(label: str) -> str:
+        if ": " in label:
+            part = label.split(": ", 1)[1]
+        elif label.lower().startswith("aligning "):
+            part = label[9:]
+        else:
+            return ""
+        part = part.removesuffix("…").strip()
+        if not part or part.lower() in {"finished", "alignment finished."}:
+            return ""
+        return part
+
+    def _show_job_progress(self, job_title: str, total_steps: int) -> None:
+        """Match MainWindow's job-progress API for Overview batch jobs."""
+        self._job_running = True
+        self._job_work_steps = max(1, int(total_steps))
+        self._status_bar.show()
+        if self._task_progress is not None:
+            self._task_progress.start(
+                self._running_job_title(job_title),
+                self._job_work_steps + 1,
+            )
+        if self._stop_btn is not None:
+            self._stop_btn.setEnabled(True)
+
+    @Slot(int, str)
+    def _on_job_progress(self, value: int, label: str) -> None:
+        if self._task_progress is None:
+            return
+        work = getattr(self, "_job_work_steps", self._task_progress._total)
+        capped = min(max(0, int(value)), max(0, int(work)))
+        detail = self._parse_progress_filename(label)
+        if not detail and label:
+            detail = label.split(": ", 1)[-1].strip() if ": " in label else label
+            detail = detail.removesuffix("…").strip()
+        self._task_progress.update(capped, detail)
+
+    def _hide_job_progress(self) -> None:
+        self._job_running = False
+        if self._task_progress is not None:
+            self._task_progress.reset()
+        if self._stop_btn is not None:
+            self._stop_btn.setEnabled(False)
+        self._status_bar.hide()
+
+    def _stop_current_job(self) -> None:
+        """Cancel Overview annotation jobs running in this duplicate window."""
+        from repeatviewer.widgets.multi_sequence_overview import (
+            MultiSequenceOverviewPanel,
+        )
+        from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
+
+        for panel in self.findChildren(SequenceMapPanel):
+            if (
+                panel.cancel_auto_annotation()
+                or panel.cancel_similarity_annotation()
+                or panel.cancel_transfer_annotation()
+            ):
+                if self._stop_btn is not None:
+                    self._stop_btn.setEnabled(False)
+                return
+
+        for panel in self.findChildren(MultiSequenceOverviewPanel):
+            if panel.cancel_auto_annotation() or panel.cancel_similarity_annotation():
+                if self._stop_btn is not None:
+                    self._stop_btn.setEnabled(False)
+                return
+
+        if self._stop_btn is not None:
+            self._stop_btn.setEnabled(False)

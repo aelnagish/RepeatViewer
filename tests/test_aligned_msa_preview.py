@@ -217,6 +217,9 @@ def test_overview_annotation_tab_visible_and_wired(
     assert "msa" in tip_sim or "open" in tip_sim
     panel._bars.set_selected_rows([1])
     assert panel._target_record_ids_for_msa_job() == ["b"]
+    # Regional MSA row box also scopes Feature detection / Similarity.
+    panel._bars.set_regional_selection(1, 4, {0})
+    assert panel._target_record_ids_for_msa_job() == ["a"]
     # Same control-panel width as single-sequence Annotation.
     assert rail._module_width == 260
     panel.deleteLater()

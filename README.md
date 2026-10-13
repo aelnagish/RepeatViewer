@@ -208,6 +208,12 @@ Background jobs show progress in the status bar; **Stop** cancels the active tas
 
 ## Documentation
 
+| Guide | Contents |
+|-------|----------|
+| [**Operations Manual**](docs/OPERATIONS_MANUAL.md) | Illustrated how-to: workspace, MSA Overview (Lens, selections), Dotplot, curation loop |
+| [User Manual](docs/MANUAL.md) | Full reference: tools, parameters, outputs, troubleshooting |
+| [Plugins](docs/PLUGINS.md) | Extending RepeatViewer with plugins |
+
 ---
 
 ## Project structure

@@ -4699,35 +4699,53 @@ class MultiSequenceOverviewPanel(QWidget):
     def _clear_annotation_job_status(self) -> None:
         self._rail.set_annotation_job_status("")
 
+    def _job_progress_hosts(self) -> list:
+        from repeatviewer.widgets.task_progress import iter_job_progress_hosts
+
+        return iter_job_progress_hosts(self)
+
     def _main_window_for_job_progress(self):
-        win = self.window()
-        if win is not None and hasattr(win, "_show_job_progress"):
-            return win
-        return None
+        """Prefer MainWindow (tool lock + status bar); else the local window."""
+        hosts = self._job_progress_hosts()
+        for win in hosts:
+            if hasattr(win, "_set_job_actions_enabled"):
+                return win
+        return hosts[0] if hosts else None
 
     def _begin_window_job_progress(self, title: str, total_steps: int) -> None:
-        win = self._main_window_for_job_progress()
-        if win is None:
-            return
-        win._show_job_progress(title, max(1, int(total_steps)))
+        steps = max(1, int(total_steps))
+        for win in self._job_progress_hosts():
+            win._show_job_progress(title, steps)
+            if hasattr(win, "_set_job_actions_enabled"):
+                win._set_job_actions_enabled(False)
 
     def _update_window_job_progress(self, completed: int, detail: str = "") -> None:
-        win = self._main_window_for_job_progress()
-        if win is None or not hasattr(win, "_on_job_progress"):
-            return
-        win._on_job_progress(max(0, int(completed)), str(detail or ""))
+        value = max(0, int(completed))
+        text = str(detail or "")
+        for win in self._job_progress_hosts():
+            if hasattr(win, "_on_job_progress"):
+                win._on_job_progress(value, text)
 
     def _end_window_job_progress(self) -> None:
-        win = self._main_window_for_job_progress()
-        if win is None:
-            return
-        if getattr(win, "_job_running", False) and hasattr(win, "_task_progress"):
-            bar = win._task_progress
-            if bar is not None:
-                total = max(1, int(getattr(bar, "_total", 1)))
-                bar.update(total, "Done")
-        if hasattr(win, "_hide_job_progress"):
-            win._hide_job_progress()
+        for win in self._job_progress_hosts():
+            if getattr(win, "_job_running", False) and hasattr(win, "_task_progress"):
+                bar = win._task_progress
+                if bar is not None:
+                    total = max(1, int(getattr(bar, "_total", 1)))
+                    bar.update(total, "Done")
+            if hasattr(win, "_hide_job_progress"):
+                win._hide_job_progress()
+            # Unlock BLAST/TE-Aid unless a MainWindow QThread job is still active.
+            # Do not call ``_any_background_job_running`` here — it includes this
+            # panel and can keep the toolbar disabled while we are finishing.
+            if hasattr(win, "_set_job_actions_enabled"):
+                worker_busy = (
+                    getattr(win, "_worker_thread", None) is not None
+                    or getattr(win, "_genome_map_thread", None) is not None
+                    or getattr(win, "_benchmark_thread", None) is not None
+                )
+                if not worker_busy:
+                    win._set_job_actions_enabled(True)
 
     def _sync_auto_annotation_all_check(self) -> None:
         checks = list(self._auto_ann_checks.values())
@@ -4904,10 +4922,20 @@ class MultiSequenceOverviewPanel(QWidget):
         return None
 
     def _target_record_ids_for_msa_job(self) -> list[str]:
-        """Selected sequences, or every sequence in the open MSA when none are selected."""
+        """Selected sequences, or every sequence in the open MSA when none are selected.
+
+        Name-column selection and regional MSA row boxes both count as a selection.
+        """
         ids = self._selected_record_ids()
         if ids:
             return ids
+        regional = self._bars.regional_rows()
+        if regional:
+            return [
+                self._record_ids[row]
+                for row in sorted(regional)
+                if 0 <= row < len(self._record_ids)
+            ]
         return list(self._record_ids)
 
     def _target_record_ids_for_manual_add(self) -> list[str] | None:
@@ -5003,14 +5031,14 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         self._ann_cancel.request()
         self._set_annotation_job_status("Stopping annotation…")
-        win = self._main_window_for_job_progress()
-        if win is not None and hasattr(win, "_task_progress") and win._task_progress:
-            win._task_progress.update(
-                getattr(win, "_job_work_steps", 0), "Stopping…"
-            )
-        # Keep Run as Stop until the worker exits; disable only the status Stop.
-        if win is not None and getattr(win, "_stop_btn", None) is not None:
-            win._stop_btn.setEnabled(False)
+        for win in self._job_progress_hosts():
+            if hasattr(win, "_task_progress") and win._task_progress:
+                win._task_progress.update(
+                    getattr(win, "_job_work_steps", 0), "Stopping…"
+                )
+            # Keep Run as Stop until the worker exits; disable only the status Stop.
+            if getattr(win, "_stop_btn", None) is not None:
+                win._stop_btn.setEnabled(False)
 
     def cancel_auto_annotation(self) -> bool:
         """Request cancellation of a running Overview feature-detection job."""
@@ -5043,17 +5071,32 @@ class MultiSequenceOverviewPanel(QWidget):
         target_ids = list(record_ids or self._selected_record_ids())
         if not target_ids:
             return
+        # Refuse to start while MainWindow is already running BLAST / TE-Aid / etc.
+        main = self._main_window_for_job_progress()
+        if main is not None and hasattr(main, "_any_background_job_running"):
+            if main._any_background_job_running():
+                QMessageBox.information(
+                    self,
+                    "Job already running",
+                    "Wait for the current job to finish before starting another. "
+                    "You can still browse folders and preview files while it runs.",
+                )
+                return
+
         self._ann_cancel.reset()
         self._ann_job_kind = kind
         self._ann_progress_total = max(1, int(total_steps))
         self._ann_last_sequence_status = ""
         self._set_annotation_controls_enabled(False)
         n = len(target_ids)
-        self._set_annotation_job_status(
-            f"{title}: running on {n:,} selected sequence{'s' if n != 1 else ''}…"
+        scope = (
+            f"{n:,} selected sequence{'s' if n != 1 else ''}"
+            if self._selected_record_ids() or self._bars.regional_rows()
+            else f"all {n:,} sequence{'s' if n != 1 else ''}"
         )
+        self._set_annotation_job_status(f"{title}: running on {scope}…")
         self.statusMessage.emit(
-            f"Running {title.lower()} on {n:,} selected sequence(s) in {self._path.name}…"
+            f"Running {title.lower()} on {scope} in {self._path.name}…"
         )
         self._begin_window_job_progress(title, total_steps)
 
@@ -5094,6 +5137,28 @@ class MultiSequenceOverviewPanel(QWidget):
             )
 
         worker = Worker(_job, progress=True)
+        from repeatviewer.widgets.process_monitor_dialog import (
+            attach_annotation_worker_process_monitor,
+        )
+
+        if kind == "similarity":
+            cfg = self._similarity_ann_settings
+            mon_title = "Similarity annotation"
+            tool_key = "similarity_annotation"
+        else:
+            cfg = self._auto_ann_settings
+            mon_title = "Feature detection"
+            tool_key = "feature_detection"
+        attach_annotation_worker_process_monitor(
+            self,
+            worker,
+            title=mon_title,
+            enabled=bool(getattr(cfg, "show_process_window", True)),
+            close_when_finished=bool(
+                getattr(cfg, "close_process_window_when_finished", True)
+            ),
+            tool_key=tool_key,
+        )
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)

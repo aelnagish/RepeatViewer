@@ -8,7 +8,7 @@ from PySide6.QtCore import QSettings
 
 
 DEFAULT_SIMILARITY_EVALUE = 1e-4
-SETTINGS_VERSION = 7
+SETTINGS_VERSION = 8
 
 
 @dataclass
@@ -21,7 +21,8 @@ class SimilarityAnnotationSettings:
     cdd_evalue: float = DEFAULT_SIMILARITY_EVALUE
     max_hits_per_database: int = 10
     show_database_name_on_track: bool = True
-    show_info_window_after_run: bool = True
+    show_process_window: bool = True
+    close_process_window_when_finished: bool = True
 
 
 def format_similarity_evalue_suffix(evalue: float | str | None) -> str:
@@ -100,7 +101,8 @@ def load_similarity_annotation_settings() -> SimilarityAnnotationSettings:
     version = _get_int(s, f"{prefix}settings_version", 0)
     max_hits = _get_int(s, f"{prefix}max_hits_per_database", 10)
     show_db_name = _get_bool(s, f"{prefix}show_database_name_on_track", True)
-    show_info = _get_bool(s, f"{prefix}show_info_window_after_run", True)
+    show_process = _get_bool(s, f"{prefix}show_process_window", True)
+    close_process = _get_bool(s, f"{prefix}close_process_window_when_finished", True)
     # v6 and earlier stored a single blast_evalue for both BLASTN and BLASTP.
     legacy_blast = _get_float(s, f"{prefix}blast_evalue", DEFAULT_SIMILARITY_EVALUE)
     blastn = _get_float(s, f"{prefix}blastn_evalue", legacy_blast)
@@ -114,7 +116,8 @@ def load_similarity_annotation_settings() -> SimilarityAnnotationSettings:
         cdd_evalue=cdd,
         max_hits_per_database=max_hits,
         show_database_name_on_track=show_db_name,
-        show_info_window_after_run=show_info,
+        show_process_window=show_process,
+        close_process_window_when_finished=close_process,
     )
     if version < SETTINGS_VERSION:
         save_similarity_annotation_settings(settings)
@@ -131,4 +134,8 @@ def save_similarity_annotation_settings(settings: SimilarityAnnotationSettings) 
     s.setValue(f"{prefix}cdd_evalue", settings.cdd_evalue)
     s.setValue(f"{prefix}max_hits_per_database", settings.max_hits_per_database)
     s.setValue(f"{prefix}show_database_name_on_track", settings.show_database_name_on_track)
-    s.setValue(f"{prefix}show_info_window_after_run", settings.show_info_window_after_run)
+    s.setValue(f"{prefix}show_process_window", bool(settings.show_process_window))
+    s.setValue(
+        f"{prefix}close_process_window_when_finished",
+        bool(settings.close_process_window_when_finished),
+    )

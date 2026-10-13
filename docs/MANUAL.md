@@ -12,6 +12,10 @@ This manual assumes you are familiar with TE biology and with tools such as
 BLAST, MAFFT and RepeatMasker. It does not assume you have used RepeatViewer
 before.
 
+For **screenshots and step-by-step operation** (especially MSA Overview, Lens,
+and selection tools), see the companion
+[Operations Manual](OPERATIONS_MANUAL.md).
+
 ---
 
 ## Contents
@@ -986,6 +990,10 @@ viewer**.
 ## 9. Visualization
 
 **Toolbar: Visualization · Tools → Visualization**
+
+Interactive Preview / MSA Overview operation (Lens, row and column selection,
+zoom) is covered with screenshots in the
+[Operations Manual § MSA Overview](OPERATIONS_MANUAL.md#5-msa-overview-detailed).
 
 Three genome-scale plots. Like Repeat Quantify, these dialogs are non-modal —
 leave one open and click files in the Files panel to fill its fields.

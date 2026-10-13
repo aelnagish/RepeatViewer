@@ -6412,6 +6412,10 @@ class AutoAnnotationSettingsPanel(QWidget):
 
         layout.addWidget(self._section_title("ORF (orfipy)"))
         layout.addLayout(self._orf_form(settings.orf or OrfSettings()))
+        layout.addWidget(_settings_separator())
+
+        layout.addWidget(self._section_title("Others"))
+        layout.addLayout(self._others_form(settings))
 
         self._ltr_fields = self._terminal_fields[0]
         self._tir_fields = self._terminal_fields[1]
@@ -6725,6 +6729,46 @@ class AutoAnnotationSettingsPanel(QWidget):
         self._orf_field_list = (min_len, max_len, alt_starts)
         return form
 
+    def _others_form(self, settings: AutoAnnotationSettings) -> QFormLayout:
+        form = self._settings_form()
+        show_box = QCheckBox("Show process window while run", self)
+        show_box.setChecked(bool(settings.show_process_window))
+        show_box.setToolTip(
+            "Open a window that streams Feature detection progress and tool "
+            "messages. Useful for long runs."
+        )
+        close_box = QCheckBox("Close process window when finished", self)
+        close_box.setChecked(bool(settings.close_process_window_when_finished))
+        close_box.setEnabled(show_box.isChecked())
+        close_box.setToolTip(
+            "Automatically close the process window after a successful run. "
+            "On failure the window stays open so you can read the log."
+        )
+        show_box.toggled.connect(close_box.setEnabled)
+        form.addRow(
+            self._form_label(""),
+            field_with_help(
+                show_box,
+                "Show process window",
+                "Open a live process window while Feature detection runs.",
+                parent=self,
+                stretch=True,
+            ),
+        )
+        form.addRow(
+            self._form_label(""),
+            field_with_help(
+                close_box,
+                "Close process window when finished",
+                "Close the process window automatically after a successful run.",
+                parent=self,
+                stretch=True,
+            ),
+        )
+        self._show_process_window = show_box
+        self._close_process_window = close_box
+        return form
+
     def _selected_orf_frames(self) -> tuple[int, ...]:
         from repeatviewer.backends.auto_annotation_settings import normalize_orf_frames
 
@@ -6759,8 +6803,14 @@ class AutoAnnotationSettingsPanel(QWidget):
             alternative_start_codons=alt_starts.text().strip(),
             frames=self._selected_orf_frames(),
         )
-        return AutoAnnotationSettings(ltr=ltr, tir=tir, tandem=tandem, orf=orf)
-
+        return AutoAnnotationSettings(
+            ltr=ltr,
+            tir=tir,
+            tandem=tandem,
+            orf=orf,
+            show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=self._close_process_window.isChecked(),
+        )
     @staticmethod
     def _read_terminal_settings(
         fields: tuple[QSpinBox, QSpinBox, QSpinBox, QSpinBox, QDoubleSpinBox],
@@ -6947,16 +6997,47 @@ class SimilarityAnnotationSettingsPanel(QWidget):
             ),
         )
 
-        self._show_info_dialog = QCheckBox("Show info window after run", self)
-        self._show_info_dialog.setChecked(settings.show_info_window_after_run)
+        self._show_process_window = QCheckBox(
+            "Show process window while run", self
+        )
+        self._show_process_window.setChecked(bool(settings.show_process_window))
+        self._show_process_window.setToolTip(
+            "Open a window that streams Similarity annotation progress and "
+            "tool messages. Useful for long runs."
+        )
         form.addRow(
             "",
             field_with_help(
-                self._show_info_dialog,
-                "Show info window after run",
-                f"When checked, {APP_DISPLAY_NAME} shows an information dialog "
-                "with the similarity search summary (e.g. hits/no hits or "
-                "database-readiness problems).",
+                self._show_process_window,
+                "Show process window",
+                "Open a live process window while Similarity annotation runs.",
+                parent=self,
+                stretch=True,
+            ),
+        )
+
+        self._close_process_window = QCheckBox(
+            "Close process window when finished", self
+        )
+        self._close_process_window.setChecked(
+            bool(settings.close_process_window_when_finished)
+        )
+        self._close_process_window.setEnabled(
+            self._show_process_window.isChecked()
+        )
+        self._close_process_window.setToolTip(
+            "Automatically close the process window after a successful run. "
+            "On failure the window stays open so you can read the log."
+        )
+        self._show_process_window.toggled.connect(
+            self._close_process_window.setEnabled
+        )
+        form.addRow(
+            "",
+            field_with_help(
+                self._close_process_window,
+                "Close process window when finished",
+                "Close the process window automatically after a successful run.",
                 parent=self,
                 stretch=True,
             ),
@@ -6971,9 +7052,9 @@ class SimilarityAnnotationSettingsPanel(QWidget):
             cdd_evalue=self._cdd_evalue.value(),
             max_hits_per_database=self._max_hits.value(),
             show_database_name_on_track=self._show_db_name.isChecked(),
-            show_info_window_after_run=self._show_info_dialog.isChecked(),
+            show_process_window=self._show_process_window.isChecked(),
+            close_process_window_when_finished=self._close_process_window.isChecked(),
         )
-
 
 
 
@@ -9447,25 +9528,33 @@ class SequenceMapPanel(QWidget):
             detail,
         )
 
+    def _job_progress_hosts(self) -> list:
+        from repeatviewer.widgets.task_progress import iter_job_progress_hosts
+
+        return iter_job_progress_hosts(self)
+
     def _main_window_for_job_progress(self):
-        """Main window that owns the bottom-right status-bar progress panel."""
-        win = self.window()
-        if win is not None and hasattr(win, "_show_job_progress"):
-            return win
-        return None
+        """Prefer MainWindow (tool lock + status bar); else the local window."""
+        hosts = self._job_progress_hosts()
+        for win in hosts:
+            if hasattr(win, "_set_job_actions_enabled"):
+                return win
+        return hosts[0] if hosts else None
 
     def _begin_window_job_progress(self, title: str, total_steps: int) -> None:
-        win = self._main_window_for_job_progress()
-        if win is None:
-            return
-        win._show_job_progress(title, max(1, int(total_steps)))
+        steps = max(1, int(total_steps))
+        for win in self._job_progress_hosts():
+            win._show_job_progress(title, steps)
+            if hasattr(win, "_set_job_actions_enabled"):
+                win._set_job_actions_enabled(False)
 
     def _update_window_job_progress(self, completed: int, detail: str = "") -> None:
         """Update the status-bar progress bar (``completed`` = finished steps)."""
-        win = self._main_window_for_job_progress()
-        if win is None or not hasattr(win, "_on_job_progress"):
-            return
-        win._on_job_progress(max(0, int(completed)), str(detail or ""))
+        value = max(0, int(completed))
+        text = str(detail or "")
+        for win in self._job_progress_hosts():
+            if hasattr(win, "_on_job_progress"):
+                win._on_job_progress(value, text)
 
     def _hold_transfer_session_progress(self) -> None:
         """Keep a full bar labeled Running Transfer annotation… after search."""
@@ -9506,17 +9595,24 @@ class SequenceMapPanel(QWidget):
         QTimer.singleShot(40, self._hold_transfer_session_progress)
 
     def _end_window_job_progress(self) -> None:
-        win = self._main_window_for_job_progress()
-        if win is None:
-            return
         # Fill the reserved final slot, then hide (same as BLAST after UI ready).
-        if getattr(win, "_job_running", False) and hasattr(win, "_task_progress"):
-            bar = win._task_progress
-            if bar is not None:
-                total = max(1, int(getattr(bar, "_total", 1)))
-                bar.update(total, "Done")
-        if hasattr(win, "_hide_job_progress"):
-            win._hide_job_progress()
+        for win in self._job_progress_hosts():
+            if getattr(win, "_job_running", False) and hasattr(win, "_task_progress"):
+                bar = win._task_progress
+                if bar is not None:
+                    total = max(1, int(getattr(bar, "_total", 1)))
+                    bar.update(total, "Done")
+            if hasattr(win, "_hide_job_progress"):
+                win._hide_job_progress()
+            # Unlock BLAST/TE-Aid unless a MainWindow QThread job is still active.
+            if hasattr(win, "_set_job_actions_enabled"):
+                worker_busy = (
+                    getattr(win, "_worker_thread", None) is not None
+                    or getattr(win, "_genome_map_thread", None) is not None
+                    or getattr(win, "_benchmark_thread", None) is not None
+                )
+                if not worker_busy:
+                    win._set_job_actions_enabled(True)
 
     @staticmethod
     def _parse_annotation_step_progress(message: str) -> tuple[int, int, str] | None:
@@ -9753,6 +9849,19 @@ class SequenceMapPanel(QWidget):
             base_features=tuple(self._map.features()),
             progress=True,
         )
+        from repeatviewer.widgets.process_monitor_dialog import (
+            attach_annotation_worker_process_monitor,
+        )
+
+        cfg = self._similarity_ann_settings
+        attach_annotation_worker_process_monitor(
+            self,
+            worker,
+            title="Similarity annotation",
+            enabled=bool(cfg.show_process_window),
+            close_when_finished=bool(cfg.close_process_window_when_finished),
+            tool_key="similarity_annotation",
+        )
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -9792,13 +9901,7 @@ class SequenceMapPanel(QWidget):
         if data is None:
             self._clear_annotation_job_status()
             return
-        before_domains = sum(
-            1 for feat in self._map.features() if feat.feature_type == "domain"
-        )
         self._map.set_features(list(result.features))
-        after_domains = sum(
-            1 for feat in result.features if feat.feature_type == "domain"
-        )
         self._clear_annotation_job_status()
         self._log_annotation_job(
             "JOB FINISH",
@@ -9806,26 +9909,6 @@ class SequenceMapPanel(QWidget):
             detail=result.message,
         )
         self.statusMessage.emit(f"{result.message} Click Save to write changes to disk.")
-        added_domains = after_domains - before_domains
-        lower_message = result.message.lower()
-        needs_dialog = (
-            added_domains <= 0
-            or "not indexed" in lower_message
-            or "not prepared" in lower_message
-            or "no blast" in lower_message
-            or "no hmm" in lower_message
-            or "no cdd" in lower_message
-            or "no orf" in lower_message
-            or "failed" in lower_message
-            or "not installed" in lower_message
-            or "unchanged (0 hit" in lower_message
-        )
-        if (
-            self._similarity_ann_settings.show_info_window_after_run
-            and needs_dialog
-            and result.message.strip()
-        ):
-            self._show_wide_information("Similarity annotation", result.message)
 
     @Slot(str)
     def _on_similarity_annotation_error(self, message: str) -> None:
@@ -9884,6 +9967,19 @@ class SequenceMapPanel(QWidget):
             settings=self._auto_ann_settings,
             base_features=tuple(self._map.features()),
             progress=True,
+        )
+        from repeatviewer.widgets.process_monitor_dialog import (
+            attach_annotation_worker_process_monitor,
+        )
+
+        cfg = self._auto_ann_settings
+        attach_annotation_worker_process_monitor(
+            self,
+            worker,
+            title="Feature detection",
+            enabled=bool(cfg.show_process_window),
+            close_when_finished=bool(cfg.close_process_window_when_finished),
+            tool_key="feature_detection",
         )
         thread = QThread(self)
         worker.moveToThread(thread)

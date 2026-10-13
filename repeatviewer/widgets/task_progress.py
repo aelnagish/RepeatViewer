@@ -3,7 +3,52 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QProgressBar, QWidget
+
+
+def iter_job_progress_hosts(widget: QWidget) -> list[QWidget]:
+    """Windows that should show panel-job progress (local preview + MainWindow).
+
+    Duplicated Overview/Annotation windows are Qt Tool windows: ``widget.window()``
+    is the floating preview, which historically had no progress API, so Similarity
+    annotation updates were dropped. Always include the floating window (when it
+    supports progress) and the MainWindow (for the status bar + tool locking).
+    """
+    hosts: list[QWidget] = []
+    seen: set[int] = set()
+
+    def _add(candidate: QWidget | None) -> None:
+        if candidate is None:
+            return
+        key = id(candidate)
+        if key in seen:
+            return
+        if not hasattr(candidate, "_show_job_progress"):
+            return
+        seen.add(key)
+        hosts.append(candidate)
+
+    _add(widget.window())
+
+    parent = widget.parentWidget()
+    while parent is not None:
+        if hasattr(parent, "_set_job_actions_enabled") and hasattr(
+            parent, "_show_job_progress"
+        ):
+            _add(parent)
+            break
+        parent = parent.parentWidget()
+
+    if not any(hasattr(host, "_set_job_actions_enabled") for host in hosts):
+        app = QApplication.instance()
+        if app is not None:
+            for top in app.topLevelWidgets():
+                if hasattr(top, "_set_job_actions_enabled") and hasattr(
+                    top, "_show_job_progress"
+                ):
+                    _add(top)
+                    break
+    return hosts
 
 
 def truncate_filename(name: str, max_len: int = 20) -> str:

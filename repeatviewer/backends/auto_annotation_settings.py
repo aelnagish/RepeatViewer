@@ -87,6 +87,8 @@ class AutoAnnotationSettings:
     tir: TerminalRepeatSettings | None = None
     tandem: TandemRepeatSettings | None = None
     orf: OrfSettings | None = None
+    show_process_window: bool = True
+    close_process_window_when_finished: bool = True
 
     def __post_init__(self) -> None:
         if self.ltr is None:
@@ -175,7 +177,16 @@ def load_auto_annotation_settings() -> AutoAnnotationSettings:
         alternative_start_codons=str(s.value(f"{prefix}orf_alt_starts", "") or ""),
         frames=normalize_orf_frames(s.value(f"{prefix}orf_frames", "")),
     )
-    return AutoAnnotationSettings(ltr=ltr, tir=tir, tandem=tandem, orf=orf)
+    return AutoAnnotationSettings(
+        ltr=ltr,
+        tir=tir,
+        tandem=tandem,
+        orf=orf,
+        show_process_window=_get_bool(s, f"{prefix}show_process_window", True),
+        close_process_window_when_finished=_get_bool(
+            s, f"{prefix}close_process_window_when_finished", True
+        ),
+    )
 
 
 def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
@@ -217,6 +228,11 @@ def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
     s.setValue(
         f"{prefix}orf_frames",
         ",".join(str(frame) for frame in normalize_orf_frames(orf.frames)),
+    )
+    s.setValue(f"{prefix}show_process_window", bool(settings.show_process_window))
+    s.setValue(
+        f"{prefix}close_process_window_when_finished",
+        bool(settings.close_process_window_when_finished),
     )
 
 

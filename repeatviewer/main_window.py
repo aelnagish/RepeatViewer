@@ -11343,11 +11343,33 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(80, _load)
         QTimer.singleShot(450, _load)
 
+    def _annotation_panel_job_running(self) -> bool:
+        """True when Overview / Annotation control-panel jobs are running."""
+        from repeatviewer.widgets.multi_sequence_overview import (
+            MultiSequenceOverviewPanel,
+        )
+        from repeatviewer.widgets.sequence_map_viewer import SequenceMapPanel
+
+        for panel in self.findChildren(MultiSequenceOverviewPanel):
+            if panel._annotation_running():
+                return True
+            transfer = getattr(panel, "_transfer_thread", None)
+            if transfer is not None and transfer.isRunning():
+                return True
+        for panel in self.findChildren(SequenceMapPanel):
+            if panel._auto_annotate_running() or panel._similarity_annotation_running():
+                return True
+            transfer = getattr(panel, "_transfer_thread", None)
+            if transfer is not None and transfer.isRunning():
+                return True
+        return False
+
     def _any_background_job_running(self) -> bool:
         return (
             self._worker_thread is not None
             or self._genome_map_thread is not None
             or self._benchmark_thread is not None
+            or self._annotation_panel_job_running()
         )
 
     def _open_confusion_matrix_benchmark(self) -> None:
@@ -16145,7 +16167,7 @@ class MainWindow(QMainWindow):
         on_finished,
         on_failed,
     ) -> None:
-        if self._worker_thread is not None:
+        if self._worker_thread is not None or self._annotation_panel_job_running():
             QMessageBox.information(
                 self,
                 "Job already running",

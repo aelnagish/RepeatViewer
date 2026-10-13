@@ -87,8 +87,13 @@ def field_with_help(
     row = QHBoxLayout(wrap)
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(6)
-    row.addWidget(field)
-    row.addWidget(make_help_button(wrap, title, help_text))
+    row.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    row.addWidget(field, 0, Qt.AlignmentFlag.AlignVCenter)
+    row.addWidget(
+        make_help_button(wrap, title, help_text),
+        0,
+        Qt.AlignmentFlag.AlignVCenter,
+    )
     if stretch:
         row.addStretch(1)
     return wrap

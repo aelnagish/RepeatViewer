@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Qt, Slot
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 
@@ -173,3 +174,101 @@ class ProcessMonitorBridge(QObject):
             self._dialog.show_failure_log(
                 self._title, list(self._buffer), error=str(error)
             )
+
+
+def attach_annotation_worker_process_monitor(
+    host: QWidget,
+    worker: QObject,
+    *,
+    title: str,
+    enabled: bool,
+    close_when_finished: bool = True,
+    tool_key: str = "annotation",
+) -> None:
+    """Show a process window for Feature detection / Similarity ``Worker`` jobs.
+
+    ``Worker`` emits ``progress(str)``, ``finished(object)``, ``error(str)`` —
+    bridge those onto the same dialog used by BLAST / TE-Aid.
+    """
+    from repeatviewer.backends.job_cancel import CANCELLED_MESSAGE
+
+    win = host.window()
+    parent = win if isinstance(win, QWidget) else host
+    # Walk to MainWindow when host is a floating Preview duplicate.
+    cursor: QWidget | None = parent
+    attach = None
+    while cursor is not None:
+        candidate = getattr(cursor, "_attach_process_monitor", None)
+        if callable(candidate):
+            attach = candidate
+            parent = cursor
+            break
+        cursor = cursor.parentWidget()
+
+    if callable(attach):
+        # Prefer MainWindow so Stop / other-tool closing stays coordinated.
+        class _Adapter(QObject):
+            progress = Signal(int, str)
+            finished = Signal()
+            failed = Signal(str)
+            log_line = Signal(str)
+
+            def __init__(self) -> None:
+                super().__init__(parent)
+                queued = Qt.ConnectionType.QueuedConnection
+                worker.progress.connect(self._on_progress, queued)
+                worker.finished.connect(self._on_finished, queued)
+                worker.error.connect(self.failed, queued)
+
+            @Slot(str)
+            def _on_progress(self, message: str) -> None:
+                text = str(message or "").strip()
+                if text:
+                    self.log_line.emit(text)
+                    self.progress.emit(0, text)
+
+            @Slot(object)
+            def _on_finished(self, _result: object) -> None:
+                self.finished.emit()
+
+        adapter = _Adapter()
+        # Keep adapter alive for the job lifetime.
+        setattr(parent, f"_{tool_key}_worker_adapter", adapter)
+        attach(
+            adapter,
+            title=title,
+            enabled=bool(enabled),
+            tool_key=tool_key,
+            mirror_progress=False,
+            close_when_finished=bool(close_when_finished),
+        )
+        return
+
+    # Fallback when no MainWindow (tests / standalone preview).
+    if not enabled:
+        return
+    dialog = ProcessMonitorDialog(title, parent=parent)
+    dialog.prepare(title)
+    bridge = ProcessMonitorBridge(
+        dialog,
+        [],
+        live=True,
+        title=title,
+        cancelled_message=CANCELLED_MESSAGE,
+        close_when_finished=bool(close_when_finished),
+        parent=parent,
+    )
+
+    class _FinishRelay(QObject):
+        @Slot(object)
+        def on_finished(self, _result: object) -> None:
+            bridge.on_finished()
+
+    relay = _FinishRelay(parent)
+    queued = Qt.ConnectionType.QueuedConnection
+    worker.progress.connect(bridge.on_line, queued)
+    worker.finished.connect(relay.on_finished, queued)
+    worker.error.connect(bridge.on_failed, queued)
+    setattr(parent, f"_{tool_key}_process_dialog", dialog)
+    setattr(parent, f"_{tool_key}_process_bridge", bridge)
+    setattr(parent, f"_{tool_key}_process_relay", relay)

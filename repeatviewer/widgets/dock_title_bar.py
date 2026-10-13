@@ -90,7 +90,7 @@ class BrowserDockTitleBar(QWidget):
             tip="Hide panel",
             text="✕",
         )
-        self._close_btn.clicked.connect(dock.close)
+        self._close_btn.clicked.connect(self._on_hide_clicked)
         layout.addWidget(self._close_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Keep zoom / chrome above overflowing file tabs so the 6th tab cannot
@@ -117,6 +117,18 @@ class BrowserDockTitleBar(QWidget):
         btn.setText(text)
         btn.setFixedSize(QSize(18, 18))
         return btn
+
+    def _on_hide_clicked(self) -> None:
+        """Hide the panel; redock floating windows so View / Reset layout can restore them."""
+        dock = self._dock
+        host = dock.parentWidget()
+        while host is not None:
+            hide = getattr(host, "hide_browser_dock", None)
+            if callable(hide):
+                hide(dock)
+                return
+            host = host.parentWidget()
+        dock.hide()
 
     def _on_dock_floating_changed(self, floating: bool) -> None:
         self._title.setToolTip(_TOOLTIP_FLOATING if floating else _TOOLTIP_DOCKED)
