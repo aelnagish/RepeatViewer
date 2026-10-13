@@ -453,8 +453,6 @@ class _NamesColumn(QWidget):
         self._row_tops: list[int] = []
         self._row_heights: list[int] = []
         self._selected_rows: set[int] = set()
-        # Column/Position selection guides (widget X), synced with the MSA band.
-        self._guide_xs: tuple[int, ...] = ()
         self._label_point_size = _DEFAULT_MSA_FONT_PT
         self._drag_origin: QPointF | None = None
         self._dragging = False
@@ -494,7 +492,6 @@ class _NamesColumn(QWidget):
         self.setMinimumWidth(80)
         self.setMinimumHeight(h)
         self.resize(w, h)
-        # Width changed — remap stored guide fractions via parent if needed.
         self.update()
 
     def set_selected_rows(self, rows: set[int]) -> None:
@@ -502,40 +499,6 @@ class _NamesColumn(QWidget):
         if new == self._selected_rows:
             return
         self._selected_rows = new
-        self.update()
-
-    def set_position_guides(
-        self,
-        start: int | None,
-        end: int | None = None,
-        *,
-        maximum: int = 1,
-    ) -> None:
-        """Draw dashed vertical Position guides behind the sequence names.
-
-        ``start``/``end`` are 1-based inclusive columns (same as Position spins).
-        Guides are mapped across the name-column width so they move when Position
-        changes, matching the MSA selection lines.
-        """
-        if start is None or int(maximum) <= 0:
-            if self._guide_xs:
-                self._guide_xs = ()
-                self.update()
-            return
-        maximum = max(1, int(maximum))
-        a = max(1, min(maximum, int(start)))
-        b = max(1, min(maximum, int(end if end is not None else start)))
-        if b < a:
-            a, b = b, a
-        span = max(1, self.width() - 1)
-        x0 = int(round((a - 1) / maximum * span))
-        x1 = int(round(b / maximum * span))
-        x0 = max(0, min(span, x0))
-        x1 = max(0, min(span, x1))
-        new = (x0,) if x0 == x1 else (x0, x1)
-        if new == self._guide_xs:
-            return
-        self._guide_xs = new
         self.update()
 
     def _label_font(self) -> QFont:
@@ -703,12 +666,6 @@ class _NamesColumn(QWidget):
                 int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                 label,
             )
-
-        if self._guide_xs:
-            edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
-            painter.setPen(QPen(edge, 1, Qt.PenStyle.DashLine))
-            for x in self._guide_xs:
-                painter.drawLine(int(x), clip.top(), int(x), clip.bottom())
 
         painter.setPen(QPen(mid, 1))
         painter.drawLine(self.width() - 1, clip.top(), self.width() - 1, clip.bottom())
@@ -3918,6 +3875,7 @@ class MultiSequenceOverviewPanel(QWidget):
         # Zoom / Position / Select / Fit live on AnnotationZoomBar (same row as
         # Text / Annotation). Keep hidden locals until bind, and for standalone use.
         self._header_zoom_bar = None
+        self._zoom_bar_header_host: QWidget | None = None
         # Throttle Position spin updates while dragging the scale (~20 Hz).
         self._scale_preview_pending: tuple[int, int] | None = None
         self._scale_preview_timer = QTimer(self)
@@ -4124,12 +4082,19 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         height = max(_MIN_ROW_HEIGHT, self._names.height())
         self._names.resize(width, height)
-        self._sync_name_position_guides(self._bars.region_selection())
         self._names.update()
+
+    def _sync_sequence_count_label(self) -> None:
+        """Update Overview toolbar sequence count (right of Cons)."""
+        bar = self._header_zoom_bar
+        if bar is None or not hasattr(bar, "set_sequence_count"):
+            return
+        bar.set_sequence_count(len(self._bars.record_ids()))
 
     def _sync_names_column(self) -> None:
         self._sync_hbar_shim()
         self._sync_name_label_size_to_letters()
+        self._sync_sequence_count_label()
         width = self._names_viewport_width()
         # Match bars content; both viewports share the same height thanks to shims.
         content_h = max(
@@ -4170,8 +4135,6 @@ class MultiSequenceOverviewPanel(QWidget):
             width=width,
             content_height=content_h,
         )
-        # Remap Position guides after a width change.
-        self._sync_name_position_guides(self._bars.region_selection())
 
     @staticmethod
     def _safe_disconnect(signal, slot) -> None:
@@ -4216,6 +4179,15 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.set_overview_mode(True)
         bar.show()
         self._toolbar_slot.show()
+        # Reparent leaves the header controls host empty — hide it so it does
+        # not keep a blank gray strip under Text/Overview in duplicate windows.
+        host = getattr(self, "_zoom_bar_header_host", None)
+        if host is not None and host is not self._toolbar_slot:
+            host.hide()
+            header = host.parent()
+            update_h = getattr(header, "_update_header_height", None)
+            if callable(update_h):
+                update_h()
         # Match single-seq AnnotationMapToolbar chrome (Select/Fit button fill).
         chrome = _app_chrome_background()
         _apply_map_paper_background(self._toolbar_slot, chrome)
@@ -4250,6 +4222,7 @@ class MultiSequenceOverviewPanel(QWidget):
         if prev_owner is self and self._header_zoom_bar is bar:
             self._mount_zoom_bar_in_panel(bar)
             bar.set_msa_mode(self.is_msa_mode())
+            self._sync_sequence_count_label()
             self._sync_header_position_spins()
             return
         if prev_owner is not None and prev_owner is not self:
@@ -4283,6 +4256,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._header_zoom_bar = bar
         bar._bound_overview = self
         bar.set_msa_mode(self.is_msa_mode())
+        self._sync_sequence_count_label()
         self._mount_zoom_bar_in_panel(bar)
         self._zoom_slider = bar.zoom_slider
         self._name_filter = bar.name_filter
@@ -4565,20 +4539,6 @@ class MultiSequenceOverviewPanel(QWidget):
     def _on_selection_visuals_dismissed(self) -> None:
         """Regional/column/row drag started — drop scale highlight only."""
         self._scale.set_region_selection(None)
-        self._sync_name_position_guides(None)
-
-    def _sync_name_position_guides(self, region: object) -> None:
-        """Keep dashed Position guides behind sequence names in sync with the MSA."""
-        maximum = max(1, int(self._bars.max_length()))
-        if region is None:
-            self._names.set_position_guides(None, maximum=maximum)
-            return
-        try:
-            start, end = int(region[0]), int(region[1])  # type: ignore[index]
-        except (TypeError, ValueError, IndexError):
-            self._names.set_position_guides(None, maximum=maximum)
-            return
-        self._names.set_position_guides(start, end, maximum=maximum)
 
     def _on_region_selection_changed(self, region: object) -> None:
         # Scale band follows column span for full-height and regional selects.
@@ -4589,7 +4549,6 @@ class MultiSequenceOverviewPanel(QWidget):
                 self._scale.set_region_selection(int(region[0]), int(region[1]))  # type: ignore[index]
             except (TypeError, ValueError, IndexError):
                 self._scale.set_region_selection(None)
-        self._sync_name_position_guides(region)
         # Selected-column sort is one-shot from the Sorting combo — do not
         # re-order rows every time the column selection changes.
         bar = self._header_zoom_bar
@@ -4621,7 +4580,6 @@ class MultiSequenceOverviewPanel(QWidget):
             bar.set_position_range(maximum, start=start_i, end=end_i)
         # Live scale band for the column span (matches committed regional select).
         self._scale.set_region_selection(start_i, end_i)
-        self._sync_name_position_guides((start_i, end_i))
         self._sync_names_column()
 
     def select_all_sequences(self) -> None:
@@ -5193,8 +5151,8 @@ class MultiSequenceOverviewPanel(QWidget):
         return gff_path
 
     def _on_delete_clicked(self) -> None:
-        """MSA: Delete → remove; Shift+Delete → gaps. Else delete features."""
-        # Shift+Delete fills with '-'; plain Delete splices/removes.
+        """Delete selection: features, MSA region/columns, or whole sequences."""
+        # Shift+Delete fills with '-'; plain Delete splices/removes (MSA only).
         fill_gaps = bool(
             QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier
         )
@@ -5206,8 +5164,12 @@ class MultiSequenceOverviewPanel(QWidget):
         if self.is_msa_mode() and self._bars.region_selection() is not None:
             self._delete_selected_msa_edit(hard_delete=not fill_gaps)
             return
-        if self.is_msa_mode() and self._bars.selected_rows():
-            self._delete_selected_msa_rows(hard_delete=not fill_gaps)
+        # Whole-sequence selection (name column / row pick), MSA or multi-FASTA.
+        if self._bars.selected_rows() and not self._bars.is_regional_selection():
+            if self.is_msa_mode():
+                self._delete_selected_msa_rows(hard_delete=not fill_gaps)
+            else:
+                self._delete_selected_multi_rows()
             return
         if self.is_msa_mode():
             QMessageBox.information(
@@ -5221,7 +5183,7 @@ class MultiSequenceOverviewPanel(QWidget):
         QMessageBox.information(
             self,
             "Delete",
-            "Select a feature on a sequence track, then click Delete.",
+            "Select sequence name(s) or a feature, then Delete.",
         )
 
     @staticmethod
@@ -5284,6 +5246,75 @@ class MultiSequenceOverviewPanel(QWidget):
     def _delete_selected_feature(self) -> None:
         """Back-compat alias for single/multi feature delete."""
         self._delete_selected_features()
+
+    def _delete_selected_multi_rows(self) -> None:
+        """Remove name-selected sequences from a multi-FASTA (non-MSA) file."""
+        if self.is_msa_mode():
+            return
+        rows = sorted(self._bars.selected_rows())
+        if not rows:
+            return
+        n = len(self._record_ids)
+        row_set = {r for r in rows if 0 <= r < n}
+        if not row_set:
+            return
+        if len(row_set) >= n:
+            QMessageBox.warning(
+                self,
+                "Delete",
+                "Cannot delete every sequence. Leave at least one.",
+            )
+            return
+        try:
+            _ids, sequences = load_fasta_rows(self._path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Delete", str(exc))
+            return
+        if len(sequences) != n:
+            QMessageBox.warning(
+                self,
+                "Delete",
+                "FASTA record count no longer matches the overview.",
+            )
+            return
+        keep = [i for i in range(n) if i not in row_set]
+        new_ids = [self._record_ids[i] for i in keep]
+        new_seqs = [sequences[i] for i in keep]
+        new_features = {
+            rid: list(self._features.get(rid) or []) for rid in new_ids
+        }
+        new_lengths = {
+            rid: len(seq) for rid, seq in zip(new_ids, new_seqs)
+        }
+        self._push_feature_undo_snapshot()
+        try:
+            write_fasta_rows(self._path, new_ids, new_seqs)
+        except (OSError, ValueError) as exc:
+            self._feature_undo_stack.pop()
+            QMessageBox.critical(self, "Delete", str(exc))
+            return
+        self._record_ids = new_ids
+        self._features = new_features
+        self._lengths = new_lengths
+        keep_ppb = self._bars.pixels_per_base()
+        self._bars.set_data(
+            new_ids,
+            new_lengths,
+            new_features,
+            sequences=new_seqs,
+            fit_bars_width=None,
+        )
+        self._bars.set_pixels_per_base(keep_ppb)
+        self._bars.set_selected_rows([])
+        self._bars.set_region_selection(None)
+        self._sync_names_column()
+        self._update_scale()
+        self._sync_header_position_spins()
+        self._persist_overview_features()
+        self.statusMessage.emit(
+            f"Removed {len(row_set)} sequence(s) · "
+            f"{len(new_ids)} remain. Ctrl+Z to undo."
+        )
 
     def _delete_selected_msa_rows(self, *, hard_delete: bool) -> None:
         """Edit name-selected whole sequences.
@@ -5857,9 +5888,11 @@ class MultiSequenceOverviewPanel(QWidget):
         width = len(sequences[0]) if sequences else 1
         self._record_ids = record_ids
         self._lengths = {rid: width for rid in record_ids}
+        # Prefer JSON sidecar only when it actually has features; an empty
+        # sidecar must not hide companion GFF annotations (same as non-MSA).
         json_by_id = load_features_by_id_from_json(self._path, record_ids)
         gff = resolve_features_gff_path(self._path)
-        if resolve_sidecar_path(self._path) is not None:
+        if json_by_id and any(json_by_id.values()):
             self._features = {
                 rid: list(json_by_id.get(rid) or []) for rid in record_ids
             }
@@ -5947,7 +5980,6 @@ class MultiSequenceOverviewPanel(QWidget):
         start = max(1, min(maximum, start))
         end = max(start, min(maximum, end))
         self._bars.set_region_selection(start, end)
-        self._sync_name_position_guides((start, end))
 
     def _select_by_position(self) -> None:
         """Zoom/scroll to the current region or Position spins (single-seq Select)."""
@@ -7076,7 +7108,6 @@ class MultiSequenceOverviewPanel(QWidget):
         # update below covers the visible change.
         self._bars.clear_feature_selection(repaint=False)
         self._bars.set_region_selection(int(start), int(end))
-        self._sync_name_position_guides((int(start), int(end)))
         # Keep name-column highlights from a prior sequence-row select.
         self._sync_names_column()
         self._bars.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -7091,7 +7122,6 @@ class MultiSequenceOverviewPanel(QWidget):
         if bar is not None and hasattr(bar, "set_position_range"):
             maximum = max(1, int(self._bars.max_length()))
             bar.set_position_range(maximum, start=start, end=end)
-        self._sync_name_position_guides((start, end))
 
     def _on_scale_column_pixel_preview(self, x0: float, x1: float) -> None:
         """Pixel-follow column guides + live Position spins while dragging the scale."""
@@ -7105,7 +7135,6 @@ class MultiSequenceOverviewPanel(QWidget):
             QPoint(int(cx1), 0)
         )
         start_i, end_i = self._scale._columns_from_x_range(float(x0), float(x1))
-        self._sync_name_position_guides((start_i, end_i))
         if self._scale_preview_pending == (start_i, end_i):
             return
         self._scale_preview_pending = (start_i, end_i)
@@ -7178,6 +7207,23 @@ class MultiSequenceOverviewPanel(QWidget):
         else:
             copy_seq.setEnabled(False)
             extract.setEnabled(False)
+
+        menu.addSeparator()
+        delete = menu.addAction("Delete")
+        can_delete = bool(
+            self._bars.selected_features()
+            or (self.is_msa_mode() and region is not None)
+            or sequence_sel
+        )
+        delete.setEnabled(can_delete)
+        if self.is_msa_mode():
+            delete.setToolTip(
+                "Remove the selection (sequences, region, or feature). "
+                "Shift+Delete fills MSA residues with gaps."
+            )
+        else:
+            delete.setToolTip("Remove selected sequence(s) or feature(s).")
+        delete.triggered.connect(self._on_delete_clicked)
         return menu
 
     def _show_overview_context_menu(self, global_pos: QPoint) -> None:

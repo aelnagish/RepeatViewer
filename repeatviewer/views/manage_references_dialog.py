@@ -594,6 +594,8 @@ class AddDatabaseDialog(QDialog):
         # Stay above RepeatViewer via parent stacking — never WindowStaysOnTopHint
         # (that covers Safari and every other app).
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+        # Hug content height so switching Type does not leave a tall empty gap.
+        self.setSizeGripEnabled(False)
         self._project = project
         self._section = section  # opener tab (hint for initial type only)
         self._result_genome: ManagedGenome | None = None
@@ -671,7 +673,6 @@ class AddDatabaseDialog(QDialog):
         self._cdd_help.setText(_CDD_SETUP_HELP)
         self._cdd_help.setObjectName("CddSetupHelp")
         self._cdd_help.hide()
-        self._help_sized_kinds: set[str] = set()
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -715,6 +716,7 @@ class AddDatabaseDialog(QDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        QTimer.singleShot(0, self._fit_dialog_to_contents)
         QTimer.singleShot(0, self._path_row.focus_field)
 
     def _keep_in_front(self) -> None:
@@ -750,20 +752,18 @@ class AddDatabaseDialog(QDialog):
             self._show_annotation.setChecked(True)
         self._maybe_fill_name_from_path()
         self._sync_annotation_name_hint()
-        # Grow once per help panel; avoid adjustSize on every type change (laggy).
-        help_key = "hmm" if is_hmm else "cdd" if is_cdd else ""
-        if help_key and help_key not in self._help_sized_kinds:
-            self._help_sized_kinds.add(help_key)
-            QTimer.singleShot(0, self._ensure_setup_help_size)
+        # Grow for HMM/CDD help and shrink again for FASTA (no empty gap).
+        if self.isVisible():
+            QTimer.singleShot(0, self._fit_dialog_to_contents)
 
-    def _ensure_setup_help_size(self) -> None:
-        if not (self._hmm_help.isVisible() or self._cdd_help.isVisible()):
-            return
+    def _fit_dialog_to_contents(self) -> None:
+        """Resize to the current form height (help panels on/off)."""
+        lay = self.layout()
+        if lay is not None:
+            lay.activate()
         hint = self.sizeHint()
-        self.resize(
-            max(self.width(), hint.width()),
-            max(self.height(), hint.height()),
-        )
+        width = max(self.minimumWidth(), hint.width())
+        self.resize(width, hint.height())
 
     def _sync_annotation_name_hint(self, _checked: bool = False) -> None:
         if self._show_annotation.isChecked():
@@ -1092,7 +1092,7 @@ class ManageReferencesDialog(QDialog):
         self._type_filter = self._section_bar
 
         self._search = QLineEdit(self)
-        self._search.setPlaceholderText("Search name, annotation, type, or path…")
+        self._search.setPlaceholderText("Filter by name or path")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedWidth(280)
         self._search.setMaximumWidth(280)
@@ -2097,9 +2097,15 @@ class ManageReferencesDialog(QDialog):
             initial = DB_KIND_HMM_PROTEIN
         else:
             initial = DB_KIND_CDD
+        # Parent to the main window so stacking stays above RepeatViewer only
+        # (not a global always-on-top over Safari / Finder / …).
+        host = self.window() if self.window() is not None else self
         dialog = AddDatabaseDialog(
-            self._project, initial_kind=initial, section=section, parent=self
+            self._project, initial_kind=initial, section=section, parent=host
         )
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
         self._add_dialog = dialog
         dialog.finished.connect(self._on_add_finished)
         dialog.show()

@@ -2922,12 +2922,22 @@ class PreviewTabWidget(QTabWidget):
                 and widget.is_annotation_preview_active()
                 and widget.is_multi_fasta_preview()
             ):
-                # Multi-seq Overview: keep title-bar Actions (Default preview tab)
-                # in the same spot as Text; map −/+/Fit live in the overview strip.
-                self._header_bar.set_header_zoom_mode("preview")
+                # Multi-seq Overview: −/+/Fit live in the overview strip.
+                # Title-bar Actions stay for the main dock via mode "preview".
+                # Duplicate windows hide Actions — use "tabs" so no empty gray
+                # strip is reserved under Text/Overview.
+                if getattr(self._zoom_bar, "_actions_visible", True):
+                    self._header_bar.set_header_zoom_mode("preview")
+                else:
+                    self._header_bar.set_header_zoom_mode("tabs")
+                    self._zoom_bar.hide()
             elif is_annotation:
                 # Single-seq Annotation: Actions on the Preview title bar (like Dotplot).
-                self._header_bar.set_header_zoom_mode("preview")
+                if getattr(self._zoom_bar, "_actions_visible", True):
+                    self._header_bar.set_header_zoom_mode("preview")
+                else:
+                    self._header_bar.set_header_zoom_mode("tabs")
+                    self._zoom_bar.hide()
             else:
                 self._header_bar.set_header_zoom_mode("preview")
         else:
@@ -2987,7 +2997,9 @@ class PreviewTabWidget(QTabWidget):
         ) and not is_cyto
         if hasattr(self._zoom_bar, "_actions_btn"):
             self._zoom_bar._actions_btn.setEnabled(actions_enabled)
-            self._zoom_bar._actions_btn.setVisible(True)
+            # Respect PreviewZoomBar.set_actions_visible(False) in duplicate windows.
+            show_actions = getattr(self._zoom_bar, "_actions_visible", True)
+            self._zoom_bar._actions_btn.setVisible(bool(show_actions))
         if is_multi_overview_active and hasattr(self._zoom_bar, "set_chrome_mode"):
             # Title-bar Actions only (font/scale spins stay off).
             self._zoom_bar.set_chrome_mode("dotplot")

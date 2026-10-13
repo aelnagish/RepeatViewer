@@ -614,6 +614,7 @@ class PreviewZoomBar(QWidget):
         self._actions_menu.addAction(self._duplicate_action)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
+        self._actions_visible = True
 
         self._block = False
         self._fit_mode = load_preview_fit_mode()
@@ -626,6 +627,11 @@ class PreviewZoomBar(QWidget):
         self.set_text_actions_enabled(can_edit=False, can_save=False)
         self.set_chrome_mode("text")
         self.set_default_preview_tab_visible(False)
+
+    def set_actions_visible(self, visible: bool) -> None:
+        """Show or hide the Actions button (off in duplicated Preview windows)."""
+        self._actions_visible = bool(visible)
+        self._actions_btn.setVisible(self._actions_visible)
 
     def set_chrome_mode(self, mode: str) -> None:
         """Configure title-bar chrome for the active preview kind.
@@ -935,6 +941,14 @@ class AnnotationZoomBar(QWidget):
         self._name_filter.textChanged.connect(self.filter_text_changed.emit)
         self._name_filter.returnPressed.connect(self.filter_return_pressed.emit)
 
+        self._sequence_count_label = QLabel("", self._overview_host)
+        self._sequence_count_label.setObjectName("OverviewSequenceCount")
+        self._sequence_count_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._sequence_count_label.setToolTip("Number of sequences in this file")
+        self._sequence_count_label.hide()
+
         for w in (
             zoom_out,
             zoom_in,
@@ -949,8 +963,11 @@ class AnnotationZoomBar(QWidget):
             consensus_btn,
         ):
             ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
-        # Left-pack controls like AnnotationMapToolbar (stretch after Fit).
+        # Left-pack controls; sequence count sits on the right after stretch.
         ov.addStretch(1)
+        ov.addWidget(
+            self._sequence_count_label, 0, Qt.AlignmentFlag.AlignVCenter
+        )
         self._overview_host.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -973,11 +990,17 @@ class AnnotationZoomBar(QWidget):
         self._actions_menu.addAction(self._duplicate_action)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._actions_visible = True
 
         self._block = False
         self._overview_mode = False
         self._msa_mode = False
         self.set_overview_mode(False)
+
+    def set_actions_visible(self, visible: bool) -> None:
+        """Show or hide the Actions button (off in duplicated Preview windows)."""
+        self._actions_visible = bool(visible)
+        self._actions_btn.setVisible(self._actions_visible and not self._overview_mode)
 
     def set_msa_mode(self, enabled: bool) -> None:
         """Show alignment-only actions only for a genuine aligned MSA."""
@@ -986,14 +1009,29 @@ class AnnotationZoomBar(QWidget):
         self._clean_btn.setVisible(visible)
         self._consensus_btn.setVisible(visible)
 
+    def set_sequence_count(self, count: int) -> None:
+        """Show total sequences on the right (same row as Cons)."""
+        n = max(0, int(count))
+        if n <= 0:
+            self._sequence_count_label.clear()
+            self._sequence_count_label.hide()
+            return
+        label = "1 sequence" if n == 1 else f"{n:,} sequences"
+        self._sequence_count_label.setText(label)
+        self._sequence_count_label.setVisible(self._overview_mode)
+
     def set_overview_mode(self, enabled: bool) -> None:
         """Show multi-seq −/+/Position/Select/Fit/Clean/Cons; Actions stay on Preview title."""
         self._overview_mode = bool(enabled)
         self._overview_host.setVisible(self._overview_mode)
         self.set_msa_mode(self._msa_mode)
+        if self._sequence_count_label.text().strip():
+            self._sequence_count_label.setVisible(self._overview_mode)
+        else:
+            self._sequence_count_label.hide()
         # Title-bar PreviewZoomBar owns Actions (aligned with "Preview"), matching
         # single-seq Annotation. Hiding here avoids a second Actions clipped by the rail.
-        self._actions_btn.setVisible(not self._overview_mode)
+        self._actions_btn.setVisible(self._actions_visible and not self._overview_mode)
         if self._overview_mode:
             # Match AnnotationMapToolbar chrome identity for theme / sizing.
             self.setObjectName("AnnotationMapToolbar")
@@ -1568,10 +1606,12 @@ class PreviewHeaderBar(QWidget):
 
         ``tabs`` — FASTA tabs only; AnnotationZoomBar is hosted inside the
         multi-seq overview panel (next to the rail), matching single-seq layout.
+        ``hidden`` — hide title zoom chrome but keep Text/Overview tabs (used by
+        duplicated Overview windows that have no Actions button).
         """
         show_preview = mode == "preview"
         show_annotation = mode == "annotation"
-        tabs_only = mode == "tabs"
+        tabs_only = mode in {"tabs", "hidden"}
         self._preview_zoom_bar.setVisible(show_preview)
         bar = self._annotation_zoom_bar
         bar_alive = False
