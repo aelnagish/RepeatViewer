@@ -8,7 +8,15 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, QSizeF, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QPixmap, QShortcut, QTextCursor
+from PySide6.QtGui import (
+    QFont,
+    QKeyEvent,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QShortcut,
+    QTextCursor,
+)
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtWidgets import (
     QLabel,
@@ -323,12 +331,18 @@ def _looks_like_binary_file(path: Path) -> bool:
 
 
 class ScaledImagePreview(QWidget):
-    """PNG/JPEG preview with scroll bars (e.g. Flexidot dotplots)."""
+    """PNG/JPEG/SVG preview with scroll bars (e.g. Flexidot / export figures).
+
+    SVG is re-rendered with ``QSvgRenderer`` at the current zoom so it stays
+    sharp (unlike ``QPixmap(svg)``, which rasterizes once then upscales).
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._original: QPixmap | None = None
+        self._svg_renderer = None
+        self._svg_size = QSize()
         self._zoom_percent = load_preview_zoom_percent("image")
         self._fit_mode = PreviewFitMode.FIT_WINDOW
         self._scale_pending = False
@@ -365,6 +379,35 @@ class ScaledImagePreview(QWidget):
         layout.addWidget(self._scroll)
 
     def set_image_file(self, path: Path) -> bool:
+        self._svg_renderer = None
+        self._svg_size = QSize()
+        if path.suffix.lower() == ".svg":
+            try:
+                from PySide6.QtSvg import QSvgRenderer
+            except Exception:
+                self._original = None
+                self._label.clear()
+                self._last_physical_w = 0
+                return False
+            renderer = QSvgRenderer(str(path))
+            if not renderer.isValid():
+                self._original = None
+                self._label.clear()
+                self._last_physical_w = 0
+                return False
+            size = renderer.defaultSize()
+            if size.width() < 1 or size.height() < 1:
+                vb = renderer.viewBox()
+                size = QSize(max(1, int(vb.width())), max(1, int(vb.height())))
+            self._svg_renderer = renderer
+            self._svg_size = size
+            # Aspect placeholder for fit math; pixels come from the renderer.
+            self._original = QPixmap(size)
+            self._original.fill(Qt.GlobalColor.white)
+            self._last_physical_w = 0
+            self.refresh_scale(immediate=True, reset_scroll=True)
+            return True
+
         pix = QPixmap(str(path))
         if pix.isNull():
             self._original = None
@@ -445,8 +488,12 @@ class ScaledImagePreview(QWidget):
             return
         self._scale_pending = False
 
-        ow = self._original.width()
-        oh = self._original.height()
+        if self._svg_renderer is not None and self._svg_size.isValid():
+            ow = max(1, self._svg_size.width())
+            oh = max(1, self._svg_size.height())
+        else:
+            ow = self._original.width()
+            oh = self._original.height()
         vw = viewport.width()
         vh = viewport.height()
 
@@ -459,8 +506,10 @@ class ScaledImagePreview(QWidget):
 
         scale = base_scale * (self._zoom_percent / 100.0)
         target_w = max(1, int(ow * scale))
+        target_h = max(1, int(oh * scale))
         dpr = max(1.0, self.devicePixelRatioF())
         physical_w = max(1, int(target_w * dpr))
+        physical_h = max(1, int(target_h * dpr))
         if physical_w == self._last_physical_w:
             current = self._label.pixmap()
             if current is not None and not current.isNull():
@@ -468,21 +517,40 @@ class ScaledImagePreview(QWidget):
                     self.reset_scroll_to_top_left()
                     self._reset_scroll_on_refresh = False
                 return
-        # Fast path while dragging/resizing large images; smooth once settled.
-        transform = (
-            Qt.TransformationMode.FastTransformation
-            if max(ow, oh) >= 2500
-            else Qt.TransformationMode.SmoothTransformation
-        )
-        try:
-            display = self._original.scaledToWidth(physical_w, transform)
-        except KeyboardInterrupt:
-            return
-        display.setDevicePixelRatio(dpr)
+
+        if self._svg_renderer is not None:
+            # Re-rasterize from vectors at the display size (stays sharp on zoom).
+            try:
+                display = QPixmap(physical_w, physical_h)
+                display.fill(Qt.GlobalColor.white)
+                painter = QPainter(display)
+                try:
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    painter.setRenderHint(
+                        QPainter.RenderHint.SmoothPixmapTransform, True
+                    )
+                    self._svg_renderer.render(painter)
+                finally:
+                    painter.end()
+            except KeyboardInterrupt:
+                return
+            display.setDevicePixelRatio(dpr)
+        else:
+            # Fast path while dragging/resizing large images; smooth once settled.
+            transform = (
+                Qt.TransformationMode.FastTransformation
+                if max(ow, oh) >= 2500
+                else Qt.TransformationMode.SmoothTransformation
+            )
+            try:
+                display = self._original.scaledToWidth(physical_w, transform)
+            except KeyboardInterrupt:
+                return
+            display.setDevicePixelRatio(dpr)
 
         self._last_physical_w = physical_w
         self._label.setPixmap(display)
-        self._label.setFixedSize(display.size())
+        self._label.setFixedSize(target_w, target_h)
         if self._reset_scroll_on_refresh:
             self.reset_scroll_to_top_left()
             self._reset_scroll_on_refresh = False

@@ -291,6 +291,8 @@ class _SegmentsItem(QGraphicsItem):
         self._line_width_step = max(
             _MIN_LINE_WIDTH_STEP, min(_MAX_LINE_WIDTH_STEP, int(line_width_step))
         )
+        # Optional cosmetic width override for high-res PNG/SVG export.
+        self._export_pen_px: float | None = None
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
         # Cache the dense hit layer in device pixels so mouse-move overlays
         # (crosshair) do not re-rasterize hundreds of thousands of segments.
@@ -303,13 +305,21 @@ class _SegmentsItem(QGraphicsItem):
         self._line_width_step = step
         self.update()
 
+    def set_export_pen_px(self, width: float | None) -> None:
+        """Temporary cosmetic pen width for export (``None`` restores UI width)."""
+        self._export_pen_px = None if width is None else max(1.0, float(width))
+        self.update()
+
     def boundingRect(self) -> QRectF:  # noqa: N802
         return QRectF(0, 0, float(self._n), float(self._n))
 
     def _pen(self, color: QColor) -> QPen:
         pen = QPen(color)
         pen.setCosmetic(True)
-        pen.setWidthF(_line_width_px(self._line_width_step))
+        if self._export_pen_px is not None:
+            pen.setWidthF(self._export_pen_px)
+        else:
+            pen.setWidthF(_line_width_px(self._line_width_step))
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         return pen
 
@@ -1015,7 +1025,191 @@ class DotplotCanvas(QGraphicsView):
         """Zoom keeping the scene point under ``view_pos`` fixed."""
         self._apply_zoom(factor, view_pos)
 
-    def render_to_pdf(self, path: Path, *, title: str = "", subtitle: str = "") -> None:
+    @staticmethod
+    def _a4_page_rect(dpi: int) -> QRect:
+        """A4 page in device pixels at ``dpi`` — same geometry as QPdfWriter."""
+        dpi = max(50, min(600, int(dpi)))
+        width = max(1, int(round(210.0 / 25.4 * dpi)))
+        height = max(1, int(round(297.0 / 25.4 * dpi)))
+        return QRect(0, 0, width, height)
+
+    @staticmethod
+    def _export_font(
+        base: QFont, point_size: float, unit: float, *, bold: bool = False
+    ) -> QFont:
+        """Font sized in pixels from A4 ``unit`` so PNG/SVG match PDF points."""
+        # pt → px at the page DPI implied by unit (px per mm): dpi = unit * 25.4
+        px = max(1, int(round(float(point_size) * unit * 25.4 / 72.0)))
+        font = QFont(base)
+        font.setPixelSize(px)
+        font.setBold(bool(bold))
+        return font
+
+    def _paint_export_figure(
+        self,
+        painter: QPainter,
+        page: QRect,
+        *,
+        title: str = "",
+        subtitle: str = "",
+    ) -> None:
+        """Paint axes, plot, and legend into ``page`` (shared by PDF/PNG/SVG)."""
+        unit = page.width() / 210.0  # device units per mm (A4 width)
+        margin = int(12 * unit)
+        gutter = int(16 * unit)  # room for tick labels
+        head = int(26 * unit)  # title block + top tick labels
+        foot = int(10 * unit)  # legend
+
+        length = max(self._length, 1)
+        offset = self._offset
+        plot_bounds = QRectF(0.0, 0.0, float(length), float(length))
+        source = self.visible_scene_rect().intersected(plot_bounds)
+        if source.width() < 1.0 or source.height() < 1.0:
+            source = QRectF(plot_bounds)
+
+        avail_w = page.width() - margin * 2 - gutter
+        avail_h = page.height() - margin * 2 - head - foot - gutter
+        aspect = source.width() / max(source.height(), 1e-9)
+        if avail_w / max(avail_h, 1) > aspect:
+            side_h = float(avail_h)
+            side_w = side_h * aspect
+        else:
+            side_w = float(avail_w)
+            side_h = side_w / aspect
+        plot = QRectF(margin + gutter, margin + head, side_w, side_h)
+
+        # The app may be in a dark theme; a figure should not be. Paint the
+        # page and the plot area white and draw everything in dark ink.
+        painter.fillRect(page, QColor(255, 255, 255))
+
+        base_font = QFont(painter.font())
+
+        if title:
+            painter.setFont(self._export_font(base_font, 11, unit, bold=True))
+            painter.setPen(QPen(QColor(20, 20, 20)))
+            painter.drawText(int(margin), int(margin + 6 * unit), title)
+        if subtitle:
+            painter.setFont(self._export_font(base_font, 8, unit))
+            painter.setPen(QPen(QColor(90, 90, 90)))
+            painter.drawText(int(margin), int(margin + 12 * unit), subtitle)
+        # --- the plot itself (current viewport only) ---
+        painter.fillRect(plot, QColor(255, 255, 255))
+        painter.save()
+        painter.setClipRect(plot)
+        self.scene().render(painter, plot, source)
+        painter.restore()
+
+        # --- axes for the visible range ---
+        span = max(float(source.width()), float(source.height()), 1.0)
+        step = _nice_tick_step(span, target_ticks=10)
+        tick_len = 3 * unit
+        painter.setFont(self._export_font(base_font, 7, unit))
+        painter.setPen(QPen(QColor(70, 70, 70)))
+        metrics = painter.fontMetrics()
+
+        x_ticks = _axis_tick_positions(
+            lo=float(source.left()),
+            hi=float(source.right()),
+            length=length,
+            step=step,
+        )
+        y_ticks = _axis_tick_positions(
+            lo=float(source.top()),
+            hi=float(source.bottom()),
+            length=length,
+            step=step,
+        )
+        x_positions = {
+            tick: plot.left()
+            + ((tick - source.left()) / max(source.width(), 1e-9)) * plot.width()
+            for tick in x_ticks
+        }
+        y_positions = {
+            tick: plot.top()
+            + ((tick - source.top()) / max(source.height(), 1e-9)) * plot.height()
+            for tick in y_ticks
+        }
+
+        def _export_x_extent(pos: float, label: str) -> tuple[float, float]:
+            half = metrics.horizontalAdvance(label) / 2.0
+            return pos - half, pos + half
+
+        def _export_y_extent(pos: float, label: str) -> tuple[float, float]:
+            half = metrics.height() / 2.0
+            return pos - half, pos + half
+
+        x_labeled = _non_overlapping_tick_labels(
+            x_ticks,
+            length=length,
+            offset=offset,
+            positions=x_positions,
+            label_extent=_export_x_extent,
+        )
+        y_labeled = _non_overlapping_tick_labels(
+            y_ticks,
+            length=length,
+            offset=offset,
+            positions=y_positions,
+            label_extent=_export_y_extent,
+        )
+
+        for tick in x_ticks:
+            label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
+            x = x_positions[tick]
+            painter.drawLine(int(x), int(plot.top() - tick_len), int(x), int(plot.top()))
+            if tick in x_labeled:
+                painter.drawText(
+                    int(x - metrics.horizontalAdvance(label) / 2),
+                    int(plot.top() - tick_len - 2 * unit),
+                    label,
+                )
+
+        for tick in y_ticks:
+            label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
+            y = y_positions[tick]
+            painter.drawLine(int(plot.left() - tick_len), int(y), int(plot.left()), int(y))
+            if tick in y_labeled:
+                painter.drawText(
+                    int(
+                        plot.left()
+                        - tick_len
+                        - 2 * unit
+                        - metrics.horizontalAdvance(label)
+                    ),
+                    int(y + metrics.ascent() / 2),
+                    label,
+                )
+
+        # --- legend ---
+        legend_y = plot.bottom() + 8 * unit
+        swatch = 6 * unit
+        entries = (
+            (_DIAGONAL_COLOR, "self"),
+            (_FORWARD_COLOR, "direct repeat"),
+            (_REVERSE_COLOR, "inverted repeat"),
+        )
+        x = plot.left()
+        for colour, label in entries:
+            pen = QPen(colour)
+            pen.setWidth(max(1, int(0.4 * unit)))
+            painter.setPen(pen)
+            painter.drawLine(int(x), int(legend_y), int(x + swatch), int(legend_y))
+            painter.setPen(QPen(QColor(70, 70, 70)))
+            painter.drawText(
+                int(x + swatch + 2 * unit),
+                int(legend_y + metrics.ascent() / 2),
+                label,
+            )
+            x += swatch + 4 * unit + metrics.horizontalAdvance(label)
+
+    def render_to_pdf(
+        self,
+        path: Path,
+        *,
+        title: str = "",
+        subtitle: str = "",
+        dpi: int = 400,
+    ) -> None:
         """Write the current view to a PDF with axes, labels and a legend.
 
         Exports the zoomed/panned viewport (not the full sequence square). The
@@ -1026,164 +1220,112 @@ class DotplotCanvas(QGraphicsView):
 
         writer = QPdfWriter(str(path))
         writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-        writer.setResolution(300)
+        writer.setResolution(max(50, min(600, int(dpi))))
         writer.setTitle(title or "Dotplot")
 
         painter = QPainter(writer)
         try:
-            page = painter.viewport()
-            unit = page.width() / 210.0          # device units per mm (A4 width)
-            margin = int(12 * unit)
-            gutter = int(16 * unit)              # room for tick labels
-            head = int(26 * unit)                # title block + top tick labels
-            foot = int(10 * unit)                # legend
-
-            length = max(self._length, 1)
-            offset = self._offset
-            plot_bounds = QRectF(0.0, 0.0, float(length), float(length))
-            source = self.visible_scene_rect().intersected(plot_bounds)
-            if source.width() < 1.0 or source.height() < 1.0:
-                source = QRectF(plot_bounds)
-
-            avail_w = page.width() - margin * 2 - gutter
-            avail_h = page.height() - margin * 2 - head - foot - gutter
-            aspect = source.width() / max(source.height(), 1e-9)
-            if avail_w / max(avail_h, 1) > aspect:
-                side_h = float(avail_h)
-                side_w = side_h * aspect
-            else:
-                side_w = float(avail_w)
-                side_h = side_w / aspect
-            plot = QRectF(margin + gutter, margin + head, side_w, side_h)
-
-            # The app may be in a dark theme; a figure should not be. Paint the
-            # page and the plot area white and draw everything in dark ink.
-            painter.fillRect(page, QColor(255, 255, 255))
-
-            base_font = QFont(painter.font())
-
-            if title:
-                f = QFont(base_font); f.setPointSizeF(11); f.setBold(True)
-                painter.setFont(f)
-                painter.setPen(QPen(QColor(20, 20, 20)))
-                painter.drawText(int(margin), int(margin + 6 * unit), title)
-            if subtitle:
-                f = QFont(base_font); f.setPointSizeF(8)
-                painter.setFont(f)
-                painter.setPen(QPen(QColor(90, 90, 90)))
-                painter.drawText(int(margin), int(margin + 12 * unit), subtitle)
-
-            # --- the plot itself (current viewport only) ---
-            painter.fillRect(plot, QColor(255, 255, 255))
-            painter.save()
-            painter.setClipRect(plot)
-            self.scene().render(painter, plot, source)
-            painter.restore()
-
-            # --- axes for the visible range ---
-            span = max(float(source.width()), float(source.height()), 1.0)
-            step = _nice_tick_step(span, target_ticks=10)
-            tick_len = 3 * unit
-            f = QFont(base_font); f.setPointSizeF(7)
-            painter.setFont(f)
-            painter.setPen(QPen(QColor(70, 70, 70)))
-            metrics = painter.fontMetrics()
-
-            x_ticks = _axis_tick_positions(
-                lo=float(source.left()),
-                hi=float(source.right()),
-                length=length,
-                step=step,
+            self._paint_export_figure(
+                painter,
+                painter.viewport(),
+                title=title,
+                subtitle=subtitle,
             )
-            y_ticks = _axis_tick_positions(
-                lo=float(source.top()),
-                hi=float(source.bottom()),
-                length=length,
-                step=step,
-            )
-            x_positions = {
-                tick: plot.left()
-                + ((tick - source.left()) / max(source.width(), 1e-9)) * plot.width()
-                for tick in x_ticks
-            }
-            y_positions = {
-                tick: plot.top()
-                + ((tick - source.top()) / max(source.height(), 1e-9)) * plot.height()
-                for tick in y_ticks
-            }
-
-            def _export_x_extent(pos: float, label: str) -> tuple[float, float]:
-                half = metrics.horizontalAdvance(label) / 2.0
-                return pos - half, pos + half
-
-            def _export_y_extent(pos: float, label: str) -> tuple[float, float]:
-                half = metrics.height() / 2.0
-                return pos - half, pos + half
-
-            x_labeled = _non_overlapping_tick_labels(
-                x_ticks,
-                length=length,
-                offset=offset,
-                positions=x_positions,
-                label_extent=_export_x_extent,
-            )
-            y_labeled = _non_overlapping_tick_labels(
-                y_ticks,
-                length=length,
-                offset=offset,
-                positions=y_positions,
-                label_extent=_export_y_extent,
-            )
-
-            for tick in x_ticks:
-                label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
-                x = x_positions[tick]
-                painter.drawLine(int(x), int(plot.top() - tick_len), int(x), int(plot.top()))
-                if tick in x_labeled:
-                    painter.drawText(
-                        int(x - metrics.horizontalAdvance(label) / 2),
-                        int(plot.top() - tick_len - 2 * unit),
-                        label,
-                    )
-
-            for tick in y_ticks:
-                label = _format_bp(_scene_to_bp(tick, length=length, offset=offset))
-                y = y_positions[tick]
-                painter.drawLine(int(plot.left() - tick_len), int(y), int(plot.left()), int(y))
-                if tick in y_labeled:
-                    painter.drawText(
-                        int(
-                            plot.left()
-                            - tick_len
-                            - 2 * unit
-                            - metrics.horizontalAdvance(label)
-                        ),
-                        int(y + metrics.ascent() / 2),
-                        label,
-                    )
-
-            # --- legend ---
-            legend_y = plot.bottom() + 8 * unit
-            swatch = 6 * unit
-            entries = (
-                (_DIAGONAL_COLOR, "self"),
-                (_FORWARD_COLOR, "direct repeat"),
-                (_REVERSE_COLOR, "inverted repeat"),
-            )
-            x = plot.left()
-            for colour, label in entries:
-                pen = QPen(colour); pen.setWidth(max(1, int(0.4 * unit)))
-                painter.setPen(pen)
-                painter.drawLine(int(x), int(legend_y), int(x + swatch), int(legend_y))
-                painter.setPen(QPen(QColor(70, 70, 70)))
-                painter.drawText(
-                    int(x + swatch + 2 * unit),
-                    int(legend_y + metrics.ascent() / 2),
-                    label,
-                )
-                x += swatch + 4 * unit + metrics.horizontalAdvance(label)
         finally:
             painter.end()
+
+    def export_to_path(
+        self,
+        path: Path,
+        *,
+        dpi: int = 400,
+        title: str = "",
+        subtitle: str = "",
+    ) -> None:
+        """Export the current view as PDF, PNG, or SVG (by ``path`` suffix).
+
+        PNG/SVG use the same A4 layout and paint path as PDF so figures match.
+        """
+        from PySide6.QtGui import QImage
+
+        suffix = path.suffix.lower()
+        dpi = max(50, min(600, int(dpi)))
+        if suffix == ".pdf":
+            self.render_to_pdf(path, title=title, subtitle=subtitle, dpi=dpi)
+            return
+
+        item = self._item
+        prev_cache = None
+        if item is not None:
+            prev_cache = item.cacheMode()
+            # DeviceCoordinateCache is for the on-screen viewport; painting to
+            # a QImage/SVG with it active yields a sparse/stale plot.
+            item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
+
+        try:
+            if suffix == ".svg":
+                try:
+                    from PySide6.QtSvg import QSvgGenerator  # type: ignore
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        "SVG export needs the PySide6 QtSvg module."
+                    ) from exc
+                # Paint in A4 *points* (72 dpi logical page), not a 400-DPI pixel
+                # grid. That keeps the SVG resolution-independent so Preview and
+                # browsers can scale it without looking like an upscaled bitmap.
+                page = QRect(0, 0, 595, 842)  # A4 at 72 pt/in
+                if item is not None:
+                    item.set_export_pen_px(_line_width_px(self._line_width_step))
+                gen = QSvgGenerator()
+                gen.setFileName(str(path))
+                gen.setSize(page.size())
+                gen.setViewBox(page)
+                gen.setResolution(72)
+                gen.setTitle(title or "Dotplot")
+                painter = QPainter(gen)
+                try:
+                    self._paint_export_figure(
+                        painter, page, title=title, subtitle=subtitle
+                    )
+                finally:
+                    painter.end()
+                return
+
+            if suffix == ".png":
+                page = self._a4_page_rect(dpi)
+                # Same cosmetic width the PDF path uses on the A4 device.
+                if item is not None:
+                    item.set_export_pen_px(_line_width_px(self._line_width_step))
+                img = QImage(page.size(), QImage.Format.Format_ARGB32)
+                # Match QPdfWriter font metrics / physical size metadata.
+                dpm = int(round(dpi / 0.0254))
+                img.setDotsPerMeterX(dpm)
+                img.setDotsPerMeterY(dpm)
+                img.fill(Qt.GlobalColor.white)
+                painter = QPainter(img)
+                try:
+                    # Match PDF: crisp hit lines (no AA on the plot layer).
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                    painter.setRenderHint(
+                        QPainter.RenderHint.SmoothPixmapTransform, False
+                    )
+                    self._paint_export_figure(
+                        painter, page, title=title, subtitle=subtitle
+                    )
+                finally:
+                    painter.end()
+                if not img.save(str(path), "PNG"):
+                    raise RuntimeError(f"Could not save PNG: {path}")
+                return
+        finally:
+            if item is not None:
+                item.set_export_pen_px(None)
+                if prev_cache is not None:
+                    item.setCacheMode(prev_cache)
+
+        raise RuntimeError(
+            f"Unsupported export format: {suffix!r}. Use .svg, .png, or .pdf."
+        )
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         if self._item is None:
@@ -1548,11 +1690,11 @@ class DotplotPanel(QWidget):
             "Zoom to the selected region (drag a rectangle on the plot first)"
         )
 
-        self._pdf_btn = QPushButton("Save", self)
+        self._pdf_btn = QPushButton("Export", self)
         self._pdf_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
         self._pdf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._pdf_btn.setToolTip(
-            "Save the current view as a PDF next to the sequence file"
+            "Export the current view as PDF, PNG, or SVG"
         )
 
         self._cancel_btn = QToolButton(self)
@@ -1641,7 +1783,7 @@ class DotplotPanel(QWidget):
         bar.addWidget(self._reset_btn)
         bar.addWidget(self._zoom_select_btn)
         bar.addWidget(self._pdf_btn)
-        # Selection readout stays after Save (not in the title row).
+        # Selection readout stays after Export (not in the title row).
         bar.addWidget(self._sel_row)
         bar.addWidget(self._compute_btn)
         bar.addWidget(self._cancel_btn)
@@ -1690,7 +1832,7 @@ class DotplotPanel(QWidget):
         self._view_y_btn.clicked.connect(lambda: self._view_axis_in_annotation("y"))
         self._zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_by(_ZOOM_STEP))
         self._zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_by(1 / _ZOOM_STEP))
-        self._pdf_btn.clicked.connect(self._save_pdf)
+        self._pdf_btn.clicked.connect(self._export_dotplot)
         self._cancel_btn.clicked.connect(self._cancel_running)
         self._compute_btn.clicked.connect(self._start_requested_compute)
         self._sync_engine_controls()
@@ -1864,7 +2006,7 @@ class DotplotPanel(QWidget):
         self._pair_combo.setVisible(False)
         self._filter_len_label.setVisible(False)
         self._filter_len.setVisible(False)
-        # Status-only note for long sequences: hide Line width / zoom / Save.
+        # Status-only note for long sequences: hide Line width / zoom / Export.
         hide_bar = self._too_long_prompt_active
         self._controls_bar.setVisible(not hide_bar)
         if hide_bar:
@@ -2281,46 +2423,47 @@ class DotplotPanel(QWidget):
             start, end = (x1, x2) if x1 <= x2 else (x2, x1)
         self.viewInAnnotationRequested.emit(int(start), int(end))
 
-    def _save_pdf(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
+    def _export_dotplot(self) -> None:
+        from PySide6.QtWidgets import QDialog, QMessageBox
 
-        from repeatviewer.tool_output_paths import kept_input_name
-        from repeatviewer.widgets.file_conflict import confirm_existing_file_path
+        from repeatviewer.views.export_annotation_view_dialog import (
+            ExportAnnotationViewDialog,
+        )
 
         if self._sequence_length <= 0:
-            QMessageBox.information(self, "Dotplot", "There is no plot to save yet.")
+            QMessageBox.information(
+                self, "Export dotplot", "There is no plot to export yet."
+            )
             return
 
-        proposed = (
-            self._path.parent / f"{kept_input_name(self._path)}_dotplot.pdf"
-        ).expanduser().resolve()
-        out = confirm_existing_file_path(
-            self,
-            proposed,
-            title="Dotplot",
-            informative=(
-                "Overwrite the existing plot, or save under a different name?"
-            ),
-            required_suffix=".pdf",
+        dialog = ExportAnnotationViewDialog(
+            source_path=self._path,
+            title="Export dotplot",
+            name_tag="dotplot",
+            default_format="pdf",
+            parent=self,
         )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        out = dialog.chosen_path()
         if out is None:
             return
 
         try:
-            self._canvas.render_to_pdf(
+            self._canvas.export_to_path(
                 out,
+                dpi=dialog.dpi(),
                 title=self._title.text() or self._path.stem,
-                # The status line already says range, word size and segment
-                # count -- exactly what a figure caption needs.
+                # Status line already has range, word size, and segment count.
                 subtitle=self._status_caption(),
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
-                self, "Dotplot", f"Could not write {out.name}:\n{exc}"
+                self, "Export dotplot", f"Could not write {out.name}:\n{exc}"
             )
             return
 
-        self.statusMessage.emit(f"Saved {out.name}")
+        self.statusMessage.emit(f"Exported {out.name}")
         self._open_saved_file(out)
 
     def _open_saved_file(self, path: Path) -> None:
