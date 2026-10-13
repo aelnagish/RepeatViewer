@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +20,11 @@ from repeatviewer.backends.auto_annotation import (
     merge_auto_annotation_features,
     run_auto_annotations,
 )
-from repeatviewer.backends.auto_annotation_settings import AutoAnnotationSettings, load_auto_annotation_settings
+from repeatviewer.backends.auto_annotation_settings import (
+    AutoAnnotationSettings,
+    default_annotation_threads,
+    load_auto_annotation_settings,
+)
 from repeatviewer.backends.job_cancel import JobCancellation, check_cancelled
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
@@ -29,6 +35,7 @@ from repeatviewer.backends.sequence_features import (
     resolve_sidecar_path,
     save_annotations_multi,
 )
+from repeatviewer.backends.thread_budget import load_batch_workers
 from repeatviewer.backends.tsd_search import detect_tsd_features_by_id
 from repeatviewer.job_options import load_tsd_search_options
 from repeatviewer.backends.similarity_annotation import (
@@ -38,6 +45,18 @@ from repeatviewer.backends.similarity_annotation import (
     run_similarity_annotations,
 )
 from repeatviewer.backends.similarity_annotation_settings import load_similarity_annotation_settings
+
+
+def _annotation_parallel_sequences(num_sequences: int) -> int:
+    """Like BLAST: Max. parallel jobs capped by selection count and CPUs."""
+    import os
+
+    requested = load_batch_workers()
+    sequences = max(1, int(num_sequences))
+    if sequences <= 1 or requested <= 1:
+        return 1
+    cpus = os.cpu_count() or 4
+    return max(1, min(requested, sequences, cpus))
 
 
 @dataclass(frozen=True)
@@ -147,6 +166,9 @@ def _annotate_one_record_fasta(
     cancel: JobCancellation | None,
     progress: Callable[[str], None] | None,
     label: str,
+    auto_threads: int | None = None,
+    run_auto: bool = True,
+    run_similarity: bool = True,
 ) -> list:
     """Run selected modules on one single-sequence FASTA; return feature list.
 
@@ -158,7 +180,7 @@ def _annotate_one_record_fasta(
     per_seq_modes = tuple(
         mode for mode in options.auto_modes if mode != AutoAnnotationMode.TSD
     )
-    if per_seq_modes:
+    if run_auto and per_seq_modes:
         if progress is not None:
             progress(f"Auto annotation: {label}")
         auto_result = run_auto_annotations(
@@ -168,10 +190,11 @@ def _annotate_one_record_fasta(
             settings=auto_cfg,
             base_features=features,
             progress=progress,
+            num_threads=auto_threads,
         )
         features = auto_result.features
 
-    if options.similarity_databases:
+    if run_similarity and options.similarity_databases:
         if progress is not None:
             progress(f"Similarity annotation: {label}")
         sim_result = run_similarity_annotations(
@@ -331,6 +354,9 @@ def run_te_annotation_on_fasta(
             cancel=cancel,
             progress=_detail_progress,
             label=resolved.name,
+            auto_threads=max(
+                1, int(getattr(auto_cfg, "num_threads", default_annotation_threads()))
+            ),
         )
         features_by_id[rid] = features
         if progress is not None:
@@ -346,19 +372,18 @@ def run_te_annotation_on_fasta(
             for rid, rec in zip(all_record_ids, records, strict=False)
         }
         total = len(annotate_ids)
+        auto_threads = max(
+            1, int(getattr(auto_cfg, "num_threads", default_annotation_threads()))
+        )
+        parallel = _annotation_parallel_sequences(len(annotate_ids))
         with tempfile.TemporaryDirectory(prefix="repeatviewer_teann_") as tmp:
             tmp_dir = Path(tmp)
+            temp_by_id: dict[str, Path] = {}
             for index, rid in enumerate(annotate_ids):
                 check_cancelled(cancel)
                 record = id_to_record.get(rid)
                 if record is None:
                     continue
-                if progress is not None:
-                    progress(
-                        index,
-                        total,
-                        f"{resolved.name}: sequence {index + 1}/{total} ({rid})",
-                    )
                 original_id = rid.split("#", 1)[0]
                 temp_record = SeqRecord(
                     record.seq,
@@ -366,10 +391,18 @@ def run_te_annotation_on_fasta(
                     name=original_id,
                     description=original_id,
                 )
-                temp_fa = _write_single_record_temp_fasta(
+                temp_by_id[rid] = _write_single_record_temp_fasta(
                     temp_record, directory=tmp_dir, index=index
                 )
-                new_feats = _annotate_one_record_fasta(
+
+            # BLAST-style: up to Max. parallel jobs sequences at once;
+            # each sequence job uses its Threads setting for tools.
+            completed = 0
+            progress_lock = threading.Lock()
+
+            def _run_one(rid: str, temp_fa: Path) -> tuple[str, list]:
+                check_cancelled(cancel)
+                feats = _annotate_one_record_fasta(
                     temp_fa,
                     options,
                     auto_cfg=auto_cfg,
@@ -377,16 +410,37 @@ def run_te_annotation_on_fasta(
                     use_blast=use_blast,
                     base_features=tuple(features_by_id.get(rid) or []),
                     cancel=cancel,
-                    progress=_detail_progress,
+                    progress=None,
                     label=f"{resolved.name} [{rid}]",
+                    auto_threads=auto_threads,
                 )
-                features_by_id[rid] = new_feats
-                if progress is not None:
-                    progress(
-                        index + 1,
-                        total,
-                        f"{resolved.name}: sequence {index + 1}/{total} ({rid})",
-                    )
+                return rid, feats
+
+            if progress is not None:
+                progress(
+                    0,
+                    total,
+                    f"{resolved.name}: up to {parallel} sequence(s) in parallel "
+                    f"({auto_threads} feature-detection thread(s) each)",
+                )
+            with ThreadPoolExecutor(max_workers=parallel) as pool:
+                futures = [
+                    pool.submit(_run_one, rid, temp_fa)
+                    for rid, temp_fa in temp_by_id.items()
+                ]
+                for future in as_completed(futures):
+                    check_cancelled(cancel)
+                    rid, feats = future.result()
+                    features_by_id[rid] = feats
+                    with progress_lock:
+                        completed += 1
+                        done = completed
+                    if progress is not None:
+                        progress(
+                            done,
+                            total,
+                            f"{resolved.name}: sequence {done}/{total} ({rid})",
+                        )
         _apply_msa_tsd()
 
     json_path: Path | None = None

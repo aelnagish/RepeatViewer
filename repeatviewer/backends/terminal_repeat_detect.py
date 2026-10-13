@@ -383,6 +383,7 @@ def _run_cancellable_self_blastn(
     cancel: JobCancellation | None = None,
     use_system_blast: bool = False,
     word_size: int = DEFAULT_TERMINAL_REPEAT_WORD_SIZE,
+    num_threads: int = 1,
 ) -> Path:
     os_type = platform.system()
     script_dir = Path(get_original_file_path())
@@ -408,7 +409,7 @@ def _run_cancellable_self_blastn(
         "-out",
         str(blast_raw),
         "-num_threads",
-        "1",
+        str(max(1, int(num_threads))),
         "-word_size",
         str(effective_ws),
         "-gapopen",
@@ -461,6 +462,7 @@ def run_self_blast(
     cancel: JobCancellation | None = None,
     use_system_blast: bool = False,
     word_size: int = DEFAULT_TERMINAL_REPEAT_WORD_SIZE,
+    num_threads: int = 1,
 ) -> Path:
     """Build a database and run self-BLAST; return the headered BLAST table path."""
     check_cancelled(cancel)
@@ -490,6 +492,7 @@ def run_self_blast(
         cancel=cancel,
         use_system_blast=use_system_blast,
         word_size=word_size,
+        num_threads=num_threads,
     )
 
 
@@ -503,6 +506,7 @@ def auto_annotate_terminal_repeats(
     repeat_mode: str = "both",
     ltr_settings: TerminalRepeatSettings | None = None,
     tir_settings: TerminalRepeatSettings | None = None,
+    num_threads: int = 1,
 ) -> TerminalRepeatResult:
     """Run self-BLAST on a single-sequence FASTA and detect LTR or TIR features."""
     fasta_path = fasta_path.expanduser().resolve()
@@ -527,6 +531,7 @@ def auto_annotate_terminal_repeats(
         work_dir = work_dir.expanduser().resolve()
         work_dir.mkdir(parents=True, exist_ok=True)
 
+    blast_threads = max(1, int(num_threads))
     try:
         if mode == "LTR":
             blast_table = run_self_blast(
@@ -535,6 +540,7 @@ def auto_annotate_terminal_repeats(
                 cancel=cancel,
                 use_system_blast=use_system_blast,
                 word_size=ltr_word_size,
+                num_threads=blast_threads,
             )
             df = _load_self_blast_table(blast_table)
             return detect_terminal_repeat_features(
@@ -552,6 +558,7 @@ def auto_annotate_terminal_repeats(
                 cancel=cancel,
                 use_system_blast=use_system_blast,
                 word_size=tir_word_size,
+                num_threads=blast_threads,
             )
             df = _load_self_blast_table(blast_table)
             return detect_terminal_repeat_features(
@@ -570,6 +577,7 @@ def auto_annotate_terminal_repeats(
                 cancel=cancel,
                 use_system_blast=use_system_blast,
                 word_size=ltr_word_size,
+                num_threads=blast_threads,
             )
             df = _load_self_blast_table(blast_table)
             return detect_terminal_repeat_features(
@@ -586,6 +594,7 @@ def auto_annotate_terminal_repeats(
             cancel=cancel,
             use_system_blast=use_system_blast,
             word_size=ltr_word_size,
+            num_threads=blast_threads,
         )
         ltr_df = _load_self_blast_table(ltr_table)
         ltr_result = detect_terminal_repeat_features(
@@ -604,6 +613,7 @@ def auto_annotate_terminal_repeats(
             cancel=cancel,
             use_system_blast=use_system_blast,
             word_size=tir_word_size,
+            num_threads=blast_threads,
         )
         tir_df = _load_self_blast_table(tir_table)
         return detect_terminal_repeat_features(

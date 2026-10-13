@@ -1188,7 +1188,7 @@ def run_batch(
     te_annotation_options: TeAnnotationOptions | None = None,
     tsd_search_options: TsdSearchOptions | None = None,
     orf_prediction_settings=None,
-    max_workers: int = 4,
+    max_workers: int = 5,
     flexidot_combined: bool = True,
     cancel: JobCancellation | None = None,
     on_outputs_ready: Callable[[list[str]], None] | None = None,
@@ -1332,9 +1332,7 @@ def run_batch(
     ]
     total_units = max(1, sum(item_units))
 
-    workers = 1 if func_name == "te_annotation" else effective_batch_workers(
-        max_workers, len(work_items)
-    )
+    workers = effective_batch_workers(max_workers, len(work_items))
     # NCBI asks clients not to hammer the service with parallel web BLAST jobs.
     if online_blast:
         workers = 1

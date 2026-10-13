@@ -12,14 +12,12 @@ def _to_bool(value, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _default_tool_threads() -> int:
-    """Live default thread count: the Preferences 'Threads for tools' value."""
-    try:
-        from repeatviewer.backends.thread_budget import load_batch_workers
+DEFAULT_TOOL_THREADS = 4
 
-        return load_batch_workers()
-    except Exception:  # noqa: BLE001
-        return 4
+
+def _default_tool_threads() -> int:
+    """Default Threads in tool dialogs (BLAST, MAFFT, TE-Aid, …)."""
+    return DEFAULT_TOOL_THREADS
 
 
 DEFAULT_EXTEND_LEFT = 1000
@@ -746,7 +744,7 @@ class TeAnnotationJobOptions:
 
 
 DEFAULT_TEAID_EVALUE = DEFAULT_REPORT_EVALUE
-DEFAULT_TEAID_THREADS = 1
+DEFAULT_TEAID_THREADS = DEFAULT_TOOL_THREADS
 DEFAULT_TEAID_SELF_BLAST_WORD_SIZE = 6
 # Text written on the consensus (x-)axis of the TE-Aid panels. Configurable so
 # non-TE users (e.g. tandem repeats) can relabel it.
@@ -808,7 +806,7 @@ def normalize_blast_evalue(e_value: float, *, default: float = DEFAULT_BLAST_EVA
 class TeaAidOptions:
     e_value: float = DEFAULT_TEAID_EVALUE
     self_blast_word_size: int = DEFAULT_TEAID_SELF_BLAST_WORD_SIZE
-    num_threads: int = DEFAULT_TEAID_THREADS
+    num_threads: int = field(default_factory=_default_tool_threads)
     x_axis_label: str = DEFAULT_TEAID_X_AXIS_LABEL
     # Genome BLAST hit coloring by span as % of consensus length.
     hit_len_high_pct: float = DEFAULT_TEAID_HIT_LEN_HIGH_PCT
@@ -1365,7 +1363,7 @@ def load_teaid_options() -> TeaAidOptions:
             default=DEFAULT_TEAID_EVALUE,
         ),
         self_blast_word_size=word_size,
-        num_threads=max(1, int(v.get("num_threads", DEFAULT_TEAID_THREADS))),
+        num_threads=max(1, int(v.get("num_threads", _default_tool_threads()))),
         x_axis_label=(
             str(v.get("x_axis_label", DEFAULT_TEAID_X_AXIS_LABEL)).strip()
             or DEFAULT_TEAID_X_AXIS_LABEL
@@ -2145,6 +2143,8 @@ def save_flexidot_options(opts: FlexidotOptions) -> None:
 
 
 def load_te_annotation_options() -> TeAnnotationJobOptions:
+    from repeatviewer.backends.auto_annotation_settings import load_annotation_run_options
+
     v = _load_settings_group("te_annotation")
     right_click_action = str(v.get("right_click_action", TE_ANNOTATION_RIGHT_CLICK_RUN))
     if right_click_action not in TE_ANNOTATION_RIGHT_CLICK_ACTIONS:
@@ -2163,22 +2163,23 @@ def load_te_annotation_options() -> TeAnnotationJobOptions:
         similarity_database_names = tuple(
             part.strip() for part in raw_dbs.split(",") if part.strip()
         )
+    _threads, show, close = load_annotation_run_options()
     return TeAnnotationJobOptions(
         auto_modes=auto_modes,
         similarity_database_names=similarity_database_names,
         right_click_action=right_click_action,
-        show_process_window=_to_bool(
-            v.get("show_process_window"), DEFAULT_SHOW_PROCESS_WINDOW
-        ),
-        close_process_window_when_finished=_to_bool(
-            v.get("close_process_window_when_finished"),
-            DEFAULT_CLOSE_PROCESS_WINDOW_WHEN_FINISHED,
-        ),
+        show_process_window=show,
+        close_process_window_when_finished=close,
     )
 
 
 def save_te_annotation_options(opts: TeAnnotationJobOptions) -> None:
     from PySide6.QtCore import QSettings
+
+    from repeatviewer.backends.auto_annotation_settings import (
+        load_annotation_run_options,
+        save_annotation_run_options,
+    )
 
     s = QSettings()
     s.beginGroup("te_annotation")
@@ -2198,12 +2199,13 @@ def save_te_annotation_options(opts: TeAnnotationJobOptions) -> None:
             "similarity_database_names",
             ",".join(opts.similarity_database_names),
         )
-    s.setValue("show_process_window", opts.show_process_window)
-    s.setValue(
-        "close_process_window_when_finished",
-        opts.close_process_window_when_finished,
-    )
     s.endGroup()
+    threads, _show, _close = load_annotation_run_options()
+    save_annotation_run_options(
+        num_threads=threads,
+        show_process_window=opts.show_process_window,
+        close_process_window_when_finished=opts.close_process_window_when_finished,
+    )
 
 
 def load_te_confusion_matrix_benchmark_options() -> TeConfusionMatrixBenchmarkOptions:

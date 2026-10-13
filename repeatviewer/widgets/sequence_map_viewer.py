@@ -91,6 +91,8 @@ from repeatviewer.widgets.help_button import field_with_help, make_help_button
 _SETTINGS_FIELD_WIDTH = 260
 # Shared label column so LTR / TIR / Tandem / ORF forms line up vertically.
 _SETTINGS_LABEL_WIDTH = 210
+# Label + field + ``?`` help + margins (long Tandem/LTR labels need room).
+_SETTINGS_DIALOG_MIN_WIDTH = 620
 
 # Shift+scroll / trackpad pinch zoom (same factor as MSA / multi-sequence).
 _MAP_ZOOM_STEP = 1.08
@@ -6376,13 +6378,18 @@ class ModifyFeatureDialog(QDialog):
 class AutoAnnotationSettingsPanel(QWidget):
     """Embeddable LTR / TIR / tandem / ORF auto-annotation parameters."""
 
+    runOptionsChanged = Signal()
+
     def __init__(
         self,
         settings: AutoAnnotationSettings,
         parent: QWidget | None = None,
+        *,
+        include_run_controls: bool = True,
     ) -> None:
         super().__init__(parent)
         self._settings = settings
+        self._include_run_controls = bool(include_run_controls)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -6412,10 +6419,14 @@ class AutoAnnotationSettingsPanel(QWidget):
 
         layout.addWidget(self._section_title("ORF (orfipy)"))
         layout.addLayout(self._orf_form(settings.orf or OrfSettings()))
-        layout.addWidget(_settings_separator())
-
-        layout.addWidget(self._section_title("Others"))
-        layout.addLayout(self._others_form(settings))
+        if self._include_run_controls:
+            layout.addWidget(_settings_separator())
+            layout.addWidget(self._section_title("Others"))
+            layout.addLayout(self._others_form(settings))
+        else:
+            self._num_threads = None
+            self._show_process_window = None
+            self._close_process_window = None
 
         self._ltr_fields = self._terminal_fields[0]
         self._tir_fields = self._terminal_fields[1]
@@ -6731,6 +6742,22 @@ class AutoAnnotationSettingsPanel(QWidget):
 
     def _others_form(self, settings: AutoAnnotationSettings) -> QFormLayout:
         form = self._settings_form()
+        threads = QSpinBox(self)
+        threads.setRange(1, 256)
+        threads.setValue(max(1, int(settings.num_threads)))
+        form.addRow(
+            self._form_label("Threads:"),
+            self._field_help(
+                self._sized_spin(threads),
+                "Threads",
+                "CPU threads inside each sequence job (like BLAST Threads). "
+                "How many sequences run at once is Preferences → "
+                "Max. parallel jobs. Peak use ≈ parallel jobs × Threads. "
+                "Default is 4. Shared with Similarity annotation.",
+            ),
+        )
+        self._num_threads = threads
+        threads.valueChanged.connect(lambda _v: self.runOptionsChanged.emit())
         show_box = QCheckBox("Show process window while run", self)
         show_box.setChecked(bool(settings.show_process_window))
         show_box.setToolTip(
@@ -6745,12 +6772,15 @@ class AutoAnnotationSettingsPanel(QWidget):
             "On failure the window stays open so you can read the log."
         )
         show_box.toggled.connect(close_box.setEnabled)
+        show_box.toggled.connect(lambda _v: self.runOptionsChanged.emit())
+        close_box.toggled.connect(lambda _v: self.runOptionsChanged.emit())
         form.addRow(
             self._form_label(""),
             field_with_help(
                 show_box,
                 "Show process window",
-                "Open a live process window while Feature detection runs.",
+                "Open a live process window while Feature detection runs. "
+                "Shared with Similarity annotation.",
                 parent=self,
                 stretch=True,
             ),
@@ -6760,7 +6790,8 @@ class AutoAnnotationSettingsPanel(QWidget):
             field_with_help(
                 close_box,
                 "Close process window when finished",
-                "Close the process window automatically after a successful run.",
+                "Close the process window automatically after a successful run. "
+                "Shared with Similarity annotation.",
                 parent=self,
                 stretch=True,
             ),
@@ -6803,14 +6834,46 @@ class AutoAnnotationSettingsPanel(QWidget):
             alternative_start_codons=alt_starts.text().strip(),
             frames=self._selected_orf_frames(),
         )
+        if self._include_run_controls and self._num_threads is not None:
+            threads = max(1, int(self._num_threads.value()))
+            show = bool(self._show_process_window.isChecked())
+            close = bool(self._close_process_window.isChecked())
+        else:
+            from repeatviewer.backends.auto_annotation_settings import (
+                load_annotation_run_options,
+            )
+
+            threads, show, close = load_annotation_run_options()
         return AutoAnnotationSettings(
             ltr=ltr,
             tir=tir,
             tandem=tandem,
             orf=orf,
-            show_process_window=self._show_process_window.isChecked(),
-            close_process_window_when_finished=self._close_process_window.isChecked(),
+            num_threads=threads,
+            show_process_window=show,
+            close_process_window_when_finished=close,
         )
+
+    def set_run_options(
+        self,
+        *,
+        num_threads: int,
+        show_process_window: bool,
+        close_process_window_when_finished: bool,
+    ) -> None:
+        """Update shared Threads / process-window controls (no signal echo)."""
+        if not self._include_run_controls or self._num_threads is None:
+            return
+        self._num_threads.blockSignals(True)
+        self._show_process_window.blockSignals(True)
+        self._close_process_window.blockSignals(True)
+        self._num_threads.setValue(max(1, int(num_threads)))
+        self._show_process_window.setChecked(bool(show_process_window))
+        self._close_process_window.setChecked(bool(close_process_window_when_finished))
+        self._close_process_window.setEnabled(self._show_process_window.isChecked())
+        self._num_threads.blockSignals(False)
+        self._show_process_window.blockSignals(False)
+        self._close_process_window.blockSignals(False)
     @staticmethod
     def _read_terminal_settings(
         fields: tuple[QSpinBox, QSpinBox, QSpinBox, QSpinBox, QDoubleSpinBox],
@@ -6837,7 +6900,7 @@ class AutoAnnotationSettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Feature detection settings")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(_SETTINGS_DIALOG_MIN_WIDTH)
         self._panel = AutoAnnotationSettingsPanel(settings, self)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -6868,12 +6931,17 @@ class AutoAnnotationSettingsDialog(QDialog):
 class SimilarityAnnotationSettingsPanel(QWidget):
     """Embeddable similarity-annotation search thresholds."""
 
+    runOptionsChanged = Signal()
+
     def __init__(
         self,
         settings: SimilarityAnnotationSettings,
         parent: QWidget | None = None,
+        *,
+        include_run_controls: bool = True,
     ) -> None:
         super().__init__(parent)
+        self._include_run_controls = bool(include_run_controls)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -6981,6 +7049,31 @@ class SimilarityAnnotationSettingsPanel(QWidget):
             ),
         )
 
+        if self._include_run_controls:
+            self._num_threads = QSpinBox(self)
+            self._num_threads.setRange(1, 256)
+            self._num_threads.setValue(max(1, int(settings.num_threads)))
+            self._num_threads.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+            form.addRow(
+                "Threads:",
+                field_with_help(
+                    self._num_threads,
+                    "Threads",
+                    "CPU threads for BLAST / HMM / CDD inside each sequence job "
+                    "(like BLAST Threads). How many sequences run at once is "
+                    "Preferences → Max. parallel jobs. When several databases "
+                    "run together on one sequence, this budget is split across "
+                    "them. Peak use ≈ parallel jobs × Threads. Default is 4. "
+                    "Shared with Feature detection.",
+                    parent=self,
+                ),
+            )
+            self._num_threads.valueChanged.connect(
+                lambda _v: self.runOptionsChanged.emit()
+            )
+        else:
+            self._num_threads = None
+
         # Tick aligns with field column (left edge of number boxes); text to the right.
         self._show_db_name = QCheckBox("Show database name on feature track", self)
         self._show_db_name.setChecked(settings.show_database_name_on_track)
@@ -6997,64 +7090,108 @@ class SimilarityAnnotationSettingsPanel(QWidget):
             ),
         )
 
-        self._show_process_window = QCheckBox(
-            "Show process window while run", self
-        )
-        self._show_process_window.setChecked(bool(settings.show_process_window))
-        self._show_process_window.setToolTip(
-            "Open a window that streams Similarity annotation progress and "
-            "tool messages. Useful for long runs."
-        )
-        form.addRow(
-            "",
-            field_with_help(
-                self._show_process_window,
-                "Show process window",
-                "Open a live process window while Similarity annotation runs.",
-                parent=self,
-                stretch=True,
-            ),
-        )
+        if self._include_run_controls:
+            self._show_process_window = QCheckBox(
+                "Show process window while run", self
+            )
+            self._show_process_window.setChecked(bool(settings.show_process_window))
+            self._show_process_window.setToolTip(
+                "Open a window that streams Similarity annotation progress and "
+                "tool messages. Useful for long runs."
+            )
+            form.addRow(
+                "",
+                field_with_help(
+                    self._show_process_window,
+                    "Show process window",
+                    "Open a live process window while Similarity annotation runs. "
+                    "Shared with Feature detection.",
+                    parent=self,
+                    stretch=True,
+                ),
+            )
 
-        self._close_process_window = QCheckBox(
-            "Close process window when finished", self
-        )
-        self._close_process_window.setChecked(
-            bool(settings.close_process_window_when_finished)
-        )
-        self._close_process_window.setEnabled(
-            self._show_process_window.isChecked()
-        )
-        self._close_process_window.setToolTip(
-            "Automatically close the process window after a successful run. "
-            "On failure the window stays open so you can read the log."
-        )
-        self._show_process_window.toggled.connect(
-            self._close_process_window.setEnabled
-        )
-        form.addRow(
-            "",
-            field_with_help(
-                self._close_process_window,
-                "Close process window when finished",
-                "Close the process window automatically after a successful run.",
-                parent=self,
-                stretch=True,
-            ),
-        )
+            self._close_process_window = QCheckBox(
+                "Close process window when finished", self
+            )
+            self._close_process_window.setChecked(
+                bool(settings.close_process_window_when_finished)
+            )
+            self._close_process_window.setEnabled(
+                self._show_process_window.isChecked()
+            )
+            self._close_process_window.setToolTip(
+                "Automatically close the process window after a successful run. "
+                "On failure the window stays open so you can read the log."
+            )
+            self._show_process_window.toggled.connect(
+                self._close_process_window.setEnabled
+            )
+            self._show_process_window.toggled.connect(
+                lambda _v: self.runOptionsChanged.emit()
+            )
+            self._close_process_window.toggled.connect(
+                lambda _v: self.runOptionsChanged.emit()
+            )
+            form.addRow(
+                "",
+                field_with_help(
+                    self._close_process_window,
+                    "Close process window when finished",
+                    "Close the process window automatically after a successful run. "
+                    "Shared with Feature detection.",
+                    parent=self,
+                    stretch=True,
+                ),
+            )
+        else:
+            self._show_process_window = None
+            self._close_process_window = None
         layout.addLayout(form)
 
     def settings(self) -> SimilarityAnnotationSettings:
+        if self._include_run_controls and self._num_threads is not None:
+            threads = max(1, int(self._num_threads.value()))
+            show = bool(self._show_process_window.isChecked())
+            close = bool(self._close_process_window.isChecked())
+        else:
+            from repeatviewer.backends.auto_annotation_settings import (
+                load_annotation_run_options,
+            )
+
+            threads, show, close = load_annotation_run_options()
         return SimilarityAnnotationSettings(
             blastn_evalue=self._blastn_evalue.value(),
             blastp_evalue=self._blastp_evalue.value(),
             hmm_evalue=self._hmm_evalue.value(),
             cdd_evalue=self._cdd_evalue.value(),
             max_hits_per_database=self._max_hits.value(),
+            num_threads=threads,
             show_database_name_on_track=self._show_db_name.isChecked(),
-            show_process_window=self._show_process_window.isChecked(),
-            close_process_window_when_finished=self._close_process_window.isChecked(),
+            show_process_window=show,
+            close_process_window_when_finished=close,
         )
+
+    def set_run_options(
+        self,
+        *,
+        num_threads: int,
+        show_process_window: bool,
+        close_process_window_when_finished: bool,
+    ) -> None:
+        """Update shared Threads / process-window controls (no signal echo)."""
+        if not self._include_run_controls or self._num_threads is None:
+            return
+        self._num_threads.blockSignals(True)
+        self._show_process_window.blockSignals(True)
+        self._close_process_window.blockSignals(True)
+        self._num_threads.setValue(max(1, int(num_threads)))
+        self._show_process_window.setChecked(bool(show_process_window))
+        self._close_process_window.setChecked(bool(close_process_window_when_finished))
+        self._close_process_window.setEnabled(self._show_process_window.isChecked())
+        self._num_threads.blockSignals(False)
+        self._show_process_window.blockSignals(False)
+        self._close_process_window.blockSignals(False)
 
 
 
@@ -7071,6 +7208,7 @@ class SimilarityAnnotationSettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Similarity annotation settings")
+        self.setMinimumWidth(_SETTINGS_DIALOG_MIN_WIDTH)
         self._panel = SimilarityAnnotationSettingsPanel(settings, self)
         layout = QVBoxLayout(self)
         layout.setSpacing(8)

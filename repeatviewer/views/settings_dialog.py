@@ -448,8 +448,8 @@ class SettingsDialog(QDialog):
         self._batch_workers.setRange(1, 32)
         self._batch_workers.setValue(project.batch_workers)
         self._batch_workers.setToolTip(
-            "How many selected sequences can run at the same time (not CPU threads "
-            "inside one BLAST)."
+            "How many selected files/jobs can run at the same time. "
+            "Default is 5."
         )
         self._browser_panel_font = NoWheelSpinBox()
         self._browser_panel_font.setRange(8, 16)
@@ -726,13 +726,13 @@ class SettingsDialog(QDialog):
             ("Default preview tab:", self._fasta_default_tab),
         ])
         parallel_jobs_help = (
-            "How many selected sequences can run at the same time.\n\n"
-            "Example — BLAST:\n"
+            "How many selected <b>files/jobs</b> can run at the same time. "
+            "Limited by how many items you selected and by available CPUs. "
+            "Default is 5.<br><br>"
+            "<b>Example BLAST:</b><br>"
             "If you select 10 FASTA files and set this to 3, RepeatViewer starts "
-            "BLAST on three sequences in parallel. When one finishes, the next "
-            "waiting sequence starts, until all 10 are done.\n\n"
-            "This is not the Threads setting in the BLAST dialog, which controls "
-            "CPU threads inside each individual BLAST process."
+            "BLAST on three files in parallel. When one finishes, the next "
+            "waiting file starts, until all 10 are done."
         )
         performance = _group("Performance", [
             (
@@ -1186,7 +1186,7 @@ class SettingsDialog(QDialog):
             use_system_sequence_viewer=_bool_from_settings(
                 s.value("use_system_sequence_viewer", False)
             ),
-            batch_workers=int(s.value("batch_workers", 4)),
+            batch_workers=int(s.value("batch_workers", 5)),
         )
         s.endGroup()
         return project

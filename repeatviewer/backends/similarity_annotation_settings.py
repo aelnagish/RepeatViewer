@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import QSettings
 
+from repeatviewer.backends.auto_annotation_settings import (
+    default_annotation_threads,
+    load_annotation_run_options,
+    save_annotation_run_options,
+)
+
 
 DEFAULT_SIMILARITY_EVALUE = 1e-4
-SETTINGS_VERSION = 8
+SETTINGS_VERSION = 9
 
 
 @dataclass
@@ -20,9 +26,14 @@ class SimilarityAnnotationSettings:
     hmm_evalue: float = DEFAULT_SIMILARITY_EVALUE
     cdd_evalue: float = DEFAULT_SIMILARITY_EVALUE
     max_hits_per_database: int = 10
+    # CPU threads for BLAST/HMM/CDD inside each sequence job (like BLAST Threads).
+    num_threads: int = field(default_factory=default_annotation_threads)
     show_database_name_on_track: bool = True
     show_process_window: bool = True
     close_process_window_when_finished: bool = True
+
+    def __post_init__(self) -> None:
+        self.num_threads = max(1, int(self.num_threads or default_annotation_threads()))
 
 
 def format_similarity_evalue_suffix(evalue: float | str | None) -> str:
@@ -101,23 +112,23 @@ def load_similarity_annotation_settings() -> SimilarityAnnotationSettings:
     version = _get_int(s, f"{prefix}settings_version", 0)
     max_hits = _get_int(s, f"{prefix}max_hits_per_database", 10)
     show_db_name = _get_bool(s, f"{prefix}show_database_name_on_track", True)
-    show_process = _get_bool(s, f"{prefix}show_process_window", True)
-    close_process = _get_bool(s, f"{prefix}close_process_window_when_finished", True)
     # v6 and earlier stored a single blast_evalue for both BLASTN and BLASTP.
     legacy_blast = _get_float(s, f"{prefix}blast_evalue", DEFAULT_SIMILARITY_EVALUE)
     blastn = _get_float(s, f"{prefix}blastn_evalue", legacy_blast)
     blastp = _get_float(s, f"{prefix}blastp_evalue", legacy_blast)
     hmm = _get_float(s, f"{prefix}hmm_evalue", DEFAULT_SIMILARITY_EVALUE)
     cdd = _get_float(s, f"{prefix}cdd_evalue", DEFAULT_SIMILARITY_EVALUE)
+    threads, show_run, close_run = load_annotation_run_options()
     settings = SimilarityAnnotationSettings(
         blastn_evalue=blastn,
         blastp_evalue=blastp,
         hmm_evalue=hmm,
         cdd_evalue=cdd,
         max_hits_per_database=max_hits,
+        num_threads=threads,
         show_database_name_on_track=show_db_name,
-        show_process_window=show_process,
-        close_process_window_when_finished=close_process,
+        show_process_window=show_run,
+        close_process_window_when_finished=close_run,
     )
     if version < SETTINGS_VERSION:
         save_similarity_annotation_settings(settings)
@@ -134,8 +145,8 @@ def save_similarity_annotation_settings(settings: SimilarityAnnotationSettings) 
     s.setValue(f"{prefix}cdd_evalue", settings.cdd_evalue)
     s.setValue(f"{prefix}max_hits_per_database", settings.max_hits_per_database)
     s.setValue(f"{prefix}show_database_name_on_track", settings.show_database_name_on_track)
-    s.setValue(f"{prefix}show_process_window", bool(settings.show_process_window))
-    s.setValue(
-        f"{prefix}close_process_window_when_finished",
-        bool(settings.close_process_window_when_finished),
+    save_annotation_run_options(
+        num_threads=settings.num_threads,
+        show_process_window=settings.show_process_window,
+        close_process_window_when_finished=settings.close_process_window_when_finished,
     )

@@ -546,7 +546,6 @@ from repeatviewer.job_options import (
     DEFAULT_TEAID_EVALUE,
     DEFAULT_TEAID_X_AXIS_LABEL,
     DEFAULT_TEAID_SELF_BLAST_WORD_SIZE,
-    DEFAULT_TEAID_THREADS,
     DEFAULT_TEAID_HIT_LEN_HIGH_PCT,
     DEFAULT_TEAID_HIT_LEN_MID_PCT,
     DEFAULT_TEAID_HIT_COLOR_HIGH,
@@ -8587,7 +8586,8 @@ _TE_ANN_FEATURE_DETECTION_HELP = (
     "<b>ORF</b>: open reading frames.<br>"
     "<b>All</b>: select or clear every detector.<br><br>"
     "Thresholds (lengths, similarity, …) are under <b>Advanced Settings</b> → "
-    "Feature detection settings."
+    "Feature detection settings. Threads and the process window are under "
+    "<b>Settings</b> on this page (shared with Similarity annotation)."
 )
 _TE_ANN_SIMILARITY_HELP = (
     "Search selected protein / DNA / HMM / CDD databases for similarity hits "
@@ -8595,7 +8595,8 @@ _TE_ANN_SIMILARITY_HELP = (
     "Add or edit databases in <b>File → Manage Database</b>. "
     "<b>All</b> selects or clears every listed database.<br><br>"
     "E-value and hit limits are under <b>Advanced Settings</b> → "
-    "Similarity annotation settings."
+    "Similarity annotation settings. Threads and the process window are under "
+    "<b>Settings</b> on this page (shared with Feature detection)."
 )
 
 
@@ -8751,6 +8752,8 @@ class TeAnnotationDialog(QDialog):
         from repeatviewer.backends.auto_annotation import AutoAnnotationMode
         from repeatviewer.backends.annotation_colors import similarity_database_color
         from repeatviewer.backends.auto_annotation_settings import (
+            default_annotation_threads,
+            load_annotation_run_options,
             load_auto_annotation_settings,
         )
         from repeatviewer.backends.similarity_annotation import SimilarityDatabaseRun
@@ -8898,11 +8901,14 @@ class TeAnnotationDialog(QDialog):
             sim_outer.addWidget(self._db_flow)
         self._sync_similarity_all_check()
 
+        # Thresholds/colors stay in Advanced; Threads + process window are on Settings.
         self._auto_settings_panel = AutoAnnotationSettingsPanel(
-            load_auto_annotation_settings(), self
+            load_auto_annotation_settings(), self, include_run_controls=False
         )
         self._similarity_settings_panel = SimilarityAnnotationSettingsPanel(
-            load_similarity_annotation_settings(), self
+            load_similarity_annotation_settings(),
+            self,
+            include_run_controls=False,
         )
         # Feature types + databases only (no nucleotide / amino-acid palettes).
         self._colors_panel = AnnotationElementColorsPanel(
@@ -9001,6 +9007,69 @@ class TeAnnotationDialog(QDialog):
         form.addRow(feature_section)
         form.addRow(_form_section_separator())
         form.addRow(sim_section)
+        form.addRow(_form_section_separator())
+
+        # Settings: shared Threads + process window (not Advanced).
+        run_threads, run_show, run_close = load_annotation_run_options()
+        settings_section = QWidget(basic)
+        settings_outer = QVBoxLayout(settings_section)
+        settings_outer.setContentsMargins(0, 0, 0, 0)
+        settings_outer.setSpacing(6)
+        settings_outer.addWidget(_section_title_label("Settings", settings_section))
+        settings_form = QFormLayout()
+        settings_form.setContentsMargins(0, 0, 0, 0)
+        settings_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        settings_form.setHorizontalSpacing(12)
+        settings_form.setVerticalSpacing(4)
+        self._threads = QSpinBox(settings_section)
+        self._threads.setRange(1, 256)
+        self._threads.setValue(max(1, int(run_threads)))
+        self._threads.setFixedWidth(260)
+        settings_form.addRow(
+            "Threads:",
+            field_with_help(
+                self._threads,
+                "Threads",
+                "CPU threads inside each sequence job for Feature detection "
+                "and Similarity annotation (like BLAST Threads). How many "
+                "sequences run at once is Preferences → Max. parallel jobs. "
+                f"Default is {default_annotation_threads()}.",
+            ),
+        )
+        self._show_process_window = QCheckBox(
+            "Show process window while run", settings_section
+        )
+        self._show_process_window.setChecked(bool(run_show))
+        self._close_process_window = QCheckBox(
+            "Close process window when finished", settings_section
+        )
+        self._close_process_window.setChecked(bool(run_close))
+        self._close_process_window.setEnabled(self._show_process_window.isChecked())
+        self._show_process_window.toggled.connect(self._close_process_window.setEnabled)
+        settings_form.addRow(
+            "",
+            field_with_help(
+                self._show_process_window,
+                "Show process window",
+                "Open a live process window while Sequence Annotation runs. "
+                "Shared with Feature detection and Similarity annotation.",
+                stretch=True,
+            ),
+        )
+        settings_form.addRow(
+            "",
+            field_with_help(
+                self._close_process_window,
+                "Close process window when finished",
+                "Close the process window automatically after a successful run. "
+                "Shared with Feature detection and Similarity annotation.",
+                stretch=True,
+            ),
+        )
+        settings_outer.addLayout(settings_form)
+        form.addRow(settings_section)
 
         params_root.addWidget(basic)
         params_root.addWidget(advanced)
@@ -9037,24 +9106,12 @@ class TeAnnotationDialog(QDialog):
         for radio in self._right_click_buttons.values():
             rc_box_layout.addWidget(radio)
 
-        process_box, self._show_process_window, self._close_process_window = (
-            make_process_output_box(
-                self,
-                tool_name="Sequence Annotation",
-                checked=bool(getattr(opts, "show_process_window", True)),
-                close_when_finished=bool(
-                    getattr(opts, "close_process_window_when_finished", True)
-                ),
-            )
-        )
-
         options_tab = QWidget(self)
         options_layout = QVBoxLayout(options_tab)
         options_layout.setContentsMargins(16, 14, 16, 14)
         options_layout.setSpacing(14)
         options_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         options_layout.addWidget(rc_box)
-        options_layout.addWidget(process_box)
         options_layout.addStretch(1)
         options_tab.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
@@ -9416,14 +9473,19 @@ class TeAnnotationDialog(QDialog):
         # Rebuild settings panels from defaults by replacing child widgets.
         parent_auto = self._auto_settings_panel.parentWidget()
         parent_sim = self._similarity_settings_panel.parentWidget()
+        from repeatviewer.backends.auto_annotation_settings import (
+            default_annotation_threads,
+        )
         from repeatviewer.widgets.sequence_map_viewer import (
             AutoAnnotationSettingsPanel,
             SimilarityAnnotationSettingsPanel,
         )
 
-        new_auto = AutoAnnotationSettingsPanel(AutoAnnotationSettings(), parent_auto)
+        new_auto = AutoAnnotationSettingsPanel(
+            AutoAnnotationSettings(), parent_auto, include_run_controls=False
+        )
         new_sim = SimilarityAnnotationSettingsPanel(
-            SimilarityAnnotationSettings(), parent_sim
+            SimilarityAnnotationSettings(), parent_sim, include_run_controls=False
         )
         if parent_auto is not None:
             layout = parent_auto.layout()
@@ -9439,26 +9501,51 @@ class TeAnnotationDialog(QDialog):
         self._similarity_settings_panel = new_sim
         self._colors_panel.restore_defaults()
         self._right_click_buttons[TE_ANNOTATION_RIGHT_CLICK_RUN].setChecked(True)
+        self._threads.setValue(default_annotation_threads())
         self._show_process_window.setChecked(defaults.show_process_window)
         self._close_process_window.setChecked(
             defaults.close_process_window_when_finished
         )
+        self._close_process_window.setEnabled(self._show_process_window.isChecked())
         if self._advanced_settings_btn.isChecked():
             self._advanced_settings_btn.setChecked(False)
         else:
             self._resize_for_advanced(False)
 
     def apply_settings_panels(self) -> None:
-        """Persist Advanced-tab feature-detection, similarity, and element colors."""
+        """Persist Settings + Advanced feature-detection, similarity, and colors."""
+        from dataclasses import replace
+
         from repeatviewer.backends.auto_annotation_settings import (
+            save_annotation_run_options,
             save_auto_annotation_settings,
         )
         from repeatviewer.backends.similarity_annotation_settings import (
             save_similarity_annotation_settings,
         )
 
-        save_auto_annotation_settings(self._auto_settings_panel.settings())
-        save_similarity_annotation_settings(self._similarity_settings_panel.settings())
+        threads = max(1, int(self._threads.value()))
+        show = bool(self._show_process_window.isChecked())
+        close = bool(self._close_process_window.isChecked())
+        save_annotation_run_options(
+            num_threads=threads,
+            show_process_window=show,
+            close_process_window_when_finished=close,
+        )
+        auto = replace(
+            self._auto_settings_panel.settings(),
+            num_threads=threads,
+            show_process_window=show,
+            close_process_window_when_finished=close,
+        )
+        sim = replace(
+            self._similarity_settings_panel.settings(),
+            num_threads=threads,
+            show_process_window=show,
+            close_process_window_when_finished=close,
+        )
+        save_auto_annotation_settings(auto)
+        save_similarity_annotation_settings(sim)
         self._colors_panel.save()
         self._refresh_similarity_db_checkbox_colors()
 
@@ -10463,7 +10550,7 @@ class TeaAidParamsDialog(QDialog):
         self._pan_list.reset_to_defaults()
         self._evalue.setValue(DEFAULT_TEAID_EVALUE)
         self._word_size.setValue(DEFAULT_TEAID_SELF_BLAST_WORD_SIZE)
-        self._threads.setValue(DEFAULT_TEAID_THREADS)
+        self._threads.setValue(max(1, defaults.num_threads))
         self._hit_high_pct.blockSignals(True)
         self._hit_mid_pct.blockSignals(True)
         self._hit_high_pct.setValue(DEFAULT_TEAID_HIT_LEN_HIGH_PCT)

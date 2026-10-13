@@ -272,7 +272,7 @@ class RepeatViewerProject:
     use_system_muscle: bool = False
     use_system_sequence_viewer: bool = False
     # How many sequences to process at once in batch jobs (Blast, TE-Aid, etc.)
-    batch_workers: int = 4
+    batch_workers: int = 5
 
     def __post_init__(self) -> None:
         self.input_dir = _to_path(self.input_dir)

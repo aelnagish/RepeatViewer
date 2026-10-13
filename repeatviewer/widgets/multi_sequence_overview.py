@@ -217,8 +217,9 @@ def _msa_letter_bg_rect(
     """Centered residue fill for letter zoom.
 
     At size-10 (slider ¾) the fill is a square of ``letter_side``. From ¾→max
-    only width grows, up to ``_MSA_LETTER_BG_MAX_WIDTH_SCALE``×, so the colour
-    extends into the wider cell; height stays at the size-10 side.
+    the fill spans the full column pitch so neighbouring columns stay flush
+    (no white gutters); height stays at the size-10 side while width follows
+    the cell as zoom grows toward ``_MSA_LETTER_BG_MAX_WIDTH_SCALE``×.
     """
     cell_w = max(0.5, float(cell_w))
     cell_h = max(0.5, float(cell_h))
@@ -240,13 +241,12 @@ def _msa_letter_bg_rect(
             s,
             s,
         )
-    # Past ¾: widen only (cap at 3× size-10 and at the column pitch).
-    bg_w = max(side, min(cell_w, side * _MSA_LETTER_BG_MAX_WIDTH_SCALE))
+    # Past ¾: fill the full column so max zoom has no inter-column gaps.
     bg_h = side
     return QRectF(
-        float(x) + (cell_w - bg_w) * 0.5,
+        float(x),
         float(y) + (cell_h - bg_h) * 0.5,
-        bg_w,
+        cell_w,
         bg_h,
     )
 
@@ -2464,15 +2464,16 @@ class _BarsCanvas(QWidget):
             / max(1, self._max_length),
         )
         if self._msa_mode or self._msa_seqs:
-            # Max zoom must reach 3× size-10 ppb so slider ¾→4/4 can widen fills.
+            # Cap at 3× size-10 so max zoom fills columns flush (no gutters).
             _band, letter_ppb = _msa_letter_size_metrics(_MSA_LETTER_SIZE_PT)
             ceil = max(
                 _MSA_MAX_PPB,
                 float(letter_ppb) * _MSA_LETTER_BG_MAX_WIDTH_SCALE,
             )
+            desired_max = ceil
         else:
             ceil = _MAX_PPB
-        desired_max = max(ceil, fit_ppb * _MAX_ZOOM_OVER_FIT)
+            desired_max = max(ceil, fit_ppb * _MAX_ZOOM_OVER_FIT)
         return fit_ppb, max(fit_ppb, min(desired_max, geometry_limit))
 
     def set_pixels_per_base(self, ppb: float) -> None:
@@ -3222,12 +3223,15 @@ class _BarsCanvas(QWidget):
                 or rubber.width() >= _RUBBER_MIN_PX
                 or rubber.height() >= _RUBBER_MIN_PX
             ):
+                feats: set[tuple[int, int]] = set()
                 if drag_kind == "features":
                     feats = self._features_intersecting_rect(rubber)
+                if drag_kind == "features" and feats:
                     # Partial overlap selects the feature → column span.
                     self._set_feature_selection(feats, set_columns=True)
                 else:
-                    # Snap live pixel rubber to matrix cells on commit.
+                    # Sequence/regional select — including when the drag started
+                    # on the annotation band but hit no features.
                     if temp_sel is not None:
                         start_i, end_i, r0, r1 = temp_sel
                         rows = list(range(r0, r1 + 1))

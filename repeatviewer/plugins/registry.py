@@ -55,7 +55,7 @@ class PluginRegistry:
         project: RepeatViewerProject,
         progress_cb: ProgressCallback,
         *,
-        max_workers: int = 4,
+        max_workers: int = 5,
         cancel=None,
     ) -> dict:
         plugin = self._plugins.get(plugin_id)

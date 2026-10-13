@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import QSettings
 
@@ -11,6 +11,16 @@ DEFAULT_TIR_SIMILARITY_THRESHOLD = 0.5
 
 
 DEFAULT_MIN_DISTANCE_TO_END = 1000
+
+
+DEFAULT_ANNOTATION_THREADS = 4
+# Shared by Feature detection + Similarity annotation (and Sequence Annotation Settings).
+ANNOTATION_RUN_PREFIX = "annotation_run/"
+
+
+def default_annotation_threads() -> int:
+    """Default Threads for Feature detection / Similarity (same as other tools)."""
+    return DEFAULT_ANNOTATION_THREADS
 
 
 @dataclass
@@ -87,10 +97,13 @@ class AutoAnnotationSettings:
     tir: TerminalRepeatSettings | None = None
     tandem: TandemRepeatSettings | None = None
     orf: OrfSettings | None = None
+    # CPU threads inside each sequence job (like BLAST Threads).
+    num_threads: int = field(default_factory=default_annotation_threads)
     show_process_window: bool = True
     close_process_window_when_finished: bool = True
 
     def __post_init__(self) -> None:
+        self.num_threads = max(1, int(self.num_threads or default_annotation_threads()))
         if self.ltr is None:
             self.ltr = TerminalRepeatSettings(
                 min_length=100,
@@ -129,6 +142,62 @@ def _get_bool(s: QSettings, key: str, default: bool) -> bool:
     if isinstance(value, str):
         return value.lower() in ("1", "true", "yes", "on")
     return bool(value)
+
+
+def load_annotation_run_options() -> tuple[int, bool, bool]:
+    """Return ``(num_threads, show_process_window, close_when_finished)``."""
+    s = QSettings()
+    threads = default_annotation_threads()
+    show = True
+    close = True
+    if s.value(f"{ANNOTATION_RUN_PREFIX}num_threads") is not None:
+        threads = _get_int(
+            s, f"{ANNOTATION_RUN_PREFIX}num_threads", default_annotation_threads()
+        )
+    else:
+        for prefix in ("auto_annotation/", "similarity_annotation/"):
+            if s.value(f"{prefix}num_threads") is not None:
+                threads = _get_int(s, f"{prefix}num_threads", threads)
+                break
+    if s.value(f"{ANNOTATION_RUN_PREFIX}show_process_window") is not None:
+        show = _get_bool(s, f"{ANNOTATION_RUN_PREFIX}show_process_window", True)
+    else:
+        for prefix in ("auto_annotation/", "similarity_annotation/", "te_annotation/"):
+            if s.value(f"{prefix}show_process_window") is not None:
+                show = _get_bool(s, f"{prefix}show_process_window", True)
+                break
+    close_key = f"{ANNOTATION_RUN_PREFIX}close_process_window_when_finished"
+    if s.value(close_key) is not None:
+        close = _get_bool(s, close_key, True)
+    else:
+        for prefix in ("auto_annotation/", "similarity_annotation/", "te_annotation/"):
+            key = f"{prefix}close_process_window_when_finished"
+            if s.value(key) is not None:
+                close = _get_bool(s, key, True)
+                break
+    return max(1, int(threads)), bool(show), bool(close)
+
+
+def save_annotation_run_options(
+    *,
+    num_threads: int,
+    show_process_window: bool,
+    close_process_window_when_finished: bool,
+) -> None:
+    """Persist shared Threads / process-window flags for both annotation panels."""
+    s = QSettings()
+    threads = max(1, int(num_threads))
+    show = bool(show_process_window)
+    close = bool(close_process_window_when_finished)
+    for prefix in (
+        ANNOTATION_RUN_PREFIX,
+        "auto_annotation/",
+        "similarity_annotation/",
+        "te_annotation/",
+    ):
+        s.setValue(f"{prefix}num_threads", threads)
+        s.setValue(f"{prefix}show_process_window", show)
+        s.setValue(f"{prefix}close_process_window_when_finished", close)
 
 
 def load_auto_annotation_settings() -> AutoAnnotationSettings:
@@ -177,15 +246,15 @@ def load_auto_annotation_settings() -> AutoAnnotationSettings:
         alternative_start_codons=str(s.value(f"{prefix}orf_alt_starts", "") or ""),
         frames=normalize_orf_frames(s.value(f"{prefix}orf_frames", "")),
     )
+    threads, show, close = load_annotation_run_options()
     return AutoAnnotationSettings(
         ltr=ltr,
         tir=tir,
         tandem=tandem,
         orf=orf,
-        show_process_window=_get_bool(s, f"{prefix}show_process_window", True),
-        close_process_window_when_finished=_get_bool(
-            s, f"{prefix}close_process_window_when_finished", True
-        ),
+        num_threads=threads,
+        show_process_window=show,
+        close_process_window_when_finished=close,
     )
 
 
@@ -229,10 +298,10 @@ def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
         f"{prefix}orf_frames",
         ",".join(str(frame) for frame in normalize_orf_frames(orf.frames)),
     )
-    s.setValue(f"{prefix}show_process_window", bool(settings.show_process_window))
-    s.setValue(
-        f"{prefix}close_process_window_when_finished",
-        bool(settings.close_process_window_when_finished),
+    save_annotation_run_options(
+        num_threads=settings.num_threads,
+        show_process_window=settings.show_process_window,
+        close_process_window_when_finished=settings.close_process_window_when_finished,
     )
 
 

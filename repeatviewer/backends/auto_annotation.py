@@ -170,6 +170,7 @@ def run_auto_annotations(
     settings: AutoAnnotationSettings | None = None,
     base_features: tuple[SequenceFeature, ...] | None = None,
     progress: Callable[[str], None] | None = None,
+    num_threads: int | None = None,
 ) -> MultiAutoAnnotationResult:
     """Run one or more auto-annotation modules and append results on new tracks.
 
@@ -183,6 +184,11 @@ def run_auto_annotations(
     from repeatviewer.backends.msa_coordinates import prepare_msa_annotation_workspace
     from repeatviewer.backends.sequence_features import load_sequence_map_data
 
+    cfg = settings or AutoAnnotationSettings()
+    threads = max(
+        1,
+        int(num_threads if num_threads is not None else cfg.num_threads),
+    )
     data = load_sequence_map_data(fasta_path)
     incoming = tuple(base_features if base_features is not None else data.features)
     workspace = prepare_msa_annotation_workspace(fasta_path, incoming)
@@ -201,7 +207,11 @@ def run_auto_annotations(
                 # Completed count before this mode: index-1.
                 progress(f"{index - 1}/{total} {mode.value}")
             result = run_auto_annotation(
-                work_path, mode, cancel=cancel, settings=settings
+                work_path,
+                mode,
+                cancel=cancel,
+                settings=cfg,
+                num_threads=threads,
             )
             if progress is not None:
                 progress(f"{index}/{total} {mode.value}")
@@ -260,10 +270,15 @@ def run_auto_annotation(
     *,
     cancel: JobCancellation | None = None,
     settings: AutoAnnotationSettings | None = None,
+    num_threads: int | None = None,
 ) -> AutoAnnotationResult:
     """Run the selected auto-annotation module on a single-sequence FASTA."""
     fasta_path = fasta_path.expanduser().resolve()
     cfg = settings or AutoAnnotationSettings()
+    threads = max(
+        1,
+        int(num_threads if num_threads is not None else cfg.num_threads),
+    )
 
     if mode == AutoAnnotationMode.TANDEM:
         record = SeqIO.read(str(fasta_path), "fasta")
@@ -305,6 +320,7 @@ def run_auto_annotation(
         repeat_mode=mode.value,
         ltr_settings=cfg.ltr,
         tir_settings=cfg.tir,
+        num_threads=threads,
     )
     return AutoAnnotationResult(
         features=terminal.features,

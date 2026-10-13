@@ -16,7 +16,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
-from repeatviewer.backends.thread_budget import analysis_threads_per_job, load_batch_workers
+from repeatviewer.backends.thread_budget import load_batch_workers
 from repeatviewer.backends.auto_annotation_settings import OrfSettings
 from repeatviewer.backends.pyhmmer_search import collect_pyhmmer_domain_hits, hmm_uses_nucleotide_query
 from repeatviewer.backends.similarity_annotation_settings import (
@@ -1154,6 +1154,7 @@ def _annotate_protein_hmm_with_pyhmmer(
     database: UserDatabase,
     *,
     settings: SimilarityAnnotationSettings,
+    cpus: int = 1,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     hmm_path = database.path.expanduser().resolve()
     proteins = _protein_records_from_orfs(sequence, orfs)
@@ -1169,6 +1170,7 @@ def _annotate_protein_hmm_with_pyhmmer(
             hmm_path,
             query_faa,
             report_e=_clamp_evalue(settings.hmm_evalue, default=DEFAULT_HMM_EVALUE),
+            cpus=max(1, int(cpus)),
         )
     selected = _select_pyhmmer_protein_hits_on_genome(raw_hits, lookup, max_hits=max_hits)
     if not selected:
@@ -1195,6 +1197,7 @@ def _annotate_dna_hmm_with_pyhmmer(
     database: UserDatabase,
     *,
     settings: SimilarityAnnotationSettings,
+    cpus: int = 1,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     hmm_path = database.path.expanduser().resolve()
     max_hits = _max_hits(settings.max_hits_per_database)
@@ -1205,6 +1208,7 @@ def _annotate_dna_hmm_with_pyhmmer(
             hmm_path,
             query_fa,
             report_e=_clamp_evalue(settings.hmm_evalue, default=DEFAULT_HMM_EVALUE),
+            cpus=max(1, int(cpus)),
         )
     selected = _select_pyhmmer_hits_by_coverage(raw_hits, max_hits=max_hits)
     if not selected:
@@ -1230,6 +1234,7 @@ def _annotate_protein_hmm_database(
     database: UserDatabase,
     *,
     settings: SimilarityAnnotationSettings,
+    cpus: int = 1,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     try:
         import pyhmmer  # type: ignore[import-untyped]  # noqa: F401
@@ -1237,7 +1242,9 @@ def _annotate_protein_hmm_database(
         return (), f"{database.name}: pyhmmer is not installed ({pyhmmer_install_hint()})."
 
     try:
-        return _annotate_protein_hmm_with_pyhmmer(sequence, orfs, database, settings=settings)
+        return _annotate_protein_hmm_with_pyhmmer(
+            sequence, orfs, database, settings=settings, cpus=cpus
+        )
     except Exception as exc:  # noqa: BLE001
         return (), f"{database.name}: pyhmmer search failed ({exc})."
 
@@ -1248,6 +1255,7 @@ def _annotate_dna_hmm_database(
     database: UserDatabase,
     *,
     settings: SimilarityAnnotationSettings,
+    cpus: int = 1,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     try:
         import pyhmmer  # type: ignore[import-untyped]  # noqa: F401
@@ -1255,7 +1263,9 @@ def _annotate_dna_hmm_database(
         return (), f"{database.name}: pyhmmer is not installed ({pyhmmer_install_hint()})."
 
     try:
-        return _annotate_dna_hmm_with_pyhmmer(sequence, seq_id, database, settings=settings)
+        return _annotate_dna_hmm_with_pyhmmer(
+            sequence, seq_id, database, settings=settings, cpus=cpus
+        )
     except Exception as exc:  # noqa: BLE001
         return (), f"{database.name}: pyhmmer search failed ({exc})."
 
@@ -1267,6 +1277,7 @@ def _annotate_hmm_database(
     database: UserDatabase,
     *,
     settings: SimilarityAnnotationSettings,
+    cpus: int = 1,
 ) -> tuple[tuple[SequenceFeature, ...], str]:
     hmm_path = database.path.expanduser().resolve()
     readiness = database_search_readiness(database)
@@ -1274,8 +1285,12 @@ def _annotate_hmm_database(
         return (), f"{database.name}: {readiness}"
 
     if hmm_uses_nucleotide_query(hmm_path):
-        return _annotate_dna_hmm_database(sequence, seq_id, database, settings=settings)
-    return _annotate_protein_hmm_database(sequence, orfs, database, settings=settings)
+        return _annotate_dna_hmm_database(
+            sequence, seq_id, database, settings=settings, cpus=cpus
+        )
+    return _annotate_protein_hmm_database(
+        sequence, orfs, database, settings=settings, cpus=cpus
+    )
 
 
 def _next_track(features: list[SequenceFeature]) -> int:
@@ -1339,6 +1354,7 @@ def _annotate_single_similarity_database(
             orfs,
             db,
             settings=settings,
+            cpus=blast_threads,
         )
     if db.db_type == DATABASE_TYPE_PROTEIN:
         return _annotate_protein_database(
@@ -1366,19 +1382,28 @@ def _annotate_single_similarity_database(
 def _similarity_parallel_workers(
     database_count: int,
     *,
-    batch_workers: int | None = None,
+    thread_budget: int | None = None,
 ) -> int:
-    workers = max(1, int(batch_workers if batch_workers is not None else load_batch_workers()))
-    return max(1, min(workers, database_count))
+    """How many databases may run at once (capped by the Threads setting)."""
+    budget = max(
+        1,
+        int(thread_budget if thread_budget is not None else load_batch_workers()),
+    )
+    return max(1, min(budget, database_count))
 
 
 def _similarity_blast_threads(
     database_count: int,
     *,
-    batch_workers: int | None = None,
+    thread_budget: int | None = None,
 ) -> int:
-    parallel = _similarity_parallel_workers(database_count, batch_workers=batch_workers)
-    return analysis_threads_per_job(batch_workers, parallel_jobs=parallel)
+    """CPU threads for one BLAST/HMM/CDD job (budget split across parallel DBs)."""
+    budget = max(
+        1,
+        int(thread_budget if thread_budget is not None else load_batch_workers()),
+    )
+    parallel = _similarity_parallel_workers(database_count, thread_budget=budget)
+    return max(1, budget // parallel)
 
 
 def _stamp_features(
@@ -1459,8 +1484,9 @@ def run_similarity_annotations(
                 messages.append(str(exc))
 
         total = len(databases)
-        workers = _similarity_parallel_workers(total)
-        blast_threads = _similarity_blast_threads(total)
+        thread_budget = max(1, int(cfg.num_threads))
+        workers = _similarity_parallel_workers(total, thread_budget=thread_budget)
+        blast_threads = _similarity_blast_threads(total, thread_budget=thread_budget)
         db_results: list[
             tuple[SimilarityDatabaseRun, tuple[SequenceFeature, ...], str] | None
         ] = [None] * total

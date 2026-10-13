@@ -10,8 +10,11 @@ from PySide6.QtCore import QSettings
 _APP_THREAD_RESERVE = 2
 
 
+DEFAULT_BATCH_WORKERS = 5
+
+
 def load_batch_workers() -> int:
-    return max(1, int(QSettings().value("batch_workers", 4)))
+    return max(1, int(QSettings().value("batch_workers", DEFAULT_BATCH_WORKERS)))
 
 
 def reserved_app_threads() -> int:
@@ -41,9 +44,9 @@ def analysis_threads_per_job(
     parallel_jobs: int = 1,
 ) -> int:
     """
-    Threads for one BLAST/TE-Aid job.
+    Threads for one analysis process when auto-budgeting from CPUs.
 
-    ``batch_workers`` is the parallel sequence count from Preferences.
+    ``batch_workers`` is Max. parallel jobs from Preferences.
     ``parallel_jobs`` is how many analysis processes run at once (e.g. similarity DBs).
     """
     workers = max(1, int(batch_workers if batch_workers is not None else load_batch_workers()))

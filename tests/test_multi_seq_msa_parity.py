@@ -908,14 +908,20 @@ def test_msa_letter_background_square_connects_rows(qapp: QApplication) -> None:
     assert bg.top() == pytest.approx(0.0)
     assert bg.bottom() == pytest.approx(float(letter_h))
 
-    # Slider ¾→4/4: width only grows to 3× size-10; height unchanged.
+    # Slider ¾→4/4: fill spans the full column (flush neighbours); height fixed.
     wide_ppb = letter_ppb * _MSA_LETTER_BG_MAX_WIDTH_SCALE
     wide = _msa_letter_bg_rect(
         0.0, 0.0, wide_ppb, float(letter_h), letter_side=float(letter_h)
     )
     assert wide.height() == pytest.approx(float(letter_h))
-    assert wide.width() == pytest.approx(letter_ppb * _MSA_LETTER_BG_MAX_WIDTH_SCALE)
-    assert wide.width() == pytest.approx(3.0 * bg.width())
+    assert wide.width() == pytest.approx(wide_ppb)
+    assert wide.left() == pytest.approx(0.0)
+    assert wide.right() == pytest.approx(wide_ppb)
+    # Adjacent max-zoom columns abut (no gutter).
+    next_col = _msa_letter_bg_rect(
+        wide_ppb, 0.0, wide_ppb, float(letter_h), letter_side=float(letter_h)
+    )
+    assert wide.right() == pytest.approx(next_col.left())
 
     canvas = _BarsCanvas()
     canvas.show()
@@ -1200,6 +1206,51 @@ def test_annotation_drag_selects_on_partial_overlap(qapp: QApplication) -> None:
     assert canvas.region_selection() == (2, 8)
     assert canvas.regional_rows() is None
     assert canvas.selected_rows() == []  # feature→column does not invent name rows
+    canvas.close()
+
+
+def test_annotation_band_drag_without_features_selects_region(
+    qapp: QApplication,
+) -> None:
+    """Drag starting on annotation band with no feature hit → sequence region."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(800, 220)
+    canvas.show()
+    qapp.processEvents()
+    feats = {
+        "a": [SequenceFeature(start=2, end=4, name="f1", feature_type="LTR")],
+        "b": [SequenceFeature(start=2, end=4, name="f2", feature_type="ORF")],
+    }
+    canvas.set_msa_data(["a", "b"], ["ACGTACGTAC", "ACGTACGTAC"], features=feats)
+    canvas.set_pixels_per_base(20.0)
+    qapp.processEvents()
+
+    # Rubber over columns past the features, in the annotation Y band.
+    empty = QRect(
+        int(canvas.bp_to_x(6.0)),
+        int(canvas._feature_band_y0(0)),
+        int(canvas.bp_to_x(9.0) - canvas.bp_to_x(6.0)),
+        int(canvas._feature_band_y0(1) + 14 - canvas._feature_band_y0(0)),
+    )
+    assert canvas._features_intersecting_rect(empty) == set()
+    canvas._drag_origin = QPointF(empty.left(), empty.top())
+    canvas._drag_kind = "features"  # press began on annotation band
+    canvas._rubber_active = True
+    canvas._rubber = empty
+    release = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(empty.right(), empty.bottom()),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mouseReleaseEvent(release)
+    qapp.processEvents()
+    assert canvas.selected_features() == []
+    assert canvas.region_selection() == (7, 9)
+    assert canvas.regional_rows() == {0, 1}
     canvas.close()
 
 

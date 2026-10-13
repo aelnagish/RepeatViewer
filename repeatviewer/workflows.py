@@ -577,7 +577,7 @@ def run_workflow(
     progress_cb,
     *,
     cancel=None,
-    max_workers: int = 4,
+    max_workers: int = 5,
     blast_options=None,
     extend=None,
     teaid_options=None,
