@@ -686,6 +686,36 @@ def test_msa_scale_double_click_zooms_to_three_quarter(
     panel.close()
 
 
+def test_multi_seq_bar_respects_track_height_and_gap(qapp: QApplication) -> None:
+    """Multi-seq bars must not overflow Track height (Sequence distance stays visible)."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.show()
+    qapp.processEvents()
+    canvas.set_data(
+        ["s1", "s2", "s3"],
+        {"s1": 100, "s2": 80, "s3": 120},
+        {"s1": [], "s2": [], "s3": []},
+        sequences=["A" * 100, "C" * 80, "G" * 120],
+    )
+    assert not canvas.is_msa_mode()
+    canvas.set_track_height(1)
+    canvas.set_sequence_row_gap(1)
+    canvas._ppb = 0.2
+    canvas._recompute_layout()
+    band = canvas._row_letter_band_height()
+    assert band >= 1
+    assert canvas._multi_seq_bar_height(0) == band
+    # Pitch = band + gap; painted bar must not spill into the gap/next row.
+    assert canvas.row_tops()[1] == canvas.row_tops()[0] + band + 1
+    assert canvas._sequence_bar_y(0) + canvas._multi_seq_bar_height(0) <= canvas.row_tops()[1]
+    canvas.set_sequence_row_gap(6)
+    canvas._recompute_layout()
+    assert canvas.row_tops()[1] == canvas.row_tops()[0] + band + 6
+    canvas.close()
+
+
 def test_msa_name_splitter_can_shrink_to_index_only(
     qapp: QApplication, tmp_path: Path
 ) -> None:

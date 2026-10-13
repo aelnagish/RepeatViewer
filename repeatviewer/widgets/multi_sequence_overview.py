@@ -2150,19 +2150,34 @@ class _BarsCanvas(QWidget):
         """Height of the residue/bar band (excludes annotation tracks)."""
         if not (0 <= row < len(self._row_heights)):
             return _MIN_ROW_HEIGHT
-        if self._msa_mode or self._bar_shows_letters():
+        # MSA and multi-seq overview both size the band from Track height.
+        if self._msa_mode or self._msa_seqs or self._bar_shows_letters():
             return int(self._row_letter_band_height())
         if not self._show_annotation_track:
             return int(self._row_heights[row])
         return _BAR_V_PAD + _BAR_HEIGHT + _BAR_V_PAD
 
     def _sequence_bar_y(self, row: int) -> int:
-        """Top Y of the sequence bar, vertically centered in its band."""
+        """Top Y of the sequence bar within its band."""
         top = self._row_tops[row] if 0 <= row < len(self._row_tops) else 0
         if self._msa_mode or self._bar_shows_letters():
             return int(top)
         band_h = self._sequence_band_height(row)
-        return int(top + max(0, (band_h - _BAR_HEIGHT) // 2))
+        bar_h = self._multi_seq_bar_height(row)
+        # Center only when the band is taller than the bar (legacy pad layout).
+        return int(top + max(0, (band_h - bar_h) // 2))
+
+    def _multi_seq_bar_height(self, row: int) -> int:
+        """Painted bar thickness for multi-seq overview (not MSA letters).
+
+        Matches Track height so Sequence distance gaps stay visible. The old
+        fixed ``_BAR_HEIGHT`` (7px) overflowed thin tracks and erased gaps.
+        """
+        band_h = max(1, int(self._sequence_band_height(row)))
+        # When annotations use the classic padded band, keep the historic bar.
+        if not (self._msa_mode or self._msa_seqs):
+            return min(_BAR_HEIGHT, band_h)
+        return band_h
 
     def _sequence_band_bottom(self, row: int) -> int:
         """Y of the residue/bar band bottom (excludes annotation tracks)."""
@@ -3801,8 +3816,9 @@ class _BarsCanvas(QWidget):
                 painter.setPen(Qt.PenStyle.NoPen)
             else:
                 bar_w = max(2.0, length * self._ppb)
+                bar_h = float(self._multi_seq_bar_height(index))
                 painter.fillRect(
-                    QRectF(self._bar_pad, bar_y, bar_w, _BAR_HEIGHT),
+                    QRectF(self._bar_pad, float(bar_y), bar_w, bar_h),
                     _bar_color(self),
                 )
             hits = self._find_hits.get(rid)
@@ -3812,8 +3828,13 @@ class _BarsCanvas(QWidget):
                 for hit_start, hit_end in hits:
                     x0 = self._bar_pad + (hit_start - 1) * self._ppb
                     x1 = self._bar_pad + hit_end * self._ppb
-                    mark_h = residue_h if show_letters else _BAR_HEIGHT + 4
-                    mark_y = bar_y if show_letters else bar_y - 2
+                    if show_letters:
+                        mark_h = residue_h
+                        mark_y = bar_y
+                    else:
+                        bar_h = self._multi_seq_bar_height(index)
+                        mark_h = max(2, bar_h + 2)
+                        mark_y = max(top, bar_y - 1)
                     mark = QRectF(x0, mark_y, max(3.0, x1 - x0), mark_h)
                     is_current = current is not None and current == (rid, hit_start, hit_end)
                     painter.fillRect(mark, _FIND_CURRENT_FILL if is_current else _FIND_HIT_FILL)
