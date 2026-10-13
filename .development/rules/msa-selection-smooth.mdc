@@ -25,20 +25,26 @@ The current drag/select behavior is intentionally fast. Treat regressions
    the selection.
 
 3. **Column selection dirties edge strips only.** Use
-   `_column_edge_dirty_region` (left/right guides + travel between old/new x).
-   **Never** `update()` the full column band or the whole canvas for column
+   `_column_edge_dirty_region` (left/right guides at old and new x only).
+   **Never** fill the span between old→new edges (that recomposes the whole
+   band). **Never** `update()` the full column band or whole canvas for column
    drags.
 
 4. **Clip dirties to the visible viewport.** Prefer
    `scroll_viewport_rect()` / `_visible_clip()`. Do not dirty the full tall
    content height when only the viewport is on screen.
 
-5. **Throttle Position + name-column work during drag (~20 Hz).** Chrome geometry
-   may follow the pointer every move; Position spins and name-column highlight
-   go through `_schedule_region_drag_preview` / `_drag_preview_timer` (50 ms).
-   Do not push spins or rebuild the names column on every mouse move.
+5. **Paint each `event.region()` rect, not `event.rect()`.** The bounding box of
+   edge dirties spans the selection; iterating strips keeps column/row drag as
+   cheap as a small regional box.
 
-6. **Zoom-aware follow.** Nucleotide / letter zoom: snap chrome to cell edges.
+6. **Throttle Position + name-column work during drag (~20 Hz).** Chrome geometry
+   may follow the pointer every move; Position spins and name-column highlight
+   go through `_schedule_region_drag_preview` / `_drag_preview_timer` /
+   `_NamesColumn._drag_highlight_timer` (50 ms). Do not push spins or rebuild
+   the names column on every mouse move.
+
+7. **Zoom-aware follow.** Nucleotide / letter zoom: snap chrome to cell edges.
    Fit / overview zoom: **pixel-follow** the rubber (no per-cell snap) so the
    outline tracks the cursor smoothly.
 

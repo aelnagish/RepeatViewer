@@ -458,6 +458,12 @@ class _NamesColumn(QWidget):
         self._dragging = False
         self._press_row = -1
         self._press_modifiers: object = Qt.KeyboardModifier.NoModifier
+        # Throttle name highlights during drag (~20 Hz); chrome follows every move.
+        self._pending_drag_rows: set[int] | None = None
+        self._drag_highlight_timer = QTimer(self)
+        self._drag_highlight_timer.setSingleShot(True)
+        self._drag_highlight_timer.setInterval(50)
+        self._drag_highlight_timer.timeout.connect(self._flush_drag_highlight)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
@@ -540,6 +546,13 @@ class _NamesColumn(QWidget):
         self.contextMenuRequested.emit(event.globalPos(), int(row))
         event.accept()
 
+    def _flush_drag_highlight(self) -> None:
+        pending = self._pending_drag_rows
+        if pending is None:
+            return
+        if pending != self._selected_rows:
+            self.set_selected_rows(pending)
+
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
             # Coalesce backlog: follow the latest cursor, not a stale event.
@@ -553,9 +566,11 @@ class _NamesColumn(QWidget):
                 y0 = float(self._drag_origin.y())
                 y1 = float(current.y())
                 row_set = set(self._rows_in_y_range(y0, y1))
-                # Name highlight only when the covered row set changes.
-                if row_set != self._selected_rows:
-                    self.set_selected_rows(row_set)
+                # MSA chrome every move; name wash throttled like regional drag.
+                self._pending_drag_rows = row_set
+                if not self._drag_highlight_timer.isActive():
+                    self._flush_drag_highlight()
+                    self._drag_highlight_timer.start()
                 self.rowsPixelPreview.emit(y0, y1)
             event.accept()
             return
@@ -570,6 +585,8 @@ class _NamesColumn(QWidget):
             self._drag_origin = None
             self._dragging = False
             self._press_row = -1
+            self._drag_highlight_timer.stop()
+            self._pending_drag_rows = None
             if was_dragging and origin is not None:
                 current = self.mapFromGlobal(QCursor.pos())
                 rubber = QRect(origin.toPoint(), current).normalized()
@@ -656,7 +673,8 @@ class _NamesColumn(QWidget):
             selected = index in self._selected_rows
             if selected:
                 painter.fillRect(0, top, self.width(), height, sel_bg)
-            label = _elide_middle(fm, rid, self.width() - 2 * _NAME_PAD)
+            numbered = f"{index + 1}. {rid}"
+            label = _elide_middle(fm, numbered, self.width() - 2 * _NAME_PAD)
             text_h = fm.height()
             # Center on the row band (MSA residue / bar strip), not the gap below.
             text_y = int(top + max(0, (height - text_h) / 2))
@@ -678,8 +696,8 @@ class _SelectionChrome:
     A translucent child overlay paints an opaque black slab on macOS and hides
     the MSA. Chrome is drawn in the host paintEvent after residues.
 
-    Column selection uses vertical edge dirty only (no full-band wash
-    recomposite) so it stays as cheap as a regional box without an overlay.
+    Column live drag uses edge dirty only. Committed columns paint a wash band.
+    Row boxes can overlay under a column band (row select, then column select).
     """
 
     def __init__(self, host: QWidget) -> None:
@@ -761,15 +779,18 @@ class _SelectionChrome:
         return QRegion() if area.isNull() else QRegion(area)
 
     def _column_edge_dirty_region(self, *rects: QRect) -> QRegion:
-        """Dirty left/right guides for live column selection (plus edge travel)."""
+        """Dirty only left/right guide strips (never the span between them).
+
+        Filling old→new travel made wide column drags recompute the whole band —
+        the lag vs regional. Guides are 1px lines; erasing ``old±pad`` and
+        painting ``new±pad`` is enough (same cost as a small regional box).
+        """
         region = QRegion()
         pad = 4
-        valid: list[QRect] = []
         for rect in rects:
             if rect is None or rect.isNull() or rect.width() <= 0:
                 continue
             r = rect.normalized()
-            valid.append(r)
             top = r.top() - pad
             height = r.height() + 2 * pad
             region = region.united(
@@ -778,17 +799,6 @@ class _SelectionChrome:
             region = region.united(
                 QRegion(QRect(r.right() - pad, top, 2 * pad + 1, height))
             )
-        # Cover pixels between old/new guide x so opaque strip updates leave no trail.
-        if len(valid) >= 2:
-            o, n = valid[0], valid[-1]
-            top = min(o.top(), n.top()) - pad
-            bottom = max(o.bottom(), n.bottom()) + pad
-            height = max(1, bottom - top)
-            for a, b in ((o.left(), n.left()), (o.right(), n.right())):
-                x0, x1 = (a, b) if a <= b else (b, a)
-                region = region.united(
-                    QRegion(QRect(x0 - pad, top, x1 - x0 + 2 * pad + 1, height))
-                )
         clip = self._visible_clip()
         if clip.isNull() or region.isEmpty():
             return QRegion()
@@ -796,21 +806,29 @@ class _SelectionChrome:
 
     def _erase_dirty_for_current(self) -> QRegion:
         """Cheapest dirty region that still erases the current chrome correctly."""
-        if not self._mode:
+        if not self._mode and not self._row_boxes:
             return QRegion()
+        dirty = QRegion()
         if self._mode == "columns":
-            # Columns are vertical guides only — never a full-band MSA recomposite.
-            return self._column_edge_dirty_region(self._box)
-        if self._mode == "rows":
-            # Live row outline → border strips; committed wash → full row area.
+            # Live guides = edges; committed column wash = band area.
             if self._live:
-                return self._border_dirty_region(*self._row_boxes)
-            return self._area_dirty_region(*self._row_boxes)
-        # Regional: small box; area dirty matches live+committed (wash/hairlines).
-        return self._area_dirty_region(self._box)
+                dirty = self._column_edge_dirty_region(self._box)
+            else:
+                dirty = self._area_dirty_region(self._box)
+        elif self._mode == "rows":
+            if self._live:
+                dirty = self._border_dirty_region(*self._row_boxes)
+            else:
+                dirty = self._area_dirty_region(*self._row_boxes)
+        elif self._mode == "region":
+            dirty = self._area_dirty_region(self._box)
+        # Row wash may sit under a column band.
+        if self._mode == "columns" and self._row_boxes:
+            dirty = dirty.united(self._area_dirty_region(*self._row_boxes))
+        return dirty
 
     def clear(self) -> None:
-        if not self._mode:
+        if not self._mode and not self._row_boxes:
             return
         dirty = self._erase_dirty_for_current()
         self._mode = ""
@@ -839,17 +857,33 @@ class _SelectionChrome:
 
     def set_column_band(self, band: QRect | None, *, live: bool = False) -> None:
         if band is None or band.isNull() or band.width() <= 0:
-            self.clear()
+            # Drop column chrome only; keep any row wash.
+            if self._mode != "columns":
+                return
+            dirty = self._erase_dirty_for_current()
+            self._mode = "rows" if self._row_boxes else ""
+            self._box = QRect()
+            self._live = False
+            if self._mode == "rows":
+                dirty = dirty.united(self._area_dirty_region(*self._row_boxes))
+            self._request_update(dirty)
             return
         new = QRect(band).normalized()
         if self._mode == "columns" and self._box == new and self._live == live:
             return
-        # Always edge strips: vertical guides to the bottom, no full-band wash.
+        # Keep existing row boxes (row select then column select).
+        kept_rows = list(self._row_boxes)
         dirty = self._erase_dirty_for_current()
-        dirty = dirty.united(self._column_edge_dirty_region(new))
+        if live:
+            dirty = dirty.united(self._column_edge_dirty_region(new))
+        else:
+            # Committed: wash the MSA band (one-shot area dirty is fine).
+            dirty = dirty.united(self._area_dirty_region(new))
+        if kept_rows:
+            dirty = dirty.united(self._area_dirty_region(*kept_rows))
         self._mode = "columns"
         self._box = new
-        self._row_boxes = []
+        self._row_boxes = kept_rows
         self._live = bool(live)
         self._request_update(dirty)
 
@@ -860,7 +894,24 @@ class _SelectionChrome:
             if b is not None and not b.isNull() and b.width() > 0 and b.height() > 0
         ]
         if not valid:
+            if self._mode == "columns":
+                # Clear row overlay only; keep column band.
+                if not self._row_boxes:
+                    return
+                dirty = self._area_dirty_region(*self._row_boxes)
+                self._row_boxes = []
+                self._request_update(dirty)
+                return
             self.clear()
+            return
+        # Under an active column band: update row wash without dropping columns.
+        if self._mode == "columns" and not self._box.isNull():
+            if self._row_boxes == valid and not live:
+                return
+            dirty = self._area_dirty_region(*self._row_boxes) if self._row_boxes else QRegion()
+            dirty = dirty.united(self._area_dirty_region(*valid))
+            self._row_boxes = valid
+            self._request_update(dirty)
             return
         if self._mode == "rows" and self._row_boxes == valid and self._live == live:
             return
@@ -876,37 +927,47 @@ class _SelectionChrome:
         self._request_update(dirty)
 
     def paint(self, painter: QPainter, clip: QRect) -> None:
-        if not self._mode:
+        if not self._mode and not self._row_boxes:
             return
         edge = self._edge_color()
         pen = QPen(edge, 1, Qt.PenStyle.DashLine)
+        band = self._band_color()
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(pen)
-        if self._mode == "rows":
+
+        def _paint_row_boxes(*, wash: bool) -> None:
             for box in self._row_boxes:
                 if not box.intersects(clip):
                     continue
-                if not self._live:
-                    painter.fillRect(box, self._band_color())
-                    painter.setPen(pen)
+                if wash:
+                    painter.fillRect(box, band)
+                painter.setPen(pen)
                 painter.drawRect(
                     box.left(),
                     box.top(),
                     max(1, box.width() - 1),
                     max(1, box.height() - 1),
                 )
-        elif self._mode == "columns":
-            box = self._box
-            if box.intersects(clip):
-                # Vertical guides only (no wash) — cheap edge dirties, no overlay.
-                painter.drawLine(box.left(), box.top(), box.left(), box.bottom())
-                painter.drawLine(box.right(), box.top(), box.right(), box.bottom())
-        else:
+
+        if self._mode == "rows":
+            _paint_row_boxes(wash=not self._live)
+            return
+        if self._mode == "columns":
+            # Row select wash stays visible under column select.
+            _paint_row_boxes(wash=True)
             box = self._box
             if box.intersects(clip):
                 if not self._live:
-                    painter.fillRect(box, self._band_color())
-                    painter.setPen(pen)
+                    painter.fillRect(box, band)
+                painter.setPen(pen)
+                painter.drawLine(box.left(), box.top(), box.left(), box.bottom())
+                painter.drawLine(box.right(), box.top(), box.right(), box.bottom())
+            return
+        if self._mode == "region":
+            box = self._box
+            if box.intersects(clip):
+                if not self._live:
+                    painter.fillRect(box, band)
+                painter.setPen(pen)
                 painter.drawRect(
                     box.left(),
                     box.top(),
@@ -1358,9 +1419,8 @@ class _BarsCanvas(QWidget):
     ) -> None:
         """Full-height column selection (scale / feature).
 
-        Keeps name-selected sequences so the name-column highlight remains after
-        a column select. MSA chrome shows the column band (not row wash).
-        Clears a prior regional matrix box only.
+        Keeps name-selected sequences so both the name column and MSA row wash
+        remain under the column band. Clears a prior regional matrix box only.
         """
         if start is None:
             if self._region_sel is None and self._regional_rows is None:
@@ -1681,7 +1741,7 @@ class _BarsCanvas(QWidget):
         return QRect(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
 
     def _sync_selection_chrome(self) -> None:
-        """Committed selection chrome (column = edge guides; region/row = wash)."""
+        """Committed selection chrome (column wash + optional row wash overlay)."""
         if (
             self._preview_columns is not None
             or self._preview_rows is not None
@@ -1698,6 +1758,12 @@ class _BarsCanvas(QWidget):
                     self._chrome.set_region_box(box)
             else:
                 self._chrome.set_column_band(self._column_band_rect(start, end))
+                # Keep sequence-row highlighting on the MSA under the column band.
+                row_boxes = self._row_selection_boxes(self._selected_rows)
+                if row_boxes:
+                    self._chrome.set_row_boxes(row_boxes)
+                else:
+                    self._chrome.set_row_boxes([])
             return
         boxes = self._row_selection_boxes(self._selected_rows)
         if not boxes:
@@ -1735,7 +1801,11 @@ class _BarsCanvas(QWidget):
         self._temp_matrix_sel = None
         self._preview_rows = None
         self._reset_edge_expand_phase()
+        # Keep sequence-row wash on the MSA while column guides follow the drag.
+        row_boxes = self._row_selection_boxes(self._selected_rows)
         self._chrome.clear()
+        if row_boxes:
+            self._chrome.set_row_boxes(row_boxes)
         self.selectionVisualsDismissed.emit()
         if had_regional:
             self.rowsChanged.emit()
@@ -1778,8 +1848,8 @@ class _BarsCanvas(QWidget):
         b = int(max(x0, x1))
         if b <= a:
             b = a + 1
-        # Only the visible strip — full content height forces huge MSA recomposite.
-        vis = self.visibleRegion().boundingRect()
+        # Viewport only — never the full tall content height.
+        vis = self.scroll_viewport_rect()
         if vis.isEmpty():
             y0, h = 0, max(1, self.height())
         else:
@@ -3023,25 +3093,29 @@ class _BarsCanvas(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        clip = event.rect()
-        # Include neighboring columns so sub-pixel MSA cells cover strip edges
-        # (avoids a 1px white line along the selection's right border).
-        paint_clip = clip.adjusted(-2, 0, 2, 0).intersected(self.rect())
         base = (
             _msa_canvas_color(self)
             if self._msa_mode
             else self.palette().color(QPalette.ColorRole.Base)
         )
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, not self._msa_mode)
-        painter.fillRect(clip, base)
-        if self._msa_mode:
-            self._paint_msa_rows(
-                painter, paint_clip if not paint_clip.isNull() else clip
-            )
-        else:
-            self._paint_bar_rows(painter, clip)
-        # Selection wash/guides on top of residue pixels.
-        self._chrome.paint(painter, clip)
+        # Paint each dirty rect — not event.rect() (bbox of all strips). Column /
+        # row edge dirties must not recompose the whole selection span.
+        region = event.region()
+        rects = list(region) if not region.isEmpty() else [event.rect()]
+        for clip in rects:
+            if clip.isNull() or clip.width() <= 0 or clip.height() <= 0:
+                continue
+            # Neighbor columns so sub-pixel MSA cells cover strip edges.
+            paint_clip = clip.adjusted(-2, 0, 2, 0).intersected(self.rect())
+            painter.fillRect(clip, base)
+            if self._msa_mode:
+                self._paint_msa_rows(
+                    painter, paint_clip if not paint_clip.isNull() else clip
+                )
+            else:
+                self._paint_bar_rows(painter, clip)
+            self._chrome.paint(painter, clip)
         if not self._rubber_active:
             self._paint_feature_hover_tip(painter)
         painter.end()
@@ -4006,8 +4080,10 @@ class MultiSequenceOverviewPanel(QWidget):
         font.setPointSize(max(2, int(self._names.label_point_size())))
         fm = QFontMetrics(font)
         widest = 0
-        for rid in self._record_ids[:500]:
-            widest = max(widest, fm.horizontalAdvance(rid))
+        for index, rid in enumerate(self._record_ids[:500]):
+            widest = max(
+                widest, fm.horizontalAdvance(f"{index + 1}. {rid}")
+            )
         natural = widest + 2 * _NAME_PAD + 4
         cap = _NAME_COLUMN_MAX
         if viewport_width and viewport_width > 100:
@@ -7084,15 +7160,17 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_row_selection_preview(row_list)
 
     def _on_name_rows_pixel_preview(self, y0: float, y1: float) -> None:
-        """Live row outline while dragging (names update themselves on row change)."""
-        # Row select clears column chrome on the scale (mutually exclusive).
-        self._scale.set_region_selection(None)
-        # Keep the drag point in view (names share vertical scroll with bars).
+        """Live row outline while dragging (names highlight is throttled separately)."""
+        # Clear scale band once per drag — not on every move.
+        if not getattr(self, "_name_row_drag_cleared_scale", False):
+            self._scale.set_region_selection(None)
+            self._name_row_drag_cleared_scale = True
         mid_y = int((float(y0) + float(y1)) * 0.5)
         self._bars._ensure_drag_point_visible(QPoint(0, mid_y))  # type: ignore[attr-defined]
         self._bars.set_row_pixel_preview(float(y0), float(y1))
 
     def _on_name_rows_dragged(self, rows: object) -> None:
+        self._name_row_drag_cleared_scale = False
         row_list = [int(r) for r in (rows or [])]
         self._bars.finish_live_selection_preview()
         self._bars.set_selected_rows(row_list)
