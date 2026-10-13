@@ -143,12 +143,16 @@ _FEAT_LABEL_MIN_WIDTH = 28.0
 _FEAT_LABEL_POINT_SIZE = 7
 _FEAT_EDGE_HIT_PX = 6.0
 _FEAT_GAP = 2
+# Default gap between sequence track and first annotation (= Annotation distance).
+_SEQ_FEATURE_GAP = 1
 _MIN_ROW_HEIGHT = _BAR_V_PAD + _BAR_HEIGHT + _BAR_V_PAD
 _NAME_COLUMN_DEFAULT = 200
 _NAME_COLUMN_MAX = 220
 # Narrowest splitter pane: enough for the row index ("12.") without the name.
 _NAME_COLUMN_MIN = 28
 _NAME_PAD = 8
+# Point / 1-column feature bands stay visible when ppb is a fraction of a pixel.
+_MIN_COLUMN_BAND_PX = 6.0
 
 
 def _name_column_min_width(fm: QFontMetrics, n_sequences: int) -> int:
@@ -394,7 +398,12 @@ def _row_height(
     seq_band = _BAR_V_PAD + _BAR_HEIGHT + _BAR_V_PAD
     feat_block = 0
     if n_tracks > 0:
-        feat_block = n_tracks * feat_height + (n_tracks - 1) * feat_gap
+        # Same gap above the first annotation as between annotation rows.
+        feat_block = (
+            feat_gap
+            + n_tracks * feat_height
+            + (n_tracks - 1) * feat_gap
+        )
     return max(_MIN_ROW_HEIGHT, seq_band + feat_block)
 
 
@@ -1882,12 +1891,31 @@ class _BarsCanvas(QWidget):
         self._preview_columns = None
         self._preview_rows = None
 
-    def _column_band_rect(self, start: int, end: int) -> QRect:
-        x0 = int(self.bp_to_x(start - 1))
-        x1 = int(math.ceil(self.bp_to_x(end)))
+    def _column_selection_x_range(self, start: int, end: int) -> tuple[float, float]:
+        """Content-x span for columns ``start``–``end`` (1-based inclusive).
+
+        Point features (start==end) and tiny zooms expand to at least
+        ``_MIN_COLUMN_BAND_PX`` so dashed guides stay visible.
+        """
+        a, b = int(start), int(end)
+        if b < a:
+            a, b = b, a
+        x0 = float(self.bp_to_x(a - 1))
+        x1 = float(self.bp_to_x(b))
         if x1 < x0:
             x0, x1 = x1, x0
-        return QRect(x0, 0, max(1, x1 - x0), max(1, self.height()))
+        min_w = max(_MIN_COLUMN_BAND_PX, float(self._ppb))
+        if (x1 - x0) < min_w - 1e-9:
+            mid = 0.5 * (x0 + x1)
+            x0 = mid - 0.5 * min_w
+            x1 = mid + 0.5 * min_w
+        return x0, x1
+
+    def _column_band_rect(self, start: int, end: int) -> QRect:
+        x0, x1 = self._column_selection_x_range(start, end)
+        left = int(math.floor(x0))
+        right = int(math.ceil(x1))
+        return QRect(left, 0, max(1, right - left), max(1, self.height()))
 
     def _rows_band_rect(self, rows: set[int]) -> QRect:
         """Bounding box of sequence bands for ``rows`` (excludes annotation tracks)."""
@@ -2543,10 +2571,12 @@ class _BarsCanvas(QWidget):
         n_tracks = len(self._tracks.get(rid) or [])
         if n_tracks <= 0:
             return 0
+        # Lead with Annotation distance so sequence→feature matches feature→feature.
+        gap = max(0, int(self._feat_gap))
         return (
-            _BAR_V_PAD
+            gap
             + n_tracks * self._feat_height
-            + (n_tracks - 1) * self._feat_gap
+            + (n_tracks - 1) * gap
         )
 
     def _recompute_layout(self) -> None:
@@ -2656,8 +2686,12 @@ class _BarsCanvas(QWidget):
         return list(range(first, last + 1))
 
     def _feature_band_y0(self, row: int) -> int:
-        """Top Y of the first annotation track (just under the sequence band)."""
-        return self._sequence_band_bottom(row)
+        """Top Y of the first annotation track (below sequence band + gap).
+
+        Gap matches Others → Annotation distance (same as between feature rows).
+        """
+        gap = max(0, int(self._feat_gap)) if self._show_annotation_track else 0
+        return self._sequence_band_bottom(row) + gap
 
     def _y_in_annotation_band(self, row: int, y: float) -> bool:
         if not self._show_annotation_track or row < 0 or row >= len(self._row_tops):
@@ -3206,7 +3240,7 @@ class _BarsCanvas(QWidget):
                     self.regionDragPreview.emit((start_i, end_i, rows))
                     self.setFocus(Qt.FocusReason.MouseFocusReason)
             elif press_feat is not None:
-                # Click a feature → select it and its columns.
+                # Click a feature → select it and its columns (incl. point features).
                 mods = event.modifiers()
                 if mods & (
                     Qt.KeyboardModifier.ControlModifier
@@ -4119,6 +4153,14 @@ class _ScaleRuler(QWidget):
         start, end = sel
         x0 = self._bp_to_x(start - 1)
         x1 = self._bp_to_x(end)
+        if x1 < x0:
+            x0, x1 = x1, x0
+        # Match MSA chrome: keep a visible band for point (start==end) columns.
+        min_w = max(_MIN_COLUMN_BAND_PX, float(self._ppb))
+        if (x1 - x0) < min_w - 1e-9:
+            mid = 0.5 * (x0 + x1)
+            x0 = mid - 0.5 * min_w
+            x1 = mid + 0.5 * min_w
         band = _REGION_BAND_DARK if _is_dark(self) else _REGION_BAND_LIGHT
         painter.fillRect(
             QRectF(x0, 0, max(1.0, x1 - x0), float(self.height())),
@@ -4126,8 +4168,8 @@ class _ScaleRuler(QWidget):
         )
         edge = QColor("#4ea1ff") if _is_dark(self) else QColor("#0b5cab")
         painter.setPen(QPen(edge, 1.5, Qt.PenStyle.DashLine))
-        painter.drawLine(int(x0), 0, int(x0), self.height())
-        painter.drawLine(int(x1), 0, int(x1), self.height())
+        painter.drawLine(int(round(x0)), 0, int(round(x0)), self.height())
+        painter.drawLine(int(round(x1)), 0, int(round(x1)), self.height())
         painter.setPen(Qt.PenStyle.NoPen)
 
     def paintEvent(self, _event) -> None:  # noqa: N802
@@ -6562,13 +6604,18 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_region_selection(start, end)
 
     def _select_by_position(self) -> None:
-        """Zoom/scroll to the current region or Position spins (single-seq Select)."""
+        """Zoom/scroll to the current region or Position spins (Select).
+
+        Regional (columns × rows) selections keep their row set and are
+        centered both horizontally and vertically after zoom.
+        """
         bar = self._header_zoom_bar
         if bar is None:
             return
         maximum = max(1, int(self._bars.max_length()))
         # Prefer the blue MSA band when present — spins can lag or mismatch.
         region = self._bars.region_selection()
+        regional_rows = self._bars.regional_rows()
         if region is not None:
             start, end = int(region[0]), int(region[1])
         else:
@@ -6579,8 +6626,14 @@ class MultiSequenceOverviewPanel(QWidget):
         start = max(1, min(maximum, start))
         end = max(start, min(maximum, end))
         bar.set_position_range(maximum, start=start, end=end)
-        self._bars.set_region_selection(start, end)
+        # Keep a regional matrix box; only promote spins → full-height columns
+        # when there was no row-limited selection.
+        if regional_rows is not None:
+            self._bars.set_regional_selection(start, end, regional_rows)
+        else:
+            self._bars.set_region_selection(start, end)
         # Inclusive columns → half-open window for zoom_to_bp_range.
+        # Point features (start==end) use a 1-column window (span floored at 1).
         self._on_region_zoom(float(start - 1), float(end))
         self._sync_zoom_slider_from_ppb()
         # After zoom, scroll so the band is centered (pending scroll may be start-aligned).
@@ -6590,6 +6643,8 @@ class MultiSequenceOverviewPanel(QWidget):
         target = int(round(mid_x - vp_w / 2.0))
         hbar = self._bars_scroll.horizontalScrollBar()
         hbar.setValue(max(0, min(hbar.maximum(), target)))
+        # Center regional rows / selected feature in the viewport.
+        self._center_selection_vertically(rows=regional_rows)
         self._update_scale()
         self._sync_names_column()
 
@@ -6807,15 +6862,19 @@ class MultiSequenceOverviewPanel(QWidget):
         )
 
     def _selection_zoom_anchor(self) -> tuple[float, float] | None:
-        """``(mid_bp_0based, viewport_x)`` for the selected region center.
+        """``(mid_bp_0based, viewport_x)`` for the selected region/feature center.
 
-        One column or a multi-column span: zoom in/out keeps the selection
-        center under the same place in the window (same as multi-column).
+        Uses the column band when present; otherwise the selected feature span
+        (including point features with start==end).
         """
         region = self._bars.region_selection()
         if region is None:
-            return None
-        start, end = int(region[0]), int(region[1])
+            span = self._bars.selected_feature_column_span()
+            if span is None:
+                return None
+            start, end = int(span[0]), int(span[1])
+        else:
+            start, end = int(region[0]), int(region[1])
         if end < start:
             start, end = end, start
         # Single column: mid of that base; multi: mid of the inclusive span.
@@ -6832,6 +6891,45 @@ class MultiSequenceOverviewPanel(QWidget):
         target = int(round(new_x - float(viewport_x)))
         hbar.setValue(max(0, min(hbar.maximum(), target)))
 
+    def _center_selection_vertically(
+        self, *, rows: set[int] | list[int] | None = None
+    ) -> None:
+        """Scroll so the selected feature or regional rows sit mid-viewport."""
+        tops = self._bars.row_tops()
+        heights = self._bars.row_heights()
+        vbar = self._bars_scroll.verticalScrollBar()
+        vp_h = max(1, self._bars_scroll.viewport().height())
+
+        def _center_y(mid_y: float) -> None:
+            target = int(round(float(mid_y) - vp_h / 2.0))
+            vbar.setValue(max(0, min(vbar.maximum(), target)))
+
+        feat = self._bars.selected_feature()
+        if feat is not None and rows is None:
+            row, flat_i = feat
+            rect = self._bars._feature_rect(row, flat_i)
+            if rect is not None:
+                _center_y(rect.center().y())
+                return
+            if 0 <= row < len(tops):
+                _center_y(float(tops[row]) + float(heights[row]) * 0.5)
+            return
+        regional = (
+            {int(r) for r in rows}
+            if rows is not None
+            else self._bars.regional_rows()
+        )
+        if not regional:
+            return
+        row_list = sorted(r for r in regional if 0 <= int(r) < len(tops))
+        if not row_list:
+            return
+        y0 = float(tops[row_list[0]])
+        y1 = float(
+            self._bars._sequence_band_bottom(row_list[-1])
+        )
+        _center_y(0.5 * (y0 + y1))
+
     def _on_zoom_slider_changed(self, value: int) -> None:
         if self._updating_zoom_slider:
             return
@@ -6846,6 +6944,7 @@ class MultiSequenceOverviewPanel(QWidget):
         elif anchor is not None:
             mid_bp, view_x = anchor
             self._scroll_to_keep_bp_at_viewport_x(mid_bp, view_x)
+            self._center_selection_vertically()
         self._sync_names_column()
         self._update_scale()
 
@@ -6913,7 +7012,7 @@ class MultiSequenceOverviewPanel(QWidget):
         )
 
     def _zoom_step(self, factor: float) -> None:
-        """Zoom from −/+ controls; prefer selected-region center when present."""
+        """Zoom from −/+ controls; prefer selected feature/region center."""
         vp = self._bars_scroll.viewport()
         hbar = self._bars_scroll.horizontalScrollBar()
         anchor = self._selection_zoom_anchor()
@@ -6924,6 +7023,8 @@ class MultiSequenceOverviewPanel(QWidget):
         else:
             anchor_x = hbar.value() + vp.width() / 2
         self._bars.zoom_by(factor, anchor_x=anchor_x)
+        if anchor is not None:
+            self._center_selection_vertically()
 
     def _on_scale_zoom_at(self, content_x: float, zoom_in: bool) -> None:
         """Scale double-click: DNA/protein size 10 at slider 3/4; right-click → Fit.
@@ -7025,6 +7126,8 @@ class MultiSequenceOverviewPanel(QWidget):
                         self._bars_scroll.horizontalScrollBar().value()
                     )
                 self._bars.zoom_by(factor, anchor_x=anchor_x)
+                if sel_anchor is not None:
+                    self._center_selection_vertically()
             event.accept()
             return True
         # Trackpad: apply both axes. Prefer the dominant axis when both move.
@@ -7062,6 +7165,10 @@ class MultiSequenceOverviewPanel(QWidget):
             new_x = self._bars.bp_to_x(float(anchor_bp))
             view_x = float(anchor_x) - hbar.value()
             hbar.setValue(max(0, int(new_x - view_x)))
+            self._center_selection_vertically()
+        elif self._selection_zoom_anchor() is not None:
+            # Slider/ppb set without pending anchor — still keep feature in view.
+            self._center_selection_vertically()
         self._update_scale()
         self._sync_zoom_slider_from_ppb()
 

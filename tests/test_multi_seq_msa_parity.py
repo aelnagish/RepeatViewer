@@ -807,6 +807,88 @@ def test_msa_single_column_selection_anchors_zoom(
     panel.close()
 
 
+def test_regional_select_button_centers_vertically(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Select on a regional box zooms horizontally and centers the rows."""
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    seq = "ACGT" * 80
+    rows = "\n".join(f">s{i}\n{seq}" for i in range(24))
+    fasta = tmp_path / "reg.fa"
+    fasta.write_text(rows + "\n", encoding="utf-8")
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.resize(900, 320)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    panel._fit_bars()
+    qapp.processEvents()
+
+    # Regional box on lower rows (columns × rows).
+    panel._bars.set_regional_selection(40, 80, {14, 15, 16})
+    qapp.processEvents()
+    assert panel._bars.regional_rows() == {14, 15, 16}
+    panel._bars_scroll.verticalScrollBar().setValue(0)
+
+    panel._select_by_position()
+    qapp.processEvents()
+    # Regional rows must survive Select (not collapsed to full-height columns).
+    assert panel._bars.regional_rows() == {14, 15, 16}
+    tops = panel._bars.row_tops()
+    y0 = float(tops[14])
+    y1 = float(panel._bars._sequence_band_bottom(16))
+    mid_sel = 0.5 * (y0 + y1)
+    vbar = panel._bars_scroll.verticalScrollBar()
+    vp_h = max(1, panel._bars_scroll.viewport().height())
+    mid_view = float(vbar.value()) + vp_h / 2.0
+    assert abs(mid_sel - mid_view) <= max(40.0, vp_h * 0.35)
+    panel.close()
+
+
+def test_feature_selection_anchors_zoom_and_centers_row(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Zoom with a feature selected anchors horizontally and centers the row."""
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    seq = "ACGT" * 50
+    rows = "\n".join(f">s{i}\n{seq}" for i in range(20))
+    fasta = tmp_path / "feats.fa"
+    fasta.write_text(rows + "\n", encoding="utf-8")
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.resize(900, 360)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    ids = list(panel._bars._record_ids)
+    feats = {rid: [] for rid in ids}
+    feats[ids[12]] = [
+        SequenceFeature(start=40, end=80, name="orf", feature_type="ORF")
+    ]
+    panel._bars.set_features_in_place(feats)
+    panel._bars._set_feature_selection({(12, 0)}, set_columns=True)
+    qapp.processEvents()
+    assert panel._bars.region_selection() == (40, 80)
+    anchor = panel._selection_zoom_anchor()
+    assert anchor is not None
+    assert anchor[0] == pytest.approx((39 + 80) / 2.0)
+
+    # Start scrolled to top so centering must move the view.
+    panel._bars_scroll.verticalScrollBar().setValue(0)
+    panel._zoom_step(2.0)
+    qapp.processEvents()
+    rect = panel._bars._feature_rect(12, 0)
+    assert rect is not None
+    vbar = panel._bars_scroll.verticalScrollBar()
+    vp_h = max(1, panel._bars_scroll.viewport().height())
+    mid_view = float(vbar.value()) + vp_h / 2.0
+    assert abs(float(rect.center().y()) - mid_view) <= max(40.0, vp_h * 0.35)
+    panel.close()
+
+
 def test_msa_letter_background_square_connects_rows(qapp: QApplication) -> None:
     """Letter fill is a full-band square; gap 0 → adjacent rows touch vertically."""
     from repeatviewer.widgets.multi_sequence_overview import (
@@ -986,6 +1068,52 @@ def test_name_click_selects_sequence_msa_click_clears(qapp: QApplication) -> Non
     )
     canvas.mouseReleaseEvent(release)
     assert canvas.selected_rows() == []
+    canvas.close()
+
+
+def test_annotation_has_gap_below_sequence_track(qapp: QApplication) -> None:
+    """Sequence→annotation gap matches Annotation distance (feature→feature)."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    feats = {
+        "a": [SequenceFeature(start=2, end=8, name="f1", feature_type="LTR")],
+        "b": [],
+    }
+    canvas.set_msa_data(["a", "b"], ["ACGTACGTAC", "ACGTACGTAC"], features=feats)
+    canvas._ppb = 0.4
+    canvas.set_feature_gap(1)
+    canvas._recompute_layout()
+    assert canvas._feature_band_y0(0) == canvas._sequence_band_bottom(0) + 1
+    canvas.set_feature_gap(3)
+    canvas._recompute_layout()
+    assert canvas._feature_band_y0(0) == canvas._sequence_band_bottom(0) + 3
+    canvas.close()
+
+
+def test_point_feature_keeps_visible_column_band(qapp: QApplication) -> None:
+    """start==end features still get a dashed column wash (min pixel width)."""
+    from repeatviewer.widgets.multi_sequence_overview import (
+        _BarsCanvas,
+        _MIN_COLUMN_BAND_PX,
+    )
+
+    canvas = _BarsCanvas()
+    canvas.resize(600, 200)
+    feats = {
+        "a": [SequenceFeature(start=50, end=50, name="snp", feature_type="others")],
+        "b": [],
+    }
+    canvas.set_msa_data(["a", "b"], ["A" * 100, "A" * 100], features=feats)
+    canvas.set_pixels_per_base(0.2)  # sub-pixel column → must expand
+    canvas._recompute_layout()
+    canvas._set_feature_selection({(0, 0)}, set_columns=True)
+    assert canvas.region_selection() == (50, 50)
+    assert canvas.selected_feature_column_span() == (50, 50)
+    band = canvas._column_band_rect(50, 50)
+    assert band.width() >= int(_MIN_COLUMN_BAND_PX)
+    assert canvas._chrome._mode == "columns"
+    assert canvas._chrome._box.width() >= int(_MIN_COLUMN_BAND_PX)
     canvas.close()
 
 
