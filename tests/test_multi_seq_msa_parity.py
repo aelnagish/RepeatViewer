@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QMouseEvent, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -311,6 +311,113 @@ def test_column_commit_upgrades_live_chrome_without_erase(
     assert canvas._chrome._mode == "columns"
     assert canvas._chrome._live is False
     canvas.close()
+
+
+def test_msa_ignores_collapsed_viewport_while_hidden(qapp: QApplication) -> None:
+    """PDF-tab hide must not shrink MSA to a corner (~40px min viewport)."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(800, 400)
+    canvas.set_msa_data(["a", "b"], ["ACGT" * 100, "ACGT" * 100])
+    canvas.set_viewport_min_size(800, 400)
+    before = QSize(canvas._min_viewport)
+    # Collapsed size while another Preview page covers Overview.
+    canvas.set_viewport_min_size(0, 0)
+    canvas.set_viewport_min_size(40, 20)
+    assert canvas._min_viewport == before
+    canvas.set_viewport_min_size(640, 320)
+    assert canvas._min_viewport.width() == 640
+    assert canvas._min_viewport.height() == 320
+    canvas.close()
+
+
+def test_msa_viewport_cache_survives_column_selection(qapp: QApplication) -> None:
+    """Selection must blit the residue cache, not rebuild it (single-seq strategy)."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(600, 240)
+    canvas.show()
+    # Long MSA at fit-like sub-pixel zoom.
+    seqs = ["ACGT" * 4000] * 8  # 16k columns
+    canvas.set_msa_data([f"s{i}" for i in range(8)], seqs)
+    canvas.set_pixels_per_base(600.0 / 16000.0)
+    qapp.processEvents()
+    assert canvas._ensure_msa_layer_cache()
+    serial = canvas._msa_layer_serial
+    cache_id = id(canvas._msa_layer_cache)
+    canvas.set_region_selection(2000, 5000)
+    qapp.processEvents()
+    # Selection must not bump the residue cache generation.
+    assert canvas._msa_layer_serial == serial
+    assert id(canvas._msa_layer_cache) == cache_id
+    assert canvas._chrome._mode == "columns"
+    assert canvas._chrome._live is False
+    canvas.close()
+
+
+def test_msa_layer_cache_logical_size_matches_viewport(qapp: QApplication) -> None:
+    """HiDPI cache must report logical size == viewport (not half-draw)."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(500, 300)
+    canvas.show()
+    canvas.set_msa_data(["a", "b", "c"], ["ACGT" * 50] * 3)
+    canvas.set_pixels_per_base(2.0)
+    qapp.processEvents()
+    assert canvas._ensure_msa_layer_cache()
+    cache = canvas._msa_layer_cache
+    assert cache is not None
+    vis = canvas.scroll_viewport_rect()
+    dpr = float(cache.devicePixelRatio())
+    # Logical size must match viewport; physical is dpr× larger.
+    assert abs(cache.width() / dpr - vis.width()) <= 1.5
+    assert abs(cache.height() / dpr - vis.height()) <= 1.5
+    canvas.close()
+
+
+def test_names_column_defers_row_click_until_release(qapp: QApplication) -> None:
+    """Trackpad drag must not flash a press-row commit before the range."""
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    from repeatviewer.widgets.multi_sequence_overview import _NamesColumn
+
+    names = _NamesColumn()
+    names.set_rows(
+        ["a", "b", "c"],
+        tops=[0, 20, 40],
+        heights=[20, 20, 20],
+        selected=set(),
+        width=120,
+        content_height=60,
+    )
+    clicks: list[int] = []
+    names.rowClicked.connect(lambda row, _mods: clicks.append(int(row)))
+
+    press = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        QPointF(10, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    names.mousePressEvent(press)
+    assert clicks == []
+    assert names._press_row == 0
+
+    release = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(10, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    names.mouseReleaseEvent(release)
+    assert clicks == [0]
+    names.close()
 
 
 def test_column_selection_uses_edge_guides_not_wash(

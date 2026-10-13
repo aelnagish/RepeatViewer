@@ -35,6 +35,7 @@ from PySide6.QtGui import (
     QPalette,
     QPdfWriter,
     QPen,
+    QPixmap,
     QPolygonF,
     QRegion,
     QWheelEvent,
@@ -197,6 +198,9 @@ _ZOOM_STEP = 1.08
 _SCALE_HEIGHT = 20
 # Ignore tiny moves (click / accidental jitter); keep low for responsive feel.
 _RUBBER_MIN_PX = 4
+# Below this ppb, MSA overview paints one sample per screen pixel (like the
+# single-sequence map / AliView fit view) instead of walking every column.
+_MSA_PIXEL_SAMPLE_PPB = 1.0
 
 
 def _msa_canvas_color(widget: QWidget) -> QColor:
@@ -533,9 +537,8 @@ class _NamesColumn(QWidget):
             self._dragging = False
             self._press_row = self._row_at_y(event.position().y())
             self._press_modifiers = event.modifiers()
-            # Highlight immediately on press (drag will replace with a range).
-            if self._press_row >= 0:
-                self.rowClicked.emit(self._press_row, self._press_modifiers)
+            # Do not commit on press — trackpad/three-finger drags would flash
+            # the press row before the range selection. Click commits on release.
             self.grabMouse()
             event.accept()
             return
@@ -582,6 +585,8 @@ class _NamesColumn(QWidget):
                 self.releaseMouse()
             was_dragging = self._dragging
             origin = self._drag_origin
+            press_row = self._press_row
+            press_mods = self._press_modifiers
             self._drag_origin = None
             self._dragging = False
             self._press_row = -1
@@ -594,7 +599,8 @@ class _NamesColumn(QWidget):
                 if rows:
                     self.set_selected_rows(set(rows))
                     self.rowsDragSelected.emit(rows)
-            # Plain click already committed on press.
+            elif press_row >= 0:
+                self.rowClicked.emit(press_row, press_mods)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -1078,6 +1084,60 @@ class _BarsCanvas(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         # Selection chrome is painted in paintEvent after residues (no overlay).
         self._chrome = _SelectionChrome(self)
+        # Viewport residue+feature snapshot (same idea as SequenceMapCanvas
+        # ``_seq_layer_cache`` / AliView paint-visible-only): rebuild on
+        # zoom/scroll/data — never on selection. Selection = blit + wash.
+        self._msa_layer_cache: QPixmap | None = None
+        self._msa_layer_cache_key: tuple | None = None
+        self._msa_layer_serial = 0
+
+    def _invalidate_msa_layer_cache(self) -> None:
+        """Drop the MSA residue pixmap (zoom/data/scroll — not selection)."""
+        self._msa_layer_cache = None
+        self._msa_layer_cache_key = None
+        self._msa_layer_serial = int(self._msa_layer_serial) + 1
+
+    def _msa_layer_cache_lookup_key(self) -> tuple | None:
+        if not self._msa_mode:
+            return None
+        vis = self.scroll_viewport_rect()
+        if vis.isEmpty() or vis.width() < 2 or vis.height() < 2:
+            return None
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        return (
+            round(dpr, 3),
+            int(vis.x()),
+            int(vis.y()),
+            int(vis.width()),
+            int(vis.height()),
+            round(float(self._ppb), 8),
+            int(self._msa_layer_serial),
+        )
+
+    def _ensure_msa_layer_cache(self) -> bool:
+        """Lazy visible-viewport residue snapshot without selection chrome."""
+        key = self._msa_layer_cache_lookup_key()
+        if key is None:
+            return False
+        if (
+            self._msa_layer_cache is not None
+            and not self._msa_layer_cache.isNull()
+            and self._msa_layer_cache_key == key
+        ):
+            return True
+        dpr, vx, vy, vw, vh, _ppb, _serial = key
+        cache = QPixmap(int(math.ceil(vw * dpr)), int(math.ceil(vh * dpr)))
+        cache.setDevicePixelRatio(float(dpr))
+        cache.fill(_msa_canvas_color(self))
+        painter = QPainter(cache)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.translate(-int(vx), -int(vy))
+        vis = QRect(int(vx), int(vy), int(vw), int(vh))
+        self._paint_msa_rows(painter, vis, paint_feature_selection=False)
+        painter.end()
+        self._msa_layer_cache = cache
+        self._msa_layer_cache_key = key
+        return True
 
     def scroll_viewport_rect(self) -> QRect:
         """This canvas's content rect currently shown in the scroll viewport."""
@@ -1603,6 +1663,7 @@ class _BarsCanvas(QWidget):
         self._msa_color_mode = new
         if self._msa_mode:
             self._clear_drag_paint_cache()
+            self._invalidate_msa_layer_cache()
             self.update()
 
     def msa_color_mode(self) -> str:
@@ -1616,6 +1677,7 @@ class _BarsCanvas(QWidget):
         self._msa_divergence_threshold = new
         if self._msa_mode:
             self._clear_drag_paint_cache()
+            self._invalidate_msa_layer_cache()
             self.update()
 
     def msa_divergence_threshold(self) -> float:
@@ -2188,7 +2250,18 @@ class _BarsCanvas(QWidget):
         self._edge_expand_anchor = None
 
     def set_viewport_min_size(self, width: int, height: int) -> None:
-        self._min_viewport = QSize(max(40, int(width)), max(40, int(height)))
+        # Ignore collapsed/hidden viewports (e.g. PDF tab on top): adopting a
+        # ~40px min size leaves the MSA in a corner with white around it.
+        w = max(0, int(width))
+        h = max(0, int(height))
+        if w < 80 or h < 40:
+            return
+        new = QSize(w, h)
+        if new == self._min_viewport:
+            fit_ppb, max_ppb = self.zoom_bounds()
+            self._ppb = max(fit_ppb, min(max_ppb, self._ppb))
+            return
+        self._min_viewport = new
         fit_ppb, max_ppb = self.zoom_bounds()
         self._ppb = max(fit_ppb, min(max_ppb, self._ppb))
         self._recompute_layout()
@@ -2222,6 +2295,7 @@ class _BarsCanvas(QWidget):
         fit_ppb, max_ppb = self.zoom_bounds()
         self._ppb = max(fit_ppb, min(max_ppb, float(ppb)))
         self._clear_drag_paint_cache()
+        self._invalidate_msa_layer_cache()
         self._recompute_layout()
         self.update()
         self.zoomChanged.emit(self._ppb)
@@ -2242,6 +2316,7 @@ class _BarsCanvas(QWidget):
         self._pending_scroll_bp = None
         self._ppb = new
         self._clear_drag_paint_cache()
+        self._invalidate_msa_layer_cache()
         self._recompute_layout()
         self.update()
         self.zoomChanged.emit(self._ppb)
@@ -2319,6 +2394,8 @@ class _BarsCanvas(QWidget):
         )
 
     def _recompute_layout(self) -> None:
+        # Layout/zoom/size change → residue snapshot must be rebuilt.
+        self._invalidate_msa_layer_cache()
         self._row_tops = []
         self._row_heights = []
         y = 0
@@ -3103,22 +3180,64 @@ class _BarsCanvas(QWidget):
         # row edge dirties must not recompose the whole selection span.
         region = event.region()
         rects = list(region) if not region.isEmpty() else [event.rect()]
+        use_cache = self._msa_mode and self._ensure_msa_layer_cache()
+        vis = self.scroll_viewport_rect() if use_cache else QRect()
+        cache = self._msa_layer_cache if use_cache else None
         for clip in rects:
             if clip.isNull() or clip.width() <= 0 or clip.height() <= 0:
                 continue
-            # Neighbor columns so sub-pixel MSA cells cover strip edges.
-            paint_clip = clip.adjusted(-2, 0, 2, 0).intersected(self.rect())
-            painter.fillRect(clip, base)
-            if self._msa_mode:
-                self._paint_msa_rows(
-                    painter, paint_clip if not paint_clip.isNull() else clip
-                )
+            if use_cache and cache is not None and not vis.isEmpty():
+                # Always clear the dirty rect first so a stale/small cache cannot
+                # leave uncleared white slabs after a tab switch.
+                painter.fillRect(clip, base)
+                # IMPORTANT: do not pass a source QRect into drawPixmap on a
+                # HiDPI QPixmap — Qt/PySide treats that source in *device*
+                # pixels, so only the top-left half of the MSA appeared (same
+                # bug as SequenceMapCanvas letter cache). Draw the full logical
+                # pixmap at the viewport origin and clip to the dirty rect.
+                painter.save()
+                painter.setClipRect(clip)
+                painter.drawPixmap(vis.topLeft(), cache)
+                painter.restore()
+                # Outside the cached viewport (rare): fall back to live paint.
+                outside = QRegion(clip).subtracted(QRegion(vis))
+                if not outside.isEmpty():
+                    for out in outside:
+                        if out.isNull() or out.width() <= 0 or out.height() <= 0:
+                            continue
+                        painter.fillRect(out, base)
+                        self._paint_msa_rows(painter, out)
+                if self._selected_feats:
+                    self._paint_feature_selection_outlines(painter, clip)
             else:
-                self._paint_bar_rows(painter, clip)
+                # Neighbor columns so sub-pixel MSA cells cover strip edges.
+                paint_clip = clip.adjusted(-2, 0, 2, 0).intersected(self.rect())
+                painter.fillRect(clip, base)
+                if self._msa_mode:
+                    self._paint_msa_rows(
+                        painter, paint_clip if not paint_clip.isNull() else clip
+                    )
+                else:
+                    self._paint_bar_rows(painter, clip)
             self._chrome.paint(painter, clip)
         if not self._rubber_active:
             self._paint_feature_hover_tip(painter)
         painter.end()
+
+    def _paint_feature_selection_outlines(
+        self, painter: QPainter, clip: QRect
+    ) -> None:
+        """Selection borders only — kept out of the residue cache."""
+        if not self._selected_feats:
+            return
+        pen = QPen(QColor("#4ea1ff" if _is_dark(self) else "#0b5cab"), 2)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(pen)
+        for row, flat_i in self._selected_feats:
+            rect = self._feature_rect(row, flat_i)
+            if rect is None or not rect.intersects(QRectF(clip)):
+                continue
+            painter.drawRect(rect.adjusted(-1, -1, 1, 1))
 
     def _paint_feature_tracks(
         self,
@@ -3128,6 +3247,7 @@ class _BarsCanvas(QWidget):
         rid: str,
         length: int,
         feat_y0: int,
+        paint_selection: bool = True,
     ) -> None:
         if not self._show_annotation_track:
             return
@@ -3165,7 +3285,7 @@ class _BarsCanvas(QWidget):
                     label=label,
                     label_point_size=self._feat_label_point_size,
                 )
-                if (row, flat_index) in self._selected_feats:
+                if paint_selection and (row, flat_index) in self._selected_feats:
                     painter.setBrush(Qt.BrushStyle.NoBrush)
                     painter.setPen(
                         QPen(QColor("#4ea1ff" if _is_dark(self) else "#0b5cab"), 2)
@@ -3212,15 +3332,111 @@ class _BarsCanvas(QWidget):
             full_label,
         )
 
-    def _paint_msa_rows(self, painter: QPainter, clip: QRect) -> None:
+    def _paint_msa_rows_pixel_sample(
+        self,
+        painter: QPainter,
+        clip: QRect,
+        *,
+        residue_h: int,
+        paint_feature_selection: bool,
+    ) -> None:
+        """Fit/overview: one colour sample per screen pixel (not per column).
+
+        Matches the single-sequence map's ``_draw_sequence_bar_viewport`` path
+        and AliView's zoomed-out rendering: cost is O(rows × viewport_width),
+        not O(rows × alignment_length). Critical for ~15k-column MSAs at Fit.
+        """
+        ppb = max(self._ppb, 1e-12)
+        max_len = max(1, int(self._max_length))
+        px_left = max(0, int(math.floor(clip.left())))
+        px_right = min(self.width(), int(math.ceil(clip.right())) + 1)
+        if px_left >= px_right:
+            return
+        painter.setPen(Qt.PenStyle.NoPen)
+        gap_line = QColor("#e0e0e0") if _is_dark(self) else QColor("#000000")
+        for index, rid in enumerate(self._record_ids):
+            top = self._row_tops[index]
+            height = self._row_heights[index]
+            if top + height < clip.top() or top > clip.bottom():
+                continue
+            seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
+            y = float(top)
+            y_mid = y + float(residue_h) * 0.5
+            px = px_left
+            while px < px_right:
+                content_x = float(px) - float(self._bar_pad)
+                if content_x < 0.0:
+                    px += 1
+                    continue
+                col = int(content_x / ppb)
+                if col >= max_len:
+                    break
+                ch = seq[col] if col < len(seq) else "-"
+                fill = self._msa_overview_fill_color(col, ch)
+                run_start = px
+                px += 1
+                while px < px_right:
+                    content_x = float(px) - float(self._bar_pad)
+                    if content_x < 0.0:
+                        break
+                    col2 = int(content_x / ppb)
+                    if col2 >= max_len:
+                        break
+                    ch2 = seq[col2] if col2 < len(seq) else "-"
+                    fill2 = self._msa_overview_fill_color(col2, ch2)
+                    if fill is None or fill2 is None:
+                        if fill is not fill2:
+                            break
+                        if (ch in "-.") != (ch2 in "-."):
+                            break
+                    elif fill.rgba() != fill2.rgba():
+                        break
+                    px += 1
+                run_w = float(px - run_start)
+                if fill is not None:
+                    painter.fillRect(QRectF(float(run_start), y, run_w, float(residue_h)), fill)
+                elif ch in "-.":
+                    pen = QPen(gap_line, 1)
+                    pen.setCosmetic(True)
+                    painter.setPen(pen)
+                    painter.drawLine(
+                        QPointF(float(run_start), y_mid),
+                        QPointF(float(px), y_mid),
+                    )
+                    painter.setPen(Qt.PenStyle.NoPen)
+            length = max(1, int(self._lengths.get(rid, 1)))
+            self._paint_feature_tracks(
+                painter,
+                row=index,
+                rid=rid,
+                length=length,
+                feat_y0=self._feature_band_y0(index),
+                paint_selection=paint_feature_selection,
+            )
+
+    def _paint_msa_rows(
+        self,
+        painter: QPainter,
+        clip: QRect,
+        *,
+        paint_feature_selection: bool = True,
+    ) -> None:
         """Column-aligned residue cells (visible rows/columns only)."""
         ppb = max(self._ppb, 1e-12)
         show_letters = self._msa_shows_letters()
+        # At letter zoom, band grows with ppb (square cells); font scales to fill.
+        residue_h = max(1, int(self._msa_letter_band_height()))
+        if not show_letters and ppb < _MSA_PIXEL_SAMPLE_PPB:
+            self._paint_msa_rows_pixel_sample(
+                painter,
+                clip,
+                residue_h=residue_h,
+                paint_feature_selection=paint_feature_selection,
+            )
+            return
         c0 = max(0, int((clip.left() - self._bar_pad) / ppb) - 1)
         c1 = min(self._max_length, int((clip.right() - self._bar_pad) / ppb) + 2)
         qcolors = self._msa_qcolors
-        # At letter zoom, band grows with ppb (square cells); font scales to fill.
-        residue_h = max(1, int(self._msa_letter_band_height()))
         residue_font = (
             self._msa_letter_font_for_cell(ppb, float(residue_h))
             if show_letters
@@ -3377,6 +3593,7 @@ class _BarsCanvas(QWidget):
                 rid=rid,
                 length=length,
                 feat_y0=self._feature_band_y0(index),
+                paint_selection=paint_feature_selection,
             )
         # Selection chrome lives entirely on ``_chrome`` (see _sync_selection_chrome).
 
@@ -3851,6 +4068,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._features: dict[str, list[SequenceFeature]] = {}
         self._annotations_dirty = False
         self._did_initial_fit = False
+        self._refit_pending_on_show = False
         self._name_width = _NAME_COLUMN_DEFAULT
         self._syncing_scroll = False
         self._search_needle = ""
@@ -4122,8 +4340,13 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _refit_after_viewport_change(self) -> None:
         """Keep Fit-zoom tracks edge-to-edge after rail / splitter / window resize."""
-        if not self._record_ids or not self.isVisible():
+        if not self._record_ids:
             return
+        if not self.isVisible():
+            # Defer until show (PDF → MSA). Do not adopt a collapsed viewport size.
+            self._refit_pending_on_show = True
+            return
+        self._refit_pending_on_show = False
         if not self._did_initial_fit:
             self._try_initial_fit()
             return
@@ -4135,6 +4358,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_names_column()
         self._update_scale()
         self._sync_zoom_slider_from_ppb()
+        self._bars.update()
 
     def _sync_hbar_shim(self) -> None:
         h = max(12, self._bars_scroll.horizontalScrollBar().sizeHint().height())
@@ -6082,16 +6306,37 @@ class MultiSequenceOverviewPanel(QWidget):
         )
 
     def _sync_viewport_fill(self) -> None:
+        if not self.isVisible():
+            return
         vp = self._bars_scroll.viewport()
+        if vp.width() < 80 or vp.height() < 40:
+            return
         self._bars.set_viewport_min_size(vp.width(), vp.height())
 
     def _try_initial_fit(self) -> None:
         if self._did_initial_fit or not self._record_ids:
             return
+        if not self.isVisible():
+            self._refit_pending_on_show = True
+            return
         if self._bars_scroll.viewport().width() < 120:
             return
         self._fit_bars()
         self._did_initial_fit = True
+
+    def _after_panel_shown(self) -> None:
+        """Restore full MSA layout after the panel was hidden (e.g. PDF tab)."""
+        if not self.isVisible() or not self._record_ids:
+            return
+        self._bars._invalidate_msa_layer_cache()
+        self._refit_pending_on_show = False
+        if not self._did_initial_fit:
+            self._try_initial_fit()
+            return
+        # Always re-measure the scroll viewport — it may have grown while
+        # this panel was covered by another Preview page.
+        self._refit_after_viewport_change()
+        self._bars.update()
 
     def _bars_viewport_width(self) -> int:
         return max(80, self._bars_scroll.viewport().width())
@@ -7745,7 +7990,10 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        QTimer.singleShot(0, self._try_initial_fit)
+        # PDF (or any other Preview page) can hide this panel while the dock
+        # resizes; refit + drop the residue cache so MSA fills the viewport.
+        QTimer.singleShot(0, self._after_panel_shown)
+        QTimer.singleShot(50, self._after_panel_shown)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
