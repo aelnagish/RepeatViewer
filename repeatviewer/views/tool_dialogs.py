@@ -566,6 +566,14 @@ from repeatviewer.job_options import (
     configure_report_evalue_spinbox,
     DivergenceRowOptions,
     AlignOptions,
+    ALIGN_RUN_MODE_ADD_TO_MSA,
+    ALIGN_RUN_MODE_COMBINED,
+    ALIGN_RUN_MODE_SEPARATE,
+    ALIGN_RUN_MODES,
+    MAFFT_ADD_METHOD_ADD,
+    MAFFT_ADD_METHOD_ADDFRAGMENTS,
+    MAFFT_ADD_METHOD_ADDFULL,
+    MAFFT_ADD_METHOD_ADDLONG,
     MAFFT_SEQUENCE_AUTO,
     MAFFT_SEQUENCE_NUCLEOTIDE,
     MAFFT_SEQUENCE_PROTEIN,
@@ -1371,6 +1379,7 @@ class AlignParamsDialog(QDialog):
         fastga_initial=None,
         fastga_files: list[Path] | None = None,
         fastga_default_reference: Path | None = None,
+        default_msa: Path | None = None,
         initial_tab: str | None = None,
         title: str = "Alignment parameters",
         for_run: bool = True,
@@ -1383,6 +1392,7 @@ class AlignParamsDialog(QDialog):
         self._for_run = for_run
         opts = initial or AlignOptions()
         self._initial_align = opts
+        self._default_msa = self._resolve_existing_align_path(default_msa)
         fastga_opts = fastga_initial or FastGaOptions()
         self._fastga_panel = FastGaPanel(
             initial=fastga_opts,
@@ -1466,13 +1476,21 @@ class AlignParamsDialog(QDialog):
         self._mafft_separate = QRadioButton(
             "Align each selected file separately", self
         )
+        self._mafft_add_to_msa = QRadioButton(
+            "Add sequences to an existing MSA", self
+        )
         self._mafft_mode_group = QButtonGroup(self)
         self._mafft_mode_group.addButton(self._mafft_combine)
         self._mafft_mode_group.addButton(self._mafft_separate)
-        if opts.mafft_combined:
-            self._mafft_combine.setChecked(True)
-        else:
-            self._mafft_separate.setChecked(True)
+        self._mafft_mode_group.addButton(self._mafft_add_to_msa)
+        self._set_mafft_run_mode(
+            getattr(opts, "mafft_run_mode", None)
+            or (
+                ALIGN_RUN_MODE_COMBINED
+                if opts.mafft_combined
+                else ALIGN_RUN_MODE_SEPARATE
+            )
+        )
 
         self._mafft_input_group = QButtonGroup(self)
         self._mafft_input_selected = QRadioButton("Use selected sequences", self)
@@ -1496,6 +1514,50 @@ class AlignParamsDialog(QDialog):
                 "to fill a row, or use Browse."
             ),
             path_mode="file",
+        )
+        self._mafft_add_sequences = PathBrowseRow(
+            self,
+            placeholder="Click in Files or Browse…",
+            browse_title="Choose sequences to add (FASTA)",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            minimum_width=280,
+        )
+        self._mafft_add_msa = PathBrowseRow(
+            self,
+            initial=str(self._default_msa) if self._default_msa else None,
+            placeholder="Click in Files or Browse…",
+            browse_title="Choose the existing MSA (FASTA)",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            minimum_width=280,
+        )
+        for row in (self._mafft_add_sequences, self._mafft_add_msa):
+            row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            row.line_edit().setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+
+        self._mafft_add_method = QComboBox(self)
+        for label, value in (
+            ("--add (insert into MSA)", MAFFT_ADD_METHOD_ADD),
+            ("--addfragments (short / partial)", MAFFT_ADD_METHOD_ADDFRAGMENTS),
+            ("--addfull (full-length into fragmentary MSA)", MAFFT_ADD_METHOD_ADDFULL),
+            ("--addlong (long sequences)", MAFFT_ADD_METHOD_ADDLONG),
+        ):
+            self._mafft_add_method.addItem(label, value)
+        add_method = getattr(opts, "mafft_add_method", MAFFT_ADD_METHOD_ADD)
+        add_idx = self._mafft_add_method.findData(add_method)
+        if add_idx >= 0:
+            self._mafft_add_method.setCurrentIndex(add_idx)
+        self._mafft_add_method.setFixedWidth(260)
+        self._mafft_add_keeplength = QCheckBox(
+            "--keeplength (do not extend the MSA)", self
+        )
+        self._mafft_add_keeplength.setChecked(
+            bool(getattr(opts, "mafft_add_keeplength", False))
         )
 
         mafft_tab = QWidget(self)
@@ -1534,6 +1596,14 @@ class AlignParamsDialog(QDialog):
             )
         )
         mafft_mode_layout.addWidget(self._mafft_separate)
+        mafft_mode_layout.addWidget(
+            field_with_help(
+                self._mafft_add_to_msa,
+                "Add sequences to an existing MSA",
+                _MAFFT_ADD_TO_MSA_HELP,
+                stretch=True,
+            )
+        )
         self._mafft_mode_label = QLabel("")
         mafft_form.addRow(self._mafft_mode_label, mafft_mode_box)
 
@@ -1556,6 +1626,18 @@ class AlignParamsDialog(QDialog):
         self._mafft_inputs_define_label = QLabel("")
         mafft_form.addRow(self._mafft_inputs_radios_label, mafft_inputs_box)
         mafft_form.addRow(self._mafft_inputs_define_label, self._mafft_define_inputs)
+        self._mafft_add_sequences_label = QLabel("Sequences to add:", mafft_basic)
+        self._mafft_add_msa_label = QLabel("Existing MSA:", mafft_basic)
+        self._mafft_add_sequences_field = self._align_path_field_with_help_spacer(
+            self._mafft_add_sequences, mafft_basic
+        )
+        self._mafft_add_msa_field = self._align_path_field_with_help_spacer(
+            self._mafft_add_msa, mafft_basic
+        )
+        mafft_form.addRow(
+            self._mafft_add_sequences_label, self._mafft_add_sequences_field
+        )
+        mafft_form.addRow(self._mafft_add_msa_label, self._mafft_add_msa_field)
 
         mafft_form.addRow(_form_section_separator())
         mafft_form.addRow(_mafft_section("Settings", mafft_basic))
@@ -1623,14 +1705,35 @@ class AlignParamsDialog(QDialog):
                 _MAFFT_ADJUST_DIRECTION_HELP,
             ),
         )
+        mafft_advanced_form.addRow(
+            "Add method:",
+            field_with_help(
+                self._mafft_add_method, "MAFFT add method", _MAFFT_ADD_METHOD_HELP
+            ),
+        )
+        mafft_advanced_form.addRow(
+            "",
+            field_with_help(
+                self._mafft_add_keeplength,
+                "Keep MSA length",
+                _MAFFT_ADD_KEEPLENGTH_HELP,
+            ),
+        )
         mafft_root.addWidget(self._mafft_advanced_panel)
         self._mafft_tab = mafft_tab
         self._set_mafft_advanced_visible(False)
+        self._mafft_combine.toggled.connect(self._on_mafft_run_mode_changed)
+        self._mafft_separate.toggled.connect(self._on_mafft_run_mode_changed)
+        self._mafft_add_to_msa.toggled.connect(self._on_mafft_run_mode_changed)
         self._mafft_input_selected.toggled.connect(self._sync_mafft_inputs)
         self._mafft_input_define.toggled.connect(self._sync_mafft_inputs)
         self._mafft_define_inputs.paths_changed.connect(
             self._on_mafft_define_paths_changed
         )
+        self._mafft_add_sequences.path_changed.connect(
+            self._on_mafft_define_paths_changed
+        )
+        self._mafft_add_msa.path_changed.connect(self._on_mafft_define_paths_changed)
         self._sync_mafft_inputs()
         mafft_tab.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
@@ -1672,13 +1775,21 @@ class AlignParamsDialog(QDialog):
         self._muscle_separate = QRadioButton(
             "Align each selected file separately", self
         )
+        self._muscle_add_to_msa = QRadioButton(
+            "Add sequences to an existing MSA", self
+        )
         self._muscle_mode_group = QButtonGroup(self)
         self._muscle_mode_group.addButton(self._muscle_combine)
         self._muscle_mode_group.addButton(self._muscle_separate)
-        if opts.muscle_combined:
-            self._muscle_combine.setChecked(True)
-        else:
-            self._muscle_separate.setChecked(True)
+        self._muscle_mode_group.addButton(self._muscle_add_to_msa)
+        self._set_muscle_run_mode(
+            getattr(opts, "muscle_run_mode", None)
+            or (
+                ALIGN_RUN_MODE_COMBINED
+                if opts.muscle_combined
+                else ALIGN_RUN_MODE_SEPARATE
+            )
+        )
 
         self._muscle_input_group = QButtonGroup(self)
         self._muscle_input_selected = QRadioButton("Use selected sequences", self)
@@ -1703,6 +1814,30 @@ class AlignParamsDialog(QDialog):
             ),
             path_mode="file",
         )
+        self._muscle_add_sequences = PathBrowseRow(
+            self,
+            placeholder="Click in Files or Browse…",
+            browse_title="Choose sequences to add (FASTA)",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            minimum_width=280,
+        )
+        self._muscle_add_msa = PathBrowseRow(
+            self,
+            initial=str(self._default_msa) if self._default_msa else None,
+            placeholder="Click in Files or Browse…",
+            browse_title="Choose the existing MSA (FASTA)",
+            file_filter=(
+                "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
+            ),
+            minimum_width=280,
+        )
+        for row in (self._muscle_add_sequences, self._muscle_add_msa):
+            row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            row.line_edit().setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
 
         muscle_tab = QWidget(self)
         muscle_root = QVBoxLayout(muscle_tab)
@@ -1739,6 +1874,14 @@ class AlignParamsDialog(QDialog):
             )
         )
         muscle_mode_layout.addWidget(self._muscle_separate)
+        muscle_mode_layout.addWidget(
+            field_with_help(
+                self._muscle_add_to_msa,
+                "Add sequences to an existing MSA",
+                _MUSCLE_ADD_TO_MSA_HELP,
+                stretch=True,
+            )
+        )
         self._muscle_mode_label = QLabel("")
         muscle_form.addRow(self._muscle_mode_label, muscle_mode_box)
 
@@ -1761,6 +1904,18 @@ class AlignParamsDialog(QDialog):
         self._muscle_inputs_define_label = QLabel("")
         muscle_form.addRow(self._muscle_inputs_radios_label, muscle_inputs_box)
         muscle_form.addRow(self._muscle_inputs_define_label, self._muscle_define_inputs)
+        self._muscle_add_sequences_label = QLabel("Sequences to add:", muscle_basic)
+        self._muscle_add_msa_label = QLabel("Existing MSA:", muscle_basic)
+        self._muscle_add_sequences_field = self._align_path_field_with_help_spacer(
+            self._muscle_add_sequences, muscle_basic
+        )
+        self._muscle_add_msa_field = self._align_path_field_with_help_spacer(
+            self._muscle_add_msa, muscle_basic
+        )
+        muscle_form.addRow(
+            self._muscle_add_sequences_label, self._muscle_add_sequences_field
+        )
+        muscle_form.addRow(self._muscle_add_msa_label, self._muscle_add_msa_field)
 
         muscle_form.addRow(_form_section_separator())
         muscle_form.addRow(_muscle_section("Settings", muscle_basic))
@@ -1811,11 +1966,18 @@ class AlignParamsDialog(QDialog):
         muscle_root.addWidget(self._muscle_advanced_panel)
         self._muscle_tab = muscle_tab
         self._set_muscle_advanced_visible(False)
+        self._muscle_combine.toggled.connect(self._on_muscle_run_mode_changed)
+        self._muscle_separate.toggled.connect(self._on_muscle_run_mode_changed)
+        self._muscle_add_to_msa.toggled.connect(self._on_muscle_run_mode_changed)
         self._muscle_input_selected.toggled.connect(self._sync_muscle_inputs)
         self._muscle_input_define.toggled.connect(self._sync_muscle_inputs)
         self._muscle_define_inputs.paths_changed.connect(
             self._on_muscle_define_paths_changed
         )
+        self._muscle_add_sequences.path_changed.connect(
+            self._on_muscle_define_paths_changed
+        )
+        self._muscle_add_msa.path_changed.connect(self._on_muscle_define_paths_changed)
         self._sync_muscle_inputs()
         muscle_tab.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
@@ -2045,6 +2207,8 @@ class AlignParamsDialog(QDialog):
                 self._mafft_mode_label,
                 self._mafft_inputs_radios_label,
                 self._mafft_inputs_define_label,
+                self._mafft_add_sequences_label,
+                self._mafft_add_msa_label,
             ],
             [
                 mafft_form if isinstance(mafft_form, QFormLayout) else None,
@@ -2067,6 +2231,8 @@ class AlignParamsDialog(QDialog):
                 self._muscle_mode_label,
                 self._muscle_inputs_radios_label,
                 self._muscle_inputs_define_label,
+                self._muscle_add_sequences_label,
+                self._muscle_add_msa_label,
             ],
             [
                 muscle_form if isinstance(muscle_form, QFormLayout) else None,
@@ -2135,14 +2301,20 @@ class AlignParamsDialog(QDialog):
     def _align_needs_wide_inputs(self) -> bool:
         """True when the active Align tab shows path rows that need width 720.
 
-        Define inputs (MAFFT / MUSCLE / FastGA), or FastGA Compare-against-a
-        reference (Reference genome path + Browse).
+        Define inputs (MAFFT / MUSCLE / FastGA), add-to-MSA paths, or FastGA
+        Compare-against-a reference (Reference genome path + Browse).
         """
         current = self._aligner_tabs.currentWidget()
         if current is self._mafft_tab:
-            return self.mafft_input_source() == ALIGN_INPUT_DEFINE
+            return (
+                self.mafft_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA
+                or self.mafft_input_source() == ALIGN_INPUT_DEFINE
+            )
         if current is self._muscle_tab:
-            return self.muscle_input_source() == ALIGN_INPUT_DEFINE
+            return (
+                self.muscle_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA
+                or self.muscle_input_source() == ALIGN_INPUT_DEFINE
+            )
         if current is self._fastga_tab:
             panel = self._fastga_panel
             return (
@@ -2520,7 +2692,82 @@ class AlignParamsDialog(QDialog):
             return self._fastga_panel.apply_folder_from_panel(folder)
         return False
 
+    @staticmethod
+    def _resolve_existing_align_path(path: Path | str | None) -> Path | None:
+        if path is None or str(path).strip() == "":
+            return None
+        try:
+            candidate = Path(path).expanduser().resolve()
+        except OSError:
+            return None
+        return candidate if candidate.is_file() else None
+
+    @staticmethod
+    def _align_path_field_with_help_spacer(
+        row: PathBrowseRow, parent: QWidget
+    ) -> QWidget:
+        """PathBrowseRow + help-sized spacer so Browse lines up with Define inputs."""
+        host = QWidget(parent)
+        host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lay.addWidget(row, stretch=1)
+        spacer = QWidget(host)
+        spacer.setFixedSize(HELP_BUTTON_SIZE, HELP_BUTTON_SIZE)
+        lay.addWidget(spacer)
+        return host
+
+    def mafft_run_mode(self) -> str:
+        if self._mafft_add_to_msa.isChecked():
+            return ALIGN_RUN_MODE_ADD_TO_MSA
+        if self._mafft_combine.isChecked():
+            return ALIGN_RUN_MODE_COMBINED
+        return ALIGN_RUN_MODE_SEPARATE
+
+    def _set_mafft_run_mode(self, mode: str | None) -> None:
+        value = str(mode or ALIGN_RUN_MODE_SEPARATE)
+        if value not in ALIGN_RUN_MODES:
+            value = ALIGN_RUN_MODE_SEPARATE
+        if value == ALIGN_RUN_MODE_ADD_TO_MSA:
+            self._mafft_add_to_msa.setChecked(True)
+        elif value == ALIGN_RUN_MODE_COMBINED:
+            self._mafft_combine.setChecked(True)
+        else:
+            self._mafft_separate.setChecked(True)
+
+    def _on_mafft_run_mode_changed(self, checked: bool = False) -> None:
+        if not checked and self.sender() is not None:
+            return
+        self._sync_mafft_inputs()
+        self._sync_mafft_add_controls()
+
+    def muscle_run_mode(self) -> str:
+        if self._muscle_add_to_msa.isChecked():
+            return ALIGN_RUN_MODE_ADD_TO_MSA
+        if self._muscle_combine.isChecked():
+            return ALIGN_RUN_MODE_COMBINED
+        return ALIGN_RUN_MODE_SEPARATE
+
+    def _set_muscle_run_mode(self, mode: str | None) -> None:
+        value = str(mode or ALIGN_RUN_MODE_SEPARATE)
+        if value not in ALIGN_RUN_MODES:
+            value = ALIGN_RUN_MODE_SEPARATE
+        if value == ALIGN_RUN_MODE_ADD_TO_MSA:
+            self._muscle_add_to_msa.setChecked(True)
+        elif value == ALIGN_RUN_MODE_COMBINED:
+            self._muscle_combine.setChecked(True)
+        else:
+            self._muscle_separate.setChecked(True)
+
+    def _on_muscle_run_mode_changed(self, checked: bool = False) -> None:
+        if not checked and self.sender() is not None:
+            return
+        self._sync_muscle_inputs()
+
     def mafft_input_source(self) -> str:
+        if self.mafft_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA:
+            return ALIGN_INPUT_DEFINE
         if self._mafft_input_define.isChecked():
             return ALIGN_INPUT_DEFINE
         return ALIGN_INPUT_SELECTED
@@ -2529,9 +2776,17 @@ class AlignParamsDialog(QDialog):
         """FASTA inputs for Run: panel selection or expanded Define inputs."""
         from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
 
+        if self.mafft_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA:
+            return []
         if self.mafft_input_source() == ALIGN_INPUT_DEFINE:
             return expand_fastga_input_paths(self._mafft_define_inputs.paths())
         return [Path(p) for p in (panel_files or [])]
+
+    def mafft_add_paths(self) -> tuple[Path | None, Path | None]:
+        """(sequences_to_add, existing_msa) for add-to-MSA mode."""
+        seq = self._resolve_existing_align_path(self._mafft_add_sequences.path())
+        msa = self._resolve_existing_align_path(self._mafft_add_msa.path())
+        return seq, msa
 
     def _on_mafft_define_paths_changed(self) -> None:
         # Defer so new rows finish layout before height is measured/pinned.
@@ -2540,21 +2795,42 @@ class AlignParamsDialog(QDialog):
         self._mafft_compact_size = None
         QTimer.singleShot(0, lambda: self._resize_for_mafft_advanced(False))
 
+    def _sync_mafft_add_controls(self) -> None:
+        add_mode = self.mafft_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA
+        self._mafft_add_method.setEnabled(add_mode)
+        self._mafft_add_keeplength.setEnabled(add_mode)
+
     def _sync_mafft_inputs(self, *, resize: bool = True) -> None:
-        define = self.mafft_input_source() == ALIGN_INPUT_DEFINE
+        add_mode = self.mafft_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA
+        define = (not add_mode) and self.mafft_input_source() == ALIGN_INPUT_DEFINE
         form = self._mafft_basic.layout()
         # Collapse the form row fully — a hidden TeMultiInputFilesWidget still
         # reports a large sizeHint and leaves a blank gap under Settings.
         if isinstance(form, QFormLayout):
+            form.setRowVisible(self._mafft_inputs_radios_label, not add_mode)
             form.setRowVisible(self._mafft_define_inputs, define)
+            form.setRowVisible(self._mafft_add_sequences_field, add_mode)
+            form.setRowVisible(self._mafft_add_msa_field, add_mode)
+        self._mafft_input_selected.setVisible(not add_mode)
+        self._mafft_input_define.setVisible(not add_mode)
         self._mafft_define_inputs.setVisible(define)
         if define:
             self._mafft_define_inputs.setMinimumHeight(0)
             self._mafft_define_inputs.setMaximumHeight(16777215)
         else:
             self._mafft_define_inputs.setFixedHeight(0)
+        for widget in (
+            self._mafft_add_sequences,
+            self._mafft_add_msa,
+            self._mafft_add_sequences_field,
+            self._mafft_add_msa_field,
+            self._mafft_add_sequences_label,
+            self._mafft_add_msa_label,
+        ):
+            widget.setVisible(add_mode)
         self._mafft_define_inputs.updateGeometry()
         self._mafft_basic.updateGeometry()
+        self._sync_mafft_add_controls()
         if hasattr(self, "_muscle_mode_label"):
             self._sync_align_field_columns()
         if (
@@ -2567,15 +2843,23 @@ class AlignParamsDialog(QDialog):
             QTimer.singleShot(0, lambda: self._resize_for_mafft_advanced(False))
 
     def _apply_mafft_path_from_panel(self, path: Path) -> bool:
-        if self.mafft_input_source() != ALIGN_INPUT_DEFINE:
-            return False
         try:
             candidate = Path(path).expanduser().resolve()
         except OSError:
             return False
+        if self.mafft_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA:
+            return self._fill_add_to_msa_path(
+                candidate,
+                sequences_row=self._mafft_add_sequences,
+                msa_row=self._mafft_add_msa,
+            )
+        if self.mafft_input_source() != ALIGN_INPUT_DEFINE:
+            return False
         return bool(self._mafft_define_inputs.accept_path(candidate))
 
     def _apply_mafft_folder_from_panel(self, folder: Path) -> bool:
+        if self.mafft_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA:
+            return False
         if self.mafft_input_source() != ALIGN_INPUT_DEFINE:
             return False
         try:
@@ -2587,6 +2871,8 @@ class AlignParamsDialog(QDialog):
         return bool(self._mafft_define_inputs.accept_path(candidate))
 
     def muscle_input_source(self) -> str:
+        if self.muscle_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA:
+            return ALIGN_INPUT_DEFINE
         if self._muscle_input_define.isChecked():
             return ALIGN_INPUT_DEFINE
         return ALIGN_INPUT_SELECTED
@@ -2595,9 +2881,17 @@ class AlignParamsDialog(QDialog):
         """FASTA inputs for Run: panel selection or expanded Define inputs."""
         from repeatviewer.backends.fastga_dotplot import expand_fastga_input_paths
 
+        if self.muscle_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA:
+            return []
         if self.muscle_input_source() == ALIGN_INPUT_DEFINE:
             return expand_fastga_input_paths(self._muscle_define_inputs.paths())
         return [Path(p) for p in (panel_files or [])]
+
+    def muscle_add_paths(self) -> tuple[Path | None, Path | None]:
+        """(sequences_to_add, existing_msa) for add-to-MSA mode."""
+        seq = self._resolve_existing_align_path(self._muscle_add_sequences.path())
+        msa = self._resolve_existing_align_path(self._muscle_add_msa.path())
+        return seq, msa
 
     def _on_muscle_define_paths_changed(self) -> None:
         # Defer so new rows finish layout before height is measured/pinned.
@@ -2607,16 +2901,31 @@ class AlignParamsDialog(QDialog):
         QTimer.singleShot(0, lambda: self._resize_for_muscle_advanced(False))
 
     def _sync_muscle_inputs(self, *, resize: bool = True) -> None:
-        define = self.muscle_input_source() == ALIGN_INPUT_DEFINE
+        add_mode = self.muscle_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA
+        define = (not add_mode) and self.muscle_input_source() == ALIGN_INPUT_DEFINE
         form = self._muscle_basic.layout()
         if isinstance(form, QFormLayout):
+            form.setRowVisible(self._muscle_inputs_radios_label, not add_mode)
             form.setRowVisible(self._muscle_define_inputs, define)
+            form.setRowVisible(self._muscle_add_sequences_field, add_mode)
+            form.setRowVisible(self._muscle_add_msa_field, add_mode)
+        self._muscle_input_selected.setVisible(not add_mode)
+        self._muscle_input_define.setVisible(not add_mode)
         self._muscle_define_inputs.setVisible(define)
         if define:
             self._muscle_define_inputs.setMinimumHeight(0)
             self._muscle_define_inputs.setMaximumHeight(16777215)
         else:
             self._muscle_define_inputs.setFixedHeight(0)
+        for widget in (
+            self._muscle_add_sequences,
+            self._muscle_add_msa,
+            self._muscle_add_sequences_field,
+            self._muscle_add_msa_field,
+            self._muscle_add_sequences_label,
+            self._muscle_add_msa_label,
+        ):
+            widget.setVisible(add_mode)
         self._muscle_define_inputs.updateGeometry()
         self._muscle_basic.updateGeometry()
         if hasattr(self, "_muscle_mode_label"):
@@ -2631,15 +2940,23 @@ class AlignParamsDialog(QDialog):
             QTimer.singleShot(0, lambda: self._resize_for_muscle_advanced(False))
 
     def _apply_muscle_path_from_panel(self, path: Path) -> bool:
-        if self.muscle_input_source() != ALIGN_INPUT_DEFINE:
-            return False
         try:
             candidate = Path(path).expanduser().resolve()
         except OSError:
             return False
+        if self.muscle_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA:
+            return self._fill_add_to_msa_path(
+                candidate,
+                sequences_row=self._muscle_add_sequences,
+                msa_row=self._muscle_add_msa,
+            )
+        if self.muscle_input_source() != ALIGN_INPUT_DEFINE:
+            return False
         return bool(self._muscle_define_inputs.accept_path(candidate))
 
     def _apply_muscle_folder_from_panel(self, folder: Path) -> bool:
+        if self.muscle_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA:
+            return False
         if self.muscle_input_source() != ALIGN_INPUT_DEFINE:
             return False
         try:
@@ -2649,6 +2966,25 @@ class AlignParamsDialog(QDialog):
         if not candidate.is_dir():
             return False
         return bool(self._muscle_define_inputs.accept_path(candidate))
+
+    @staticmethod
+    def _fill_add_to_msa_path(
+        candidate: Path,
+        *,
+        sequences_row: PathBrowseRow,
+        msa_row: PathBrowseRow,
+    ) -> bool:
+        """Fill Sequences if empty, else Existing MSA if empty, else Sequences."""
+        if not candidate.is_file():
+            return False
+        if sequences_row.path() is None:
+            target = sequences_row
+        elif msa_row.path() is None:
+            target = msa_row
+        else:
+            target = sequences_row
+        target.set_path(str(candidate))
+        return True
 
     def fastga_run_files(self) -> list[Path]:
         """Query genomes for Run: panel selection or expanded Define inputs."""
@@ -2671,9 +3007,18 @@ class AlignParamsDialog(QDialog):
 
     def combined_for(self, aligner: str) -> bool:
         """Whether the given aligner should combine into one MSA."""
+        mode = (
+            self.muscle_run_mode()
+            if aligner == ALIGNER_MUSCLE
+            else self.mafft_run_mode()
+        )
+        return mode == ALIGN_RUN_MODE_COMBINED
+
+    def run_mode_for(self, aligner: str) -> str:
+        """Persisted Mode radio for MAFFT or MUSCLE."""
         if aligner == ALIGNER_MUSCLE:
-            return self._muscle_combine.isChecked()
-        return self._mafft_combine.isChecked()
+            return self.muscle_run_mode()
+        return self.mafft_run_mode()
 
     def _sync_controls(self) -> None:
         strategy = str(self._strategy.currentData())
@@ -2732,6 +3077,9 @@ class AlignParamsDialog(QDialog):
             if right_click in (ALIGNER_MAFFT, ALIGNER_MUSCLE)
             else self._initial_align.combined_aligner
         )
+        mafft_mode = self.mafft_run_mode()
+        muscle_mode_run = self.muscle_run_mode()
+        add_method = str(self._mafft_add_method.currentData() or MAFFT_ADD_METHOD_ADD)
         return AlignOptions(
             combined_aligner=combined,
             num_threads=max(1, int(self._threads.value())),
@@ -2754,8 +3102,12 @@ class AlignParamsDialog(QDialog):
             muscle_input_paths=[],
             mafft_input_source=ALIGN_INPUT_SELECTED,
             mafft_input_paths=[],
-            mafft_combined=self._mafft_combine.isChecked(),
-            muscle_combined=self._muscle_combine.isChecked(),
+            mafft_run_mode=mafft_mode,
+            muscle_run_mode=muscle_mode_run,
+            mafft_combined=mafft_mode == ALIGN_RUN_MODE_COMBINED,
+            muscle_combined=muscle_mode_run == ALIGN_RUN_MODE_COMBINED,
+            mafft_add_method=add_method,
+            mafft_add_keeplength=self._mafft_add_keeplength.isChecked(),
             last_dialog_tab=persistable_dialog_tab(
                 self.current_dialog_tab(), first_tab=ALIGNER_MAFFT
             ),
@@ -2820,12 +3172,17 @@ class AlignParamsDialog(QDialog):
         self._offset.setValue(defaults.offset)
         self._reorder.setChecked(defaults.reorder)
         self._adjust_direction.setChecked(defaults.adjust_direction)
-        if defaults.mafft_combined:
-            self._mafft_combine.setChecked(True)
-        else:
-            self._mafft_separate.setChecked(True)
+        self._set_mafft_run_mode(defaults.mafft_run_mode)
+        add_idx = self._mafft_add_method.findData(defaults.mafft_add_method)
+        if add_idx >= 0:
+            self._mafft_add_method.setCurrentIndex(add_idx)
+        self._mafft_add_keeplength.setChecked(defaults.mafft_add_keeplength)
         self._mafft_input_selected.setChecked(True)
         self._mafft_define_inputs.clear_paths()
+        self._mafft_add_sequences.set_path(None)
+        self._mafft_add_msa.set_path(
+            str(self._default_msa) if self._default_msa else None
+        )
         self._sync_mafft_inputs()
 
         muscle_idx = self._muscle_mode.findData(defaults.muscle_mode)
@@ -2838,11 +3195,12 @@ class AlignParamsDialog(QDialog):
         self._muscle_perturb.setValue(max(0, defaults.muscle_perturb))
         self._muscle_input_selected.setChecked(True)
         self._muscle_define_inputs.clear_paths()
+        self._muscle_add_sequences.set_path(None)
+        self._muscle_add_msa.set_path(
+            str(self._default_msa) if self._default_msa else None
+        )
+        self._set_muscle_run_mode(defaults.muscle_run_mode)
         self._sync_muscle_inputs()
-        if defaults.muscle_combined:
-            self._muscle_combine.setChecked(True)
-        else:
-            self._muscle_separate.setChecked(True)
 
         for value, radio in self._right_click_buttons.items():
             radio.setChecked(value == defaults.right_click_aligner)
@@ -3742,7 +4100,27 @@ _MAFFT_MODE_HELP = (
     "selected files into a single FASTA, then run MAFFT once on that combined "
     "file.<br><br>"
     "<b>Align each selected file separately</b>: align each selected FASTA file "
-    "separately with MAFFT."
+    "separately with MAFFT.<br><br>"
+    "<b>Add sequences to an existing MSA</b>: provide unaligned sequences and an "
+    "existing MSA; MAFFT inserts the new sequences with "
+    "<code>--add</code> / related options (see Advanced Settings)."
+)
+_MAFFT_ADD_TO_MSA_HELP = (
+    "Requires two files: <b>Sequences to add</b> (unaligned FASTA) and "
+    "<b>Existing MSA</b> (aligned FASTA). The Files selection prefills the MSA "
+    "path when you open this window. Click files in the Files panel to fill the "
+    "paths, or use Browse. Add-method flags live under Advanced Settings."
+)
+_MAFFT_ADD_METHOD_HELP = (
+    "Used only in <b>Add sequences to an existing MSA</b> mode.<br><br>"
+    "<b>--add</b>: insert new sequences into the existing alignment.<br><br>"
+    "<b>--addfragments</b>: better for short / partial sequences.<br><br>"
+    "<b>--addfull</b>: add full-length sequences into a fragmentary MSA.<br><br>"
+    "<b>--addlong</b>: for sequences much longer than the MSA."
+)
+_MAFFT_ADD_KEEPLENGTH_HELP = (
+    "MAFFT <b>--keeplength</b>: keep the existing MSA length (do not introduce "
+    "new columns). Only used with Add sequences to an existing MSA."
 )
 _MAFFT_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MAFFT uses the FASTA files that were "
@@ -3805,7 +4183,16 @@ _MUSCLE_MODE_HELP = (
     "selected files into a single FASTA, then run MUSCLE once on that combined "
     "file.<br><br>"
     "<b>Align each selected file separately</b>: align each selected FASTA file "
-    "separately with MUSCLE."
+    "separately with MUSCLE.<br><br>"
+    "<b>Add sequences to an existing MSA</b>: provide unaligned sequences and an "
+    "existing MSA. MUSCLE 5 has no profile-add; it degaps the MSA, merges the "
+    "new sequences, and re-aligns. Prefer MAFFT for true add-to-MSA."
+)
+_MUSCLE_ADD_TO_MSA_HELP = (
+    "Requires two files: <b>Sequences to add</b> and <b>Existing MSA</b>. "
+    "The Files selection prefills the MSA path when you open this window. "
+    "MUSCLE 5 re-aligns the merged sequences (it does not preserve MSA columns "
+    "the way MAFFT <code>--add</code> does)."
 )
 _MUSCLE_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MUSCLE uses the FASTA files that were "

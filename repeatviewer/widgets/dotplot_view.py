@@ -1643,6 +1643,22 @@ class DotplotPanel(QWidget):
         )
         self._pair_label = QLabel("Compare:", self)
 
+        # Multi-FASTA / MSA: pick which record's self-dotplot to show.
+        self._sequence_combo = QComboBox(self)
+        self._sequence_combo.setFixedWidth(180)
+        self._sequence_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._sequence_combo.setMinimumContentsLength(8)
+        self._sequence_combo.setToolTip(
+            "Which sequence to show as a self-dotplot."
+        )
+        self._sequence_label = QLabel("Sequence:", self)
+        self._sequence_records: list[tuple[str, str]] = []
+        self._ungap_for_plot = False
+        # When ungapping for MSA: 0-based gapped index of each ungapped residue.
+        self._coord_keep: list[int] | None = None
+
         # For an alignment file there is no k-mer step to tune, so the
         # equivalent of word size is which alignments are drawn at all.
         self._filter_len = QSpinBox(self)
@@ -1761,6 +1777,8 @@ class DotplotPanel(QWidget):
         self._word_label = QLabel("Word size:", self)
         bar.addWidget(self._pair_label)
         bar.addWidget(self._pair_combo)
+        bar.addWidget(self._sequence_label)
+        bar.addWidget(self._sequence_combo)
         bar.addWidget(self._filter_len_label)
         bar.addWidget(self._filter_len)
         bar.addWidget(self._region_start_label)
@@ -1825,6 +1843,7 @@ class DotplotPanel(QWidget):
         self._region_start.valueChanged.connect(self._recompute)
         self._region_size.valueChanged.connect(self._recompute)
         self._pair_combo.currentIndexChanged.connect(self._show_selected_pair)
+        self._sequence_combo.currentIndexChanged.connect(self._on_sequence_choice_changed)
         self._filter_len.valueChanged.connect(self._recompute)
         self._reset_btn.clicked.connect(self._canvas.reset_zoom)
         self._zoom_select_btn.clicked.connect(self._zoom_to_selection)
@@ -1851,6 +1870,12 @@ class DotplotPanel(QWidget):
         self._alignments = None
         self._active_sequence_id = ""
         self._active_sequence = ""
+        self._sequence_records = []
+        self._ungap_for_plot = False
+        self._coord_keep = None
+        self._sequence_combo.blockSignals(True)
+        self._sequence_combo.clear()
+        self._sequence_combo.blockSignals(False)
         self._too_long_prompt_active = False
         self._canvas.set_axes([], [])
         self._sequence_id = ""
@@ -1861,18 +1886,94 @@ class DotplotPanel(QWidget):
         self.clear_selection()
         self._set_status_text("")
         self._compute_btn.hide()
+        self._sync_engine_controls()
 
-    def set_active_sequence(self, sequence_id: str, sequence: str) -> None:
-        """Use this record for Dotplot (Self) on multi-sequence FASTA files."""
+    def set_record_choices(
+        self,
+        records: list[tuple[str, str]],
+        *,
+        ungap: bool = False,
+        preferred_id: str | None = None,
+    ) -> None:
+        """Populate the Sequence picker for multi-FASTA / MSA Dotplot (Self).
+
+        When ``ungap`` is True (MSA), gaps are stripped for plotting and a
+        coordinate map is kept so selections can highlight the MSA.
+        """
+        cleaned: list[tuple[str, str]] = []
+        for rid, seq in records:
+            sid = str(rid or "").strip()
+            if not sid:
+                continue
+            cleaned.append((sid, str(seq or "")))
+        self._sequence_records = cleaned
+        self._ungap_for_plot = bool(ungap)
+        self._sequence_combo.blockSignals(True)
+        self._sequence_combo.clear()
+        # Match Overview name-column numbering (1-based, same order).
+        for index, (sid, _seq) in enumerate(cleaned):
+            self._sequence_combo.addItem(f"{index + 1}. {sid}", sid)
+        want = str(preferred_id or "").strip()
+        idx = self._sequence_combo.findData(want) if want else -1
+        if idx < 0 and cleaned:
+            idx = 0
+        if idx >= 0:
+            self._sequence_combo.setCurrentIndex(idx)
+        self._sequence_combo.blockSignals(False)
+        self._sync_engine_controls()
+        if cleaned:
+            sid = str(self._sequence_combo.currentData() or cleaned[0][0])
+            seq = next((s for i, s in cleaned if i == sid), cleaned[0][1])
+            self.set_active_sequence(sid, seq, ungap=self._ungap_for_plot)
+        else:
+            self.set_active_sequence("", "")
+
+    def _on_sequence_choice_changed(self, _index: int = -1) -> None:
+        if self._mode == "alignment" or not self._sequence_records:
+            return
+        sid = str(self._sequence_combo.currentData() or "").strip()
+        seq = next((s for i, s in self._sequence_records if i == sid), "")
+        if not sid:
+            return
+        self.set_active_sequence(sid, seq, ungap=self._ungap_for_plot)
+        if self.isVisible():
+            self.ensure_loaded()
+
+    def set_active_sequence(
+        self, sequence_id: str, sequence: str, *, ungap: bool | None = None
+    ) -> None:
+        """Use this record for Dotplot (Self) on multi-sequence FASTA files.
+
+        When ``ungap`` is True, strip ``-``/``.`` for the plot and remember
+        gapped coordinates for Overview highlighting.
+        """
         sid = str(sequence_id or "").strip()
         seq = str(sequence or "")
-        if sid == self._active_sequence_id and seq == self._active_sequence:
+        do_ungap = self._ungap_for_plot if ungap is None else bool(ungap)
+        plot_seq = seq
+        keep: list[int] | None = None
+        if do_ungap and seq:
+            from repeatviewer.backends.msa_coordinates import ungap_sequence
+
+            plot_seq, keep = ungap_sequence(seq)
+        if (
+            sid == self._active_sequence_id
+            and plot_seq == self._active_sequence
+            and keep == self._coord_keep
+        ):
             return
         self._active_sequence_id = sid
-        self._active_sequence = seq
-        self._full_length = len(seq)
+        self._active_sequence = plot_seq
+        self._coord_keep = keep
+        self._full_length = len(plot_seq)
         self._loaded_for = None
         self._too_long_prompt_active = False
+        if sid and self._sequence_combo.count():
+            idx = self._sequence_combo.findData(sid)
+            if idx >= 0 and self._sequence_combo.currentIndex() != idx:
+                self._sequence_combo.blockSignals(True)
+                self._sequence_combo.setCurrentIndex(idx)
+                self._sequence_combo.blockSignals(False)
 
     def _is_large(self) -> bool:
         if self._active_sequence:
@@ -1990,6 +2091,8 @@ class DotplotPanel(QWidget):
             multi = self._alignments is not None and not self._alignments.is_single_pair()
             self._pair_label.setVisible(multi)
             self._pair_combo.setVisible(multi)
+            self._sequence_label.setVisible(False)
+            self._sequence_combo.setVisible(False)
             self._filter_len_label.setVisible(True)
             self._filter_len.setVisible(True)
             # FastGA / PAF previews: no From/Window; View select stays hidden
@@ -2004,6 +2107,9 @@ class DotplotPanel(QWidget):
 
         self._pair_label.setVisible(False)
         self._pair_combo.setVisible(False)
+        multi_seq = self._mode != "alignment" and len(self._sequence_records) > 1
+        self._sequence_label.setVisible(multi_seq)
+        self._sequence_combo.setVisible(multi_seq)
         self._filter_len_label.setVisible(False)
         self._filter_len.setVisible(False)
         # Status-only note for long sequences: hide Line width / zoom / Export.
@@ -2327,9 +2433,40 @@ class DotplotPanel(QWidget):
         self._word.setValue(suggest_word_size(size))
         self._word.blockSignals(False)
 
-    def show_selection(self, start: int, end: int) -> None:
-        """Mirror a 1-D Annotation selection onto the plot as an x/y box."""
+    def _source_to_plot_range(self, start: int, end: int) -> tuple[int, int]:
+        """Map Overview/MSA (source) coords onto plot coords (ungapped when MSA)."""
         lo, hi = (int(start), int(end)) if start <= end else (int(end), int(start))
+        keep = self._coord_keep
+        if not keep:
+            return lo, hi
+        from repeatviewer.backends.msa_coordinates import gapped_to_ungapped_1based
+
+        u1 = gapped_to_ungapped_1based(lo, keep) or 1
+        u2 = gapped_to_ungapped_1based(hi, keep) or u1
+        if u2 < u1:
+            u1, u2 = u2, u1
+        return int(u1), int(u2)
+
+    def _plot_to_source_range(self, start: int, end: int) -> tuple[int, int]:
+        """Map plot coords back to Overview/MSA (gapped) coordinates."""
+        lo, hi = (int(start), int(end)) if start <= end else (int(end), int(start))
+        keep = self._coord_keep
+        if not keep:
+            return lo, hi
+        from repeatviewer.backends.msa_coordinates import ungapped_to_gapped_1based
+
+        g1 = ungapped_to_gapped_1based(lo, keep)
+        g2 = ungapped_to_gapped_1based(hi, keep)
+        if g2 < g1:
+            g1, g2 = g2, g1
+        return int(g1), int(g2)
+
+    def show_selection(self, start: int, end: int) -> None:
+        """Mirror a 1-D Annotation/Overview selection onto the plot as an x/y box.
+
+        ``start``/``end`` are source coordinates (gapped MSA columns when ungapping).
+        """
+        lo, hi = self._source_to_plot_range(start, end)
         self._canvas.set_range(lo, hi)
         # Same range on both axes — show x and y explicitly (not "Selected N bp").
         self._show_selection_status(lo, hi, lo, hi)
@@ -2421,6 +2558,7 @@ class DotplotPanel(QWidget):
             start, end = (y1, y2) if y1 <= y2 else (y2, y1)
         else:
             start, end = (x1, x2) if x1 <= x2 else (x2, x1)
+        start, end = self._plot_to_source_range(int(start), int(end))
         self.viewInAnnotationRequested.emit(int(start), int(end))
 
     def _export_dotplot(self) -> None:
@@ -2488,12 +2626,14 @@ class DotplotPanel(QWidget):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def sequence_id(self) -> str:
-        return self._sequence_id
+        return self._active_sequence_id or self._sequence_id
 
     def _on_rect_selected(self, x1: int, x2: int, y1: int, y2: int) -> None:
         self._show_selection_status(x1, x2, y1, y2)
         if self._mode != "alignment":
-            self.rangeSelected.emit(x1, x2, y1, y2)
+            sx1, sx2 = self._plot_to_source_range(x1, x2)
+            sy1, sy2 = self._plot_to_source_range(y1, y2)
+            self.rangeSelected.emit(sx1, sx2, sy1, sy2)
 
     def _on_position(self, x: int, y: int) -> None:
         # Live coords are on the axis rulers; skip status-bar spam (was a lag source).

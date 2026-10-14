@@ -261,6 +261,27 @@ class TsdSearchOptions:
 
 DEFAULT_ALIGN_THREADS = 5
 ALIGN_MODE_COMBINED = "combined"
+ALIGN_MODE_ADD_TO_MSA = "add_to_msa"
+# Per-aligner Mode radios in the Align window (persisted).
+ALIGN_RUN_MODE_SEPARATE = "separate"
+ALIGN_RUN_MODE_COMBINED = "combined"
+ALIGN_RUN_MODE_ADD_TO_MSA = "add_to_msa"
+ALIGN_RUN_MODES = (
+    ALIGN_RUN_MODE_SEPARATE,
+    ALIGN_RUN_MODE_COMBINED,
+    ALIGN_RUN_MODE_ADD_TO_MSA,
+)
+# MAFFT --add family (Advanced Settings; used only in add-to-MSA mode).
+MAFFT_ADD_METHOD_ADD = "add"
+MAFFT_ADD_METHOD_ADDFRAGMENTS = "addfragments"
+MAFFT_ADD_METHOD_ADDFULL = "addfull"
+MAFFT_ADD_METHOD_ADDLONG = "addlong"
+MAFFT_ADD_METHODS = (
+    MAFFT_ADD_METHOD_ADD,
+    MAFFT_ADD_METHOD_ADDFRAGMENTS,
+    MAFFT_ADD_METHOD_ADDFULL,
+    MAFFT_ADD_METHOD_ADDLONG,
+)
 MAFFT_STRATEGY_AUTO = "auto"
 MAFFT_STRATEGY_FFT_NS_1 = "fft_ns_1"
 MAFFT_STRATEGY_FFT_NS_2 = "fft_ns_2"
@@ -334,9 +355,15 @@ class AlignOptions:
     muscle_input_paths: list[str] = field(default_factory=list)
     mafft_input_source: str = ALIGN_INPUT_SELECTED
     mafft_input_paths: list[str] = field(default_factory=list)
-    # Per-aligner "combine all selected files into one MSA" choice.
+    # Per-aligner Mode radio: separate | combined | add_to_msa.
+    mafft_run_mode: str = ALIGN_RUN_MODE_SEPARATE
+    muscle_run_mode: str = ALIGN_RUN_MODE_SEPARATE
+    # Legacy bools kept in sync with *_run_mode for older callers/tests.
     mafft_combined: bool = False
     muscle_combined: bool = False
+    # MAFFT add-to-MSA Advanced Settings (ignored unless mafft_run_mode is add).
+    mafft_add_method: str = MAFFT_ADD_METHOD_ADD
+    mafft_add_keeplength: bool = False
     # Which Align window tab was open last (mafft / muscle / fastga / options).
     last_dialog_tab: str = ALIGNER_MAFFT
     # Which aligner a right-click on the Align toolbar button runs.
@@ -1530,6 +1557,22 @@ def load_align_options() -> AlignOptions:
     def _flag(key: str) -> bool:
         return str(v.get(key, "false")).lower() in {"1", "true", "yes"}
 
+    def _run_mode(key: str, combined_key: str) -> str:
+        raw = str(v.get(key, "") or "").strip().lower()
+        if raw in ALIGN_RUN_MODES:
+            return raw
+        return (
+            ALIGN_RUN_MODE_COMBINED
+            if _flag(combined_key)
+            else ALIGN_RUN_MODE_SEPARATE
+        )
+
+    mafft_run_mode = _run_mode("mafft_run_mode", "mafft_combined")
+    muscle_run_mode = _run_mode("muscle_run_mode", "muscle_combined")
+    mafft_add_method = str(v.get("mafft_add_method", MAFFT_ADD_METHOD_ADD) or "")
+    if mafft_add_method not in MAFFT_ADD_METHODS:
+        mafft_add_method = MAFFT_ADD_METHOD_ADD
+
     return AlignOptions(
         combined_aligner=combined_aligner,
         num_threads=max(1, int(v.get("num_threads", _default_tool_threads()))),
@@ -1551,8 +1594,12 @@ def load_align_options() -> AlignOptions:
         muscle_input_paths=muscle_input_paths,
         mafft_input_source=mafft_input_source,
         mafft_input_paths=mafft_input_paths,
-        mafft_combined=_flag("mafft_combined"),
-        muscle_combined=_flag("muscle_combined"),
+        mafft_run_mode=mafft_run_mode,
+        muscle_run_mode=muscle_run_mode,
+        mafft_combined=mafft_run_mode == ALIGN_RUN_MODE_COMBINED,
+        muscle_combined=muscle_run_mode == ALIGN_RUN_MODE_COMBINED,
+        mafft_add_method=mafft_add_method,
+        mafft_add_keeplength=_flag("mafft_add_keeplength"),
         last_dialog_tab=(
             str(v.get("last_dialog_tab", ALIGNER_MAFFT))
             if str(v.get("last_dialog_tab", ALIGNER_MAFFT)) in ALIGN_DIALOG_TABS
@@ -1591,8 +1638,25 @@ def save_align_options(opts: AlignOptions) -> None:
             "muscle_input_paths": list(opts.muscle_input_paths or []),
             "mafft_input_source": opts.mafft_input_source,
             "mafft_input_paths": list(opts.mafft_input_paths or []),
-            "mafft_combined": opts.mafft_combined,
-            "muscle_combined": opts.muscle_combined,
+            "mafft_run_mode": (
+                opts.mafft_run_mode
+                if opts.mafft_run_mode in ALIGN_RUN_MODES
+                else ALIGN_RUN_MODE_SEPARATE
+            ),
+            "muscle_run_mode": (
+                opts.muscle_run_mode
+                if opts.muscle_run_mode in ALIGN_RUN_MODES
+                else ALIGN_RUN_MODE_SEPARATE
+            ),
+            # Legacy keys: true only for combine mode (not add-to-MSA).
+            "mafft_combined": opts.mafft_run_mode == ALIGN_RUN_MODE_COMBINED,
+            "muscle_combined": opts.muscle_run_mode == ALIGN_RUN_MODE_COMBINED,
+            "mafft_add_method": (
+                opts.mafft_add_method
+                if opts.mafft_add_method in MAFFT_ADD_METHODS
+                else MAFFT_ADD_METHOD_ADD
+            ),
+            "mafft_add_keeplength": bool(opts.mafft_add_keeplength),
             "last_dialog_tab": (
                 opts.last_dialog_tab
                 if opts.last_dialog_tab in ALIGN_DIALOG_TABS

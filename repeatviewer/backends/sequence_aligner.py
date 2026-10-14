@@ -16,6 +16,11 @@ from Bio import SeqIO
 from repeatviewer.job_options import (
     ALIGNER_MAFFT,
     ALIGNER_MUSCLE,
+    MAFFT_ADD_METHOD_ADD,
+    MAFFT_ADD_METHOD_ADDFRAGMENTS,
+    MAFFT_ADD_METHOD_ADDFULL,
+    MAFFT_ADD_METHOD_ADDLONG,
+    MAFFT_ADD_METHODS,
     MAFFT_SEQUENCE_NUCLEOTIDE,
     MAFFT_SEQUENCE_PROTEIN,
     MAFFT_STRATEGY_AUTO,
@@ -477,6 +482,262 @@ def _mafft_arguments(
             raise ValueError("Reverse-complement adjustment is only valid for DNA/RNA.")
         args.append("--adjustdirectionaccurately")
     return args
+
+
+def add_to_msa_output_stem(
+    msa_fasta: Path | str,
+    *,
+    engine: str = ALIGNER_MAFFT,
+) -> str:
+    """Basename stem for add-to-MSA outputs: ``{msa.name}_add_mafft`` / ``_add_muscle``."""
+    from repeatviewer.tool_output_paths import kept_input_name
+
+    if engine == ALIGNER_MUSCLE:
+        tool = "add_muscle"
+    elif engine == ALIGNER_MAFFT:
+        tool = "add_mafft"
+    else:
+        raise ValueError(f"Unknown alignment engine: {engine}")
+    return f"{kept_input_name(msa_fasta)}_{tool}"
+
+
+def run_alignment_add_to_msa(
+    sequences_fasta: Path,
+    msa_fasta: Path,
+    *,
+    num_threads: int = 5,
+    use_system_mafft: bool = False,
+    use_system_muscle: bool = False,
+    engine: str = ALIGNER_MAFFT,
+    strategy: str = MAFFT_STRATEGY_FFT_NS_1,
+    sequence_type: str = "auto",
+    retree: int = 1,
+    max_iterate: int = 0,
+    gap_open_penalty: float = 1.53,
+    offset: float = 0.0,
+    reorder: bool = False,
+    adjust_direction: bool = False,
+    muscle_mode: str = "align",
+    muscle_num_threads: int = 5,
+    muscle_perm: str = "none",
+    muscle_perturb: int = 0,
+    mafft_add_method: str = MAFFT_ADD_METHOD_ADD,
+    mafft_add_keeplength: bool = False,
+    cancel=None,
+) -> Path:
+    """Add unaligned sequences into an existing MSA.
+
+    MAFFT uses ``--add`` / ``--addfragments`` / ``--addfull`` / ``--addlong``
+    (optional ``--keeplength``). MUSCLE 5 has no profile-add; it degaps the MSA,
+    concatenates the new sequences, and re-aligns the combined set.
+    """
+    sequences_fasta = sequences_fasta.expanduser().resolve()
+    msa_fasta = msa_fasta.expanduser().resolve()
+    if sequences_fasta.resolve() == msa_fasta.resolve():
+        raise ValueError("Sequences to add and the existing MSA must be different files.")
+    if _fasta_sequence_count(sequences_fasta) < 1:
+        raise ValueError(f"{sequences_fasta.name} contains no sequences to add.")
+    if _fasta_sequence_count(msa_fasta) < 1:
+        raise ValueError(f"{msa_fasta.name} contains no sequences.")
+
+    output_file = _next_available_fasta(
+        msa_fasta.parent, add_to_msa_output_stem(msa_fasta, engine=engine)
+    )
+    if engine == ALIGNER_MUSCLE:
+        return _run_muscle_add_to_msa(
+            sequences_fasta,
+            msa_fasta,
+            output_file,
+            use_system_muscle=use_system_muscle,
+            mode=muscle_mode,
+            num_threads=muscle_num_threads,
+            perm=muscle_perm,
+            perturb=muscle_perturb,
+            cancel=cancel,
+        )
+    if engine != ALIGNER_MAFFT:
+        raise ValueError(f"Unknown alignment engine: {engine}")
+    resolved = mafft_command(use_system_mafft=use_system_mafft)
+    if resolved is None:
+        source = "system PATH" if use_system_mafft else "RepeatViewer bundle"
+        raise RuntimeError(
+            f"MAFFT was not found in the {source}. Disable 'Use system "
+            "MAFFT' in Preferences to use RepeatViewer's bundled copy, or install "
+            "MAFFT on PATH."
+        )
+    _run_mafft_add_to_msa(
+        sequences_fasta,
+        msa_fasta,
+        output_file,
+        command=resolved[0],
+        env=resolved[1],
+        num_threads=num_threads,
+        strategy=strategy,
+        sequence_type=sequence_type,
+        retree=retree,
+        max_iterate=max_iterate,
+        gap_open_penalty=gap_open_penalty,
+        offset=offset,
+        reorder=reorder,
+        adjust_direction=adjust_direction,
+        add_method=mafft_add_method,
+        keeplength=mafft_add_keeplength,
+        cancel=cancel,
+    )
+    return output_file
+
+
+def _run_mafft_add_to_msa(
+    sequences_fasta: Path,
+    msa_fasta: Path,
+    output_file: Path,
+    *,
+    command: list[str],
+    env: dict[str, str],
+    num_threads: int,
+    strategy: str,
+    sequence_type: str,
+    retree: int,
+    max_iterate: int,
+    gap_open_penalty: float,
+    offset: float,
+    reorder: bool,
+    adjust_direction: bool,
+    add_method: str,
+    keeplength: bool,
+    cancel=None,
+) -> None:
+    method = str(add_method or MAFFT_ADD_METHOD_ADD).lower()
+    if method not in MAFFT_ADD_METHODS:
+        method = MAFFT_ADD_METHOD_ADD
+    arguments = _mafft_arguments(
+        num_threads=num_threads,
+        strategy=strategy,
+        sequence_type=sequence_type,
+        retree=retree,
+        max_iterate=max_iterate,
+        gap_open_penalty=gap_open_penalty,
+        offset=offset,
+        reorder=reorder,
+        adjust_direction=adjust_direction,
+    )
+    add_flag = f"--{method}"
+    with tempfile.NamedTemporaryFile(
+        prefix=".repeatviewer_mafft_progress_",
+        suffix=".log",
+        dir=msa_fasta.parent,
+        delete=False,
+    ) as progress_handle:
+        progress_path = Path(progress_handle.name)
+    cmd = [
+        *command,
+        *arguments,
+        add_flag,
+        str(sequences_fasta),
+    ]
+    if keeplength and method in {
+        MAFFT_ADD_METHOD_ADD,
+        MAFFT_ADD_METHOD_ADDFRAGMENTS,
+        MAFFT_ADD_METHOD_ADDFULL,
+        MAFFT_ADD_METHOD_ADDLONG,
+    }:
+        cmd.append("--keeplength")
+    cmd.extend(
+        [
+            "--progress",
+            str(progress_path),
+            str(msa_fasta),
+        ]
+    )
+    try:
+        try:
+            result = run_logged_process(
+                cmd,
+                tool="MAFFT",
+                inputs=[sequences_fasta, msa_fasta],
+                cwd=msa_fasta.parent,
+                check=True,
+                env=env,
+                stdout_is_result=True,
+                output_path=output_file,
+                progress_file=progress_path,
+                cancel=cancel,
+            )
+        finally:
+            progress_path.unlink(missing_ok=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(_format_subprocess_error("MAFFT", exc)) from exc
+    if not result.stdout.strip():
+        raise RuntimeError("MAFFT completed without producing an alignment.")
+    output_file.write_text(result.stdout, encoding="utf-8")
+    logger.info("MAFFT add-to-MSA finished: %s", output_file.name)
+
+
+def _run_muscle_add_to_msa(
+    sequences_fasta: Path,
+    msa_fasta: Path,
+    output_file: Path,
+    *,
+    use_system_muscle: bool,
+    mode: str,
+    num_threads: int,
+    perm: str,
+    perturb: int,
+    cancel=None,
+) -> Path:
+    """MUSCLE 5 has no profile-add: degap MSA + new sequences, then re-align."""
+    resolved = muscle_command(use_system_muscle=use_system_muscle)
+    if resolved is None:
+        source = "system PATH" if use_system_muscle else "RepeatViewer bundle"
+        raise RuntimeError(
+            f"MUSCLE was not found in the {source}. Disable 'Use system "
+            "MUSCLE' in Preferences to use RepeatViewer's bundled copy, or install "
+            "MUSCLE on PATH."
+        )
+    records = []
+    used_ids: set[str] = set()
+    for path in (msa_fasta, sequences_fasta):
+        for record in SeqIO.parse(str(path), "fasta"):
+            # Degap so MUSCLE re-aligns from sequences (MSA columns are not kept).
+            record.seq = record.seq.replace("-", "").replace(".", "")
+            if not str(record.seq):
+                continue
+            rid = record.id
+            if rid in used_ids:
+                base = rid
+                n = 2
+                while f"{base}_{n}" in used_ids:
+                    n += 1
+                rid = f"{base}_{n}"
+                record.id = rid
+                record.description = ""
+            used_ids.add(rid)
+            records.append(record)
+    if len(records) < 2:
+        raise ValueError(
+            "Add-to-MSA with MUSCLE needs at least two sequences after merging "
+            "the MSA and the sequences to add."
+        )
+    combined = msa_fasta.parent / f".repeatviewer_{output_file.stem}_input.fa"
+    SeqIO.write(records, str(combined), "fasta")
+    try:
+        _run_muscle(
+            combined,
+            output_file,
+            command=resolved[0],
+            env=resolved[1],
+            mode=mode,
+            num_threads=num_threads,
+            perm=perm,
+            perturb=perturb,
+            cancel=cancel,
+        )
+    finally:
+        try:
+            combined.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return output_file
 
 
 def run_alignment_combined(

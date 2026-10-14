@@ -61,6 +61,7 @@ _FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
 _MULTI_FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
     ("Text", DefaultFastaPreviewTab.TEXT),
     ("Overview", DefaultFastaPreviewTab.ANNOTATION),
+    ("Dotplot (Self)", DefaultFastaPreviewTab.DOTPLOT),
 )
 
 
@@ -99,8 +100,6 @@ def _add_default_fasta_tab_menu(parent_menu: QMenu) -> QAction:
 
     def _sync_checks() -> None:
         current = load_default_fasta_preview_tab().value
-        if state["multi"] and current == DefaultFastaPreviewTab.DOTPLOT.value:
-            current = DefaultFastaPreviewTab.ANNOTATION.value
         matched = False
         for action in group.actions():
             checked = action.data() == current
@@ -679,7 +678,7 @@ class PreviewZoomBar(QWidget):
         self._duplicate_sep.setVisible(show_tab or something_above)
 
     def set_multi_fasta_default_tabs(self, enabled: bool) -> None:
-        """Multi-seq: Default preview tab is Text / Overview (no Dotplot)."""
+        """Multi-seq: Default preview tab is Text / Overview / Dotplot (Self)."""
         setter = getattr(self._default_tab_action, "set_multi_fasta_choices", None)
         if callable(setter):
             setter(bool(enabled))
@@ -1066,7 +1065,7 @@ class AnnotationZoomBar(QWidget):
         self.update()
 
     def set_multi_fasta_default_tabs(self, enabled: bool) -> None:
-        """Multi-seq: Default preview tab is Text / Overview (no Dotplot)."""
+        """Multi-seq: Default preview tab is Text / Overview / Dotplot (Self)."""
         setter = getattr(self._default_tab_action, "set_multi_fasta_choices", None)
         if callable(setter):
             setter(bool(enabled))

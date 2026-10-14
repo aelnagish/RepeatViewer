@@ -382,6 +382,69 @@ def test_align_dialog_reopens_last_tab(qapp, tmp_path):
     assert dlg2.current_dialog_tab() == ALIGNER_MAFFT
 
 
+def test_mafft_add_to_msa_mode_shows_two_paths_and_prefills_msa(qapp, tmp_path):
+    from repeatviewer.job_options import (
+        ALIGN_RUN_MODE_ADD_TO_MSA,
+        MAFFT_ADD_METHOD_ADDFRAGMENTS,
+        AlignOptions,
+    )
+    from repeatviewer.views.tool_dialogs import TOOL_PARAMS_DIALOG_WIDTH_WIDE
+
+    msa = tmp_path / "msa.fa"
+    msa.write_text(">a\nAC--GT\n>b\nACGTGT\n")
+    seqs = tmp_path / "extra.fa"
+    seqs.write_text(">c\nACGT\n")
+    dlg, _files = _align_dialog(
+        qapp,
+        tmp_path,
+        initial=AlignOptions(
+            mafft_run_mode=ALIGN_RUN_MODE_ADD_TO_MSA,
+            mafft_add_method=MAFFT_ADD_METHOD_ADDFRAGMENTS,
+            mafft_add_keeplength=True,
+        ),
+        default_msa=msa,
+    )
+    dlg.show()
+    qapp.processEvents()
+    assert dlg.mafft_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA
+    assert dlg._mafft_add_msa.path() == msa.resolve()
+    assert dlg._mafft_add_sequences.isVisible()
+    assert dlg._mafft_define_inputs.isHidden()
+    assert dlg._align_needs_wide_inputs() is True
+    dlg._resize_for_mafft_advanced(False)
+    qapp.processEvents()
+    assert dlg.width() == TOOL_PARAMS_DIALOG_WIDTH_WIDE
+
+    assert dlg.apply_path_from_panel(seqs) is True
+    got_seq, got_msa = dlg.mafft_add_paths()
+    assert got_seq == seqs.resolve()
+    assert got_msa == msa.resolve()
+
+    opts = dlg.options()
+    assert opts.mafft_run_mode == ALIGN_RUN_MODE_ADD_TO_MSA
+    assert opts.mafft_combined is False
+    assert opts.mafft_add_method == MAFFT_ADD_METHOD_ADDFRAGMENTS
+    assert opts.mafft_add_keeplength is True
+
+
+def test_muscle_add_to_msa_mode_mirrors_mafft_inputs(qapp, tmp_path):
+    from repeatviewer.job_options import ALIGN_RUN_MODE_ADD_TO_MSA, AlignOptions
+
+    msa = tmp_path / "aln.fa"
+    msa.write_text(">a\nAAAA\n>b\nAA-A\n")
+    dlg, _files = _align_dialog(
+        qapp,
+        tmp_path,
+        initial=AlignOptions(muscle_run_mode=ALIGN_RUN_MODE_ADD_TO_MSA),
+        initial_tab=ALIGNER_MUSCLE,
+        default_msa=msa,
+    )
+    assert dlg.muscle_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA
+    assert dlg._muscle_add_msa.path() == msa.resolve()
+    assert dlg._muscle_input_selected.isHidden()
+    assert dlg.options().muscle_run_mode == ALIGN_RUN_MODE_ADD_TO_MSA
+
+
 def test_fastga_reference_path_matches_define_inputs_width(qapp, tmp_path):
     """Reference genome path box / Browse must match Define-inputs width."""
     from repeatviewer.job_options import FASTGA_INPUT_DEFINE

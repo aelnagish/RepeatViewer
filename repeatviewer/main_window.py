@@ -311,6 +311,7 @@ from repeatviewer.backends.gui_functions import sanitize_name as flexidot_saniti
 from repeatviewer.backends.sequence_aligner import (
     alignment_backends,
     run_alignment,
+    run_alignment_add_to_msa,
     run_alignment_combined,
 )
 from repeatviewer.backends.bismark_cov import is_bismark_cov_file
@@ -346,7 +347,10 @@ from repeatviewer.job_options import (
     ALIGNERS,
     FASTGA_MODE_PAIRS,
     FASTGA_MODE_REFERENCE,
+    ALIGN_MODE_ADD_TO_MSA,
     ALIGN_MODE_COMBINED,
+    ALIGN_RUN_MODE_ADD_TO_MSA,
+    ALIGN_RUN_MODE_COMBINED,
     BLAST_PROGRAM_BLASTN,
     BLAST_PROGRAM_BLASTP,
     BLAST_PROGRAM_BLASTX,
@@ -632,6 +636,14 @@ def _mafft_option_kwargs(options) -> dict[str, Any]:
     }
 
 
+def _mafft_add_option_kwargs(options) -> dict[str, Any]:
+    return {
+        **_mafft_option_kwargs(options),
+        "mafft_add_method": getattr(options, "mafft_add_method", "add"),
+        "mafft_add_keeplength": bool(getattr(options, "mafft_add_keeplength", False)),
+    }
+
+
 class AlignWorker(QObject):
     progress = Signal(int, str)
     log_line = Signal(str)
@@ -689,6 +701,44 @@ class AlignWorker(QObject):
                     output = run_alignment_combined(
                         self._seq_files,
                         **_mafft_option_kwargs(self._options),
+                        use_system_mafft=self._use_system_mafft,
+                        use_system_muscle=self._use_system_muscle,
+                        engine=self._engine,
+                        cancel=cancel,
+                    )
+                    self.progress.emit(2, "Writing alignment…")
+                    self.progress.emit(ALIGN_PHASES, "Alignment finished.")
+                    _log("Alignment finished.")
+                self.finished.emit([str(output)])
+            except JobCancelledError:
+                self.failed.emit(CANCELLED_MESSAGE)
+            except Exception as exc:  # noqa: BLE001
+                self.failed.emit(_format_cli_failure(exc))
+            return
+
+        if self._mode == ALIGN_MODE_ADD_TO_MSA:
+            try:
+                from repeatviewer.backends.job_phases import ALIGN_PHASES
+
+                if len(self._seq_files) < 2:
+                    raise ValueError(
+                        "Add-to-MSA needs a sequences file and an existing MSA."
+                    )
+                sequences_fasta, msa_fasta = self._seq_files[0], self._seq_files[1]
+                with process_log_sink(sink):
+                    if cancel is not None:
+                        cancel.check()
+                    engine = (self._engine or "mafft").upper()
+                    self.progress.emit(0, f"Preparing add-to-MSA ({engine})…")
+                    _log(
+                        f"Adding {sequences_fasta.name} into {msa_fasta.name} "
+                        f"({engine})…"
+                    )
+                    self.progress.emit(1, f"Adding sequences ({engine})…")
+                    output = run_alignment_add_to_msa(
+                        sequences_fasta,
+                        msa_fasta,
+                        **_mafft_add_option_kwargs(self._options),
                         use_system_mafft=self._use_system_mafft,
                         use_system_muscle=self._use_system_muscle,
                         engine=self._engine,
@@ -10604,13 +10654,28 @@ class MainWindow(QMainWindow):
         )
 
     def _mode_for_aligner(self, aligner: str) -> str:
-        """'combined' or 'one_by_one' from the aligner's saved combine flag."""
-        combined = (
-            self._align_options.muscle_combined
+        """Job mode from the aligner's saved Mode radio.
+
+        Add-to-MSA needs explicit sequence + MSA paths from the dialog, so
+        toolbar / right-click fall back to one-by-one.
+        """
+        run_mode = (
+            getattr(self._align_options, "muscle_run_mode", None)
             if aligner == ALIGNER_MUSCLE
-            else self._align_options.mafft_combined
+            else getattr(self._align_options, "mafft_run_mode", None)
         )
-        return ALIGN_MODE_COMBINED if combined else "one_by_one"
+        if not run_mode:
+            combined = (
+                self._align_options.muscle_combined
+                if aligner == ALIGNER_MUSCLE
+                else self._align_options.mafft_combined
+            )
+            run_mode = (
+                ALIGN_RUN_MODE_COMBINED if combined else "separate"
+            )
+        if run_mode == ALIGN_RUN_MODE_COMBINED:
+            return ALIGN_MODE_COMBINED
+        return "one_by_one"
 
     def _open_align_dialog(self, *, initial_tab: str | None = None) -> None:
         """Align parameters: Cancel / Save / Run (toolbar and menu use the same dialog).
@@ -10621,6 +10686,10 @@ class MainWindow(QMainWindow):
         """
         fastga_files = self._fastga_candidate_files()
         setting_genome = self._project_setting_genome()
+        selected_fasta = [
+            p for p in self._selected_files() if p.suffix.lower() in _FASTA_SUFFIXES
+        ]
+        default_msa = selected_fasta[0] if selected_fasta else None
         dialog = AlignParamsDialog(
             initial=self._align_options,
             use_system_mafft=self._project.use_system_mafft,
@@ -10628,6 +10697,7 @@ class MainWindow(QMainWindow):
             fastga_initial=self._fastga_options_for_next_run(),
             fastga_files=fastga_files,
             fastga_default_reference=setting_genome,
+            default_msa=default_msa,
             initial_tab=initial_tab,
             parent=self,
         )
@@ -10665,32 +10735,52 @@ class MainWindow(QMainWindow):
                 if files:
                     self._start_fastga_job(files, run_opts)
                 return
-            if aligner == ALIGNER_MUSCLE:
-                from repeatviewer.job_options import ALIGN_INPUT_DEFINE
-
-                if d.muscle_input_source() == ALIGN_INPUT_DEFINE:
-                    muscle_files = d.muscle_run_files()
-                    if not muscle_files:
+            if aligner in (ALIGNER_MAFFT, ALIGNER_MUSCLE):
+                run_mode = d.run_mode_for(aligner)
+                if run_mode == ALIGN_RUN_MODE_ADD_TO_MSA:
+                    if aligner == ALIGNER_MUSCLE:
+                        sequences, msa = d.muscle_add_paths()
+                    else:
+                        sequences, msa = d.mafft_add_paths()
+                    if sequences is None or msa is None:
                         QMessageBox.information(
                             self,
-                            "No FASTA inputs",
-                            "Add one or more FASTA files or folders under Define inputs.",
+                            "Add to MSA",
+                            "Choose both a Sequences to add file and an Existing MSA.",
+                        )
+                        return
+                    if sequences.resolve() == msa.resolve():
+                        QMessageBox.information(
+                            self,
+                            "Add to MSA",
+                            "Sequences to add and Existing MSA must be different files.",
                         )
                         return
                     self._align_sequences(
-                        muscle_files,
+                        [sequences, msa],
                         engine=aligner,
-                        mode=self._mode_for_aligner(aligner),
+                        mode=ALIGN_MODE_ADD_TO_MSA,
                     )
                     return
-                self._align_sequences(
-                    engine=aligner, mode=self._mode_for_aligner(aligner)
-                )
-                return
-            if aligner == ALIGNER_MAFFT:
                 from repeatviewer.job_options import ALIGN_INPUT_DEFINE
 
-                if d.mafft_input_source() == ALIGN_INPUT_DEFINE:
+                if aligner == ALIGNER_MUSCLE:
+                    if d.muscle_input_source() == ALIGN_INPUT_DEFINE:
+                        muscle_files = d.muscle_run_files()
+                        if not muscle_files:
+                            QMessageBox.information(
+                                self,
+                                "No FASTA inputs",
+                                "Add one or more FASTA files or folders under Define inputs.",
+                            )
+                            return
+                        self._align_sequences(
+                            muscle_files,
+                            engine=aligner,
+                            mode=self._mode_for_aligner(aligner),
+                        )
+                        return
+                elif d.mafft_input_source() == ALIGN_INPUT_DEFINE:
                     mafft_files = d.mafft_run_files()
                     if not mafft_files:
                         QMessageBox.information(
@@ -10755,6 +10845,13 @@ class MainWindow(QMainWindow):
                 "Need at least two sequences in the selected FASTA file(s).",
             )
             return
+        if mode == ALIGN_MODE_ADD_TO_MSA and len(seq_files) < 2:
+            QMessageBox.information(
+                self,
+                "Add to MSA",
+                "Choose both a Sequences to add file and an Existing MSA.",
+            )
+            return
         available = alignment_backends(
             use_system_mafft=self._project.use_system_mafft,
             use_system_muscle=self._project.use_system_muscle,
@@ -10790,11 +10887,13 @@ class MainWindow(QMainWindow):
         title = f"Align ({engine.upper()})"
         if mode == ALIGN_MODE_COMBINED:
             title = f"{title} (combined)"
+        elif mode == ALIGN_MODE_ADD_TO_MSA:
+            title = f"{title} (add to MSA)"
         from repeatviewer.backends.job_phases import ALIGN_PHASES
 
         total_steps = (
             ALIGN_PHASES
-            if mode == ALIGN_MODE_COMBINED
+            if mode in (ALIGN_MODE_COMBINED, ALIGN_MODE_ADD_TO_MSA)
             else max(1, len(seq_files)) * ALIGN_PHASES
         )
         show_log = bool(getattr(opts, "show_process_window", DEFAULT_SHOW_PROCESS_WINDOW))

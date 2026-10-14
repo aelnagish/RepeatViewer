@@ -444,6 +444,13 @@ class SettingsDialog(QDialog):
 
         self._system_viewer = QCheckBox()
         self._system_viewer.setChecked(project.use_system_sequence_viewer)
+        self._system_viewer.setToolTip(
+            "Off (default): open FASTA in the AliView bundled with RepeatViewer "
+            "(needs a working Java JDK).\n\n"
+            "On: open FASTA in a system-installed AliView.app / aliview on PATH. "
+            "Do not use this just to open .fa files with Finder — macOS has no "
+            "default app for FASTA and will show “No application knows how to open”."
+        )
         self._batch_workers = NoWheelSpinBox()
         self._batch_workers.setRange(1, 32)
         self._batch_workers.setValue(project.batch_workers)

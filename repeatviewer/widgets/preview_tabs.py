@@ -801,6 +801,8 @@ class FilePreviewPage(QWidget):
         # Annotation view. select_by_position() only retries for ~2 s while the
         # tab is hidden, so hold it here until Annotation is actually opened.
         self._pending_annotation_selection: tuple[int, int] | None = None
+        # Prefer this Overview record when opening Dotplot (Self) from context menu.
+        self._pending_dotplot_sequence_id: str | None = None
         # Annotation/overview data is loaded lazily on first Annotation tab open
         # so Text preview of large genomes does not wait on a full FASTA parse.
         self._annotation_data_loaded_for: Path | None = None
@@ -1067,10 +1069,6 @@ class FilePreviewPage(QWidget):
 
     def _on_fasta_tab_changed(self, index: int) -> None:
         if not self._single_fasta_mode:
-            return
-        # Multi-FASTA: Dotplot (Self) is hidden — bounce to Annotation.
-        if self._multi_fasta_mode and index == 2:
-            self.set_fasta_tab_index(1)
             return
         self._refresh_sequence_info_bar()
         if index == 0:
@@ -1340,6 +1338,9 @@ class FilePreviewPage(QWidget):
             self._annotation_overview.openInAdditionalPreviewTab.connect(
                 self.openInAdditionalPreviewTab.emit
             )
+            self._annotation_overview.showSelfDotplotRequested.connect(
+                self._on_overview_show_self_dotplot
+            )
             holder_layout = self._fasta_annotation_holder.layout()
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_annotation_holder)
@@ -1483,17 +1484,72 @@ class FilePreviewPage(QWidget):
             self._dotplot_panel.set_path(self.path)
         return self._dotplot_panel
 
+    def _on_overview_show_self_dotplot(self, sequence_id: str) -> None:
+        """Overview context menu → Dotplot (Self) for the chosen sequence."""
+        sid = str(sequence_id or "").strip()
+        if not sid:
+            return
+        self._pending_dotplot_sequence_id = sid
+        self._activate_fasta_tab(DefaultFastaPreviewTab.DOTPLOT)
+
+    def _overview_region_for_dotplot(self, panel) -> tuple[int, int] | None:
+        """Overview region to mirror onto Dotplot, or ``None`` to skip highlight.
+
+        Requires exactly one selected sequence (whole-row or regional) whose id
+        matches the Dotplot's active sequence. Multi-sequence / full-column
+        selections without a single matching row do not highlight the plot.
+        """
+        overview = self._annotation_overview
+        if overview is None or panel is None:
+            return None
+        try:
+            region = overview._bars.region_selection()
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not read Overview selection")
+            return None
+        if region is None:
+            return None
+        dot_id = str(panel.sequence_id() or "").strip()
+        if not dot_id:
+            return None
+        ids = overview.record_ids()
+        regional = overview._bars.regional_rows()
+        if regional is not None:
+            if len(regional) != 1:
+                return None
+            row = next(iter(regional))
+            if not (0 <= row < len(ids)) or ids[row] != dot_id:
+                return None
+            return int(region[0]), int(region[1])
+        # Full-height column band: only when exactly one name-selected sequence
+        # matches the Dotplot sequence.
+        rows = overview._bars.selected_rows()
+        if len(rows) != 1:
+            return None
+        row = int(rows[0])
+        if not (0 <= row < len(ids)) or ids[row] != dot_id:
+            return None
+        return int(region[0]), int(region[1])
+
     def _open_dotplot_tab(self) -> None:
         self._capture_text_selection_into_pending()
         panel = self._ensure_dotplot_panel()
         self._sync_dotplot_active_sequence(panel)
         panel.ensure_loaded()
-        # Carry the current Annotation selection across to the plot. A pending
-        # selection that originated on the plot takes priority, so switching
-        # back and forth does not overwrite what you just dragged.
+        # Carry the current Annotation/Overview selection across to the plot. A
+        # pending selection that originated on the plot takes priority, so
+        # switching back and forth does not overwrite what you just dragged.
         if self._pending_annotation_selection is not None:
             start, end = self._pending_annotation_selection
             panel.show_selection(int(start), int(end))
+            return
+        if self._multi_fasta_mode and self._annotation_overview is not None:
+            mapped = self._overview_region_for_dotplot(panel)
+            if mapped is not None:
+                panel.show_selection(int(mapped[0]), int(mapped[1]))
+            else:
+                # Avoid leaving a highlight from another sequence or multi-select.
+                panel.clear_selection()
             return
         if self._annotation_panel is not None:
             try:
@@ -1505,10 +1561,43 @@ class FilePreviewPage(QWidget):
                 panel.show_selection(int(current[0]), int(current[1]))
 
     def _sync_dotplot_active_sequence(self, panel=None) -> None:
-        """Point Dotplot (Self) at the Annotation tab's active FASTA record."""
+        """Point Dotplot (Self) at the active Annotation/Overview sequence."""
         if panel is None:
             panel = self._dotplot_panel
-        if panel is None or self._annotation_panel is None:
+        if panel is None:
+            return
+        if self._multi_fasta_mode:
+            overview = self._annotation_overview
+            if overview is None:
+                return
+            try:
+                ov_path = Path(overview._path).expanduser().resolve()
+                page_path = self.path.expanduser().resolve()
+            except OSError:
+                return
+            if ov_path != page_path:
+                return
+            records = overview.sequences_for_dotplot()
+            if not records:
+                return
+            pending = str(self._pending_dotplot_sequence_id or "").strip()
+            self._pending_dotplot_sequence_id = None
+            # Keep the Dotplot Sequence pick unless Overview explicitly asked
+            # to open a self-dotplot (pending) or the plot has no sequence yet.
+            current = str(panel.sequence_id() or "").strip()
+            preferred = (
+                pending
+                or current
+                or overview.selected_record_id()
+                or records[0][0]
+            )
+            panel.set_record_choices(
+                records,
+                ungap=bool(self._msa_aligned_mode),
+                preferred_id=preferred,
+            )
+            return
+        if self._annotation_panel is None:
             return
         try:
             ann_path = self._annotation_panel.fasta_path().expanduser().resolve()
@@ -1687,12 +1776,23 @@ class FilePreviewPage(QWidget):
         if pending is None:
             return
         try:
-            panel = self._ensure_annotation_panel()
-            # Load only if this panel has no sequence yet: load_path() re-parses
-            # the whole FASTA, so calling it per selection would be very slow.
-            if getattr(panel, "_loaded_data", None) is None:
-                panel.load_path(self.path)
-            panel.select_by_position(int(pending[0]), int(pending[1]))
+            if self._multi_fasta_mode:
+                overview = self._ensure_annotation_overview()
+                if not overview.record_ids():
+                    overview.load_path(self.path, msa_mode=self._msa_aligned_mode)
+                seq_id = None
+                if self._dotplot_panel is not None:
+                    seq_id = self._dotplot_panel.sequence_id() or None
+                overview.select_by_position(
+                    int(pending[0]), int(pending[1]), sequence_id=seq_id
+                )
+            else:
+                panel = self._ensure_annotation_panel()
+                # Load only if this panel has no sequence yet: load_path() re-parses
+                # the whole FASTA, so calling it per selection would be very slow.
+                if getattr(panel, "_loaded_data", None) is None:
+                    panel.load_path(self.path)
+                panel.select_by_position(int(pending[0]), int(pending[1]))
         except Exception:  # noqa: BLE001
             # Do not swallow silently: a missing method here previously made
             # the whole dotplot/annotation sync a no-op with no visible error.
@@ -1715,14 +1815,10 @@ class FilePreviewPage(QWidget):
 
     def _activate_fasta_tab(self, tab: DefaultFastaPreviewTab) -> None:
         if tab == DefaultFastaPreviewTab.DOTPLOT:
-            if self._multi_fasta_mode:
-                # Multi-FASTA uses overview Annotation only (no Dotplot Self tab).
-                tab = DefaultFastaPreviewTab.ANNOTATION
-            else:
-                self.set_fasta_tab_index(2)
-                self._refresh_sequence_info_bar()
-                QTimer.singleShot(0, self._open_dotplot_tab)
-                return
+            self.set_fasta_tab_index(2)
+            self._refresh_sequence_info_bar()
+            QTimer.singleShot(0, self._open_dotplot_tab)
+            return
         if tab == DefaultFastaPreviewTab.ANNOTATION:
             if self._multi_fasta_mode:
                 self._show_annotation_content(multi=True)
@@ -1748,6 +1844,8 @@ class FilePreviewPage(QWidget):
                 progress_detail="Loading annotations…"
             )
             self._refresh_sequence_info_bar()
+            if self._pending_annotation_selection is not None:
+                QTimer.singleShot(0, self._apply_pending_annotation_selection)
             return
         panel = self._ensure_annotation_panel()
         self._show_annotation_content(multi=False)
@@ -2069,8 +2167,6 @@ class FilePreviewPage(QWidget):
             default_tab = load_default_fasta_preview_tab()
             if stay_on_annotation:
                 default_tab = DefaultFastaPreviewTab.ANNOTATION
-            if self._multi_fasta_mode and default_tab == DefaultFastaPreviewTab.DOTPLOT:
-                default_tab = DefaultFastaPreviewTab.ANNOTATION
             open_annotation = default_tab == DefaultFastaPreviewTab.ANNOTATION
             # Selections belong to one sequence; never carry them to the next file.
             self._pending_annotation_selection = None
@@ -2120,6 +2216,12 @@ class FilePreviewPage(QWidget):
             if open_annotation:
                 if show_progress:
                     self._update_open_progress(3, "Loading annotations…")
+                self._ensure_annotation_data_loaded()
+            elif (
+                default_tab == DefaultFastaPreviewTab.DOTPLOT
+                and self._multi_fasta_mode
+            ):
+                # Dotplot needs Overview sequences for the Sequence picker.
                 self._ensure_annotation_data_loaded()
             self._activate_fasta_tab(default_tab)
             if show_progress:
@@ -2702,14 +2804,11 @@ class PreviewTabWidget(QTabWidget):
             has_images = widget.has_cyto_images()
             multi = widget.is_multi_fasta_preview()
             if hasattr(self._header_bar, "set_fasta_tab_visible"):
-                self._header_bar.set_fasta_tab_visible(2, not multi)  # Dotplot (Self)
+                self._header_bar.set_fasta_tab_visible(2, True)  # Dotplot (Self)
                 self._header_bar.set_fasta_tab_visible(3, has_images and not multi)
             if hasattr(self._header_bar, "set_fasta_tab_label"):
                 # Same label for single-seq map and multi-seq overview.
                 self._header_bar.set_fasta_tab_label(1, "Overview")
-            if multi and widget.current_fasta_tab_index() == 2:
-                widget.set_fasta_tab_index(1)
-                return
             if not has_images and widget.current_fasta_tab_index() == 3:
                 widget.set_fasta_tab_index(1)  # last image removed: back to Annotation
                 return

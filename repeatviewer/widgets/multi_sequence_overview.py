@@ -4283,6 +4283,8 @@ class MultiSequenceOverviewPanel(QWidget):
     sequenceExtracted = Signal(object)
     # Open cleaned / derived FASTA as an extra Preview tab (not replace).
     openInAdditionalPreviewTab = Signal(object)
+    # Open Dotplot (Self) for this record id (top selected when multi-select).
+    showSelfDotplotRequested = Signal(str)
 
     def __init__(self, fasta_path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -7343,7 +7345,52 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def selected_record_id(self) -> str | None:
         ids = self._selected_record_ids()
-        return ids[0] if ids else None
+        if ids:
+            return ids[0]
+        # Regional box (e.g. Dotplot → Overview): topmost highlighted row.
+        regional = self._bars.regional_rows()
+        if regional:
+            row = min(regional)
+            if 0 <= row < len(self._record_ids):
+                return self._record_ids[row]
+        return None
+
+    def sequences_for_dotplot(self) -> list[tuple[str, str]]:
+        """``(id, sequence)`` rows for Dotplot (Self); MSA sequences stay gapped."""
+        out: list[tuple[str, str]] = []
+        for rid in self._record_ids:
+            try:
+                out.append((rid, self._sequence_text_for_id(rid)))
+            except (OSError, ValueError):
+                continue
+        return out
+
+    def select_by_position(
+        self,
+        start: int,
+        end: int,
+        *,
+        sequence_id: str | None = None,
+    ) -> None:
+        """Highlight a 1-based inclusive range.
+
+        With ``sequence_id``, highlight only that sequence's span (regional box),
+        not a full-height column across every track. Without it, keep a column
+        band (scale / feature Selection).
+        """
+        maximum = max(1, int(self._bars.max_length()))
+        lo, hi = (int(start), int(end)) if start <= end else (int(end), int(start))
+        lo = max(1, min(maximum, lo))
+        hi = max(lo, min(maximum, hi))
+        row = self._row_for_id(sequence_id) if sequence_id else -1
+        if row >= 0:
+            self._bars.set_regional_selection(lo, hi, [row])
+            self._scroll_to_row(row)
+        else:
+            self._bars.set_region_selection(lo, hi)
+        self._sync_header_position_spins()
+        # Inclusive columns → half-open window (same as Select / Find).
+        self._on_region_zoom(float(lo - 1), float(hi))
 
     def features_by_id(self) -> dict[str, list[SequenceFeature]]:
         return {rid: list(feats) for rid, feats in self._features.items()}
@@ -7942,6 +7989,11 @@ class MultiSequenceOverviewPanel(QWidget):
         menu.addSeparator()
         copy_seq = menu.addAction("Copy Sequence")
         extract = menu.addAction("Extract Sequence")
+        copy_ungapped = None
+        extract_ungapped = None
+        if self.is_msa_mode():
+            copy_ungapped = menu.addAction("Copy Sequence without gap")
+            extract_ungapped = menu.addAction("Extract Sequence without gap")
         if region is not None:
             start, end = region
             copy_seq.triggered.connect(
@@ -7950,12 +8002,46 @@ class MultiSequenceOverviewPanel(QWidget):
             extract.triggered.connect(
                 lambda _c=False, a=start, b=end: self._extract_region_sequence(a, b)
             )
+            if copy_ungapped is not None:
+                copy_ungapped.triggered.connect(
+                    lambda _c=False, a=start, b=end: self._copy_region_sequence(
+                        a, b, without_gaps=True
+                    )
+                )
+            if extract_ungapped is not None:
+                extract_ungapped.triggered.connect(
+                    lambda _c=False, a=start, b=end: self._extract_region_sequence(
+                        a, b, without_gaps=True
+                    )
+                )
         elif sequence_sel:
             copy_seq.triggered.connect(self._copy_selected_sequences)
             extract.triggered.connect(self._extract_selected)
+            if copy_ungapped is not None:
+                copy_ungapped.triggered.connect(
+                    lambda _c=False: self._copy_selected_sequences(without_gaps=True)
+                )
+            if extract_ungapped is not None:
+                extract_ungapped.triggered.connect(
+                    lambda _c=False: self._extract_selected(without_gaps=True)
+                )
         else:
             copy_seq.setEnabled(False)
             extract.setEnabled(False)
+            if copy_ungapped is not None:
+                copy_ungapped.setEnabled(False)
+            if extract_ungapped is not None:
+                extract_ungapped.setEnabled(False)
+
+        show_dot = menu.addAction("Show self-dotplot")
+        if selected_rows:
+            show_dot.triggered.connect(self._show_self_dotplot_for_selection)
+            if len(selected_rows) > 1:
+                show_dot.setToolTip(
+                    "Opens Dotplot (Self) for the topmost selected sequence."
+                )
+        else:
+            show_dot.setEnabled(False)
 
         menu.addSeparator()
         delete = menu.addAction("Delete")
@@ -7977,6 +8063,16 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _show_overview_context_menu(self, global_pos: QPoint) -> None:
         self._build_overview_context_menu().exec(global_pos)
+
+    def _show_self_dotplot_for_selection(self) -> None:
+        """Open Dotplot (Self) for the topmost selected sequence."""
+        rows = self._bars.selected_rows()
+        if not rows:
+            return
+        row = int(rows[0])  # selected_rows() is sorted → visually topmost
+        if not (0 <= row < len(self._record_ids)):
+            return
+        self.showSelfDotplotRequested.emit(self._record_ids[row])
 
     def _rename_selected_sequence(self) -> None:
         """Rename one selected sequence in the FASTA and annotation sidecar."""
@@ -8074,15 +8170,25 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         self.statusMessage.emit(f"Renamed “{old_id}” → “{new_id}”")
 
-    def _copy_region_sequence(self, start: int, end: int) -> None:
+    @staticmethod
+    def _strip_alignment_gaps(sequence: str) -> str:
+        """Remove MSA gap characters (``-`` / ``.``) from sequence text."""
+        from repeatviewer.backends.msa_coordinates import ungap_sequence
+
+        return ungap_sequence(sequence)[0]
+
+    def _copy_region_sequence(
+        self, start: int, end: int, *, without_gaps: bool = False
+    ) -> None:
         """Copy the selected region from target sequence(s) to the clipboard."""
+        title = "Copy Sequence without gap" if without_gaps else "Copy Sequence"
         targets = self._target_record_ids_for_manual_add()
         if not targets:
             QMessageBox.information(
                 self,
-                "Copy Sequence",
+                title,
                 "Select one or more sequences (click names, or drag a box "
-                "on the tracks), then Copy Sequence.",
+                f"on the tracks), then {title}.",
             )
             return
         lo, hi = (start, end) if start <= end else (end, start)
@@ -8092,6 +8198,8 @@ class MultiSequenceOverviewPanel(QWidget):
             for rid in targets:
                 seq = self._sequence_text_for_id(rid)
                 frag = seq[lo - 1 : hi]
+                if without_gaps:
+                    frag = self._strip_alignment_gaps(frag)
                 if not frag:
                     continue
                 total += len(frag)
@@ -8100,20 +8208,22 @@ class MultiSequenceOverviewPanel(QWidget):
                 else:
                     chunks.append(f">{rid}\n{frag}")
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Copy Sequence", str(exc))
+            QMessageBox.warning(self, title, str(exc))
             return
         if not chunks:
-            QMessageBox.warning(self, "Copy Sequence", "The selection is empty.")
+            QMessageBox.warning(self, title, "The selection is empty.")
             return
         QApplication.clipboard().setText("\n".join(chunks))
         unit = "aa" if self._bars.is_msa_mode() and self._bars._msa_protein else "bp"
+        gap_note = " without gaps" if without_gaps else ""
         self.statusMessage.emit(
-            f"Copied {total:,} {unit} ({lo:,}-{hi:,}) from "
+            f"Copied {total:,} {unit}{gap_note} ({lo:,}-{hi:,}) from "
             f"{len(targets):,} sequence{'s' if len(targets) != 1 else ''}"
         )
 
-    def _copy_selected_sequences(self) -> None:
+    def _copy_selected_sequences(self, *, without_gaps: bool = False) -> None:
         """Copy whole selected sequence(s) to the clipboard as FASTA text."""
+        title = "Copy Sequence without gap" if without_gaps else "Copy Sequence"
         ids = self._selected_record_ids()
         if not ids:
             return
@@ -8121,26 +8231,33 @@ class MultiSequenceOverviewPanel(QWidget):
         try:
             for rid in ids:
                 seq = self._sequence_text_for_id(rid)
+                if without_gaps:
+                    seq = self._strip_alignment_gaps(seq)
                 chunks.append(f">{rid}\n{seq}")
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Copy Sequence", str(exc))
+            QMessageBox.warning(self, title, str(exc))
             return
         QApplication.clipboard().setText("\n".join(chunks))
+        gap_note = " without gaps" if without_gaps else ""
         self.statusMessage.emit(
-            f"Copied {len(ids):,} sequence{'s' if len(ids) != 1 else ''} to the clipboard"
+            f"Copied {len(ids):,} sequence{'s' if len(ids) != 1 else ''}"
+            f"{gap_note} to the clipboard"
         )
 
-    def _extract_region_sequence(self, start: int, end: int) -> None:
+    def _extract_region_sequence(
+        self, start: int, end: int, *, without_gaps: bool = False
+    ) -> None:
         """Extract the selected region from target sequence(s) to a new FASTA."""
         from repeatviewer.widgets.sequence_map_viewer import _ExtractSequenceDialog
 
+        title = "Extract Sequence without gap" if without_gaps else "Extract Sequence"
         targets = self._target_record_ids_for_manual_add()
         if not targets:
             QMessageBox.information(
                 self,
-                "Extract Sequence",
+                title,
                 "Select one or more sequences (click names, or drag a box "
-                "on the tracks), then Extract Sequence.",
+                f"on the tracks), then {title}.",
             )
             return
         lo, hi = (start, end) if start <= end else (end, start)
@@ -8148,7 +8265,7 @@ class MultiSequenceOverviewPanel(QWidget):
         try:
             primary_seq = self._sequence_text_for_id(primary)
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Extract Sequence", str(exc))
+            QMessageBox.warning(self, title, str(exc))
             return
         seq_len = max(1, len(primary_seq))
         dialog = _ExtractSequenceDialog(
@@ -8170,7 +8287,7 @@ class MultiSequenceOverviewPanel(QWidget):
         if out_path.exists():
             answer = QMessageBox.question(
                 self,
-                "Extract Sequence",
+                title,
                 f"{out_path.name} already exists. Overwrite it?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -8186,29 +8303,32 @@ class MultiSequenceOverviewPanel(QWidget):
                 if b < a:
                     a, b = b, a
                 frag = seq[a - 1 : b]
+                if without_gaps:
+                    frag = self._strip_alignment_gaps(frag)
                 if reverse:
                     frag = reverse_complement(frag)
                 strand = "-" if reverse else "+"
                 header = (
                     f">{name}"
                     if len(targets) == 1
-                    else f">{name}_{rid}"
+                    else f"{name}_{rid}"
                 )
                 lines.append(f">{header} {rid}:{a}-{b}({strand})")
                 for offset in range(0, len(frag), 60):
                     lines.append(frag[offset : offset + 60])
             out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Extract Sequence", str(exc))
+            QMessageBox.warning(self, title, str(exc))
             return
         self.sequenceExtracted.emit(out_path)
+        gap_note = " without gaps" if without_gaps else ""
         self.statusMessage.emit(
-            f"Extracted {chosen_start:,}-{chosen_end:,} from "
+            f"Extracted {chosen_start:,}-{chosen_end:,}{gap_note} from "
             f"{len(targets):,} sequence{'s' if len(targets) != 1 else ''} → "
             f"{out_path.name}"
         )
 
-    def _extract_selected(self) -> None:
+    def _extract_selected(self, *, without_gaps: bool = False) -> None:
         from repeatviewer.backends.sequence_compose import (
             SequenceComposeError,
             extract_records,
@@ -8216,11 +8336,12 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         from repeatviewer.widgets.file_conflict import confirm_existing_file_path
 
+        title = "Extract Sequence without gap" if without_gaps else "Extract"
         ids = self._selected_record_ids()
         if not ids:
             QMessageBox.information(
                 self,
-                "Extract",
+                title,
                 "Select one or more sequences, then Extract.",
             )
             return
@@ -8231,7 +8352,7 @@ class MultiSequenceOverviewPanel(QWidget):
         confirmed = confirm_existing_file_path(
             self,
             proposed,
-            title="Extract",
+            title=title,
             informative=(
                 "Overwrite the existing file, or save under a different name?"
             ),
@@ -8239,24 +8360,41 @@ class MultiSequenceOverviewPanel(QWidget):
         if confirmed is None:
             return
 
-        try:
-            written = extract_records(
-                self._path,
-                set(ids),
-                self._path.parent,
-                single_file=True,
-                output_path=confirmed,
-            )
-        except SequenceComposeError as exc:
-            QMessageBox.warning(self, "Extract", str(exc))
-            return
+        if without_gaps:
+            try:
+                lines: list[str] = []
+                for rid in ids:
+                    seq = self._strip_alignment_gaps(self._sequence_text_for_id(rid))
+                    lines.append(f">{rid}")
+                    for offset in range(0, len(seq), 60):
+                        lines.append(seq[offset : offset + 60])
+                confirmed.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                written = [confirmed]
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, title, str(exc))
+                return
+        else:
+            try:
+                written = extract_records(
+                    self._path,
+                    set(ids),
+                    self._path.parent,
+                    single_file=True,
+                    output_path=confirmed,
+                )
+            except SequenceComposeError as exc:
+                QMessageBox.warning(self, title, str(exc))
+                return
 
         for path in written:
             self.sequenceExtracted.emit(path)
         names = ", ".join(p.name for p in written[:4])
         if len(written) > 4:
             names += ", …"
-        self.statusMessage.emit(f"Extracted {len(written)} file(s): {names}")
+        gap_note = " without gaps" if without_gaps else ""
+        self.statusMessage.emit(
+            f"Extracted {len(written)} file(s){gap_note}: {names}"
+        )
 
     def _on_feature_resized(
         self, rid: str, store_index: int, feat: object

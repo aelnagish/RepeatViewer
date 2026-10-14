@@ -13,12 +13,16 @@ from repeatviewer.backends.sequence_aligner import (
     bundled_mafft_command,
     bundled_muscle_command,
     run_alignment,
+    run_alignment_add_to_msa,
 )
 from repeatviewer.job_options import (
     ALIGNER_MAFFT,
+    ALIGN_RUN_MODE_ADD_TO_MSA,
     AlignOptions,
+    MAFFT_ADD_METHOD_ADD,
     MAFFT_SEQUENCE_NUCLEOTIDE,
     MAFFT_STRATEGY_CUSTOM,
+    MAFFT_STRATEGY_FFT_NS_1,
     MAFFT_STRATEGY_LINSI,
 )
 
@@ -90,6 +94,44 @@ def test_run_alignment_with_bundled_mafft(tmp_path: Path) -> None:
     )
     assert out.is_file()
     assert out.read_text().count(">") == 2
+
+
+def test_run_alignment_add_to_msa_with_bundled_mafft(tmp_path: Path) -> None:
+    if bundled_mafft_command() is None:
+        pytest.skip("No bundled MAFFT for this platform")
+    msa = tmp_path / "msa.fa"
+    msa.write_text(">a\nACGTACGT\n>b\nACGTTCGT\n")
+    # Seed an MSA first so --add has a real alignment.
+    aligned = run_alignment(
+        msa,
+        num_threads=1,
+        strategy=MAFFT_STRATEGY_FFT_NS_1,
+        sequence_type=MAFFT_SEQUENCE_NUCLEOTIDE,
+    )
+    extra = tmp_path / "extra.fa"
+    extra.write_text(">c\nACGTACGA\n")
+    out = run_alignment_add_to_msa(
+        extra,
+        aligned,
+        num_threads=1,
+        strategy=MAFFT_STRATEGY_FFT_NS_1,
+        sequence_type=MAFFT_SEQUENCE_NUCLEOTIDE,
+        mafft_add_method=MAFFT_ADD_METHOD_ADD,
+    )
+    assert out.is_file()
+    assert out.name.startswith(aligned.stem)
+    assert "_add_mafft" in out.name
+    assert out.read_text().count(">") == 3
+
+
+def test_align_options_add_to_msa_defaults() -> None:
+    options = AlignOptions()
+    assert options.mafft_run_mode == "separate"
+    assert options.muscle_run_mode == "separate"
+    assert options.mafft_add_method == MAFFT_ADD_METHOD_ADD
+    assert options.mafft_add_keeplength is False
+    add = AlignOptions(mafft_run_mode=ALIGN_RUN_MODE_ADD_TO_MSA)
+    assert add.mafft_combined is False
 
 
 def test_run_alignment_with_bundled_muscle(tmp_path: Path) -> None:

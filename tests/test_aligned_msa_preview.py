@@ -407,15 +407,42 @@ def test_msa_overview_context_menu_has_rename_for_sequence_selection(
     assert "Rename sequence" in texts
     assert "Copy Sequence" in texts
     assert "Extract Sequence" in texts
+    assert "Copy Sequence without gap" in texts
+    assert "Extract Sequence without gap" in texts
+    assert "Show self-dotplot" in texts
     rename = next(a for a in menu.actions() if a.text() == "Rename sequence")
     assert rename.isEnabled() is True
+    show_dot = next(a for a in menu.actions() if a.text() == "Show self-dotplot")
+    assert show_dot.isEnabled() is True
 
-    # Region-only selection: no Rename.
+    # Region-only selection: no Rename; self-dotplot disabled (no sequence rows).
     panel._bars.set_selected_rows([])
     panel._bars.set_region_selection(2, 4)
     menu2 = panel._build_overview_context_menu()
     texts2 = [a.text() for a in menu2.actions() if not a.isSeparator()]
     assert "Rename sequence" not in texts2
+    assert "Copy Sequence without gap" in texts2
+    show_dot2 = next(a for a in menu2.actions() if a.text() == "Show self-dotplot")
+    assert show_dot2.isEnabled() is False
+    panel.close()
+
+
+def test_msa_copy_sequence_without_gap_strips_dashes(
+    qapp: QApplication, tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "gaps.fa"
+    path.write_text(">seqA\nAC--GT\n>seqB\nACGTGT\n")
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    panel._bars.set_selected_rows([0])
+    clipped: list[str] = []
+    monkeypatch.setattr(
+        QApplication,
+        "clipboard",
+        lambda: type("Clip", (), {"setText": lambda _s, t: clipped.append(t)})(),
+    )
+    panel._copy_selected_sequences(without_gaps=True)
+    assert clipped == [">seqA\nACGT"]
     panel.close()
 
 
