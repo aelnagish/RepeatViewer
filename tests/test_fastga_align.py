@@ -409,6 +409,8 @@ def test_mafft_add_to_msa_mode_shows_two_paths_and_prefills_msa(qapp, tmp_path):
     assert dlg.mafft_run_mode() == ALIGN_RUN_MODE_ADD_TO_MSA
     assert dlg._mafft_add_msa.path() == msa.resolve()
     assert dlg._mafft_add_sequences.isVisible()
+    assert dlg._mafft_add_sequences._extra_btn is not None
+    assert dlg._mafft_add_sequences._extra_btn.text() == "Paste…"
     assert dlg._mafft_define_inputs.isHidden()
     assert dlg._align_needs_wide_inputs() is True
     dlg._resize_for_mafft_advanced(False)
@@ -425,6 +427,48 @@ def test_mafft_add_to_msa_mode_shows_two_paths_and_prefills_msa(qapp, tmp_path):
     assert opts.mafft_combined is False
     assert opts.mafft_add_method == MAFFT_ADD_METHOD_ADDFRAGMENTS
     assert opts.mafft_add_keeplength is True
+
+
+def test_paste_sequence_to_add_writes_fasta_beside_msa(qapp, tmp_path, monkeypatch):
+    from repeatviewer.job_options import ALIGN_RUN_MODE_ADD_TO_MSA, AlignOptions
+    from repeatviewer.views.tool_dialogs import NewSequenceDialog
+
+    msa = tmp_path / "msa.fa"
+    msa.write_text(">a\nAC--GT\n>b\nACGTGT\n")
+    dlg, _files = _align_dialog(
+        qapp,
+        tmp_path,
+        initial=AlignOptions(mafft_run_mode=ALIGN_RUN_MODE_ADD_TO_MSA),
+        default_msa=msa,
+    )
+
+    class _FakePaste(NewSequenceDialog):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+
+        def exec(self):  # noqa: A003
+            return NewSequenceDialog.DialogCode.Accepted
+
+        def values(self):
+            return {
+                "name": "pasted_seq",
+                "sequence": "ACGTACGT",
+                "description": "",
+                "organism": "",
+                "molecule": "DNA",
+            }
+
+    monkeypatch.setattr(
+        "repeatviewer.views.tool_dialogs.NewSequenceDialog",
+        _FakePaste,
+    )
+    dlg._paste_sequence_to_add(dlg._mafft_add_sequences)
+    got_seq, got_msa = dlg.mafft_add_paths()
+    assert got_msa == msa.resolve()
+    assert got_seq is not None
+    assert got_seq.parent == msa.parent
+    assert got_seq.read_text().startswith(">pasted_seq\n")
+    assert "ACGTACGT" in got_seq.read_text().replace("\n", "")
 
 
 def test_muscle_add_to_msa_mode_mirrors_mafft_inputs(qapp, tmp_path):

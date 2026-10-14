@@ -34,6 +34,7 @@ class PathBrowseRow(QWidget):
     path_changed = Signal()
     activated = Signal(object)
     text_changed = Signal(str)
+    extra_clicked = Signal()
 
     def __init__(
         self,
@@ -51,6 +52,8 @@ class PathBrowseRow(QWidget):
         browse_handler: Callable[[], None] | None = None,
         browse_below: bool = False,
         elide_middle: bool = False,
+        extra_button_label: str = "",
+        extra_button_tooltip: str = "",
     ) -> None:
         super().__init__(parent)
         if mode not in ("file", "directory", "file_or_directory"):
@@ -92,6 +95,18 @@ class PathBrowseRow(QWidget):
         if initial is not None and not self._path.text().strip():
             self.set_path(initial)
 
+        self._extra_btn: QPushButton | None = None
+        label = str(extra_button_label or "").strip()
+        if label:
+            self._extra_btn = QPushButton(label, self)
+            self._extra_btn.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+            if extra_button_tooltip:
+                self._extra_btn.setToolTip(extra_button_tooltip)
+            self._extra_btn.clicked.connect(self.extra_clicked.emit)
+
         self._browse_btn = QPushButton("Browse", self)
         self._browse_btn.setSizePolicy(
             QSizePolicy.Policy.Fixed,
@@ -106,7 +121,9 @@ class PathBrowseRow(QWidget):
             layout.addWidget(self._path)
             browse_row = QHBoxLayout()
             browse_row.setContentsMargins(0, 0, 0, 0)
-            browse_row.setSpacing(0)
+            browse_row.setSpacing(6)
+            if self._extra_btn is not None:
+                browse_row.addWidget(self._extra_btn, 0)
             browse_row.addWidget(self._browse_btn, 0)
             browse_row.addStretch(1)
             layout.addLayout(browse_row)
@@ -115,6 +132,8 @@ class PathBrowseRow(QWidget):
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(6)
             layout.addWidget(self._path, stretch=1)
+            if self._extra_btn is not None:
+                layout.addWidget(self._extra_btn)
             layout.addWidget(self._browse_btn)
 
         self._default_tooltip = self._path.toolTip()

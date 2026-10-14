@@ -1517,12 +1517,19 @@ class AlignParamsDialog(QDialog):
         )
         self._mafft_add_sequences = PathBrowseRow(
             self,
-            placeholder="Click in Files or Browse…",
+            placeholder="Click in Files, Browse, or Paste…",
             browse_title="Choose sequences to add (FASTA)",
             file_filter=(
                 "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
             ),
             minimum_width=280,
+            extra_button_label="Paste…",
+            extra_button_tooltip=(
+                "Type or paste a sequence; saves a FASTA and fills this path."
+            ),
+        )
+        self._mafft_add_sequences.extra_clicked.connect(
+            lambda: self._paste_sequence_to_add(self._mafft_add_sequences)
         )
         self._mafft_add_msa = PathBrowseRow(
             self,
@@ -1816,12 +1823,19 @@ class AlignParamsDialog(QDialog):
         )
         self._muscle_add_sequences = PathBrowseRow(
             self,
-            placeholder="Click in Files or Browse…",
+            placeholder="Click in Files, Browse, or Paste…",
             browse_title="Choose sequences to add (FASTA)",
             file_filter=(
                 "FASTA (*.fa *.fasta *.fna *.fas *.faa *.fsa);;All files (*)"
             ),
             minimum_width=280,
+            extra_button_label="Paste…",
+            extra_button_tooltip=(
+                "Type or paste a sequence; saves a FASTA and fills this path."
+            ),
+        )
+        self._muscle_add_sequences.extra_clicked.connect(
+            lambda: self._paste_sequence_to_add(self._muscle_add_sequences)
         )
         self._muscle_add_msa = PathBrowseRow(
             self,
@@ -2788,6 +2802,47 @@ class AlignParamsDialog(QDialog):
         msa = self._resolve_existing_align_path(self._mafft_add_msa.path())
         return seq, msa
 
+    def _folder_for_pasted_add_sequence(self) -> Path | None:
+        """Prefer the Existing MSA folder; otherwise the Sequences path folder."""
+        for row in (
+            self._mafft_add_msa,
+            self._muscle_add_msa,
+            self._mafft_add_sequences,
+            self._muscle_add_sequences,
+        ):
+            existing = self._resolve_existing_align_path(row.path())
+            if existing is not None:
+                return existing.parent
+        if self._default_msa is not None:
+            return self._default_msa.parent
+        return None
+
+    def _paste_sequence_to_add(self, sequences_row: PathBrowseRow) -> None:
+        """Open New Sequence, write a FASTA, and fill Sequences to add."""
+        from repeatviewer.backends.sequence_compose import (
+            SequenceComposeError,
+            write_new_sequence,
+        )
+
+        folder = self._folder_for_pasted_add_sequence()
+        if folder is None:
+            QMessageBox.information(
+                self,
+                "Sequences to add",
+                "Choose an Existing MSA first (or set Sequences to add to a "
+                "folder), so the pasted sequence has somewhere to be saved.",
+            )
+            return
+        dialog = NewSequenceDialog(parent=self, title="Sequences to add")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            path = write_new_sequence(folder, **dialog.values())
+        except SequenceComposeError as exc:
+            QMessageBox.warning(self, "Sequences to add", str(exc))
+            return
+        sequences_row.set_path(path)
+
     def _on_mafft_define_paths_changed(self) -> None:
         # Defer so new rows finish layout before height is measured/pinned.
         if not self.isVisible() or self._mafft_advanced_visible():
@@ -3219,11 +3274,12 @@ class AlignParamsDialog(QDialog):
 class NewSequenceDialog(QDialog):
     """Type or paste a sequence and save it as a FASTA."""
 
-    def __init__(self, *, parent=None) -> None:
+    def __init__(self, *, parent=None, title: str = "New Sequence") -> None:
         super().__init__(parent)
         from repeatviewer.backends.sequence_compose import MOLECULE_LABELS
+        from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
 
-        self.setWindowTitle("New Sequence")
+        self.setWindowTitle(title)
         self.resize(720, 520)
 
         self._text = QPlainTextEdit(self)
@@ -4109,7 +4165,8 @@ _MAFFT_ADD_TO_MSA_HELP = (
     "Requires two files: <b>Sequences to add</b> (unaligned FASTA) and "
     "<b>Existing MSA</b> (aligned FASTA). The Files selection prefills the MSA "
     "path when you open this window. Click files in the Files panel to fill the "
-    "paths, or use Browse. Add-method flags live under Advanced Settings."
+    "paths, use Browse, or <b>Paste…</b> to type/paste a sequence (saved next to "
+    "the MSA). Add-method flags live under Advanced Settings."
 )
 _MAFFT_ADD_METHOD_HELP = (
     "Used only in <b>Add sequences to an existing MSA</b> mode.<br><br>"
@@ -4191,8 +4248,9 @@ _MUSCLE_MODE_HELP = (
 _MUSCLE_ADD_TO_MSA_HELP = (
     "Requires two files: <b>Sequences to add</b> and <b>Existing MSA</b>. "
     "The Files selection prefills the MSA path when you open this window. "
-    "MUSCLE 5 re-aligns the merged sequences (it does not preserve MSA columns "
-    "the way MAFFT <code>--add</code> does)."
+    "Use Browse or <b>Paste…</b> to type/paste a sequence (saved next to the "
+    "MSA). MUSCLE 5 re-aligns the merged sequences (it does not preserve MSA "
+    "columns the way MAFFT <code>--add</code> does)."
 )
 _MUSCLE_INPUTS_HELP = (
     "<b>Use selected sequences</b> (default): MUSCLE uses the FASTA files that were "
