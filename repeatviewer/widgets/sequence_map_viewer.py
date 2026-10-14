@@ -6484,9 +6484,12 @@ class AutoAnnotationSettingsPanel(QWidget):
         min_distance = QSpinBox(self)
         min_distance.setRange(0, 1_000_000)
         min_distance.setValue(cfg.min_pair_distance)
-        min_distance_to_end = QSpinBox(self)
-        min_distance_to_end.setRange(0, 1_000_000)
-        min_distance_to_end.setValue(cfg.min_distance_to_end)
+        max_distance_to_end = QSpinBox(self)
+        max_distance_to_end.setRange(0, 1_000_000)
+        max_distance_to_end.setValue(cfg.max_distance_to_end)
+        max_pairs = QSpinBox(self)
+        max_pairs.setRange(1, 3)
+        max_pairs.setValue(cfg.max_pairs)
         similarity = QDoubleSpinBox(self)
         similarity.setRange(0.0, 1.0)
         similarity.setDecimals(2)
@@ -6522,15 +6525,26 @@ class AutoAnnotationSettingsPanel(QWidget):
             ),
         )
         form.addRow(
-            self._form_label("Min distance to end (bp):"),
+            self._form_label("Max distance to end (bp):"),
             self._field_help(
-                self._sized_spin(min_distance_to_end),
-                f"{repeat_kind} min distance to end",
-                f"How close the {repeat_kind} pair must sit to the sequence "
-                f"termini (bp). The left (5′) copy must start within this "
+                self._sized_spin(max_distance_to_end),
+                f"{repeat_kind} max distance to end",
+                f"The maximum distance between the sequence ends to each of "
+                f"the {repeat_kind}. The left (5′) copy must start within this "
                 f"distance of the beginning, and the right (3′) copy must end "
                 f"within this distance of the sequence end. Larger values "
                 f"allow more internal candidates; default 1000.",
+            ),
+        )
+        form.addRow(
+            self._form_label("Max pairs:"),
+            self._field_help(
+                self._sized_spin(max_pairs),
+                f"{repeat_kind} max pairs",
+                f"How many {repeat_kind} pairs to keep (1–3). "
+                f"1 keeps only the outermost pair; higher values also keep "
+                f"inner nested pairs (named {repeat_kind}5_2 / {repeat_kind}3_2, "
+                f"etc.). Default 2.",
             ),
         )
         form.addRow(
@@ -6546,7 +6560,14 @@ class AutoAnnotationSettingsPanel(QWidget):
         if not hasattr(self, "_terminal_fields"):
             self._terminal_fields = []
         self._terminal_fields.append(
-            (min_len, max_len, min_distance, min_distance_to_end, similarity)
+            (
+                min_len,
+                max_len,
+                min_distance,
+                max_distance_to_end,
+                max_pairs,
+                similarity,
+            )
         )
         return form
 
@@ -6876,16 +6897,26 @@ class AutoAnnotationSettingsPanel(QWidget):
         self._close_process_window.blockSignals(False)
     @staticmethod
     def _read_terminal_settings(
-        fields: tuple[QSpinBox, QSpinBox, QSpinBox, QSpinBox, QDoubleSpinBox],
+        fields: tuple[
+            QSpinBox, QSpinBox, QSpinBox, QSpinBox, QSpinBox, QDoubleSpinBox
+        ],
         *,
         default_min: int,
     ) -> TerminalRepeatSettings:
-        min_len, max_len, min_distance, min_distance_to_end, similarity = fields
+        (
+            min_len,
+            max_len,
+            min_distance,
+            max_distance_to_end,
+            max_pairs,
+            similarity,
+        ) = fields
         return TerminalRepeatSettings(
             min_length=min_len.value() or default_min,
             max_length=max(max_len.value(), min_len.value()),
             min_pair_distance=min_distance.value(),
-            min_distance_to_end=min_distance_to_end.value(),
+            max_distance_to_end=max_distance_to_end.value(),
+            max_pairs=max_pairs.value(),
             similarity_threshold=similarity.value(),
         )
 

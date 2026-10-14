@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from PySide6.QtWidgets import QApplication
 
 from repeatviewer.backends.sequence_features import (
@@ -57,6 +58,73 @@ def test_overview_load_path_enters_msa_mode(qapp: QApplication, tmp_path: Path) 
     # Force a paint pass; must not raise.
     panel._bars.repaint()
     qapp.processEvents()
+    panel.deleteLater()
+
+
+def test_name_multi_drag_keeps_horizontal_scroll_when_zoomed(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Dragging several name rows must not jump a zoomed MSA back to bp 1."""
+    long_cols = "ACGT" * 800
+    path = tmp_path / "aln.fa"
+    rows = "\n".join(f">s{i}\n{long_cols}" for i in range(8))
+    path.write_text(rows + "\n", encoding="utf-8")
+
+    panel = MultiSequenceOverviewPanel(path)
+    panel.resize(900, 500)
+    panel.show()
+    panel.load_path(path, msa_mode=True)
+    qapp.processEvents()
+    panel._fit_bars()
+    panel._bars.zoom_by(10.0, anchor_x=100.0)
+    qapp.processEvents()
+    panel._bars_scroll.horizontalScrollBar().setValue(500)
+    before = panel._bars_scroll.horizontalScrollBar().value()
+    assert before > 0
+
+    # Same call path as name-column multi-row drag preview.
+    panel._on_name_rows_pixel_preview(40.0, 120.0)
+    qapp.processEvents()
+
+    assert panel._bars_scroll.horizontalScrollBar().value() == before
+    panel.deleteLater()
+
+
+def test_overview_switching_msa_resets_scroll_to_origin(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Loading a different MSA must show bp 1 / first row, not the prior scroll."""
+    long_cols = "ACGT" * 500
+    first = tmp_path / "first.fa"
+    first.write_text(f">a\n{long_cols}\n>b\n{long_cols}\n", encoding="utf-8")
+    second = tmp_path / "second.fa"
+    second.write_text(f">x\n{long_cols}\n>y\n{long_cols}\n", encoding="utf-8")
+
+    panel = MultiSequenceOverviewPanel(first)
+    panel.resize(800, 400)
+    panel.show()
+    panel.load_path(first, msa_mode=True)
+    qapp.processEvents()
+    panel._fit_bars()
+    # Simulate user zoom + scroll into the middle of the first MSA.
+    panel._bars.zoom_by(8.0, anchor_x=200.0)
+    qapp.processEvents()
+    panel._bars_scroll.horizontalScrollBar().setValue(400)
+    panel._bars_scroll.verticalScrollBar().setValue(30)
+    assert panel._bars_scroll.horizontalScrollBar().value() > 0
+
+    panel.load_path(second, msa_mode=True)
+    qapp.processEvents()
+    panel._try_initial_fit()
+    panel._reset_scrollbars_to_origin()
+    qapp.processEvents()
+
+    assert panel._bars_scroll.horizontalScrollBar().value() == 0
+    assert panel._bars_scroll.verticalScrollBar().value() == 0
+    assert panel._names_scroll.verticalScrollBar().value() == 0
+    # Fit zoom for the new file (not the previous zoomed-in ppb).
+    fit_ppb, _ = panel._bars.zoom_bounds(panel._bars_viewport_width())
+    assert panel._bars.pixels_per_base() == pytest.approx(fit_ppb, rel=0.05)
     panel.deleteLater()
 
 

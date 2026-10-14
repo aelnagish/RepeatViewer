@@ -87,6 +87,7 @@ from repeatviewer.backends.sequence_features import (
     load_aligned_fasta_rows,
     load_fasta_rows,
     load_all_features_by_id,
+    filter_features_by_annotation_visibility,
     load_features_by_id_from_json,
     ordered_feature_pack_keys,
     remount_parent_ids,
@@ -1131,6 +1132,8 @@ class _BarsCanvas(QWidget):
         self._column_distance = 0  # pixels between residue backgrounds
         self._color_unaligned_background = True
         self._show_annotation_track = True
+        # None = no type filter; frozenset = only these annotation_visibility_key values.
+        self._visible_annotation_kinds: frozenset[str] | None = None
         # Stable load order for “Original order” sorting.
         self._original_index: list[int] = []
         self._region_sel: tuple[int, int] | None = None
@@ -1297,10 +1300,7 @@ class _BarsCanvas(QWidget):
         self._original_index = list(range(len(self._record_ids)))
         self._lengths = dict(lengths)
         self._features = dict(features)
-        self._tracks = {
-            rid: _pack_feature_tracks(list(features.get(rid) or []))
-            for rid in record_ids
-        }
+        self._rebuild_packed_tracks()
         self._max_length = max((lengths.get(rid, 1) for rid in record_ids), default=1)
         self._selected_rows = set()
         self._selected_feats = set()
@@ -1355,10 +1355,7 @@ class _BarsCanvas(QWidget):
         self._features = {
             rid: list(feat_map.get(rid) or []) for rid in record_ids
         }
-        self._tracks = {
-            rid: _pack_feature_tracks(list(self._features.get(rid) or []))
-            for rid in record_ids
-        }
+        self._rebuild_packed_tracks()
         self._max_length = max(1, width)
         self._selected_rows = set()
         self._selected_feats = set()
@@ -1390,14 +1387,23 @@ class _BarsCanvas(QWidget):
         self._features = {
             rid: list(features.get(rid) or []) for rid in self._record_ids
         }
-        self._tracks = {
-            rid: _pack_feature_tracks(list(self._features.get(rid) or []))
-            for rid in self._record_ids
-        }
+        self._rebuild_packed_tracks()
         self._hover_feat = None
         self._clear_drag_paint_cache()
         self._recompute_layout()
         self.update()
+
+    def _features_for_display(self, rid: str) -> list[SequenceFeature]:
+        return filter_features_by_annotation_visibility(
+            list(self._features.get(rid) or []),
+            self._visible_annotation_kinds,
+        )
+
+    def _rebuild_packed_tracks(self) -> None:
+        self._tracks = {
+            rid: _pack_feature_tracks(self._features_for_display(rid))
+            for rid in self._record_ids
+        }
 
     def set_show_annotation_track(self, enabled: bool) -> None:
         self._show_annotation_track = bool(enabled)
@@ -1407,6 +1413,27 @@ class _BarsCanvas(QWidget):
 
     def show_annotation_track(self) -> bool:
         return bool(self._show_annotation_track)
+
+    def set_visible_annotation_kinds(
+        self, keys: frozenset[str] | set[str] | None
+    ) -> None:
+        """Limit painted tracks to these visibility keys (None = all kinds)."""
+        if keys is None:
+            new_keys: frozenset[str] | None = None
+        else:
+            new_keys = frozenset(keys)
+        if new_keys == self._visible_annotation_kinds:
+            return
+        self._visible_annotation_kinds = new_keys
+        self._selected_feats = set()
+        self._hover_feat = None
+        self._rebuild_packed_tracks()
+        self._clear_drag_paint_cache()
+        self._recompute_layout()
+        self.update()
+
+    def visible_annotation_kinds(self) -> frozenset[str] | None:
+        return self._visible_annotation_kinds
 
     def set_msa_residue_size(self, point_size: int) -> None:
         """Legacy hook: MSA letter size is fixed at ``_MSA_LETTER_SIZE_PT``.
@@ -4495,6 +4522,9 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_show_annotation_track(
             bool(self._rail.show_annotation_track.isChecked())
         )
+        self._bars.set_visible_annotation_kinds(
+            self._rail.visible_annotation_kinds()
+        )
 
         # Same 1px map↔rail divider as single-seq AnnotationMapWindow.
         from repeatviewer.widgets.sequence_map_viewer import _MAP_RAIL_DIVIDER
@@ -4561,11 +4591,14 @@ class MultiSequenceOverviewPanel(QWidget):
         self._viewport_refit_timer.start()
 
     def _is_near_fit_zoom(self) -> bool:
-        """True when the view is at (or past) whole-alignment Fit zoom."""
+        """True when the view is at (or past) whole-alignment Fit zoom.
+
+        Use actual ``pixels_per_base`` — not the zoom slider alone. The slider
+        can briefly lag after wheel/Select zoom; trusting ``value() <= 1`` would
+        call Fit during name-column multi-select and jump the MSA to bp 1.
+        """
         if not self._record_ids:
             return False
-        if int(self._zoom_slider.value()) <= 1:
-            return True
         fit_ppb, _ = self._slider_ppb_bounds()
         return float(self._bars.pixels_per_base()) <= fit_ppb * 1.02
 
@@ -4900,6 +4933,9 @@ class MultiSequenceOverviewPanel(QWidget):
             self._on_multi_sequence_background_changed
         )
         rail.showAnnotationTrackChanged.connect(self._on_show_annotation_track_changed)
+        rail.annotationTrackKindsChanged.connect(
+            self._on_annotation_track_kinds_changed
+        )
         rail.sequenceSortChanged.connect(self._on_sequence_sort_changed)
         rail.findRequested.connect(self._on_rail_find_requested)
         rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
@@ -5077,6 +5113,24 @@ class MultiSequenceOverviewPanel(QWidget):
     def _on_show_annotation_track_changed(self, enabled: bool) -> None:
         self._bars.set_show_annotation_track(bool(enabled))
         self._sync_names_column()
+
+    def _on_annotation_track_kinds_changed(self, keys: object) -> None:
+        if keys is None:
+            visible: frozenset[str] | None = None
+        else:
+            visible = frozenset(str(k) for k in keys)
+        self._bars.set_visible_annotation_kinds(visible)
+        self._sync_names_column()
+
+    def _sync_annotation_kind_filters(self) -> None:
+        """Refresh type checkboxes from loaded features and apply to the canvas."""
+        all_feats: list[SequenceFeature] = []
+        for rid in self._record_ids:
+            all_feats.extend(self._features.get(rid) or [])
+        self._rail.set_available_annotation_kinds(all_feats)
+        self._bars.set_visible_annotation_kinds(
+            self._rail.visible_annotation_kinds()
+        )
 
     def _on_sequence_sort_changed(self, mode: str) -> None:
         self._bars.sort_rows(str(mode or "original"))
@@ -5705,10 +5759,26 @@ class MultiSequenceOverviewPanel(QWidget):
             self._features[rid] = list(result.features_by_id.get(rid) or [])
         self._annotations_dirty = True
         self._refresh_features_after_edit()
-        self.statusMessage.emit(
-            f"{kind} finished for selected sequences. "
-            "Click Save to write changes to disk."
-        )
+        skipped = list(getattr(result, "skipped_sequences", ()) or ())
+        if skipped:
+            headline, body = result.skipped_reminder_parts(kind=kind)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle(f"{kind} — some sequences skipped")
+            # macOS: setText is the bold key line; informative text stays regular.
+            box.setText(headline)
+            box.setInformativeText(body)
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            box.exec()
+            self.statusMessage.emit(
+                f"{kind} finished with {len(skipped)} sequence(s) skipped. "
+                "Click Save to write changes to disk."
+            )
+        else:
+            self.statusMessage.emit(
+                f"{kind} finished for selected sequences. "
+                "Click Save to write changes to disk."
+            )
 
     @Slot(str)
     def _on_batch_annotation_error(self, message: str) -> None:
@@ -5763,6 +5833,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_selected_rows(keep_sel)
         if keep_region is not None:
             self._bars.set_region_selection(keep_region[0], keep_region[1])
+        self._sync_annotation_kind_filters()
         self._sync_names_column()
         self._update_scale()
 
@@ -5832,18 +5903,14 @@ class MultiSequenceOverviewPanel(QWidget):
         selected = self._bars.selected_features()
         if not selected:
             return
-        # Resolve flat indices to feature objects before mutating stores.
+        # Resolve via canvas packed tracks (respects type visibility filters).
         targets_by_rid: dict[str, list[SequenceFeature]] = {}
         for row, feat_index in selected:
-            if not (0 <= row < len(self._record_ids)):
+            resolved = self._bars._store_index_for_flat(row, feat_index)
+            if resolved is None:
                 continue
-            rid = self._record_ids[row]
-            flat: list[SequenceFeature] = []
-            for track in _pack_feature_tracks(list(self._features.get(rid) or [])):
-                flat.extend(track)
-            if not (0 <= feat_index < len(flat)):
-                continue
-            targets_by_rid.setdefault(rid, []).append(flat[feat_index])
+            rid, _store_i, feat = resolved
+            targets_by_rid.setdefault(rid, []).append(feat)
         if not targets_by_rid:
             return
 
@@ -6481,10 +6548,14 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_mode_specific_controls()
         self._bars.sort_rows(self._rail.sequence_sort_mode())
         self._record_ids = list(self._bars.record_ids())
+        self._sync_annotation_kind_filters()
         self._sync_names_column()
         self._update_scale()
         self._sync_header_position_spins()
+        # New file: always start at top-left (do not keep prior zoom/scroll).
+        self._reset_overview_to_start()
         QTimer.singleShot(0, self._try_initial_fit)
+        QTimer.singleShot(0, self._reset_scrollbars_to_origin)
         QTimer.singleShot(50, self._try_initial_fit)
         QTimer.singleShot(200, self._try_initial_fit)
 
@@ -6561,10 +6632,14 @@ class MultiSequenceOverviewPanel(QWidget):
         # Apply saved sort after rows are loaded (original order until then).
         self._bars.sort_rows(self._rail.sequence_sort_mode())
         self._record_ids = list(self._bars.record_ids())
+        self._sync_annotation_kind_filters()
         self._sync_names_column()
         self._update_scale()
         self._sync_header_position_spins()
+        # New MSA: always start at top-left (do not keep prior zoom/scroll).
+        self._reset_overview_to_start()
         QTimer.singleShot(0, self._try_initial_fit)
+        QTimer.singleShot(0, self._reset_scrollbars_to_origin)
         QTimer.singleShot(50, self._try_initial_fit)
         QTimer.singleShot(200, self._try_initial_fit)
         kind = "protein" if self._bars._msa_protein else "nucleotide"
@@ -6681,16 +6756,31 @@ class MultiSequenceOverviewPanel(QWidget):
         self._update_scale()
         self._sync_names_column()
 
-    def _fit_bars(self) -> None:
-        # Keep the user's splitter ratio; only zoom tracks to the track viewport.
+    def _reset_scrollbars_to_origin(self) -> None:
+        """Pin Overview to bp 1 and the first sequence row."""
+        self._bars_scroll.horizontalScrollBar().setValue(0)
+        self._bars_scroll.verticalScrollBar().setValue(0)
+        self._names_scroll.verticalScrollBar().setValue(0)
+
+    def _reset_overview_to_start(self) -> None:
+        """After loading a different FASTA/MSA, fit and show the top-left.
+
+        Previous file zoom (``_ppb``) and scrollbar positions must not carry
+        over when switching alignments in the same Overview panel.
+        """
         self._name_width = self._current_name_width()
         self._sync_viewport_fill()
+        # Drop any pending mid-alignment scroll from the previous file.
         self._bars.fit_to_bars_width(self._bars_viewport_width())
-        self._bars_scroll.horizontalScrollBar().setValue(0)
+        self._reset_scrollbars_to_origin()
         self._sync_names_column()
         self._update_scale()
         self._sync_zoom_slider_from_ppb()
         self._sync_header_position_spins()
+
+    def _fit_bars(self) -> None:
+        # Keep the user's splitter ratio; only zoom tracks to the track viewport.
+        self._reset_overview_to_start()
 
     def _open_msa_clean_dialog(self) -> None:
         """Open MSA clean parameters for the alignment shown in this overview."""
@@ -7526,6 +7616,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_selected_rows(keep_sel)
         if keep_region is not None:
             self._bars.set_region_selection(keep_region[0], keep_region[1])
+        self._sync_annotation_kind_filters()
         self._sync_names_column()
         self._update_scale()
         self.annotationsSaved.emit(json_path)
@@ -7914,7 +8005,12 @@ class MultiSequenceOverviewPanel(QWidget):
             self._scale.set_region_selection(None)
             self._name_row_drag_cleared_scale = True
         mid_y = int((float(y0) + float(y1)) * 0.5)
-        self._bars._ensure_drag_point_visible(QPoint(0, mid_y))  # type: ignore[attr-defined]
+        # Keep the current horizontal zoom window. Passing x=0 made
+        # ``_ensure_drag_point_visible`` treat the drag as left of the viewport
+        # and jump the MSA back to bp 1 whenever several name rows were selected.
+        hbar = self._bars_scroll.horizontalScrollBar()
+        mid_x = int(hbar.value()) + max(1, self._bars_scroll.viewport().width()) // 2
+        self._bars._ensure_drag_point_visible(QPoint(mid_x, mid_y))  # type: ignore[attr-defined]
         self._bars.set_row_pixel_preview(float(y0), float(y1))
 
     def _on_name_rows_dragged(self, rows: object) -> None:
@@ -8454,31 +8550,12 @@ class MultiSequenceOverviewPanel(QWidget):
     def _modify_feature_at(self, row: int, feat_index: int) -> None:
         from repeatviewer.widgets.sequence_map_viewer import ModifyFeatureDialog
 
-        if not (0 <= row < len(self._record_ids)):
+        resolved = self._bars._store_index_for_flat(row, feat_index)
+        if resolved is None:
             return
-        rid = self._record_ids[row]
-        flat: list[SequenceFeature] = []
-        for track in _pack_feature_tracks(list(self._features.get(rid) or [])):
-            flat.extend(track)
-        if not (0 <= feat_index < len(flat)):
-            return
-        current = flat[feat_index]
+        rid, store_index, _current = resolved
         store = list(self._features.get(rid) or [])
-        store_index = next(
-            (
-                i
-                for i, feat in enumerate(store)
-                if (
-                    feat.start == current.start
-                    and feat.end == current.end
-                    and feat.name == current.name
-                    and feat.feature_type == current.feature_type
-                    and feat.strand == current.strand
-                )
-            ),
-            -1,
-        )
-        if store_index < 0:
+        if not (0 <= store_index < len(store)):
             return
         seq_length = max(1, int(self._lengths.get(rid, 1)))
         parent_candidates = [

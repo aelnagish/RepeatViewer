@@ -37,6 +37,12 @@ from repeatviewer.backends.annotation_colors import (
     feature_type_color,
     load_add_feature_buttons,
 )
+from repeatviewer.backends.sequence_features import (
+    ALWAYS_ANNOTATION_VISIBILITY_KINDS,
+    SequenceFeature,
+    annotation_visibility_label,
+    collect_annotation_visibility_keys,
+)
 
 # Checkbox label → feature-type key used by the annotation colors panel.
 _FEATURE_DETECT_TYPE_BY_LABEL: dict[str, str] = {
@@ -106,6 +112,7 @@ _SETTINGS_GROUP = "sequence_annotation_rail"
 _SETTINGS_TAB_KEY = "last_tab"
 _SETTINGS_SECTIONS_KEY = "expanded_sections"
 _SETTINGS_COLLAPSED_KEY = "panel_collapsed"
+_SETTINGS_HIDDEN_ANN_KINDS_KEY = "hidden_annotation_kinds"
 # Default first open: Annotation tab with all sections collapsed.
 _DEFAULT_TAB_INDEX = 1
 _COLLAPSED_RAIL_WIDTH = _RAIL_TAB_WIDTH
@@ -710,6 +717,8 @@ class SequenceAnnotationRail(QWidget):
 
     # Display / size signals (live apply).
     showAnnotationTrackChanged = Signal(bool)
+    # frozenset[str] of visible annotation_visibility_key values (empty = hide all kinds).
+    annotationTrackKindsChanged = Signal(object)
     sequenceSortChanged = Signal(str)  # original | name | selected_columns
     showComplementChanged = Signal(bool)
     showTranslationChanged = Signal(bool)
@@ -960,12 +969,29 @@ class SequenceAnnotationRail(QWidget):
         self.show_annotation_track.setChecked(True)
         self.show_annotation_track.setToolTip(
             "Show feature annotation tracks under each sequence "
-            "(including MSA residue rows)."
+            "(including MSA residue rows). Use the type checkboxes "
+            "below to show or hide LTR, TIR, ORF, and each protein domain."
         )
-        self.show_annotation_track.toggled.connect(
-            self.showAnnotationTrackChanged.emit
-        )
+        self.show_annotation_track.toggled.connect(self._on_show_annotation_track_toggled)
         tracks_section.add_widget(self.show_annotation_track)
+
+        # Nested type filters (LTR / TIR / ORF / domain kinds).
+        self._annotation_kinds_host = QWidget(tracks_section)
+        self._annotation_kinds_host.setMinimumWidth(0)
+        kinds_outer = QVBoxLayout(self._annotation_kinds_host)
+        kinds_outer.setContentsMargins(14, 0, 0, 2)
+        kinds_outer.setSpacing(4)
+        self.annotation_kind_checks: dict[str, QCheckBox] = {}
+        self._annotation_kinds_flow_host = QWidget(self._annotation_kinds_host)
+        self._annotation_kinds_flow_host.setMinimumWidth(0)
+        self._annotation_kinds_flow = _FlowLayout(self._annotation_kinds_flow_host, spacing=6)
+        self._annotation_kinds_flow_host.setLayout(self._annotation_kinds_flow)
+        kinds_outer.addWidget(self._annotation_kinds_flow_host)
+        self._hidden_annotation_kinds = self._load_hidden_annotation_kinds()
+        self._rebuild_annotation_kind_checks(list(ALWAYS_ANNOTATION_VISIBILITY_KINDS))
+        # Nested type filters apply to multi/MSA overview only (wired there).
+        self._annotation_kinds_host.setVisible(False)
+        tracks_section.add_widget(self._annotation_kinds_host)
 
         sort_row = QWidget(tracks_section)
         sort_layout = QHBoxLayout(sort_row)
@@ -1901,6 +1927,143 @@ class SequenceAnnotationRail(QWidget):
         self.showTranslationChanged.emit(checked)
         self._emit_translation_frames()
 
+    def _on_show_annotation_track_toggled(self, checked: bool) -> None:
+        host = getattr(self, "_annotation_kinds_host", None)
+        if host is not None:
+            host.setVisible(
+                bool(checked) and bool(getattr(self, "_overview_mode", False))
+            )
+        self.showAnnotationTrackChanged.emit(bool(checked))
+        self._emit_annotation_track_kinds()
+
+    @staticmethod
+    def _normalize_hidden_annotation_kind(key: str) -> str:
+        """Map legacy per-family keys (``domain::Pfam: RVT_1``) to database group."""
+        text = str(key or "").strip()
+        if text.startswith("domain::"):
+            rest = text[len("domain::") :]
+            if ": " in rest:
+                db, _, _ = rest.partition(": ")
+                db = db.strip()
+                if db:
+                    return f"domain::{db}"
+        return text
+
+    @classmethod
+    def _load_hidden_annotation_kinds(cls) -> set[str]:
+        settings = QSettings()
+        settings.beginGroup(_SETTINGS_GROUP)
+        try:
+            raw = settings.value(_SETTINGS_HIDDEN_ANN_KINDS_KEY, [])
+        finally:
+            settings.endGroup()
+        if raw is None:
+            return set()
+        if isinstance(raw, str):
+            items = [raw] if raw.strip() else []
+        else:
+            try:
+                items = [str(item).strip() for item in raw if str(item).strip()]
+            except TypeError:
+                return set()
+        return {
+            cls._normalize_hidden_annotation_kind(item)
+            for item in items
+            if item
+        }
+
+    def _save_hidden_annotation_kinds(self) -> None:
+        settings = QSettings()
+        settings.beginGroup(_SETTINGS_GROUP)
+        try:
+            settings.setValue(
+                _SETTINGS_HIDDEN_ANN_KINDS_KEY,
+                sorted(self._hidden_annotation_kinds),
+            )
+        finally:
+            settings.endGroup()
+
+    def _clear_annotation_kind_flow(self) -> None:
+        flow = getattr(self, "_annotation_kinds_flow", None)
+        if flow is None:
+            return
+        while flow.count():
+            item = flow.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _rebuild_annotation_kind_checks(self, keys: list[str]) -> None:
+        """Rebuild nested type checkboxes; preserve hidden-kind prefs."""
+        self._clear_annotation_kind_flow()
+        self.annotation_kind_checks = {}
+        host = getattr(self, "_annotation_kinds_flow_host", None)
+        flow = getattr(self, "_annotation_kinds_flow", None)
+        if host is None or flow is None:
+            return
+        hidden = getattr(self, "_hidden_annotation_kinds", set())
+        for key in keys:
+            label = annotation_visibility_label(key)
+            check = QCheckBox(label, host)
+            check.setMinimumWidth(0)
+            check.setChecked(key not in hidden)
+            if key.startswith("domain::"):
+                check.setStyleSheet(
+                    f"QCheckBox {{ color: {feature_type_color('domain')}; }}"
+                )
+            else:
+                check.setStyleSheet(
+                    f"QCheckBox {{ color: {feature_type_color(key)}; }}"
+                )
+            check.setToolTip(f"Show or hide “{label}” annotation tracks.")
+            check.toggled.connect(
+                lambda checked, kind=key: self._on_annotation_kind_toggled(
+                    kind, checked
+                )
+            )
+            flow.addWidget(check)
+            self.annotation_kind_checks[key] = check
+
+    def set_available_annotation_kinds(
+        self,
+        features: list[SequenceFeature] | None = None,
+        *,
+        keys: list[str] | None = None,
+    ) -> None:
+        """Refresh type checkboxes from current features (or an explicit key list)."""
+        if keys is None:
+            keys = collect_annotation_visibility_keys(features or [])
+        always = list(ALWAYS_ANNOTATION_VISIBILITY_KINDS)
+        rest = [key for key in keys if key not in ALWAYS_ANNOTATION_VISIBILITY_KINDS]
+        ordered = always + rest
+        current = list(self.annotation_kind_checks.keys())
+        if current == ordered:
+            return
+        self._rebuild_annotation_kind_checks(ordered)
+        self._emit_annotation_track_kinds()
+
+    def _on_annotation_kind_toggled(self, key: str, checked: bool) -> None:
+        if checked:
+            self._hidden_annotation_kinds.discard(key)
+        else:
+            self._hidden_annotation_kinds.add(key)
+        self._save_hidden_annotation_kinds()
+        self._emit_annotation_track_kinds()
+
+    def visible_annotation_kinds(self) -> frozenset[str]:
+        """Visibility keys currently checked under Show annotation track."""
+        if not self.show_annotation_track.isChecked():
+            return frozenset()
+        return frozenset(
+            key
+            for key, check in self.annotation_kind_checks.items()
+            if check.isChecked()
+        )
+
+    def _emit_annotation_track_kinds(self) -> None:
+        self.annotationTrackKindsChanged.emit(self.visible_annotation_kinds())
+
     def _emit_translation_frames(self, *_args) -> None:
         frames = frozenset(
             frame for frame, check in self.frame_checks.items() if check.isChecked()
@@ -2138,6 +2301,11 @@ class SequenceAnnotationRail(QWidget):
         self._tracks_divider.setVisible(True)
         self._tracks_section.setVisible(True)
         self.show_annotation_track.setVisible(True)
+        kinds_host = getattr(self, "_annotation_kinds_host", None)
+        if kinds_host is not None:
+            kinds_host.setVisible(
+                overview and self.show_annotation_track.isChecked()
+            )
         self.sequence_sort_row.setVisible(overview)
         if overview:
             self._populate_sequence_sort_options(

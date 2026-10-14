@@ -107,6 +107,7 @@ def test_column_residue_frequencies_and_threshold() -> None:
     from repeatviewer.backends.msa_coordinates import (
         MSA_COLOR_ALL_BACKGROUNDS,
         MSA_COLOR_BG_WHEN_CONSERVED,
+        MSA_COLOR_DIFF_FROM_SELECTED,
         MSA_COLOR_LETTERS_ONLY,
         MSA_COLOR_NO_BG_WHEN_CONSERVED,
         column_conservation_mask,
@@ -115,6 +116,7 @@ def test_column_residue_frequencies_and_threshold() -> None:
         msa_residue_fill_background,
         normalize_msa_color_mode,
         normalize_msa_divergence_threshold,
+        residue_differs_from_reference,
     )
 
     freqs = column_residue_frequencies(["AA-", "AA-", "AC-"])
@@ -176,4 +178,28 @@ def test_column_residue_frequencies_and_threshold() -> None:
     # Retired conservation_grey settings migrate to Color all.
     assert normalize_msa_color_mode("conservation_grey") == (
         MSA_COLOR_ALL_BACKGROUNDS
+    )
+    assert normalize_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED) == (
+        MSA_COLOR_DIFF_FROM_SELECTED
+    )
+
+    assert residue_differs_from_reference("T", "A")
+    assert not residue_differs_from_reference("A", "a")
+    assert not residue_differs_from_reference("-", "A")
+    assert residue_differs_from_reference("A", "-")
+    assert not residue_differs_from_reference("A", None)
+    assert msa_residue_fill_background(
+        MSA_COLOR_DIFF_FROM_SELECTED,
+        residue="T",
+        reference_residue="A",
+    )
+    assert not msa_residue_fill_background(
+        MSA_COLOR_DIFF_FROM_SELECTED,
+        residue="A",
+        reference_residue="A",
+    )
+    assert not msa_residue_fill_background(
+        MSA_COLOR_DIFF_FROM_SELECTED,
+        residue="T",
+        reference_residue=None,
     )

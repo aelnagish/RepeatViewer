@@ -33,6 +33,12 @@ special_character = {
     '#': '_',
 }
 
+# Characters that break NCBI BLAST when present in a *full path* used as argv.
+# Do NOT include ``/`` or ``\`` — every absolute path has separators, and treating
+# them as unsafe forced all jobs into a shared temp link named from the basename
+# (e.g. ``ungapped.fa``), which races under parallel feature detection.
+_BLAST_UNSAFE_PATH_CHARS = frozenset(' |<>:"*?#')
+
 _blast_db_locks: dict[str, threading.Lock] = {}
 _blast_db_locks_guard = threading.Lock()
 
@@ -73,8 +79,12 @@ def blast_database_basename(genome_file: str | os.PathLike) -> str:
 
 
 def _blast_path_has_unsafe_chars(path: str) -> bool:
-    """True when BLAST may mis-parse the path (spaces and other specials)."""
-    return any(ch in path for ch in special_character)
+    """True when BLAST may mis-parse the path (spaces, ``#``, etc.).
+
+    Path separators are allowed; only characters that break BLAST's path
+    tokenization are treated as unsafe.
+    """
+    return any(ch in path for ch in _BLAST_UNSAFE_PATH_CHARS)
 
 
 def _blast_safe_fasta_for_makeblastdb(genome_file: str) -> tuple[str, str | None]:
@@ -84,20 +94,22 @@ def _blast_safe_fasta_for_makeblastdb(genome_file: str) -> tuple[str, str | None
     correctly quoted. Use a same-directory symlink/hardlink with a sanitized
     name when needed. ``cleanup_path`` is removed after the run when set.
     """
+    import hashlib
+
     genome_abs = os.path.abspath(str(genome_file))
     if not _blast_path_has_unsafe_chars(genome_abs):
         return genome_abs, None
 
     parent = os.path.dirname(genome_abs)
     safe_base = blast_database_basename(genome_abs)
-    # Distinct from the ``-out`` prefix (same sanitized basename).
-    link_name = f".repeatviewer_blast_in_{safe_base}"
+    # Unique per absolute path so parallel jobs never share one link target
+    # (all MSA rows used to collide on ``ungapped.fa``).
+    path_tag = hashlib.sha1(genome_abs.encode("utf-8")).hexdigest()[:10]
+    link_name = f".repeatviewer_blast_in_{safe_base}_{path_tag}"
     link_path = os.path.join(parent, link_name)
 
     # Prefer a space-free parent; otherwise fall back to the system temp dir.
     if _blast_path_has_unsafe_chars(parent):
-        import tempfile
-
         safe_dir = os.path.join(tempfile.gettempdir(), "repeatviewer_blast")
         os.makedirs(safe_dir, exist_ok=True)
         link_path = os.path.join(safe_dir, link_name)

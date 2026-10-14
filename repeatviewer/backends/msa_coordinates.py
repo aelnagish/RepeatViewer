@@ -297,7 +297,10 @@ def prepare_msa_annotation_workspace(
         )
     tmp = tempfile.TemporaryDirectory(prefix="repeatviewer_msa_annot_")
     rid = str(records[0].id or "seq")
-    out = Path(tmp.name) / "ungapped.fa"
+    # Unique basename avoids parallel makeblastdb races on a shared
+    # ``ungapped.fa`` link name under the BLAST-safe temp directory.
+    safe_rid = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in rid)[:40]
+    out = Path(tmp.name) / f"ungapped_{safe_rid or 'seq'}.fa"
     SeqIO.write(
         SeqRecord(Seq(ungapped), id=rid, name=rid, description=rid),
         str(out),

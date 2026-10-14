@@ -78,6 +78,94 @@ DEFAULT_FEATURE_TYPES = (
     "others",
 )
 
+# Always offered under Display → Tracks → Show annotation track.
+ALWAYS_ANNOTATION_VISIBILITY_KINDS: tuple[str, ...] = ("LTR", "TIR", "ORF")
+
+# Strip trailing "(E=…)", "(85%)", etc. from domain track labels.
+_DOMAIN_KIND_SUFFIX_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def domain_kind_from_feature_name(name: str) -> str:
+    """Stable protein-domain label without E-value / percent suffixes."""
+    text = str(name or "").strip() or "domain"
+    while True:
+        stripped = _DOMAIN_KIND_SUFFIX_RE.sub("", text).strip()
+        if stripped == text:
+            break
+        text = stripped
+    return text or "domain"
+
+
+def domain_visibility_group(name: str) -> str:
+    """Track-filter group for a domain feature (database, not family).
+
+    ``Pfam: RVT_1`` and ``Pfam: Integrase`` both map to ``Pfam`` so one
+    checkbox controls every Pfam hit. Names without a ``DB: `` prefix use
+    ``domain``.
+    """
+    text = domain_kind_from_feature_name(name)
+    if ": " in text:
+        db, _, _ = text.partition(": ")
+        db = db.strip()
+        if db:
+            return db
+    return "domain"
+
+
+def annotation_visibility_key(feat: SequenceFeature) -> str:
+    """Key used by Display → Tracks type filters.
+
+    Structural types use ``feature_type`` (LTR, TIR, ORF, …). Protein domains
+    use ``domain::<database>`` (e.g. ``domain::Pfam``) so all hits from the
+    same database share one checkbox.
+    """
+    ftype = str(feat.feature_type or "others").strip() or "others"
+    if ftype.lower() == "domain":
+        return f"domain::{domain_visibility_group(feat.name)}"
+    return ftype
+
+
+def annotation_visibility_label(key: str) -> str:
+    """Checkbox label for an :func:`annotation_visibility_key`."""
+    text = str(key or "").strip()
+    if text.startswith("domain::"):
+        return text[len("domain::") :] or "domain"
+    return text or "others"
+
+
+def collect_annotation_visibility_keys(
+    features: Iterable[SequenceFeature],
+) -> list[str]:
+    """Ordered visibility keys: LTR/TIR/ORF, other types present, then domains."""
+    present = {annotation_visibility_key(feat) for feat in features}
+    ordered: list[str] = []
+    for key in ALWAYS_ANNOTATION_VISIBILITY_KINDS:
+        ordered.append(key)
+    other_types = sorted(
+        key
+        for key in present
+        if key not in ALWAYS_ANNOTATION_VISIBILITY_KINDS
+        and not key.startswith("domain::")
+    )
+    ordered.extend(other_types)
+    ordered.extend(sorted(key for key in present if key.startswith("domain::")))
+    return ordered
+
+
+def filter_features_by_annotation_visibility(
+    features: Iterable[SequenceFeature],
+    visible_keys: frozenset[str] | set[str] | None,
+) -> list[SequenceFeature]:
+    """Keep features whose visibility key is in ``visible_keys``.
+
+    ``None`` means show all (no type filter). An empty set hides every feature.
+    """
+    feats = list(features)
+    if visible_keys is None:
+        return feats
+    allowed = frozenset(visible_keys)
+    return [feat for feat in feats if annotation_visibility_key(feat) in allowed]
+
 
 @dataclass
 class SequenceFeature:

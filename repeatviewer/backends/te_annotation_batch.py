@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -25,7 +26,11 @@ from repeatviewer.backends.auto_annotation_settings import (
     default_annotation_threads,
     load_auto_annotation_settings,
 )
-from repeatviewer.backends.job_cancel import JobCancellation, check_cancelled
+from repeatviewer.backends.job_cancel import (
+    JobCancelledError,
+    JobCancellation,
+    check_cancelled,
+)
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
     load_features_by_id_from_json,
@@ -76,6 +81,8 @@ class TeAnnotationBatchResult:
     lengths_by_id: dict[str, int]
     json_path: Path | None = None
     gff_path: Path | None = None
+    # Sequences that failed detection but did not abort the batch: (id, reason).
+    skipped_sequences: tuple[tuple[str, str], ...] = ()
 
     @property
     def output_paths(self) -> list[Path]:
@@ -85,6 +92,39 @@ class TeAnnotationBatchResult:
         if self.gff_path is not None:
             paths.append(self.gff_path.resolve())
         return paths
+
+    def skipped_reminder_parts(
+        self, *, kind: str = "Feature detection"
+    ) -> tuple[str, str]:
+        """Return ``(headline, body)`` for a skip reminder dialog.
+
+        Use ``headline`` as ``QMessageBox`` text (native bold key line) and
+        ``body`` as informative text (regular weight on macOS).
+        """
+        skipped = list(self.skipped_sequences)
+        if not skipped:
+            return "", ""
+        headline = (
+            f"{kind} finished, but {len(skipped)} sequence(s) were skipped"
+        )
+        lines: list[str] = []
+        for rid, reason in skipped[:20]:
+            detail = str(reason or "unknown error").strip() or "unknown error"
+            if len(detail) > 180:
+                detail = detail[:177] + "…"
+            lines.append(f"• {rid}: {detail}")
+        if len(skipped) > 20:
+            lines.append(f"• …and {len(skipped) - 20} more")
+        lines.append("")
+        lines.append("Other sequences were annotated normally.")
+        return headline, "\n".join(lines)
+
+    def skipped_reminder_text(self, *, kind: str = "Feature detection") -> str:
+        """Plain-text summary (tests / logs); prefer :meth:`skipped_reminder_parts` in UI."""
+        headline, body = self.skipped_reminder_parts(kind=kind)
+        if not headline:
+            return ""
+        return f"{headline}:\n\n{body}" if body else headline
 
 def existing_annotation_gff_paths(fasta_paths: list[Path]) -> list[Path]:
     """Return existing companion annotation GFF files (``.RV.gff3`` / legacy)."""
@@ -291,6 +331,7 @@ def run_te_annotation_on_fasta(
     features_by_id = {
         rid: list(existing_by_id.get(rid) or []) for rid in all_record_ids
     }
+    skipped: list[tuple[str, str]] = []
 
     def _apply_msa_tsd() -> None:
         """Scan TSD on each MSA row and merge features (no cluster step)."""
@@ -344,21 +385,28 @@ def run_te_annotation_on_fasta(
         rid = annotate_ids[0]
         if progress is not None:
             progress(0, 1, resolved.name)
-        features = _annotate_one_record_fasta(
-            resolved,
-            options,
-            auto_cfg=auto_cfg,
-            sim_cfg=sim_cfg,
-            use_blast=use_blast,
-            base_features=tuple(existing_by_id.get(rid) or []),
-            cancel=cancel,
-            progress=_detail_progress,
-            label=resolved.name,
-            auto_threads=max(
-                1, int(getattr(auto_cfg, "num_threads", default_annotation_threads()))
-            ),
-        )
-        features_by_id[rid] = features
+        try:
+            features = _annotate_one_record_fasta(
+                resolved,
+                options,
+                auto_cfg=auto_cfg,
+                sim_cfg=sim_cfg,
+                use_blast=use_blast,
+                base_features=tuple(existing_by_id.get(rid) or []),
+                cancel=cancel,
+                progress=_detail_progress,
+                label=resolved.name,
+                auto_threads=max(
+                    1,
+                    int(getattr(auto_cfg, "num_threads", default_annotation_threads())),
+                ),
+            )
+            features_by_id[rid] = features
+        except JobCancelledError:
+            raise
+        except Exception as exc:
+            logging.exception("Annotation failed for %s", rid)
+            skipped.append((rid, str(exc) or exc.__class__.__name__))
         if progress is not None:
             progress(1, 1, resolved.name)
         _apply_msa_tsd()
@@ -400,21 +448,29 @@ def run_te_annotation_on_fasta(
             completed = 0
             progress_lock = threading.Lock()
 
-            def _run_one(rid: str, temp_fa: Path) -> tuple[str, list]:
+            def _run_one(
+                rid: str, temp_fa: Path
+            ) -> tuple[str, list[SequenceFeature] | None, str | None]:
                 check_cancelled(cancel)
-                feats = _annotate_one_record_fasta(
-                    temp_fa,
-                    options,
-                    auto_cfg=auto_cfg,
-                    sim_cfg=sim_cfg,
-                    use_blast=use_blast,
-                    base_features=tuple(features_by_id.get(rid) or []),
-                    cancel=cancel,
-                    progress=None,
-                    label=f"{resolved.name} [{rid}]",
-                    auto_threads=auto_threads,
-                )
-                return rid, feats
+                try:
+                    feats = _annotate_one_record_fasta(
+                        temp_fa,
+                        options,
+                        auto_cfg=auto_cfg,
+                        sim_cfg=sim_cfg,
+                        use_blast=use_blast,
+                        base_features=tuple(features_by_id.get(rid) or []),
+                        cancel=cancel,
+                        progress=None,
+                        label=f"{resolved.name} [{rid}]",
+                        auto_threads=auto_threads,
+                    )
+                    return rid, feats, None
+                except JobCancelledError:
+                    raise
+                except Exception as exc:
+                    logging.exception("Annotation failed for %s", rid)
+                    return rid, None, str(exc) or exc.__class__.__name__
 
             if progress is not None:
                 progress(
@@ -430,17 +486,32 @@ def run_te_annotation_on_fasta(
                 ]
                 for future in as_completed(futures):
                     check_cancelled(cancel)
-                    rid, feats = future.result()
-                    features_by_id[rid] = feats
+                    try:
+                        rid, feats, error = future.result()
+                    except JobCancelledError:
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+                    if error:
+                        skipped.append((rid, error))
+                    elif feats is not None:
+                        features_by_id[rid] = feats
                     with progress_lock:
                         completed += 1
                         done = completed
                     if progress is not None:
-                        progress(
-                            done,
-                            total,
-                            f"{resolved.name}: sequence {done}/{total} ({rid})",
-                        )
+                        if error:
+                            progress(
+                                done,
+                                total,
+                                f"{resolved.name}: skipped {done}/{total} ({rid})",
+                            )
+                        else:
+                            progress(
+                                done,
+                                total,
+                                f"{resolved.name}: sequence {done}/{total} ({rid})",
+                            )
         _apply_msa_tsd()
 
     json_path: Path | None = None
@@ -462,4 +533,5 @@ def run_te_annotation_on_fasta(
         lengths_by_id=lengths,
         json_path=json_path,
         gff_path=gff_path,
+        skipped_sequences=tuple(skipped),
     )

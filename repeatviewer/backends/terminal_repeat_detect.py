@@ -23,6 +23,7 @@ from repeatviewer.backends.auto_annotation_settings import (
     DEFAULT_LTR_SIMILARITY_THRESHOLD,
     DEFAULT_TIR_SIMILARITY_THRESHOLD,
     TerminalRepeatSettings,
+    normalize_max_terminal_pairs,
 )
 from repeatviewer.backends.sequence_features import SequenceFeature
 
@@ -30,6 +31,8 @@ MIN_LTR_LEN = 100
 MIN_TIR_LEN = 20
 DEFAULT_TERMINAL_REPEAT_WORD_SIZE = 11
 MIN_TERMINAL_REPEAT_WORD_SIZE = 4
+# Collapse near-identical BLAST rows when selecting multiple pairs.
+_PAIR_DEDUP_TOLERANCE_BP = 25
 
 
 def word_size_for_terminal_repeat(min_repeat_length: int) -> int:
@@ -125,18 +128,70 @@ def _pair_distance_ok(hit: pd.Series, *, min_pair_distance: int) -> bool:
     return s5 - q3 >= min_pair_distance
 
 
-def _terminal_ends_ok(hit: pd.Series, record_len: int, *, min_distance_to_end: int) -> bool:
+def _terminal_ends_ok(hit: pd.Series, record_len: int, *, max_distance_to_end: int) -> bool:
     """
     Require the 5′ copy near the sequence start and the 3′ copy near the end.
 
-    ``min_distance_to_end`` is the maximum allowed gap (bp) from each terminus:
+    ``max_distance_to_end`` is the maximum allowed gap (bp) from each terminus:
     left copy start within that many bp of position 1, right copy end within
     that many bp of ``record_len``.
     """
-    allowed = max(0, int(min_distance_to_end))
+    allowed = max(0, int(max_distance_to_end))
     left_gap = max(0, int(hit["qstart"]) - 1)
     right_gap = max(0, record_len - int(hit["s_hi"]))
     return left_gap <= allowed and right_gap <= allowed
+
+
+def _pair_coords(hit: pd.Series) -> tuple[int, int, int, int]:
+    return (
+        int(hit["qstart"]),
+        int(hit["qend"]),
+        int(hit["s_lo"]),
+        int(hit["s_hi"]),
+    )
+
+
+def _pairs_nearly_identical(
+    a: pd.Series,
+    b: pd.Series,
+    *,
+    tol: int = _PAIR_DEDUP_TOLERANCE_BP,
+) -> bool:
+    return all(
+        abs(x - y) <= tol for x, y in zip(_pair_coords(a), _pair_coords(b), strict=True)
+    )
+
+
+def _select_terminal_pairs(
+    candidates: pd.DataFrame,
+    record_len: int,
+    *,
+    cfg: TerminalRepeatSettings,
+    score_column: str,
+) -> list[pd.Series]:
+    """Keep up to ``cfg.max_pairs`` outermost pairs that pass distance filters."""
+    if candidates.empty:
+        return []
+    ranked = candidates.copy()
+    ranked["score"] = ranked[score_column]
+    ranked = ranked.sort_values("score", ascending=False)
+    max_pairs = normalize_max_terminal_pairs(cfg.max_pairs)
+    selected: list[pd.Series] = []
+    for _, hit in ranked.iterrows():
+        if not _terminal_ends_ok(
+            hit,
+            record_len,
+            max_distance_to_end=cfg.max_distance_to_end,
+        ):
+            continue
+        if not _pair_distance_ok(hit, min_pair_distance=cfg.min_pair_distance):
+            continue
+        if any(_pairs_nearly_identical(hit, kept) for kept in selected):
+            continue
+        selected.append(hit)
+        if len(selected) >= max_pairs:
+            break
+    return selected
 
 
 def _check_terminal_repeat(
@@ -146,16 +201,16 @@ def _check_terminal_repeat(
     repeat_mode: str = "both",
     ltr_settings: TerminalRepeatSettings | None = None,
     tir_settings: TerminalRepeatSettings | None = None,
-) -> tuple[str | None, pd.Series | None]:
+) -> tuple[str | None, list[pd.Series]]:
     """
     Port of TEtrimmer ``check_terminal_repeat`` hit selection.
 
-    Returns (repeat_type, winning_row) where repeat_type is ``LTR``, ``TIR``, or None.
-    Unlike TEtrimmer, TIR is still evaluated when LTR-like hits exist but fail the
-    terminal-end proximity checks.
+    Returns ``(repeat_type, hits)`` where ``hits`` are outermost-first pairs
+    (up to ``max_pairs``). Unlike TEtrimmer, TIR is still evaluated when
+    LTR-like hits exist but fail the terminal-end proximity checks.
     """
     if df.empty:
-        return None, None
+        return None, []
 
     ltr_cfg = ltr_settings or TerminalRepeatSettings(
         min_length=MIN_LTR_LEN,
@@ -186,22 +241,19 @@ def _check_terminal_repeat(
             similarity_threshold=ltr_cfg.similarity_threshold,
         )
         if not df_ltr.empty:
+            # Outermost = largest span from 5′ start to 3′ end.
             df_ltr["score"] = df_ltr["send"] - df_ltr["qstart"]
-            ltr_hit = df_ltr.loc[df_ltr["score"].idxmax()]
-            if (
-                _terminal_ends_ok(
-                    ltr_hit,
-                    record_len,
-                    min_distance_to_end=ltr_cfg.min_distance_to_end,
-                )
-                and _pair_distance_ok(
-                    ltr_hit, min_pair_distance=ltr_cfg.min_pair_distance
-                )
-            ):
-                return "LTR", ltr_hit
+            ltr_hits = _select_terminal_pairs(
+                df_ltr,
+                record_len,
+                cfg=ltr_cfg,
+                score_column="score",
+            )
+            if ltr_hits:
+                return "LTR", ltr_hits
 
     if not try_tir:
-        return None, None
+        return None, []
 
     df_tir = hits[
         (hits["qstart"] != hits["sstart"])
@@ -216,21 +268,19 @@ def _check_terminal_repeat(
         similarity_threshold=tir_cfg.similarity_threshold,
     )
     if df_tir.empty:
-        return None, None
+        return None, []
 
     # TEtrimmer uses sstart - qstart; with normalized coords use the far subject end.
     df_tir["score"] = df_tir["s_hi"] - df_tir["qstart"]
-    tir_hit = df_tir.loc[df_tir["score"].idxmax()]
-    if (
-        _terminal_ends_ok(
-            tir_hit,
-            record_len,
-            min_distance_to_end=tir_cfg.min_distance_to_end,
-        )
-        and _pair_distance_ok(tir_hit, min_pair_distance=tir_cfg.min_pair_distance)
-    ):
-        return "TIR", tir_hit
-    return None, None
+    tir_hits = _select_terminal_pairs(
+        df_tir,
+        record_len,
+        cfg=tir_cfg,
+        score_column="score",
+    )
+    if tir_hits:
+        return "TIR", tir_hits
+    return None, []
 
 
 def _terminal_repeat_identity_suffix(hit: pd.Series) -> str:
@@ -247,12 +297,24 @@ def _terminal_repeat_identity_suffix(hit: pd.Series) -> str:
     return f" ({pident:.1f}%)"
 
 
+def _terminal_repeat_base_name(prefix: str, pair_index: int) -> str:
+    """``LTR5``, ``LTR5_2``, ``LTR5_3`` (1-based pair index)."""
+    if pair_index <= 1:
+        return prefix
+    return f"{prefix}_{pair_index}"
+
+
 def _terminal_repeat_name(base: str, hit: pd.Series) -> str:
     suffix = _terminal_repeat_identity_suffix(hit)
     return f"{base}{suffix}" if suffix else base
 
 
-def _features_from_hit(repeat_type: str, hit: pd.Series) -> list[SequenceFeature]:
+def _features_from_hit(
+    repeat_type: str,
+    hit: pd.Series,
+    *,
+    pair_index: int = 1,
+) -> list[SequenceFeature]:
     q5 = int(hit["qstart"])
     q3 = int(hit["qend"])
     s_lo = int(hit["s_lo"])
@@ -263,13 +325,17 @@ def _features_from_hit(repeat_type: str, hit: pd.Series) -> list[SequenceFeature
             SequenceFeature(
                 start=q5,
                 end=q3,
-                name=_terminal_repeat_name("LTR5", hit),
+                name=_terminal_repeat_name(
+                    _terminal_repeat_base_name("LTR5", pair_index), hit
+                ),
                 feature_type="LTR",
             ),
             SequenceFeature(
                 start=s_lo,
                 end=s_hi,
-                name=_terminal_repeat_name("LTR3", hit),
+                name=_terminal_repeat_name(
+                    _terminal_repeat_base_name("LTR3", pair_index), hit
+                ),
                 feature_type="LTR",
             ),
         ]
@@ -279,14 +345,18 @@ def _features_from_hit(repeat_type: str, hit: pd.Series) -> list[SequenceFeature
             SequenceFeature(
                 start=q5,
                 end=q3,
-                name=_terminal_repeat_name("TIR5", hit),
+                name=_terminal_repeat_name(
+                    _terminal_repeat_base_name("TIR5", pair_index), hit
+                ),
                 feature_type="TIR",
                 strand="+",
             ),
             SequenceFeature(
                 start=s_lo,
                 end=s_hi,
-                name=_terminal_repeat_name("TIR3", hit),
+                name=_terminal_repeat_name(
+                    _terminal_repeat_base_name("TIR3", pair_index), hit
+                ),
                 feature_type="TIR",
                 strand="-",
             ),
@@ -312,14 +382,14 @@ def detect_terminal_repeat_features(
             message="Self-BLAST returned no hits (sequence may contain too many N/X).",
         )
 
-    repeat_type, hit = _check_terminal_repeat(
+    repeat_type, hit_rows = _check_terminal_repeat(
         df,
         record_len,
         repeat_mode=mode,
         ltr_settings=ltr_settings,
         tir_settings=tir_settings,
     )
-    if repeat_type is None or hit is None:
+    if repeat_type is None or not hit_rows:
         hits = _prepare_blast_hits(df)
         if mode == "TIR":
             tir_candidates = int(
@@ -353,15 +423,22 @@ def detect_terminal_repeat_features(
                 message = "No LTR or TIR terminal repeats were identified."
         return TerminalRepeatResult(features=(), repeat_type=None, message=message)
 
-    features = _features_from_hit(repeat_type, hit)
+    features: list[SequenceFeature] = []
+    for index, hit in enumerate(hit_rows, start=1):
+        features.extend(_features_from_hit(repeat_type, hit, pair_index=index))
     if mode == "LTR" and repeat_type != "LTR":
         return TerminalRepeatResult(features=(), repeat_type=None, message="No LTR terminal repeats were identified.")
     if mode == "TIR" and repeat_type != "TIR":
         return TerminalRepeatResult(features=(), repeat_type=None, message="No TIR terminal repeats were identified.")
+    n_pairs = len(hit_rows)
+    pair_label = "pair" if n_pairs == 1 else "pairs"
     return TerminalRepeatResult(
         features=tuple(features),
         repeat_type=repeat_type,
-        message=f"Detected {repeat_type} repeats ({len(features)} features).",
+        message=(
+            f"Detected {repeat_type} repeats "
+            f"({n_pairs} {pair_label}, {len(features)} features)."
+        ),
     )
 
 
@@ -482,7 +559,10 @@ def run_self_blast(
             "makeblastdb was not found. Install BLAST+ or use the bundled binaries."
         )
     if database == "makeblastdb_got_error":
-        raise RuntimeError("makeblastdb failed while building the self-BLAST database.")
+        raise RuntimeError(
+            "makeblastdb failed while building the self-BLAST database "
+            f"for {fasta_path.name}."
+        )
 
     check_cancelled(cancel)
     return _run_cancellable_self_blastn(
@@ -510,7 +590,21 @@ def auto_annotate_terminal_repeats(
 ) -> TerminalRepeatResult:
     """Run self-BLAST on a single-sequence FASTA and detect LTR or TIR features."""
     fasta_path = fasta_path.expanduser().resolve()
-    record_len = _record_length(fasta_path)
+    try:
+        record_len = _record_length(fasta_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not read sequence for terminal-repeat detection: {exc}"
+        ) from exc
+    if record_len <= 0:
+        return TerminalRepeatResult(
+            features=(),
+            repeat_type=None,
+            message=(
+                "Sequence is empty (or only gaps after MSA ungapping); "
+                "skipped LTR/TIR self-BLAST."
+            ),
+        )
     ltr_cfg = ltr_settings or TerminalRepeatSettings(
         min_length=MIN_LTR_LEN,
         similarity_threshold=DEFAULT_LTR_SIMILARITY_THRESHOLD,
