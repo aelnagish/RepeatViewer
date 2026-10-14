@@ -4285,6 +4285,8 @@ class MultiSequenceOverviewPanel(QWidget):
     openInAdditionalPreviewTab = Signal(object)
     # Open Dotplot (Self) for this record id (top selected when multi-select).
     showSelfDotplotRequested = Signal(str)
+    # Display row order changed (Sorting) — Dotplot Sequence list should refresh.
+    sequenceOrderChanged = Signal()
 
     def __init__(self, fasta_path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -5078,8 +5080,11 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _on_sequence_sort_changed(self, mode: str) -> None:
         self._bars.sort_rows(str(mode or "original"))
+        # Bars own the display order; keep panel ids aligned for Dotplot / tools.
+        self._record_ids = list(self._bars.record_ids())
         self._save_overview_display_settings()
         self._sync_names_column()
+        self.sequenceOrderChanged.emit()
 
     def _select_all_sequences(self) -> None:
         self._bars.select_all_rows()
@@ -6410,6 +6415,7 @@ class MultiSequenceOverviewPanel(QWidget):
         """
         self._path = path.expanduser().resolve()
         self.clear_find_hits()  # hits belong to the previous file
+        self._fasta_seq_cache = None
         use_msa = bool(msa_mode) if msa_mode is not None else is_aligned_fasta(self._path)
         if use_msa:
             self._load_msa_path()
@@ -6474,6 +6480,7 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         self._sync_mode_specific_controls()
         self._bars.sort_rows(self._rail.sequence_sort_mode())
+        self._record_ids = list(self._bars.record_ids())
         self._sync_names_column()
         self._update_scale()
         self._sync_header_position_spins()
@@ -6553,6 +6560,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_mode_specific_controls()
         # Apply saved sort after rows are loaded (original order until then).
         self._bars.sort_rows(self._rail.sequence_sort_mode())
+        self._record_ids = list(self._bars.record_ids())
         self._sync_names_column()
         self._update_scale()
         self._sync_header_position_spins()
@@ -7355,10 +7363,22 @@ class MultiSequenceOverviewPanel(QWidget):
                 return self._record_ids[row]
         return None
 
+    def record_ids_for_dotplot(self) -> list[str]:
+        """Sequence ids in Overview display order (current Sorting)."""
+        return list(self._bars.record_ids())
+
+    def sequence_text_for_dotplot(self, seq_id: str) -> str:
+        """Load one sequence for Dotplot (Self); MSA rows stay gapped."""
+        return self._sequence_text_for_id(seq_id)
+
     def sequences_for_dotplot(self) -> list[tuple[str, str]]:
-        """``(id, sequence)`` rows for Dotplot (Self); MSA sequences stay gapped."""
+        """``(id, sequence)`` rows for Dotplot (Self); MSA sequences stay gapped.
+
+        Prefer ``record_ids_for_dotplot`` + ``sequence_text_for_dotplot`` for
+        large files — this eager helper loads every sequence.
+        """
         out: list[tuple[str, str]] = []
-        for rid in self._record_ids:
+        for rid in self.record_ids_for_dotplot():
             try:
                 out.append((rid, self._sequence_text_for_id(rid)))
             except (OSError, ValueError):
@@ -7607,20 +7627,30 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _sequence_text_for_id(self, seq_id: str) -> str:
         """Return sequence string for a record (MSA cache or disk)."""
+        wanted = str(seq_id or "").strip()
         if self._bars.is_msa_mode():
+            ids = self._bars.record_ids()
             try:
-                row = self._record_ids.index(seq_id)
+                row = ids.index(wanted)
             except ValueError:
                 row = -1
             if 0 <= row < len(self._bars._msa_seqs):
                 return str(self._bars._msa_seqs[row])
-        from Bio import SeqIO
+        # Multi-FASTA: cache the file once so Dotplot switches are not O(n) parses.
+        cache = getattr(self, "_fasta_seq_cache", None)
+        if cache is None:
+            from Bio import SeqIO
 
-        for rec in SeqIO.parse(str(self._path), "fasta"):
-            if str(rec.id) == seq_id or str(rec.id).split("#", 1)[0] == seq_id.split(
-                "#", 1
-            )[0]:
-                return str(rec.seq)
+            cache = {}
+            for rec in SeqIO.parse(str(self._path), "fasta"):
+                cache[str(rec.id)] = str(rec.seq)
+            self._fasta_seq_cache = cache
+        if wanted in cache:
+            return cache[wanted]
+        short = wanted.split("#", 1)[0]
+        for rid, seq in cache.items():
+            if rid == wanted or rid.split("#", 1)[0] == short:
+                return seq
         raise ValueError(f"Sequence “{seq_id}” was not found in {self._path.name}.")
 
     def _on_transfer_annotations_clicked(self) -> None:

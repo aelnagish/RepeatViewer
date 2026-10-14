@@ -120,7 +120,7 @@ def test_run_alignment_add_to_msa_with_bundled_mafft(tmp_path: Path) -> None:
     )
     assert out.is_file()
     assert out.name.startswith(aligned.stem)
-    assert "_add_mafft" in out.name
+    assert "_amafft" in out.name
     assert out.read_text().count(">") == 3
 
 

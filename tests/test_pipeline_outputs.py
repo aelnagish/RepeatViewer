@@ -90,6 +90,7 @@ def test_blast_gff_output_path() -> None:
 
 def test_kept_input_name_used_by_align_and_combine(tmp_path: Path) -> None:
     from repeatviewer.backends.sequence_aligner import (
+        add_to_msa_output_stem,
         alignment_output_stem,
         combined_alignment_output_stem,
         _next_available_fasta,
@@ -106,6 +107,8 @@ def test_kept_input_name_used_by_align_and_combine(tmp_path: Path) -> None:
     assert alignment_output_stem(a, engine="muscle") == "reads.fa_muscle"
     assert combined_alignment_output_stem([a, b], engine="mafft") == "reads.fa_cmafft"
     assert combined_alignment_output_stem([a, b], engine="muscle") == "reads.fa_cmuscle"
+    assert add_to_msa_output_stem(a, engine="mafft") == "reads.fa_amafft"
+    assert add_to_msa_output_stem(a, engine="muscle") == "reads.fa_amuscle"
     first = _next_available_fasta(tmp_path, "reads.fa_cmafft")
     assert first.name == "reads.fa_cmafft.fa"
     first.write_text(">x\nA\n")

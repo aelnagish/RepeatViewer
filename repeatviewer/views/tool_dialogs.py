@@ -2833,7 +2833,11 @@ class AlignParamsDialog(QDialog):
                 "folder), so the pasted sequence has somewhere to be saved.",
             )
             return
-        dialog = NewSequenceDialog(parent=self, title="Sequences to add")
+        dialog = NewSequenceDialog(
+            parent=self,
+            title="Sequences to add",
+            show_metadata=False,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -3272,15 +3276,42 @@ class AlignParamsDialog(QDialog):
 
 
 class NewSequenceDialog(QDialog):
-    """Type or paste a sequence and save it as a FASTA."""
+    """Type or paste a sequence and save it as a FASTA.
 
-    def __init__(self, *, parent=None, title: str = "New Sequence") -> None:
+    ``show_metadata=False`` (Sequences to add): paste area only — name comes
+    from a FASTA header when present, otherwise ``added_sequence``.
+    """
+
+    # Full New Sequence form.
+    _DEFAULT_WIDTH = 720
+    _DEFAULT_HEIGHT = 520
+    # Sequences to add (paste only) — matches the usual resized paste window.
+    _PASTE_DEFAULT_WIDTH = 870
+    _PASTE_DEFAULT_HEIGHT = 440
+
+    def __init__(
+        self,
+        *,
+        parent=None,
+        title: str = "New Sequence",
+        show_metadata: bool = True,
+    ) -> None:
         super().__init__(parent)
-        from repeatviewer.backends.sequence_compose import MOLECULE_LABELS
+        from repeatviewer.backends.sequence_compose import (
+            MOLECULE_DNA,
+            MOLECULE_LABELS,
+        )
         from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
 
+        self._show_metadata = bool(show_metadata)
         self.setWindowTitle(title)
-        self.resize(720, 520)
+        if self._show_metadata:
+            self.resize(self._DEFAULT_WIDTH, self._DEFAULT_HEIGHT)
+        else:
+            self.setMinimumWidth(520)
+            self.setMinimumHeight(280)
+            self.resize(self._PASTE_DEFAULT_WIDTH, self._PASTE_DEFAULT_HEIGHT)
+            self.setSizeGripEnabled(True)
 
         self._text = QPlainTextEdit(self)
         self._text.setPlaceholderText("Type or paste in sequence…")
@@ -3296,6 +3327,9 @@ class NewSequenceDialog(QDialog):
         self._molecule = QComboBox(self)
         for label, value in MOLECULE_LABELS:
             self._molecule.addItem(label, value)
+        dna_idx = self._molecule.findData(MOLECULE_DNA)
+        if dna_idx >= 0:
+            self._molecule.setCurrentIndex(dna_idx)
 
         for field in (self._name, self._description, self._organism, self._molecule):
             field.setFixedWidth(320)
@@ -3312,6 +3346,8 @@ class NewSequenceDialog(QDialog):
         form.addRow("Description:", self._description)
         form.addRow("Organism:", self._organism)
         form.addRow("Type:", self._molecule)
+        self._form_host = QWidget(self)
+        self._form_host.setLayout(form)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -3324,9 +3360,13 @@ class NewSequenceDialog(QDialog):
         layout.setSpacing(10)
         layout.addWidget(QLabel("Type or paste in sequence:", self))
         layout.addWidget(self._text, stretch=1)
-        layout.addLayout(form)
+        layout.addWidget(self._form_host)
         layout.addWidget(self._summary)
         layout.addWidget(self._buttons)
+
+        if not self._show_metadata:
+            self._form_host.hide()
+            self._summary.hide()
 
         # Track whether the user has typed a name themselves: a pasted FASTA
         # header fills these in, but must never overwrite a typed value.
@@ -3357,25 +3397,56 @@ class NewSequenceDialog(QDialog):
             self._description.setText(description)
         self._sync()
 
+    def _resolved_name(self) -> str:
+        name = self._name.text().strip()
+        if name:
+            return name
+        if not self._show_metadata:
+            from repeatviewer.backends.sequence_compose import parse_pasted_header
+
+            header_name, _ = parse_pasted_header(self._text.toPlainText())
+            if header_name:
+                return header_name
+            return "added_sequence"
+        return ""
+
     def _sync(self) -> None:
         from repeatviewer.backends.sequence_compose import check_sequence
 
         check = check_sequence(self._text.toPlainText(), str(self._molecule.currentData()))
-        parts = [f"{check.length:,} bp" if check.length else "empty"]
-        if check.invalid:
-            parts.append(f"unexpected characters: {check.invalid}")
-        self._summary.setText("  ·  ".join(parts))
-        ok = bool(check.length) and bool(self._name.text().strip())
+        if self._show_metadata:
+            parts = [f"{check.length:,} bp" if check.length else "empty"]
+            if check.invalid:
+                parts.append(f"unexpected characters: {check.invalid}")
+            self._summary.setText("  ·  ".join(parts))
+            ok = bool(check.length) and bool(self._name.text().strip())
+        else:
+            ok = bool(check.length)
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(ok)
 
     def values(self) -> dict:
         return {
-            "name": self._name.text().strip(),
+            "name": self._resolved_name(),
             "sequence": self._text.toPlainText(),
-            "description": self._description.text().strip(),
-            "organism": self._organism.text().strip(),
+            "description": (
+                self._description.text().strip() if self._show_metadata else ""
+            ),
+            "organism": self._organism.text().strip() if self._show_metadata else "",
             "molecule": str(self._molecule.currentData()),
         }
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        # Keep resize() effective when dialog polish calls adjustSize().
+        hint = super().sizeHint()
+        if self._show_metadata:
+            return QSize(
+                max(hint.width(), self._DEFAULT_WIDTH),
+                max(hint.height(), self._DEFAULT_HEIGHT),
+            )
+        return QSize(
+            max(hint.width(), self._PASTE_DEFAULT_WIDTH),
+            max(hint.height(), self._PASTE_DEFAULT_HEIGHT),
+        )
 
 
 class NameWithAnnotationDialog(QDialog):

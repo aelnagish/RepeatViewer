@@ -489,13 +489,13 @@ def add_to_msa_output_stem(
     *,
     engine: str = ALIGNER_MAFFT,
 ) -> str:
-    """Basename stem for add-to-MSA outputs: ``{msa.name}_add_mafft`` / ``_add_muscle``."""
+    """Basename stem for add-to-MSA outputs: ``{msa.name}_amafft`` / ``_amuscle``."""
     from repeatviewer.tool_output_paths import kept_input_name
 
     if engine == ALIGNER_MUSCLE:
-        tool = "add_muscle"
+        tool = "amuscle"
     elif engine == ALIGNER_MAFFT:
-        tool = "add_mafft"
+        tool = "amafft"
     else:
         raise ValueError(f"Unknown alignment engine: {engine}")
     return f"{kept_input_name(msa_fasta)}_{tool}"

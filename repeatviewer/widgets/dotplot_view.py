@@ -16,13 +16,23 @@ so they stay beside the data the way they do in Geneious.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QNativeGestureEvent, QPainter, QPalette, QPen, QTransform
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QNativeGestureEvent,
+    QPainter,
+    QPalette,
+    QPen,
+    QStandardItem,
+    QStandardItemModel,
+    QTransform,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QGraphicsItem,
     QGraphicsScene,
     QGraphicsView,
@@ -35,6 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
 from repeatviewer.widgets.spin_boxes import (
     NoWheelDoubleSpinBox as QDoubleSpinBox,
     NoWheelSpinBox as QSpinBox,
@@ -1654,6 +1665,11 @@ class DotplotPanel(QWidget):
             "Which sequence to show as a self-dotplot."
         )
         self._sequence_label = QLabel("Sequence:", self)
+        # Ids for the Sequence picker; sequence text is loaded lazily.
+        self._sequence_ids: list[str] = []
+        self._sequence_cache: dict[str, str] = {}
+        self._sequence_loader: Callable[[str], str] | None = None
+        # Legacy alias used by engine-visibility checks (id list length).
         self._sequence_records: list[tuple[str, str]] = []
         self._ungap_for_plot = False
         # When ungapping for MSA: 0-based gapped index of each ungapped residue.
@@ -1870,11 +1886,14 @@ class DotplotPanel(QWidget):
         self._alignments = None
         self._active_sequence_id = ""
         self._active_sequence = ""
+        self._sequence_ids = []
+        self._sequence_cache = {}
+        self._sequence_loader = None
         self._sequence_records = []
         self._ungap_for_plot = False
         self._coord_keep = None
         self._sequence_combo.blockSignals(True)
-        self._sequence_combo.clear()
+        self._sequence_combo.setModel(QStandardItemModel(self._sequence_combo))
         self._sequence_combo.blockSignals(False)
         self._too_long_prompt_active = False
         self._canvas.set_axes([], [])
@@ -1890,52 +1909,101 @@ class DotplotPanel(QWidget):
 
     def set_record_choices(
         self,
-        records: list[tuple[str, str]],
+        records: list[str] | list[tuple[str, str]],
         *,
         ungap: bool = False,
         preferred_id: str | None = None,
+        sequence_loader: Callable[[str], str] | None = None,
     ) -> None:
         """Populate the Sequence picker for multi-FASTA / MSA Dotplot (Self).
+
+        ``records`` may be ids only (preferred for large MSAs) or
+        ``(id, sequence)`` pairs. Sequence text is loaded lazily via
+        ``sequence_loader`` when needed so opening the tab with thousands of
+        rows does not copy every alignment string into the combo.
 
         When ``ungap`` is True (MSA), gaps are stripped for plotting and a
         coordinate map is kept so selections can highlight the MSA.
         """
-        cleaned: list[tuple[str, str]] = []
-        for rid, seq in records:
-            sid = str(rid or "").strip()
-            if not sid:
-                continue
-            cleaned.append((sid, str(seq or "")))
-        self._sequence_records = cleaned
+        ids: list[str] = []
+        cache: dict[str, str] = {}
+        for item in records:
+            if isinstance(item, tuple):
+                sid = str(item[0] or "").strip()
+                if not sid:
+                    continue
+                ids.append(sid)
+                cache[sid] = str(item[1] or "")
+            else:
+                sid = str(item or "").strip()
+                if sid:
+                    ids.append(sid)
+        same_ids = ids == self._sequence_ids and bool(ungap) == self._ungap_for_plot
+        self._sequence_ids = ids
+        self._sequence_loader = sequence_loader
+        # Keep any preloaded sequences; drop cache entries that left the list.
+        if cache:
+            self._sequence_cache = cache
+        else:
+            keep = set(ids)
+            self._sequence_cache = {
+                sid: seq for sid, seq in self._sequence_cache.items() if sid in keep
+            }
+        self._sequence_records = [(sid, self._sequence_cache.get(sid, "")) for sid in ids]
         self._ungap_for_plot = bool(ungap)
-        self._sequence_combo.blockSignals(True)
-        self._sequence_combo.clear()
-        # Match Overview name-column numbering (1-based, same order).
-        for index, (sid, _seq) in enumerate(cleaned):
-            self._sequence_combo.addItem(f"{index + 1}. {sid}", sid)
+        if not same_ids:
+            # Batch model fill — much faster than addItem() × N for large MSAs.
+            model = QStandardItemModel(len(ids), 1, self._sequence_combo)
+            for index, sid in enumerate(ids):
+                item = QStandardItem(f"{index + 1}. {sid}")
+                item.setData(sid, Qt.ItemDataRole.UserRole)
+                model.setItem(index, 0, item)
+            self._sequence_combo.blockSignals(True)
+            self._sequence_combo.setModel(model)
+            self._sequence_combo.blockSignals(False)
         want = str(preferred_id or "").strip()
         idx = self._sequence_combo.findData(want) if want else -1
-        if idx < 0 and cleaned:
+        if idx < 0 and ids:
             idx = 0
+        self._sequence_combo.blockSignals(True)
         if idx >= 0:
             self._sequence_combo.setCurrentIndex(idx)
         self._sequence_combo.blockSignals(False)
         self._sync_engine_controls()
-        if cleaned:
-            sid = str(self._sequence_combo.currentData() or cleaned[0][0])
-            seq = next((s for i, s in cleaned if i == sid), cleaned[0][1])
-            self.set_active_sequence(sid, seq, ungap=self._ungap_for_plot)
+        if ids:
+            sid = str(self._sequence_combo.currentData() or ids[0])
+            self.set_active_sequence(
+                sid, self._sequence_for_id(sid), ungap=self._ungap_for_plot
+            )
         else:
             self.set_active_sequence("", "")
 
+    def _sequence_for_id(self, sequence_id: str) -> str:
+        """Return sequence text for ``sequence_id``, loading it once if needed."""
+        sid = str(sequence_id or "").strip()
+        if not sid:
+            return ""
+        cached = self._sequence_cache.get(sid)
+        if cached is not None:
+            return cached
+        if self._sequence_loader is None:
+            return ""
+        try:
+            seq = str(self._sequence_loader(sid) or "")
+        except (OSError, ValueError):
+            seq = ""
+        self._sequence_cache[sid] = seq
+        return seq
+
     def _on_sequence_choice_changed(self, _index: int = -1) -> None:
-        if self._mode == "alignment" or not self._sequence_records:
+        if self._mode == "alignment" or not self._sequence_ids:
             return
         sid = str(self._sequence_combo.currentData() or "").strip()
-        seq = next((s for i, s in self._sequence_records if i == sid), "")
         if not sid:
             return
-        self.set_active_sequence(sid, seq, ungap=self._ungap_for_plot)
+        self.set_active_sequence(
+            sid, self._sequence_for_id(sid), ungap=self._ungap_for_plot
+        )
         if self.isVisible():
             self.ensure_loaded()
 
@@ -2107,7 +2175,7 @@ class DotplotPanel(QWidget):
 
         self._pair_label.setVisible(False)
         self._pair_combo.setVisible(False)
-        multi_seq = self._mode != "alignment" and len(self._sequence_records) > 1
+        multi_seq = self._mode != "alignment" and len(self._sequence_ids) > 1
         self._sequence_label.setVisible(multi_seq)
         self._sequence_combo.setVisible(multi_seq)
         self._filter_len_label.setVisible(False)

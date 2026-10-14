@@ -64,6 +64,56 @@ def test_overview_select_by_position_sets_region(
     overview.close()
 
 
+def test_overview_sort_updates_dotplot_sequence_order(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    path = tmp_path / "aln.fa"
+    path.write_text(">zeta\nACGTAC\n>alpha\nACGTAC\n>beta\nACGTAC\n")
+    overview = MultiSequenceOverviewPanel(path)
+    overview.load_path(path, msa_mode=True)
+    assert overview.record_ids_for_dotplot() == ["zeta", "alpha", "beta"]
+    ordered: list[list[str]] = []
+    overview.sequenceOrderChanged.connect(
+        lambda: ordered.append(overview.record_ids_for_dotplot())
+    )
+    overview._on_sequence_sort_changed("name")
+    assert overview.record_ids() == ["alpha", "beta", "zeta"]
+    assert overview.record_ids_for_dotplot() == ["alpha", "beta", "zeta"]
+    assert ordered == [["alpha", "beta", "zeta"]]
+    overview.close()
+
+
+def test_dotplot_set_record_choices_loads_sequence_lazily(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    path = tmp_path / "aln.fa"
+    path.write_text(">a\nAC--GT\n>b\nACGTGT\n>c\nAAAAAA\n")
+    loads: list[str] = []
+
+    def loader(sid: str) -> str:
+        loads.append(sid)
+        return {"a": "AC--GT", "b": "ACGTGT", "c": "AAAAAA"}[sid]
+
+    panel = DotplotPanel(path)
+    panel.set_record_choices(
+        ["a", "b", "c"],
+        ungap=True,
+        preferred_id="b",
+        sequence_loader=loader,
+    )
+    assert panel._sequence_combo.count() == 3
+    assert panel._sequence_combo.itemText(2) == "3. c"
+    assert panel.sequence_id() == "b"
+    assert panel._active_sequence == "ACGTGT"
+    # Only the preferred sequence is fetched when the list is built.
+    assert loads == ["b"]
+    panel._sequence_combo.setCurrentIndex(0)
+    qapp.processEvents()
+    assert loads == ["b", "a"]
+    assert panel._active_sequence == "ACGT"
+    panel.close()
+
+
 def test_overview_region_for_dotplot_requires_matching_single_sequence(
     qapp: QApplication, tmp_path: Path
 ) -> None:

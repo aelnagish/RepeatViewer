@@ -445,6 +445,9 @@ def test_paste_sequence_to_add_writes_fasta_beside_msa(qapp, tmp_path, monkeypat
     class _FakePaste(NewSequenceDialog):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
+            assert kwargs.get("show_metadata") is False
+            assert not self._form_host.isVisibleTo(self)
+            assert not self._summary.isVisibleTo(self)
 
         def exec(self):  # noqa: A003
             return NewSequenceDialog.DialogCode.Accepted
@@ -469,6 +472,24 @@ def test_paste_sequence_to_add_writes_fasta_beside_msa(qapp, tmp_path, monkeypat
     assert got_seq.parent == msa.parent
     assert got_seq.read_text().startswith(">pasted_seq\n")
     assert "ACGTACGT" in got_seq.read_text().replace("\n", "")
+
+
+def test_sequences_to_add_dialog_hides_metadata_fields(qapp):
+    from repeatviewer.views.tool_dialogs import NewSequenceDialog
+
+    dlg = NewSequenceDialog(title="Sequences to add", show_metadata=False)
+    assert dlg._form_host.isHidden()
+    assert dlg._summary.isHidden()
+    assert dlg.width() == NewSequenceDialog._PASTE_DEFAULT_WIDTH
+    assert dlg.height() == NewSequenceDialog._PASTE_DEFAULT_HEIGHT
+    dlg._text.setPlainText(">my_seq desc\nACGT\n")
+    qapp.processEvents()
+    assert dlg._buttons.button(dlg._buttons.StandardButton.Ok).isEnabled()
+    values = dlg.values()
+    assert values["name"] == "my_seq"
+    assert values["description"] == ""
+    assert values["organism"] == ""
+    dlg.close()
 
 
 def test_muscle_add_to_msa_mode_mirrors_mafft_inputs(qapp, tmp_path):

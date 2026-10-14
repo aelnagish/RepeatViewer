@@ -1341,6 +1341,9 @@ class FilePreviewPage(QWidget):
             self._annotation_overview.showSelfDotplotRequested.connect(
                 self._on_overview_show_self_dotplot
             )
+            self._annotation_overview.sequenceOrderChanged.connect(
+                self._on_overview_sequence_order_changed
+            )
             holder_layout = self._fasta_annotation_holder.layout()
             if holder_layout is None:
                 holder_layout = QVBoxLayout(self._fasta_annotation_holder)
@@ -1492,6 +1495,12 @@ class FilePreviewPage(QWidget):
         self._pending_dotplot_sequence_id = sid
         self._activate_fasta_tab(DefaultFastaPreviewTab.DOTPLOT)
 
+    def _on_overview_sequence_order_changed(self) -> None:
+        """Keep Dotplot Sequence list numbered like the Overview after Sorting."""
+        if self._dotplot_panel is None:
+            return
+        self._sync_dotplot_active_sequence(self._dotplot_panel)
+
     def _overview_region_for_dotplot(self, panel) -> tuple[int, int] | None:
         """Overview region to mirror onto Dotplot, or ``None`` to skip highlight.
 
@@ -1577,8 +1586,8 @@ class FilePreviewPage(QWidget):
                 return
             if ov_path != page_path:
                 return
-            records = overview.sequences_for_dotplot()
-            if not records:
+            record_ids = overview.record_ids_for_dotplot()
+            if not record_ids:
                 return
             pending = str(self._pending_dotplot_sequence_id or "").strip()
             self._pending_dotplot_sequence_id = None
@@ -1589,12 +1598,14 @@ class FilePreviewPage(QWidget):
                 pending
                 or current
                 or overview.selected_record_id()
-                or records[0][0]
+                or record_ids[0]
             )
+            # Ids only + lazy loader: avoid copying every MSA row into the combo.
             panel.set_record_choices(
-                records,
+                record_ids,
                 ungap=bool(self._msa_aligned_mode),
                 preferred_id=preferred,
+                sequence_loader=overview.sequence_text_for_dotplot,
             )
             return
         if self._annotation_panel is None:
