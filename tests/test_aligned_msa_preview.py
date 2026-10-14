@@ -473,26 +473,75 @@ def test_msa_overview_context_menu_has_rename_for_sequence_selection(
     texts = [a.text() for a in menu.actions() if not a.isSeparator()]
     assert "Add feature…" in texts
     assert "Rename sequence" in texts
+    assert "Set as standard" in texts
     assert "Copy Sequence" in texts
     assert "Extract Sequence" in texts
     assert "Copy Sequence without gap" in texts
     assert "Extract Sequence without gap" in texts
     assert "Show self-dotplot" in texts
+    # Copy grouped above its without-gap twin; same for Extract.
+    assert texts.index("Copy Sequence") < texts.index("Copy Sequence without gap")
+    assert texts.index("Copy Sequence without gap") < texts.index("Extract Sequence")
+    assert texts.index("Extract Sequence") < texts.index(
+        "Extract Sequence without gap"
+    )
     rename = next(a for a in menu.actions() if a.text() == "Rename sequence")
     assert rename.isEnabled() is True
+    set_std = next(a for a in menu.actions() if a.text() == "Set as standard")
+    assert set_std.isEnabled() is True
     show_dot = next(a for a in menu.actions() if a.text() == "Show self-dotplot")
     assert show_dot.isEnabled() is True
 
-    # Region-only selection: no Rename; self-dotplot disabled (no sequence rows).
+    # Region-only selection: no Rename / Set as standard; self-dotplot disabled.
     panel._bars.set_selected_rows([])
     panel._bars.set_region_selection(2, 4)
     menu2 = panel._build_overview_context_menu()
     texts2 = [a.text() for a in menu2.actions() if not a.isSeparator()]
     assert "Rename sequence" not in texts2
+    assert "Set as standard" not in texts2
     assert "Copy Sequence without gap" in texts2
     show_dot2 = next(a for a in menu2.actions() if a.text() == "Show self-dotplot")
     assert show_dot2.isEnabled() is False
     panel.close()
+
+
+def test_msa_color_vs_standard_defaults_to_first_until_pinned(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+
+    path = tmp_path / "std.fa"
+    path.write_text(">seqA\nACGT\n>seqB\nTGCA\n>seqC\nAAAA\n")
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    panel._bars.set_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED)
+    assert panel._bars.msa_diff_standard_row() == 0
+    assert panel._bars.msa_diff_standard_is_pinned() is False
+
+    panel._bars.set_selected_rows([2])
+    assert panel._bars.msa_diff_standard_row() == 0
+
+    panel._bars.set_selected_rows([1])
+    panel._set_selected_as_msa_standard()
+    assert panel._bars.msa_diff_standard_is_pinned() is True
+    assert panel._bars.msa_diff_standard_id() == "seqB"
+    assert panel._bars.msa_diff_standard_row() == 1
+
+    panel._bars.set_selected_rows([0])
+    assert panel._bars.msa_diff_standard_row() == 1
+
+    panel._bars.set_msa_color_mode("all_backgrounds")
+    panel._bars.set_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED)
+    assert panel._bars.msa_diff_standard_row() == 1
+    panel.close()
+
+    # Reopen the same MSA — pinned standard is restored from settings.
+    panel2 = MultiSequenceOverviewPanel(path)
+    panel2.load_path(path, msa_mode=True)
+    panel2._bars.set_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED)
+    assert panel2._bars.msa_diff_standard_id() == "seqB"
+    assert panel2._bars.msa_diff_standard_row() == 1
+    panel2.close()
 
 
 def test_msa_copy_sequence_without_gap_strips_dashes(

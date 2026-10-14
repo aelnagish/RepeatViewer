@@ -24,6 +24,8 @@ MSA_COLOR_LETTERS_ONLY = "letters_only"
 MSA_COLOR_NO_BG_WHEN_CONSERVED = "no_bg_when_conserved"
 # Fill letters whose column frequency meets the divergence threshold.
 MSA_COLOR_BG_WHEN_CONSERVED = "bg_when_conserved"
+# Fill the standard fully; other rows only where they differ from it.
+MSA_COLOR_DIFF_FROM_SELECTED = "diff_from_selected"
 # Retired id kept for settings migration only.
 _MSA_COLOR_CONSERVATION_GREY_LEGACY = "conservation_grey"
 
@@ -32,6 +34,7 @@ MSA_COLOR_MODE_CHOICES: tuple[tuple[str, str], ...] = (
     (MSA_COLOR_ALL_BACKGROUNDS, "Color all"),
     (MSA_COLOR_BG_WHEN_CONSERVED, "Color conserved"),
     (MSA_COLOR_NO_BG_WHEN_CONSERVED, "Color divergent"),
+    (MSA_COLOR_DIFF_FROM_SELECTED, "Color vs standard"),
 )
 
 MSA_COLOR_MODE_IDS = frozenset(mode_id for mode_id, _label in MSA_COLOR_MODE_CHOICES)
@@ -115,6 +118,27 @@ def letter_is_conserved(
     return float(freqs.get(ch, 0.0)) >= normalize_msa_divergence_threshold(threshold)
 
 
+def residue_differs_from_reference(residue: str, reference: str | None) -> bool:
+    """True when ``residue`` differs from the selected standard at one column.
+
+    Matching letters (case-insensitive) do not highlight. Missing standard
+    never highlights. A gap on the compared row highlights when the standard
+    has a residue; a letter vs a gap on the standard also counts. Matching
+    gaps (both gap) do not highlight.
+    """
+    if reference is None:
+        return False
+    ch = str(residue or "")
+    ref = str(reference or "")
+    ch_gap = (not ch) or ch in GAP_CHARS
+    ref_gap = (not ref) or ref in GAP_CHARS
+    if ch_gap and ref_gap:
+        return False
+    if ch_gap or ref_gap:
+        return True
+    return ch.upper() != ref.upper()
+
+
 def msa_residue_fill_background(
     mode: str | None,
     *,
@@ -122,17 +146,33 @@ def msa_residue_fill_background(
     column_freqs: dict[str, float] | None = None,
     threshold: float = DEFAULT_MSA_DIVERGENCE_THRESHOLD,
     column_conserved: bool | None = None,
+    reference_residue: str | None = None,
+    is_reference_row: bool = False,
 ) -> bool:
     """Whether an MSA cell should paint a residue background fill.
 
-    Gaps never take a residue colour fill here (caller may still draw ``-``).
+    Gaps never take a residue colour fill except in
+    :data:`MSA_COLOR_DIFF_FROM_SELECTED` (caller may still draw ``-``).
     ``column_conserved`` is accepted for older callers and ignored when
     ``column_freqs`` is provided.
+
+    For :data:`MSA_COLOR_DIFF_FROM_SELECTED` (Color vs standard):
+    - ``is_reference_row=True`` fills every non-gap residue (full standard).
+    - other rows fill when ``residue`` differs from ``reference_residue``,
+      including gaps where the standard has a letter.
     """
     ch = str(residue or "")
+    normalized = normalize_msa_color_mode(mode)
+    if normalized == MSA_COLOR_DIFF_FROM_SELECTED:
+        if ch in GAP_CHARS:
+            if is_reference_row:
+                return False
+            return residue_differs_from_reference(ch, reference_residue)
+        if is_reference_row:
+            return True
+        return residue_differs_from_reference(ch, reference_residue)
     if ch in GAP_CHARS:
         return False
-    normalized = normalize_msa_color_mode(mode)
     if normalized == MSA_COLOR_ALL_BACKGROUNDS:
         return True
     if normalized == MSA_COLOR_LETTERS_ONLY:

@@ -4455,6 +4455,7 @@ class SequenceMapWidget(QWidget):
             toolbar = QWidget(self)
             toolbar.setObjectName("AnnotationMapToolbar")
             toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            toolbar.setMinimumWidth(0)
             toolbar.setFixedHeight(28)
             # Toolbar follows app chrome; sequence/annotation paper stays light.
             _apply_map_paper_background(toolbar, _app_chrome_background())
@@ -4462,6 +4463,7 @@ class SequenceMapWidget(QWidget):
             tb.setContentsMargins(6, 2, 8, 2)
             tb.setSpacing(6)
             tb.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+            tb.setSizeConstraint(QHBoxLayout.SizeConstraint.SetNoConstraint)
 
             zoom_out_btn = _make_zoom_button("−", toolbar)
             zoom_out_btn.setToolTip("Zoom out")
@@ -4497,12 +4499,14 @@ class SequenceMapWidget(QWidget):
             fit_btn.setFixedHeight(20)
             fit_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
+            pos_label = QLabel("Position:", toolbar)
+            to_label = QLabel("to", toolbar)
             tb.addWidget(zoom_out_btn, 0, Qt.AlignmentFlag.AlignVCenter)
             tb.addWidget(zoom_in_btn, 0, Qt.AlignmentFlag.AlignVCenter)
             tb.addWidget(self._zoom_slider, 0, Qt.AlignmentFlag.AlignVCenter)
-            tb.addWidget(QLabel("Position:", toolbar), 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(pos_label, 0, Qt.AlignmentFlag.AlignVCenter)
             tb.addWidget(self._pos_start, 0, Qt.AlignmentFlag.AlignVCenter)
-            tb.addWidget(QLabel("to", toolbar), 0, Qt.AlignmentFlag.AlignVCenter)
+            tb.addWidget(to_label, 0, Qt.AlignmentFlag.AlignVCenter)
             tb.addWidget(self._pos_end, 0, Qt.AlignmentFlag.AlignVCenter)
             tb.addWidget(select_btn, 0, Qt.AlignmentFlag.AlignVCenter)
             tb.addWidget(fit_btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -4513,6 +4517,22 @@ class SequenceMapWidget(QWidget):
             self._sequence_stats_label.setWordWrap(False)
             tb.addWidget(self._sequence_stats_label, 0, Qt.AlignmentFlag.AlignVCenter)
             self._toolbar = toolbar
+            from repeatviewer.widgets.toolbar_overflow import ToolbarOverflowHider
+
+            self._toolbar_overflow = ToolbarOverflowHider(
+                toolbar,
+                [
+                    [zoom_out_btn],
+                    [zoom_in_btn],
+                    [self._zoom_slider],
+                    [pos_label, self._pos_start, to_label, self._pos_end],
+                    [select_btn],
+                    [fit_btn],
+                    [self._sequence_stats_label],
+                ],
+                spacing=6,
+                layout=tb,
+            )
         else:
             zoom_row = QHBoxLayout()
             zoom_row.setContentsMargins(6, 4, 6, 4)
@@ -7275,6 +7295,9 @@ class SequenceMapPanel(QWidget):
     sequenceExtracted = Signal(object)  # Path to a newly written FASTA
     activeSequenceChanged = Signal(str)  # sequence id after multi-seq switch
 
+    _MIN_PANEL_WIDTH = 160
+    _MIN_PANEL_HEIGHT = 120
+
     def __init__(
         self,
         fasta_path: Path,
@@ -7284,6 +7307,7 @@ class SequenceMapPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumWidth(0)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._path = fasta_path.expanduser().resolve()
         # Sequence from the last load_path(), so the summary can be computed
@@ -7591,6 +7615,9 @@ class SequenceMapPanel(QWidget):
         s.setValue("sequence_name_size", rail.sequence_name_size.value())
         s.setValue("base_number_size", rail.base_number_size.value())
         s.endGroup()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self._MIN_PANEL_WIDTH, self._MIN_PANEL_HEIGHT)
 
     def bind_annotation_zoom_bar(self, bar) -> None:
         self._map.bind_annotation_zoom_bar(bar)

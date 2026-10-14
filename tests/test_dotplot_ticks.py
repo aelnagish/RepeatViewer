@@ -6,11 +6,110 @@ from PySide6.QtCore import QRectF
 
 from repeatviewer.widgets.dotplot_view import (
     _axis_tick_positions,
+    _ensure_min_bp_rect,
     _format_bp,
     _nice_tick_step,
     _non_overlapping_tick_labels,
     _scene_to_bp,
 )
+
+
+def test_dotplot_rail_range_boxes_align_hyphen(qapp) -> None:
+    """X/Y range fields use ' - ' and share a start column so hyphens line up."""
+    from repeatviewer.widgets.dotplot_rail import DotplotRail
+
+    rail = DotplotRail()
+    assert rail.sel_x_label.text() == "X"
+    assert rail.sel_y_label.text() == "Y"
+    assert rail.sel_x.start_text() == ""
+    assert not rail.sel_x._sep.isVisibleTo(rail.sel_x)
+    rail.set_selection_ranges(x=(256, 1698), y=(5517, 6553))
+    assert rail.sel_x._sep.text() == " - "
+    assert rail.sel_y._sep.text() == " - "
+    assert rail.sel_x.start_text() == "256"
+    assert rail.sel_y.start_text() == "5,517"
+    # Longer start wins the shared column width.
+    assert rail.sel_x._start.width() == rail.sel_y._start.width()
+    assert rail.sel_x._start.width() >= rail.sel_y._start.fontMetrics().horizontalAdvance(
+        "5,517"
+    )
+    assert rail.view_x_btn.isEnabled()
+    assert rail.view_y_btn.isEnabled()
+    # Selection block sits after the parameter host (bottom of the panel).
+    page = rail.sel_row.parentWidget()
+    page_layout = page.layout()
+    assert page_layout.indexOf(rail.sel_row) > page_layout.indexOf(rail._params_host)
+    # Show reverse sits below Line width in the form.
+    form = rail.line_width.parentWidget().layout().itemAt(0).layout()
+    widgets = []
+    for i in range(form.rowCount()):
+        field = form.itemAt(i, form.ItemRole.FieldRole)
+        if field is not None and field.widget() is not None:
+            widgets.append(field.widget())
+    assert widgets.index(rail.line_width) < widgets.index(rail.reverse)
+    rail.deleteLater()
+
+
+def test_zoom_keeps_selection_visible(qapp) -> None:
+    """Zooming with a selection anchors on it and keeps it in the viewport."""
+    from PySide6.QtCore import QRectF
+
+    from repeatviewer.backends.dotplot import (
+        STRAND_FORWARD,
+        DotplotResult,
+        DotplotSegment,
+    )
+    from repeatviewer.widgets.dotplot_view import DotplotCanvas
+
+    canvas = DotplotCanvas()
+    canvas.resize(900, 700)
+    canvas.show()
+    qapp.processEvents()
+    canvas.show_result(
+        DotplotResult(
+            sequence_id="t",
+            sequence_length=10_000,
+            word_size=6,
+            segments=[DotplotSegment(0, 0, 100, STRAND_FORWARD)],
+            include_reverse=True,
+        )
+    )
+    qapp.processEvents()
+    canvas.reset_zoom()
+    qapp.processEvents()
+
+    canvas._selection = QRectF(7000.0, 7000.0, 200.0, 200.0)
+    # Zoom in several steps — selection must remain inside the visible scene.
+    for _ in range(8):
+        canvas._apply_zoom(1.5, canvas.viewport().rect().topLeft())
+        qapp.processEvents()
+        vis = canvas.visible_scene_rect()
+        sel = canvas._selection
+        assert sel is not None
+        assert vis.intersects(sel), f"selection left the view: vis={vis} sel={sel}"
+        # Centre of selection should stay on-screen after zoom-about-selection.
+        assert vis.contains(sel.center())
+    canvas.close()
+
+
+def test_ensure_min_bp_rect_expands_sub_base_drag() -> None:
+    """At high zoom a few-pixel drag is < 1 bp; still become a 1×1 selection."""
+    bounds = QRectF(0.0, 0.0, 10_000.0, 10_000.0)
+    tiny = QRectF(3768.2, 3343.1, 0.3, 0.4)
+    grown = _ensure_min_bp_rect(tiny, bounds)
+    assert grown.width() >= 1.0
+    assert grown.height() >= 1.0
+    assert bounds.contains(grown)
+
+
+def test_ensure_min_bp_rect_clamps_near_edge() -> None:
+    bounds = QRectF(0.0, 0.0, 100.0, 100.0)
+    near = QRectF(99.7, 0.1, 0.2, 0.2)
+    grown = _ensure_min_bp_rect(near, bounds)
+    assert grown.width() >= 1.0
+    assert grown.height() >= 1.0
+    assert grown.right() <= bounds.right() + 1e-9
+    assert grown.left() >= bounds.left() - 1e-9
 
 
 def test_nice_tick_step_for_6kb_uses_1k_not_5k() -> None:

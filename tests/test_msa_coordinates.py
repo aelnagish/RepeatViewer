@@ -109,6 +109,7 @@ def test_column_residue_frequencies_and_threshold() -> None:
         MSA_COLOR_BG_WHEN_CONSERVED,
         MSA_COLOR_DIFF_FROM_SELECTED,
         MSA_COLOR_LETTERS_ONLY,
+        MSA_COLOR_MODE_CHOICES,
         MSA_COLOR_NO_BG_WHEN_CONSERVED,
         column_conservation_mask,
         column_residue_frequencies,
@@ -182,12 +183,37 @@ def test_column_residue_frequencies_and_threshold() -> None:
     assert normalize_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED) == (
         MSA_COLOR_DIFF_FROM_SELECTED
     )
+    assert dict(MSA_COLOR_MODE_CHOICES)[MSA_COLOR_DIFF_FROM_SELECTED] == (
+        "Color vs standard"
+    )
 
     assert residue_differs_from_reference("T", "A")
     assert not residue_differs_from_reference("A", "a")
-    assert not residue_differs_from_reference("-", "A")
+    assert residue_differs_from_reference("-", "A")
     assert residue_differs_from_reference("A", "-")
+    assert not residue_differs_from_reference("-", "-")
+    assert not residue_differs_from_reference(".", "-")
     assert not residue_differs_from_reference("A", None)
+    # Standard row: fully coloured.
+    assert msa_residue_fill_background(
+        MSA_COLOR_DIFF_FROM_SELECTED,
+        residue="A",
+        reference_residue="A",
+        is_reference_row=True,
+    )
+    assert msa_residue_fill_background(
+        MSA_COLOR_DIFF_FROM_SELECTED,
+        residue="T",
+        reference_residue="A",
+        is_reference_row=True,
+    )
+    assert not msa_residue_fill_background(
+        MSA_COLOR_DIFF_FROM_SELECTED,
+        residue="-",
+        reference_residue="A",
+        is_reference_row=True,
+    )
+    # Other rows: only differences (including gap vs standard letter).
     assert msa_residue_fill_background(
         MSA_COLOR_DIFF_FROM_SELECTED,
         residue="T",
@@ -197,6 +223,16 @@ def test_column_residue_frequencies_and_threshold() -> None:
         MSA_COLOR_DIFF_FROM_SELECTED,
         residue="A",
         reference_residue="A",
+    )
+    assert msa_residue_fill_background(
+        MSA_COLOR_DIFF_FROM_SELECTED,
+        residue="-",
+        reference_residue="A",
+    )
+    assert not msa_residue_fill_background(
+        MSA_COLOR_DIFF_FROM_SELECTED,
+        residue="-",
+        reference_residue="-",
     )
     assert not msa_residue_fill_background(
         MSA_COLOR_DIFF_FROM_SELECTED,

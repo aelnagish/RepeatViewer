@@ -32,34 +32,23 @@ from PySide6.QtGui import (
     QTransform,
 )
 from PySide6.QtWidgets import (
-    QCheckBox,
     QGraphicsItem,
     QGraphicsScene,
     QGraphicsView,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QSizePolicy,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from repeatviewer.widgets.combo_boxes import NoWheelComboBox as QComboBox
-from repeatviewer.widgets.spin_boxes import (
-    NoWheelDoubleSpinBox as QDoubleSpinBox,
-    NoWheelSpinBox as QSpinBox,
-)
-from repeatviewer.widgets.preview_controls import ZOOM_CONTROL_HEIGHT
+from repeatviewer.widgets.dotplot_rail import DotplotRail
 from repeatviewer.widgets.preview_zoom import (
     PREVIEW_WHEEL_DELTA_PER_STEP,
     wheel_zoom_delta_from_event,
 )
 
 from repeatviewer.backends.dotplot import (
-    DEFAULT_WORD_SIZE,
-    MAX_WORD_SIZE,
-    MIN_WORD_SIZE,
     STRAND_REVERSE,
     DotplotError,
     DotplotResult,
@@ -75,10 +64,7 @@ from repeatviewer.backends.paf_dotplot import (
     result_for_pair,
 )
 from repeatviewer.backends.fastga_dotplot import (
-    DEFAULT_MIN_IDENTITY,
-    DEFAULT_MIN_LENGTH,
     DEFAULT_SEED_FREQ,
-    MAX_SEED_FREQ,
     FASTGA_PREFERRED_ABOVE_BYTES,
     FastgaError,
     fastga_available,
@@ -186,6 +172,38 @@ _SELECT_FILL = QColor(70, 130, 220, 55)
 _SELECT_EDGE = QColor(60, 110, 200, 190)
 
 _CLICK_SLOP = 4
+# Selection is stored in scene (base) units. At high zoom a normal drag is often
+# < 1 bp wide; expand to this minimum so the rubber band still commits.
+_MIN_SELECTION_BP = 1.0
+
+
+def _ensure_min_bp_rect(
+    rect: QRectF, bounds: QRectF, *, min_size: float = _MIN_SELECTION_BP
+) -> QRectF:
+    """Grow ``rect`` to at least ``min_size``×``min_size`` bases, clamped to ``bounds``."""
+    r = QRectF(rect)
+    if r.width() < min_size:
+        cx = r.center().x()
+        r.setLeft(cx - min_size / 2.0)
+        r.setWidth(min_size)
+    if r.height() < min_size:
+        cy = r.center().y()
+        r.setTop(cy - min_size / 2.0)
+        r.setHeight(min_size)
+    r = r.intersected(bounds)
+    if r.width() < min_size and bounds.width() >= min_size:
+        if r.left() <= bounds.left() + 1e-9:
+            r.setRect(bounds.left(), r.top(), min_size, r.height())
+        else:
+            r.setRect(bounds.right() - min_size, r.top(), min_size, r.height())
+        r = r.intersected(bounds)
+    if r.height() < min_size and bounds.height() >= min_size:
+        if r.top() <= bounds.top() + 1e-9:
+            r.setRect(r.left(), bounds.top(), r.width(), min_size)
+        else:
+            r.setRect(r.left(), bounds.bottom() - min_size, r.width(), min_size)
+        r = r.intersected(bounds)
+    return r
 
 
 def _nice_tick_step(span: float, target_ticks: int = 10) -> int:
@@ -564,13 +582,16 @@ class _PlotOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-        active = view._selection
-        if view._drag_start is not None and view._drag_now is not None:
-            active = QRectF(view._drag_start, view._drag_now).normalized()
-        if active is not None and active.width() >= 1 and active.height() >= 1:
-            tl = view.mapFromScene(active.topLeft())
-            br = view.mapFromScene(active.bottomRight())
+        # Live drag is tracked in viewport pixels so the rubber band stays under
+        # the cursor after zoom (scene↔view mapping can lag or disagree).
+        rect: QRect | None = None
+        if view._drag_start_vp is not None and view._drag_now_vp is not None:
+            rect = QRect(view._drag_start_vp, view._drag_now_vp).normalized()
+        elif view._selection is not None:
+            tl = view.mapFromScene(view._selection.topLeft())
+            br = view.mapFromScene(view._selection.bottomRight())
             rect = QRect(tl, br).normalized()
+        if rect is not None and rect.width() >= 1 and rect.height() >= 1:
             painter.fillRect(rect, _SELECT_FILL)
             edge = QPen(_SELECT_EDGE)
             edge.setCosmetic(True)
@@ -578,11 +599,12 @@ class _PlotOverlay(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
 
-        if view._cursor_pos is not None:
+        # Crosshair from viewport mouse position — same space as the rubber band.
+        if view._cursor_vp is not None:
             cross = QPen(QColor(90, 140, 220, 150))
             cross.setCosmetic(True)
             painter.setPen(cross)
-            pt = view.mapFromScene(view._cursor_pos)
+            pt = view._cursor_vp
             painter.drawLine(pt.x(), 0, pt.x(), self.height())
             painter.drawLine(0, pt.y(), self.width(), pt.y())
         painter.end()
@@ -593,6 +615,7 @@ class DotplotCanvas(QGraphicsView):
 
     positionChanged = Signal(int, int)
     rectSelected = Signal(int, int, int, int)  # x_start, x_end, y_start, y_end
+    zoomChanged = Signal()  # scale changed (slider / fit / wheel / pinch)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -633,8 +656,11 @@ class DotplotCanvas(QGraphicsView):
         self._zoom_drag_accum = 0.0
         self._wheel_zoom_accum = 0
         self._pinch_accum = 0.0
-        self._drag_start: QPointF | None = None
-        self._drag_now: QPointF | None = None
+        # Rubber-band corners in viewport pixels (follow the mouse exactly).
+        self._drag_start_vp: QPoint | None = None
+        self._drag_now_vp: QPoint | None = None
+        # Cursor in viewport pixels (crosshair) and scene coords (rulers / status).
+        self._cursor_vp: QPoint | None = None
         self._cursor_pos: QPointF | None = None
         # Exactly one selection exists at a time, always a rectangle in scene
         # coordinates, whether it came from a drag here or from the Annotation
@@ -820,8 +846,11 @@ class DotplotCanvas(QGraphicsView):
         self._set_uniform_scale(scale)
         self._fit_scale = scale
         self._clamp_scroll_to_plot()
+        self._position_rulers()
         self.viewport().update()
+        self._refresh_overlay()
         self._refresh_rulers()
+        self.zoomChanged.emit()
 
     def _set_uniform_scale(self, scale: float) -> None:
         """Identical X/Y scale, plot pinned to the top-left of the viewport."""
@@ -865,8 +894,11 @@ class DotplotCanvas(QGraphicsView):
         self.setTransform(QTransform.fromScale(scale, scale))
         self.centerOn(target.center())
         self._clamp_scroll_to_plot()
+        self._position_rulers()
         self.viewport().update()
+        self._refresh_overlay()
         self._refresh_rulers()
+        self.zoomChanged.emit()
         return True
 
     def has_selection(self) -> bool:
@@ -914,8 +946,24 @@ class DotplotCanvas(QGraphicsView):
 
     def clear_selection(self) -> None:
         self._selection = None
-        self._drag_start = self._drag_now = None
+        self._drag_start_vp = self._drag_now_vp = None
         self._refresh_overlay()
+
+    def _viewport_event_pos(self, event) -> QPoint:
+        """Mouse/wheel position in viewport coordinates for ``mapToScene``.
+
+        Events arrive through the viewport (typical) with viewport-local coords.
+        If the originating widget is the view itself, map into the viewport so
+        ruler margins are not treated as plot pixels.
+        """
+        pos = event.position().toPoint()
+        widget = event.widget() if hasattr(event, "widget") else None
+        if widget is self:
+            return self.viewport().mapFrom(self, pos)
+        return pos
+
+    def _clear_drag(self) -> None:
+        self._drag_start_vp = self._drag_now_vp = None
 
     def selection_sequence_coords(self) -> tuple[int, int, int, int] | None:
         """Return the current drag-box as 1-based inclusive (x1, x2, y1, y2), or None."""
@@ -995,8 +1043,57 @@ class DotplotCanvas(QGraphicsView):
             self.verticalScrollBar().value() + int(round(shifted.y() - origin.y()))
         )
 
+    def _pan_scene_by(self, dx: float, dy: float) -> None:
+        """Shift the view by ``dx``/``dy`` scene (bp) units."""
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            return
+        origin = self.mapFromScene(QPointF(0, 0))
+        shifted = self.mapFromScene(QPointF(dx, dy))
+        self.horizontalScrollBar().setValue(
+            self.horizontalScrollBar().value() + int(round(shifted.x() - origin.x()))
+        )
+        self.verticalScrollBar().setValue(
+            self.verticalScrollBar().value() + int(round(shifted.y() - origin.y()))
+        )
+
+    def _ensure_selection_visible(self) -> None:
+        """Pan so the current selection stays inside the viewport when possible."""
+        sel = self._selection
+        if sel is None or not self._length:
+            return
+        if sel.width() < 1.0 or sel.height() < 1.0:
+            return
+        vis = self.mapToScene(self.viewport().rect()).boundingRect()
+        if vis.width() < 1e-6 or vis.height() < 1e-6:
+            return
+        # Selection larger than the view: keep its centre on screen.
+        if sel.width() >= vis.width() or sel.height() >= vis.height():
+            self.centerOn(sel.center())
+            return
+        dx = dy = 0.0
+        if sel.left() < vis.left():
+            dx = sel.left() - vis.left()
+        elif sel.right() > vis.right():
+            dx = sel.right() - vis.right()
+        if sel.top() < vis.top():
+            dy = sel.top() - vis.top()
+        elif sel.bottom() > vis.bottom():
+            dy = sel.bottom() - vis.bottom()
+        self._pan_scene_by(dx, dy)
+
+    def _selection_anchor_vp(self) -> QPoint | None:
+        """Viewport point under the selection centre, if a selection exists."""
+        if not self.has_selection() or self._selection is None:
+            return None
+        pt = self.mapFromScene(self._selection.center())
+        return QPoint(pt)
+
     def _apply_zoom(self, factor: float, anchor: QPoint | None = None) -> None:
-        """Zoom by ``factor`` about ``anchor`` (viewport coords), then clamp."""
+        """Zoom by ``factor`` about ``anchor`` (viewport coords), then clamp.
+
+        When a rectangular selection exists, zoom about its centre and pan so
+        the selection stays visible in the window.
+        """
         if self._item is None or not self._length:
             return
         current = self._uniform_scale()
@@ -1006,7 +1103,11 @@ class DotplotCanvas(QGraphicsView):
         if abs(actual - 1.0) < 1e-9:
             return
 
-        if anchor is None:
+        # Prefer the selection so zooming in/out never loses the highlight.
+        sel_anchor = self._selection_anchor_vp()
+        if sel_anchor is not None:
+            anchor = sel_anchor
+        elif anchor is None:
             anchor = self.viewport().rect().center()
 
         # Manual under-cursor zoom. Do not combine with AnchorUnderMouse —
@@ -1024,17 +1125,64 @@ class DotplotCanvas(QGraphicsView):
             self.verticalScrollBar().value() + int(round(offset.y()))
         )
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self._ensure_selection_visible()
         self._clamp_scroll_to_plot()
+        # Clamping to the plot can push the selection off-screen again on edges.
+        self._ensure_selection_visible()
+        self._clamp_scroll_to_plot()
+        self._position_rulers()
         self.viewport().update()
+        self._refresh_overlay()
         self._refresh_rulers()
+        self.zoomChanged.emit()
 
     def zoom_by(self, factor: float) -> None:
-        """Zoom about the centre of the view (used by the +/- buttons)."""
+        """Zoom about the selection (if any) or the centre of the view."""
         self._apply_zoom(factor, self.viewport().rect().center())
 
     def zoom_at(self, factor: float, view_pos) -> None:
         """Zoom keeping the scene point under ``view_pos`` fixed."""
         self._apply_zoom(factor, view_pos)
+
+    def zoom_slider_value(self) -> int:
+        """Map current scale to 0–100 (0 = fit, 100 = max zoom)."""
+        import math
+
+        fit = float(self._fit_scale or 0.0)
+        current = float(self._uniform_scale())
+        if fit <= 0 or current <= 0:
+            return 0
+        if current <= fit * 1.001:
+            return 0
+        max_s = float(_MAX_PIXELS_PER_BASE)
+        if current >= max_s * 0.999:
+            return 100
+        lo = math.log(fit)
+        hi = math.log(max_s)
+        if hi <= lo:
+            return 0
+        t = (math.log(current) - lo) / (hi - lo)
+        return int(round(max(0.0, min(100.0, t * 100.0))))
+
+    def set_zoom_slider_value(self, value: int) -> None:
+        """Set scale from a 0–100 slider (0 = fit, 100 = max zoom)."""
+        import math
+
+        value = max(0, min(100, int(value)))
+        if value <= 0 or self._fit_scale <= 0:
+            self.reset_zoom()
+            return
+        if not self._length:
+            return
+        fit = float(self._fit_scale)
+        max_s = float(_MAX_PIXELS_PER_BASE)
+        t = value / 100.0
+        target = math.exp(math.log(fit) + t * (math.log(max_s) - math.log(fit)))
+        target = min(max_s, max(fit, target))
+        current = self._uniform_scale()
+        if current <= 0:
+            return
+        self._apply_zoom(target / current, self.viewport().rect().center())
 
     @staticmethod
     def _a4_page_rect(dpi: int) -> QRect:
@@ -1350,7 +1498,9 @@ class DotplotCanvas(QGraphicsView):
             steps = int(self._wheel_zoom_accum / PREVIEW_WHEEL_DELTA_PER_STEP)
             if steps != 0:
                 self._wheel_zoom_accum -= steps * PREVIEW_WHEEL_DELTA_PER_STEP
-                self._apply_zoom(_ZOOM_STEP ** steps, event.position().toPoint())
+                self._apply_zoom(
+                    _ZOOM_STEP ** steps, self._viewport_event_pos(event)
+                )
             event.accept()
             return
 
@@ -1386,13 +1536,15 @@ class DotplotCanvas(QGraphicsView):
                 steps = int(self._pinch_accum / _PINCH_DELTA_PER_STEP)
                 if steps != 0:
                     self._pinch_accum -= steps * _PINCH_DELTA_PER_STEP
-                    self._apply_zoom(_ZOOM_STEP ** steps, event.position().toPoint())
+                    self._apply_zoom(
+                        _ZOOM_STEP ** steps, self._viewport_event_pos(event)
+                    )
                 event.accept()
                 return True
         return super().viewportEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        pos = event.position().toPoint()
+        pos = self._viewport_event_pos(event)
         self._press_pos = pos
         if self._item is None:
             super().mousePressEvent(event)
@@ -1415,17 +1567,19 @@ class DotplotCanvas(QGraphicsView):
                 self._zoom_drag_accum = 0.0
                 self.setCursor(Qt.CursorShape.SizeVerCursor)
                 return
-            # Click-drag draws a selection rectangle.
+            # Click-drag draws a selection rectangle (viewport pixels).
             self._selection = None
-            self._drag_start = self.mapToScene(pos)
-            self._drag_now = self._drag_start
+            self._drag_start_vp = pos
+            self._drag_now_vp = pos
+            self._cursor_vp = pos
+            self._cursor_pos = self.mapToScene(pos)
             self._refresh_overlay()
             return
 
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        pos = event.position().toPoint()
+        pos = self._viewport_event_pos(event)
         if self._zoom_dragging and self._zoom_drag_origin is not None:
             # Drag up → zoom in; drag down → zoom out (matches PNG preview).
             global_pos = QPointF(event.globalPosition())
@@ -1448,13 +1602,26 @@ class DotplotCanvas(QGraphicsView):
             self._refresh_overlay()
             self._refresh_rulers()
             return
-        super().mouseMoveEvent(event)
         if self._item is None:
+            super().mouseMoveEvent(event)
             return
+        self._cursor_vp = pos
         point = self.mapToScene(pos)
         self._cursor_pos = point
-        if self._drag_start is not None:
-            self._drag_now = point
+        if self._drag_start_vp is not None:
+            # Keep selection drag in viewport pixels so the highlight tracks the
+            # cursor even when zoomed; convert to scene only on release.
+            self._drag_now_vp = pos
+            self._refresh_overlay()
+            self._refresh_rulers()
+            x, y = int(point.x()), int(point.y())
+            if 0 <= x <= self._length and 0 <= y <= self._length:
+                self.positionChanged.emit(
+                    _scene_to_bp(x, length=self._length, offset=self._offset),
+                    _scene_to_bp(y, length=self._length, offset=self._offset),
+                )
+            return
+        super().mouseMoveEvent(event)
         # Overlay only — do not viewport().update() (that re-paints all hits).
         self._refresh_overlay()
         self._refresh_rulers()
@@ -1481,33 +1648,36 @@ class DotplotCanvas(QGraphicsView):
             self._press_pos = None
             # Tiny motion → click clears the selection (no accidental clear on pan).
             if press is not None:
-                moved = (event.position().toPoint() - press).manhattanLength()
+                moved = (self._viewport_event_pos(event) - press).manhattanLength()
                 if moved <= _CLICK_SLOP:
                     self._selection = None
-                    self._drag_start = self._drag_now = None
+                    self._clear_drag()
                     self._refresh_overlay()
             return
         super().mouseReleaseEvent(event)
         if self._item is None or self._press_pos is None:
-            self._drag_start = self._drag_now = None
+            self._clear_drag()
             return
-        released = event.position().toPoint()
+        released = self._viewport_event_pos(event)
         moved = (released - self._press_pos).manhattanLength()
         self._press_pos = None
 
         if moved <= _CLICK_SLOP:
             # A plain click only clears the selection; it never navigates.
-            self._drag_start = self._drag_now = None
+            self._clear_drag()
             self._selection = None
             self._refresh_overlay()
             return
 
-        if self._drag_start is not None and self._drag_now is not None:
-            rect = QRectF(self._drag_start, self._drag_now).normalized()
-            self._drag_start = self._drag_now = None
-            bounds = QRectF(0, 0, self._length, self._length)
-            rect = rect.intersected(bounds)
-            if rect.width() >= 1 and rect.height() >= 1:
+        if self._drag_start_vp is not None and self._drag_now_vp is not None:
+            # Convert the pixel rubber band into scene (bp) coordinates once.
+            a = self.mapToScene(self._drag_start_vp)
+            b = self.mapToScene(self._drag_now_vp)
+            self._clear_drag()
+            rect = QRectF(a, b).normalized()
+            bounds = QRectF(0.0, 0.0, float(self._length), float(self._length))
+            rect = _ensure_min_bp_rect(rect.intersected(bounds), bounds)
+            if rect.width() >= _MIN_SELECTION_BP and rect.height() >= _MIN_SELECTION_BP:
                 self._selection = rect
                 self._refresh_overlay()
                 self.rectSelected.emit(
@@ -1517,11 +1687,12 @@ class DotplotCanvas(QGraphicsView):
                     int(rect.bottom()) + self._offset,
                 )
             return
-        self._drag_start = self._drag_now = None
+        self._clear_drag()
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         super().leaveEvent(event)
         self._cursor_pos = None
+        self._cursor_vp = None
         self._refresh_overlay()
         self._refresh_rulers()
 
@@ -1554,117 +1725,42 @@ class DotplotPanel(QWidget):
         self._mode = "fasta"
         self._alignments = None
 
-        self._word = QSpinBox(self)
-        self._word.setRange(MIN_WORD_SIZE, MAX_WORD_SIZE)
-        self._word.setValue(DEFAULT_WORD_SIZE)
-        self._word.setToolTip(
-            "Length of the exact match used to place a dot. Larger = stricter "
-            "and faster; smaller = more sensitive and noisier."
-        )
-        self._word.setFixedWidth(70)
+        # Parameter controls live on the right Display rail.
+        self._rail = DotplotRail(self)
+        self._word = self._rail.word
+        self._reverse = self._rail.reverse
+        self._line_width = self._rail.line_width
+        self._line_width_label = self._rail.line_width_label
+        self._identity = self._rail.identity
+        self._min_len = self._rail.min_len
+        self._seed_freq = self._rail.seed_freq
+        self._region_start = self._rail.region_start
+        self._region_size = self._rail.region_size
+        self._region_start_label = self._rail.region_start_label
+        self._region_size_label = self._rail.region_size_label
+        self._pair_combo = self._rail.pair_combo
+        self._pair_label = self._rail.pair_label
+        self._sequence_combo = self._rail.sequence_combo
+        self._sequence_label = self._rail.sequence_label
+        self._filter_len = self._rail.filter_len
+        self._filter_len_label = self._rail.filter_len_label
+        self._word_label = self._rail.word_label
+        self._identity_label = self._rail.identity_label
+        self._min_len_label = self._rail.min_len_label
+        self._seed_freq_label = self._rail.seed_freq_label
+        self._compute_btn = self._rail.compute_btn
+        self._cancel_btn = self._rail.cancel_btn
+        self._zoom_out_btn = self._rail.zoom_out_btn
+        self._zoom_in_btn = self._rail.zoom_in_btn
+        self._reset_btn = self._rail.fit_btn
+        self._zoom_select_btn = self._rail.select_btn
+        self._pdf_btn = self._rail.export_btn
+        self._sel_row = self._rail.sel_row
+        self._sel_x = self._rail.sel_x
+        self._sel_y = self._rail.sel_y
+        self._view_x_btn = self._rail.view_x_btn
+        self._view_y_btn = self._rail.view_y_btn
 
-        self._reverse = QCheckBox("Show reverse", self)
-        self._reverse.setChecked(True)
-        self._reverse.setToolTip(
-            "Show reverse-strand hits (inverted repeats, TIRs, hairpins) "
-            "as anti-diagonal lines."
-        )
-
-        self._line_width = QSpinBox(self)
-        self._line_width.setRange(_MIN_LINE_WIDTH_STEP, _MAX_LINE_WIDTH_STEP)
-        self._line_width.setValue(_DEFAULT_LINE_WIDTH_STEP)
-        self._line_width.setFixedWidth(55)
-        self._line_width.setToolTip(
-            "Match and self-diagonal thickness.\n"
-            "Steps 1–15 use a fine gradient "
-            f"({_LINE_WIDTH_PX_MIN:g}–{_LINE_WIDTH_PX_MAX:g} screen pixels)."
-        )
-        self._line_width_label = QLabel("Line width:", self)
-
-        # FastGA controls: only meaningful for the large-sequence engine.
-        self._identity = QDoubleSpinBox(self)
-        self._identity.setRange(0.5, 1.0)
-        self._identity.setSingleStep(0.05)
-        self._identity.setDecimals(2)
-        self._identity.setValue(DEFAULT_MIN_IDENTITY)
-        self._identity.setFixedWidth(70)
-        self._identity.setToolTip("Minimum alignment identity reported by FastGA.")
-
-        self._min_len = QSpinBox(self)
-        # FastGA rejects values below its seed/chain thresholds: alignments must
-        # contain a 40 bp seed and chains must cover at least 85 bases, so a
-        # very small -l simply fails. 100 is FastGA's own default.
-        self._min_len.setRange(100, 100_000)
-        self._min_len.setSingleStep(50)
-        self._min_len.setValue(DEFAULT_MIN_LENGTH)
-        self._min_len.setFixedWidth(90)
-        self._min_len.setToolTip(
-            "Shortest alignment FastGA will report, in bp.\n"
-            "Cannot go below 100: alignments must contain a seed, and FastGA "
-            "rejects shorter limits.\n"
-            "Raise it on satellite arrays, where short matches swamp the plot."
-        )
-
-        self._seed_freq = QSpinBox(self)
-        self._seed_freq.setRange(1, MAX_SEED_FREQ)
-        self._seed_freq.setValue(DEFAULT_SEED_FREQ)
-        self._seed_freq.setSingleStep(50)
-        self._seed_freq.setFixedWidth(90)
-        self._seed_freq.setToolTip(
-            "FastGA's -f: seeds occurring more often than this are discarded as "
-            "'repetitive' before alignment.\n"
-            "FastGA's own default is 10, which removes satellite arrays entirely "
-            "-- every monomer k-mer occurs far more than 10 times.\n"
-            "Raise it to see repeat structure; higher values are slower."
-        )
-
-        self._region_start = QSpinBox(self)
-        self._region_start.setRange(1, 2_000_000_000)
-        self._region_start.setValue(1)
-        self._region_start.setGroupSeparatorShown(True)
-        self._region_start.setFixedWidth(120)
-        self._region_start.setToolTip("First base of the window to plot.")
-
-        self._region_size = QSpinBox(self)
-        self._region_size.setRange(1_000, 5_000_000)
-        self._region_size.setValue(200_000)
-        self._region_size.setSingleStep(50_000)
-        self._region_size.setGroupSeparatorShown(True)
-        self._region_size.setFixedWidth(120)
-        self._region_size.setToolTip(
-            "How many bases to plot from the start position.\n"
-            "A whole scaffold cannot be plotted at small word sizes -- the "
-            "match count grows with the square of the repeat copy number -- "
-            "but a window of a few hundred kb is instant."
-        )
-
-        self._region_start_label = QLabel("From:", self)
-        self._region_size_label = QLabel("Window:", self)
-
-        self._pair_combo = QComboBox(self)
-        # Long pair labels live in the popup; keep the closed control compact.
-        self._pair_combo.setFixedWidth(180)
-        self._pair_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self._pair_combo.setMinimumContentsLength(8)
-        self._pair_combo.setToolTip(
-            "Which sequence pair to plot. 'All sequences' lays every query and "
-            "target end to end, with separators between them."
-        )
-        self._pair_label = QLabel("Compare:", self)
-
-        # Multi-FASTA / MSA: pick which record's self-dotplot to show.
-        self._sequence_combo = QComboBox(self)
-        self._sequence_combo.setFixedWidth(180)
-        self._sequence_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self._sequence_combo.setMinimumContentsLength(8)
-        self._sequence_combo.setToolTip(
-            "Which sequence to show as a self-dotplot."
-        )
-        self._sequence_label = QLabel("Sequence:", self)
         # Ids for the Sequence picker; sequence text is loaded lazily.
         self._sequence_ids: list[str] = []
         self._sequence_cache: dict[str, str] = {}
@@ -1674,76 +1770,6 @@ class DotplotPanel(QWidget):
         self._ungap_for_plot = False
         # When ungapping for MSA: 0-based gapped index of each ungapped residue.
         self._coord_keep: list[int] | None = None
-
-        # For an alignment file there is no k-mer step to tune, so the
-        # equivalent of word size is which alignments are drawn at all.
-        self._filter_len = QSpinBox(self)
-        self._filter_len.setRange(0, 10_000_000)
-        self._filter_len.setValue(0)
-        self._filter_len.setSingleStep(100)
-        self._filter_len.setGroupSeparatorShown(True)
-        self._filter_len.setFixedWidth(72)
-        self._filter_len.setToolTip(
-            "Hide alignments shorter than this, in bp.\n"
-            "0 shows everything. Raise it to strip short, noisy matches the "
-            "way a larger word size would when computing a dotplot."
-        )
-        self._filter_len_label = QLabel("Min length:", self)
-
-        self._identity_label = QLabel("Min identity:", self)
-        self._min_len_label = QLabel("Min length:", self)
-        self._seed_freq_label = QLabel("Repeat cutoff:", self)
-
-        self._zoom_out_btn = QToolButton(self)
-        self._zoom_out_btn.setText("−")
-        self._zoom_out_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._zoom_out_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._zoom_out_btn.setToolTip(
-            "Zoom out (Shift+scroll, Shift+drag, or pinch)"
-        )
-
-        self._zoom_in_btn = QToolButton(self)
-        self._zoom_in_btn.setText("+")
-        self._zoom_in_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._zoom_in_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._zoom_in_btn.setToolTip(
-            "Zoom in (Shift+scroll, Shift+drag, or pinch)"
-        )
-
-        self._reset_btn = QPushButton("Fit", self)
-        self._reset_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._reset_btn.setToolTip("Fit the whole plot in the view")
-
-        self._zoom_select_btn = QPushButton("Select", self)
-        self._zoom_select_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._zoom_select_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._zoom_select_btn.setToolTip(
-            "Zoom to the selected region (drag a rectangle on the plot first)"
-        )
-
-        self._pdf_btn = QPushButton("Export", self)
-        self._pdf_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._pdf_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._pdf_btn.setToolTip(
-            "Export the current view as PDF, PNG, or SVG"
-        )
-
-        self._cancel_btn = QToolButton(self)
-        self._cancel_btn.setText("Cancel")
-        self._cancel_btn.setAutoRaise(True)
-        self._cancel_btn.hide()
-
-        # FastGA on a large genome takes minutes, so it is never started just
-        # because the tab was opened — the user must click this button.
-        self._compute_btn = QToolButton(self)
-        self._compute_btn.setText("Run FastGA")
-        self._compute_btn.setAutoRaise(True)
-        self._compute_btn.setToolTip(
-            "Run FastGA to build a self-dotplot of this long sequence. "
-            "This can take several minutes on large chromosomes."
-        )
-        self._compute_btn.hide()
 
         self._thread: QThread | None = None
         self._worker: _FastgaWorker | None = None
@@ -1758,74 +1784,6 @@ class DotplotPanel(QWidget):
         self._status.setTextFormat(Qt.TextFormat.RichText)
         self._status.setContentsMargins(0, 2, 6, 2)
 
-        self._sel_row = QWidget(self)
-        sel_layout = QHBoxLayout(self._sel_row)
-        sel_layout.setContentsMargins(0, 0, 0, 0)
-        sel_layout.setSpacing(4)
-        self._sel_x = QLabel("", self._sel_row)
-        self._sel_x.setStyleSheet("color: palette(mid);")
-        self._view_x_btn = QPushButton("View", self._sel_row)
-        self._view_x_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._view_x_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._view_x_btn.setToolTip(
-            "Open Annotation and highlight the selected x (horizontal) range"
-        )
-        self._sel_sep = QLabel("·", self._sel_row)
-        self._sel_sep.setStyleSheet("color: palette(mid);")
-        self._sel_y = QLabel("", self._sel_row)
-        self._sel_y.setStyleSheet("color: palette(mid);")
-        self._view_y_btn = QPushButton("View", self._sel_row)
-        self._view_y_btn.setFixedHeight(ZOOM_CONTROL_HEIGHT)
-        self._view_y_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._view_y_btn.setToolTip(
-            "Open Annotation and highlight the selected y (vertical) range"
-        )
-        sel_layout.addWidget(self._sel_x)
-        sel_layout.addWidget(self._view_x_btn)
-        sel_layout.addWidget(self._sel_sep)
-        sel_layout.addWidget(self._sel_y)
-        sel_layout.addWidget(self._view_y_btn)
-        self._sel_row.hide()
-
-        bar = QHBoxLayout()
-        bar.setContentsMargins(6, 4, 6, 4)
-        bar.setSpacing(8)
-        self._word_label = QLabel("Word size:", self)
-        bar.addWidget(self._pair_label)
-        bar.addWidget(self._pair_combo)
-        bar.addWidget(self._sequence_label)
-        bar.addWidget(self._sequence_combo)
-        bar.addWidget(self._filter_len_label)
-        bar.addWidget(self._filter_len)
-        bar.addWidget(self._region_start_label)
-        bar.addWidget(self._region_start)
-        bar.addWidget(self._region_size_label)
-        bar.addWidget(self._region_size)
-        bar.addWidget(self._word_label)
-        bar.addWidget(self._word)
-        bar.addWidget(self._reverse)
-        bar.addWidget(self._line_width_label)
-        bar.addWidget(self._line_width)
-        bar.addWidget(self._identity_label)
-        bar.addWidget(self._identity)
-        bar.addWidget(self._min_len_label)
-        bar.addWidget(self._min_len)
-        bar.addWidget(self._seed_freq_label)
-        bar.addWidget(self._seed_freq)
-        bar.addWidget(self._zoom_out_btn)
-        bar.addWidget(self._zoom_in_btn)
-        bar.addWidget(self._reset_btn)
-        bar.addWidget(self._zoom_select_btn)
-        bar.addWidget(self._pdf_btn)
-        # Selection readout stays after Export (not in the title row).
-        bar.addWidget(self._sel_row)
-        bar.addWidget(self._compute_btn)
-        bar.addWidget(self._cancel_btn)
-        bar.addStretch(1)
-
-        self._controls_bar = QWidget(self)
-        self._controls_bar.setLayout(bar)
-
         self._title = QLabel("", self)
         self._title.setContentsMargins(_RULER_LEFT, 2, 6, 2)
         title_font = QFont(self.font())
@@ -1834,21 +1792,28 @@ class DotplotPanel(QWidget):
         self._title.hide()
 
         self._canvas = DotplotCanvas(self)
-        self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        left = QWidget(self)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 8, 0)
         title_row.setSpacing(8)
         title_row.addWidget(self._title, 0, Qt.AlignmentFlag.AlignVCenter)
         title_row.addWidget(self._status, 0, Qt.AlignmentFlag.AlignVCenter)
         title_row.addStretch(1)
+        left_layout.addLayout(title_row)
+        left_layout.addWidget(self._canvas, stretch=1)
 
-        layout.addWidget(self._controls_bar)
-        layout.addLayout(title_row)
-        layout.addWidget(self._canvas, stretch=1)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(left, stretch=1)
+        layout.addWidget(self._rail, 0)
 
         self._word.valueChanged.connect(self._recompute)
         self._reverse.toggled.connect(self._recompute)
@@ -1859,20 +1824,30 @@ class DotplotPanel(QWidget):
         self._region_start.valueChanged.connect(self._recompute)
         self._region_size.valueChanged.connect(self._recompute)
         self._pair_combo.currentIndexChanged.connect(self._show_selected_pair)
-        self._sequence_combo.currentIndexChanged.connect(self._on_sequence_choice_changed)
+        self._sequence_combo.currentIndexChanged.connect(
+            self._on_sequence_choice_changed
+        )
         self._filter_len.valueChanged.connect(self._recompute)
         self._reset_btn.clicked.connect(self._canvas.reset_zoom)
         self._zoom_select_btn.clicked.connect(self._zoom_to_selection)
-        self._view_x_btn.clicked.connect(lambda: self._view_axis_in_annotation("x"))
-        self._view_y_btn.clicked.connect(lambda: self._view_axis_in_annotation("y"))
+        self._view_x_btn.clicked.connect(
+            lambda: self._view_axis_in_annotation("x")
+        )
+        self._view_y_btn.clicked.connect(
+            lambda: self._view_axis_in_annotation("y")
+        )
         self._zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_by(_ZOOM_STEP))
-        self._zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_by(1 / _ZOOM_STEP))
+        self._zoom_out_btn.clicked.connect(
+            lambda: self._canvas.zoom_by(1 / _ZOOM_STEP)
+        )
         self._pdf_btn.clicked.connect(self._export_dotplot)
-        self._cancel_btn.clicked.connect(self._cancel_running)
-        self._compute_btn.clicked.connect(self._start_requested_compute)
+        self._rail.zoomSliderChanged.connect(self._on_zoom_slider_changed)
+        self._rail.cancelClicked.connect(self._cancel_running)
+        self._rail.computeClicked.connect(self._start_requested_compute)
         self._sync_engine_controls()
         self._canvas.positionChanged.connect(self._on_position)
         self._canvas.rectSelected.connect(self._on_rect_selected)
+        self._canvas.zoomChanged.connect(self._sync_zoom_slider)
 
     def set_path(self, path: Path) -> None:
         resolved = path.expanduser().resolve()
@@ -1906,6 +1881,17 @@ class DotplotPanel(QWidget):
         self._set_status_text("")
         self._compute_btn.hide()
         self._sync_engine_controls()
+        self._rail.set_selection_ranges()
+
+    def refresh_sequence_summary(self) -> None:
+        """No-op: Summary was removed from the Display rail."""
+        return
+
+    def _on_zoom_slider_changed(self, value: int) -> None:
+        self._canvas.set_zoom_slider_value(int(value))
+
+    def _sync_zoom_slider(self) -> None:
+        self._rail.set_zoom_slider_value(self._canvas.zoom_slider_value())
 
     def set_record_choices(
         self,
@@ -2156,21 +2142,28 @@ class DotplotPanel(QWidget):
                 self._seed_freq_label, self._seed_freq,
             ):
                 widget.setVisible(False)
-            multi = self._alignments is not None and not self._alignments.is_single_pair()
+            multi = (
+                self._alignments is not None
+                and not self._alignments.is_single_pair()
+            )
             self._pair_label.setVisible(multi)
             self._pair_combo.setVisible(multi)
             self._sequence_label.setVisible(False)
             self._sequence_combo.setVisible(False)
             self._filter_len_label.setVisible(True)
             self._filter_len.setVisible(True)
-            # FastGA / PAF previews: no From/Window; View select stays hidden
-            # (x/y is appended to the status line for self / pair compares).
+            # FastGA / PAF previews: no From/Window; x/y goes on the status line.
             for widget in (
                 self._region_start_label, self._region_start,
                 self._region_size_label, self._region_size,
             ):
                 widget.setVisible(False)
             self._sel_row.hide()
+            self._compute_btn.hide()
+            self._line_width_label.setVisible(True)
+            self._line_width.setVisible(True)
+            self._rail.sync_control_visibility(view=True, params=True)
+            self._rail.setVisible(True)
             return
 
         self._pair_label.setVisible(False)
@@ -2180,15 +2173,30 @@ class DotplotPanel(QWidget):
         self._sequence_combo.setVisible(multi_seq)
         self._filter_len_label.setVisible(False)
         self._filter_len.setVisible(False)
-        # Status-only note for long sequences: hide Line width / zoom / Export.
+        self._sel_row.show()
+        # Status-only note for long sequences: hide zoom / Export / plot params.
         hide_bar = self._too_long_prompt_active
-        self._controls_bar.setVisible(not hide_bar)
         if hide_bar:
             self._compute_btn.hide()
             self._title.hide()
+            for widget in (
+                self._word_label, self._word, self._reverse,
+                self._region_start_label, self._region_start,
+                self._region_size_label, self._region_size,
+                self._line_width_label, self._line_width,
+                self._identity_label, self._identity,
+                self._min_len_label, self._min_len,
+                self._seed_freq_label, self._seed_freq,
+            ):
+                widget.setVisible(False)
+            # Multi-record: keep Sequence picker only.
+            show_params = multi_seq
+            self._rail.sync_control_visibility(view=False, params=show_params)
+            self._rail.setVisible(show_params)
             return
+        show_kmer = not self._is_large()
         for widget in (self._word_label, self._word, self._reverse):
-            widget.setVisible(not self._is_large())
+            widget.setVisible(show_kmer)
         for widget in (
             self._region_start_label,
             self._region_start,
@@ -2205,6 +2213,10 @@ class DotplotPanel(QWidget):
             self._seed_freq,
         ):
             widget.setVisible(False)
+        self._line_width_label.setVisible(True)
+        self._line_width.setVisible(True)
+        self._rail.sync_control_visibility(view=True, params=True)
+        self._rail.setVisible(True)
 
     def _current_key(self):
         active = self._active_sequence_id or ""
@@ -2545,12 +2557,14 @@ class DotplotPanel(QWidget):
 
     def _clear_selection_chrome(self) -> None:
         self._selection_xy = None
-        self._sel_x.clear()
-        self._sel_y.clear()
-        self._sel_row.hide()
-        if self._mode == "alignment" and self._status_base:
-            self._status.setTextFormat(Qt.TextFormat.RichText)
-            self._status.setText(self._status_base)
+        self._rail.set_selection_ranges()
+        if self._mode == "alignment":
+            self._sel_row.hide()
+            if self._status_base:
+                self._status.setTextFormat(Qt.TextFormat.RichText)
+                self._status.setText(self._status_base)
+        else:
+            self._sel_row.show()
 
     def _set_status_text(
         self,
@@ -2601,8 +2615,10 @@ class DotplotPanel(QWidget):
                     f"y <b>{y1:,}</b>–<b>{y2:,}</b>"
                 )
             return
-        self._sel_x.setText(f"x {x1:,}-{x2:,}")
-        self._sel_y.setText(f"y {y1:,}-{y2:,}")
+        self._rail.set_selection_ranges(
+            x=(int(x1), int(x2)),
+            y=(int(y1), int(y2)),
+        )
         self._sel_row.show()
 
     def _zoom_to_selection(self) -> None:

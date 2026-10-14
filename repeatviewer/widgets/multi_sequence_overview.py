@@ -185,6 +185,7 @@ _DEFAULT_MSA_SEQUENCE_DISTANCE = 1
 _DEFAULT_MULTI_SEQUENCE_DISTANCE = 2
 _DEFAULT_MSA_COLUMN_DISTANCE = 0
 _OVERVIEW_DISPLAY_SETTINGS_GROUP = "annotation_overview_display"
+_MSA_DIFF_STANDARD_BY_PATH_GROUP = "msa_diff_standard_by_path"
 _FEATURE_UNDO_LIMIT = 32
 
 
@@ -344,6 +345,11 @@ def _bar_color(widget: QWidget) -> QColor:
 def _msa_plain_bar_color(widget: QWidget) -> QColor:
     """Light grey for MSA overview when scheme leaves a residue uncoloured."""
     return QColor("#b8b8b8") if _is_dark(widget) else QColor("#d0d0d0")
+
+
+def _msa_gap_diff_color(widget: QWidget) -> QColor:
+    """Fill for a gap that differs from the Color vs standard reference."""
+    return QColor("#c0392b") if _is_dark(widget) else QColor("#e74c3c")
 
 
 def _split_tracks_by_source_pref() -> bool:
@@ -1123,6 +1129,8 @@ class _BarsCanvas(QWidget):
         self._msa_color_mode = MSA_COLOR_ALL_BACKGROUNDS
         self._msa_divergence_threshold = DEFAULT_MSA_DIVERGENCE_THRESHOLD
         self._msa_col_freqs: list[dict[str, float]] = []
+        # Explicit Color vs standard pin by record id (None → first sequence).
+        self._msa_diff_standard_id: str | None = None
         # Apply default track height → overview band pixels.
         self._apply_track_height_to_residue_band()
         self._sequence_row_gap = 0  # pixels between sequences (Others → Sequence distance)
@@ -1303,6 +1311,7 @@ class _BarsCanvas(QWidget):
         self._rebuild_packed_tracks()
         self._max_length = max((lengths.get(rid, 1) for rid in record_ids), default=1)
         self._selected_rows = set()
+        self._msa_diff_standard_id = None
         self._selected_feats = set()
         self._hover_feat = None
         self._region_sel = None
@@ -1358,6 +1367,7 @@ class _BarsCanvas(QWidget):
         self._rebuild_packed_tracks()
         self._max_length = max(1, width)
         self._selected_rows = set()
+        self._msa_diff_standard_id = None
         self._selected_feats = set()
         self._hover_feat = None
         self._region_sel = None
@@ -1756,6 +1766,7 @@ class _BarsCanvas(QWidget):
             self._original_index = list(range(n))
         inv = {old: new for new, old in enumerate(order)}
         self._selected_rows = {inv[r] for r in self._selected_rows if r in inv}
+        # Standard is pinned by record id — survives row reordering.
         if self._regional_rows is not None:
             self._regional_rows = {inv[r] for r in self._regional_rows if r in inv}
         self._selected_feats = {
@@ -1833,6 +1844,32 @@ class _BarsCanvas(QWidget):
         if new == self._msa_color_mode:
             return
         self._msa_color_mode = new
+        # Keep an explicit standard pin across mode switches for this MSA.
+        if self._msa_mode:
+            self._clear_drag_paint_cache()
+            self._invalidate_msa_layer_cache()
+            self.update()
+
+    def set_msa_diff_standard_row(self, row: int | None) -> None:
+        """Pin the Color vs standard reference by row (``None`` clears the pin)."""
+        if row is None:
+            self.set_msa_diff_standard_id(None)
+            return
+        r = int(row)
+        if not (0 <= r < len(self._record_ids)):
+            return
+        self.set_msa_diff_standard_id(self._record_ids[r])
+
+    def set_msa_diff_standard_id(self, record_id: str | None) -> None:
+        """Pin the Color vs standard reference by sequence id."""
+        new = str(record_id).strip() if record_id else None
+        if new == "":
+            new = None
+        if new is not None and new not in self._record_ids:
+            return
+        if new == self._msa_diff_standard_id:
+            return
+        self._msa_diff_standard_id = new
         if self._msa_mode:
             self._clear_drag_paint_cache()
             self._invalidate_msa_layer_cache()
@@ -1875,23 +1912,74 @@ class _BarsCanvas(QWidget):
                 cache[key.lower()] = (bg, fg)
         self._msa_qcolors = cache
 
-    def _msa_should_fill_background(self, col: int, ch: str) -> bool:
+    def msa_diff_standard_id(self) -> str | None:
+        """Pinned Color vs standard record id, or ``None`` if unset."""
+        rid = self._msa_diff_standard_id
+        if rid and rid in self._record_ids:
+            return str(rid)
+        return None
+
+    def msa_diff_standard_row(self) -> int | None:
+        """Active Color vs standard row (pinned, else first sequence)."""
+        return self._msa_standard_row()
+
+    def msa_diff_standard_is_pinned(self) -> bool:
+        """True when the user set an explicit standard for this MSA."""
+        return self.msa_diff_standard_id() is not None
+
+    def _msa_standard_row(self) -> int | None:
+        """Pinned Color vs standard row, else first sequence while in that mode."""
+        from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+
+        if self._msa_color_mode != MSA_COLOR_DIFF_FROM_SELECTED:
+            return None
+        if not self._msa_seqs or not self._record_ids:
+            return None
+        rid = self._msa_diff_standard_id
+        if rid:
+            try:
+                return int(self._record_ids.index(rid))
+            except ValueError:
+                self._msa_diff_standard_id = None
+        # No explicit standard yet → always the first sequence in this MSA.
+        return 0
+
+    def _msa_standard_residue(self, col: int) -> str | None:
+        std = self._msa_standard_row()
+        if std is None:
+            return None
+        seq = self._msa_seqs[std]
+        if not (0 <= col < len(seq)):
+            return None
+        return seq[col]
+
+    def _msa_should_fill_background(
+        self, col: int, ch: str, *, row: int | None = None
+    ) -> bool:
         """Whether the residue uses the scheme colour (vs overview light-grey).
 
-        Applies at overview and letter zoom. Gaps never fill.
+        Applies at overview and letter zoom. Gaps fill only in Color vs
+        selected when they differ from the standard.
         """
-        if ch in "-.":
+        from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+
+        if ch in "-." and self._msa_color_mode != MSA_COLOR_DIFF_FROM_SELECTED:
             return False
         freqs = (
             self._msa_col_freqs[col]
             if 0 <= col < len(self._msa_col_freqs)
             else None
         )
+        std = self._msa_standard_row()
+        is_ref = row is not None and std is not None and row == std
+        reference = self._msa_standard_residue(col) if std is not None else None
         return msa_residue_fill_background(
             self._msa_color_mode,
             residue=ch,
             column_freqs=freqs,
             threshold=self._msa_divergence_threshold,
+            reference_residue=reference,
+            is_reference_row=is_ref,
         )
 
     def _msa_residue_paint_pair(self, col: int, ch: str) -> tuple[QColor, QColor] | None:
@@ -1900,16 +1988,21 @@ class _BarsCanvas(QWidget):
             return None
         return self._msa_qcolors.get(ch)
 
-    def _msa_overview_fill_color(self, col: int, ch: str) -> QColor | None:
+    def _msa_overview_fill_color(
+        self, col: int, ch: str, *, row: int | None = None
+    ) -> QColor | None:
         """Solid fill for a zoomed-out MSA residue, or ``None`` for a gap.
 
         Scheme-coloured cells use the residue palette (or conservation
         greyscale). Cells the scheme leaves uncoloured use the same light
-        grey as multi-sequence overview bars.
+        grey as multi-sequence overview bars. Gap-vs-standard diffs use a
+        dedicated accent fill.
         """
         if ch in "-.":
+            if self._msa_should_fill_background(col, ch, row=row):
+                return _msa_gap_diff_color(self)
             return None
-        if self._msa_should_fill_background(col, ch):
+        if self._msa_should_fill_background(col, ch, row=row):
             pair = self._msa_residue_paint_pair(col, ch)
             if pair is not None:
                 return pair[0]
@@ -2589,7 +2682,7 @@ class _BarsCanvas(QWidget):
             self._sync_row_selection_chrome()
             return
         self._selected_rows = new
-        # Overlay chrome only — avoid full MSA residue repaint on name select.
+        # Overlay chrome only — Color vs standard is pinned separately.
         self._sync_row_selection_chrome()
         if cleared_region:
             self.regionSelectionChanged.emit(None)
@@ -3597,7 +3690,7 @@ class _BarsCanvas(QWidget):
                 if col >= max_len:
                     break
                 ch = seq[col] if col < len(seq) else "-"
-                fill = self._msa_overview_fill_color(col, ch)
+                fill = self._msa_overview_fill_color(col, ch, row=index)
                 run_start = px
                 px += 1
                 while px < px_right:
@@ -3608,7 +3701,7 @@ class _BarsCanvas(QWidget):
                     if col2 >= max_len:
                         break
                     ch2 = seq[col2] if col2 < len(seq) else "-"
-                    fill2 = self._msa_overview_fill_color(col2, ch2)
+                    fill2 = self._msa_overview_fill_color(col2, ch2, row=index)
                     if fill is None or fill2 is None:
                         if fill is not fill2:
                             break
@@ -3693,19 +3786,21 @@ class _BarsCanvas(QWidget):
                 if x > clip.right():
                     break
                 ch = seq[j] if j < len(seq) else "-"
-                fill_bg = self._msa_should_fill_background(j, ch)
+                fill_bg = self._msa_should_fill_background(j, ch, row=index)
                 paint_pair = self._msa_residue_paint_pair(j, ch)
                 overview_fill = (
                     None
                     if show_letters
-                    else self._msa_overview_fill_color(j, ch)
+                    else self._msa_overview_fill_color(j, ch, row=index)
                 )
                 run_end = j + 1
                 # Coalesce only when columns share one fill/colour (distance 0).
                 if not show_letters and self._column_distance <= 0:
                     while run_end < c1:
                         nxt = seq[run_end] if run_end < len(seq) else "-"
-                        nxt_fill = self._msa_overview_fill_color(run_end, nxt)
+                        nxt_fill = self._msa_overview_fill_color(
+                            run_end, nxt, row=index
+                        )
                         if overview_fill is None or nxt_fill is None:
                             if overview_fill is not nxt_fill:
                                 break
@@ -3719,20 +3814,55 @@ class _BarsCanvas(QWidget):
                 width = max(x_next - x, 1.0 if not show_letters else max(0.5, ppb * span))
                 cell = QRectF(x, y, width, float(residue_h))
                 if ch in "-.":
-                    # Gaps stay on the white canvas (no grey cell fill).
+                    # Gaps stay on the white canvas unless Color vs standard
+                    # marks them as differing from the standard.
                     if show_letters:
-                        gap_fg = (
-                            QColor("#d0d0d0")
-                            if _is_dark(self)
-                            else QColor("#666666")
+                        letter_cell = QRectF(
+                            x, y, max(0.5, ppb), float(residue_h)
                         )
-                        painter.setPen(gap_fg)
+                        if fill_bg:
+                            gap_fill = _msa_gap_diff_color(self)
+                            bg = _msa_letter_bg_rect(
+                                x,
+                                y,
+                                max(0.5, ppb),
+                                float(residue_h),
+                                letter_side=letter_side,
+                            )
+                            painter.fillRect(bg, gap_fill)
+                            from repeatviewer.widgets.residue_color_grid import (
+                                ResidueColorGrid,
+                            )
+
+                            painter.setPen(
+                                QColor(
+                                    ResidueColorGrid.contrast_text_color(gap_fill)
+                                )
+                            )
+                        else:
+                            gap_fg = (
+                                QColor("#d0d0d0")
+                                if _is_dark(self)
+                                else QColor("#666666")
+                            )
+                            painter.setPen(gap_fg)
                         painter.drawText(
-                            cell.toRect(),
+                            letter_cell.toRect(),
                             int(Qt.AlignmentFlag.AlignCenter),
                             "-",
                         )
                         painter.setPen(Qt.PenStyle.NoPen)
+                    elif overview_fill is not None:
+                        m = _bg_margin
+                        if m > 0 and (
+                            cell.width() > 2.0 * m + 0.5
+                            and cell.height() > 2.0 * m + 0.5
+                        ):
+                            painter.fillRect(
+                                cell.adjusted(m, m, -m, -m), overview_fill
+                            )
+                        else:
+                            painter.fillRect(cell, overview_fill)
                     else:
                         # Overview: thin backbone through gaps between residues.
                         y_mid = float(y) + float(residue_h) * 0.5
@@ -4302,6 +4432,30 @@ class _ScaleRuler(QWidget):
         painter.end()
 
 
+class _OverviewToolbarSlot(QWidget):
+    """Map toolbar host that never forces a wide minimum and clips paint overflow.
+
+    In split panes the −/+/Position/Select row can prefer a width wider than the
+    map column. Without a zero minimum and a clip mask, controls spill onto the
+    scale below and under the Display rail instead of being hidden by overflow.
+    """
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, self.minimumHeight() or ANNOTATION_TOOLBAR_RENDERED_HEIGHT)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(
+            max(0, self.width()),
+            self.height() or ANNOTATION_TOOLBAR_RENDERED_HEIGHT,
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # Clip children to this rect so a half-shown button cannot paint over
+        # the scale ruler or the Display rail beside the map.
+        self.setMask(QRegion(self.rect()))
+
+
 class MultiSequenceOverviewPanel(QWidget):
     """Annotation overview: names (left) | tracks + scale (right)."""
 
@@ -4315,9 +4469,15 @@ class MultiSequenceOverviewPanel(QWidget):
     # Display row order changed (Sorting) — Dotplot Sequence list should refresh.
     sequenceOrderChanged = Signal()
 
+    # Split/duplicate windows must shrink below rail+toolbar natural width;
+    # overflow and clipping handle the rest.
+    _MIN_PANEL_WIDTH = 160
+    _MIN_PANEL_HEIGHT = 120
+
     def __init__(self, fasta_path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumWidth(0)
         self._path = fasta_path.expanduser().resolve()
         self._record_ids: list[str] = []
         self._lengths: dict[str, int] = {}
@@ -4447,17 +4607,21 @@ class MultiSequenceOverviewPanel(QWidget):
 
         # Host for AnnotationZoomBar — above the complete overview map so its
         # controls start at the same left edge as the sequence names.
-        self._toolbar_slot = QWidget(self)
+        self._toolbar_slot = _OverviewToolbarSlot(self)
         self._toolbar_slot.setObjectName("OverviewMapToolbarSlot")
         self._toolbar_slot.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
+        self._toolbar_slot.setMinimumWidth(0)
         self._toolbar_slot.setFixedHeight(ANNOTATION_TOOLBAR_RENDERED_HEIGHT)
         self._toolbar_slot_layout = QHBoxLayout(self._toolbar_slot)
         # Match the single-sequence AnnotationMapToolbar exactly: its first
         # control begins at x=6 with no extra host inset.
         self._toolbar_slot_layout.setContentsMargins(0, 0, 0, 0)
         self._toolbar_slot_layout.setSpacing(0)
+        self._toolbar_slot_layout.setSizeConstraint(
+            QHBoxLayout.SizeConstraint.SetNoConstraint
+        )
         self._toolbar_slot.hide()
 
         names_col = QWidget(self)
@@ -4475,12 +4639,15 @@ class MultiSequenceOverviewPanel(QWidget):
         tracks_layout.addWidget(self._scale, 0)
         tracks_layout.addWidget(self._bars_scroll, 1)
 
+        names_col.setMinimumWidth(_NAME_COLUMN_MIN)
+        tracks_col.setMinimumWidth(40)
         self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self._splitter.addWidget(names_col)
         self._splitter.addWidget(tracks_col)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
-        self._splitter.setChildrenCollapsible(False)
+        # Allow narrow panes (split Preview); names floor is still _NAME_COLUMN_MIN.
+        self._splitter.setChildrenCollapsible(True)
         self._splitter.splitterMoved.connect(self._on_splitter_moved)
 
         # Toolbar spans both splitter columns.  The scale and sequence tracks
@@ -4547,9 +4714,14 @@ class MultiSequenceOverviewPanel(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        layout.setSizeConstraint(QHBoxLayout.SizeConstraint.SetNoConstraint)
         layout.addWidget(self._map_host, 1)
         layout.addWidget(map_rail_divider, 0)
         layout.addWidget(self._rail, 0)
+        self._map_host.setMinimumWidth(0)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self._MIN_PANEL_WIDTH, self._MIN_PANEL_HEIGHT)
 
     def _compute_name_width(self, viewport_width: int | None = None) -> int:
         """Keep names compact so the MSA + right control panel get more width."""
@@ -4586,6 +4758,11 @@ class MultiSequenceOverviewPanel(QWidget):
     def _on_rail_panel_collapsed_changed(self, _collapsed: bool) -> None:
         """Rail hide/show changes track width without resizing this widget."""
         self._schedule_viewport_refit()
+        bar = self._header_zoom_bar
+        hider = getattr(bar, "_overview_overflow", None) if bar is not None else None
+        if hider is not None:
+            # Map column width changes when the Display panel opens/closes.
+            QTimer.singleShot(0, hider.sync)
 
     def _schedule_viewport_refit(self) -> None:
         self._viewport_refit_timer.start()
@@ -4754,6 +4931,13 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.set_overview_mode(True)
         bar.show()
         self._toolbar_slot.show()
+        # Overflow must measure the map column, not the preferred toolbar width.
+        hider = getattr(bar, "_overview_overflow", None)
+        if hider is not None:
+            hider.add_width_source(self._toolbar_slot)
+            hider.add_width_source(self._map_host)
+            hider.sync()
+            QTimer.singleShot(0, hider.sync)
         # Reparent leaves the header controls host empty — hide it so it does
         # not keep a blank gray strip under Text/Overview in duplicate windows.
         host = getattr(self, "_zoom_bar_header_host", None)
@@ -5197,8 +5381,77 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.refresh_msa_colors()
 
     def _on_msa_coloring_mode_changed(self, mode: str) -> None:
+        from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+
         self._bars.set_msa_color_mode(mode)
         self._save_overview_display_settings()
+        if normalize_msa_color_mode(mode) == MSA_COLOR_DIFF_FROM_SELECTED:
+            std = self._bars.msa_diff_standard_row()
+            if std is None:
+                self.statusMessage.emit(
+                    "Color vs standard: no sequences loaded."
+                )
+            else:
+                rid = self._bars.record_ids()[std]
+                note = (
+                    ""
+                    if self._bars.msa_diff_standard_is_pinned()
+                    else " (first sequence)"
+                )
+                self.statusMessage.emit(
+                    f"Color vs standard: {rid}{note}."
+                )
+
+    def _msa_diff_standard_path_key(self) -> str:
+        return str(Path(self._path).expanduser().resolve())
+
+    def _persist_msa_diff_standard_id(self, record_id: str | None) -> None:
+        """Remember Color vs standard per MSA path (survives reopen / duplicate)."""
+        s = self._overview_display_settings()
+        try:
+            s.beginGroup(_MSA_DIFF_STANDARD_BY_PATH_GROUP)
+            key = self._msa_diff_standard_path_key()
+            text = str(record_id or "").strip()
+            if text:
+                s.setValue(key, text)
+            else:
+                s.remove(key)
+        finally:
+            s.endGroup()
+            s.endGroup()
+        s.sync()
+
+    def _restore_msa_diff_standard_from_settings(self) -> None:
+        """Apply a saved Color vs standard id after MSA rows are loaded."""
+        if not self.is_msa_mode() or not self._record_ids:
+            return
+        s = self._overview_display_settings()
+        try:
+            s.beginGroup(_MSA_DIFF_STANDARD_BY_PATH_GROUP)
+            raw = s.value(self._msa_diff_standard_path_key(), "")
+        finally:
+            s.endGroup()
+            s.endGroup()
+        rid = str(raw or "").strip()
+        if not rid:
+            return
+        if rid in self._bars.record_ids():
+            self._bars.set_msa_diff_standard_id(rid)
+        else:
+            # Sequence gone from this FASTA — drop the stale pin.
+            self._persist_msa_diff_standard_id(None)
+
+    def _set_selected_as_msa_standard(self) -> None:
+        """Right-click → Set as standard for Color vs standard mode."""
+        rows = self._bars.selected_rows()
+        if len(rows) != 1:
+            return
+        row = int(rows[0])
+        self._bars.set_msa_diff_standard_row(row)
+        rid = self._bars.msa_diff_standard_id()
+        self._persist_msa_diff_standard_id(rid)
+        if rid:
+            self.statusMessage.emit(f"Color vs standard: {rid}.")
 
     def _on_msa_divergence_changed(self, value: float) -> None:
         self._bars.set_msa_divergence_threshold(value)
@@ -6077,6 +6330,8 @@ class MultiSequenceOverviewPanel(QWidget):
             self._bars.set_pixels_per_base(keep_ppb)
             self._bars.set_selected_rows([])
             self._bars.set_region_selection(None)
+            # Re-pin if the standard survived deletion; else drop a stale save.
+            self._restore_msa_diff_standard_from_settings()
             self._sync_names_column()
             self._update_scale()
             self._sync_header_position_spins()
@@ -6632,6 +6887,7 @@ class MultiSequenceOverviewPanel(QWidget):
         # Apply saved sort after rows are loaded (original order until then).
         self._bars.sort_rows(self._rail.sequence_sort_mode())
         self._record_ids = list(self._bars.record_ids())
+        self._restore_msa_diff_standard_from_settings()
         self._sync_annotation_kind_filters()
         self._sync_names_column()
         self._update_scale()
@@ -8111,14 +8367,19 @@ class MultiSequenceOverviewPanel(QWidget):
             rename = menu.addAction("Rename sequence")
             rename.setEnabled(len(selected_rows) == 1)
             rename.triggered.connect(self._rename_selected_sequence)
+            if self.is_msa_mode():
+                set_std = menu.addAction("Set as standard")
+                set_std.setEnabled(len(selected_rows) == 1)
+                set_std.triggered.connect(self._set_selected_as_msa_standard)
 
         menu.addSeparator()
         copy_seq = menu.addAction("Copy Sequence")
-        extract = menu.addAction("Extract Sequence")
         copy_ungapped = None
-        extract_ungapped = None
         if self.is_msa_mode():
             copy_ungapped = menu.addAction("Copy Sequence without gap")
+        extract = menu.addAction("Extract Sequence")
+        extract_ungapped = None
+        if self.is_msa_mode():
             extract_ungapped = menu.addAction("Extract Sequence without gap")
         if region is not None:
             start, end = region
@@ -8256,6 +8517,7 @@ class MultiSequenceOverviewPanel(QWidget):
         length = int(self._lengths.pop(old_id, self._lengths.get(new_id, 0)))
         self._lengths[new_id] = length
         self._record_ids = new_ids
+        was_standard = self._bars.msa_diff_standard_id() == old_id
         keep_ppb = self._bars.pixels_per_base()
         keep_region = self._bars.region_selection()
         if self._bars.is_msa_mode():
@@ -8265,6 +8527,11 @@ class MultiSequenceOverviewPanel(QWidget):
                 features=self._features,
             )
             self._bars.set_pixels_per_base(keep_ppb)
+            if was_standard:
+                self._bars.set_msa_diff_standard_id(new_id)
+                self._persist_msa_diff_standard_id(new_id)
+            else:
+                self._restore_msa_diff_standard_from_settings()
         else:
             self._bars.set_data(
                 new_ids,
@@ -8605,3 +8872,8 @@ class MultiSequenceOverviewPanel(QWidget):
         super().resizeEvent(event)
         self._sync_hbar_shim()
         self._schedule_viewport_refit()
+        # Keep −/+/Position/… overflow in sync when the split pane or rail moves.
+        bar = self._header_zoom_bar
+        hider = getattr(bar, "_overview_overflow", None) if bar is not None else None
+        if hider is not None:
+            hider.sync()

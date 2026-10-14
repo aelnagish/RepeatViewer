@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -52,6 +52,7 @@ from repeatviewer.widgets.preview_zoom import (
     wheel_zoom_delta_from_event,
 )
 from repeatviewer.widgets.spin_boxes import NoWheelSlider, NoWheelSpinBox
+from repeatviewer.widgets.toolbar_overflow import ToolbarOverflowHider
 
 _FASTA_DEFAULT_TAB_CHOICES: tuple[tuple[str, DefaultFastaPreviewTab], ...] = (
     ("Text", DefaultFastaPreviewTab.TEXT),
@@ -150,7 +151,14 @@ ZOOM_SLIDER_HEIGHT = 22
 ANNOTATION_ZOOM_SLIDER_WIDTH = 120
 _OVERVIEW_POSITION_SPIN_WIDTH = 108
 _OVERVIEW_SELECT_FIT_HEIGHT = 20
+# Public alias for other toolbars (dotplot rail, etc.).
+OVERVIEW_SELECT_FIT_HEIGHT = _OVERVIEW_SELECT_FIT_HEIGHT
 _ZOOM_BTN_SIDE = ZOOM_SLIDER_HEIGHT
+
+
+def make_overview_zoom_button(text: str, parent: QWidget) -> QToolButton:
+    """Square −/+ control aligned with the overview zoom slider."""
+    return _make_overview_zoom_button(text, parent)
 
 
 def _make_overview_zoom_button(text: str, parent: QWidget) -> QToolButton:
@@ -556,6 +564,7 @@ class PreviewZoomBar(QWidget):
     edit_text_requested = Signal()
     save_text_requested = Signal()
     duplicate_window_requested = Signal()
+    split_window_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -611,6 +620,12 @@ class PreviewZoomBar(QWidget):
         )
         self._duplicate_action.triggered.connect(self.duplicate_window_requested.emit)
         self._actions_menu.addAction(self._duplicate_action)
+        self._split_action = QAction("Split window", self._actions_menu)
+        self._split_action.setToolTip(
+            "Open a floating Preview with two side-by-side panes of this file."
+        )
+        self._split_action.triggered.connect(self.split_window_requested.emit)
+        self._actions_menu.addAction(self._split_action)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn)
         self._actions_visible = True
@@ -808,6 +823,7 @@ class AnnotationZoomBar(QWidget):
     filter_text_changed = Signal(str)
     filter_return_pressed = Signal()
     duplicate_window_requested = Signal()
+    split_window_requested = Signal()
 
     _POSITION_SPIN_WIDTH = _OVERVIEW_POSITION_SPIN_WIDTH
 
@@ -816,10 +832,14 @@ class AnnotationZoomBar(QWidget):
         self.setObjectName("PreviewZoomBar")
         # Height matches single-seq AnnotationMapToolbar when hosting overview controls.
         self.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
+        # Allow split/duplicate panes to shrink; overflow hides controls instead.
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 2, 8, 2)
         layout.setSpacing(6)
         layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        layout.setSizeConstraint(QHBoxLayout.SizeConstraint.SetNoConstraint)
 
         # Hidden spin kept for sequence-map bind API (embedded maps ignore it).
         self._spin = _make_zoom_percent_spin(
@@ -860,7 +880,7 @@ class AnnotationZoomBar(QWidget):
         )
         apply_annotation_zoom_slider_style(self._zoom_slider)
 
-        pos_label = QLabel("Position:", self._overview_host)
+        self._pos_label = QLabel("Position:", self._overview_host)
         self._pos_start = NoWheelSpinBox(self._overview_host)
         self._pos_start.setMinimum(1)
         self._pos_start.setMaximum(1)
@@ -873,7 +893,7 @@ class AnnotationZoomBar(QWidget):
         self._pos_start.setToolTip("1-based start position (column)")
         self._pos_start.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        to_label = QLabel("to", self._overview_host)
+        self._to_label = QLabel("to", self._overview_host)
         self._pos_end = NoWheelSpinBox(self._overview_host)
         self._pos_end.setMinimum(1)
         self._pos_end.setMaximum(1)
@@ -952,9 +972,9 @@ class AnnotationZoomBar(QWidget):
             zoom_out,
             zoom_in,
             self._zoom_slider,
-            pos_label,
+            self._pos_label,
             self._pos_start,
-            to_label,
+            self._to_label,
             self._pos_end,
             select_btn,
             fit_btn,
@@ -970,7 +990,37 @@ class AnnotationZoomBar(QWidget):
         self._overview_host.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
+        self._overview_host.setMinimumWidth(0)
         self._overview_host.setFixedHeight(OVERVIEW_TOOLBAR_HEIGHT)
+        # Hide whole controls from the right when the bar is too narrow
+        # (−/+ stay longest; never show a half-cut button).
+        self._overview_overflow = ToolbarOverflowHider(
+            self._overview_host,
+            [
+                [zoom_out],
+                [zoom_in],
+                [self._zoom_slider],
+                [
+                    self._pos_label,
+                    self._pos_start,
+                    self._to_label,
+                    self._pos_end,
+                ],
+                [select_btn],
+                [fit_btn],
+                [clean_btn],
+                [consensus_btn],
+                [self._sequence_count_label],
+            ],
+            spacing=6,
+            layout=ov,
+        )
+        # Count / Clean / Cons start disallowed; set_overview_mode / set_msa_mode enable.
+        self._overview_overflow.set_unit_allowed_by_widget(
+            self._sequence_count_label, False
+        )
+        self._overview_overflow.set_unit_allowed_by_widget(clean_btn, False)
+        self._overview_overflow.set_unit_allowed_by_widget(consensus_btn, False)
         layout.addWidget(self._overview_host, 1)
 
         self._actions_btn = _make_preview_actions_button(
@@ -987,6 +1037,12 @@ class AnnotationZoomBar(QWidget):
         )
         self._duplicate_action.triggered.connect(self.duplicate_window_requested.emit)
         self._actions_menu.addAction(self._duplicate_action)
+        self._split_action = QAction("Split window", self._actions_menu)
+        self._split_action.setToolTip(
+            "Open a floating Preview with two side-by-side panes of this file."
+        )
+        self._split_action.triggered.connect(self.split_window_requested.emit)
+        self._actions_menu.addAction(self._split_action)
         self._actions_btn.setMenu(self._actions_menu)
         layout.addWidget(self._actions_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         self._actions_visible = True
@@ -995,6 +1051,22 @@ class AnnotationZoomBar(QWidget):
         self._overview_mode = False
         self._msa_mode = False
         self.set_overview_mode(False)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        # Do not let Position/Cons/… fixed widths set the window/splitter floor;
+        # ToolbarOverflowHider drops whole controls when this bar is narrow.
+        return QSize(0, self.height() or OVERVIEW_TOOLBAR_HEIGHT)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        height = self.height() or OVERVIEW_TOOLBAR_HEIGHT
+        width = max(0, self.width()) if self.width() > 0 else 240
+        return QSize(width, height)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        hider = getattr(self, "_overview_overflow", None)
+        if hider is not None:
+            hider.sync()
 
     def set_actions_visible(self, visible: bool) -> None:
         """Show or hide the Actions button (off in duplicated Preview windows)."""
@@ -1005,19 +1077,34 @@ class AnnotationZoomBar(QWidget):
         """Show alignment-only actions only for a genuine aligned MSA."""
         self._msa_mode = bool(enabled)
         visible = self._overview_mode and self._msa_mode
-        self._clean_btn.setVisible(visible)
-        self._consensus_btn.setVisible(visible)
+        # Overflow hider owns visibility; mark Clean/Cons as allowed only for MSA.
+        hider = getattr(self, "_overview_overflow", None)
+        if hider is not None:
+            hider.set_unit_allowed_by_widget(self._clean_btn, visible)
+            hider.set_unit_allowed_by_widget(self._consensus_btn, visible)
+        else:
+            self._clean_btn.setVisible(visible)
+            self._consensus_btn.setVisible(visible)
 
     def set_sequence_count(self, count: int) -> None:
         """Show total sequences on the right (same row as Cons)."""
         n = max(0, int(count))
+        hider = getattr(self, "_overview_overflow", None)
         if n <= 0:
             self._sequence_count_label.clear()
-            self._sequence_count_label.hide()
+            if hider is not None:
+                hider.set_unit_allowed_by_widget(self._sequence_count_label, False)
+            else:
+                self._sequence_count_label.hide()
             return
         label = "1 sequence" if n == 1 else f"{n:,} sequences"
         self._sequence_count_label.setText(label)
-        self._sequence_count_label.setVisible(self._overview_mode)
+        if hider is not None:
+            hider.set_unit_allowed_by_widget(
+                self._sequence_count_label, self._overview_mode
+            )
+        else:
+            self._sequence_count_label.setVisible(self._overview_mode)
 
     def set_overview_mode(self, enabled: bool) -> None:
         """Show multi-seq −/+/Position/Select/Fit/Clean/Cons; Actions stay on Preview title."""
@@ -1025,9 +1112,13 @@ class AnnotationZoomBar(QWidget):
         self._overview_host.setVisible(self._overview_mode)
         self.set_msa_mode(self._msa_mode)
         if self._sequence_count_label.text().strip():
-            self._sequence_count_label.setVisible(self._overview_mode)
+            self._overview_overflow.set_unit_allowed_by_widget(
+                self._sequence_count_label, self._overview_mode
+            )
         else:
-            self._sequence_count_label.hide()
+            self._overview_overflow.set_unit_allowed_by_widget(
+                self._sequence_count_label, False
+            )
         # Title-bar PreviewZoomBar owns Actions (aligned with "Preview"), matching
         # single-seq Annotation. Hiding here avoids a second Actions clipped by the rail.
         self._actions_btn.setVisible(self._actions_visible and not self._overview_mode)
@@ -1062,6 +1153,7 @@ class AnnotationZoomBar(QWidget):
             style.unpolish(widget)
             style.polish(widget)
             widget.updateGeometry()
+        self._overview_overflow.sync()
         self.update()
 
     def set_multi_fasta_default_tabs(self, enabled: bool) -> None:

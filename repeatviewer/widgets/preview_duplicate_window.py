@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, Slot
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
@@ -50,11 +50,14 @@ class PreviewDuplicateWindow(QWidget):
         # Keep the tool window visible with the main app on macOS.
         self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
         self.setWindowTitle(f"Preview — {source.path.name}")
+        # Allow shrinking; toolbar overflow hides controls when narrow.
+        self.setMinimumSize(320, 240)
         self.resize(max(640, source.width()), max(420, source.height()))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetNoConstraint)
 
         self._zoom_bar = PreviewZoomBar()
         self._annotation_zoom_bar = AnnotationZoomBar()
@@ -136,6 +139,9 @@ class PreviewDuplicateWindow(QWidget):
         QTimer.singleShot(50, lambda idx=fasta_tab: self._finish_open(idx))
 
         ensure_widget_on_screen(self)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(320, 240)
 
     @staticmethod
     def _snapshot_source_features(source: FilePreviewPage) -> dict | None:

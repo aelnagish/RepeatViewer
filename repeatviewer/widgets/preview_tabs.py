@@ -1260,6 +1260,17 @@ class FilePreviewPage(QWidget):
                 self._annotation_panel.refresh_sequence_summary()
             return
 
+        # Dotplot shows Length/GC or Sequence number in its Display rail.
+        if self.is_dotplot_preview_active():
+            self._sequence_info_bar.hide()
+            self._sequence_info_bar_cache_key = None
+            panel = getattr(self, "_dotplot_panel", None)
+            if panel is None:
+                panel = getattr(self, "_alignment_dotplot", None)
+            if panel is not None and hasattr(panel, "refresh_sequence_summary"):
+                panel.refresh_sequence_summary()
+            return
+
         if not _is_fasta_file(path):
             self._sequence_info_bar.clear()
             self._sequence_info_bar.hide()
@@ -2642,11 +2653,19 @@ class PreviewTabWidget(QTabWidget):
             self._zoom_bar.save_text_requested.connect(self._on_save_text_requested)
         if hasattr(self._zoom_bar, "duplicate_window_requested"):
             self._zoom_bar.duplicate_window_requested.connect(self.open_duplicate_window)
+        if hasattr(self._zoom_bar, "split_window_requested"):
+            self._zoom_bar.split_window_requested.connect(self.open_split_window)
         if self._annotation_zoom_bar is not None and hasattr(
             self._annotation_zoom_bar, "duplicate_window_requested"
         ):
             self._annotation_zoom_bar.duplicate_window_requested.connect(
                 self.open_duplicate_window
+            )
+        if self._annotation_zoom_bar is not None and hasattr(
+            self._annotation_zoom_bar, "split_window_requested"
+        ):
+            self._annotation_zoom_bar.split_window_requested.connect(
+                self.open_split_window
             )
         self._save_text_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self._save_text_shortcut.activated.connect(self._on_save_text_requested)
@@ -3354,6 +3373,24 @@ class PreviewTabWidget(QTabWidget):
         # reference so WA_DeleteOnClose windows are not garbage-collected early.
         host = self.window()
         win = PreviewDuplicateWindow(widget, source_tabs=self, parent=host)
+        return self._show_floating_preview_window(win)
+
+    def open_split_window(self) -> bool:
+        """Open a floating left/right split Preview of the current file."""
+        widget = self.currentWidget()
+        if not isinstance(widget, FilePreviewPage):
+            return False
+        path = widget.path.expanduser().resolve()
+        if not path.is_file():
+            return False
+        from repeatviewer.widgets.preview_split_window import PreviewSplitWindow
+
+        host = self.window()
+        win = PreviewSplitWindow(widget, source_tabs=self, parent=host)
+        return self._show_floating_preview_window(win)
+
+    def _show_floating_preview_window(self, win: QWidget) -> bool:
+        """Track, show, and raise a Duplicate / Split preview window."""
         self._duplicate_windows.append(win)
 
         def _forget(*_args, window=win) -> None:
