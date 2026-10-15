@@ -258,7 +258,7 @@ _COLORBLIND_BASE_COLORS: dict[str, tuple[str, str]] = {
     "G": ("#707070", "#000000"),
     "T": ("#009E73", "#FFFFFF"),
     "U": ("#009E73", "#FFFFFF"),
-    "N": ("#C8C8C8", "#000000"),
+    "N": ("#FFFFFF", "#000000"),
 }
 
 # Same MSA "Default" palette used by Element colors / MSA plot.
@@ -269,7 +269,7 @@ _STANDARD_BASE_COLORS: dict[str, tuple[str, str]] = {
     "G": ("#707070", "#000000"),
     "T": ("#F06090", "#000000"),
     "U": ("#F06090", "#000000"),
-    "N": ("#C8C8C8", "#000000"),
+    "N": ("#FFFFFF", "#000000"),
 }
 
 # Pre–MSA-default AliView ACGT colours; ignore if still stored as "custom".

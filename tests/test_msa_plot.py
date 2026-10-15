@@ -98,13 +98,9 @@ def test_nucleotide_ambiguity_defaults_white() -> None:
         NUCLEOTIDE_COLORS_DEFAULT,
     )
 
-    for letter in ("R", "Y", "W", "S", "M", "K", "B", "H", "D", "V", "I"):
+    for letter in ("R", "Y", "W", "S", "M", "K", "B", "H", "D", "V", "I", "N", "X"):
         assert NUCLEOTIDE_COLORS_DEFAULT[letter] == "#FFFFFF"
         assert NUCLEOTIDE_COLORS_COLORBLIND[letter] == "#FFFFFF"
-    assert NUCLEOTIDE_COLORS_DEFAULT["N"] == "#C8C8C8"
-    assert NUCLEOTIDE_COLORS_COLORBLIND["N"] == "#C8C8C8"
-    assert NUCLEOTIDE_COLORS_DEFAULT["X"] == "#C8C8C8"
-    assert NUCLEOTIDE_COLORS_COLORBLIND["X"] == "#C8C8C8"
     assert NUCLEOTIDE_COLORS_DEFAULT["T"] == NUCLEOTIDE_COLORS_DEFAULT["U"]
 
 

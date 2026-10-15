@@ -491,7 +491,12 @@ class _FlowLayout(QLayout):
         self._do_layout(rect, test_only=False)
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return self.minimumSize()
+        # Prefer a wrapped height for a typical rail width so the host hugs content.
+        width = 200
+        parent = self.parentWidget()
+        if parent is not None and parent.width() > 0:
+            width = parent.width()
+        return QSize(width, self.heightForWidth(width))
 
     def minimumSize(self) -> QSize:  # noqa: N802
         size = QSize()
@@ -499,6 +504,7 @@ class _FlowLayout(QLayout):
             size = size.expandedTo(item.minimumSize())
         left, top, right, bottom = self.getContentsMargins()
         size += QSize(left + right, top + bottom)
+        # At least one row tall; width is the widest chip.
         return size
 
     def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
@@ -720,6 +726,7 @@ class SequenceAnnotationRail(QWidget):
     showAnnotationTrackChanged = Signal(bool)
     # frozenset[str] of visible annotation_visibility_key values (empty = hide all kinds).
     annotationTrackKindsChanged = Signal(object)
+    showStandardBoundariesChanged = Signal(bool)
     sequenceSortChanged = Signal(str)  # original | name | selected_columns
     showComplementChanged = Signal(bool)
     showTranslationChanged = Signal(bool)
@@ -964,51 +971,7 @@ class SequenceAnnotationRail(QWidget):
         tracks_section = _CollapsibleSection("Tracks", page, expanded=True)
         self._tracks_section = tracks_section
 
-        self.displayed_annotations_label = QLabel(
-            "Displayed annotations", tracks_section
-        )
-        self.displayed_annotations_label.setToolTip(
-            "Choose which annotation types appear under each sequence "
-            "(including MSA residue rows). Use All or the type checkboxes "
-            "for LTR, TIR, ORF, TSD, and each protein domain."
-        )
-        tracks_section.add_widget(self.displayed_annotations_label)
-
-        # Hidden compat toggle: True when at least one type checkbox is on.
-        self.show_annotation_track = QCheckBox(tracks_section)
-        self.show_annotation_track.hide()
-        self.show_annotation_track.setChecked(True)
-
-        # Type filters: All + LTR / TIR / ORF / TSD / domain kinds.
-        self._annotation_kinds_host = QWidget(tracks_section)
-        self._annotation_kinds_host.setMinimumWidth(0)
-        kinds_outer = QVBoxLayout(self._annotation_kinds_host)
-        kinds_outer.setContentsMargins(0, 0, 0, 2)
-        kinds_outer.setSpacing(4)
-        self.annotation_kinds_all_check = QCheckBox("All", self._annotation_kinds_host)
-        self.annotation_kinds_all_check.setToolTip(
-            "Select or clear all annotation types"
-        )
-        self._annotation_kinds_all_updating = False
-        self.annotation_kinds_all_check.toggled.connect(
-            self._on_annotation_kinds_all_toggled
-        )
-        kinds_outer.addWidget(self.annotation_kinds_all_check)
-        self.annotation_kind_checks: dict[str, QCheckBox] = {}
-        self._annotation_kinds_flow_host = QWidget(self._annotation_kinds_host)
-        self._annotation_kinds_flow_host.setMinimumWidth(0)
-        self._annotation_kinds_flow = _FlowLayout(
-            self._annotation_kinds_flow_host, spacing=6
-        )
-        self._annotation_kinds_flow_host.setLayout(self._annotation_kinds_flow)
-        kinds_outer.addWidget(self._annotation_kinds_flow_host)
-        self._hidden_annotation_kinds = self._load_hidden_annotation_kinds()
-        self._rebuild_annotation_kind_checks(list(ALWAYS_ANNOTATION_VISIBILITY_KINDS))
-        # Type filters apply to multi/MSA overview only (wired there).
-        self._annotation_kinds_host.setVisible(False)
-        self.displayed_annotations_label.setVisible(False)
-        tracks_section.add_widget(self._annotation_kinds_host)
-
+        # Sorting → Show standard boundaries → Displayed annotations (grows with kinds).
         sort_row = QWidget(tracks_section)
         sort_layout = QHBoxLayout(sort_row)
         sort_layout.setContentsMargins(0, 2, 0, 2)
@@ -1034,6 +997,76 @@ class SequenceAnnotationRail(QWidget):
         self.sequence_sort_row = sort_row
         self._populate_sequence_sort_options(msa=False)
         self.sequence_sort_row.setVisible(False)
+
+        self.show_standard_boundaries = QCheckBox(
+            "Show standard boundaries", tracks_section
+        )
+        self.show_standard_boundaries.setChecked(True)
+        self.show_standard_boundaries.setToolTip(
+            "Draw vertical dashed lines at the leftmost and rightmost non-gap "
+            "nucleotides of the standard sequence (through the scale and tracks). "
+            "Works with any MSA color scheme. Right-click a sequence and choose "
+            "Set as standard to pin the reference row."
+        )
+        self.show_standard_boundaries.toggled.connect(
+            self.showStandardBoundariesChanged.emit
+        )
+        self.show_standard_boundaries.setVisible(False)
+        tracks_section.add_widget(self.show_standard_boundaries)
+
+        self.displayed_annotations_label = QLabel(
+            "Displayed annotations", tracks_section
+        )
+        self.displayed_annotations_label.setToolTip(
+            "Choose which annotation types appear under each sequence "
+            "(including MSA residue rows). Use All or the type checkboxes "
+            "for LTR, TIR, ORF, TSD, and each protein domain. Extra types "
+            "wrap onto new rows as needed."
+        )
+        tracks_section.add_widget(self.displayed_annotations_label)
+
+        # Hidden compat toggle: True when at least one type checkbox is on.
+        self.show_annotation_track = QCheckBox(tracks_section)
+        self.show_annotation_track.hide()
+        self.show_annotation_track.setChecked(True)
+
+        # Type filters: All + LTR / TIR / ORF / TSD / domain kinds in one flow.
+        # Height hugs content (no reserved empty space); wraps when many kinds.
+        self._annotation_kinds_host = QWidget(tracks_section)
+        self._annotation_kinds_host.setMinimumWidth(0)
+        self._annotation_kinds_host.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        kinds_outer = QVBoxLayout(self._annotation_kinds_host)
+        kinds_outer.setContentsMargins(0, 0, 0, 2)
+        kinds_outer.setSpacing(0)
+        self.annotation_kind_checks: dict[str, QCheckBox] = {}
+        self._annotation_kinds_flow_host = QWidget(self._annotation_kinds_host)
+        self._annotation_kinds_flow_host.setMinimumWidth(0)
+        self._annotation_kinds_flow_host.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self._annotation_kinds_flow = _FlowLayout(
+            self._annotation_kinds_flow_host, spacing=6
+        )
+        self._annotation_kinds_flow_host.setLayout(self._annotation_kinds_flow)
+        self.annotation_kinds_all_check = QCheckBox(
+            "All", self._annotation_kinds_flow_host
+        )
+        self.annotation_kinds_all_check.setToolTip(
+            "Select or clear all annotation types"
+        )
+        self._annotation_kinds_all_updating = False
+        self.annotation_kinds_all_check.toggled.connect(
+            self._on_annotation_kinds_all_toggled
+        )
+        kinds_outer.addWidget(self._annotation_kinds_flow_host)
+        self._hidden_annotation_kinds = self._load_hidden_annotation_kinds()
+        self._rebuild_annotation_kind_checks(list(ALWAYS_ANNOTATION_VISIBILITY_KINDS))
+        # Type filters apply to multi/MSA overview only (wired there).
+        self._annotation_kinds_host.setVisible(False)
+        self.displayed_annotations_label.setVisible(False)
+        tracks_section.add_widget(self._annotation_kinds_host)
 
         self.show_complement = QCheckBox("Show complement", tracks_section)
         self.show_complement.setToolTip(
@@ -1171,18 +1204,23 @@ class SequenceAnnotationRail(QWidget):
             "conserved residues stay light grey (overview) or unfilled "
             "(letter zoom).<br><br>"
             "<b>Color vs standard</b><br>"
-            "The standard row is fully coloured; other rows highlight residues "
-            "and gaps that differ from it (including gaps present in other "
-            "sequences but not in the standard). With no standard set yet, "
-            "the first sequence is used. Right-click a sequence and choose "
+            "The standard row is painted with the All-black palette, and its "
+            "name is shown in bold with an accent colour (also when Show "
+            "standard boundaries is on). Residues that match the standard use "
+            "a black letter on an unfilled background. Other rows highlight "
+            "residues and gaps that differ from it (gap differences stay red). "
+            "A differing nucleotide that meets the Divergence threshold uses "
+            "the Default nucleotide colours; a differing nucleotide that is "
+            "not conserved uses black. With no standard set yet, the first "
+            "sequence is used. Right-click a sequence and choose "
             "<b>Set as standard</b> to pin a different row; that choice stays "
             "for this MSA until you change it.<br><br>"
             "<b>Divergence</b><br>"
             "A letter is conserved when it occupies at least this fraction "
             "of the non-gap residues in its column. For example, "
             "<b>0.40</b> means a letter present in ≥40% of sequences "
-            "(ignoring gaps) counts as conserved. Applies to conserved "
-            "and divergent modes."
+            "(ignoring gaps) counts as conserved. Applies to Color "
+            "conserved, Color divergent, and Color vs standard."
         )
 
         self.msa_coloring_label = QLabel("MSA color scheme:", color_section)
@@ -2044,12 +2082,20 @@ class SequenceAnnotationRail(QWidget):
         flow = getattr(self, "_annotation_kinds_flow", None)
         if flow is None:
             return
+        all_check = getattr(self, "annotation_kinds_all_check", None)
+        host = getattr(self, "_annotation_kinds_flow_host", None)
         while flow.count():
             item = flow.takeAt(0)
             widget = item.widget() if item is not None else None
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+            if widget is None:
+                continue
+            # Keep the shared All checkbox; only drop type chips.
+            if widget is all_check:
+                if host is not None:
+                    widget.setParent(host)
+                continue
+            widget.setParent(None)
+            widget.deleteLater()
 
     def _rebuild_annotation_kind_checks(self, keys: list[str]) -> None:
         """Rebuild nested type checkboxes; preserve hidden-kind prefs."""
@@ -2062,6 +2108,11 @@ class SequenceAnnotationRail(QWidget):
         hidden = getattr(self, "_hidden_annotation_kinds", set())
         self._annotation_kinds_all_updating = True
         try:
+            # All sits in the same wrapping row as LTR / TIR / ORF / …
+            all_check = getattr(self, "annotation_kinds_all_check", None)
+            if all_check is not None:
+                all_check.setParent(host)
+                flow.addWidget(all_check)
             for key in keys:
                 label = annotation_visibility_label(key)
                 check = QCheckBox(label, host)
@@ -2368,6 +2419,7 @@ class SequenceAnnotationRail(QWidget):
     def _sync_msa_divergence_enabled(self) -> None:
         from repeatviewer.backends.msa_coordinates import (
             MSA_COLOR_BG_WHEN_CONSERVED,
+            MSA_COLOR_DIFF_FROM_SELECTED,
             MSA_COLOR_NO_BG_WHEN_CONSERVED,
         )
 
@@ -2378,6 +2430,7 @@ class SequenceAnnotationRail(QWidget):
         enabled = mode in (
             MSA_COLOR_BG_WHEN_CONSERVED,
             MSA_COLOR_NO_BG_WHEN_CONSERVED,
+            MSA_COLOR_DIFF_FROM_SELECTED,
         )
         row.setEnabled(enabled)
 
@@ -2421,6 +2474,11 @@ class SequenceAnnotationRail(QWidget):
         kinds_host = getattr(self, "_annotation_kinds_host", None)
         if kinds_host is not None:
             kinds_host.setVisible(overview)
+        std_bounds = getattr(self, "show_standard_boundaries", None)
+        if std_bounds is not None:
+            std_bounds.setVisible(
+                overview and bool(getattr(self, "_msa_display_mode", False))
+            )
         self.sequence_sort_row.setVisible(overview)
         if overview:
             self._populate_sequence_sort_options(
@@ -2483,6 +2541,9 @@ class SequenceAnnotationRail(QWidget):
         )
         if bool(getattr(self, "_overview_mode", False)):
             self.sequence_sort_row.setVisible(True)
+            std_bounds = getattr(self, "show_standard_boundaries", None)
+            if std_bounds is not None:
+                std_bounds.setVisible(self._msa_display_mode)
             self.set_nucleotide_color_context(
                 "msa" if self._msa_display_mode else "multi"
             )

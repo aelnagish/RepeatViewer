@@ -517,8 +517,10 @@ def test_msa_color_vs_standard_defaults_to_first_until_pinned(
     panel = MultiSequenceOverviewPanel(path)
     panel.load_path(path, msa_mode=True)
     panel._bars.set_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED)
+    panel._sync_standard_name_emphasis()
     assert panel._bars.msa_diff_standard_row() == 0
     assert panel._bars.msa_diff_standard_is_pinned() is False
+    assert panel._names.standard_row() == 0
 
     panel._bars.set_selected_rows([2])
     assert panel._bars.msa_diff_standard_row() == 0
@@ -528,13 +530,23 @@ def test_msa_color_vs_standard_defaults_to_first_until_pinned(
     assert panel._bars.msa_diff_standard_is_pinned() is True
     assert panel._bars.msa_diff_standard_id() == "seqB"
     assert panel._bars.msa_diff_standard_row() == 1
+    assert panel._names.standard_row() == 1
 
     panel._bars.set_selected_rows([0])
     assert panel._bars.msa_diff_standard_row() == 1
 
     panel._bars.set_msa_color_mode("all_backgrounds")
+    panel._rail.show_standard_boundaries.setChecked(True)
+    panel._sync_standard_name_emphasis()
+    # Show standard boundaries still emphasizes the name without Color vs standard.
+    assert panel._names.standard_row() == 1
+    panel._rail.show_standard_boundaries.setChecked(False)
+    panel._sync_standard_name_emphasis()
+    assert panel._names.standard_row() is None
     panel._bars.set_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED)
+    panel._sync_standard_name_emphasis()
     assert panel._bars.msa_diff_standard_row() == 1
+    assert panel._names.standard_row() == 1
     panel.close()
 
     # Reopen the same MSA — pinned standard is restored from settings.
@@ -546,20 +558,87 @@ def test_msa_color_vs_standard_defaults_to_first_until_pinned(
     panel2.close()
 
 
+def test_msa_color_vs_standard_conserved_diff_uses_default_palette(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Conserved diffs → Default colours; rare diffs + standard → All black."""
+    from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+    from repeatviewer.backends.msa_plot import (
+        DEFAULT_NUCLEOTIDE_COLORS,
+        NUCLEOTIDE_COLORS_ALL_BLACK,
+    )
+
+    path = tmp_path / "vs_std.fa"
+    # Col1: majority T vs standard A → conserved T diff.
+    # Col2: single T vs standard A → rare T diff.
+    path.write_text(
+        ">std\nAAA\n"
+        ">s2\nATT\n"
+        ">s3\nATA\n"
+        ">s4\nATA\n"
+        ">s5\nATA\n"
+    )
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    bars = panel._bars
+    bars.set_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED)
+    bars.set_msa_divergence_threshold(0.4)
+    assert bars.msa_diff_standard_row() == 0
+
+    std_a = bars._msa_residue_paint_pair(0, "A", row=0)
+    assert std_a is not None
+    assert std_a[0].name().lower() == NUCLEOTIDE_COLORS_ALL_BLACK["A"].lower()
+
+    conserved_t = bars._msa_residue_paint_pair(1, "T", row=1)
+    assert conserved_t is not None
+    assert conserved_t[0].name().lower() == DEFAULT_NUCLEOTIDE_COLORS["T"].lower()
+
+    rare_t = bars._msa_residue_paint_pair(2, "T", row=1)
+    assert rare_t is not None
+    assert rare_t[0].name().lower() == NUCLEOTIDE_COLORS_ALL_BLACK["T"].lower()
+
+    # Match to standard: black letter colour (pair[0] used when unfilled).
+    match_a = bars._msa_residue_paint_pair(0, "A", row=1)
+    assert match_a is not None
+    assert match_a[0].name().lower() == "#000000"
+
+    # Gap that differs from standard stays the red accent fill.
+    gap = bars._msa_overview_fill_color(0, "-", row=1)
+    assert gap is not None
+    assert gap.name().lower() in {"#e74c3c", "#c0392b"}
+    panel.close()
+
+
 def test_msa_standard_extent_for_boundary_guides(
     qapp: QApplication, tmp_path: Path
 ) -> None:
-    """Color vs standard guides use only leftmost/rightmost standard nucleotides."""
-    from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+    """Standard-boundary guides use leftmost/rightmost nucleotides in any scheme."""
+    from repeatviewer.backends.msa_coordinates import (
+        MSA_COLOR_BG_WHEN_CONSERVED,
+        MSA_COLOR_DIFF_FROM_SELECTED,
+    )
 
     path = tmp_path / "islands.fa"
     path.write_text(">std\nAC----GTAC\n>other\nACGTACGTAC\n")
     panel = MultiSequenceOverviewPanel(path)
     panel.load_path(path, msa_mode=True)
+    panel._rail.show_standard_boundaries.setChecked(True)
     panel._bars.set_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED)
     assert panel._bars.msa_diff_standard_row() == 0
     # First non-gap col 0, last non-gap col 9 — ignore the internal gap.
-    assert panel._bars._msa_standard_extent_columns() == (0, 9)
+    assert panel._bars.msa_standard_extent_columns() == (0, 9)
+    assert panel._bars.show_msa_standard_boundaries() is True
+    panel._sync_scale_standard_boundaries()
+    assert panel._scale._standard_boundary_cols == (0, 9)
+    # Guides stay available under Color conserved (and other schemes).
+    panel._bars.set_msa_color_mode(MSA_COLOR_BG_WHEN_CONSERVED)
+    assert panel._bars.msa_standard_extent_columns() == (0, 9)
+    panel._sync_scale_standard_boundaries()
+    assert panel._scale._standard_boundary_cols == (0, 9)
+    assert panel._rail.show_standard_boundaries.text() == "Show standard boundaries"
+    panel._rail.show_standard_boundaries.setChecked(False)
+    assert panel._bars.show_msa_standard_boundaries() is False
+    assert panel._scale._standard_boundary_cols is None
     panel.close()
 
 

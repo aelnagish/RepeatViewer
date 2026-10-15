@@ -556,6 +556,8 @@ class _NamesColumn(QWidget):
         self._row_tops: list[int] = []
         self._row_heights: list[int] = []
         self._selected_rows: set[int] = set()
+        # Bold + accent colour for the MSA standard sequence name.
+        self._standard_row: int | None = None
         self._label_point_size = _DEFAULT_MSA_FONT_PT
         self._drag_origin: QPointF | None = None
         self._dragging = False
@@ -616,11 +618,31 @@ class _NamesColumn(QWidget):
         self._selected_rows = new
         self.update()
 
-    def _label_font(self) -> QFont:
+    def set_standard_row(self, row: int | None) -> None:
+        """Emphasize the standard sequence name (``None`` clears)."""
+        if row is None:
+            new: int | None = None
+        else:
+            r = int(row)
+            new = r if 0 <= r < len(self._record_ids) else None
+        if new == self._standard_row:
+            return
+        self._standard_row = new
+        self.update()
+
+    def standard_row(self) -> int | None:
+        return self._standard_row
+
+    def _label_font(self, *, bold: bool = False) -> QFont:
         """Name font = DNA/protein label size + 1."""
         font = QFont(self.font())
         font.setPointSize(max(2, int(self._label_point_size)))
+        font.setBold(bool(bold))
         return font
+
+    def _standard_name_color(self) -> QColor:
+        """Accent colour for the standard sequence name."""
+        return QColor("#7eb6ff") if _is_dark(self) else QColor("#0b5cab")
 
     def _row_at_y(self, y: float) -> int:
         """Sequence under ``y``, splitting Sequence-distance gaps between neighbors.
@@ -830,11 +852,16 @@ class _NamesColumn(QWidget):
         mid = self.palette().color(QPalette.ColorRole.Mid)
 
         font = self._label_font()
+        bold_font = self._label_font(bold=True)
         painter.setFont(font)
         fm = QFontMetrics(font)
+        bold_fm = QFontMetrics(bold_font)
         avail = max(0, self.width() - 2 * _NAME_PAD)
         labels = self._ensure_elided_labels(fm, avail)
         text_h = fm.height()
+        bold_text_h = bold_fm.height()
+        std_row = self._standard_row
+        std_color = self._standard_name_color()
 
         for index in self._rows_in_y_range(float(clip.top()), float(clip.bottom()) + 1.0):
             top = self._row_tops[index]
@@ -842,11 +869,15 @@ class _NamesColumn(QWidget):
             if index in self._selected_rows:
                 painter.fillRect(0, top, self.width(), height, sel_bg)
             label = labels[index] if index < len(labels) else ""
+            emphasize = std_row is not None and index == std_row
+            row_font = bold_font if emphasize else font
+            row_text_h = bold_text_h if emphasize else text_h
             # Center on the row band (MSA residue / bar strip), not the gap below.
-            text_y = int(top + max(0, (height - text_h) / 2))
-            painter.setPen(text_color)
+            text_y = int(top + max(0, (height - row_text_h) / 2))
+            painter.setFont(row_font)
+            painter.setPen(std_color if emphasize else text_color)
             painter.drawText(
-                QRect(_NAME_PAD, text_y, avail, text_h),
+                QRect(_NAME_PAD, text_y, avail, row_text_h),
                 int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                 label,
             )
@@ -1170,6 +1201,10 @@ class _BarsCanvas(QWidget):
         self._msa_protein = False
         self._msa_colors: dict[str, tuple[str, str]] = {}
         self._msa_qcolors: dict[str, tuple[QColor, QColor]] = {}
+        # Color vs standard: Default palette for conserved diffs; All-black for
+        # the standard row and non-conserved diffs (independent of Display scheme).
+        self._msa_default_qcolors: dict[str, tuple[QColor, QColor]] = {}
+        self._msa_black_qcolors: dict[str, tuple[QColor, QColor]] = {}
         self._msa_residue_height = _MSA_ROW_HEIGHT
         self._msa_font_pt = _MSA_LETTER_SIZE_PT
         self._track_height_level = _DEFAULT_TRACK_HEIGHT
@@ -1178,6 +1213,8 @@ class _BarsCanvas(QWidget):
         self._msa_col_freqs: list[dict[str, float]] = []
         # Explicit Color vs standard pin by record id (None → first sequence).
         self._msa_diff_standard_id: str | None = None
+        # Tracks → Standard boundaries (vertical dashed extent guides).
+        self._show_msa_standard_boundaries = True
         # Apply default track height → overview band pixels.
         self._apply_track_height_to_residue_band()
         self._sequence_row_gap = 0  # pixels between sequences (Others → Sequence distance)
@@ -2072,6 +2109,23 @@ class _BarsCanvas(QWidget):
             self._invalidate_msa_layer_cache()
             self.update()
 
+    def set_show_msa_standard_boundaries(self, enabled: bool) -> None:
+        """Tracks → Show standard boundaries: vertical dashed extent guides."""
+        enabled = bool(enabled)
+        if enabled == self._show_msa_standard_boundaries:
+            return
+        self._show_msa_standard_boundaries = enabled
+        if self._msa_mode:
+            self._invalidate_msa_layer_cache()
+            self.update()
+
+    def show_msa_standard_boundaries(self) -> bool:
+        return bool(self._show_msa_standard_boundaries)
+
+    def msa_standard_extent_columns(self) -> tuple[int, int] | None:
+        """Public 0-based inclusive standard extent for scale mirroring."""
+        return self._msa_standard_extent_columns()
+
     def set_msa_diff_standard_row(self, row: int | None) -> None:
         """Pin the Color vs standard reference by row (``None`` clears the pin)."""
         if row is None:
@@ -2133,6 +2187,44 @@ class _BarsCanvas(QWidget):
                 cache[key.upper()] = (bg, fg)
                 cache[key.lower()] = (bg, fg)
         self._msa_qcolors = cache
+        self._rebuild_msa_vs_standard_palette_caches()
+
+    def _qcolor_pairs_from_bg_hex(
+        self, bg_by_residue: dict[str, str]
+    ) -> dict[str, tuple[QColor, QColor]]:
+        from repeatviewer.widgets.residue_color_grid import ResidueColorGrid
+
+        out: dict[str, tuple[QColor, QColor]] = {}
+        for key, hex_bg in bg_by_residue.items():
+            bg = QColor(str(hex_bg))
+            if not bg.isValid():
+                continue
+            fg = QColor(ResidueColorGrid.contrast_text_color(bg))
+            pair = (bg, fg)
+            out[key] = pair
+            out[key.upper()] = pair
+            out[key.lower()] = pair
+        return out
+
+    def _rebuild_msa_vs_standard_palette_caches(self) -> None:
+        """Fixed Default + All-black palettes for Color vs standard painting."""
+        from repeatviewer.backends.msa_plot import (
+            DEFAULT_AMINO_ACID_COLORS,
+            DEFAULT_NUCLEOTIDE_COLORS,
+            NUCLEOTIDE_COLORS_ALL_BLACK,
+        )
+
+        if self._msa_protein:
+            default_bg = dict(DEFAULT_AMINO_ACID_COLORS)
+            black_bg = {key: "#000000" for key in default_bg}
+            black_bg["-"] = "#FFFFFF"
+            black_bg["."] = "#FFFFFF"
+            black_bg["*"] = "#000000"
+        else:
+            default_bg = dict(DEFAULT_NUCLEOTIDE_COLORS)
+            black_bg = dict(NUCLEOTIDE_COLORS_ALL_BLACK)
+        self._msa_default_qcolors = self._qcolor_pairs_from_bg_hex(default_bg)
+        self._msa_black_qcolors = self._qcolor_pairs_from_bg_hex(black_bg)
 
     def msa_diff_standard_id(self) -> str | None:
         """Pinned Color vs standard record id, or ``None`` if unset."""
@@ -2150,12 +2242,12 @@ class _BarsCanvas(QWidget):
         return self.msa_diff_standard_id() is not None
 
     def _msa_standard_row(self) -> int | None:
-        """Pinned Color vs standard row, else first sequence while in that mode."""
-        from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+        """Pinned standard row, else first sequence (any MSA color scheme).
 
-        if self._msa_color_mode != MSA_COLOR_DIFF_FROM_SELECTED:
-            return None
-        if not self._msa_seqs or not self._record_ids:
+        Used for Color vs standard fills and for Show standard boundaries
+        guides in every scheme.
+        """
+        if not self._msa_mode or not self._msa_seqs or not self._record_ids:
             return None
         rid = self._msa_diff_standard_id
         if rid:
@@ -2204,11 +2296,50 @@ class _BarsCanvas(QWidget):
             is_reference_row=is_ref,
         )
 
-    def _msa_residue_paint_pair(self, col: int, ch: str) -> tuple[QColor, QColor] | None:
-        """Background/foreground colours for a non-gap residue cell."""
+    def _msa_residue_paint_pair(
+        self, col: int, ch: str, *, row: int | None = None
+    ) -> tuple[QColor, QColor] | None:
+        """Background/foreground colours for a non-gap residue cell.
+
+        Color vs standard (nucleotide and protein):
+        - standard row → All-black palette
+        - differing + conserved (Divergence) → Default palette
+        - differing + not conserved → All-black palette
+        Other schemes use the Display nucleotide/protein scheme.
+        """
         if ch in "-.":
             return None
-        return self._msa_qcolors.get(ch)
+        from repeatviewer.backends.msa_coordinates import (
+            MSA_COLOR_DIFF_FROM_SELECTED,
+            letter_is_conserved,
+            residue_differs_from_reference,
+        )
+
+        if self._msa_color_mode != MSA_COLOR_DIFF_FROM_SELECTED:
+            return self._msa_qcolors.get(ch)
+
+        std = self._msa_standard_row()
+        is_ref = row is not None and std is not None and int(row) == int(std)
+        if is_ref:
+            return self._msa_black_qcolors.get(ch) or self._msa_qcolors.get(ch)
+
+        reference = self._msa_standard_residue(col) if std is not None else None
+        if not residue_differs_from_reference(ch, reference):
+            # Match to standard: black letter only (no coloured background).
+            # Letter zoom uses pair[0] as the glyph colour when unfilled.
+            black = QColor("#000000")
+            return (black, QColor("#FFFFFF"))
+
+        freqs = (
+            self._msa_col_freqs[col]
+            if 0 <= col < len(self._msa_col_freqs)
+            else None
+        )
+        if letter_is_conserved(
+            freqs, ch, threshold=self._msa_divergence_threshold
+        ):
+            return self._msa_default_qcolors.get(ch) or self._msa_qcolors.get(ch)
+        return self._msa_black_qcolors.get(ch) or self._msa_qcolors.get(ch)
 
     def _msa_overview_fill_color(
         self, col: int, ch: str, *, row: int | None = None
@@ -2225,7 +2356,7 @@ class _BarsCanvas(QWidget):
                 return _msa_gap_diff_color(self)
             return None
         if self._msa_should_fill_background(col, ch, row=row):
-            pair = self._msa_residue_paint_pair(col, ch)
+            pair = self._msa_residue_paint_pair(col, ch, row=row)
             if pair is not None:
                 return pair[0]
             return _msa_plain_bar_color(self)
@@ -3916,13 +4047,10 @@ class _BarsCanvas(QWidget):
     ) -> None:
         """Two full-height dashed guides: leftmost and rightmost standard nucleotides.
 
-        Shown in Color vs standard at overview and nucleotide (letter) zoom.
-        Mark only the overall left/right extent of the standard row — not every
-        internal gap island.
+        Independent of MSA color scheme. Mark only the overall left/right
+        extent of the standard row — not every internal gap island.
         """
-        from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
-
-        if self._msa_color_mode != MSA_COLOR_DIFF_FROM_SELECTED:
+        if not self._msa_mode or not self._show_msa_standard_boundaries:
             return
         extent = self._msa_standard_extent_columns()
         if extent is None:
@@ -3945,7 +4073,7 @@ class _BarsCanvas(QWidget):
                 x1 = mid + 0.5 * min_w
         edge = QColor("#e8e8e8") if _is_dark(self) else QColor("#000000")
         # Thicker at letter zoom so the guides stay readable among residues.
-        width = 2.5 if self._msa_shows_letters() else 1.0
+        width = 3.0 if self._msa_shows_letters() else 2.0
         pen = QPen(edge, width, Qt.PenStyle.DashLine)
         pen.setCosmetic(True)
         painter.setPen(pen)
@@ -4092,7 +4220,7 @@ class _BarsCanvas(QWidget):
                     break
                 ch = seq[j] if j < len(seq) else "-"
                 fill_bg = self._msa_should_fill_background(j, ch, row=index)
-                paint_pair = self._msa_residue_paint_pair(j, ch)
+                paint_pair = self._msa_residue_paint_pair(j, ch, row=index)
                 overview_fill = (
                     None
                     if show_letters
@@ -4376,6 +4504,8 @@ class _ScaleRuler(QWidget):
         self._scroll_x = 0
         self._font_point_size = 8
         self._region_sel: tuple[int, int] | None = None
+        # Color vs standard: 0-based inclusive (first, last) nucleotide columns.
+        self._standard_boundary_cols: tuple[int, int] | None = None
         self._drag_origin_x: float | None = None
         self._drag_current_x: float | None = None
         self._rubber_active = False
@@ -4437,6 +4567,24 @@ class _ScaleRuler(QWidget):
         if new == self._region_sel:
             return
         self._region_sel = new
+        self.update()
+
+    def set_standard_boundary_columns(
+        self, first: int | None, last: int | None = None
+    ) -> None:
+        """Draw Color vs standard extent guides through the scale (0-based cols)."""
+        if first is None:
+            if self._standard_boundary_cols is None:
+                return
+            self._standard_boundary_cols = None
+            self.update()
+            return
+        a = max(0, int(first))
+        b = max(a, int(last if last is not None else first))
+        new = (a, b)
+        if new == self._standard_boundary_cols:
+            return
+        self._standard_boundary_cols = new
         self.update()
 
     def _x_to_bp(self, x: float) -> float:
@@ -4734,6 +4882,31 @@ class _ScaleRuler(QWidget):
             if label_left >= last_label_right + 4 and label_right <= bars_right + 0.5:
                 painter.drawText(int(label_left), int(label_baseline), label)
                 last_label_right = label_right
+
+        # Color vs standard: extend dashed guides through the scale/ticks.
+        bounds = self._standard_boundary_cols
+        if bounds is not None:
+            first, last = bounds
+            # Match MSA bars: left edge of first col, right edge of last col.
+            x0 = origin + float(first) * ppb - scroll
+            x1 = origin + float(last + 1) * ppb - scroll
+            if not show_every_base:
+                min_w = max(_MIN_COLUMN_BAND_PX, float(ppb))
+                if (x1 - x0) < min_w - 1e-9:
+                    mid = 0.5 * (x0 + x1)
+                    x0 = mid - 0.5 * min_w
+                    x1 = mid + 0.5 * min_w
+            edge = QColor("#e8e8e8") if _is_dark(self) else QColor("#000000")
+            width_pen = 3.0 if show_every_base else 2.0
+            pen = QPen(edge, width_pen, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            h = float(self.height())
+            if -2.0 <= x0 <= float(width) + 2.0:
+                painter.drawLine(QPointF(x0, 0.0), QPointF(x0, h))
+            if -2.0 <= x1 <= float(width) + 2.0 and abs(x1 - x0) > 0.5:
+                painter.drawLine(QPointF(x1, 0.0), QPointF(x1, h))
+            painter.setPen(Qt.PenStyle.NoPen)
         painter.end()
 
 
@@ -5213,6 +5386,7 @@ class MultiSequenceOverviewPanel(QWidget):
             and self._names.width() == width
         ):
             self._names.set_selected_rows(highlight)
+            self._sync_standard_name_emphasis()
             return
         self._names.set_rows(
             record_ids,
@@ -5222,6 +5396,24 @@ class MultiSequenceOverviewPanel(QWidget):
             width=width,
             content_height=content_h,
         )
+        self._sync_standard_name_emphasis()
+
+    def _sync_standard_name_emphasis(self) -> None:
+        """Bold + colour the standard sequence name when it is relevant."""
+        from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+
+        names = getattr(self, "_names", None)
+        bars = getattr(self, "_bars", None)
+        if names is None or bars is None:
+            return
+        emphasize = False
+        if getattr(bars, "_msa_mode", False):
+            emphasize = (
+                bars.msa_color_mode() == MSA_COLOR_DIFF_FROM_SELECTED
+                or bars.show_msa_standard_boundaries()
+            )
+        row = bars.msa_diff_standard_row() if emphasize else None
+        names.set_standard_row(row)
 
     @staticmethod
     def _safe_disconnect(signal, slot) -> None:
@@ -5518,6 +5710,9 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.annotationTrackKindsChanged.connect(
             self._on_annotation_track_kinds_changed
         )
+        rail.showStandardBoundariesChanged.connect(
+            self._on_show_standard_boundaries_changed
+        )
         rail.sequenceSortChanged.connect(self._on_sequence_sort_changed)
         rail.findRequested.connect(self._on_rail_find_requested)
         rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
@@ -5541,6 +5736,9 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         self._bars.set_msa_color_mode(rail.msa_coloring_mode_id())
         self._bars.set_msa_divergence_threshold(rail.msa_divergence_threshold())
+        self._bars.set_show_msa_standard_boundaries(
+            rail.show_standard_boundaries.isChecked()
+        )
         self._sync_auto_annotation_all_check()
         self._refresh_similarity_database_rows()
 
@@ -5580,6 +5778,16 @@ class MultiSequenceOverviewPanel(QWidget):
                 )
             )
             sort_mode = str(s.value("sequence_sort_mode", "original") or "original")
+            show_std_bounds_raw = s.value("show_standard_boundaries", True)
+            if isinstance(show_std_bounds_raw, str):
+                show_std_bounds = show_std_bounds_raw.strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+            else:
+                show_std_bounds = bool(show_std_bounds_raw)
         finally:
             s.endGroup()
         track_h = max(1, min(10, track_h))
@@ -5597,6 +5805,7 @@ class MultiSequenceOverviewPanel(QWidget):
             rail.annotation_label_size,
             rail.base_number_size,
             rail.column_distance,
+            rail.show_standard_boundaries,
         ):
             widget.blockSignals(True)
         try:
@@ -5607,6 +5816,7 @@ class MultiSequenceOverviewPanel(QWidget):
             rail.annotation_label_size.setValue(ann_labels)
             rail.base_number_size.setValue(scale_labels)
             rail.column_distance.setValue(col_distance)
+            rail.show_standard_boundaries.setChecked(show_std_bounds)
         finally:
             for widget in (
                 rail.track_height,
@@ -5616,12 +5826,14 @@ class MultiSequenceOverviewPanel(QWidget):
                 rail.annotation_label_size,
                 rail.base_number_size,
                 rail.column_distance,
+                rail.show_standard_boundaries,
             ):
                 widget.blockSignals(False)
         rail.set_msa_coloring_mode(msa_mode)
         rail.set_msa_divergence_threshold(msa_div)
         self._bars.set_msa_color_mode(msa_mode)
         self._bars.set_msa_divergence_threshold(msa_div)
+        self._bars.set_show_msa_standard_boundaries(show_std_bounds)
         rail.set_sequence_sort_mode(sort_mode)
 
     def _save_overview_display_settings(self) -> None:
@@ -5650,8 +5862,18 @@ class MultiSequenceOverviewPanel(QWidget):
                 float(rail.msa_divergence_threshold()),
             )
             s.setValue("sequence_sort_mode", rail.sequence_sort_mode())
+            s.setValue(
+                "show_standard_boundaries",
+                rail.show_standard_boundaries.isChecked(),
+            )
         finally:
             s.endGroup()
+
+    def _on_show_standard_boundaries_changed(self, enabled: bool) -> None:
+        self._bars.set_show_msa_standard_boundaries(bool(enabled))
+        self._sync_scale_standard_boundaries()
+        self._sync_standard_name_emphasis()
+        self._save_overview_display_settings()
 
     def _on_track_height_changed(self, level: int) -> None:
         lvl = max(1, min(10, int(level)))
@@ -5782,6 +6004,8 @@ class MultiSequenceOverviewPanel(QWidget):
         from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
 
         self._bars.set_msa_color_mode(mode)
+        self._sync_scale_standard_boundaries()
+        self._sync_standard_name_emphasis()
         self._save_overview_display_settings()
         if normalize_msa_color_mode(mode) == MSA_COLOR_DIFF_FROM_SELECTED:
             std = self._bars.msa_diff_standard_row()
@@ -5835,6 +6059,7 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         if rid in self._bars.record_ids():
             self._bars.set_msa_diff_standard_id(rid)
+            self._sync_standard_name_emphasis()
         else:
             # Sequence gone from this FASTA — drop the stale pin.
             self._persist_msa_diff_standard_id(None)
@@ -5846,6 +6071,8 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         row = int(rows[0])
         self._bars.set_msa_diff_standard_row(row)
+        self._sync_scale_standard_boundaries()
+        self._sync_standard_name_emphasis()
         rid = self._bars.msa_diff_standard_id()
         self._persist_msa_diff_standard_id(rid)
         if rid:
@@ -7860,6 +8087,25 @@ class MultiSequenceOverviewPanel(QWidget):
             bar_pad=self._bars.bar_pad(),
         )
         self._scale.set_scroll_x(self._bars_scroll.horizontalScrollBar().value())
+        self._sync_scale_standard_boundaries()
+
+    def _sync_scale_standard_boundaries(self) -> None:
+        """Mirror standard-extent dashes onto the scale (any MSA color scheme)."""
+        bars = getattr(self, "_bars", None)
+        scale = getattr(self, "_scale", None)
+        if bars is None or scale is None:
+            return
+        if (
+            not getattr(bars, "_msa_mode", False)
+            or not bars.show_msa_standard_boundaries()
+        ):
+            scale.set_standard_boundary_columns(None)
+            return
+        extent = bars.msa_standard_extent_columns()
+        if extent is None:
+            scale.set_standard_boundary_columns(None)
+        else:
+            scale.set_standard_boundary_columns(extent[0], extent[1])
 
     def _on_hscroll(self, value: int) -> None:
         self._scale.set_scroll_x(value)

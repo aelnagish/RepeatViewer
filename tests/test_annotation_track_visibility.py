@@ -75,6 +75,10 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
     assert not rail.displayed_annotations_label.isHidden()
     assert not rail._annotation_kinds_host.isHidden()
     assert not rail.annotation_kinds_all_check.isHidden()
+    # All shares the wrapping flow with LTR / TIR / … (grows as kinds wrap).
+    assert rail._annotation_kinds_flow.indexOf(rail.annotation_kinds_all_check) == 0
+    assert rail.show_standard_boundaries.text() == "Show standard boundaries"
+    assert not rail.show_standard_boundaries.font().bold()
     assert "LTR" in rail.annotation_kind_checks
     assert "TIR" in rail.annotation_kind_checks
     assert "ORF" in rail.annotation_kind_checks

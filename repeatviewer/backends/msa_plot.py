@@ -39,8 +39,8 @@ NUCLEOTIDE_COLORS_DEFAULT: dict[str, str] = {
     "G": "#707070",
     "T": "#F06090",
     "U": "#F06090",
-    "N": "#C8C8C8",
-    "X": "#C8C8C8",
+    "N": "#FFFFFF",
+    "X": "#FFFFFF",
     "-": "#FFFFFF",
     **{letter: "#FFFFFF" for letter in _NUCLEOTIDE_AMBIGUITY_LETTERS},
 }
@@ -53,13 +53,13 @@ NUCLEOTIDE_COLORS_COLORBLIND: dict[str, str] = {
     "G": "#707070",
     "T": "#009E73",
     "U": "#009E73",
-    "N": "#C8C8C8",
-    "X": "#C8C8C8",
+    "N": "#FFFFFF",
+    "X": "#FFFFFF",
     "-": "#FFFFFF",
     **{letter: "#FFFFFF" for letter in _NUCLEOTIDE_AMBIGUITY_LETTERS},
 }
 
-# A/T/U/G/C solid black; other letters keep Default greys / white.
+# A/T/U/G/C solid black; N/X/- and ambiguity stay white (from Default).
 NUCLEOTIDE_COLORS_ALL_BLACK: dict[str, str] = {
     **NUCLEOTIDE_COLORS_DEFAULT,
     "A": "#000000",
