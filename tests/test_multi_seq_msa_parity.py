@@ -360,8 +360,8 @@ def test_msa_viewport_cache_survives_column_selection(qapp: QApplication) -> Non
     canvas.close()
 
 
-def test_msa_layer_cache_logical_size_matches_viewport(qapp: QApplication) -> None:
-    """HiDPI cache must report logical size == viewport (not half-draw)."""
+def test_msa_layer_cache_logical_size_matches_overscroll(qapp: QApplication) -> None:
+    """HiDPI cache covers the viewport plus overscroll pad (not half-draw)."""
     from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
 
     canvas = _BarsCanvas()
@@ -374,10 +374,93 @@ def test_msa_layer_cache_logical_size_matches_viewport(qapp: QApplication) -> No
     cache = canvas._msa_layer_cache
     assert cache is not None
     vis = canvas.scroll_viewport_rect()
+    cover = canvas._msa_layer_cache_rect
     dpr = float(cache.devicePixelRatio())
-    # Logical size must match viewport; physical is dpr× larger.
-    assert abs(cache.width() / dpr - vis.width()) <= 1.5
-    assert abs(cache.height() / dpr - vis.height()) <= 1.5
+    # Logical size must match overscroll cover; physical is dpr× larger.
+    assert abs(cache.width() / dpr - cover.width()) <= 1.5
+    assert abs(cache.height() / dpr - cover.height()) <= 1.5
+    assert cover.contains(vis)
+    canvas.close()
+
+
+def test_msa_layer_cache_survives_small_vertical_scroll(qapp: QApplication) -> None:
+    """Vertical scroll within the overscroll pad must reuse the residue pixmap."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(400, 200)
+    canvas.show()
+    # Tall content so there is room to scroll within the pad.
+    seqs = ["ACGT" * 100] * 40
+    canvas.set_msa_data([f"s{i}" for i in range(40)], seqs)
+    canvas.set_pixels_per_base(2.0)
+    qapp.processEvents()
+    assert canvas._ensure_msa_layer_cache()
+    serial = canvas._msa_layer_serial
+    origin = QPoint(canvas._msa_layer_cache_origin)
+    vis = canvas.scroll_viewport_rect()
+    # Force a second ensure with same identity/cover — must hit the reuse path.
+    assert canvas._ensure_msa_layer_cache()
+    assert canvas._msa_layer_serial == serial
+    assert canvas._msa_layer_cache_origin == origin
+    assert canvas._msa_layer_cache_covers(vis)
+    canvas.close()
+
+
+def test_msa_layer_cache_strip_scrolls_without_serial_bump(
+    qapp: QApplication,
+) -> None:
+    """Shifting the cover paints only the exposed strip (no generation bump)."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(400, 240)
+    canvas.show()
+    seqs = ["ACGT" * 80] * 50
+    canvas.set_msa_data([f"s{i}" for i in range(50)], seqs)
+    canvas.set_pixels_per_base(2.0)
+    qapp.processEvents()
+    assert canvas._ensure_msa_layer_cache()
+    serial = canvas._msa_layer_serial
+    old = QRect(canvas._msa_layer_cache_rect)
+    assert not old.isEmpty()
+    # Shift cover down by a modest strip — same size, high overlap.
+    shifted = QRect(old)
+    shifted.translate(0, 40)
+    shifted = shifted.intersected(canvas.rect())
+    if shifted.size() != old.size():
+        shifted.setSize(old.size())
+        if shifted.bottom() > canvas.height():
+            shifted.moveBottom(canvas.height())
+    assert canvas._try_scroll_msa_layer_cache(shifted)
+    assert canvas._msa_layer_serial == serial
+    assert canvas._msa_layer_cache_rect.top() == shifted.top()
+    canvas.close()
+
+
+def test_msa_layer_cache_stays_put_while_viewport_has_slack(
+    qapp: QApplication,
+) -> None:
+    """Sticky cover: comfortable edge slack must not recenter every frame."""
+    from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
+
+    canvas = _BarsCanvas()
+    canvas.resize(400, 240)
+    canvas.show()
+    seqs = ["ACGT" * 80] * 60
+    canvas.set_msa_data([f"s{i}" for i in range(60)], seqs)
+    canvas.set_pixels_per_base(2.0)
+    qapp.processEvents()
+    assert canvas._ensure_msa_layer_cache()
+    origin = QPoint(canvas._msa_layer_cache_origin)
+    cover = QRect(canvas._msa_layer_cache_rect)
+    vis = canvas.scroll_viewport_rect()
+    assert canvas._msa_layer_cache_covers(vis)
+    desired = canvas._msa_layer_desired_cover(vis)
+    assert desired == cover
+    assert canvas._ensure_msa_layer_cache()
+    assert canvas._msa_layer_cache_origin == origin
+    assert canvas._msa_layer_cache_rect == cover
     canvas.close()
 
 

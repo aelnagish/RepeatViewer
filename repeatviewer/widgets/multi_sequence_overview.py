@@ -567,6 +567,9 @@ class _NamesColumn(QWidget):
         self._drag_highlight_timer.setSingleShot(True)
         self._drag_highlight_timer.setInterval(50)
         self._drag_highlight_timer.timeout.connect(self._flush_drag_highlight)
+        # Elided name cache: invalidate on ids / width / font size.
+        self._elided_labels: list[str] = []
+        self._elided_labels_key: tuple | None = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
@@ -577,6 +580,7 @@ class _NamesColumn(QWidget):
         Cap matches zoomed-in MSA letter fonts (see ``_msa_letter_font_for_cell``).
         """
         self._label_point_size = max(2, min(96, int(point_size) + 1))
+        self._elided_labels_key = None
         self.update()
 
     def label_point_size(self) -> int:
@@ -596,6 +600,7 @@ class _NamesColumn(QWidget):
         self._row_tops = list(tops)
         self._row_heights = list(heights)
         self._selected_rows = set(selected)
+        self._elided_labels_key = None
         min_w = _name_column_min_width(QFontMetrics(self._label_font()), len(record_ids))
         w = max(min_w, int(width))
         h = max(_MIN_ROW_HEIGHT, int(content_height))
@@ -624,12 +629,58 @@ class _NamesColumn(QWidget):
         return -1
 
     def _rows_in_y_range(self, y0: float, y1: float) -> list[int]:
-        lo, hi = (y0, y1) if y0 <= y1 else (y1, y0)
-        rows: list[int] = []
-        for index, (top, height) in enumerate(zip(self._row_tops, self._row_heights)):
-            if top + height > lo and top < hi:
-                rows.append(index)
-        return rows
+        tops = self._row_tops
+        heights = self._row_heights
+        n = len(tops)
+        if n <= 0:
+            return []
+        lo_y, hi_y = (y0, y1) if y0 <= y1 else (y1, y0)
+        lo, hi = 0, n - 1
+        first = n
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if tops[mid] + heights[mid] > lo_y:
+                first = mid
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        lo, hi = 0, n - 1
+        last = -1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if tops[mid] < hi_y:
+                last = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if first > last:
+            return []
+        return list(range(first, last + 1))
+
+    def _ensure_elided_labels(self, fm: QFontMetrics, avail: int) -> list[str]:
+        key = (len(self._record_ids), int(avail), int(self._label_point_size), self.width())
+        if self._elided_labels_key == key and len(self._elided_labels) == len(
+            self._record_ids
+        ):
+            return self._elided_labels
+        labels: list[str] = []
+        for index, rid in enumerate(self._record_ids):
+            prefix = f"{index + 1}."
+            numbered = f"{prefix} {rid}"
+            if fm.horizontalAdvance(numbered) <= avail:
+                label = numbered
+            elif fm.horizontalAdvance(prefix) <= avail:
+                name_budget = max(0, avail - fm.horizontalAdvance(prefix))
+                tail = fm.elidedText(
+                    f" {rid}", Qt.TextElideMode.ElideRight, name_budget
+                )
+                label = prefix + (tail if tail and tail != "…" else "")
+            else:
+                label = fm.elidedText(prefix, Qt.TextElideMode.ElideRight, avail)
+            labels.append(label)
+        self._elided_labels = labels
+        self._elided_labels_key = key
+        return labels
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -770,32 +821,16 @@ class _NamesColumn(QWidget):
         font = self._label_font()
         painter.setFont(font)
         fm = QFontMetrics(font)
+        avail = max(0, self.width() - 2 * _NAME_PAD)
+        labels = self._ensure_elided_labels(fm, avail)
+        text_h = fm.height()
 
-        for index, rid in enumerate(self._record_ids):
+        for index in self._rows_in_y_range(float(clip.top()), float(clip.bottom()) + 1.0):
             top = self._row_tops[index]
             height = self._row_heights[index]
-            if top + height < clip.top() or top > clip.bottom():
-                continue
-            selected = index in self._selected_rows
-            if selected:
+            if index in self._selected_rows:
                 painter.fillRect(0, top, self.width(), height, sel_bg)
-            prefix = f"{index + 1}."
-            numbered = f"{prefix} {rid}"
-            # Prefer keeping ``N.`` when the splitter is dragged narrow.
-            avail = max(0, self.width() - 2 * _NAME_PAD)
-            if fm.horizontalAdvance(numbered) <= avail:
-                label = numbered
-            elif fm.horizontalAdvance(prefix) <= avail:
-                name_budget = max(0, avail - fm.horizontalAdvance(prefix))
-                tail = fm.elidedText(
-                    f" {rid}", Qt.TextElideMode.ElideRight, name_budget
-                )
-                label = prefix + (tail if tail and tail != "…" else "")
-            else:
-                label = fm.elidedText(
-                    prefix, Qt.TextElideMode.ElideRight, avail
-                )
-            text_h = fm.height()
+            label = labels[index] if index < len(labels) else ""
             # Center on the row band (MSA residue / bar strip), not the gap below.
             text_y = int(top + max(0, (height - text_h) / 2))
             painter.setPen(text_color)
@@ -1205,60 +1240,235 @@ class _BarsCanvas(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         # Selection chrome is painted in paintEvent after residues (no overlay).
         self._chrome = _SelectionChrome(self)
-        # Viewport residue+feature snapshot (same idea as SequenceMapCanvas
-        # ``_seq_layer_cache`` / AliView paint-visible-only): rebuild on
-        # zoom/scroll/data — never on selection. Selection = blit + wash.
+        # Sticky overscrolled residue+feature snapshot:
+        # - While the viewport sits inside the cover with edge slack → pure blit
+        # - Near an edge → shift + paint only the newly exposed strip
+        # Selection never invalidates this layer — chrome blits on top.
         self._msa_layer_cache: QPixmap | None = None
+        self._msa_layer_cache_scratch: QPixmap | None = None
         self._msa_layer_cache_key: tuple | None = None
+        self._msa_layer_cache_origin = QPoint(0, 0)
+        self._msa_layer_cache_rect = QRect()
         self._msa_layer_serial = 0
 
     def _invalidate_msa_layer_cache(self) -> None:
-        """Drop the MSA residue pixmap (zoom/data/scroll — not selection)."""
+        """Drop the MSA residue pixmap (zoom/data — not selection)."""
         self._msa_layer_cache = None
+        self._msa_layer_cache_scratch = None
         self._msa_layer_cache_key = None
+        self._msa_layer_cache_origin = QPoint(0, 0)
+        self._msa_layer_cache_rect = QRect()
         self._msa_layer_serial = int(self._msa_layer_serial) + 1
 
-    def _msa_layer_cache_lookup_key(self) -> tuple | None:
+    def _msa_layer_cache_identity_key(self, vis: QRect) -> tuple | None:
+        """Identity that forces a full rebuild (not scroll position)."""
         if not self._msa_mode:
             return None
-        vis = self.scroll_viewport_rect()
         if vis.isEmpty() or vis.width() < 2 or vis.height() < 2:
             return None
         dpr = max(1.0, float(self.devicePixelRatioF()))
         return (
             round(dpr, 3),
-            int(vis.x()),
-            int(vis.y()),
             int(vis.width()),
             int(vis.height()),
             round(float(self._ppb), 8),
             int(self._msa_layer_serial),
+            int(self.width()),
+            int(self.height()),
         )
 
-    def _ensure_msa_layer_cache(self) -> bool:
-        """Lazy visible-viewport residue snapshot without selection chrome."""
-        key = self._msa_layer_cache_lookup_key()
-        if key is None:
+    def _msa_layer_cover_size(self, vis: QRect) -> tuple[int, int]:
+        """Logical cache size for this viewport (viewport + pad on each side)."""
+        # One full viewport of pad → many scroll steps are pure blit.
+        pad_x = max(64, int(vis.width()))
+        pad_y = max(64, int(vis.height()))
+        cw = min(self.width(), int(vis.width()) + 2 * pad_x)
+        ch = min(self.height(), int(vis.height()) + 2 * pad_y)
+        return max(1, cw), max(1, ch)
+
+    def _msa_layer_overscroll_rect(self, vis: QRect) -> QRect:
+        """Fixed-size cover centered on the viewport (clamped to content)."""
+        cw, ch = self._msa_layer_cover_size(vis)
+        if cw < 1 or ch < 1:
+            return QRect()
+        x0 = int(vis.center().x() - cw / 2)
+        y0 = int(vis.center().y() - ch / 2)
+        x0 = max(0, min(x0, max(0, self.width() - cw)))
+        y0 = max(0, min(y0, max(0, self.height() - ch)))
+        return QRect(x0, y0, cw, ch)
+
+    def _msa_layer_cache_covers(self, vis: QRect) -> bool:
+        cached = self._msa_layer_cache_rect
+        if cached.isEmpty() or vis.isEmpty():
             return False
+        return (
+            cached.left() <= vis.left()
+            and cached.top() <= vis.top()
+            and cached.right() >= vis.right()
+            and cached.bottom() >= vis.bottom()
+        )
+
+    def _msa_layer_edge_margin(self, vis: QRect) -> int:
+        """Prefetch when the viewport comes this close to a cache edge."""
+        return max(48, int(vis.height() * 0.2), int(vis.width() * 0.2))
+
+    def _msa_layer_desired_cover(self, vis: QRect) -> QRect:
+        """Keep the current cover while the viewport has comfortable slack."""
+        cached = self._msa_layer_cache_rect
+        ideal = self._msa_layer_overscroll_rect(vis)
+        if ideal.isEmpty():
+            return QRect()
         if (
-            self._msa_layer_cache is not None
-            and not self._msa_layer_cache.isNull()
-            and self._msa_layer_cache_key == key
+            not cached.isEmpty()
+            and cached.size() == ideal.size()
+            and self._msa_layer_cache_covers(vis)
         ):
-            return True
-        dpr, vx, vy, vw, vh, _ppb, _serial = key
-        cache = QPixmap(int(math.ceil(vw * dpr)), int(math.ceil(vh * dpr)))
-        cache.setDevicePixelRatio(float(dpr))
+            margin = self._msa_layer_edge_margin(vis)
+            slack_l = vis.left() - cached.left()
+            slack_t = vis.top() - cached.top()
+            slack_r = cached.right() - vis.right()
+            slack_b = cached.bottom() - vis.bottom()
+            if (
+                slack_l >= margin
+                and slack_t >= margin
+                and slack_r >= margin
+                and slack_b >= margin
+            ):
+                return QRect(cached)
+        return ideal
+
+    def _alloc_msa_layer_pixmap(self, cw: int, ch: int, dpr: float) -> QPixmap:
+        pix = QPixmap(int(math.ceil(cw * dpr)), int(math.ceil(ch * dpr)))
+        pix.setDevicePixelRatio(float(dpr))
+        return pix
+
+    def _msa_layer_pixmap_matches(
+        self, pix: QPixmap | None, *, cw: int, ch: int, dpr: float
+    ) -> bool:
+        if pix is None or pix.isNull():
+            return False
+        return (
+            abs(pix.width() / max(dpr, 1e-6) - cw) <= 1.5
+            and abs(pix.height() / max(dpr, 1e-6) - ch) <= 1.5
+            and abs(float(pix.devicePixelRatio()) - dpr) <= 0.01
+        )
+
+    def _rebuild_msa_layer_cache(self, identity: tuple, cover: QRect) -> bool:
+        """Paint the full overscroll cover from scratch."""
+        dpr = float(identity[0])
+        cw = int(cover.width())
+        ch = int(cover.height())
+        if cw < 1 or ch < 1:
+            return False
+        if self._msa_layer_pixmap_matches(
+            self._msa_layer_cache, cw=cw, ch=ch, dpr=dpr
+        ):
+            cache = self._msa_layer_cache
+            assert cache is not None
+        else:
+            cache = self._alloc_msa_layer_pixmap(cw, ch, dpr)
         cache.fill(_msa_canvas_color(self))
         painter = QPainter(cache)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.translate(-int(vx), -int(vy))
-        vis = QRect(int(vx), int(vy), int(vw), int(vh))
-        self._paint_msa_rows(painter, vis, paint_feature_selection=False)
+        painter.translate(-int(cover.x()), -int(cover.y()))
+        self._paint_msa_rows(painter, cover, paint_feature_selection=False)
         painter.end()
         self._msa_layer_cache = cache
-        self._msa_layer_cache_key = key
+        self._msa_layer_cache_key = identity
+        self._msa_layer_cache_origin = QPoint(int(cover.x()), int(cover.y()))
+        self._msa_layer_cache_rect = QRect(cover)
         return True
+
+    def _try_scroll_msa_layer_cache(self, new_cover: QRect) -> bool:
+        """Shift retained pixels and paint only newly exposed strips.
+
+        Returns False when a full rebuild is cheaper / required.
+        """
+        old = self._msa_layer_cache_rect
+        cache = self._msa_layer_cache
+        if (
+            cache is None
+            or cache.isNull()
+            or old.isEmpty()
+            or new_cover.isEmpty()
+            or old.size() != new_cover.size()
+        ):
+            return False
+        overlap = old.intersected(new_cover)
+        if overlap.isEmpty():
+            return False
+        # Large jumps: full rebuild is clearer than copying a tiny sliver.
+        old_area = max(1, old.width() * old.height())
+        if overlap.width() * overlap.height() < int(0.35 * old_area):
+            return False
+
+        dx = int(old.x() - new_cover.x())
+        dy = int(old.y() - new_cover.y())
+        if dx == 0 and dy == 0:
+            return True
+
+        dpr = float(cache.devicePixelRatio())
+        cw = int(new_cover.width())
+        ch = int(new_cover.height())
+        bg = _msa_canvas_color(self)
+        if self._msa_layer_pixmap_matches(
+            self._msa_layer_cache_scratch, cw=cw, ch=ch, dpr=dpr
+        ):
+            scratch = self._msa_layer_cache_scratch
+            assert scratch is not None
+        else:
+            scratch = self._alloc_msa_layer_pixmap(cw, ch, dpr)
+            self._msa_layer_cache_scratch = scratch
+        painter = QPainter(scratch)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        # No full-clear: every pixel is either shifted from ``cache`` or in
+        # the exposed strip painted below (avoids a Retina-wide fill hitch).
+        painter.drawPixmap(QPoint(dx, dy), cache)
+        exposed = QRegion(new_cover).subtracted(QRegion(old))
+        painter.translate(-int(new_cover.x()), -int(new_cover.y()))
+        for rect in exposed:
+            if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+                continue
+            painter.fillRect(rect, bg)
+            self._paint_msa_rows(painter, rect, paint_feature_selection=False)
+        painter.end()
+
+        # Ping-pong: scratch becomes the live cache; old cache is reusable.
+        self._msa_layer_cache_scratch = cache
+        self._msa_layer_cache = scratch
+        self._msa_layer_cache_origin = QPoint(int(new_cover.x()), int(new_cover.y()))
+        self._msa_layer_cache_rect = QRect(new_cover)
+        return True
+
+    def _ensure_msa_layer_cache(self) -> bool:
+        """Lazy sticky overscrolled residue snapshot without selection chrome."""
+        vis = self.scroll_viewport_rect()
+        identity = self._msa_layer_cache_identity_key(vis)
+        if identity is None:
+            return False
+        have_cache = (
+            self._msa_layer_cache is not None
+            and not self._msa_layer_cache.isNull()
+            and self._msa_layer_cache_key == identity
+        )
+        if have_cache and self._msa_layer_cache_covers(vis):
+            desired = self._msa_layer_desired_cover(vis)
+            if desired.isEmpty() or desired == self._msa_layer_cache_rect:
+                # Comfortable slack — blit only, no residue work this frame.
+                return True
+            # Near an edge: prefetch the recentered cover while still covered.
+            if self._try_scroll_msa_layer_cache(desired):
+                return True
+            return True
+        cover = self._msa_layer_desired_cover(vis)
+        if cover.isEmpty():
+            cover = self._msa_layer_overscroll_rect(vis)
+        if cover.isEmpty():
+            return False
+        if have_cache and self._try_scroll_msa_layer_cache(cover):
+            if self._msa_layer_cache_covers(vis):
+                return True
+        return self._rebuild_msa_layer_cache(identity, cover)
 
     def scroll_viewport_rect(self) -> QRect:
         """This canvas's content rect currently shown in the scroll viewport."""
@@ -3508,12 +3718,13 @@ class _BarsCanvas(QWidget):
         region = event.region()
         rects = list(region) if not region.isEmpty() else [event.rect()]
         use_cache = self._msa_mode and self._ensure_msa_layer_cache()
-        vis = self.scroll_viewport_rect() if use_cache else QRect()
         cache = self._msa_layer_cache if use_cache else None
+        cache_origin = self._msa_layer_cache_origin if use_cache else QPoint()
+        cache_rect = self._msa_layer_cache_rect if use_cache else QRect()
         for clip in rects:
             if clip.isNull() or clip.width() <= 0 or clip.height() <= 0:
                 continue
-            if use_cache and cache is not None and not vis.isEmpty():
+            if use_cache and cache is not None and not cache_rect.isEmpty():
                 # Always clear the dirty rect first so a stale/small cache cannot
                 # leave uncleared white slabs after a tab switch.
                 painter.fillRect(clip, base)
@@ -3521,13 +3732,13 @@ class _BarsCanvas(QWidget):
                 # HiDPI QPixmap — Qt/PySide treats that source in *device*
                 # pixels, so only the top-left half of the MSA appeared (same
                 # bug as SequenceMapCanvas letter cache). Draw the full logical
-                # pixmap at the viewport origin and clip to the dirty rect.
+                # overscrolled pixmap at its content origin and clip to dirty.
                 painter.save()
                 painter.setClipRect(clip)
-                painter.drawPixmap(vis.topLeft(), cache)
+                painter.drawPixmap(cache_origin, cache)
                 painter.restore()
-                # Outside the cached viewport (rare): fall back to live paint.
-                outside = QRegion(clip).subtracted(QRegion(vis))
+                # Outside the overscrolled cache (rare): fall back to live paint.
+                outside = QRegion(clip).subtracted(QRegion(cache_rect))
                 if not outside.isEmpty():
                     for out in outside:
                         if out.isNull() or out.width() <= 0 or out.height() <= 0:
@@ -3575,9 +3786,12 @@ class _BarsCanvas(QWidget):
         length: int,
         feat_y0: int,
         paint_selection: bool = True,
+        clip: QRect | None = None,
     ) -> None:
         if not self._show_annotation_track:
             return
+        clip_left = float(clip.left()) - 2.0 if clip is not None else None
+        clip_right = float(clip.right()) + 2.0 if clip is not None else None
         flat_index = 0
         for track_i, track in enumerate(self._tracks.get(rid) or []):
             ty = feat_y0 + track_i * (self._feat_height + self._feat_gap)
@@ -3588,6 +3802,10 @@ class _BarsCanvas(QWidget):
                     start, end = end, start
                 x0 = self._bar_pad + (start - 1) * self._ppb
                 x1 = self._bar_pad + end * self._ppb
+                if clip_left is not None and clip_right is not None:
+                    if x1 < clip_left or x0 > clip_right:
+                        flat_index += 1
+                        continue
                 rect = QRectF(x0, ty, max(2.0, x1 - x0), float(self._feat_height))
                 try:
                     fc = QColor(feat.color) if feat.color else _DEFAULT_FEAT
@@ -3681,11 +3899,9 @@ class _BarsCanvas(QWidget):
             return
         painter.setPen(Qt.PenStyle.NoPen)
         gap_line = QColor("#e0e0e0") if _is_dark(self) else QColor("#000000")
-        for index, rid in enumerate(self._record_ids):
+        for index in self._rows_in_y_range(float(clip.top()), float(clip.bottom()) + 1.0):
+            rid = self._record_ids[index]
             top = self._row_tops[index]
-            height = self._row_heights[index]
-            if top + height < clip.top() or top > clip.bottom():
-                continue
             seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
             y = float(top)
             y_mid = y + float(residue_h) * 0.5
@@ -3739,6 +3955,7 @@ class _BarsCanvas(QWidget):
                 length=length,
                 feat_y0=self._feature_band_y0(index),
                 paint_selection=paint_feature_selection,
+                clip=clip,
             )
 
     def _paint_msa_rows(
@@ -3773,11 +3990,9 @@ class _BarsCanvas(QWidget):
         # Overview: Column distance insets. Letter mode: square→wide fill.
         _bg_margin = max(0.0, float(self._column_distance) * 0.5)
         painter.setPen(Qt.PenStyle.NoPen)
-        for index, rid in enumerate(self._record_ids):
+        for index in self._rows_in_y_range(float(clip.top()), float(clip.bottom()) + 1.0):
+            rid = self._record_ids[index]
             top = self._row_tops[index]
-            height = self._row_heights[index]
-            if top + height < clip.top() or top > clip.bottom():
-                continue
             # No selection wash on residues — dashed outline / name highlight only.
             seq = self._msa_seqs[index] if index < len(self._msa_seqs) else ""
             y = top
@@ -3960,6 +4175,7 @@ class _BarsCanvas(QWidget):
                 length=length,
                 feat_y0=self._feature_band_y0(index),
                 paint_selection=paint_feature_selection,
+                clip=clip,
             )
         # Selection chrome lives entirely on ``_chrome`` (see _sync_selection_chrome).
 
@@ -3974,11 +4190,9 @@ class _BarsCanvas(QWidget):
             else None
         )
 
-        for index, rid in enumerate(self._record_ids):
+        for index in self._rows_in_y_range(float(clip.top()), float(clip.bottom()) + 1.0):
+            rid = self._record_ids[index]
             top = self._row_tops[index]
-            height = self._row_heights[index]
-            if top + height < clip.top() or top > clip.bottom():
-                continue
             # No selection wash on bars — dashed outline / name highlight only.
             length = max(1, int(self._lengths.get(rid, 1)))
             bar_y = top if show_letters else self._sequence_bar_y(index)

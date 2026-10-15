@@ -340,7 +340,10 @@ class _SegmentsItem(QGraphicsItem):
         self.update()
 
     def boundingRect(self) -> QRectF:  # noqa: N802
-        return QRectF(0, 0, float(self._n), float(self._n))
+        # Pad half a scene unit so the cosmetic right/bottom axis strokes at
+        # ``n`` are not clipped by the item bounds.
+        n = float(self._n)
+        return QRectF(0.0, 0.0, n, n).adjusted(0.0, 0.0, 0.5, 0.5)
 
     def _pen(self, color: QColor) -> QPen:
         pen = QPen(color)
@@ -354,10 +357,18 @@ class _SegmentsItem(QGraphicsItem):
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        # White plot face; viewport outside the square uses the ruler grey so
-        # there is no framed "box" around the data.
+        # White plot face; viewport outside the square uses the ruler grey.
+        # Top/left edges are the X/Y ruler axes; close the square on the
+        # right/bottom with the same light axis stroke (no scale labels).
         exposed = option.exposedRect if option is not None else self.boundingRect()
         painter.fillRect(exposed, QColor(255, 255, 255))
+        n = float(self._n)
+        axis = QPen(_RULER_LINE)
+        axis.setCosmetic(True)
+        axis.setWidth(1)
+        painter.setPen(axis)
+        painter.drawLine(QPointF(n, 0.0), QPointF(n, n))  # right
+        painter.drawLine(QPointF(0.0, n), QPointF(n, n))  # bottom
         scale = painter.transform().m11() or 1.0
         # Scene length that maps to ~1 screen pixel. Shorter hits still get a
         # point so Fit zoom is not an empty diagonal on long sequences.
