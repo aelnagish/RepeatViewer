@@ -546,6 +546,23 @@ def test_msa_color_vs_standard_defaults_to_first_until_pinned(
     panel2.close()
 
 
+def test_msa_standard_extent_for_boundary_guides(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Color vs standard guides use only leftmost/rightmost standard nucleotides."""
+    from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+
+    path = tmp_path / "islands.fa"
+    path.write_text(">std\nAC----GTAC\n>other\nACGTACGTAC\n")
+    panel = MultiSequenceOverviewPanel(path)
+    panel.load_path(path, msa_mode=True)
+    panel._bars.set_msa_color_mode(MSA_COLOR_DIFF_FROM_SELECTED)
+    assert panel._bars.msa_diff_standard_row() == 0
+    # First non-gap col 0, last non-gap col 9 — ignore the internal gap.
+    assert panel._bars._msa_standard_extent_columns() == (0, 9)
+    panel.close()
+
+
 def test_msa_copy_sequence_without_gap_strips_dashes(
     qapp: QApplication, tmp_path: Path, monkeypatch
 ) -> None:

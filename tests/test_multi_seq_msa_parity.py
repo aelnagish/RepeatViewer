@@ -1455,6 +1455,33 @@ def test_msa_pane_to_matrix_gap_does_not_jump_to_last_row(
     assert row != len(canvas.record_ids()) - 1
 
 
+def test_names_column_gap_click_selects_nearest_sequence(
+    qapp: QApplication,
+) -> None:
+    """Sequence distance gaps split between neighbors for name-column select."""
+    from repeatviewer.widgets.multi_sequence_overview import _NamesColumn
+
+    names = _NamesColumn()
+    tops = [0, 20, 40]
+    heights = [8, 8, 8]  # 12 px gap between bands
+    names.set_rows(
+        ["a", "b", "c"],
+        tops,
+        heights,
+        set(),
+        width=120,
+        content_height=60,
+    )
+    # Just below row 0 → nearer to row 0.
+    assert names._row_at_y(9) == 0
+    # Just above row 1 → nearer to row 1.
+    assert names._row_at_y(18) == 1
+    # Mid-gap (y=14): tie goes to the upper row.
+    assert names._row_at_y(14) == 0
+    assert names._rows_in_y_range(9, 18) == [0, 1]
+    names.close()
+
+
 def test_msa_regional_select_snaps_box_and_keeps_matrix_rows(
     qapp: QApplication,
 ) -> None:

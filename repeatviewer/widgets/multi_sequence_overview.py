@@ -623,39 +623,50 @@ class _NamesColumn(QWidget):
         return font
 
     def _row_at_y(self, y: float) -> int:
-        for index, (top, height) in enumerate(zip(self._row_tops, self._row_heights)):
-            if top <= y < top + height:
-                return index
-        return -1
+        """Sequence under ``y``, splitting Sequence-distance gaps between neighbors.
 
-    def _rows_in_y_range(self, y0: float, y1: float) -> list[int]:
+        Empty space from Others → Sequence distance is not a dead zone: the
+        upper half of a gap belongs to the row above, the lower half to the
+        row below (same rule as MSA regional hit-testing).
+        """
         tops = self._row_tops
         heights = self._row_heights
         n = len(tops)
         if n <= 0:
-            return []
-        lo_y, hi_y = (y0, y1) if y0 <= y1 else (y1, y0)
-        lo, hi = 0, n - 1
-        first = n
+            return -1
+        if y < tops[0]:
+            return 0
+        last = n - 1
+        last_bottom = tops[last] + heights[last]
+        if y >= last_bottom:
+            return last
+        lo, hi = 0, last
         while lo <= hi:
             mid = (lo + hi) // 2
-            if tops[mid] + heights[mid] > lo_y:
-                first = mid
+            top = tops[mid]
+            bottom = top + heights[mid]
+            if y < top:
                 hi = mid - 1
-            else:
-                lo = mid + 1
-        lo, hi = 0, n - 1
-        last = -1
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            if tops[mid] < hi_y:
-                last = mid
+            elif y >= bottom:
+                if mid < last and y < tops[mid + 1]:
+                    mid_dist = y - bottom
+                    next_dist = tops[mid + 1] - y
+                    return mid if mid_dist <= next_dist else mid + 1
                 lo = mid + 1
             else:
-                hi = mid - 1
-        if first > last:
+                return mid
+        return max(0, min(last, lo))
+
+    def _rows_in_y_range(self, y0: float, y1: float) -> list[int]:
+        """Inclusive row span for a vertical drag (gaps count toward nearest rows)."""
+        if not self._row_tops:
             return []
-        return list(range(first, last + 1))
+        r0 = self._row_at_y(y0)
+        r1 = self._row_at_y(y1)
+        if r0 < 0 or r1 < 0:
+            return []
+        lo, hi = (r0, r1) if r0 <= r1 else (r1, r0)
+        return list(range(lo, hi + 1))
 
     def _ensure_elided_labels(self, fm: QFontMetrics, avail: int) -> list[str]:
         key = (len(self._record_ids), int(avail), int(self._label_point_size), self.width())
@@ -3877,6 +3888,75 @@ class _BarsCanvas(QWidget):
             full_label,
         )
 
+    def _msa_standard_extent_columns(self) -> tuple[int, int] | None:
+        """0-based inclusive ``(first, last)`` non-gap columns on the standard row.
+
+        Returns ``None`` when Color vs standard has no standard residues.
+        """
+        std = self._msa_standard_row()
+        if std is None or not (0 <= std < len(self._msa_seqs)):
+            return None
+        seq = self._msa_seqs[std]
+        first: int | None = None
+        last: int | None = None
+        for i, ch in enumerate(seq):
+            if ch in "-.":
+                continue
+            if first is None:
+                first = i
+            last = i
+        if first is None or last is None:
+            return None
+        return int(first), int(last)
+
+    def _paint_msa_standard_boundaries(
+        self,
+        painter: QPainter,
+        clip: QRect,
+    ) -> None:
+        """Two full-height dashed guides: leftmost and rightmost standard nucleotides.
+
+        Shown in Color vs standard at overview and nucleotide (letter) zoom.
+        Mark only the overall left/right extent of the standard row — not every
+        internal gap island.
+        """
+        from repeatviewer.backends.msa_coordinates import MSA_COLOR_DIFF_FROM_SELECTED
+
+        if self._msa_color_mode != MSA_COLOR_DIFF_FROM_SELECTED:
+            return
+        extent = self._msa_standard_extent_columns()
+        if extent is None:
+            return
+        first, last = extent
+        ppb = max(self._ppb, 1e-12)
+        y0 = float(clip.top())
+        y1 = float(clip.bottom()) + 1.0
+        if y1 <= y0:
+            return
+        # Left edge of first nucleotide; right edge of last nucleotide.
+        x0 = float(self._bar_pad) + float(first) * ppb
+        x1 = float(self._bar_pad) + float(last + 1) * ppb
+        # Only pad tiny extents at overview zoom; at letter zoom keep exact edges.
+        if not self._msa_shows_letters():
+            min_w = max(_MIN_COLUMN_BAND_PX, float(ppb))
+            if (x1 - x0) < min_w - 1e-9:
+                mid = 0.5 * (x0 + x1)
+                x0 = mid - 0.5 * min_w
+                x1 = mid + 0.5 * min_w
+        edge = QColor("#e8e8e8") if _is_dark(self) else QColor("#000000")
+        # Thicker at letter zoom so the guides stay readable among residues.
+        width = 2.5 if self._msa_shows_letters() else 1.0
+        pen = QPen(edge, width, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        clip_left = float(clip.left()) - 1.0
+        clip_right = float(clip.right()) + 1.0
+        if clip_left <= x0 <= clip_right:
+            painter.drawLine(QPointF(x0, y0), QPointF(x0, y1))
+        if clip_left <= x1 <= clip_right and abs(x1 - x0) > 0.5:
+            painter.drawLine(QPointF(x1, y0), QPointF(x1, y1))
+        painter.setPen(Qt.PenStyle.NoPen)
+
     def _paint_msa_rows_pixel_sample(
         self,
         painter: QPainter,
@@ -3957,6 +4037,7 @@ class _BarsCanvas(QWidget):
                 paint_selection=paint_feature_selection,
                 clip=clip,
             )
+        self._paint_msa_standard_boundaries(painter, clip)
 
     def _paint_msa_rows(
         self,
@@ -4177,6 +4258,7 @@ class _BarsCanvas(QWidget):
                 paint_selection=paint_feature_selection,
                 clip=clip,
             )
+        self._paint_msa_standard_boundaries(painter, clip)
         # Selection chrome lives entirely on ``_chrome`` (see _sync_selection_chrome).
 
     def _paint_bar_rows(self, painter: QPainter, clip: QRect) -> None:
