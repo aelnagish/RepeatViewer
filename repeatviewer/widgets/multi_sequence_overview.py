@@ -72,10 +72,12 @@ from repeatviewer.backends.msa_coordinates import (
     MSA_COLOR_ALL_BACKGROUNDS,
     column_residue_frequencies,
     drop_features_overlapping_region,
+    fill_rows_region,
     mask_rows_region,
     msa_residue_fill_background,
     normalize_msa_color_mode,
     normalize_msa_divergence_threshold,
+    normalize_msa_edit_residue,
     remap_features_after_column_delete,
     remove_alignment_columns,
     splice_rows_region,
@@ -1189,6 +1191,8 @@ class _BarsCanvas(QWidget):
     regionDragPreview = Signal(object)
     rowsChanged = Signal()  # layout / selection updated — refresh names column
     deleteRequested = Signal()  # Delete / Backspace while tracks focused
+    # Type a residue into the selected MSA region (AliView-style edit).
+    residueEditRequested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3817,7 +3821,30 @@ class _BarsCanvas(QWidget):
             self.select_all_rows()
             event.accept()
             return
+        # Type a letter / gap into the selected MSA region (replace in place).
+        if self._msa_mode and self._try_emit_residue_edit(event):
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    def _try_emit_residue_edit(self, event: QKeyEvent) -> bool:
+        """Emit ``residueEditRequested`` when a residue key is typed."""
+        mods = event.modifiers()
+        if mods & (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.MetaModifier
+            | Qt.KeyboardModifier.AltModifier
+        ):
+            return False
+        # Shift+letter is fine (uppercase); Shift+arrows handled above.
+        text = event.text()
+        ch = normalize_msa_edit_residue(text, protein=bool(self._msa_protein))
+        if ch is None:
+            return False
+        if self._region_sel is None:
+            return False
+        self.residueEditRequested.emit(ch)
+        return True
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4738,6 +4765,11 @@ class _ScaleRuler(QWidget):
                 clear(None)
                 event.accept()
                 return
+        # Forward typed residues to the MSA canvas (same as tracks focus).
+        try_edit = getattr(bars, "_try_emit_residue_edit", None) if bars else None
+        if callable(try_edit) and try_edit(event):
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def _paint_column_selection(self, painter: QPainter) -> None:
@@ -5691,6 +5723,7 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.restoreClicked.connect(self._restore_features)
         rail.exportClicked.connect(self._export_overview_view)
         self._bars.deleteRequested.connect(self._on_delete_clicked)
+        self._bars.residueEditRequested.connect(self._replace_selected_msa_residues)
         rail.addFeatureClicked.connect(self._on_add_feature_clicked)
         rail.addFeatureSettingsClicked.connect(
             self._open_add_feature_buttons_settings
@@ -6783,15 +6816,110 @@ class MultiSequenceOverviewPanel(QWidget):
             QMessageBox.information(
                 self,
                 "Delete",
-                "Select sequences, a region, or columns, then Delete (remove) "
-                "or Shift+Delete (→ gaps). Ctrl+Z undoes. "
-                "Or select a feature and Delete.",
+                "Select sequences, a region, or columns, then Delete (remove), "
+                "Shift+Delete (→ gaps), or type a letter to replace. "
+                "Ctrl+Z undoes. Or select a feature and Delete.",
             )
             return
         QMessageBox.information(
             self,
             "Delete",
             "Select sequence name(s) or a feature, then Delete.",
+        )
+
+    def _replace_selected_msa_residues(self, residue: str) -> None:
+        """Replace the selected MSA region with ``residue`` (typed letter / gap)."""
+        if not self.is_msa_mode():
+            return
+        region = self._bars.region_selection()
+        if region is None:
+            return
+        protein = bool(getattr(self._bars, "_msa_protein", False))
+        ch = normalize_msa_edit_residue(residue, protein=protein)
+        if ch is None:
+            return
+        start, end = int(region[0]), int(region[1])
+        if end < start:
+            start, end = end, start
+        seqs = self._bars.msa_sequences()
+        if not seqs:
+            return
+        width = len(seqs[0])
+        start = max(1, min(width, start))
+        end = max(start, min(width, end))
+        regional_rows = self._bars.regional_rows()
+        is_regional = regional_rows is not None and len(regional_rows) > 0
+        if is_regional:
+            rows = set(regional_rows)
+            edited_ids = {
+                self._record_ids[r]
+                for r in rows
+                if 0 <= r < len(self._record_ids)
+            }
+        else:
+            rows = set(range(len(seqs)))
+            edited_ids = set(self._record_ids)
+
+        self._push_feature_undo_snapshot()
+        try:
+            new_seqs = fill_rows_region(
+                seqs,
+                start,
+                end,
+                rows if is_regional else None,
+                fill=ch,
+            )
+        except ValueError as exc:
+            self._feature_undo_stack.pop()
+            QMessageBox.warning(self, "Edit", str(exc))
+            return
+
+        new_features: dict[str, list[SequenceFeature]] = {}
+        for rid in self._record_ids:
+            feats = list(self._features.get(rid) or [])
+            if rid in edited_ids:
+                feats = drop_features_overlapping_region(feats, start, end)
+            new_features[rid] = feats
+
+        try:
+            write_aligned_fasta_rows(self._path, self._record_ids, new_seqs)
+        except (OSError, ValueError) as exc:
+            self._feature_undo_stack.pop()
+            QMessageBox.critical(self, "Edit", str(exc))
+            return
+
+        self._features = new_features
+        self._lengths = {rid: width for rid in self._record_ids}
+        keep_ppb = self._bars.pixels_per_base()
+        keep_region = (start, end)
+        keep_rows = set(rows) if is_regional else None
+        self._bars.set_msa_data(
+            self._record_ids,
+            new_seqs,
+            features=self._features,
+            fit_bars_width=None,
+        )
+        self._bars.set_pixels_per_base(keep_ppb)
+        # Keep the selection so the user can type again to change the fill.
+        if keep_rows is not None:
+            self._bars.set_regional_selection(
+                keep_region[0], keep_region[1], keep_rows
+            )
+        else:
+            self._bars.set_region_selection(keep_region[0], keep_region[1])
+        self._sync_names_column()
+        self._update_scale()
+        self._sync_header_position_spins()
+        self._persist_overview_features()
+        scope = (
+            f"{len(rows)} sequence(s)"
+            if is_regional
+            else "all sequences"
+        )
+        label = "gaps" if ch == "-" else f"'{ch}'"
+        self.statusMessage.emit(
+            f"Replaced columns {start}–{end} with {label} on {scope}. "
+            "Ctrl+Z to undo."
         )
 
     def _delete_selected_features(self) -> None:
@@ -7079,11 +7207,12 @@ class MultiSequenceOverviewPanel(QWidget):
                 else:
                     new_seqs = remove_alignment_columns(seqs, start, end)
             else:
-                new_seqs = mask_rows_region(
+                new_seqs = fill_rows_region(
                     seqs,
                     start,
                     end,
                     rows if is_regional else None,
+                    fill="-",
                 )
         except ValueError as exc:
             self._feature_undo_stack.pop()
@@ -9107,7 +9236,8 @@ class MultiSequenceOverviewPanel(QWidget):
         if self.is_msa_mode():
             delete.setToolTip(
                 "Remove the selection (sequences, region, or feature). "
-                "Shift+Delete fills MSA residues with gaps."
+                "Shift+Delete fills with gaps. Type a letter to replace "
+                "the selected region."
             )
         else:
             delete.setToolTip("Remove selected sequence(s) or feature(s).")

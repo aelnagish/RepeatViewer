@@ -408,24 +408,48 @@ def splice_rows_region(
     return [s + ("-" * (max_len - len(s))) for s in out]
 
 
-def mask_rows_region(
+# Residues accepted when typing into an MSA selection (AliView-style edit).
+_MSA_NUCLEOTIDE_EDIT_CHARS = frozenset("ACGTUNIRYWSMKBDHVX-.")
+_MSA_PROTEIN_EDIT_CHARS = frozenset("ACDEFGHIKLMNPQRSTVWYBXZJUO*-.")
+
+
+def normalize_msa_edit_residue(residue: str, *, protein: bool = False) -> str | None:
+    """Return a single editable MSA character, or ``None`` if invalid."""
+    ch = str(residue or "")
+    if len(ch) != 1:
+        return None
+    if ch in "-.":
+        return ch
+    up = ch.upper()
+    allowed = _MSA_PROTEIN_EDIT_CHARS if protein else _MSA_NUCLEOTIDE_EDIT_CHARS
+    if up in allowed:
+        return up
+    return None
+
+
+def fill_rows_region(
     sequences: list[str],
     start_1based: int,
     end_1based: int,
     row_indices: set[int] | list[int] | None = None,
+    *,
+    fill: str = "-",
 ) -> list[str]:
-    """Replace ``[start, end]`` with ``-`` on the given rows (or all rows)."""
+    """Replace ``[start, end]`` with ``fill`` on the given rows (or all rows)."""
     if not sequences:
         return []
     width = len(sequences[0])
     if any(len(s) != width for s in sequences):
         raise ValueError("MSA rows must share one length")
+    ch = str(fill or "")
+    if len(ch) != 1:
+        raise ValueError("fill must be a single character")
     a = max(1, min(width, int(start_1based)))
     b = max(1, min(width, int(end_1based)))
     if b < a:
         a, b = b, a
     lo, hi = a - 1, b
-    gap = "-" * (hi - lo)
+    block = ch * (hi - lo)
     if row_indices is None:
         rows = set(range(len(sequences)))
     else:
@@ -433,10 +457,26 @@ def mask_rows_region(
     out: list[str] = []
     for i, seq in enumerate(sequences):
         if i in rows:
-            out.append(seq[:lo] + gap + seq[hi:])
+            out.append(seq[:lo] + block + seq[hi:])
         else:
             out.append(seq)
     return out
+
+
+def mask_rows_region(
+    sequences: list[str],
+    start_1based: int,
+    end_1based: int,
+    row_indices: set[int] | list[int] | None = None,
+) -> list[str]:
+    """Replace ``[start, end]`` with ``-`` on the given rows (or all rows)."""
+    return fill_rows_region(
+        sequences,
+        start_1based,
+        end_1based,
+        row_indices,
+        fill="-",
+    )
 
 
 def drop_features_overlapping_region(

@@ -239,3 +239,22 @@ def test_column_residue_frequencies_and_threshold() -> None:
         residue="T",
         reference_residue=None,
     )
+
+
+def test_fill_rows_region_and_normalize_edit_residue() -> None:
+    from repeatviewer.backends.msa_coordinates import (
+        fill_rows_region,
+        mask_rows_region,
+        normalize_msa_edit_residue,
+    )
+
+    assert normalize_msa_edit_residue("a", protein=False) == "A"
+    assert normalize_msa_edit_residue("-", protein=False) == "-"
+    assert normalize_msa_edit_residue("Q", protein=False) is None
+    assert normalize_msa_edit_residue("q", protein=True) == "Q"
+    assert normalize_msa_edit_residue("AC", protein=False) is None
+
+    seqs = ["ACGTAC", "ACGTAC"]
+    assert fill_rows_region(seqs, 2, 4, fill="N") == ["ANNNAC", "ANNNAC"]
+    assert fill_rows_region(seqs, 2, 4, {1}, fill="T") == ["ACGTAC", "ATTTAC"]
+    assert mask_rows_region(seqs, 3, 3) == ["AC-TAC", "AC-TAC"]

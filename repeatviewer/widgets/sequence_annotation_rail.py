@@ -2553,11 +2553,13 @@ class SequenceAnnotationRail(QWidget):
             self.delete_btn.setToolTip(
                 "Delete: remove selected residues/columns, or selected "
                 "sequence(s). Shift+Delete: fill selection / selected "
-                "sequence(s) with gaps. Or delete a selected feature "
+                "sequence(s) with gaps. Type a letter (A/C/G/T/…) or '-' "
+                "to replace the selection. Or delete a selected feature "
                 "(Esc clears the band first)."
             )
             self.restore_btn.setToolTip(
-                "Undo the last Delete (Ctrl+Z). Restores MSA and features."
+                "Undo the last Delete or typed edit (Ctrl+Z). "
+                "Restores MSA and features."
             )
         else:
             self.delete_btn.setToolTip("Delete the selected feature.")

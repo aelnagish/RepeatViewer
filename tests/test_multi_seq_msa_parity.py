@@ -1641,6 +1641,49 @@ def test_delete_removes_shift_delete_fills_gaps(
     panel.close()
 
 
+def test_type_letter_replaces_msa_selection(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Typing a residue into a column/region selection replaces in place."""
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "edit.fa"
+    fasta.write_text(
+        ">s1\nACGTACGTAC\n>s2\nACGTACGTAC\n",
+        encoding="utf-8",
+    )
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    panel._bars.set_region_selection(3, 5)
+    panel._features = {
+        "s1": [
+            SequenceFeature(start=2, end=8, name="overlap", feature_type="LTR"),
+            SequenceFeature(start=9, end=10, name="keep", feature_type="ORF"),
+        ],
+        "s2": [],
+    }
+    panel._replace_selected_msa_residues("N")
+    qapp.processEvents()
+    assert panel._bars.msa_sequences() == ["ACNNNCGTAC", "ACNNNCGTAC"]
+    assert [f.name for f in panel._features["s1"]] == ["keep"]
+    assert panel._features["s1"][0].start == 9
+    # Selection kept so the user can type again.
+    assert panel._bars.region_selection() == (3, 5)
+    assert fasta.read_text(encoding="utf-8").count("ACNNNCGTAC") == 2
+
+    panel._replace_selected_msa_residues("-")
+    qapp.processEvents()
+    assert panel._bars.msa_sequences() == ["AC---CGTAC", "AC---CGTAC"]
+
+    panel._restore_features()
+    qapp.processEvents()
+    assert panel._bars.msa_sequences() == ["ACNNNCGTAC", "ACNNNCGTAC"]
+    panel.close()
+
+
 def test_scale_click_selects_column_double_click_zooms(
     qapp: QApplication,
 ) -> None:
