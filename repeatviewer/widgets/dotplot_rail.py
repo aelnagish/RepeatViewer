@@ -476,7 +476,35 @@ class DotplotRail(QWidget):
         self.sequence_combo.setToolTip(
             "Which sequence to show as a self-dotplot."
         )
-        form.addRow(self.sequence_label, self.sequence_combo)
+        self.sequence_prev_btn = QToolButton(self._params_host)
+        self.sequence_prev_btn.setText("◀")
+        self.sequence_prev_btn.setAutoRaise(True)
+        self.sequence_prev_btn.setFixedSize(22, 22)
+        self.sequence_prev_btn.setToolTip("Previous sequence")
+        self.sequence_prev_btn.clicked.connect(
+            lambda: self.step_sequence(-1)
+        )
+        self.sequence_next_btn = QToolButton(self._params_host)
+        self.sequence_next_btn.setText("▶")
+        self.sequence_next_btn.setAutoRaise(True)
+        self.sequence_next_btn.setFixedSize(22, 22)
+        self.sequence_next_btn.setToolTip("Next sequence")
+        self.sequence_next_btn.clicked.connect(
+            lambda: self.step_sequence(1)
+        )
+        sequence_row = QWidget(self._params_host)
+        sequence_row.setMinimumWidth(0)
+        sequence_layout = QHBoxLayout(sequence_row)
+        sequence_layout.setContentsMargins(0, 0, 0, 0)
+        sequence_layout.setSpacing(2)
+        sequence_layout.addWidget(self.sequence_combo, 1)
+        sequence_layout.addWidget(self.sequence_prev_btn, 0)
+        sequence_layout.addWidget(self.sequence_next_btn, 0)
+        self.sequence_combo.currentIndexChanged.connect(
+            self.sync_sequence_step_buttons
+        )
+        form.addRow(self.sequence_label, sequence_row)
+        self.sync_sequence_step_buttons()
 
         self.filter_len_label = QLabel("Min length:", self._params_host)
         self.filter_len = QSpinBox(self._params_host)
@@ -708,6 +736,25 @@ class DotplotRail(QWidget):
 
         self.view_x_btn.setEnabled(x is not None)
         self.view_y_btn.setEnabled(y is not None)
+
+    def step_sequence(self, delta: int) -> None:
+        """Move the Sequence combo by ``delta`` entries (wraps at the ends)."""
+        count = int(self.sequence_combo.count())
+        if count <= 0:
+            return
+        current = int(self.sequence_combo.currentIndex())
+        if current < 0:
+            current = 0
+        next_index = (current + int(delta)) % count
+        if next_index == current:
+            return
+        self.sequence_combo.setCurrentIndex(next_index)
+
+    def sync_sequence_step_buttons(self, *_args) -> None:
+        count = int(self.sequence_combo.count())
+        enabled = count > 1
+        self.sequence_prev_btn.setEnabled(enabled)
+        self.sequence_next_btn.setEnabled(enabled)
 
     def sync_control_visibility(
         self,

@@ -1753,6 +1753,8 @@ class DotplotPanel(QWidget):
         self._pair_label = self._rail.pair_label
         self._sequence_combo = self._rail.sequence_combo
         self._sequence_label = self._rail.sequence_label
+        self._sequence_prev_btn = self._rail.sequence_prev_btn
+        self._sequence_next_btn = self._rail.sequence_next_btn
         self._filter_len = self._rail.filter_len
         self._filter_len_label = self._rail.filter_len_label
         self._word_label = self._rail.word_label
@@ -2004,6 +2006,16 @@ class DotplotPanel(QWidget):
         if self.isVisible():
             self.ensure_loaded()
 
+    def _numbered_sequence_label(self, sequence_id: str) -> str:
+        """Match the Sequence combo: ``N. id`` when multiple sequences are loaded."""
+        sid = str(sequence_id or "").strip()
+        if not sid:
+            return ""
+        ids = self._sequence_ids
+        if len(ids) > 1 and sid in ids:
+            return f"{ids.index(sid) + 1}. {sid}"
+        return sid
+
     def set_active_sequence(
         self, sequence_id: str, sequence: str, *, ungap: bool | None = None
     ) -> None:
@@ -2161,6 +2173,8 @@ class DotplotPanel(QWidget):
             self._pair_combo.setVisible(multi)
             self._sequence_label.setVisible(False)
             self._sequence_combo.setVisible(False)
+            self._sequence_prev_btn.setVisible(False)
+            self._sequence_next_btn.setVisible(False)
             self._filter_len_label.setVisible(True)
             self._filter_len.setVisible(True)
             # FastGA / PAF previews: no From/Window; x/y goes on the status line.
@@ -2182,6 +2196,10 @@ class DotplotPanel(QWidget):
         multi_seq = self._mode != "alignment" and len(self._sequence_ids) > 1
         self._sequence_label.setVisible(multi_seq)
         self._sequence_combo.setVisible(multi_seq)
+        self._sequence_prev_btn.setVisible(multi_seq)
+        self._sequence_next_btn.setVisible(multi_seq)
+        if multi_seq:
+            self._rail.sync_sequence_step_buttons()
         self._filter_len_label.setVisible(False)
         self._filter_len.setVisible(False)
         self._sel_row.show()
@@ -2471,7 +2489,9 @@ class DotplotPanel(QWidget):
         self._sync_engine_controls()
         self._sequence_id = result.sequence_id
         self._sequence_length = result.sequence_length
-        name = result.sequence_id or self._path.stem
+        name = self._numbered_sequence_label(
+            result.sequence_id or self._path.stem
+        )
         self._title.setText(name)
         self._title.setVisible(bool(name))
         self._canvas.set_title(name)

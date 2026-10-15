@@ -114,6 +114,49 @@ def test_dotplot_set_record_choices_loads_sequence_lazily(
     panel.close()
 
 
+def test_dotplot_numbered_sequence_label(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    path = tmp_path / "aln.fa"
+    path.write_text(">a\nACGTAC\n>b\nACGTAC\n")
+    panel = DotplotPanel(path)
+    panel.set_record_choices(
+        [("a", "ACGTAC"), ("b", "ACGTAC")],
+        preferred_id="b",
+    )
+    assert panel._numbered_sequence_label("b") == "2. b"
+    assert panel._numbered_sequence_label("a") == "1. a"
+    assert panel._numbered_sequence_label("") == ""
+    panel.close()
+
+
+def test_dotplot_sequence_prev_next_buttons(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    path = tmp_path / "aln.fa"
+    path.write_text(">a\nACGTAC\n>b\nACGTAC\n>c\nACGTAC\n")
+    panel = DotplotPanel(path)
+    panel.set_record_choices(
+        [("a", "ACGTAC"), ("b", "ACGTAC"), ("c", "ACGTAC")],
+        preferred_id="a",
+    )
+    assert panel._sequence_combo.currentData() == "a"
+    assert panel._sequence_prev_btn.isEnabled()
+    assert panel._sequence_next_btn.isEnabled()
+
+    panel._rail.step_sequence(1)
+    assert panel._sequence_combo.currentData() == "b"
+    panel._rail.step_sequence(1)
+    assert panel._sequence_combo.currentData() == "c"
+    # Wraps last → first.
+    panel._rail.step_sequence(1)
+    assert panel._sequence_combo.currentData() == "a"
+    # Previous wraps first → last.
+    panel._rail.step_sequence(-1)
+    assert panel._sequence_combo.currentData() == "c"
+    panel.close()
+
+
 def test_overview_region_for_dotplot_requires_matching_single_sequence(
     qapp: QApplication, tmp_path: Path
 ) -> None:
