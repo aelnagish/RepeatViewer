@@ -59,6 +59,7 @@ FEATURE_TYPE_COLORS: dict[str, str] = {
     "PBS": "#d35400",
     "PPT": "#e67e22",
     "ORF": "#27ae60",
+    "TSD": "#16a085",
     "tandem repeat": "#000000",
     "domain": "#2980b9",
     "others": "#7f8c8d",
@@ -73,13 +74,14 @@ DEFAULT_FEATURE_TYPES = (
     "PBS",
     "PPT",
     "ORF",
+    "TSD",
     "tandem repeat",
     "domain",
     "others",
 )
 
-# Always offered under Display → Tracks → Show annotation track.
-ALWAYS_ANNOTATION_VISIBILITY_KINDS: tuple[str, ...] = ("LTR", "TIR", "ORF")
+# Always offered under Display → Tracks → Displayed annotations.
+ALWAYS_ANNOTATION_VISIBILITY_KINDS: tuple[str, ...] = ("LTR", "TIR", "ORF", "TSD")
 
 # Strip trailing "(E=…)", "(85%)", etc. from domain track labels.
 _DOMAIN_KIND_SUFFIX_RE = re.compile(r"\s*\([^)]*\)\s*$")

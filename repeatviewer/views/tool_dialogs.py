@@ -6510,52 +6510,109 @@ class TsdSearchParamsDialog(QDialog):
         initial: TsdSearchOptions | None = None,
         title: str = "TSD search parameters",
         parent=None,
+        include_clustering: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         opts = initial or TsdSearchOptions()
+        self._include_clustering = bool(include_clustering)
 
         self._left = QSpinBox()
         self._left.setRange(0, 10_000_000)
         self._left.setValue(opts.left_boundary)
-        self._left.setToolTip("MSA column index for the left TE boundary.")
+        self._left.setToolTip(
+            "Putative left TE boundary as a 1-based MSA column (0 = auto)."
+        )
 
         self._right = QSpinBox()
         self._right.setRange(0, 10_000_000)
         self._right.setValue(opts.right_boundary)
-        self._right.setToolTip("MSA column index for the right TE boundary.")
+        self._right.setToolTip(
+            "Putative right TE boundary as a 1-based MSA column (0 = auto)."
+        )
 
         self._radius = QSpinBox()
         self._radius.setRange(1, 10_000)
         self._radius.setValue(opts.nt_radius)
         self._radius.setSuffix(" nt")
-        self._radius.setToolTip("Search window size on each side of the boundary.")
+        self._radius.setToolTip(
+            "Search region (nucleotides) around each provided boundary."
+        )
 
-        self._max_sim = QDoubleSpinBox()
-        self._max_sim.setRange(0.0, 1.0)
-        self._max_sim.setDecimals(2)
-        self._max_sim.setSingleStep(0.05)
-        self._max_sim.setValue(opts.max_sim_threshold)
+        self._min_len = QSpinBox()
+        self._min_len.setRange(2, 200)
+        self._min_len.setValue(opts.min_tsd_length)
+        self._min_len.setSuffix(" nt")
+        self._min_len.setToolTip("Minimum TSD motif length.")
 
-        self._nt_threshold = QDoubleSpinBox()
-        self._nt_threshold.setRange(0.0, 1.0)
-        self._nt_threshold.setDecimals(2)
-        self._nt_threshold.setSingleStep(0.05)
-        self._nt_threshold.setValue(opts.nt_threshold)
+        self._max_len = QSpinBox()
+        self._max_len.setRange(2, 200)
+        self._max_len.setValue(opts.max_tsd_length)
+        self._max_len.setSuffix(" nt")
+        self._max_len.setToolTip("Maximum TSD motif length.")
 
-        self._cluster_eps = QDoubleSpinBox()
-        self._cluster_eps.setRange(0.1, 10.0)
-        self._cluster_eps.setDecimals(1)
-        self._cluster_eps.setSingleStep(0.1)
-        self._cluster_eps.setValue(opts.cluster_eps)
+        self._min_dist = QSpinBox()
+        self._min_dist.setRange(0, 10_000_000)
+        self._min_dist.setValue(opts.min_distance)
+        self._min_dist.setSuffix(" nt")
+        self._min_dist.setToolTip(
+            "Minimum distance between the left and right TSD copies "
+            "(TE body length). 0 = no minimum."
+        )
+
+        self._max_dist = QSpinBox()
+        self._max_dist.setRange(0, 10_000_000)
+        self._max_dist.setValue(opts.max_distance)
+        self._max_dist.setSuffix(" nt")
+        self._max_dist.setToolTip(
+            "Maximum distance between the left and right TSD copies. "
+            "0 = no maximum."
+        )
 
         form = QFormLayout()
         form.addRow("Left boundary (MSA column):", self._left)
         form.addRow("Right boundary (MSA column):", self._right)
-        form.addRow("Search radius:", self._radius)
-        form.addRow("Max TSD similarity:", self._max_sim)
-        form.addRow("Poly-N threshold:", self._nt_threshold)
-        form.addRow("Cluster distance (eps):", self._cluster_eps)
+        form.addRow("Search region around boundary:", self._radius)
+        form.addRow("Min TSD length:", self._min_len)
+        form.addRow("Max TSD length:", self._max_len)
+        form.addRow("Min distance between TSDs:", self._min_dist)
+        form.addRow("Max distance between TSDs:", self._max_dist)
+
+        if self._include_clustering:
+            self._max_sim = QDoubleSpinBox()
+            self._max_sim.setRange(0.0, 1.0)
+            self._max_sim.setDecimals(2)
+            self._max_sim.setSingleStep(0.05)
+            self._max_sim.setValue(opts.max_sim_threshold)
+            self._max_sim.setToolTip(
+                "Clustering: discard TSD groups that are too similar to each other."
+            )
+
+            self._nt_threshold = QDoubleSpinBox()
+            self._nt_threshold.setRange(0.0, 1.0)
+            self._nt_threshold.setDecimals(2)
+            self._nt_threshold.setSingleStep(0.05)
+            self._nt_threshold.setValue(opts.nt_threshold)
+            self._nt_threshold.setToolTip(
+                "Clustering: poly-N / low-complexity filter threshold."
+            )
+
+            self._cluster_eps = QDoubleSpinBox()
+            self._cluster_eps.setRange(0.1, 10.0)
+            self._cluster_eps.setDecimals(1)
+            self._cluster_eps.setSingleStep(0.1)
+            self._cluster_eps.setValue(opts.cluster_eps)
+            self._cluster_eps.setToolTip(
+                "DBSCAN cluster distance (eps) for the Tools text report."
+            )
+
+            form.addRow("Max TSD similarity:", self._max_sim)
+            form.addRow("Poly-N threshold:", self._nt_threshold)
+            form.addRow("Cluster distance (eps):", self._cluster_eps)
+        else:
+            self._max_sim = None
+            self._nt_threshold = None
+            self._cluster_eps = None
 
         self._button_box = make_cancel_save_run_bar(self)
 
@@ -6567,13 +6624,31 @@ class TsdSearchParamsDialog(QDialog):
         return dialog_should_run(self)
 
     def options(self) -> TsdSearchOptions:
+        min_len = int(self._min_len.value())
+        max_len = max(min_len, int(self._max_len.value()))
         return TsdSearchOptions(
             left_boundary=self._left.value(),
             right_boundary=self._right.value(),
             nt_radius=self._radius.value(),
-            max_sim_threshold=self._max_sim.value(),
-            nt_threshold=self._nt_threshold.value(),
-            cluster_eps=self._cluster_eps.value(),
+            min_tsd_length=min_len,
+            max_tsd_length=max_len,
+            min_distance=self._min_dist.value(),
+            max_distance=self._max_dist.value(),
+            max_sim_threshold=(
+                self._max_sim.value()
+                if self._max_sim is not None
+                else TsdSearchOptions().max_sim_threshold
+            ),
+            nt_threshold=(
+                self._nt_threshold.value()
+                if self._nt_threshold is not None
+                else TsdSearchOptions().nt_threshold
+            ),
+            cluster_eps=(
+                self._cluster_eps.value()
+                if self._cluster_eps is not None
+                else TsdSearchOptions().cluster_eps
+            ),
         )
 
 
@@ -9235,11 +9310,14 @@ _TE_ANN_FEATURE_DETECTION_HELP = (
     "<b>TIR</b>: terminal inverted repeats (typical of DNA transposons).<br>"
     "<b>Tandem</b>: tandem / satellite-style repeats.<br>"
     "<b>ORF</b>: open reading frames.<br>"
+    "<b>TSD</b>: target site duplications near putative TE boundaries "
+    "(MSA only; writes features to the annotation JSON for Overview).<br>"
     "<b>All</b>: select or clear every detector.<br><br>"
-    "Thresholds (lengths, similarity, …) are under <b>Advanced Settings</b> → "
-    "Feature detection settings. Threads are under <b>Settings</b> on this page "
-    "(shared with Similarity annotation). The process window is under "
-    "<b>Options</b>."
+    "Thresholds (lengths, similarity, TSD boundaries, …) are under "
+    "<b>Advanced Settings</b> → Feature detection settings. Threads are under "
+    "<b>Settings</b> on this page (shared with Similarity annotation). The "
+    "process window is under <b>Options</b>. Tools → TSD search also writes a "
+    "clustered text report."
 )
 _TE_ANN_SIMILARITY_HELP = (
     "Search selected protein / DNA / HMM / CDD databases for similarity hits "
@@ -9421,10 +9499,12 @@ class TeAnnotationDialog(QDialog):
         from repeatviewer.widgets.sequence_map_viewer import (
             AutoAnnotationSettingsPanel,
             SimilarityAnnotationSettingsPanel,
+            TsdSearchSettingsPanel,
         )
 
         super().__init__(parent)
         self.setWindowTitle("Sequence Annotation")
+        self._TsdSearchSettingsPanel = TsdSearchSettingsPanel
         self.setMinimumWidth(_TE_ANNOTATION_PARAMS_WIDTH)
         opts = initial or TeAnnotationJobOptions()
         self._for_run = for_run
@@ -9493,9 +9573,16 @@ class TeAnnotationDialog(QDialog):
             ("TIR", AutoAnnotationMode.TIR),
             ("Tandem", AutoAnnotationMode.TANDEM),
             ("ORF", AutoAnnotationMode.ORF),
+            ("TSD", AutoAnnotationMode.TSD),
         ):
             check = QCheckBox(label, feature_section)
             check.setChecked(mode.value in selected_modes)
+            if mode == AutoAnnotationMode.TSD:
+                check.setToolTip(
+                    "Target site duplications near putative TE boundaries "
+                    "(MSA only). Configure boundaries under Advanced → "
+                    "Feature detection settings / Tools → TSD search."
+                )
             check.toggled.connect(self._on_auto_check_toggled)
             self._auto_ann_checks[mode] = check
             auto_checks_row.addWidget(check)
@@ -9572,6 +9659,15 @@ class TeAnnotationDialog(QDialog):
         auto_box = QGroupBox("Feature detection settings", self)
         auto_box_layout = QVBoxLayout(auto_box)
         auto_box_layout.addWidget(self._auto_settings_panel)
+        self._tsd_settings_panel = self._TsdSearchSettingsPanel(
+            auto_box,
+            note=(
+                "TSD runs on MSA files (≥2 sequences). Sequence Annotation writes "
+                "features to the annotation JSON for Overview display. Tools → "
+                "TSD search also writes a clustered text report."
+            ),
+        )
+        auto_box_layout.addWidget(self._tsd_settings_panel)
 
         sim_box = QGroupBox("Similarity annotation settings", self)
         sim_box_layout = QVBoxLayout(sim_box)
@@ -10051,7 +10147,14 @@ class TeAnnotationDialog(QDialog):
         self._sync_auto_all_check()
 
     def _sync_auto_all_check(self) -> None:
-        checks = list(self._auto_ann_checks.values())
+        # "All" covers LTR/TIR/Tandem/ORF; TSD is optional (MSA-only) and independent.
+        from repeatviewer.backends.auto_annotation import AutoAnnotationMode
+
+        checks = [
+            check
+            for mode, check in self._auto_ann_checks.items()
+            if mode != AutoAnnotationMode.TSD
+        ]
         if not checks:
             return
         all_checked = all(check.isChecked() for check in checks)
@@ -10062,8 +10165,12 @@ class TeAnnotationDialog(QDialog):
     def _on_auto_all_toggled(self, checked: bool) -> None:
         if self._auto_all_updating:
             return
+        from repeatviewer.backends.auto_annotation import AutoAnnotationMode
+
         self._auto_all_updating = True
-        for check in self._auto_ann_checks.values():
+        for mode, check in self._auto_ann_checks.items():
+            if mode == AutoAnnotationMode.TSD:
+                continue
             check.setChecked(checked)
         self._auto_all_updating = False
 
@@ -10121,9 +10228,11 @@ class TeAnnotationDialog(QDialog):
         from repeatviewer.backends.auto_annotation_settings import (
             default_annotation_threads,
         )
+        from repeatviewer.job_options import TsdSearchOptions
         from repeatviewer.widgets.sequence_map_viewer import (
             AutoAnnotationSettingsPanel,
             SimilarityAnnotationSettingsPanel,
+            TsdSearchSettingsPanel,
         )
 
         new_auto = AutoAnnotationSettingsPanel(
@@ -10132,12 +10241,16 @@ class TeAnnotationDialog(QDialog):
         new_sim = SimilarityAnnotationSettingsPanel(
             SimilarityAnnotationSettings(), parent_sim, include_run_controls=False
         )
+        new_tsd = TsdSearchSettingsPanel(parent_auto, initial=TsdSearchOptions())
         if parent_auto is not None:
             layout = parent_auto.layout()
             if layout is not None:
                 layout.replaceWidget(self._auto_settings_panel, new_auto)
+                layout.replaceWidget(self._tsd_settings_panel, new_tsd)
         self._auto_settings_panel.deleteLater()
         self._auto_settings_panel = new_auto
+        self._tsd_settings_panel.deleteLater()
+        self._tsd_settings_panel = new_tsd
         if parent_sim is not None:
             layout = parent_sim.layout()
             if layout is not None:
@@ -10191,6 +10304,9 @@ class TeAnnotationDialog(QDialog):
         )
         save_auto_annotation_settings(auto)
         save_similarity_annotation_settings(sim)
+        from repeatviewer.job_options import save_tsd_search_options
+
+        save_tsd_search_options(self._tsd_settings_panel.options())
         self._colors_panel.save()
         self._refresh_similarity_db_checkbox_colors()
         self._refresh_feature_detect_check_colors()

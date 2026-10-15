@@ -42,7 +42,7 @@ from repeatviewer.backends.sequence_features import (
 )
 from repeatviewer.backends.thread_budget import load_batch_workers
 from repeatviewer.backends.tsd_search import detect_tsd_features_by_id
-from repeatviewer.job_options import load_tsd_search_options
+from repeatviewer.job_options import TsdSearchOptions, load_tsd_search_options
 from repeatviewer.backends.similarity_annotation import (
     SimilarityAnnotationSettings,
     SimilarityDatabaseRun,
@@ -263,6 +263,7 @@ def run_te_annotation_on_fasta(
     record_ids: Sequence[str] | None = None,
     persist: bool = True,
     base_features_by_id: Mapping[str, Sequence[SequenceFeature]] | None = None,
+    tsd_search_options: TsdSearchOptions | None = None,
 ) -> TeAnnotationBatchResult:
     """
     Run selected annotation modules on a FASTA (one or many sequences).
@@ -342,13 +343,17 @@ def run_te_annotation_on_fasta(
         check_cancelled(cancel)
         if progress is not None:
             progress(-1, len(annotate_ids), f"{resolved.name}: TSD scan")
-        tsd_opts = load_tsd_search_options()
+        tsd_opts = tsd_search_options or load_tsd_search_options()
         tsd_by_id = detect_tsd_features_by_id(
             resolved,
             record_ids=all_record_ids,
             left_boundary=tsd_opts.left_boundary,
             right_boundary=tsd_opts.right_boundary,
             nt_radius=tsd_opts.nt_radius,
+            k_min=tsd_opts.min_tsd_length,
+            k_max=tsd_opts.max_tsd_length,
+            min_distance=tsd_opts.min_distance,
+            max_distance=tsd_opts.max_distance,
         )
         for rid in annotate_ids:
             existing = list(features_by_id.get(rid) or [])

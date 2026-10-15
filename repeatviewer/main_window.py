@@ -581,6 +581,7 @@ _TOOLBAR_TOOLTIPS = {
     "te_genome_map": "Genome density plot using default parameters",
     "te_divergence_plot": "TE divergence plot (divergence vs total TE length)",
     "extend": "Extend MSA ends using default parameters",
+    "tsd_search": "Search target site duplications near putative TE boundaries",
     "teaid": "TE-Aid interactive HTML report using default parameters",
     "msa_clean": "Trim or clean MSA using default parameters",
     "flexidot": "Dotplot comparison of selected sequences using default parameters",
@@ -593,6 +594,7 @@ _JOB_DISPLAY_TITLES = {
     "blast": "BLAST",
     "hmmer": "HMMER",
     "extend": "MSA Extend",
+    "tsd_search": "TSD search",
     "msa_clean": "MSA Clean",
     "msa_clean_gappy": "MSA remove gappy columns",
     "msa_clean_div": "Clean row with divergence",
@@ -5776,6 +5778,7 @@ class MainWindow(QMainWindow):
         self._populate_tree_menu(tools_menu.addMenu("T&ree"))
         self._populate_map_menu(tools_menu.addMenu("&Mapping"))
         self._populate_extend_menu(tools_menu.addMenu("MSA &Extend"))
+        self._populate_tsd_search_menu(tools_menu.addMenu("TSD &search"))
         self._populate_teaid_menu(tools_menu.addMenu("&TE-Aid"))
         self._populate_msa_clean_menu(tools_menu.addMenu("MSA &Clean"))
         self._populate_consensus_menu(tools_menu.addMenu("&Consensus"))
@@ -7359,6 +7362,17 @@ class MainWindow(QMainWindow):
                     "Right-click: run with saved settings (set in the Options tab)."
                 ),
                 right_click_slot=self._quick_extend_right_click,
+            )
+        elif tool_id == "tsd_search":
+            self._add_toolbar_action_button(
+                bar,
+                "TSD Search",
+                self._modify_tsd_search_parameters,
+                tooltip=(
+                    "Click: set TSD boundaries / lengths and run.\n"
+                    "Right-click: run with saved settings."
+                ),
+                right_click_slot=self._run_tsd_search,
             )
         elif tool_id == "teaid":
             self._add_toolbar_action_button(

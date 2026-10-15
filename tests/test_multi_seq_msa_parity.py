@@ -219,8 +219,11 @@ def test_overview_rail_keeps_add_transfer_and_track_toggle(qapp: QApplication) -
     rail.show()
     qapp.processEvents()
     rail.set_overview_display_mode(True)
-    assert not rail.show_annotation_track.isHidden()
-    assert rail.show_annotation_track.isChecked()
+    assert rail.show_annotation_track.isHidden()
+    assert not rail.displayed_annotations_label.isHidden()
+    assert not rail._annotation_kinds_host.isHidden()
+    assert not rail.annotation_kinds_all_check.isHidden()
+    assert "LTR" in rail.annotation_kind_checks
     # Sort options: multi-seq has original/name; MSA also has selected columns.
     assert not rail.sequence_sort_row.isHidden()
     assert rail.sequence_sort.findData("selected_columns") < 0
@@ -1296,6 +1299,54 @@ def test_delete_selected_features_not_column_region(
     assert panel._features["b"] == []
     assert [f.name for f in panel._features["c"]] == ["keep"]
     assert panel._bars.msa_sequences() == ["ACGTACGTAC", "ACGTACGTAC", "ACGTACGTAC"]
+    assert panel._bars.selected_features() == []
+    panel.close()
+
+
+def test_delete_selected_duplicate_tsd_features(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Stacked TSD flanks with identical fields must all delete when selected."""
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "aln.fa"
+    fasta.write_text(">a\nACGTACGTACGTAC\n>b\nACGTACGTACGTAC\n", encoding="utf-8")
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    # Three identical left-flank TSDs (same coords/name) stack in packed tracks.
+    panel._features = {
+        "a": [
+            SequenceFeature(start=1, end=5, name="TSD_ATGCA", feature_type="TSD"),
+            SequenceFeature(start=1, end=5, name="TSD_ATGCA", feature_type="TSD"),
+            SequenceFeature(start=1, end=5, name="TSD_ATGCA", feature_type="TSD"),
+            SequenceFeature(start=10, end=14, name="TSD_ATGCA", feature_type="TSD"),
+        ],
+        "b": [
+            SequenceFeature(start=1, end=5, name="TSD_ATGCA", feature_type="TSD"),
+            SequenceFeature(start=1, end=5, name="TSD_ATGCA", feature_type="TSD"),
+        ],
+    }
+    panel._refresh_features_after_edit()
+    # Select every flat feature on both rows.
+    flats_a = {
+        (0, i)
+        for i in range(sum(len(t) for t in (panel._bars._tracks.get("a") or [])))
+    }
+    flats_b = {
+        (1, i)
+        for i in range(sum(len(t) for t in (panel._bars._tracks.get("b") or [])))
+    }
+    panel._bars._set_feature_selection(flats_a | flats_b, set_columns=True)
+    assert len(panel._bars.selected_features()) == 6
+
+    panel._on_delete_clicked()
+    qapp.processEvents()
+
+    assert panel._features["a"] == []
+    assert panel._features["b"] == []
     assert panel._bars.selected_features() == []
     panel.close()
 

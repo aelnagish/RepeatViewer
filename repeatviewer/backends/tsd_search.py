@@ -99,8 +99,15 @@ def _scan_record_tsd_hits(
     right_boundary: int,
     nt_radius: int,
     k_min: int,
+    k_max: int = 20,
+    min_distance: int = 0,
+    max_distance: int = 0,
 ) -> list[TsdFlankHit]:
     """Per-sequence TSD scan (no cross-sequence filtering or clustering)."""
+    k_min = max(2, int(k_min))
+    k_max = max(k_min, int(k_max))
+    min_distance = max(0, int(min_distance))
+    max_distance = max(0, int(max_distance))
     all_nt_pos = [i for i, char in enumerate(seq_str) if char != "-"]
     if len(all_nt_pos) < 2 * k_min:
         return []
@@ -139,6 +146,8 @@ def _scan_record_tsd_hits(
         for seed_idx_l in left_kmers_seeds[kmer]:
             l_shift = 0
             while seed_idx_l - l_shift - 1 >= 0 and j - l_shift - 1 >= 0:
+                if k + l_shift + 1 > k_max:
+                    break
                 char_l = seq_str[l_nt_pos_map[seed_idx_l - l_shift - 1]]
                 char_r = seq_str[r_nt_pos_map[j - l_shift - 1]]
                 if char_l == char_r:
@@ -151,6 +160,8 @@ def _scan_record_tsd_hits(
                 seed_idx_l + k + r_shift < len(l_nt_pos_map)
                 and j + k + r_shift < len(r_nt_pos_map)
             ):
+                if k + l_shift + r_shift + 1 > k_max:
+                    break
                 char_l = seq_str[l_nt_pos_map[seed_idx_l + k + r_shift]]
                 char_r = seq_str[r_nt_pos_map[j + k + r_shift]]
                 if char_l == char_r:
@@ -177,7 +188,15 @@ def _scan_record_tsd_hits(
             if nt_idx_r - 1 not in nt_to_msa:
                 continue
             te_end_col = nt_to_msa[nt_idx_r - 1]
+            # Nucleotides between the inner edges of the two TSD copies.
+            te_nt_span = max(0, nt_idx_r - nt_idx_l - 1)
+            if te_nt_span < min_distance:
+                continue
+            if max_distance > 0 and te_nt_span > max_distance:
+                continue
             final_kmer_seq = "".join(seq_str[c] for c in l_indices)
+            if len(final_kmer_seq) < k_min or len(final_kmer_seq) > k_max:
+                continue
             if len(final_kmer_seq) >= 5 and len(set(final_kmer_seq.lower())) == 1:
                 continue
 
@@ -211,6 +230,9 @@ def scan_tsds_per_sequence(
     *,
     nt_radius: int = 100,
     k_min: int = 4,
+    k_max: int = 20,
+    min_distance: int = 0,
+    max_distance: int = 0,
     record_ids: list[str] | None = None,
 ) -> list[TsdFlankHit]:
     """Scan each MSA row for TSDs; no cross-sequence filter or clustering."""
@@ -235,6 +257,9 @@ def scan_tsds_per_sequence(
                 right_boundary=right,
                 nt_radius=nt_radius,
                 k_min=k_min,
+                k_max=k_max,
+                min_distance=min_distance,
+                max_distance=max_distance,
             )
         )
     return hits
@@ -248,6 +273,9 @@ def detect_tsd_features_by_id(
     right_boundary: int = 0,
     nt_radius: int = 100,
     k_min: int = 4,
+    k_max: int = 20,
+    min_distance: int = 0,
+    max_distance: int = 0,
 ) -> dict[str, list[SequenceFeature]]:
     """Per-sequence TSD flanks as annotation features (1-based MSA columns).
 
@@ -259,6 +287,9 @@ def detect_tsd_features_by_id(
         right_boundary,
         nt_radius=nt_radius,
         k_min=k_min,
+        k_max=k_max,
+        min_distance=min_distance,
+        max_distance=max_distance,
         record_ids=record_ids,
     )
     by_id: dict[str, list[SequenceFeature]] = {}
@@ -290,10 +321,11 @@ def identify_tsds_with_boundary_logic(
     right_boundary,
     nt_radius=100,
     k_min=4,
-    k_max=7,
+    k_max=20,
+    min_distance=0,
+    max_distance=0,
 ):
     """Legacy aggregator used by Tools → TSD search (keeps cluster pipeline)."""
-    del k_max  # retained for TEtrimmer API compatibility
     location_hits: dict[tuple[int, int], list[tuple[str, str]]] = defaultdict(list)
     for hit in scan_tsds_per_sequence(
         file_path,
@@ -301,6 +333,9 @@ def identify_tsds_with_boundary_logic(
         right_boundary,
         nt_radius=nt_radius,
         k_min=k_min,
+        k_max=k_max,
+        min_distance=min_distance,
+        max_distance=max_distance,
     ):
         location_hits[(hit.te_start, hit.te_end)].append((hit.seq_id, hit.tsd_seq))
     return location_hits
@@ -429,6 +464,10 @@ def TSD_identifier(
     input_file: str | Path,
     output_file: str | Path,
     *,
+    k_min: int = 4,
+    k_max: int = 20,
+    min_distance: int = 0,
+    max_distance: int = 0,
     max_sim_threshold: float = 0.3,
     nt_threshold: float = 0.95,
     cluster_eps: float = 1.0,
@@ -442,6 +481,10 @@ def TSD_identifier(
         left_n,
         right_n,
         nt_radius=extend_n,
+        k_min=k_min,
+        k_max=k_max,
+        min_distance=min_distance,
+        max_distance=max_distance,
     )
     filtered_location_hits = process_tsd_hits(
         location_hits,

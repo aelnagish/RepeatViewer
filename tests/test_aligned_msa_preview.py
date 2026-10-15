@@ -273,7 +273,9 @@ def test_overview_annotation_tab_visible_and_wired(
     assert "selected" in tip
     assert "msa" in tip or "open" in tip
     assert not rail._annotation_sections["manual"].isHidden()
-    assert not rail.show_annotation_track.isHidden()
+    assert rail.show_annotation_track.isHidden()
+    assert not rail.displayed_annotations_label.isHidden()
+    assert not rail._annotation_kinds_host.isHidden()
     assert panel._auto_ann_checks
     assert callable(panel._on_auto_run_clicked)
     assert callable(panel._on_similarity_run_clicked)

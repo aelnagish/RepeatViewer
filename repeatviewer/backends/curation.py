@@ -100,6 +100,7 @@ _DISPLAY_NAMES = {
     "consensus_generation": "Consensus",
     "flexidot": "Flexidot",
     "te_annotation": "Sequence Annotation",
+    "tsd_search": "TSD search",
     "reverse_complement": "Reverse complement",
     "orf_prediction": "ORF prediction",
     "dna_translation": "DNA translation",
@@ -1140,6 +1141,9 @@ def run_on_sequence(
         )
 
     elif func_name == "tsd_search":
+        from repeatviewer.backends.auto_annotation import AutoAnnotationMode
+        from repeatviewer.tool_output_paths import kept_input_name
+
         tsd_opts = tsd_search_options or TsdSearchOptions()
         if tsd_opts.left_boundary <= 0 or tsd_opts.right_boundary <= 0:
             raise RuntimeError(
@@ -1147,7 +1151,6 @@ def run_on_sequence(
             )
         if tsd_opts.left_boundary >= tsd_opts.right_boundary:
             raise RuntimeError("Left boundary must be less than the right boundary.")
-        from repeatviewer.tool_output_paths import kept_input_name
 
         out_file = out_dir / f"{kept_input_name(seq_path)}.tsd_search.txt"
         TSD_identifier(
@@ -1156,11 +1159,25 @@ def run_on_sequence(
             tsd_opts.nt_radius,
             seq_path,
             out_file,
+            k_min=tsd_opts.min_tsd_length,
+            k_max=tsd_opts.max_tsd_length,
+            min_distance=tsd_opts.min_distance,
+            max_distance=tsd_opts.max_distance,
             max_sim_threshold=tsd_opts.max_sim_threshold,
             nt_threshold=tsd_opts.nt_threshold,
             cluster_eps=tsd_opts.cluster_eps,
         )
         created.append(str(out_file.resolve()))
+        # Also write TSD flanks to the annotation JSON so Overview can display them.
+        ann = run_te_annotation_on_fasta(
+            seq_path,
+            TeAnnotationOptions(auto_modes=(AutoAnnotationMode.TSD,)),
+            cancel=cancel,
+            progress=sequence_progress,
+            persist=True,
+            tsd_search_options=tsd_opts,
+        )
+        created.extend(str(p) for p in ann.output_paths)
 
     elif func_name == "hmmer":
         from repeatviewer.backends.hmmer_tool import resolve_hmm_database, run_hmmer_search

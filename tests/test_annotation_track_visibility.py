@@ -43,7 +43,7 @@ def test_annotation_visibility_keys_group_pfam() -> None:
     assert annotation_visibility_key(feats[2]) == "domain::Pfam"
     assert annotation_visibility_label("domain::Pfam") == "Pfam"
     keys = collect_annotation_visibility_keys(feats)
-    assert keys[:3] == ["LTR", "TIR", "ORF"]
+    assert keys[:4] == ["LTR", "TIR", "ORF", "TSD"]
     assert keys.count("domain::Pfam") == 1
     assert "domain::Pfam: RVT_1" not in keys
 
@@ -71,11 +71,14 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
     rail.show()
     qapp.processEvents()
     rail.set_overview_display_mode(True)
-    assert not rail.show_annotation_track.isHidden()
+    assert rail.show_annotation_track.isHidden()
+    assert not rail.displayed_annotations_label.isHidden()
     assert not rail._annotation_kinds_host.isHidden()
+    assert not rail.annotation_kinds_all_check.isHidden()
     assert "LTR" in rail.annotation_kind_checks
     assert "TIR" in rail.annotation_kind_checks
     assert "ORF" in rail.annotation_kind_checks
+    assert "TSD" in rail.annotation_kind_checks
 
     feats = [
         SequenceFeature(1, 10, "left", feature_type="LTR"),
@@ -83,20 +86,38 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
         SequenceFeature(55, 70, "Pfam: Chromo (E=1e-3)", feature_type="domain"),
         SequenceFeature(90, 100, "tandem", feature_type="tandem repeat"),
     ]
-    rail.set_available_annotation_kinds(feats)
+    rail._hidden_annotation_kinds.clear()
+    rail._rebuild_annotation_kind_checks(
+        [
+            "LTR",
+            "TIR",
+            "ORF",
+            "TSD",
+            "tandem repeat",
+            "domain::Pfam",
+        ]
+    )
     assert "domain::Pfam" in rail.annotation_kind_checks
     assert "domain::Pfam: RVT_1" not in rail.annotation_kind_checks
     assert "tandem repeat" in rail.annotation_kind_checks
     assert rail.annotation_kind_checks["domain::Pfam"].text() == "Pfam"
+    assert rail.annotation_kinds_all_check.isChecked()
 
     rail.annotation_kind_checks["LTR"].setChecked(False)
     visible = rail.visible_annotation_kinds()
     assert "LTR" not in visible
     assert "domain::Pfam" in visible
+    assert not rail.annotation_kinds_all_check.isChecked()
+    assert rail.show_annotation_track.isChecked()
 
-    rail.show_annotation_track.setChecked(False)
-    assert rail._annotation_kinds_host.isHidden()
+    rail.annotation_kinds_all_check.setChecked(True)
+    assert rail.annotation_kinds_all_check.isChecked()
+    rail.annotation_kinds_all_check.setChecked(False)
     assert rail.visible_annotation_kinds() == frozenset()
+    assert not rail.show_annotation_track.isChecked()
+    assert not rail._annotation_kinds_host.isHidden()
+    # Restore defaults so later tests are not polluted via QSettings.
+    rail.annotation_kinds_all_check.setChecked(True)
     rail.close()
 
 

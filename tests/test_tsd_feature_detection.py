@@ -115,3 +115,59 @@ def test_run_te_annotation_persist_false_skips_sidecar(tmp_path: Path, monkeypat
     assert result.features_by_id["a"]
     assert result.features_by_id["b"]
     assert all(f.feature_type == "TSD" for f in result.features_by_id["a"])
+
+
+def test_scan_respects_min_tsd_length(tmp_path: Path) -> None:
+    fasta = tmp_path / "msa.fa"
+    _write_msa_with_tsd(fasta)
+    hits = scan_tsds_per_sequence(
+        fasta,
+        left_boundary=5,
+        right_boundary=24,
+        nt_radius=10,
+        k_min=6,  # ATGCA is 5 nt — below minimum
+        k_max=20,
+        record_ids=["a", "b"],
+    )
+    assert hits == []
+
+
+def test_scan_respects_min_distance(tmp_path: Path) -> None:
+    fasta = tmp_path / "msa.fa"
+    _write_msa_with_tsd(fasta)
+    # TE body is 20 nt; require min_distance 50 so all hits drop.
+    hits = scan_tsds_per_sequence(
+        fasta,
+        left_boundary=5,
+        right_boundary=24,
+        nt_radius=10,
+        min_distance=50,
+        record_ids=["a", "b"],
+    )
+    assert hits == []
+
+
+def test_tool_tsd_search_writes_text_and_json(tmp_path: Path) -> None:
+    """Tools → TSD search: clustered text report + annotation JSON for Overview."""
+    from repeatviewer.backends.curation import run_on_sequence
+    from repeatviewer.backends.sequence_features import load_features_by_id_from_json
+    from repeatviewer.project import RepeatViewerProject
+
+    fasta = tmp_path / "msa.fa"
+    _write_msa_with_tsd(fasta)
+    outs = run_on_sequence(
+        "tsd_search",
+        fasta,
+        RepeatViewerProject(),
+        tsd_search_options=TsdSearchOptions(
+            left_boundary=5,
+            right_boundary=24,
+            nt_radius=10,
+        ),
+    )
+    text_files = [p for p in outs if str(p).endswith(".tsd_search.txt")]
+    assert text_files
+    assert Path(text_files[0]).is_file()
+    features = load_features_by_id_from_json(fasta, ["a", "b"])
+    assert features["a"]
+    assert all(f.feature_type == "TSD" for f in features["a"])

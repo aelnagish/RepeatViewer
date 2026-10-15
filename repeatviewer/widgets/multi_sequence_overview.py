@@ -131,6 +131,7 @@ _AUTO_ANNOTATION_MODES: tuple[tuple[str, AutoAnnotationMode], ...] = (
     ("TIR", AutoAnnotationMode.TIR),
     ("Tandem", AutoAnnotationMode.TANDEM),
     ("ORF", AutoAnnotationMode.ORF),
+    ("TSD", AutoAnnotationMode.TSD),
 )
 
 _BAR_HEIGHT = 7
@@ -2918,12 +2919,20 @@ class _BarsCanvas(QWidget):
     def _store_index_for_flat(
         self, row: int, flat_index: int
     ) -> tuple[str, int, SequenceFeature] | None:
-        """Map packed flat index → (record_id, store_index, feature)."""
+        """Map packed flat index → (record_id, store_index, feature).
+
+        Prefer object identity so stacked duplicates (same coords/name, e.g.
+        multiple TSD flanks) each resolve to a distinct store entry.
+        """
         feat = self._feature_by_flat_index(row, flat_index)
         if feat is None or not (0 <= row < len(self._record_ids)):
             return None
         rid = self._record_ids[row]
         store = list(self._features.get(rid) or [])
+        for i, candidate in enumerate(store):
+            if candidate is feat:
+                return rid, i, candidate
+        # Fallback when tracks were rebuilt from copies of the same fields.
         for i, candidate in enumerate(store):
             if (
                 int(candidate.start) == int(feat.start)
@@ -5545,7 +5554,12 @@ class MultiSequenceOverviewPanel(QWidget):
                     win._set_job_actions_enabled(True)
 
     def _sync_auto_annotation_all_check(self) -> None:
-        checks = list(self._auto_ann_checks.values())
+        # "All" covers LTR/TIR/Tandem/ORF; TSD is optional (MSA-only) and independent.
+        checks = [
+            check
+            for mode, check in self._auto_ann_checks.items()
+            if mode != AutoAnnotationMode.TSD
+        ]
         if not checks:
             return
         all_checked = all(check.isChecked() for check in checks)
@@ -5563,7 +5577,9 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         self._auto_all_updating = True
         try:
-            for check in self._auto_ann_checks.values():
+            for mode, check in self._auto_ann_checks.items():
+                if mode == AutoAnnotationMode.TSD:
+                    continue
                 check.setChecked(checked)
         finally:
             self._auto_all_updating = False
@@ -5666,6 +5682,7 @@ class MultiSequenceOverviewPanel(QWidget):
         )
 
     def _open_auto_annotation_settings(self) -> None:
+        from repeatviewer.job_options import save_tsd_search_options
         from repeatviewer.widgets.sequence_map_viewer import AutoAnnotationSettingsDialog
 
         self._auto_ann_settings = load_auto_annotation_settings()
@@ -5674,6 +5691,7 @@ class MultiSequenceOverviewPanel(QWidget):
             return
         self._auto_ann_settings = dialog.settings()
         save_auto_annotation_settings(self._auto_ann_settings)
+        save_tsd_search_options(dialog.tsd_options())
         self.statusMessage.emit("Auto annotation settings saved.")
 
     def _open_similarity_annotation_settings(self) -> None:
@@ -6141,45 +6159,30 @@ class MultiSequenceOverviewPanel(QWidget):
             "Select sequence name(s) or a feature, then Delete.",
         )
 
-    @staticmethod
-    def _feature_identity_key(feat: SequenceFeature) -> tuple:
-        return (
-            int(feat.start),
-            int(feat.end),
-            str(feat.name),
-            str(feat.feature_type),
-            str(feat.strand),
-        )
-
     def _delete_selected_features(self) -> None:
         """Delete every selected annotation (not the column span they cover)."""
         selected = self._bars.selected_features()
         if not selected:
             return
         # Resolve via canvas packed tracks (respects type visibility filters).
-        targets_by_rid: dict[str, list[SequenceFeature]] = {}
+        # Use store indices — not field identity — so stacked duplicates
+        # (identical TSD flanks) are each removed when selected.
+        indices_by_rid: dict[str, set[int]] = {}
         for row, feat_index in selected:
             resolved = self._bars._store_index_for_flat(row, feat_index)
             if resolved is None:
                 continue
-            rid, _store_i, feat = resolved
-            targets_by_rid.setdefault(rid, []).append(feat)
-        if not targets_by_rid:
+            rid, store_i, _feat = resolved
+            indices_by_rid.setdefault(rid, set()).add(store_i)
+        if not indices_by_rid:
             return
 
         self._push_feature_undo_snapshot()
         deleted = 0
-        for rid, targets in targets_by_rid.items():
-            want = {self._feature_identity_key(feat) for feat in targets}
+        for rid, remove_at in indices_by_rid.items():
             store = list(self._features.get(rid) or [])
-            kept: list[SequenceFeature] = []
-            for feat in store:
-                key = self._feature_identity_key(feat)
-                if key in want:
-                    want.discard(key)
-                    deleted += 1
-                    continue
-                kept.append(feat)
+            kept = [feat for i, feat in enumerate(store) if i not in remove_at]
+            deleted += len(store) - len(kept)
             self._features[rid] = kept
 
         self._bars.clear_feature_selection()
@@ -6189,7 +6192,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._refresh_features_after_edit()
         self._persist_overview_features()
         if deleted == 1:
-            rid = next(iter(targets_by_rid))
+            rid = next(iter(indices_by_rid))
             self.statusMessage.emit(f"Deleted feature on {rid}.")
         else:
             self.statusMessage.emit(f"Deleted {deleted} features.")

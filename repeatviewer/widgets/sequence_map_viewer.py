@@ -149,7 +149,12 @@ from repeatviewer.backends.similarity_annotation_settings import (
     save_similarity_annotation_settings,
     similarity_feature_track_label,
 )
-from repeatviewer.job_options import configure_report_evalue_spinbox
+from repeatviewer.job_options import (
+    configure_report_evalue_spinbox,
+    load_tsd_search_options,
+    save_tsd_search_options,
+    TsdSearchOptions,
+)
 from repeatviewer.backends.orf_detect import orfipy_available
 from repeatviewer.backends.similarity_annotation import (
     SimilarityAnnotationResult,
@@ -269,6 +274,7 @@ _AUTO_ANNOTATION_MODES: tuple[tuple[str, AutoAnnotationMode], ...] = (
     ("TIR", AutoAnnotationMode.TIR),
     ("Tandem", AutoAnnotationMode.TANDEM),
     ("ORF", AutoAnnotationMode.ORF),
+    ("TSD", AutoAnnotationMode.TSD),
 )
 _AUTO_MODE_LABEL = {
     AutoAnnotationMode.LTR: "LTR",
@@ -6941,8 +6947,119 @@ class AutoAnnotationSettingsPanel(QWidget):
         )
 
 
+class TsdSearchSettingsPanel(QWidget):
+    """Boundaries / length / distance for Feature detection and Sequence Annotation."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        initial: TsdSearchOptions | None = None,
+        note: str | None = None,
+    ) -> None:
+        from PySide6.QtWidgets import QGroupBox
+
+        super().__init__(parent)
+        opts = initial or load_tsd_search_options()
+        box = QGroupBox("TSD (target site duplication)", self)
+        form = QFormLayout(box)
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        self._tsd_left = QSpinBox(box)
+        self._tsd_left.setRange(0, 10_000_000)
+        self._tsd_left.setValue(opts.left_boundary)
+        self._tsd_left.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        self._tsd_left.setToolTip(
+            "Putative left TE boundary (MSA column; 0 = auto)."
+        )
+        form.addRow("Left boundary:", self._tsd_left)
+
+        self._tsd_right = QSpinBox(box)
+        self._tsd_right.setRange(0, 10_000_000)
+        self._tsd_right.setValue(opts.right_boundary)
+        self._tsd_right.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        self._tsd_right.setToolTip(
+            "Putative right TE boundary (MSA column; 0 = auto)."
+        )
+        form.addRow("Right boundary:", self._tsd_right)
+
+        self._tsd_radius = QSpinBox(box)
+        self._tsd_radius.setRange(1, 10_000)
+        self._tsd_radius.setValue(opts.nt_radius)
+        self._tsd_radius.setSuffix(" nt")
+        self._tsd_radius.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        self._tsd_radius.setToolTip("Search region around each boundary.")
+        form.addRow("Search region:", self._tsd_radius)
+
+        self._tsd_min_len = QSpinBox(box)
+        self._tsd_min_len.setRange(2, 200)
+        self._tsd_min_len.setValue(opts.min_tsd_length)
+        self._tsd_min_len.setSuffix(" nt")
+        self._tsd_min_len.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow("Min TSD length:", self._tsd_min_len)
+
+        self._tsd_max_len = QSpinBox(box)
+        self._tsd_max_len.setRange(2, 200)
+        self._tsd_max_len.setValue(opts.max_tsd_length)
+        self._tsd_max_len.setSuffix(" nt")
+        self._tsd_max_len.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        form.addRow("Max TSD length:", self._tsd_max_len)
+
+        self._tsd_min_dist = QSpinBox(box)
+        self._tsd_min_dist.setRange(0, 10_000_000)
+        self._tsd_min_dist.setValue(opts.min_distance)
+        self._tsd_min_dist.setSuffix(" nt")
+        self._tsd_min_dist.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        self._tsd_min_dist.setToolTip(
+            "Minimum distance between left and right TSD copies. 0 = no minimum."
+        )
+        form.addRow("Min distance between TSDs:", self._tsd_min_dist)
+
+        self._tsd_max_dist = QSpinBox(box)
+        self._tsd_max_dist.setRange(0, 10_000_000)
+        self._tsd_max_dist.setValue(opts.max_distance)
+        self._tsd_max_dist.setSuffix(" nt")
+        self._tsd_max_dist.setFixedWidth(_SETTINGS_FIELD_WIDTH)
+        self._tsd_max_dist.setToolTip(
+            "Maximum distance between left and right TSD copies. 0 = no maximum."
+        )
+        form.addRow("Max distance between TSDs:", self._tsd_max_dist)
+
+        note_text = note or (
+            "TSD runs on MSA files (≥2 sequences). Features are written to the "
+            "annotation JSON and shown on the Overview tracks. Tools → TSD search "
+            "also writes a clustered text report."
+        )
+        note_label = QLabel(note_text, box)
+        note_label.setWordWrap(True)
+        form.addRow(note_label)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(box)
+
+    def options(self) -> TsdSearchOptions:
+        min_len = int(self._tsd_min_len.value())
+        max_len = max(min_len, int(self._tsd_max_len.value()))
+        prev = load_tsd_search_options()
+        return TsdSearchOptions(
+            left_boundary=self._tsd_left.value(),
+            right_boundary=self._tsd_right.value(),
+            nt_radius=self._tsd_radius.value(),
+            min_tsd_length=min_len,
+            max_tsd_length=max_len,
+            min_distance=self._tsd_min_dist.value(),
+            max_distance=self._tsd_max_dist.value(),
+            max_sim_threshold=prev.max_sim_threshold,
+            nt_threshold=prev.nt_threshold,
+            cluster_eps=prev.cluster_eps,
+        )
+
+
 class AutoAnnotationSettingsDialog(QDialog):
-    """Configure LTR, TIR, tandem-repeat, and ORF auto-annotation parameters."""
+    """Configure LTR, TIR, tandem-repeat, ORF, and TSD auto-annotation parameters."""
 
     def __init__(
         self,
@@ -6953,12 +7070,19 @@ class AutoAnnotationSettingsDialog(QDialog):
         self.setWindowTitle("Feature detection settings")
         self.setMinimumWidth(_SETTINGS_DIALOG_MIN_WIDTH)
         self._panel = AutoAnnotationSettingsPanel(settings, self)
+        self._tsd_panel = TsdSearchSettingsPanel(self)
+        body = QWidget(self)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        body_layout.addWidget(self._panel)
+        body_layout.addWidget(self._tsd_panel)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(self._panel)
-        # Cap height so the dense LTR/TIR/Tandem/ORF form scrolls on small screens.
+        scroll.setWidget(body)
+        # Cap height so the dense LTR/TIR/Tandem/ORF/TSD form scrolls on small screens.
         screen = QApplication.primaryScreen()
         max_h = 640
         if screen is not None:
@@ -6977,6 +7101,9 @@ class AutoAnnotationSettingsDialog(QDialog):
 
     def settings(self) -> AutoAnnotationSettings:
         return self._panel.settings()
+
+    def tsd_options(self) -> TsdSearchOptions:
+        return self._tsd_panel.options()
 
 
 class SimilarityAnnotationSettingsPanel(QWidget):
@@ -7693,7 +7820,12 @@ class SequenceMapPanel(QWidget):
         self._sync_auto_annotation_all_check()
 
     def _sync_auto_annotation_all_check(self) -> None:
-        checks = list(self._auto_ann_checks.values())
+        # "All" covers LTR/TIR/Tandem/ORF; TSD is optional (MSA-only) and independent.
+        checks = [
+            check
+            for mode, check in self._auto_ann_checks.items()
+            if mode != AutoAnnotationMode.TSD
+        ]
         if not checks:
             return
         all_checked = all(check.isChecked() for check in checks)
@@ -7705,7 +7837,9 @@ class SequenceMapPanel(QWidget):
         if self._auto_all_updating:
             return
         self._auto_all_updating = True
-        for check in self._auto_ann_checks.values():
+        for mode, check in self._auto_ann_checks.items():
+            if mode == AutoAnnotationMode.TSD:
+                continue
             check.setChecked(checked)
         self._auto_all_updating = False
 
@@ -9895,6 +10029,7 @@ class SequenceMapPanel(QWidget):
             return
         self._auto_ann_settings = dialog.settings()
         save_auto_annotation_settings(self._auto_ann_settings)
+        save_tsd_search_options(dialog.tsd_options())
         self._broadcast_shared_annotation_settings_changed()
         self.statusMessage.emit("Auto annotation settings saved.")
 
