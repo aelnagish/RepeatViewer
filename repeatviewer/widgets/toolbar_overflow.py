@@ -9,6 +9,26 @@ from PySide6.QtCore import QEvent, QObject
 from PySide6.QtWidgets import QLayout, QWidget
 
 
+def _qt_alive(obj: object | None) -> bool:
+    """False when a QObject's C++ side is already gone (shiboken)."""
+    if obj is None:
+        return False
+    try:
+        from shiboken6 import isValid
+
+        if not bool(isValid(obj)):
+            return False
+    except Exception:
+        pass
+    # Even when isValid is unavailable / optimistic, probe a cheap call —
+    # deleted Overview toolbar slots raise RuntimeError here.
+    try:
+        obj.objectName()  # type: ignore[attr-defined]
+        return True
+    except RuntimeError:
+        return False
+
+
 class ToolbarOverflowHider(QObject):
     """Show as many left-side units as fit; hide the rest as whole units.
 
@@ -43,26 +63,61 @@ class ToolbarOverflowHider(QObject):
 
     def add_width_source(self, widget: QWidget | None) -> None:
         """Also watch ``widget`` for resize (e.g. map toolbar slot / pane)."""
-        if widget is None or widget is self._host:
+        if widget is None or widget is self._host or not _qt_alive(widget):
             return
+        self._prune_width_sources()
         if widget in self._width_sources:
             return
         self._width_sources.append(widget)
         widget.installEventFilter(self)
 
+    def remove_width_source(self, widget: QWidget | None) -> None:
+        """Stop watching ``widget`` (call before destroying an Overview panel)."""
+        if widget is None:
+            return
+        if widget in self._width_sources:
+            self._width_sources.remove(widget)
+        if _qt_alive(widget):
+            try:
+                widget.removeEventFilter(self)
+            except RuntimeError:
+                pass
+
+    def clear_width_sources(self) -> None:
+        """Drop every external width source (Overview unbind / tab replace)."""
+        for src in list(self._width_sources):
+            self.remove_width_source(src)
+        self._width_sources.clear()
+
+    def _prune_width_sources(self) -> None:
+        alive: list[QWidget] = []
+        for src in self._width_sources:
+            try:
+                if _qt_alive(src):
+                    alive.append(src)
+            except RuntimeError:
+                continue
+        self._width_sources = alive
+
     def set_unit_allowed(self, index: int, allowed: bool) -> None:
         if not (0 <= index < len(self._units)):
             return
         self._allowed[index] = bool(allowed)
+        self._prune_width_sources()
         self.sync()
 
     def set_unit_allowed_by_widget(self, widget: QWidget, allowed: bool) -> None:
+        # Drop destroyed Overview map hosts before measuring widths.
+        self._prune_width_sources()
         for index, unit in enumerate(self._units):
             if widget in unit:
                 self.set_unit_allowed(index, allowed)
                 return
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if not _qt_alive(self) or not _qt_alive(self._host):
+            return False
+        self._prune_width_sources()
         if watched is self._host or watched in self._width_sources:
             if event.type() in (
                 QEvent.Type.Resize,
@@ -73,15 +128,20 @@ class ToolbarOverflowHider(QObject):
         return False
 
     def sync(self) -> None:
-        if self._syncing or self._host is None:
+        if self._syncing or not _qt_alive(self) or not _qt_alive(self._host):
             return
         self._syncing = True
         try:
             self._apply()
+        except RuntimeError:
+            # Host / width source deleted mid-sync (tab replace).
+            self._prune_width_sources()
         finally:
             self._syncing = False
 
     def _widget_width(self, widget: QWidget) -> int:
+        if not _qt_alive(widget):
+            return 0
         # Prefer an explicit fixed width (stable after stylesheet polish).
         max_w = int(widget.maximumWidth())
         min_w = int(widget.minimumWidth())
@@ -98,7 +158,7 @@ class ToolbarOverflowHider(QObject):
         return width
 
     def _unit_width(self, unit: list[QWidget]) -> int:
-        widths = [self._widget_width(w) for w in unit]
+        widths = [self._widget_width(w) for w in unit if _qt_alive(w)]
         if not widths:
             return 0
         return sum(widths) + self._spacing * (len(widths) - 1)
@@ -111,14 +171,20 @@ class ToolbarOverflowHider(QObject):
 
     def _available_width(self) -> int:
         """Width the host can actually use (never larger than a narrow parent)."""
+        if not _qt_alive(self._host):
+            return 0
         left_m, right_m = self._margins_horizontal()
         margins = left_m + right_m
         candidates: list[int] = []
         host_w = max(0, int(self._host.width()) - margins)
         if host_w > 0:
             candidates.append(host_w)
+        self._prune_width_sources()
         for src in self._width_sources:
-            sw = max(0, int(src.width()) - margins)
+            try:
+                sw = max(0, int(src.width()) - margins)
+            except RuntimeError:
+                continue
             if sw > 0:
                 candidates.append(sw)
         # Walk parents: in split panes the host can still report a wide
@@ -126,7 +192,12 @@ class ToolbarOverflowHider(QObject):
         parent = self._host.parentWidget()
         depth = 0
         while parent is not None and depth < 6:
-            pw = max(0, int(parent.width()) - margins)
+            if not _qt_alive(parent):
+                break
+            try:
+                pw = max(0, int(parent.width()) - margins)
+            except RuntimeError:
+                break
             if pw > 0:
                 candidates.append(pw)
             parent = parent.parentWidget()
@@ -138,6 +209,8 @@ class ToolbarOverflowHider(QObject):
         return max(0, min(candidates) - self._SAFETY_PAD)
 
     def _apply(self) -> None:
+        if not _qt_alive(self._host):
+            return
         available = self._available_width()
         allowed_indexes = [i for i, ok in enumerate(self._allowed) if ok]
         # Before the host has a real width (not shown / not laid out yet),
@@ -163,6 +236,8 @@ class ToolbarOverflowHider(QObject):
         for index, unit in enumerate(self._units):
             show = index in visible_set
             for widget in unit:
+                if not _qt_alive(widget):
+                    continue
                 if widget.isHidden() == show:
                     widget.setVisible(show)
 

@@ -229,3 +229,29 @@ def test_iter_job_progress_hosts_includes_main_and_duplicate(
     assert any(host is main for host in hosts)
     main.close()
     tool.close()
+
+
+def test_overflow_hider_survives_deleted_overview_width_source(
+    qapp: QApplication,
+) -> None:
+    """Switching Overview files must not crash on a deleted toolbar slot."""
+    from PySide6.QtWidgets import QHBoxLayout, QWidget
+
+    from repeatviewer.widgets.preview_controls import AnnotationZoomBar
+
+    host = QWidget()
+    layout = QHBoxLayout(host)
+    bar = AnnotationZoomBar()
+    layout.addWidget(bar)
+    slot = QWidget()
+    hider = bar._overview_overflow
+    hider.add_width_source(slot)
+    assert slot in hider._width_sources
+
+    slot.deleteLater()
+    qapp.processEvents()
+    # Deferred sync + prune must not raise ``already deleted``.
+    hider.sync()
+    hider.clear_width_sources()
+    assert hider._width_sources == []
+    host.close()

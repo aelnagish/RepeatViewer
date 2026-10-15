@@ -108,7 +108,12 @@ from repeatviewer.backends.auto_annotation import (
 )
 from repeatviewer.backends.auto_annotation_settings import (
     AutoAnnotationSettings,
+    DEFAULT_MAX_TERMINAL_PAIRS,
+    DEFAULT_TIR_MAX_LENGTH,
+    DEFAULT_TIR_MIN_LENGTH,
+    DEFAULT_TIR_MIN_PAIR_DISTANCE,
     DEFAULT_TIR_SIMILARITY_THRESHOLD,
+    MAX_TERMINAL_PAIRS_LIMIT,
     OrfSettings,
     TerminalRepeatSettings,
     TandemRepeatSettings,
@@ -6430,8 +6435,9 @@ class AutoAnnotationSettingsPanel(QWidget):
             self._terminal_repeat_form(
                 settings.tir
                 or TerminalRepeatSettings(
-                    min_length=20,
-                    max_length=500,
+                    min_length=DEFAULT_TIR_MIN_LENGTH,
+                    max_length=DEFAULT_TIR_MAX_LENGTH,
+                    min_pair_distance=DEFAULT_TIR_MIN_PAIR_DISTANCE,
                     similarity_threshold=DEFAULT_TIR_SIMILARITY_THRESHOLD,
                 ),
                 "TIR",
@@ -6514,7 +6520,7 @@ class AutoAnnotationSettingsPanel(QWidget):
         max_distance_to_end.setRange(0, 1_000_000)
         max_distance_to_end.setValue(cfg.max_distance_to_end)
         max_pairs = QSpinBox(self)
-        max_pairs.setRange(1, 3)
+        max_pairs.setRange(1, MAX_TERMINAL_PAIRS_LIMIT)
         max_pairs.setValue(cfg.max_pairs)
         similarity = QDoubleSpinBox(self)
         similarity.setRange(0.0, 1.0)
@@ -6559,7 +6565,7 @@ class AutoAnnotationSettingsPanel(QWidget):
                 f"the {repeat_kind}. The left (5′) copy must start within this "
                 f"distance of the beginning, and the right (3′) copy must end "
                 f"within this distance of the sequence end. Larger values "
-                f"allow more internal candidates; default 1000.",
+                f"allow more internal candidates; default 10000.",
             ),
         )
         form.addRow(
@@ -6567,10 +6573,11 @@ class AutoAnnotationSettingsPanel(QWidget):
             self._field_help(
                 self._sized_spin(max_pairs),
                 f"{repeat_kind} max pairs",
-                f"How many {repeat_kind} pairs to keep (1–3). "
+                f"How many {repeat_kind} pairs to keep "
+                f"(1–{MAX_TERMINAL_PAIRS_LIMIT}). "
                 f"1 keeps only the outermost pair; higher values also keep "
                 f"inner nested pairs (named {repeat_kind}5_2 / {repeat_kind}3_2, "
-                f"etc.). Default 2.",
+                f"etc.). Default {DEFAULT_MAX_TERMINAL_PAIRS}.",
             ),
         )
         form.addRow(
@@ -7479,9 +7486,11 @@ class SequenceMapPanel(QWidget):
         self._auto_ann_thread: QThread | None = None
         self._auto_ann_worker: Worker | None = None
         self._auto_ann_cancel = JobCancellation()
+        self._auto_ann_reveal_kinds: tuple[str, ...] = ()
         self._sim_ann_thread: QThread | None = None
         self._sim_ann_worker: Worker | None = None
         self._sim_ann_cancel = JobCancellation()
+        self._sim_ann_reveal_kinds: tuple[str, ...] = ()
         self._auto_all_updating = False
         self._similarity_all_updating = False
         self._similarity_db_rows: list[tuple] = []
@@ -10161,6 +10170,11 @@ class SequenceMapPanel(QWidget):
 
         self._push_feature_undo_snapshot()
         self._sim_ann_cancel.reset()
+        self._sim_ann_reveal_kinds = tuple(
+            f"domain::{run.database.name}"
+            for run in databases
+            if str(run.database.name or "").strip()
+        )
         self._set_similarity_annotation_enabled(False)
         labels = ", ".join(run.database.name for run in databases)
         self._log_annotation_job(
@@ -10222,6 +10236,14 @@ class SequenceMapPanel(QWidget):
         self._end_window_job_progress()
 
     @Slot(object)
+    def _reveal_annotation_kinds_after_run(self, keys: tuple[str, ...]) -> None:
+        """Enable Displayed annotations for kinds just predicted."""
+        if not keys:
+            return
+        ensure = getattr(self._rail, "ensure_annotation_kinds_visible", None)
+        if callable(ensure):
+            ensure(keys)
+
     def _on_similarity_annotation_finished(self, result: object) -> None:
         if not isinstance(result, SimilarityAnnotationResult):
             self._log_annotation_job(
@@ -10238,6 +10260,7 @@ class SequenceMapPanel(QWidget):
             self._clear_annotation_job_status()
             return
         self._map.set_features(list(result.features))
+        self._reveal_annotation_kinds_after_run(self._sim_ann_reveal_kinds)
         self._clear_annotation_job_status()
         self._log_annotation_job(
             "JOB FINISH",
@@ -10284,8 +10307,11 @@ class SequenceMapPanel(QWidget):
 
         self._push_feature_undo_snapshot()
         self._auto_ann_cancel.reset()
+        self._auto_ann_reveal_kinds = tuple(str(mode.value) for mode in modes)
         self._set_auto_annotation_enabled(False)
-        labels = ", ".join(_AUTO_MODE_LABEL[mode] for mode in modes)
+        labels = ", ".join(
+            _AUTO_MODE_LABEL.get(mode, str(mode.value)) for mode in modes
+        )
         self._log_annotation_job(
             "JOB START",
             "Auto annotation",
@@ -10342,6 +10368,7 @@ class SequenceMapPanel(QWidget):
 
     @Slot(object)
     def _on_auto_annotation_finished(self, result: object) -> None:
+        reveal_kinds = tuple(self._auto_ann_reveal_kinds)
         if isinstance(result, MultiAutoAnnotationResult):
             data = self._map.data()
             if data is None:
@@ -10349,6 +10376,7 @@ class SequenceMapPanel(QWidget):
                 return
             features = list(result.features)
             self._map.set_features(features)
+            self._reveal_annotation_kinds_after_run(reveal_kinds)
             self._clear_annotation_job_status()
             self._log_annotation_job(
                 "JOB FINISH",
@@ -10379,6 +10407,7 @@ class SequenceMapPanel(QWidget):
 
         if not result.features:
             self._show_wide_information("Auto annotation", result.message)
+            self._reveal_annotation_kinds_after_run(reveal_kinds)
             self._log_annotation_job(
                 "JOB FINISH",
                 "Auto annotation",
@@ -10390,6 +10419,7 @@ class SequenceMapPanel(QWidget):
 
         merged = merge_auto_annotation_features(data.features, result.features, result.mode)
         self._map.set_features(merged)
+        self._reveal_annotation_kinds_after_run(reveal_kinds)
         self._clear_annotation_job_status()
         self._log_annotation_job(
             "JOB FINISH",

@@ -4894,6 +4894,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._ann_job_kind = ""
         self._ann_progress_total = 0
         self._ann_last_sequence_status = ""
+        self._ann_reveal_kinds: tuple[str, ...] = ()
         self._auto_all_updating = False
         self._similarity_all_updating = False
         self._similarity_db_rows: list[tuple] = []
@@ -4985,7 +4986,12 @@ class MultiSequenceOverviewPanel(QWidget):
         hider = getattr(bar, "_overview_overflow", None) if bar is not None else None
         if hider is not None:
             # Map column width changes when the Display panel opens/closes.
-            QTimer.singleShot(0, hider.sync)
+            def _deferred_overflow_sync(overflow: object = hider) -> None:
+                sync = getattr(overflow, "sync", None)
+                if callable(sync):
+                    sync()
+
+            QTimer.singleShot(0, _deferred_overflow_sync)
 
     def _schedule_viewport_refit(self) -> None:
         self._viewport_refit_timer.start()
@@ -5004,7 +5010,7 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _refit_after_viewport_change(self) -> None:
         """Keep Fit-zoom tracks edge-to-edge after rail / splitter / window resize."""
-        if not self._record_ids:
+        if not self._overview_panel_alive() or not self._record_ids:
             return
         if not self.isVisible():
             # Defer until show (PDF → MSA). Do not adopt a collapsed viewport size.
@@ -5059,14 +5065,38 @@ class MultiSequenceOverviewPanel(QWidget):
         self._names.resize(width, height)
         self._names.update()
 
+    def _overview_panel_alive(self) -> bool:
+        """False once Qt has destroyed this panel (deferred timers must no-op)."""
+        try:
+            from shiboken6 import isValid
+
+            return bool(isValid(self))
+        except Exception:
+            try:
+                self.objectName()
+                return True
+            except RuntimeError:
+                return False
+
     def _sync_sequence_count_label(self) -> None:
         """Update Overview toolbar sequence count (right of Cons)."""
+        if not self._overview_panel_alive():
+            return
         bar = self._header_zoom_bar
         if bar is None or not hasattr(bar, "set_sequence_count"):
             return
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(bar):
+                return
+        except Exception:
+            pass
         bar.set_sequence_count(len(self._bars.record_ids()))
 
     def _sync_names_column(self) -> None:
+        if not self._overview_panel_alive():
+            return
         self._sync_hbar_shim()
         self._sync_name_label_size_to_letters()
         self._sync_sequence_count_label()
@@ -5114,8 +5144,16 @@ class MultiSequenceOverviewPanel(QWidget):
     @staticmethod
     def _safe_disconnect(signal, slot) -> None:
         """Disconnect without raising when the slot/receiver is already gone."""
+        import warnings
+
         try:
-            signal.disconnect(slot)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r".*Failed to disconnect.*",
+                    category=RuntimeWarning,
+                )
+                signal.disconnect(slot)
         except (RuntimeError, TypeError, SystemError):
             pass
 
@@ -5124,9 +5162,27 @@ class MultiSequenceOverviewPanel(QWidget):
         host = getattr(self, "_zoom_bar_header_host", None)
         bar.set_overview_mode(False)
         bar.hide()
-        self._toolbar_slot.hide()
+        slot = getattr(self, "_toolbar_slot", None)
+        if slot is not None:
+            try:
+                from shiboken6 import isValid
+
+                if isValid(slot):
+                    slot.hide()
+            except Exception:
+                try:
+                    slot.hide()
+                except RuntimeError:
+                    pass
         if host is None:
             return
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(host):
+                return
+        except Exception:
+            pass
         layout = host.layout()
         bar.setParent(host)
         if layout is not None and layout.indexOf(bar) < 0:
@@ -5155,12 +5211,36 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.show()
         self._toolbar_slot.show()
         # Overflow must measure the map column, not the preferred toolbar width.
+        # Drop any stale sources from a previous Overview page first.
         hider = getattr(bar, "_overview_overflow", None)
         if hider is not None:
+            clear = getattr(hider, "clear_width_sources", None)
+            if callable(clear):
+                clear()
             hider.add_width_source(self._toolbar_slot)
             hider.add_width_source(self._map_host)
+            # If this panel is destroyed without unbind, drop our slot immediately.
+            slot = self._toolbar_slot
+
+            def _drop_slot_width_source(*_args, overflow=hider, source=slot) -> None:
+                remove = getattr(overflow, "remove_width_source", None)
+                if callable(remove):
+                    remove(source)
+
+            try:
+                slot.destroyed.connect(_drop_slot_width_source)
+            except (RuntimeError, TypeError):
+                pass
             hider.sync()
-            QTimer.singleShot(0, hider.sync)
+
+            def _deferred_overflow_sync(
+                overflow: object = hider,
+            ) -> None:
+                sync = getattr(overflow, "sync", None)
+                if callable(sync):
+                    sync()
+
+            QTimer.singleShot(0, _deferred_overflow_sync)
         # Reparent leaves the header controls host empty — hide it so it does
         # not keep a blank gray strip under Text/Overview in duplicate windows.
         host = getattr(self, "_zoom_bar_header_host", None)
@@ -5180,6 +5260,19 @@ class MultiSequenceOverviewPanel(QWidget):
         bar = self._header_zoom_bar
         if bar is None:
             return
+        # Overflow hider on the shared bar must not keep pointers to this
+        # panel's toolbar slot / map host — those are destroyed with the page
+        # and otherwise cause ``_OverviewToolbarSlot already deleted``.
+        hider = getattr(bar, "_overview_overflow", None)
+        if hider is not None:
+            clear = getattr(hider, "clear_width_sources", None)
+            if callable(clear):
+                clear()
+            else:
+                remove = getattr(hider, "remove_width_source", None)
+                if callable(remove):
+                    remove(getattr(self, "_toolbar_slot", None))
+                    remove(getattr(self, "_map_host", None))
         self._safe_disconnect(bar.zoom_slider.valueChanged, self._on_zoom_slider_changed)
         self._safe_disconnect(bar.fit_requested, self._fit_bars)
         self._safe_disconnect(bar.select_requested, self._select_by_position)
@@ -6116,6 +6209,17 @@ class MultiSequenceOverviewPanel(QWidget):
         self._ann_job_kind = kind
         self._ann_progress_total = max(1, int(total_steps))
         self._ann_last_sequence_status = ""
+        # Remember which Displayed-annotations kinds this run should turn on.
+        if kind == "similarity":
+            self._ann_reveal_kinds = tuple(
+                f"domain::{run.database.name}"
+                for run in options.similarity_databases
+                if str(run.database.name or "").strip()
+            )
+        else:
+            self._ann_reveal_kinds = tuple(
+                str(mode.value) for mode in options.auto_modes
+            )
         self._set_annotation_controls_enabled(False)
         n = len(target_ids)
         scope = (
@@ -6243,7 +6347,14 @@ class MultiSequenceOverviewPanel(QWidget):
         for rid in self._record_ids:
             self._features[rid] = list(result.features_by_id.get(rid) or [])
         self._annotations_dirty = True
+        reveal_kinds = tuple(self._ann_reveal_kinds)
         self._refresh_features_after_edit()
+        # Show the kinds that were just predicted even if Tracks had them off.
+        if reveal_kinds:
+            self._rail.ensure_annotation_kinds_visible(reveal_kinds)
+            self._bars.set_visible_annotation_kinds(
+                self._rail.visible_annotation_kinds()
+            )
         skipped = list(getattr(result, "skipped_sequences", ()) or ())
         if skipped:
             headline, body = result.skipped_reminder_parts(kind=kind)
@@ -6282,6 +6393,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._ann_job_kind = ""
         self._ann_progress_total = 0
         self._ann_last_sequence_status = ""
+        self._ann_reveal_kinds = ()
         self._set_annotation_controls_enabled(True)
         self._end_window_job_progress()
 
@@ -7131,6 +7243,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_viewport_min_size(vp.width(), vp.height())
 
     def _try_initial_fit(self) -> None:
+        if not self._overview_panel_alive():
+            return
         if self._did_initial_fit or not self._record_ids:
             return
         if not self.isVisible():
@@ -7143,6 +7257,9 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _after_panel_shown(self) -> None:
         """Restore full MSA layout after the panel was hidden (e.g. PDF tab)."""
+        # Tab replace can destroy this panel while a showEvent singleShot is queued.
+        if not self._overview_panel_alive():
+            return
         if not self.isVisible() or not self._record_ids:
             return
         self._bars._invalidate_msa_layer_cache()
@@ -7241,6 +7358,8 @@ class MultiSequenceOverviewPanel(QWidget):
         Previous file zoom (``_ppb``) and scrollbar positions must not carry
         over when switching alignments in the same Overview panel.
         """
+        if not self._overview_panel_alive():
+            return
         self._name_width = self._current_name_width()
         self._sync_viewport_fill()
         # Drop any pending mid-alignment scroll from the previous file.
@@ -7253,6 +7372,8 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _fit_bars(self) -> None:
         # Keep the user's splitter ratio; only zoom tracks to the track viewport.
+        if not self._overview_panel_alive():
+            return
         self._reset_overview_to_start()
 
     def _open_msa_clean_dialog(self) -> None:

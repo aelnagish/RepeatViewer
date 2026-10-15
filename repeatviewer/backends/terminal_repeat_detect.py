@@ -20,15 +20,17 @@ from repeatviewer.backends.gui_functions import (
 )
 from repeatviewer.backends.job_cancel import JobCancelledError, JobCancellation, check_cancelled, run_subprocess_with_cancel
 from repeatviewer.backends.auto_annotation_settings import (
+    DEFAULT_LTR_MIN_LENGTH,
     DEFAULT_LTR_SIMILARITY_THRESHOLD,
+    DEFAULT_TIR_MIN_LENGTH,
     DEFAULT_TIR_SIMILARITY_THRESHOLD,
     TerminalRepeatSettings,
     normalize_max_terminal_pairs,
 )
 from repeatviewer.backends.sequence_features import SequenceFeature
 
-MIN_LTR_LEN = 100
-MIN_TIR_LEN = 20
+MIN_LTR_LEN = DEFAULT_LTR_MIN_LENGTH
+MIN_TIR_LEN = DEFAULT_TIR_MIN_LENGTH
 DEFAULT_TERMINAL_REPEAT_WORD_SIZE = 11
 MIN_TERMINAL_REPEAT_WORD_SIZE = 4
 # Collapse near-identical BLAST rows when selecting multiple pairs.

@@ -6,17 +6,23 @@ from dataclasses import dataclass, field
 
 from PySide6.QtCore import QSettings
 
-DEFAULT_LTR_SIMILARITY_THRESHOLD = 0.6
-DEFAULT_TIR_SIMILARITY_THRESHOLD = 0.5
+DEFAULT_LTR_SIMILARITY_THRESHOLD = 0.30
+DEFAULT_TIR_SIMILARITY_THRESHOLD = 0.20
 
+DEFAULT_LTR_MIN_LENGTH = 50
+DEFAULT_LTR_MAX_LENGTH = 4000
+DEFAULT_LTR_MIN_PAIR_DISTANCE = 100
+DEFAULT_TIR_MIN_LENGTH = 9
+DEFAULT_TIR_MAX_LENGTH = 2000
+DEFAULT_TIR_MIN_PAIR_DISTANCE = 50
 
-DEFAULT_MAX_DISTANCE_TO_END = 1000
+DEFAULT_MAX_DISTANCE_TO_END = 10_000
 # Backward-compatible alias for older imports / settings code.
 DEFAULT_MIN_DISTANCE_TO_END = DEFAULT_MAX_DISTANCE_TO_END
 
-# How many nested LTR/TIR pairs to keep (outermost first). Hard cap is 3.
-DEFAULT_MAX_TERMINAL_PAIRS = 2
-MAX_TERMINAL_PAIRS_LIMIT = 3
+# How many nested LTR/TIR pairs to keep (outermost first). Hard cap is 100.
+DEFAULT_MAX_TERMINAL_PAIRS = 3
+MAX_TERMINAL_PAIRS_LIMIT = 100
 
 
 def normalize_max_terminal_pairs(value: object) -> int:
@@ -39,13 +45,13 @@ def default_annotation_threads() -> int:
 
 @dataclass
 class TerminalRepeatSettings:
-    min_length: int = 100
-    max_length: int = 2000
-    min_pair_distance: int = 100
+    min_length: int = DEFAULT_LTR_MIN_LENGTH
+    max_length: int = DEFAULT_LTR_MAX_LENGTH
+    min_pair_distance: int = DEFAULT_LTR_MIN_PAIR_DISTANCE
     # Maximum allowed gap from each sequence terminus (bp).
     max_distance_to_end: int = DEFAULT_MAX_DISTANCE_TO_END
     similarity_threshold: float = DEFAULT_LTR_SIMILARITY_THRESHOLD
-    # Keep up to this many terminal pairs (1 = outermost only; max 3).
+    # Keep up to this many terminal pairs (1 = outermost only; max 100).
     max_pairs: int = DEFAULT_MAX_TERMINAL_PAIRS
 
     def __post_init__(self) -> None:
@@ -126,16 +132,21 @@ class AutoAnnotationSettings:
         self.num_threads = max(1, int(self.num_threads or default_annotation_threads()))
         if self.ltr is None:
             self.ltr = TerminalRepeatSettings(
-                min_length=100,
-                max_length=2000,
+                min_length=DEFAULT_LTR_MIN_LENGTH,
+                max_length=DEFAULT_LTR_MAX_LENGTH,
+                min_pair_distance=DEFAULT_LTR_MIN_PAIR_DISTANCE,
+                max_distance_to_end=DEFAULT_MAX_DISTANCE_TO_END,
                 similarity_threshold=DEFAULT_LTR_SIMILARITY_THRESHOLD,
+                max_pairs=DEFAULT_MAX_TERMINAL_PAIRS,
             )
         if self.tir is None:
             self.tir = TerminalRepeatSettings(
-                min_length=20,
-                max_length=500,
-                min_pair_distance=50,
+                min_length=DEFAULT_TIR_MIN_LENGTH,
+                max_length=DEFAULT_TIR_MAX_LENGTH,
+                min_pair_distance=DEFAULT_TIR_MIN_PAIR_DISTANCE,
+                max_distance_to_end=DEFAULT_MAX_DISTANCE_TO_END,
                 similarity_threshold=DEFAULT_TIR_SIMILARITY_THRESHOLD,
+                max_pairs=DEFAULT_MAX_TERMINAL_PAIRS,
             )
         if self.tandem is None:
             self.tandem = TandemRepeatSettings()
@@ -239,9 +250,11 @@ def load_auto_annotation_settings() -> AutoAnnotationSettings:
     s = QSettings()
     prefix = "auto_annotation/"
     ltr = TerminalRepeatSettings(
-        min_length=_get_int(s, f"{prefix}ltr_min_length", 100),
-        max_length=_get_int(s, f"{prefix}ltr_max_length", 2000),
-        min_pair_distance=_get_int(s, f"{prefix}ltr_min_pair_distance", 100),
+        min_length=_get_int(s, f"{prefix}ltr_min_length", DEFAULT_LTR_MIN_LENGTH),
+        max_length=_get_int(s, f"{prefix}ltr_max_length", DEFAULT_LTR_MAX_LENGTH),
+        min_pair_distance=_get_int(
+            s, f"{prefix}ltr_min_pair_distance", DEFAULT_LTR_MIN_PAIR_DISTANCE
+        ),
         max_distance_to_end=_get_int_migrated(
             s,
             f"{prefix}ltr_max_distance_to_end",
@@ -256,9 +269,11 @@ def load_auto_annotation_settings() -> AutoAnnotationSettings:
         ),
     )
     tir = TerminalRepeatSettings(
-        min_length=_get_int(s, f"{prefix}tir_min_length", 20),
-        max_length=_get_int(s, f"{prefix}tir_max_length", 500),
-        min_pair_distance=_get_int(s, f"{prefix}tir_min_pair_distance", 50),
+        min_length=_get_int(s, f"{prefix}tir_min_length", DEFAULT_TIR_MIN_LENGTH),
+        max_length=_get_int(s, f"{prefix}tir_max_length", DEFAULT_TIR_MAX_LENGTH),
+        min_pair_distance=_get_int(
+            s, f"{prefix}tir_min_pair_distance", DEFAULT_TIR_MIN_PAIR_DISTANCE
+        ),
         max_distance_to_end=_get_int_migrated(
             s,
             f"{prefix}tir_max_distance_to_end",
@@ -310,7 +325,9 @@ def save_auto_annotation_settings(settings: AutoAnnotationSettings) -> None:
     prefix = "auto_annotation/"
     ltr = settings.ltr or TerminalRepeatSettings()
     tir = settings.tir or TerminalRepeatSettings(
-        min_length=20,
+        min_length=DEFAULT_TIR_MIN_LENGTH,
+        max_length=DEFAULT_TIR_MAX_LENGTH,
+        min_pair_distance=DEFAULT_TIR_MIN_PAIR_DISTANCE,
         similarity_threshold=DEFAULT_TIR_SIMILARITY_THRESHOLD,
     )
     tandem = settings.tandem or TandemRepeatSettings()

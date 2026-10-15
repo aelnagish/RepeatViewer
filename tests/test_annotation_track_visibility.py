@@ -121,6 +121,40 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
     rail.close()
 
 
+def test_ensure_annotation_kinds_visible_after_run(qapp: QApplication) -> None:
+    """Feature/similarity runs re-tick Displayed annotations that were off."""
+    from repeatviewer.widgets.sequence_annotation_rail import SequenceAnnotationRail
+
+    rail = SequenceAnnotationRail()
+    rail.show()
+    qapp.processEvents()
+    rail.set_overview_display_mode(True)
+    rail._hidden_annotation_kinds.clear()
+    rail._rebuild_annotation_kind_checks(
+        ["LTR", "TIR", "ORF", "TSD", "domain::Pfam"]
+    )
+    rail.annotation_kind_checks["LTR"].setChecked(False)
+    rail.annotation_kind_checks["domain::Pfam"].setChecked(False)
+    assert "LTR" not in rail.visible_annotation_kinds()
+    assert "domain::Pfam" not in rail.visible_annotation_kinds()
+
+    rail.ensure_annotation_kinds_visible(["LTR", "domain::Pfam"])
+    assert "LTR" in rail.visible_annotation_kinds()
+    assert "domain::Pfam" in rail.visible_annotation_kinds()
+    assert rail.annotation_kind_checks["LTR"].isChecked()
+    assert rail.annotation_kind_checks["domain::Pfam"].isChecked()
+    assert "LTR" not in rail._hidden_annotation_kinds
+    assert "domain::Pfam" not in rail._hidden_annotation_kinds
+
+    # New domain group appears and is ticked when first predicted.
+    rail.ensure_annotation_kinds_visible(["domain::CDD"])
+    assert "domain::CDD" in rail.annotation_kind_checks
+    assert rail.annotation_kind_checks["domain::CDD"].isChecked()
+
+    rail.annotation_kinds_all_check.setChecked(True)
+    rail.close()
+
+
 def test_bars_filter_packed_tracks(qapp: QApplication) -> None:
     from repeatviewer.widgets.multi_sequence_overview import _BarsCanvas
 

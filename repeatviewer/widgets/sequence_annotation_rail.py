@@ -2126,6 +2126,55 @@ class SequenceAnnotationRail(QWidget):
             if check.isChecked()
         )
 
+    def ensure_annotation_kinds_visible(self, keys: list[str] | tuple[str, ...] | set[str]) -> None:
+        """Tick Displayed annotations for ``keys`` after a prediction run.
+
+        Feature detection / Similarity should show their results even when the
+        user had previously unchecked that type under Tracks.
+        """
+        wanted: list[str] = []
+        seen: set[str] = set()
+        for raw in keys:
+            key = self._normalize_hidden_annotation_kind(str(raw or "").strip())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            wanted.append(key)
+        if not wanted:
+            return
+
+        changed = False
+        for key in wanted:
+            if key in self._hidden_annotation_kinds:
+                self._hidden_annotation_kinds.discard(key)
+                changed = True
+        if changed:
+            self._save_hidden_annotation_kinds()
+
+        missing = [key for key in wanted if key not in self.annotation_kind_checks]
+        if missing:
+            ordered = list(self.annotation_kind_checks.keys()) + missing
+            self._rebuild_annotation_kind_checks(ordered)
+            changed = True
+
+        self._annotation_kinds_all_updating = True
+        try:
+            for key in wanted:
+                check = self.annotation_kind_checks.get(key)
+                if check is None:
+                    continue
+                if not check.isChecked():
+                    check.setChecked(True)
+                    changed = True
+        finally:
+            self._annotation_kinds_all_updating = False
+
+        if not changed:
+            return
+        self._sync_annotation_kinds_all_check()
+        self._sync_show_annotation_track_from_kinds()
+        self._emit_annotation_track_kinds()
+
     def _emit_annotation_track_kinds(self) -> None:
         self.annotationTrackKindsChanged.emit(self.visible_annotation_kinds())
 
