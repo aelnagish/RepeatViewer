@@ -1641,6 +1641,46 @@ def test_delete_removes_shift_delete_fills_gaps(
     panel.close()
 
 
+def test_delete_gap_columns_keeps_overlapping_features(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Deleting columns that are only gaps under a feature must keep it."""
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "gaps.fa"
+    fasta.write_text(
+        ">s1\nAC---CGTAC\n>s2\nACGTACGTAC\n",
+        encoding="utf-8",
+    )
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    # Regional delete on s1 only: cols 3–5 are gaps under the LTR.
+    panel._bars.set_regional_selection(3, 5, {0})
+    panel._features = {
+        "s1": [
+            SequenceFeature(start=2, end=8, name="ltr", feature_type="LTR"),
+            SequenceFeature(start=9, end=10, name="keep", feature_type="ORF"),
+        ],
+        "s2": [
+            SequenceFeature(start=3, end=5, name="hit", feature_type="LTR"),
+        ],
+    }
+    panel._delete_selected_msa_edit(hard_delete=True)
+    qapp.processEvents()
+    # s1: LTR kept and remapped; s2 untouched (not in regional edit).
+    assert [(f.name, f.start, f.end) for f in panel._features["s1"]] == [
+        ("ltr", 2, 5),
+        ("keep", 6, 7),
+    ]
+    assert [(f.name, f.start, f.end) for f in panel._features["s2"]] == [
+        ("hit", 3, 5),
+    ]
+    panel.close()
+
+
 def test_type_letter_replaces_msa_selection(
     qapp: QApplication, tmp_path: Path
 ) -> None:

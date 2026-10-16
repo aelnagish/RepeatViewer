@@ -6899,10 +6899,13 @@ class MultiSequenceOverviewPanel(QWidget):
             return
 
         new_features: dict[str, list[SequenceFeature]] = {}
-        for rid in self._record_ids:
+        for i, rid in enumerate(self._record_ids):
             feats = list(self._features.get(rid) or [])
             if rid in edited_ids:
-                feats = drop_features_overlapping_region(feats, start, end)
+                seq = seqs[i] if i < len(seqs) else ""
+                feats = drop_features_overlapping_region(
+                    feats, start, end, sequence=seq
+                )
             new_features[rid] = feats
 
         try:
@@ -7144,10 +7147,13 @@ class MultiSequenceOverviewPanel(QWidget):
             self._record_ids[r] for r in row_set if 0 <= r < len(self._record_ids)
         }
         new_features: dict[str, list[SequenceFeature]] = {}
-        for rid in self._record_ids:
+        for i, rid in enumerate(self._record_ids):
             feats = list(self._features.get(rid) or [])
             if rid in edited_ids:
-                feats = drop_features_overlapping_region(feats, 1, width)
+                seq = seqs[i] if i < len(seqs) else ""
+                feats = drop_features_overlapping_region(
+                    feats, 1, width, sequence=seq
+                )
             new_features[rid] = feats
         try:
             write_aligned_fasta_rows(self._path, self._record_ids, new_seqs)
@@ -7179,7 +7185,9 @@ class MultiSequenceOverviewPanel(QWidget):
 
         * Delete — remove residues/columns (splice).
         * Shift+Delete — replace residues with ``-`` (keep columns).
-        Features overlapping the edited span on changed rows are dropped.
+        Features are dropped only when the edited span covers a non-gap
+        residue on that sequence; gap-only overlaps are kept (and remapped
+        after a hard column delete).
         """
         region = self._bars.region_selection()
         if region is None or not self.is_msa_mode():
@@ -7244,11 +7252,14 @@ class MultiSequenceOverviewPanel(QWidget):
             return
 
         new_features: dict[str, list[SequenceFeature]] = {}
-        for rid in self._record_ids:
+        for i, rid in enumerate(self._record_ids):
             feats = list(self._features.get(rid) or [])
             if rid in edited_ids:
-                # Drop annotations that overlap the edited span.
-                feats = drop_features_overlapping_region(feats, start, end)
+                seq = seqs[i] if i < len(seqs) else ""
+                # Drop only when the edit covers real residues under the feature.
+                feats = drop_features_overlapping_region(
+                    feats, start, end, sequence=seq
+                )
                 if hard_delete:
                     feats = remap_features_after_column_delete(feats, start, end)
             new_features[rid] = feats

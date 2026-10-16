@@ -479,12 +479,39 @@ def mask_rows_region(
     )
 
 
+def region_has_residue(
+    sequence: str,
+    start_1based: int,
+    end_1based: int,
+) -> bool:
+    """True when ``sequence[start:end]`` (1-based inclusive) has a non-gap."""
+    if not sequence:
+        return False
+    a = int(start_1based)
+    b = int(end_1based)
+    if b < a:
+        a, b = b, a
+    lo = max(0, a - 1)
+    hi = min(len(sequence), b)
+    for i in range(lo, hi):
+        if sequence[i] not in GAP_CHARS:
+            return True
+    return False
+
+
 def drop_features_overlapping_region(
     features: list[SequenceFeature],
     start_1based: int,
     end_1based: int,
+    sequence: str | None = None,
 ) -> list[SequenceFeature]:
-    """Drop features that overlap inclusive ``[start, end]`` (any overlap)."""
+    """Drop features that overlap inclusive ``[start, end]``.
+
+    When ``sequence`` is set, a feature is dropped only if the overlap with
+    the edited span contains at least one non-gap residue. Overlaps that fall
+    only on ``-`` / ``.`` columns are kept so deleting gap columns does not
+    strip MSA annotations.
+    """
     a = int(start_1based)
     b = int(end_1based)
     if b < a:
@@ -496,6 +523,15 @@ def drop_features_overlapping_region(
             fs, fe = fe, fs
         if fe < a or fs > b:
             kept.append(feat)
+            continue
+        if sequence is None:
+            # No sequence context → any overlap removes the feature.
+            continue
+        inter_a = max(fs, a)
+        inter_b = min(fe, b)
+        if region_has_residue(sequence, inter_a, inter_b):
+            continue
+        kept.append(feat)
     return kept
 
 

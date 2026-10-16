@@ -241,6 +241,44 @@ def test_column_residue_frequencies_and_threshold() -> None:
     )
 
 
+def test_drop_features_keeps_gap_only_overlaps() -> None:
+    from repeatviewer.backends.msa_coordinates import (
+        drop_features_overlapping_region,
+        remap_features_after_column_delete,
+        region_has_residue,
+    )
+
+    seq = "AC---GTAC"  # cols 3–5 are gaps
+    feat_gap = SequenceFeature(start=2, end=8, name="ltr", feature_type="LTR")
+    feat_out = SequenceFeature(start=8, end=9, name="orf", feature_type="ORF")
+    assert not region_has_residue(seq, 3, 5)
+    assert region_has_residue(seq, 2, 3)  # C + gap
+
+    # Without sequence: any overlap drops.
+    assert [
+        f.name
+        for f in drop_features_overlapping_region([feat_gap, feat_out], 3, 5)
+    ] == ["orf"]
+
+    # With sequence: gap-only overlap under LTR is kept; then remapped.
+    kept = drop_features_overlapping_region(
+        [feat_gap, feat_out], 3, 5, sequence=seq
+    )
+    assert [f.name for f in kept] == ["ltr", "orf"]
+    remapped = remap_features_after_column_delete(kept, 3, 5)
+    assert [(f.name, f.start, f.end) for f in remapped] == [
+        ("ltr", 2, 5),  # 2–8 minus cols 3–5 → 2–5
+        ("orf", 5, 6),  # 8–9 → 5–6
+    ]
+
+    # Residue under the feature → drop.
+    seq_res = "ACGTAGTAC"
+    dropped = drop_features_overlapping_region(
+        [feat_gap, feat_out], 3, 5, sequence=seq_res
+    )
+    assert [f.name for f in dropped] == ["orf"]
+
+
 def test_fill_rows_region_and_normalize_edit_residue() -> None:
     from repeatviewer.backends.msa_coordinates import (
         fill_rows_region,
