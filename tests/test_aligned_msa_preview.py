@@ -475,7 +475,7 @@ def test_msa_overview_context_menu_has_rename_for_sequence_selection(
     texts = [a.text() for a in menu.actions() if not a.isSeparator()]
     assert "Add feature…" in texts
     assert "Rename sequence" in texts
-    assert "Set as standard" in texts
+    assert "Set as reference" in texts
     assert "Copy Sequence" in texts
     assert "Extract Sequence" in texts
     assert "Copy Sequence without gap" in texts
@@ -489,18 +489,18 @@ def test_msa_overview_context_menu_has_rename_for_sequence_selection(
     )
     rename = next(a for a in menu.actions() if a.text() == "Rename sequence")
     assert rename.isEnabled() is True
-    set_std = next(a for a in menu.actions() if a.text() == "Set as standard")
+    set_std = next(a for a in menu.actions() if a.text() == "Set as reference")
     assert set_std.isEnabled() is True
     show_dot = next(a for a in menu.actions() if a.text() == "Show self-dotplot")
     assert show_dot.isEnabled() is True
 
-    # Region-only selection: no Rename / Set as standard; self-dotplot disabled.
+    # Region-only selection: no Rename / Set as reference; self-dotplot disabled.
     panel._bars.set_selected_rows([])
     panel._bars.set_region_selection(2, 4)
     menu2 = panel._build_overview_context_menu()
     texts2 = [a.text() for a in menu2.actions() if not a.isSeparator()]
     assert "Rename sequence" not in texts2
-    assert "Set as standard" not in texts2
+    assert "Set as reference" not in texts2
     assert "Copy Sequence without gap" in texts2
     show_dot2 = next(a for a in menu2.actions() if a.text() == "Show self-dotplot")
     assert show_dot2.isEnabled() is False
@@ -606,6 +606,12 @@ def test_msa_color_vs_standard_conserved_diff_uses_default_palette(
     gap = bars._msa_overview_fill_color(0, "-", row=1)
     assert gap is not None
     assert gap.name().lower() in {"#e74c3c", "#c0392b"}
+
+    # N/X always use the fixed yellow highlight under Color vs reference.
+    n_fill = bars._msa_residue_paint_pair(0, "N", row=1)
+    assert n_fill is not None
+    assert n_fill[0].name().lower() == "#f0c000"
+    assert bars._msa_should_fill_background(0, "N", row=1) is True
     panel.close()
 
 
@@ -635,7 +641,7 @@ def test_msa_standard_extent_for_boundary_guides(
     assert panel._bars.msa_standard_extent_columns() == (0, 9)
     panel._sync_scale_standard_boundaries()
     assert panel._scale._standard_boundary_cols == (0, 9)
-    assert panel._rail.show_standard_boundaries.text() == "Show standard boundaries"
+    assert panel._rail.show_standard_boundaries.text() == "Show reference boundaries"
     panel._rail.show_standard_boundaries.setChecked(False)
     assert panel._bars.show_msa_standard_boundaries() is False
     assert panel._scale._standard_boundary_cols is None

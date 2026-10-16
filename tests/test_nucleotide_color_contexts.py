@@ -73,6 +73,31 @@ def test_all_black_scheme_roundtrip_matches_combo_name() -> None:
         _clear_nucleotide_settings()
 
 
+def test_named_preset_custom_colors_survive_scheme_switch() -> None:
+    """Editing Default then switching to Color-blind must not wipe Default."""
+    _clear_nucleotide_settings()
+    try:
+        save_nucleotide_scheme("msa", "Default")
+        custom_default = dict(DEFAULT_NUCLEOTIDE_COLORS)
+        custom_default["A"] = "#112233"
+        save_custom_nucleotide_backgrounds(custom_default, "msa")
+        assert load_nucleotide_scheme_name("msa") == "Default"
+        assert nucleotide_palette_colors("msa")["A"].upper() == "#112233"
+
+        save_nucleotide_scheme("msa", "Color-blind")
+        assert load_nucleotide_scheme_name("msa") == "Color-blind"
+        assert (
+            nucleotide_palette_colors("msa")["A"].upper()
+            == NUCLEOTIDE_COLORS_COLORBLIND["A"].upper()
+        )
+
+        save_nucleotide_scheme("msa", "Default")
+        assert load_nucleotide_scheme_name("msa") == "Default"
+        assert nucleotide_palette_colors("msa")["A"].upper() == "#112233"
+    finally:
+        _clear_nucleotide_settings()
+
+
 def test_legacy_all_black_migrates_to_named_scheme() -> None:
     import json
 

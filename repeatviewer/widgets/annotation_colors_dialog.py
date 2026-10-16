@@ -50,10 +50,13 @@ from repeatviewer.widgets.preview_zoom import (
     default_amino_acid_backgrounds,
     default_nucleotide_backgrounds,
     load_custom_amino_acid_backgrounds,
+    load_nucleotide_preset_overrides,
+    load_nucleotide_scheme_name,
     nucleotide_palette_colors,
     normalize_nucleotide_color_context,
     save_custom_amino_acid_backgrounds,
     save_custom_nucleotide_backgrounds,
+    save_nucleotide_preset_overrides,
     save_nucleotide_scheme,
 )
 from repeatviewer.widgets.residue_color_grid import ResidueColorGrid
@@ -252,9 +255,17 @@ class AnnotationElementColorsPanel(QWidget):
     def _apply_nuc_preset(self, name: str, colors: dict[str, str]) -> None:
         if self._nuc_grid is None:
             return
-        self._nuc_grid.set_colors(colors)
+        ctx = self._nucleotide_color_context
+        # Keep custom colours for the preset we are leaving.
+        previous = load_nucleotide_scheme_name(ctx)
+        if previous in {"Default", "Color-blind", "All black"}:
+            save_nucleotide_preset_overrides(
+                ctx, previous, self._nuc_grid.colors()
+            )
+        overrides = load_nucleotide_preset_overrides(ctx, name)
+        self._nuc_grid.set_colors(overrides if overrides else colors)
         # Persist only for this display context (single / multi / MSA).
-        save_nucleotide_scheme(self._nucleotide_color_context, name)
+        save_nucleotide_scheme(ctx, name)
 
     def _section_label(self, text: str) -> QLabel:
         label = QLabel(f"<b>{text}</b>")
@@ -264,6 +275,9 @@ class AnnotationElementColorsPanel(QWidget):
     def restore_defaults(self) -> None:
         if self._nuc_grid is not None:
             self._nuc_grid.set_colors(default_nucleotide_backgrounds())
+            save_nucleotide_preset_overrides(
+                self._nucleotide_color_context, "Default", None
+            )
             save_nucleotide_scheme(self._nucleotide_color_context, "Default")
         if self._aa_grid is not None:
             self._aa_grid.set_colors(default_amino_acid_backgrounds())

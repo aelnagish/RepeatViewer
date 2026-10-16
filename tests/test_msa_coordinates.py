@@ -184,7 +184,7 @@ def test_column_residue_frequencies_and_threshold() -> None:
         MSA_COLOR_DIFF_FROM_SELECTED
     )
     assert dict(MSA_COLOR_MODE_CHOICES)[MSA_COLOR_DIFF_FROM_SELECTED] == (
-        "Color vs standard"
+        "Color vs reference"
     )
 
     assert residue_differs_from_reference("T", "A")

@@ -31,16 +31,19 @@ OutputFormat = Literal["png", "pdf"]
 # IUPAC nucleotide ambiguity codes (default white so users can recolour them).
 _NUCLEOTIDE_AMBIGUITY_LETTERS = ("I", "R", "Y", "W", "S", "M", "K", "B", "H", "D", "V")
 
-# Nucleotide defaults (A green, C purple-blue, G charcoal, T/U pink); ambiguities white.
-# G uses medium-dark grey (not pure black) so black letters stay readable.
+# Shared N/X highlight (Default / Color-blind / All black / Color vs reference).
+NUCLEOTIDE_N_X_HIGHLIGHT = "#F0C000"
+
+# Nucleotide defaults (A green, C purple-blue, G charcoal, T/U pink);
+# N/X gold; other ambiguities white. G is charcoal so black letters stay readable.
 NUCLEOTIDE_COLORS_DEFAULT: dict[str, str] = {
     "A": "#00C800",
     "C": "#7040E8",
     "G": "#707070",
     "T": "#F06090",
     "U": "#F06090",
-    "N": "#FFFFFF",
-    "X": "#FFFFFF",
+    "N": NUCLEOTIDE_N_X_HIGHLIGHT,
+    "X": NUCLEOTIDE_N_X_HIGHLIGHT,
     "-": "#FFFFFF",
     **{letter: "#FFFFFF" for letter in _NUCLEOTIDE_AMBIGUITY_LETTERS},
 }
@@ -53,13 +56,13 @@ NUCLEOTIDE_COLORS_COLORBLIND: dict[str, str] = {
     "G": "#707070",
     "T": "#009E73",
     "U": "#009E73",
-    "N": "#FFFFFF",
-    "X": "#FFFFFF",
+    "N": NUCLEOTIDE_N_X_HIGHLIGHT,
+    "X": NUCLEOTIDE_N_X_HIGHLIGHT,
     "-": "#FFFFFF",
     **{letter: "#FFFFFF" for letter in _NUCLEOTIDE_AMBIGUITY_LETTERS},
 }
 
-# A/T/U/G/C solid black; N/X/- and ambiguity stay white (from Default).
+# A/T/U/G/C solid black; N/X keep the gold highlight (from Default).
 NUCLEOTIDE_COLORS_ALL_BLACK: dict[str, str] = {
     **NUCLEOTIDE_COLORS_DEFAULT,
     "A": "#000000",

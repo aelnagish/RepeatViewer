@@ -258,7 +258,7 @@ _COLORBLIND_BASE_COLORS: dict[str, tuple[str, str]] = {
     "G": ("#707070", "#000000"),
     "T": ("#009E73", "#FFFFFF"),
     "U": ("#009E73", "#FFFFFF"),
-    "N": ("#FFFFFF", "#000000"),
+    "N": ("#F0C000", "#000000"),
 }
 
 # Same MSA "Default" palette used by Element colors / MSA plot.
@@ -269,7 +269,7 @@ _STANDARD_BASE_COLORS: dict[str, tuple[str, str]] = {
     "G": ("#707070", "#000000"),
     "T": ("#F06090", "#000000"),
     "U": ("#F06090", "#000000"),
-    "N": ("#FFFFFF", "#000000"),
+    "N": ("#F0C000", "#000000"),
 }
 
 # Pre–MSA-default AliView ACGT colours; ignore if still stored as "custom".
@@ -291,6 +291,9 @@ _amino_acid_color_map_cache: dict[str, tuple[str, str]] | None = None
 NUCLEOTIDE_COLOR_CONTEXTS: tuple[str, ...] = ("single", "multi", "msa")
 _NUCLEOTIDE_SCHEME_NAMES: frozenset[str] = frozenset(
     {"Default", "Color-blind", "All black", "Custom"}
+)
+_NUCLEOTIDE_NAMED_PRESETS: frozenset[str] = frozenset(
+    {"Default", "Color-blind", "All black"}
 )
 _NUCLEOTIDE_SCHEME_CORE: tuple[str, ...] = ("A", "C", "G", "T", "U")
 _NUCLEOTIDE_CONTEXTS_MIGRATED_KEY = "nucleotide_contexts_migrated_v1"
@@ -411,6 +414,77 @@ def _nucleotide_colors_key(context: str) -> str:
     return f"nucleotide_colors_json_{context}"
 
 
+def _nucleotide_preset_key_token(preset: str) -> str:
+    return str(preset or "Default").strip().lower().replace(" ", "_")
+
+
+def _nucleotide_preset_overrides_key(context: str, preset: str) -> str:
+    ctx = normalize_nucleotide_color_context(context)
+    return (
+        f"nucleotide_preset_overrides_json_{ctx}_"
+        f"{_nucleotide_preset_key_token(preset)}"
+    )
+
+
+def load_nucleotide_preset_overrides(
+    context: str, preset: str
+) -> dict[str, str]:
+    """Custom colours stored for one named preset in a display context."""
+    name = str(preset or "").strip()
+    if name not in _NUCLEOTIDE_NAMED_PRESETS:
+        return {}
+    _ensure_nucleotide_context_migration()
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    raw = s.value(_nucleotide_preset_overrides_key(context, name), "")
+    s.endGroup()
+    return _parse_nucleotide_colors_json(raw)
+
+
+def _nucleotide_palette_matches_stock(
+    cleaned: dict[str, str], stock: dict[str, str]
+) -> bool:
+    """True when ``cleaned`` agrees with ``stock`` on every shared key."""
+    if not cleaned:
+        return True
+    for key, value in cleaned.items():
+        stock_val = stock.get(key)
+        if stock_val is None:
+            return False
+        if str(value).upper() != str(stock_val).upper():
+            return False
+    for key, value in stock.items():
+        if key in cleaned and str(cleaned[key]).upper() != str(value).upper():
+            return False
+    return True
+
+
+def save_nucleotide_preset_overrides(
+    context: str,
+    preset: str,
+    colors: dict[str, str] | None,
+) -> None:
+    """Persist (or clear) per-preset custom colours for a display context."""
+    import json
+
+    name = str(preset or "").strip()
+    if name not in _NUCLEOTIDE_NAMED_PRESETS:
+        return
+    _ensure_nucleotide_context_migration()
+    ctx = normalize_nucleotide_color_context(context)
+    cleaned = _clean_nucleotide_color_dict(colors or {})
+    stock = _nucleotide_preset_palette(name)
+    s = QSettings()
+    s.beginGroup(PREVIEW_SETTINGS_GROUP)
+    key = _nucleotide_preset_overrides_key(ctx, name)
+    if cleaned and not _nucleotide_palette_matches_stock(cleaned, stock):
+        s.setValue(key, json.dumps(cleaned, sort_keys=True))
+    else:
+        s.remove(key)
+    s.endGroup()
+    invalidate_residue_color_maps(ctx)
+
+
 def _write_nucleotide_context_settings(
     context: str,
     scheme: str,
@@ -504,7 +578,11 @@ def save_nucleotide_scheme(
     name: str,
     colors: dict[str, str] | None = None,
 ) -> None:
-    """Persist a named preset or Custom palette for one display context."""
+    """Persist the active named preset or Custom palette for one context.
+
+    Switching between Default / Color-blind / All black keeps each preset's
+    own colour overrides; only the active scheme name changes.
+    """
     _ensure_nucleotide_context_migration()
     label = str(name or "Default").strip()
     if label == "Custom":
@@ -517,6 +595,9 @@ def save_nucleotide_scheme(
         return
     if label not in _NUCLEOTIDE_SCHEME_NAMES:
         label = "Default"
+    # Named presets: optional ``colors`` update that preset's overrides.
+    if label in _NUCLEOTIDE_NAMED_PRESETS and colors is not None:
+        save_nucleotide_preset_overrides(context, label, colors)
     _write_nucleotide_context_settings(context, label, None)
 
 
@@ -552,20 +633,33 @@ def load_custom_nucleotide_backgrounds(context: str = "single") -> dict[str, str
 def save_custom_nucleotide_backgrounds(
     colors: dict[str, str], context: str = "single"
 ) -> None:
-    """Save a full palette for one context (matches a preset when possible)."""
+    """Save the current palette under the active scheme for one context.
+
+    Named presets keep their own overrides so switching Default ↔ Color-blind
+    restores each preset's custom colours. A palette whose A/C/G/T/U match a
+    stock preset activates that preset (and stores any non-stock extras).
+    """
     _ensure_nucleotide_context_migration()
     cleaned = _clean_nucleotide_color_dict(colors)
     if not cleaned:
         save_nucleotide_scheme(context, "Default")
         return
     matched = match_nucleotide_scheme_name(cleaned)
+    scheme = load_nucleotide_scheme_name(context)
     if matched is not None:
-        save_nucleotide_scheme(context, matched)
-    else:
-        save_nucleotide_scheme(context, "Custom", cleaned)
+        save_nucleotide_preset_overrides(context, matched, cleaned)
+        _write_nucleotide_context_settings(context, matched, None)
+        return
+    if scheme in _NUCLEOTIDE_NAMED_PRESETS:
+        save_nucleotide_preset_overrides(context, scheme, cleaned)
+        _write_nucleotide_context_settings(context, scheme, None)
+        return
+    _write_nucleotide_context_settings(context, "Custom", cleaned)
 
 
 def clear_custom_nucleotide_backgrounds(context: str = "single") -> None:
+    """Reset the active context to stock Default (clears Default overrides)."""
+    save_nucleotide_preset_overrides(context, "Default", None)
     save_nucleotide_scheme(context, "Default")
 
 
@@ -585,6 +679,7 @@ def nucleotide_palette_colors(context: str = "single") -> dict[str, str]:
         merged.update(load_custom_nucleotide_backgrounds(ctx))
     else:
         merged = _nucleotide_preset_palette(scheme)
+        merged.update(load_nucleotide_preset_overrides(ctx, scheme))
     return _normalize_tu_colors(merged)
 
 

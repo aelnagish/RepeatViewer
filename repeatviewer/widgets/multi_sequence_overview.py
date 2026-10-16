@@ -2211,11 +2211,16 @@ class _BarsCanvas(QWidget):
         return out
 
     def _rebuild_msa_vs_standard_palette_caches(self) -> None:
-        """Fixed Default + All-black palettes for Color vs standard painting."""
+        """Fixed Default + All-black palettes for Color vs reference painting.
+
+        Independent of Display → Nucleotide. N/X use a yellow highlight so
+        ambiguous bases stay visible (stock Default leaves them white).
+        """
         from repeatviewer.backends.msa_plot import (
             DEFAULT_AMINO_ACID_COLORS,
             DEFAULT_NUCLEOTIDE_COLORS,
             NUCLEOTIDE_COLORS_ALL_BLACK,
+            NUCLEOTIDE_N_X_HIGHLIGHT,
         )
 
         if self._msa_protein:
@@ -2224,7 +2229,10 @@ class _BarsCanvas(QWidget):
             black_bg["-"] = "#FFFFFF"
             black_bg["."] = "#FFFFFF"
             black_bg["*"] = "#000000"
+            default_bg["X"] = NUCLEOTIDE_N_X_HIGHLIGHT
+            black_bg["X"] = NUCLEOTIDE_N_X_HIGHLIGHT
         else:
+            # Stock Default / All-black already use NUCLEOTIDE_N_X_HIGHLIGHT for N/X.
             default_bg = dict(DEFAULT_NUCLEOTIDE_COLORS)
             black_bg = dict(NUCLEOTIDE_COLORS_ALL_BLACK)
         self._msa_default_qcolors = self._qcolor_pairs_from_bg_hex(default_bg)
@@ -2283,6 +2291,12 @@ class _BarsCanvas(QWidget):
 
         if ch in "-." and self._msa_color_mode != MSA_COLOR_DIFF_FROM_SELECTED:
             return False
+        # Color vs reference: always paint N/X so ambiguous bases stay visible.
+        if (
+            self._msa_color_mode == MSA_COLOR_DIFF_FROM_SELECTED
+            and str(ch or "").upper() in {"N", "X"}
+        ):
+            return True
         freqs = (
             self._msa_col_freqs[col]
             if 0 <= col < len(self._msa_col_freqs)
@@ -2305,10 +2319,11 @@ class _BarsCanvas(QWidget):
     ) -> tuple[QColor, QColor] | None:
         """Background/foreground colours for a non-gap residue cell.
 
-        Color vs standard (nucleotide and protein):
-        - standard row → All-black palette
+        Color vs reference (nucleotide and protein; fixed scheme):
+        - reference row → All-black palette
         - differing + conserved (Divergence) → Default palette
         - differing + not conserved → All-black palette
+        - N/X → yellow highlight (always filled)
         Other schemes use the Display nucleotide/protein scheme.
         """
         if ch in "-.":
@@ -2322,6 +2337,15 @@ class _BarsCanvas(QWidget):
         if self._msa_color_mode != MSA_COLOR_DIFF_FROM_SELECTED:
             return self._msa_qcolors.get(ch)
 
+        key = str(ch or "").upper()
+        # Ambiguous bases always use the fixed yellow highlight.
+        if key in {"N", "X"}:
+            return (
+                self._msa_default_qcolors.get(key)
+                or self._msa_black_qcolors.get(key)
+                or self._msa_qcolors.get(ch)
+            )
+
         std = self._msa_standard_row()
         is_ref = row is not None and std is not None and int(row) == int(std)
         if is_ref:
@@ -2329,7 +2353,7 @@ class _BarsCanvas(QWidget):
 
         reference = self._msa_standard_residue(col) if std is not None else None
         if not residue_differs_from_reference(ch, reference):
-            # Match to standard: black letter only (no coloured background).
+            # Match to reference: black letter only (no coloured background).
             # Letter zoom uses pair[0] as the glyph colour when unfilled.
             black = QColor("#000000")
             return (black, QColor("#FFFFFF"))
@@ -6044,7 +6068,7 @@ class MultiSequenceOverviewPanel(QWidget):
             std = self._bars.msa_diff_standard_row()
             if std is None:
                 self.statusMessage.emit(
-                    "Color vs standard: no sequences loaded."
+                    "Color vs reference: no sequences loaded."
                 )
             else:
                 rid = self._bars.record_ids()[std]
@@ -6054,7 +6078,7 @@ class MultiSequenceOverviewPanel(QWidget):
                     else " (first sequence)"
                 )
                 self.statusMessage.emit(
-                    f"Color vs standard: {rid}{note}."
+                    f"Color vs reference: {rid}{note}."
                 )
 
     def _msa_diff_standard_path_key(self) -> str:
@@ -6098,7 +6122,7 @@ class MultiSequenceOverviewPanel(QWidget):
             self._persist_msa_diff_standard_id(None)
 
     def _set_selected_as_msa_standard(self) -> None:
-        """Right-click → Set as standard for Color vs standard mode."""
+        """Right-click → Set as reference for Color vs reference mode."""
         rows = self._bars.selected_rows()
         if len(rows) != 1:
             return
@@ -6109,7 +6133,7 @@ class MultiSequenceOverviewPanel(QWidget):
         rid = self._bars.msa_diff_standard_id()
         self._persist_msa_diff_standard_id(rid)
         if rid:
-            self.statusMessage.emit(f"Color vs standard: {rid}.")
+            self.statusMessage.emit(f"Color vs reference: {rid}.")
 
     def _on_msa_divergence_changed(self, value: float) -> None:
         self._bars.set_msa_divergence_threshold(value)
@@ -9163,7 +9187,7 @@ class MultiSequenceOverviewPanel(QWidget):
             rename.setEnabled(len(selected_rows) == 1)
             rename.triggered.connect(self._rename_selected_sequence)
             if self.is_msa_mode():
-                set_std = menu.addAction("Set as standard")
+                set_std = menu.addAction("Set as reference")
                 set_std.setEnabled(len(selected_rows) == 1)
                 set_std.triggered.connect(self._set_selected_as_msa_standard)
 

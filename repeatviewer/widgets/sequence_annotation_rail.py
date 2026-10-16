@@ -999,14 +999,14 @@ class SequenceAnnotationRail(QWidget):
         self.sequence_sort_row.setVisible(False)
 
         self.show_standard_boundaries = QCheckBox(
-            "Show standard boundaries", tracks_section
+            "Show reference boundaries", tracks_section
         )
         self.show_standard_boundaries.setChecked(True)
         self.show_standard_boundaries.setToolTip(
             "Draw vertical dashed lines at the leftmost and rightmost non-gap "
-            "nucleotides of the standard sequence (through the scale and tracks). "
+            "nucleotides of the reference sequence (through the scale and tracks). "
             "Works with any MSA color scheme. Right-click a sequence and choose "
-            "Set as standard to pin the reference row."
+            "Set as reference to pin the reference row."
         )
         self.show_standard_boundaries.toggled.connect(
             self.showStandardBoundariesChanged.emit
@@ -1030,8 +1030,8 @@ class SequenceAnnotationRail(QWidget):
         self.show_annotation_track.hide()
         self.show_annotation_track.setChecked(True)
 
-        # Type filters: All + LTR / TIR / ORF / TSD / domain kinds in one flow.
-        # Height hugs content (no reserved empty space); wraps when many kinds.
+        # Type filters: All on its own row (like Feature detection), then
+        # LTR / TIR / ORF / TSD / domains in a wrapping flow below.
         self._annotation_kinds_host = QWidget(tracks_section)
         self._annotation_kinds_host.setMinimumWidth(0)
         self._annotation_kinds_host.setSizePolicy(
@@ -1039,8 +1039,17 @@ class SequenceAnnotationRail(QWidget):
         )
         kinds_outer = QVBoxLayout(self._annotation_kinds_host)
         kinds_outer.setContentsMargins(0, 0, 0, 2)
-        kinds_outer.setSpacing(0)
+        kinds_outer.setSpacing(4)
         self.annotation_kind_checks: dict[str, QCheckBox] = {}
+        self.annotation_kinds_all_check = QCheckBox("All", self._annotation_kinds_host)
+        self.annotation_kinds_all_check.setToolTip(
+            "Select or clear all annotation types"
+        )
+        self._annotation_kinds_all_updating = False
+        self.annotation_kinds_all_check.toggled.connect(
+            self._on_annotation_kinds_all_toggled
+        )
+        kinds_outer.addWidget(self.annotation_kinds_all_check, 0, Qt.AlignmentFlag.AlignLeft)
         self._annotation_kinds_flow_host = QWidget(self._annotation_kinds_host)
         self._annotation_kinds_flow_host.setMinimumWidth(0)
         self._annotation_kinds_flow_host.setSizePolicy(
@@ -1050,16 +1059,6 @@ class SequenceAnnotationRail(QWidget):
             self._annotation_kinds_flow_host, spacing=6
         )
         self._annotation_kinds_flow_host.setLayout(self._annotation_kinds_flow)
-        self.annotation_kinds_all_check = QCheckBox(
-            "All", self._annotation_kinds_flow_host
-        )
-        self.annotation_kinds_all_check.setToolTip(
-            "Select or clear all annotation types"
-        )
-        self._annotation_kinds_all_updating = False
-        self.annotation_kinds_all_check.toggled.connect(
-            self._on_annotation_kinds_all_toggled
-        )
         kinds_outer.addWidget(self._annotation_kinds_flow_host)
         self._hidden_annotation_kinds = self._load_hidden_annotation_kinds()
         self._rebuild_annotation_kind_checks(list(ALWAYS_ANNOTATION_VISIBILITY_KINDS))
@@ -1203,24 +1202,26 @@ class SequenceAnnotationRail(QWidget):
             "Colour only letters below the divergence threshold; "
             "conserved residues stay light grey (overview) or unfilled "
             "(letter zoom).<br><br>"
-            "<b>Color vs standard</b><br>"
-            "The standard row is painted with the All-black palette, and its "
+            "<b>Color vs reference</b><br>"
+            "Uses a fixed colour scheme (independent of Display → Nucleotide). "
+            "The reference row is painted with the All-black palette, and its "
             "name is shown in bold with an accent colour (also when Show "
-            "standard boundaries is on). Residues that match the standard use "
+            "reference boundaries is on). Residues that match the reference use "
             "a black letter on an unfilled background. Other rows highlight "
             "residues and gaps that differ from it (gap differences stay red). "
             "A differing nucleotide that meets the Divergence threshold uses "
             "the Default nucleotide colours; a differing nucleotide that is "
-            "not conserved uses black. With no standard set yet, the first "
-            "sequence is used. Right-click a sequence and choose "
-            "<b>Set as standard</b> to pin a different row; that choice stays "
+            "not conserved uses black. <b>N</b> / <b>X</b> always use a yellow "
+            "highlight so ambiguous bases stay visible. With no reference set "
+            "yet, the first sequence is used. Right-click a sequence and choose "
+            "<b>Set as reference</b> to pin a different row; that choice stays "
             "for this MSA until you change it.<br><br>"
             "<b>Divergence</b><br>"
             "A letter is conserved when it occupies at least this fraction "
             "of the non-gap residues in its column. For example, "
             "<b>0.40</b> means a letter present in ≥40% of sequences "
             "(ignoring gaps) counts as conserved. Applies to Color "
-            "conserved, Color divergent, and Color vs standard."
+            "conserved, Color divergent, and Color vs reference."
         )
 
         self.msa_coloring_label = QLabel("MSA color scheme:", color_section)
@@ -2082,23 +2083,19 @@ class SequenceAnnotationRail(QWidget):
         flow = getattr(self, "_annotation_kinds_flow", None)
         if flow is None:
             return
-        all_check = getattr(self, "annotation_kinds_all_check", None)
-        host = getattr(self, "_annotation_kinds_flow_host", None)
         while flow.count():
             item = flow.takeAt(0)
             widget = item.widget() if item is not None else None
             if widget is None:
                 continue
-            # Keep the shared All checkbox; only drop type chips.
-            if widget is all_check:
-                if host is not None:
-                    widget.setParent(host)
-                continue
             widget.setParent(None)
             widget.deleteLater()
 
     def _rebuild_annotation_kind_checks(self, keys: list[str]) -> None:
-        """Rebuild nested type checkboxes; preserve hidden-kind prefs."""
+        """Rebuild nested type checkboxes; preserve hidden-kind prefs.
+
+        ``All`` stays on its own row above the wrapping type flow.
+        """
         self._clear_annotation_kind_flow()
         self.annotation_kind_checks = {}
         host = getattr(self, "_annotation_kinds_flow_host", None)
@@ -2108,11 +2105,6 @@ class SequenceAnnotationRail(QWidget):
         hidden = getattr(self, "_hidden_annotation_kinds", set())
         self._annotation_kinds_all_updating = True
         try:
-            # All sits in the same wrapping row as LTR / TIR / ORF / …
-            all_check = getattr(self, "annotation_kinds_all_check", None)
-            if all_check is not None:
-                all_check.setParent(host)
-                flow.addWidget(all_check)
             for key in keys:
                 label = annotation_visibility_label(key)
                 check = QCheckBox(label, host)

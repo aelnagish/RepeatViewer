@@ -92,15 +92,21 @@ def test_clustal_is_default_amino_palette() -> None:
     assert AMINO_ACID_COLORS_CLUSTAL["A"] == "#80A0F0"
 
 
-def test_nucleotide_ambiguity_defaults_white() -> None:
+def test_nucleotide_ambiguity_defaults_and_n_x_highlight() -> None:
     from repeatviewer.backends.msa_plot import (
+        NUCLEOTIDE_COLORS_ALL_BLACK,
         NUCLEOTIDE_COLORS_COLORBLIND,
         NUCLEOTIDE_COLORS_DEFAULT,
+        NUCLEOTIDE_N_X_HIGHLIGHT,
     )
 
-    for letter in ("R", "Y", "W", "S", "M", "K", "B", "H", "D", "V", "I", "N", "X"):
+    for letter in ("R", "Y", "W", "S", "M", "K", "B", "H", "D", "V", "I"):
         assert NUCLEOTIDE_COLORS_DEFAULT[letter] == "#FFFFFF"
         assert NUCLEOTIDE_COLORS_COLORBLIND[letter] == "#FFFFFF"
+    for letter in ("N", "X"):
+        assert NUCLEOTIDE_COLORS_DEFAULT[letter] == NUCLEOTIDE_N_X_HIGHLIGHT
+        assert NUCLEOTIDE_COLORS_COLORBLIND[letter] == NUCLEOTIDE_N_X_HIGHLIGHT
+        assert NUCLEOTIDE_COLORS_ALL_BLACK[letter] == NUCLEOTIDE_N_X_HIGHLIGHT
     assert NUCLEOTIDE_COLORS_DEFAULT["T"] == NUCLEOTIDE_COLORS_DEFAULT["U"]
 
 

@@ -24,7 +24,7 @@ MSA_COLOR_LETTERS_ONLY = "letters_only"
 MSA_COLOR_NO_BG_WHEN_CONSERVED = "no_bg_when_conserved"
 # Fill letters whose column frequency meets the divergence threshold.
 MSA_COLOR_BG_WHEN_CONSERVED = "bg_when_conserved"
-# Fill the standard fully; other rows only where they differ from it.
+# Fill the reference fully; other rows only where they differ from it.
 MSA_COLOR_DIFF_FROM_SELECTED = "diff_from_selected"
 # Retired id kept for settings migration only.
 _MSA_COLOR_CONSERVATION_GREY_LEGACY = "conservation_grey"
@@ -34,7 +34,7 @@ MSA_COLOR_MODE_CHOICES: tuple[tuple[str, str], ...] = (
     (MSA_COLOR_ALL_BACKGROUNDS, "Color all"),
     (MSA_COLOR_BG_WHEN_CONSERVED, "Color conserved"),
     (MSA_COLOR_NO_BG_WHEN_CONSERVED, "Color divergent"),
-    (MSA_COLOR_DIFF_FROM_SELECTED, "Color vs standard"),
+    (MSA_COLOR_DIFF_FROM_SELECTED, "Color vs reference"),
 )
 
 MSA_COLOR_MODE_IDS = frozenset(mode_id for mode_id, _label in MSA_COLOR_MODE_CHOICES)
@@ -156,10 +156,10 @@ def msa_residue_fill_background(
     ``column_conserved`` is accepted for older callers and ignored when
     ``column_freqs`` is provided.
 
-    For :data:`MSA_COLOR_DIFF_FROM_SELECTED` (Color vs standard):
-    - ``is_reference_row=True`` fills every non-gap residue (full standard).
+    For :data:`MSA_COLOR_DIFF_FROM_SELECTED` (Color vs reference):
+    - ``is_reference_row=True`` fills every non-gap residue (full reference).
     - other rows fill when ``residue`` differs from ``reference_residue``,
-      including gaps where the standard has a letter.
+      including gaps where the reference has a letter.
     """
     ch = str(residue or "")
     normalized = normalize_msa_color_mode(mode)
