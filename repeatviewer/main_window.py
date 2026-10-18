@@ -8625,11 +8625,15 @@ class MainWindow(QMainWindow):
         self._sync_sidecar_in_file_list(path, select=False)
 
     def _on_preview_sequence_extracted(self, path: object) -> None:
-        """Show the extracted FASTA in Files and open it in Preview."""
+        """Select the extracted FASTA in Files and open it in Preview.
+
+        Shared by single-sequence and MSA Extract Sequence (and other preview
+        writes that emit ``sequenceExtracted``, e.g. consensus).
+        """
         if not isinstance(path, Path) or not path.is_file():
             return
         resolved = path.expanduser().resolve()
-        self._sync_sidecar_in_file_list(resolved, select=False)
+        self._sync_sidecar_in_file_list(resolved, select=True)
         self._open_files_in_preview_tabs([resolved])
 
     def _on_preview_open_additional_tab(self, path: object) -> None:
@@ -8693,6 +8697,8 @@ class MainWindow(QMainWindow):
 
             if select:
                 if sidecar_item is not None:
+                    # Move deep-blue selection to the new file (single select).
+                    self._file_list.clearSelection()
                     self._reveal_file_list_item(
                         sidecar_item,
                         scroll_hint=QAbstractItemView.ScrollHint.EnsureVisible,

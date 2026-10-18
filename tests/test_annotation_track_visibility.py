@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QToolButton
 
 from repeatviewer.backends.sequence_features import (
     SequenceFeature,
@@ -80,6 +80,21 @@ def test_rail_nested_kind_checks(qapp: QApplication) -> None:
     assert rail.annotation_kinds_all_check.parentWidget() is rail._annotation_kinds_host
     assert rail.show_standard_boundaries.text() == "Show reference boundaries"
     assert not rail.show_standard_boundaries.font().bold()
+    assert rail.show_blast_coverage.text() == "Show BLAST coverage"
+    assert rail.show_blast_coverage_row is not None
+    help_btns = [
+        w
+        for w in rail.show_blast_coverage_row.findChildren(QToolButton)
+        if w.text() == "?"
+    ]
+    assert len(help_btns) == 1
+    assert "Show BLAST coverage" in help_btns[0].accessibleName()
+    tip = help_btns[0].toolTip()
+    assert "reference genome" in tip
+    assert "Manage Database" in tip
+    assert "project genome" not in tip
+    assert "Define Genome" not in tip
+    assert "Reading the plot" not in tip
     assert "LTR" in rail.annotation_kind_checks
     assert "TIR" in rail.annotation_kind_checks
     assert "ORF" in rail.annotation_kind_checks

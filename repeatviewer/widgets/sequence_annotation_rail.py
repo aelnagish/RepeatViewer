@@ -727,6 +727,7 @@ class SequenceAnnotationRail(QWidget):
     # frozenset[str] of visible annotation_visibility_key values (empty = hide all kinds).
     annotationTrackKindsChanged = Signal(object)
     showStandardBoundariesChanged = Signal(bool)
+    showBlastCoverageChanged = Signal(bool)
     sequenceSortChanged = Signal(str)  # original | name | selected_columns
     showComplementChanged = Signal(bool)
     showTranslationChanged = Signal(bool)
@@ -1013,6 +1014,31 @@ class SequenceAnnotationRail(QWidget):
         )
         self.show_standard_boundaries.setVisible(False)
         tracks_section.add_widget(self.show_standard_boundaries)
+
+        self.show_blast_coverage = QCheckBox("Show BLAST coverage", tracks_section)
+        self.show_blast_coverage.setChecked(True)
+        self.show_blast_coverage.setToolTip(
+            "Show or hide the Coverage track above the MSA."
+        )
+        self.show_blast_coverage.toggled.connect(self.showBlastCoverageChanged.emit)
+        _COVERAGE_TRACK_HELP = (
+            "<p><b>Coverage track</b> plots how often the MSA consensus is found "
+            "in the reference genome (TE-Aid-style BLAST hit depth).</p>"
+            "<p><b>How to run</b><br/>"
+            "Click <b>Cov</b> on the overview toolbar. RepeatViewer builds a "
+            "majority consensus at threshold 0, BLASTs it against the reference "
+            "genome (Manage Database), then draws one filled coverage profile "
+            "above the alignment.</p>"
+        )
+        self.show_blast_coverage_row = field_with_help(
+            self.show_blast_coverage,
+            "Show BLAST coverage",
+            _COVERAGE_TRACK_HELP,
+            parent=tracks_section,
+            stretch=True,
+        )
+        self.show_blast_coverage_row.setVisible(False)
+        tracks_section.add_widget(self.show_blast_coverage_row)
 
         self.displayed_annotations_label = QLabel(
             "Displayed annotations", tracks_section
@@ -2466,11 +2492,15 @@ class SequenceAnnotationRail(QWidget):
         kinds_host = getattr(self, "_annotation_kinds_host", None)
         if kinds_host is not None:
             kinds_host.setVisible(overview)
+        msa_overview = overview and bool(getattr(self, "_msa_display_mode", False))
         std_bounds = getattr(self, "show_standard_boundaries", None)
         if std_bounds is not None:
-            std_bounds.setVisible(
-                overview and bool(getattr(self, "_msa_display_mode", False))
-            )
+            std_bounds.setVisible(msa_overview)
+        blast_cov_row = getattr(self, "show_blast_coverage_row", None)
+        if blast_cov_row is not None:
+            blast_cov_row.setVisible(msa_overview)
+        elif getattr(self, "show_blast_coverage", None) is not None:
+            self.show_blast_coverage.setVisible(msa_overview)
         self.sequence_sort_row.setVisible(overview)
         if overview:
             self._populate_sequence_sort_options(
@@ -2536,6 +2566,11 @@ class SequenceAnnotationRail(QWidget):
             std_bounds = getattr(self, "show_standard_boundaries", None)
             if std_bounds is not None:
                 std_bounds.setVisible(self._msa_display_mode)
+            blast_cov_row = getattr(self, "show_blast_coverage_row", None)
+            if blast_cov_row is not None:
+                blast_cov_row.setVisible(self._msa_display_mode)
+            elif getattr(self, "show_blast_coverage", None) is not None:
+                self.show_blast_coverage.setVisible(self._msa_display_mode)
             self.set_nucleotide_color_context(
                 "msa" if self._msa_display_mode else "multi"
             )

@@ -819,6 +819,7 @@ class AnnotationZoomBar(QWidget):
     select_requested = Signal()
     clean_requested = Signal()
     consensus_requested = Signal()
+    coverage_requested = Signal()
     extract_requested = Signal()  # kept for callers; Extract is not on this bar
     filter_text_changed = Signal(str)
     filter_return_pressed = Signal()
@@ -860,12 +861,14 @@ class AnnotationZoomBar(QWidget):
         ov.setSpacing(6)
         ov.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
+        # Finer than the old ±8 so MSA / multi-seq −/+ are easier to fine-tune
+        # (slider range is 0–100).
         zoom_out = _make_overview_zoom_button("−", self._overview_host)
         zoom_out.setToolTip("Zoom out (Shift+scroll)")
-        zoom_out.clicked.connect(lambda: self._nudge_zoom_slider(-8))
+        zoom_out.clicked.connect(lambda: self._nudge_zoom_slider(-3))
         zoom_in = _make_overview_zoom_button("+", self._overview_host)
         zoom_in.setToolTip("Zoom in (Shift+scroll)")
-        zoom_in.clicked.connect(lambda: self._nudge_zoom_slider(8))
+        zoom_in.clicked.connect(lambda: self._nudge_zoom_slider(3))
 
         self._zoom_slider = NoWheelSlider(Qt.Orientation.Horizontal, self._overview_host)
         self._zoom_slider.setObjectName("annotationZoomSlider")
@@ -951,6 +954,17 @@ class AnnotationZoomBar(QWidget):
         consensus_btn.clicked.connect(self.consensus_requested.emit)
         self._consensus_btn = consensus_btn
 
+        coverage_btn = QPushButton("Cov", self._overview_host)
+        coverage_btn.setFixedHeight(_OVERVIEW_SELECT_FIT_HEIGHT)
+        coverage_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        coverage_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        coverage_btn.setToolTip(
+            "Build a consensus (threshold 0), BLAST it against the project "
+            "genome, and plot TE-Aid-style coverage on top of the MSA."
+        )
+        coverage_btn.clicked.connect(self.coverage_requested.emit)
+        self._coverage_btn = coverage_btn
+
         # Hidden: overview name jump still available via bind API / Find.
         self._name_filter = QLineEdit(self._overview_host)
         self._name_filter.setObjectName("FileFilter")
@@ -980,6 +994,7 @@ class AnnotationZoomBar(QWidget):
             fit_btn,
             clean_btn,
             consensus_btn,
+            coverage_btn,
         ):
             ov.addWidget(w, 0, Qt.AlignmentFlag.AlignVCenter)
         # Left-pack controls; sequence count sits on the right after stretch.
@@ -1010,17 +1025,19 @@ class AnnotationZoomBar(QWidget):
                 [fit_btn],
                 [clean_btn],
                 [consensus_btn],
+                [coverage_btn],
                 [self._sequence_count_label],
             ],
             spacing=6,
             layout=ov,
         )
-        # Count / Clean / Cons start disallowed; set_overview_mode / set_msa_mode enable.
+        # Count / Clean / Cons / Cov start disallowed; set_overview_mode / set_msa_mode enable.
         self._overview_overflow.set_unit_allowed_by_widget(
             self._sequence_count_label, False
         )
         self._overview_overflow.set_unit_allowed_by_widget(clean_btn, False)
         self._overview_overflow.set_unit_allowed_by_widget(consensus_btn, False)
+        self._overview_overflow.set_unit_allowed_by_widget(coverage_btn, False)
         layout.addWidget(self._overview_host, 1)
 
         self._actions_btn = _make_preview_actions_button(
@@ -1077,14 +1094,16 @@ class AnnotationZoomBar(QWidget):
         """Show alignment-only actions only for a genuine aligned MSA."""
         self._msa_mode = bool(enabled)
         visible = self._overview_mode and self._msa_mode
-        # Overflow hider owns visibility; mark Clean/Cons as allowed only for MSA.
+        # Overflow hider owns visibility; mark Clean/Cons/Cov as allowed only for MSA.
         hider = getattr(self, "_overview_overflow", None)
         if hider is not None:
             hider.set_unit_allowed_by_widget(self._clean_btn, visible)
             hider.set_unit_allowed_by_widget(self._consensus_btn, visible)
+            hider.set_unit_allowed_by_widget(self._coverage_btn, visible)
         else:
             self._clean_btn.setVisible(visible)
             self._consensus_btn.setVisible(visible)
+            self._coverage_btn.setVisible(visible)
 
     def set_sequence_count(self, count: int) -> None:
         """Show total sequences on the right (same row as Cons)."""

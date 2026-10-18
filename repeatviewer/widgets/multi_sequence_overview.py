@@ -142,6 +142,13 @@ _FIND_CURRENT_FILL = QColor(37, 99, 235, 220)
 _FIND_HIT_BORDER = QColor(180, 83, 9, 230)
 # Equal blank space above and below the sequence bar within its band.
 _BAR_V_PAD = 4
+# Filled-area BLAST coverage track above the MSA (under the scale ruler).
+_MSA_COVERAGE_TRACK_HEIGHT = 48
+_MSA_COVERAGE_FILL_LIGHT = QColor(14, 116, 144, 90)
+_MSA_COVERAGE_STROKE_LIGHT = QColor(14, 116, 144, 220)
+_MSA_COVERAGE_FILL_DARK = QColor(94, 234, 212, 80)
+_MSA_COVERAGE_STROKE_DARK = QColor(94, 234, 212, 210)
+_MSA_COVERAGE_AXIS_POINT_SIZE = 8
 _FEAT_HEIGHT = 12
 _FEAT_LABEL_MIN_WIDTH = 28.0
 _FEAT_LABEL_POINT_SIZE = 7
@@ -1193,6 +1200,8 @@ class _BarsCanvas(QWidget):
     deleteRequested = Signal()  # Delete / Backspace while tracks focused
     # Type a residue into the selected MSA region (AliView-style edit).
     residueEditRequested = Signal(str)
+    # MSA / multi-seq reload — clear top-of-MSA BLAST coverage on the panel.
+    blastCoverageInvalidated = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1566,6 +1575,7 @@ class _BarsCanvas(QWidget):
             for key, (bg, fg) in self._msa_colors.items()
         }
         self._msa_col_freqs = []
+        self.blastCoverageInvalidated.emit()
         self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
         self._original_index = list(range(len(self._record_ids)))
@@ -1618,6 +1628,7 @@ class _BarsCanvas(QWidget):
         )
         self._rebuild_msa_qcolor_cache()
         self._rebuild_msa_conservation()
+        self.blastCoverageInvalidated.emit()
         self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
         self._original_index = list(range(len(self._record_ids)))
@@ -3191,7 +3202,7 @@ class _BarsCanvas(QWidget):
         return list(range(first, last + 1))
 
     def _feature_band_y0(self, row: int) -> int:
-        """Top Y of the first annotation track (below sequence band + gap).
+        """Top Y of the first annotation track (below sequence + gap).
 
         Gap matches Others → Annotation distance (same as between feature rows).
         """
@@ -4533,6 +4544,391 @@ class _BarsCanvas(QWidget):
         # Selection chrome lives entirely on ``_chrome``.
 
 
+def _format_coverage_tick(value: float) -> str:
+    """Compact integer-ish label for coverage axis ticks."""
+    v = max(0, int(round(float(value))))
+    if v >= 1_000_000:
+        text = f"{v / 1_000_000:.1f}M"
+        return text.replace(".0M", "M")
+    if v >= 10_000:
+        return f"{v // 1000}k"
+    if v >= 1000:
+        text = f"{v / 1000:.1f}k"
+        return text.replace(".0k", "k")
+    return str(v)
+
+
+def _coverage_axis_tick_values(peak: float) -> list[float]:
+    """0 / log-mid / peak ticks for the coverage y-axis (log1p scale)."""
+    peak = max(0.0, float(peak))
+    if peak <= 0.0:
+        return [0.0]
+    top = float(max(1, int(round(peak))))
+    ticks = [0.0]
+    if top >= 3.0:
+        mid = math.expm1(0.5 * math.log1p(top))
+        mid_i = float(max(1, int(round(mid))))
+        if 0.0 < mid_i < top:
+            ticks.append(mid_i)
+    ticks.append(top)
+    return ticks
+
+
+def _coverage_log_y(
+    depth: float,
+    *,
+    peak: float,
+    bottom_y: float,
+    usable: float,
+) -> float:
+    """Map coverage depth to widget y using the same log1p scale as the plot."""
+    log_peak = math.log1p(max(0.0, float(peak)))
+    if log_peak <= 0.0:
+        return bottom_y
+    t = math.log1p(max(0.0, float(depth))) / log_peak
+    return bottom_y - max(0.0, min(1.0, t)) * usable
+
+
+class _MsaCoverageYAxis(QWidget):
+    """Names-column band for the coverage track: track title + Y-axis ticks."""
+
+    _TRACK_TITLE = "Coverage track"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._peak = 0.0
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(0)
+        self.hide()
+        self.setToolTip("BLAST coverage (hit depth)")
+
+    def set_peak(self, peak: float) -> None:
+        peak = max(0.0, float(peak))
+        if abs(peak - self._peak) < 1e-9 and self.height() > 0:
+            return
+        self._peak = peak
+        self.update()
+
+    def peak(self) -> float:
+        return float(self._peak)
+
+    def set_track_height(self, height: int) -> None:
+        h = max(0, int(height))
+        if h <= 0:
+            self.setFixedHeight(0)
+            self.hide()
+            return
+        self.setFixedHeight(h)
+        self.show()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if self.height() <= 0:
+            return
+        painter = QPainter(self)
+        try:
+            dark = _is_dark(self)
+            base = self.palette().color(QPalette.ColorRole.Base)
+            painter.fillRect(event.rect(), base)
+            name_color = self.palette().color(QPalette.ColorRole.Text)
+            tick_color = QColor("#94a3b8") if dark else QColor("#64748b")
+            axis = QColor("#888888") if dark else QColor("#b0b0b0")
+            mid = self.palette().color(QPalette.ColorRole.Mid)
+
+            # Track title — same left pad / vertical centering as sequence names.
+            name_font = QFont(self.font())
+            name_font.setPointSize(max(2, int(name_font.pointSize())))
+            name_fm = QFontMetrics(name_font)
+            name_h = name_fm.height()
+            text_y = int(max(0, (self.height() - name_h) / 2))
+            # Leave room on the right for Y-axis tick labels.
+            axis_reserve = max(36, name_fm.horizontalAdvance("2.7k") + 14)
+            title_avail = max(0, self.width() - 2 * _NAME_PAD - axis_reserve)
+            title = name_fm.elidedText(
+                self._TRACK_TITLE, Qt.TextElideMode.ElideRight, title_avail
+            )
+            painter.setFont(name_font)
+            painter.setPen(name_color)
+            painter.drawText(
+                QRect(_NAME_PAD, text_y, title_avail, name_h),
+                int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                title,
+            )
+
+            # Right-edge Y-axis ticks (hit depth).
+            tick_font = QFont(self.font())
+            tick_font.setFamily("Menlo")
+            tick_font.setStyleHint(QFont.StyleHint.Monospace)
+            tick_font.setPointSize(_MSA_COVERAGE_AXIS_POINT_SIZE)
+            painter.setFont(tick_font)
+            fm = QFontMetrics(tick_font)
+            usable = float(max(1, self.height() - 2))
+            bottom_y = float(self.height() - 1)
+            peak = max(0.0, float(self._peak))
+            ticks = _coverage_axis_tick_values(peak)
+            x_spine = float(self.width()) - 0.5
+            painter.setPen(QPen(axis, 1.0))
+            painter.drawLine(QPointF(x_spine, 0.5), QPointF(x_spine, bottom_y))
+            for value in ticks:
+                y = _coverage_log_y(
+                    value,
+                    peak=peak if peak > 0 else 1.0,
+                    bottom_y=bottom_y,
+                    usable=usable,
+                )
+                painter.setPen(QPen(axis, 1.0))
+                painter.drawLine(
+                    QPointF(x_spine - 4.0, y),
+                    QPointF(x_spine, y),
+                )
+                label = _format_coverage_tick(value)
+                tw = fm.horizontalAdvance(label)
+                th = fm.ascent()
+                ty = y + th * 0.35
+                if value <= 0:
+                    ty = min(float(self.height()) - 2.0, max(th, ty))
+                elif abs(value - (ticks[-1] if ticks else 0)) < 1e-9:
+                    ty = max(float(th), min(ty, float(self.height()) - 2.0))
+                painter.setPen(tick_color)
+                painter.drawText(
+                    QPointF(max(2.0, x_spine - 6.0 - float(tw)), ty),
+                    label,
+                )
+
+            painter.setPen(QPen(mid, 1))
+            painter.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+        finally:
+            painter.end()
+
+
+class _MsaTopCoverageProfile(QWidget):
+    """Filled-area BLAST coverage for the MSA consensus, under the scale ruler.
+
+    Y-scale uses the max depth in the visible viewport with log1p so local
+    peaks do not hide nearby variation. Values are MSA-column aligned
+    (consensus threshold 0 has no gaps).
+    """
+
+    viewportPeakChanged = Signal(float)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._coverage: list[int] = []
+        self._coverage_max = 0
+        self._show = True
+        self._ppb = 0.05
+        self._max_length = 1
+        self._bar_pad = 8
+        self._scroll_x = 0
+        self._viewport_peak = 0.0
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(0)
+        self.hide()
+        self.setToolTip("BLAST coverage of the MSA consensus (threshold 0)")
+
+    def set_scale(self, *, ppb: float, max_length: int, bar_pad: int) -> None:
+        self._ppb = max(_ABS_MIN_PPB, float(ppb))
+        self._max_length = max(1, int(max_length))
+        self._bar_pad = int(bar_pad)
+        self._refresh_viewport_peak()
+        self.update()
+
+    def set_scroll_x(self, value: int) -> None:
+        self._scroll_x = int(value)
+        self._refresh_viewport_peak()
+        self.update()
+
+    def set_show(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._show:
+            return
+        self._show = enabled
+        self._sync_height()
+        self._refresh_viewport_peak()
+        self.update()
+
+    def show_enabled(self) -> bool:
+        return bool(self._show)
+
+    def clear(self) -> None:
+        if not self._coverage and self._coverage_max == 0:
+            self._sync_height()
+            self._refresh_viewport_peak()
+            return
+        self._coverage = []
+        self._coverage_max = 0
+        self._sync_height()
+        self._refresh_viewport_peak()
+        self.update()
+
+    def set_coverage(self, values: list[int] | None) -> None:
+        if not values:
+            self.clear()
+            return
+        cleaned = [max(0, int(v)) for v in values]
+        self._coverage = cleaned
+        self._coverage_max = max(cleaned) if cleaned else 0
+        self._sync_height()
+        self._refresh_viewport_peak()
+        self.update()
+
+    def coverage(self) -> list[int]:
+        return list(self._coverage)
+
+    def coverage_max(self) -> int:
+        return int(self._coverage_max)
+
+    def viewport_peak(self) -> float:
+        return float(self._viewport_peak)
+
+    def is_plot_visible(self) -> bool:
+        return bool(self._show) and bool(self._coverage)
+
+    def track_height(self) -> int:
+        return _MSA_COVERAGE_TRACK_HEIGHT if self.is_plot_visible() else 0
+
+    def _sync_height(self) -> None:
+        h = self.track_height()
+        if h <= 0:
+            self.setFixedHeight(0)
+            self.hide()
+        else:
+            self.setFixedHeight(h)
+            self.show()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._refresh_viewport_peak()
+
+    def _compute_viewport_peak(self) -> float:
+        if not self.is_plot_visible():
+            return 0.0
+        values = self._coverage
+        n = len(values)
+        if n <= 0:
+            return 0.0
+        ppb = max(self._ppb, 1e-12)
+        origin = float(self._bar_pad) - float(self._scroll_x)
+        view_w = max(1.0, float(self.width()))
+        # Clamp independently — do not swap. Past the alignment end, raw c0 can
+        # exceed n-1 while c1 stays at n-1; swapping would index out of range.
+        vis_c0 = max(0, min(n - 1, int(math.floor((0.0 - origin) / ppb)) - 1))
+        vis_c1 = max(0, min(n - 1, int(math.ceil((view_w - origin) / ppb)) + 1))
+        if vis_c1 < vis_c0:
+            return 0.0
+        peak = 0.0
+        for col in range(vis_c0, vis_c1 + 1):
+            v = float(values[col])
+            if v > peak:
+                peak = v
+        return peak
+
+    def _refresh_viewport_peak(self) -> None:
+        peak = self._compute_viewport_peak()
+        if abs(peak - self._viewport_peak) < 1e-9:
+            return
+        self._viewport_peak = peak
+        self.viewportPeakChanged.emit(peak)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if not self.is_plot_visible():
+            return
+        values = [float(v) for v in self._coverage]
+        n = len(values)
+        if n <= 0:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        try:
+            dark = _is_dark(self)
+            fill = _MSA_COVERAGE_FILL_DARK if dark else _MSA_COVERAGE_FILL_LIGHT
+            stroke = (
+                _MSA_COVERAGE_STROKE_DARK if dark else _MSA_COVERAGE_STROKE_LIGHT
+            )
+            usable = float(max(1, self.height() - 2))
+            bottom_y = float(self.height() - 1)
+            ppb = max(self._ppb, 1e-12)
+            origin = float(self._bar_pad) - float(self._scroll_x)
+            view_w = max(1.0, float(self.width()))
+            vis_peak = self._compute_viewport_peak()
+            if vis_peak <= 0.0:
+                return
+            log_peak = math.log1p(float(vis_peak))
+            if log_peak <= 0.0:
+                return
+
+            axis = QColor("#888888") if dark else QColor("#b0b0b0")
+            painter.setPen(QPen(axis, 1.0))
+            painter.drawLine(QPointF(0.0, bottom_y), QPointF(view_w, bottom_y))
+            # Light horizontal guides at axis tick depths.
+            painter.setPen(QPen(axis, 1.0, Qt.PenStyle.DotLine))
+            for tick in _coverage_axis_tick_values(vis_peak):
+                if tick <= 0.0:
+                    continue
+                gy = _coverage_log_y(
+                    tick, peak=vis_peak, bottom_y=bottom_y, usable=usable
+                )
+                painter.drawLine(QPointF(0.0, gy), QPointF(view_w, gy))
+            painter.setPen(Qt.PenStyle.NoPen)
+
+            def _y_for(depth: float) -> float:
+                return _coverage_log_y(
+                    depth, peak=vis_peak, bottom_y=bottom_y, usable=usable
+                )
+
+            samples: list[tuple[float, float]] = []
+            if ppb >= 1.0 - 1e-9:
+                c0 = max(0, int((0.0 - origin) / ppb) - 1)
+                c1 = min(n - 1, int((view_w - origin) / ppb) + 1)
+                for col in range(c0, c1 + 1):
+                    cx = origin + (col + 0.5) * ppb
+                    if cx < -2 or cx > view_w + 2:
+                        continue
+                    samples.append((cx, _y_for(values[col])))
+            else:
+                px_right = int(math.ceil(view_w)) + 1
+                for sx in range(0, px_right):
+                    bp0 = (float(sx) - origin) / ppb
+                    bp1 = (float(sx) + 1.0 - origin) / ppb
+                    c0 = max(0, int(math.floor(bp0)))
+                    c1 = min(n - 1, int(math.ceil(bp1)) - 1)
+                    if c1 < c0:
+                        c1 = c0
+                    if c0 >= n or c1 < 0:
+                        continue
+                    c0 = min(c0, n - 1)
+                    peak_v = 0.0
+                    for col in range(c0, c1 + 1):
+                        v = values[col]
+                        if v > peak_v:
+                            peak_v = v
+                    samples.append((float(sx) + 0.5, _y_for(peak_v)))
+
+            if len(samples) < 2:
+                if samples:
+                    x, y = samples[0]
+                    painter.setPen(QPen(stroke, 1.5))
+                    painter.drawLine(QPointF(x, bottom_y), QPointF(x, y))
+                return
+
+            poly = QPolygonF()
+            poly.append(QPointF(samples[0][0], bottom_y))
+            for x, y in samples:
+                poly.append(QPointF(x, y))
+            poly.append(QPointF(samples[-1][0], bottom_y))
+            painter.setBrush(fill)
+            painter.drawPolygon(poly)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(stroke, 1.4))
+            for i in range(1, len(samples)):
+                painter.drawLine(
+                    QPointF(samples[i - 1][0], samples[i - 1][1]),
+                    QPointF(samples[i][0], samples[i][1]),
+                )
+        finally:
+            painter.end()
+
+
 class _ScaleRuler(QWidget):
     """Horizontal bp scale under the tracks only.
 
@@ -5059,6 +5455,11 @@ class MultiSequenceOverviewPanel(QWidget):
         )
 
         self._scale = _ScaleRuler(self)
+        self._coverage_profile = _MsaTopCoverageProfile(self)
+        self._coverage_shim = _MsaCoverageYAxis(self)
+        self._coverage_profile.viewportPeakChanged.connect(
+            self._coverage_shim.set_peak
+        )
 
         # Spacer under names matching the tracks h-scrollbar so last rows stay aligned.
         self._hbar_shim = QWidget(self)
@@ -5086,6 +5487,7 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         self._bars_scroll.horizontalScrollBar().valueChanged.connect(self._on_hscroll)
         self._bars.rowsChanged.connect(self._sync_names_column)
+        self._bars.blastCoverageInvalidated.connect(self.clear_blast_coverage)
         self._bars.featureActivated.connect(self._on_feature_activated)
         self._bars.featureResized.connect(self._on_feature_resized)
         self._bars.zoomChanged.connect(self._on_zoom_changed)
@@ -5163,6 +5565,7 @@ class MultiSequenceOverviewPanel(QWidget):
         names_layout.setContentsMargins(0, 0, 0, 0)
         names_layout.setSpacing(0)
         names_layout.addWidget(self._scale_shim, 0)
+        names_layout.addWidget(self._coverage_shim, 0)
         names_layout.addWidget(self._names_scroll, 1)
         names_layout.addWidget(self._hbar_shim)
 
@@ -5171,6 +5574,7 @@ class MultiSequenceOverviewPanel(QWidget):
         tracks_layout.setContentsMargins(0, 0, 0, 0)
         tracks_layout.setSpacing(0)
         tracks_layout.addWidget(self._scale, 0)
+        tracks_layout.addWidget(self._coverage_profile, 0)
         tracks_layout.addWidget(self._bars_scroll, 1)
 
         names_col.setMinimumWidth(_NAME_COLUMN_MIN)
@@ -5220,6 +5624,9 @@ class MultiSequenceOverviewPanel(QWidget):
         self._transfer_cancel = JobCancellation()
         self._transfer_thread: QThread | None = None
         self._transfer_worker: Worker | None = None
+        self._cov_cancel = JobCancellation()
+        self._cov_thread: QThread | None = None
+        self._cov_worker: Worker | None = None
         self._wire_overview_annotation_rail()
         self._bars.set_show_annotation_track(
             bool(self._rail.show_annotation_track.isChecked())
@@ -5227,6 +5634,10 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.set_visible_annotation_kinds(
             self._rail.visible_annotation_kinds()
         )
+        self._coverage_profile.set_show(
+            bool(self._rail.show_blast_coverage.isChecked())
+        )
+        self._sync_coverage_shim()
 
         # Same 1px map↔rail divider as single-seq AnnotationMapWindow.
         from repeatviewer.widgets.sequence_map_viewer import _MAP_RAIL_DIVIDER
@@ -5610,6 +6021,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self._safe_disconnect(bar.pos_end.valueChanged, self._on_position_spin_changed)
         self._safe_disconnect(bar.clean_requested, self._open_msa_clean_dialog)
         self._safe_disconnect(bar.consensus_requested, self._open_consensus_dialog)
+        self._safe_disconnect(bar.coverage_requested, self._run_msa_blast_coverage)
         self._safe_disconnect(bar.extract_requested, self._extract_selected)
         self._safe_disconnect(bar.filter_text_changed, self._on_name_filter_edited)
         self._safe_disconnect(bar.filter_return_pressed, self._on_name_filter_next)
@@ -5680,6 +6092,7 @@ class MultiSequenceOverviewPanel(QWidget):
         bar.pos_end.valueChanged.connect(self._on_position_spin_changed)
         bar.clean_requested.connect(self._open_msa_clean_dialog)
         bar.consensus_requested.connect(self._open_consensus_dialog)
+        bar.coverage_requested.connect(self._run_msa_blast_coverage)
         bar.extract_requested.connect(self._extract_selected)
         bar.filter_text_changed.connect(self._on_name_filter_edited)
         bar.filter_return_pressed.connect(self._on_name_filter_next)
@@ -5770,6 +6183,7 @@ class MultiSequenceOverviewPanel(QWidget):
         rail.showStandardBoundariesChanged.connect(
             self._on_show_standard_boundaries_changed
         )
+        rail.showBlastCoverageChanged.connect(self._on_show_blast_coverage_changed)
         rail.sequenceSortChanged.connect(self._on_sequence_sort_changed)
         rail.findRequested.connect(self._on_rail_find_requested)
         rail.panelCollapsedChanged.connect(self._on_rail_panel_collapsed_changed)
@@ -5931,6 +6345,30 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_scale_standard_boundaries()
         self._sync_standard_name_emphasis()
         self._save_overview_display_settings()
+
+    def _on_show_blast_coverage_changed(self, enabled: bool) -> None:
+        self._coverage_profile.set_show(bool(enabled))
+        self._sync_coverage_shim()
+        self._sync_names_column()
+
+    def clear_blast_coverage(self) -> None:
+        """Drop the top-of-MSA BLAST coverage plot (keeps the show toggle)."""
+        self._coverage_profile.clear()
+        self._sync_coverage_shim()
+
+    def set_blast_coverage(self, values: list[int] | None) -> None:
+        """Store consensus BLAST coverage (MSA-column depths) for the top track."""
+        self._coverage_profile.set_coverage(values)
+        self._sync_coverage_shim()
+        self._update_scale()
+
+    def blast_coverage(self) -> list[int]:
+        return self._coverage_profile.coverage()
+
+    def _sync_coverage_shim(self) -> None:
+        h = int(self._coverage_profile.track_height())
+        self._coverage_shim.set_track_height(h)
+        self._coverage_shim.set_peak(self._coverage_profile.viewport_peak())
 
     def _on_track_height_changed(self, level: int) -> None:
         lvl = max(1, min(10, int(level)))
@@ -7413,30 +7851,35 @@ class MultiSequenceOverviewPanel(QWidget):
         dpi = max(50, min(600, int(dialog.dpi())))
         scale = max(1.0, float(dpi) / 96.0)
 
-        # Tight figure: scale + sequence content (not the tall empty scroll viewport).
+        # Tight figure: scale + coverage + sequence content (not empty viewport).
         scale_h = max(1, int(self._scale.height() or self._scale.sizeHint().height()))
+        cov_h = int(self._coverage_profile.track_height())
         body_h = max(1, int(self._bars.content_height()))
         names_w = max(1, int(self._names_scroll.width() or self._name_width))
         tracks_w = max(1, int(self._bars_scroll.width() or 200))
         handle_w = max(0, int(self._splitter.handleWidth()))
         width = max(1, names_w + handle_w + tracks_w)
-        height = scale_h + body_h
+        height = scale_h + cov_h + body_h
 
         def _paint_overview(painter: QPainter) -> None:
             from PySide6.QtGui import QRegion
 
-            # Names column: scale shim + names (clipped to content height).
+            # Names column: scale shim + coverage shim + names.
             self._scale_shim.render(painter, QPoint(0, 0))
+            if cov_h > 0:
+                self._coverage_shim.render(painter, QPoint(0, scale_h))
             self._names.render(
                 painter,
-                QPoint(0, scale_h),
+                QPoint(0, scale_h + cov_h),
                 QRegion(QRect(0, 0, names_w, body_h)),
             )
             x = names_w + handle_w
             self._scale.render(painter, QPoint(x, 0))
+            if cov_h > 0:
+                self._coverage_profile.render(painter, QPoint(x, scale_h))
             self._bars.render(
                 painter,
-                QPoint(x, scale_h),
+                QPoint(x, scale_h + cov_h),
                 QRegion(QRect(0, 0, tracks_w, body_h)),
             )
 
@@ -7978,6 +8421,159 @@ class MultiSequenceOverviewPanel(QWidget):
             f"Consensus written · {result.name} ({length:,} residues)"
         )
 
+    def _coverage_running(self) -> bool:
+        return self._cov_thread is not None and self._cov_thread.isRunning()
+
+    def _resolve_project_genome(self) -> Path | None:
+        main = self._main_window_for_job_progress()
+        if main is not None and hasattr(main, "_genome_path_resolved"):
+            try:
+                path = main._genome_path_resolved()
+            except Exception:
+                path = None
+            if path is not None:
+                resolved = Path(path).expanduser().resolve()
+                if resolved.is_file():
+                    return resolved
+        return None
+
+    def _run_msa_blast_coverage(self) -> None:
+        """Consensus (threshold 0) → BLAST vs genome → top-of-MSA coverage."""
+        if self._coverage_running():
+            self._cov_cancel.request()
+            self.statusMessage.emit("Stopping BLAST coverage…")
+            return
+        if not self.is_msa_mode():
+            QMessageBox.information(
+                self,
+                "BLAST coverage",
+                "Coverage is only available for aligned MSAs.",
+            )
+            return
+        if self._annotation_running() or (
+            self._transfer_thread is not None and self._transfer_thread.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "BLAST coverage",
+                "Wait for the current annotation job to finish.",
+            )
+            return
+        main = self._main_window_for_job_progress()
+        if main is not None and hasattr(main, "_any_background_job_running"):
+            if main._any_background_job_running():
+                QMessageBox.information(
+                    self,
+                    "BLAST coverage",
+                    "Another background job is already running.",
+                )
+                return
+        genome = self._resolve_project_genome()
+        if genome is None:
+            QMessageBox.warning(
+                self,
+                "BLAST coverage",
+                "Set the project genome (Define Genome) before running Cov.",
+            )
+            return
+        sequences = list(self._bars.msa_sequences())
+        if not sequences:
+            QMessageBox.information(
+                self,
+                "BLAST coverage",
+                "No MSA sequences are loaded.",
+            )
+            return
+        from repeatviewer.job_options import load_teaid_options
+        from repeatviewer.backends.msa_blast_coverage import (
+            compute_msa_consensus_blast_coverage,
+        )
+
+        teaid = load_teaid_options()
+        e_value = float(teaid.e_value)
+        num_threads = max(1, int(teaid.num_threads))
+        self._cov_cancel = JobCancellation()
+        cancel = self._cov_cancel
+        total = 2
+        self._begin_window_job_progress("BLAST coverage", total)
+        self.statusMessage.emit("BLAST coverage: consensus…")
+
+        def _job(progress=None):
+            def _prog(completed: int, detail: str) -> None:
+                if progress is not None:
+                    progress(f"{int(completed)}/{total} {detail}")
+
+            return compute_msa_consensus_blast_coverage(
+                sequences,
+                genome_path=genome,
+                e_value=e_value,
+                num_threads=num_threads,
+                cancel=cancel,
+                progress=_prog,
+            )
+
+        worker = Worker(_job, progress=True)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.signals.progress.connect(self._on_msa_coverage_progress)
+        worker.signals.finished.connect(self._on_msa_coverage_finished)
+        worker.signals.error.connect(self._on_msa_coverage_error)
+        worker.signals.finished.connect(thread.quit)
+        worker.signals.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_msa_coverage_thread)
+        self._cov_worker = worker
+        self._cov_thread = thread
+        thread.start()
+
+    @Slot(str)
+    def _on_msa_coverage_progress(self, message: str) -> None:
+        text = str(message or "").strip()
+        match = re.match(r"^(\d+)\s*/\s*(\d+)\s+(.+)$", text)
+        if match is None:
+            self.statusMessage.emit(text)
+            return
+        completed = int(match.group(1))
+        detail = match.group(3).strip()
+        self.statusMessage.emit(f"BLAST coverage {completed}/{match.group(2)}: {detail}")
+        self._update_window_job_progress(completed, detail)
+
+    @Slot(object)
+    def _on_msa_coverage_finished(self, result: object) -> None:
+        if not isinstance(result, list):
+            self.statusMessage.emit("BLAST coverage finished with an unexpected result.")
+            return
+        self.set_blast_coverage(result)
+        self._rail.show_blast_coverage.blockSignals(True)
+        try:
+            self._rail.show_blast_coverage.setChecked(True)
+        finally:
+            self._rail.show_blast_coverage.blockSignals(False)
+        self._coverage_profile.set_show(True)
+        self._sync_coverage_shim()
+        self._sync_names_column()
+        peak = int(self._coverage_profile.coverage_max())
+        self.statusMessage.emit(
+            f"BLAST coverage ready · consensus (threshold 0) · peak {peak}"
+        )
+
+    @Slot(str)
+    def _on_msa_coverage_error(self, message: str) -> None:
+        lower = str(message or "").lower()
+        if "stopped by user" in lower or "job stopped" in lower:
+            self.statusMessage.emit("BLAST coverage stopped.")
+            return
+        QMessageBox.warning(self, "BLAST coverage failed", str(message))
+        self.statusMessage.emit(f"BLAST coverage failed: {message}")
+
+    @Slot()
+    def _clear_msa_coverage_thread(self) -> None:
+        self._cov_thread = None
+        self._cov_worker = None
+        self._end_window_job_progress()
+
     def _slider_ppb_bounds(self) -> tuple[float, float]:
         return self._bars.zoom_bounds(self._bars_viewport_width())
 
@@ -8245,12 +8841,16 @@ class MultiSequenceOverviewPanel(QWidget):
         self._bars.zoom_by(factor, anchor_x=float(content_x))
 
     def _update_scale(self) -> None:
-        self._scale.set_scale(
-            ppb=self._bars.pixels_per_base(),
-            max_length=self._bars.max_length(),
-            bar_pad=self._bars.bar_pad(),
+        ppb = self._bars.pixels_per_base()
+        max_length = self._bars.max_length()
+        bar_pad = self._bars.bar_pad()
+        scroll_x = self._bars_scroll.horizontalScrollBar().value()
+        self._scale.set_scale(ppb=ppb, max_length=max_length, bar_pad=bar_pad)
+        self._scale.set_scroll_x(scroll_x)
+        self._coverage_profile.set_scale(
+            ppb=ppb, max_length=max_length, bar_pad=bar_pad
         )
-        self._scale.set_scroll_x(self._bars_scroll.horizontalScrollBar().value())
+        self._coverage_profile.set_scroll_x(scroll_x)
         self._sync_scale_standard_boundaries()
 
     def _sync_scale_standard_boundaries(self) -> None:
@@ -8273,6 +8873,7 @@ class MultiSequenceOverviewPanel(QWidget):
 
     def _on_hscroll(self, value: int) -> None:
         self._scale.set_scroll_x(value)
+        self._coverage_profile.set_scroll_x(value)
 
     def _on_names_vscroll(self, value: int) -> None:
         # Names bar is AlwaysOff; ignore user-driven changes (should not happen).

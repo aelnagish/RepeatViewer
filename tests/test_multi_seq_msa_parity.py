@@ -1724,6 +1724,44 @@ def test_type_letter_replaces_msa_selection(
     panel.close()
 
 
+def test_msa_blast_coverage_set_and_clear(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Synthetic coverage shows the top track; clear / toggle hide it."""
+    from repeatviewer.widgets.multi_sequence_overview import MultiSequenceOverviewPanel
+
+    fasta = tmp_path / "cov.fa"
+    fasta.write_text(
+        ">s1\nACGTACGT\n>s2\nACGTACGT\n",
+        encoding="utf-8",
+    )
+    panel = MultiSequenceOverviewPanel(fasta)
+    panel.show()
+    qapp.processEvents()
+    panel.load_path(fasta, msa_mode=True)
+    qapp.processEvents()
+    assert panel._coverage_profile.track_height() == 0
+    panel.set_blast_coverage([1, 2, 0, 3, 1, 0, 0, 4])
+    qapp.processEvents()
+    assert panel._coverage_profile.is_plot_visible()
+    assert panel._coverage_profile.track_height() > 0
+    assert panel._coverage_shim.isVisible()
+    assert panel._coverage_shim.height() == panel._coverage_profile.track_height()
+    assert panel.blast_coverage() == [1, 2, 0, 3, 1, 0, 0, 4]
+    panel._rail.show_blast_coverage.setChecked(False)
+    qapp.processEvents()
+    assert not panel._coverage_profile.is_plot_visible()
+    assert panel._coverage_profile.track_height() == 0
+    panel._rail.show_blast_coverage.setChecked(True)
+    qapp.processEvents()
+    assert panel._coverage_profile.is_plot_visible()
+    panel.clear_blast_coverage()
+    qapp.processEvents()
+    assert panel.blast_coverage() == []
+    assert panel._coverage_profile.track_height() == 0
+    panel.close()
+
+
 def test_scale_click_selects_column_double_click_zooms(
     qapp: QApplication,
 ) -> None:
