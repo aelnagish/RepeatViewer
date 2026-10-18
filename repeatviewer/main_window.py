@@ -4568,7 +4568,9 @@ class MainWindow(QMainWindow):
                 open_preview=False,
             )
         if created:
-            self._auto_open_outputs(created)
+            self._auto_open_outputs(
+                created, source_files=list(source_files or [])
+            )
         self._set_status_message(message, 8000)
 
     def _fastga_candidate_files(self) -> list[Path]:
@@ -8625,16 +8627,46 @@ class MainWindow(QMainWindow):
         self._sync_sidecar_in_file_list(path, select=False)
 
     def _on_preview_sequence_extracted(self, path: object) -> None:
-        """Select the extracted FASTA in Files and open it in Preview.
+        """Replace Preview with the extracted FASTA; ◀ returns to the source.
 
+        Matches Extract Sequences from File: green tint on the new file, light
+        blue tint on the MSA/source file, deep-blue selection on the output.
         Shared by single-sequence and MSA Extract Sequence (and other preview
         writes that emit ``sequenceExtracted``, e.g. consensus).
         """
         if not isinstance(path, Path) or not path.is_file():
             return
         resolved = path.expanduser().resolve()
+        source: Path | None = None
+        if self._preview_tabs is not None:
+            page = self._preview_tabs.currentWidget()
+            raw = getattr(page, "path", None) if page is not None else None
+            if raw is not None:
+                try:
+                    candidate = Path(str(raw)).expanduser().resolve()
+                except OSError:
+                    candidate = None
+                if candidate is not None and candidate.is_file() and candidate != resolved:
+                    source = candidate
+        sources = [source] if source is not None else []
+        if self._current_folder is not None:
+            # Same job tinting as Files → Extract Sequences from File.
+            self._populate_file_list(
+                self._current_folder,
+                new_outputs=[resolved],
+                source_files=sources,
+                open_preview=False,
+            )
+            self._auto_open_outputs([resolved], source_files=sources)
+            return
+        if (
+            source is not None
+            and hasattr(self, "_folder_nav")
+            and self._folder_nav is not None
+        ):
+            self._folder_nav.set_file(source, record_history=True)
         self._sync_sidecar_in_file_list(resolved, select=True)
-        self._open_files_in_preview_tabs([resolved])
+        self._open_file_in_preview(resolved)
 
     def _on_preview_open_additional_tab(self, path: object) -> None:
         """Open a derived FASTA (e.g. MSA clean) as an additional Preview tab."""
@@ -16875,21 +16907,50 @@ class MainWindow(QMainWindow):
             key=lambda p: (preview_path_priority(p), -order.get(str(p), 0)),
         )
 
-    def _auto_open_outputs(self, created_paths: list[Path]) -> None:
-        """Open the best new output and select it (deep blue); others stay green."""
+    def _auto_open_outputs(
+        self,
+        created_paths: list[Path],
+        *,
+        source_files: list[Path] | None = None,
+    ) -> None:
+        """Open the best new output (replace Preview); ◀ returns to source files.
+
+        ``source_files`` (e.g. Extract Sequences from File input) are pushed onto
+        the Folders file history before the output so Back restores them.
+        """
         target = self._pick_preview_output(created_paths)
         if target is None:
             return
+        try:
+            target_key = str(target.expanduser().resolve())
+        except OSError:
+            target_key = str(target)
         # Suppress selection→preview while we select, so we open exactly once.
         was_suppress = self._file_list.suppress_selection_preview()
         self._file_list.set_suppress_selection_preview(True)
         try:
+            if (
+                source_files
+                and hasattr(self, "_folder_nav")
+                and self._folder_nav is not None
+            ):
+                for src in source_files:
+                    try:
+                        resolved_src = Path(src).expanduser().resolve()
+                    except OSError:
+                        continue
+                    if not resolved_src.is_file():
+                        continue
+                    if str(resolved_src) == target_key:
+                        continue
+                    self._folder_nav.set_file(resolved_src, record_history=True)
             self._file_list.clearSelection()
             self._file_list.setCurrentItem(None)
             # Do not full-restyle the folder — select path re-tints job keys only.
             self._select_path_in_file_list(target)
             if is_previewable_file(target):
-                self._open_preview_tab(target, replace=True)
+                # Replace active Preview tab and record output on ◀ / ▶ history.
+                self._open_file_in_preview(target)
                 self._select_path_in_file_list(target)
         finally:
             if not was_suppress:

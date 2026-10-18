@@ -185,33 +185,59 @@ def con_generater(
     return output_file, consensus_seq_len
 
 
-def _consensus_position_ticks(max_len: int) -> list[int]:
-    """1-based TE consensus tick values; always includes 1, never the exact sequence end."""
+def _nice_consensus_tick_step(max_len: int, *, target_ticks: int = 8) -> int:
+    """Choose a 1/2/5×10ⁿ step so the axis has about ``target_ticks`` labels."""
     max_len = max(1, int(max_len))
-    if max_len <= 100:
-        step = 10
-    elif max_len <= 250:
-        step = 25
-    elif max_len <= 500:
-        step = 50
-    elif max_len <= 1000:
-        step = 100
-    elif max_len <= 2500:
-        step = 500
+    target = max(3, int(target_ticks))
+    raw = max(1.0, float(max_len) / float(target))
+    exp = int(np.floor(np.log10(raw)))
+    base = 10.0 ** exp
+    frac = raw / base
+    if frac <= 1.0:
+        nice = 1.0
+    elif frac <= 2.0:
+        nice = 2.0
+    elif frac <= 5.0:
+        nice = 5.0
     else:
-        step = 1000
+        nice = 10.0
+    return max(1, int(nice * base))
+
+
+def _format_consensus_tick_label(pos: int) -> str:
+    """Compact axis label (``15k``) so Plotly SI prefixes do not crowd the axis."""
+    value = max(0, int(pos))
+    if value >= 10_000 and value % 1000 == 0:
+        return f"{value // 1000}k"
+    if value >= 10_000:
+        text = f"{value / 1000:.1f}k"
+        return text.replace(".0k", "k")
+    return str(value)
+
+
+def _consensus_position_ticks(max_len: int) -> list[int]:
+    """1-based TE consensus tick values; always includes 1, never the exact sequence end.
+
+    Step grows with length (nice 1/2/5×10ⁿ) so long consensus axes stay readable
+    instead of packing a tick every 1 kb on a 20–30 kb TE.
+    """
+    max_len = max(1, int(max_len))
+    step = _nice_consensus_tick_step(max_len)
     ticks = [1]
     pos = step
     while pos < max_len:
-        ticks.append(pos)
+        if pos != 1:
+            ticks.append(pos)
         pos += step
     return ticks
 
 
 def _consensus_axis_tick_kwargs(max_len: int, *, tickangle: int = 0) -> dict:
+    ticks = _consensus_position_ticks(max_len)
     return {
         'tickmode': 'array',
-        'tickvals': _consensus_position_ticks(max_len),
+        'tickvals': ticks,
+        'ticktext': [_format_consensus_tick_label(t) for t in ticks],
         'tickangle': tickangle,
     }
 
@@ -1271,9 +1297,7 @@ def _configure_self_dot_subplot(
         showticklabels=True,
         title_font=_AXIS_TITLE_FONT,
         range=[1, cons_len],
-        tickmode='array',
-        tickvals=_consensus_position_ticks(cons_len),
-        tickangle=0,
+        **_consensus_axis_tick_kwargs(cons_len, tickangle=0),
         linewidth=1,
         linecolor='black',
         mirror=True,

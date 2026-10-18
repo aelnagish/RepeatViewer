@@ -548,21 +548,47 @@ class _Ruler(QWidget):
 
         cursor = view.cursor_scene_pos()
         if cursor is not None:
-            painter.setPen(QPen(QColor(40, 90, 180)))
+            cursor_font = QFont(font)
+            cursor_font.setBold(True)
+            painter.setFont(cursor_font)
             value = cursor.x() if self._horizontal else cursor.y()
             pos = view.scene_to_ruler(value, self._horizontal)
             real = _scene_to_bp(value, length=length, offset=offset)
             label = f"{real:,}"
+            cursor_metrics = painter.fontMetrics()
+            # Opaque pad so the bold cursor value covers any tick label underneath.
+            pad = 2
             if self._horizontal and 0 <= pos <= self.width():
-                painter.drawText(int(pos) + 2, self.height() - 6, label)
+                x0 = int(pos) + 2
+                y_base = self.height() - 6
+                tw = cursor_metrics.horizontalAdvance(label)
+                th = cursor_metrics.height()
+                bg = QRect(
+                    x0 - pad,
+                    y_base - cursor_metrics.ascent() - pad,
+                    tw + 2 * pad,
+                    th + 2 * pad,
+                )
+                painter.fillRect(bg, _RULER_BG)
+                painter.setPen(QPen(QColor(40, 90, 180)))
+                painter.drawText(x0, y_base, label)
             elif not self._horizontal and 0 <= pos <= self.height():
-                label_h = metrics.height()
+                label_h = cursor_metrics.height()
                 text_rect = QRect(
                     0,
                     int(pos) - label_h // 2,
                     self.width() - 4 - _Y_TICK_PAD,
                     label_h,
                 )
+                tw = cursor_metrics.horizontalAdvance(label)
+                bg = QRect(
+                    text_rect.right() - tw - pad,
+                    text_rect.top() - pad,
+                    tw + 2 * pad,
+                    label_h + 2 * pad,
+                )
+                painter.fillRect(bg, _RULER_BG)
+                painter.setPen(QPen(QColor(40, 90, 180)))
                 painter.drawText(
                     text_rect,
                     int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
