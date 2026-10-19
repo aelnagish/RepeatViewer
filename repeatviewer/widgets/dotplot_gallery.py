@@ -43,7 +43,7 @@ _GRID_MARGIN = 4
 # Match DotplotPanel Single-view Line width mapping (step 1–15 → 1–4.5 px).
 _MIN_LINE_WIDTH_STEP = 1
 _MAX_LINE_WIDTH_STEP = 15
-_DEFAULT_LINE_WIDTH_STEP = 1
+_DEFAULT_LINE_WIDTH_STEP = 3
 _LINE_WIDTH_PX_MIN = 1.0
 _LINE_WIDTH_PX_MAX = 4.5
 
@@ -261,7 +261,7 @@ class DotplotGallery(QWidget):
         self._thumbs: list[DotplotThumb] = []
         self._cache: dict[tuple, DotplotResult | str] = {}
         self._pending: list[str] = []
-        self._word = 10
+        self._word = 15
         self._reverse = True
         self._loader = None
         self._ungap = False
@@ -364,7 +364,7 @@ class DotplotGallery(QWidget):
         *,
         sequence_loader,
         ungap: bool = False,
-        word_size: int = 10,
+        word_size: int = 15,
         include_reverse: bool = True,
         page_size: int | None = None,
         thumb_size: int | None = None,

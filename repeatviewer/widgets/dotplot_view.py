@@ -132,7 +132,7 @@ _REVERSE_COLOR = QColor(200, 60, 40)   # inverted repeats (red)
 # Charcoal — must stay distinct from warm reverse red and cool forward blue.
 _DIAGONAL_COLOR = QColor(45, 45, 45)
 
-_DEFAULT_LINE_WIDTH_STEP = 1
+_DEFAULT_LINE_WIDTH_STEP = 3
 _MIN_LINE_WIDTH_STEP = 1
 _MAX_LINE_WIDTH_STEP = 15
 # UI steps 1…15: same fine gradient as before (≈0.25 px per step), up to ~4.5 px.
