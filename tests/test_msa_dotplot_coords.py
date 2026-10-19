@@ -64,6 +64,42 @@ def test_overview_select_by_position_sets_region(
     overview.close()
 
 
+def test_overview_select_by_position_scrolls_to_sequence(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Dotplot → Overview must bring the selected sequence into view."""
+    path = tmp_path / "many.fa"
+    lines: list[str] = []
+    for i in range(80):
+        lines.append(f">seq{i}")
+        lines.append("ACGTACGTACGTACGTACGTACGTACGTACGT")
+    path.write_text("\n".join(lines) + "\n")
+    overview = MultiSequenceOverviewPanel(path)
+    overview.load_path(path, msa_mode=False)
+    overview.resize(900, 400)
+    overview.show()
+    qapp.processEvents()
+
+    target = "seq50"
+    overview.select_by_position(5, 12, sequence_id=target)
+    qapp.processEvents()
+    QApplication.processEvents()
+
+    row = overview._row_for_id(target)
+    assert row >= 0
+    assert overview._bars.regional_rows() == {row}
+    tops = overview._bars.row_tops()
+    heights = overview._bars.row_heights()
+    y0 = tops[row]
+    y1 = y0 + heights[row]
+    vbar = overview._bars_scroll.verticalScrollBar()
+    vp_h = overview._bars_scroll.viewport().height()
+    # Target row intersects the viewport after centering.
+    assert y1 > vbar.value()
+    assert y0 < vbar.value() + vp_h
+    overview.close()
+
+
 def test_overview_sort_updates_dotplot_sequence_order(
     qapp: QApplication, tmp_path: Path
 ) -> None:

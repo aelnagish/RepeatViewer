@@ -115,6 +115,49 @@ def suggest_word_size(sequence_length: int) -> int:
     return 22
 
 
+def structural_length_floor(word_size: int, sequence_length: int) -> int:
+    """Minimum run length treated as structure (LTR-scale diagonals).
+
+    Shorter runs are background noise that dominate at small word sizes and
+    bury longer diagonals unless they are thinned and drawn underneath.
+    """
+    ws = max(1, int(word_size))
+    n = max(1, int(sequence_length))
+    return max(ws * 3, min(80, max(16, n // 150)))
+
+
+def partition_segments_for_display(
+    segments: list[DotplotSegment],
+    *,
+    word_size: int,
+    sequence_length: int,
+    max_noise: int = 12_000,
+) -> tuple[list[DotplotSegment], list[DotplotSegment]]:
+    """Split hits into thinned noise (draw first) and structural runs (on top).
+
+    Small word sizes produce hundreds of thousands of short matches. Drawing
+    them all at full opacity hides longer LTR / repeat diagonals. Keep every
+    structural run, subsample noise to ``max_noise``, and sort structural
+    short→long so the longest diagonals paint last.
+    """
+    floor = structural_length_floor(word_size, sequence_length)
+    noise: list[DotplotSegment] = []
+    structural: list[DotplotSegment] = []
+    for seg in segments:
+        if int(seg.length) >= floor:
+            structural.append(seg)
+        else:
+            noise.append(seg)
+    budget = max(0, int(max_noise))
+    if budget <= 0:
+        noise = []
+    elif len(noise) > budget:
+        step = max(1, (len(noise) + budget - 1) // budget)
+        noise = noise[::step]
+    structural.sort(key=lambda s: int(s.length))
+    return noise, structural
+
+
 def _build_word_index(sequence: str, word_size: int) -> dict[str, list[int]]:
     """Map each k-mer to the positions where it starts.
 

@@ -9265,12 +9265,29 @@ class MultiSequenceOverviewPanel(QWidget):
         row = self._row_for_id(sequence_id) if sequence_id else -1
         if row >= 0:
             self._bars.set_regional_selection(lo, hi, [row])
-            self._scroll_to_row(row)
         else:
             self._bars.set_region_selection(lo, hi)
         self._sync_header_position_spins()
         # Inclusive columns → half-open window (same as Select / Find).
         self._on_region_zoom(float(lo - 1), float(hi))
+        self._sync_zoom_slider_from_ppb()
+        # Center after zoom so row layout / scrollbar maxima are final (same
+        # pattern as position-spin Select). Scroll-before-zoom left the target
+        # sequence off-screen when returning from Dotplot.
+        if row >= 0:
+            ppb = max(self._bars.pixels_per_base(), 1e-12)
+            mid_x = self._bars.bar_pad() + ((lo - 1 + hi) / 2.0) * ppb
+            vp_w = max(1, self._bars_scroll.viewport().width())
+            hbar = self._bars_scroll.horizontalScrollBar()
+            hbar.setValue(
+                max(0, min(hbar.maximum(), int(round(mid_x - vp_w / 2.0))))
+            )
+            self._center_selection_vertically(rows={row})
+            # Defer once more in case the Overview tab just became visible and
+            # viewport height was still 0 when centering ran.
+            QTimer.singleShot(
+                0, lambda r=row: self._center_selection_vertically(rows={r})
+            )
 
     def features_by_id(self) -> dict[str, list[SequenceFeature]]:
         return {rid: list(feats) for rid, feats in self._features.items()}

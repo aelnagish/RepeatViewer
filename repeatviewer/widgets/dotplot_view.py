@@ -38,10 +38,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from repeatviewer.widgets.dotplot_gallery import DotplotGallery
 from repeatviewer.widgets.dotplot_rail import DotplotRail
 from repeatviewer.widgets.preview_zoom import (
     PREVIEW_WHEEL_DELTA_PER_STEP,
@@ -1834,24 +1836,36 @@ class DotplotPanel(QWidget):
         self._canvas.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        self._gallery = DotplotGallery(self)
+        self._gallery.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        # Multi-seq / MSA default to Grid; Single is used for one-at-a-time.
+        self._view_mode = "grid"
+        self._gallery_return_sid: str | None = None
 
-        left = QWidget(self)
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(0)
+        single_page = QWidget(self)
+        single_layout = QVBoxLayout(single_page)
+        single_layout.setContentsMargins(0, 0, 0, 0)
+        single_layout.setSpacing(0)
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 8, 0)
         title_row.setSpacing(8)
         title_row.addWidget(self._title, 0, Qt.AlignmentFlag.AlignVCenter)
         title_row.addWidget(self._status, 0, Qt.AlignmentFlag.AlignVCenter)
         title_row.addStretch(1)
-        left_layout.addLayout(title_row)
-        left_layout.addWidget(self._canvas, stretch=1)
+        single_layout.addLayout(title_row)
+        single_layout.addWidget(self._canvas, stretch=1)
+
+        self._plot_stack = QStackedWidget(self)
+        self._plot_stack.addWidget(single_page)  # 0 = Single
+        self._plot_stack.addWidget(self._gallery)  # 1 = Grid
+        self._plot_stack.setCurrentIndex(0)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(left, stretch=1)
+        layout.addWidget(self._plot_stack, stretch=1)
         layout.addWidget(self._rail, 0)
 
         self._word.valueChanged.connect(self._recompute)
@@ -1883,6 +1897,14 @@ class DotplotPanel(QWidget):
         self._rail.zoomSliderChanged.connect(self._on_zoom_slider_changed)
         self._rail.cancelClicked.connect(self._cancel_running)
         self._rail.computeClicked.connect(self._start_requested_compute)
+        self._rail.viewModeChanged.connect(self._on_view_mode_changed)
+        self._rail.galleryPageStep.connect(self._on_gallery_page_step)
+        self._rail.galleryPageSelected.connect(self._on_gallery_page_selected)
+        self._rail.galleryPageSizeChanged.connect(self._on_gallery_page_size_changed)
+        self._rail.galleryThumbSizeChanged.connect(self._on_gallery_thumb_size_changed)
+        self._rail.returnToGridClicked.connect(self._return_to_gallery)
+        self._gallery.thumbClicked.connect(self._on_gallery_thumb_clicked)
+        self._gallery.pageChanged.connect(self._sync_gallery_page_label)
         self._sync_engine_controls()
         self._canvas.positionChanged.connect(self._on_position)
         self._canvas.rectSelected.connect(self._on_rect_selected)
@@ -1910,6 +1932,12 @@ class DotplotPanel(QWidget):
         self._sequence_combo.setModel(QStandardItemModel(self._sequence_combo))
         self._sequence_combo.blockSignals(False)
         self._too_long_prompt_active = False
+        self._view_mode = "grid"
+        self._gallery_return_sid = None
+        self._rail.set_view_mode("grid")
+        self._rail.set_return_to_grid_visible(False)
+        self._plot_stack.setCurrentIndex(0)
+        self._gallery.clear()
         self._canvas.set_axes([], [])
         self._sequence_id = ""
         self._canvas.clear_plot()
@@ -2000,8 +2028,37 @@ class DotplotPanel(QWidget):
             self.set_active_sequence(
                 sid, self._sequence_for_id(sid), ungap=self._ungap_for_plot
             )
+            if len(ids) > 1:
+                if not same_ids:
+                    # New id list → Grid from page 0.
+                    self._view_mode = "grid"
+                    self._rail.set_view_mode("grid")
+                    if self.isVisible():
+                        self._show_gallery(reset_page=True)
+                elif self._view_mode == "grid":
+                    # Same sequences: keep Grid page/scroll across tab switches.
+                    self._rail.set_view_mode("grid")
+                    if self.isVisible():
+                        self._show_gallery(reset_page=False)
+                else:
+                    # Same sequences: keep Single view.
+                    self._rail.set_view_mode("single")
+                    self._plot_stack.setCurrentIndex(0)
+                    self._rail.set_return_to_grid_visible(
+                        self._gallery_return_sid is not None
+                    )
+            else:
+                self._view_mode = "single"
+                self._rail.set_view_mode("single")
+                self._plot_stack.setCurrentIndex(0)
+                self._rail.set_return_to_grid_visible(False)
         else:
             self.set_active_sequence("", "")
+            self._view_mode = "single"
+            self._rail.set_view_mode("single")
+            self._plot_stack.setCurrentIndex(0)
+            self._gallery.clear()
+            self._rail.set_return_to_grid_visible(False)
 
     def _sequence_for_id(self, sequence_id: str) -> str:
         """Return sequence text for ``sequence_id``, loading it once if needed."""
@@ -2201,6 +2258,11 @@ class DotplotPanel(QWidget):
             self._sequence_combo.setVisible(False)
             self._sequence_prev_btn.setVisible(False)
             self._sequence_next_btn.setVisible(False)
+            self._rail.set_view_mode_visible(False)
+            if self._view_mode == "grid":
+                self._view_mode = "single"
+                self._rail.set_view_mode("single")
+                self._plot_stack.setCurrentIndex(0)
             self._filter_len_label.setVisible(True)
             self._filter_len.setVisible(True)
             # FastGA / PAF previews: no From/Window; x/y goes on the status line.
@@ -2224,34 +2286,49 @@ class DotplotPanel(QWidget):
         self._sequence_combo.setVisible(multi_seq)
         self._sequence_prev_btn.setVisible(multi_seq)
         self._sequence_next_btn.setVisible(multi_seq)
+        self._rail.set_view_mode_visible(multi_seq)
         if multi_seq:
             self._rail.sync_sequence_step_buttons()
+            self._rail.set_gallery_nav_visible(self._view_mode == "grid")
+            self._rail.set_return_to_grid_visible(
+                self._view_mode == "single" and self._gallery_return_sid is not None
+            )
+        else:
+            self._rail.set_return_to_grid_visible(False)
         self._filter_len_label.setVisible(False)
         self._filter_len.setVisible(False)
-        self._sel_row.show()
+        grid_mode = multi_seq and self._view_mode == "grid"
+        self._sel_row.setVisible(not grid_mode)
         # Status-only note for long sequences: hide zoom / Export / plot params.
-        hide_bar = self._too_long_prompt_active
+        # Word size + Line width stay under Sequence whenever Display is shown.
+        hide_bar = self._too_long_prompt_active and not grid_mode
         if hide_bar:
             self._compute_btn.hide()
             self._title.hide()
             for widget in (
-                self._word_label, self._word, self._reverse,
+                self._reverse,
                 self._region_start_label, self._region_start,
                 self._region_size_label, self._region_size,
-                self._line_width_label, self._line_width,
                 self._identity_label, self._identity,
                 self._min_len_label, self._min_len,
                 self._seed_freq_label, self._seed_freq,
             ):
                 widget.setVisible(False)
-            # Multi-record: keep Sequence picker only.
+            self._word_label.setVisible(True)
+            self._word.setVisible(True)
+            self._line_width_label.setVisible(True)
+            self._line_width.setVisible(True)
+            # Multi-record: keep Sequence + Word size + Line width.
             show_params = multi_seq
             self._rail.sync_control_visibility(view=False, params=show_params)
             self._rail.setVisible(show_params)
             return
-        show_kmer = not self._is_large()
-        for widget in (self._word_label, self._word, self._reverse):
-            widget.setVisible(show_kmer)
+        show_kmer = not self._is_large() or grid_mode
+        self._reverse.setVisible(show_kmer)
+        self._word_label.setVisible(True)
+        self._word.setVisible(True)
+        self._line_width_label.setVisible(True)
+        self._line_width.setVisible(True)
         for widget in (
             self._region_start_label,
             self._region_start,
@@ -2268,9 +2345,7 @@ class DotplotPanel(QWidget):
             self._seed_freq,
         ):
             widget.setVisible(False)
-        self._line_width_label.setVisible(True)
-        self._line_width.setVisible(True)
-        self._rail.sync_control_visibility(view=True, params=True)
+        self._rail.sync_control_visibility(view=not grid_mode, params=True)
         self._rail.setVisible(True)
 
     def _current_key(self):
@@ -2301,6 +2376,13 @@ class DotplotPanel(QWidget):
         if self._mode == "alignment":
             return  # already loaded from file; nothing to compute
         self._sync_engine_controls()
+        if len(self._sequence_ids) > 1 and self._view_mode == "grid":
+            self._show_gallery(reset_page=False)
+            return
+        if len(self._sequence_ids) > 1 and self._view_mode != "single":
+            # First open of a multi-record file → Grid.
+            self._show_gallery(reset_page=True)
+            return
         key = self._current_key()
         if self._loaded_for == key or self._thread is not None:
             return
@@ -2311,6 +2393,111 @@ class DotplotPanel(QWidget):
                 self._offer_too_long_no_fastga()
             return
         self._compute_kmer(key)
+
+    def _on_view_mode_changed(self, mode: str) -> None:
+        want = "grid" if str(mode).strip().lower() == "grid" else "single"
+        if want == self._view_mode and (
+            (want == "grid" and self._plot_stack.currentIndex() == 1)
+            or (want == "single" and self._plot_stack.currentIndex() == 0)
+        ):
+            return
+        if want == "grid" and len(self._sequence_ids) > 1:
+            self._return_to_gallery()
+        else:
+            self._view_mode = "single"
+            self._rail.set_view_mode("single")
+            self._plot_stack.setCurrentIndex(0)
+            self._sync_engine_controls()
+            if self.isVisible():
+                self.ensure_loaded()
+
+    def _show_gallery(
+        self,
+        *,
+        reset_page: bool = True,
+        focus_sequence_id: str | None = None,
+    ) -> None:
+        """Show the paged multi-sequence thumbnail grid."""
+        if len(self._sequence_ids) <= 1:
+            self._view_mode = "single"
+            self._rail.set_view_mode("single")
+            self._plot_stack.setCurrentIndex(0)
+            self._rail.set_return_to_grid_visible(False)
+            return
+        self._view_mode = "grid"
+        self._rail.set_view_mode("grid")
+        self._rail.set_return_to_grid_visible(False)
+        self._plot_stack.setCurrentIndex(1)
+        self._title.hide()
+        self._set_status_text("")
+        # Keep Grid pens in sync with the shared Line width control.
+        self._gallery.set_line_width_step(int(self._line_width.value()))
+        focus = str(focus_sequence_id or self._gallery_return_sid or "").strip() or None
+        self._gallery.set_sequences(
+            self._sequence_ids,
+            sequence_loader=self._sequence_for_id,
+            ungap=self._ungap_for_plot,
+            word_size=int(self._word.value()),
+            include_reverse=self._reverse.isChecked(),
+            page_size=int(self._rail.page_size.value()),
+            thumb_size=int(self._rail.thumb_size.value()),
+            reset_page=reset_page,
+            focus_sequence_id=None if reset_page else focus,
+        )
+        self._gallery_return_sid = None
+        self._sync_gallery_page_label()
+        self._sync_engine_controls()
+
+    def _return_to_gallery(self) -> None:
+        """Return to Grid, keeping page and focusing the last opened sequence."""
+        focus = str(
+            self._gallery_return_sid or self._active_sequence_id or ""
+        ).strip() or None
+        self._show_gallery(reset_page=False, focus_sequence_id=focus)
+
+    def _on_gallery_page_step(self, delta: int) -> None:
+        if self._view_mode != "grid":
+            return
+        self._gallery.set_page(self._gallery.page() + int(delta))
+
+    def _on_gallery_page_selected(self, page: int) -> None:
+        if self._view_mode != "grid":
+            return
+        self._gallery.set_page(int(page))
+
+    def _on_gallery_page_size_changed(self, value: int) -> None:
+        if self._view_mode != "grid":
+            return
+        self._gallery.set_page_size(int(value))
+        self._sync_gallery_page_label()
+
+    def _on_gallery_thumb_size_changed(self, value: int) -> None:
+        if self._view_mode != "grid":
+            return
+        self._gallery.set_thumb_size(int(value))
+
+    def _sync_gallery_page_label(self, _page: int = 0) -> None:
+        self._rail.set_gallery_page_choices(
+            page=self._gallery.page(),
+            page_size=self._gallery.page_size(),
+            total=len(self._sequence_ids),
+        )
+
+    def _on_gallery_thumb_clicked(self, sequence_id: str) -> None:
+        """Leave Grid and open the clicked sequence as a full Single plot."""
+        sid = str(sequence_id or "").strip()
+        if not sid:
+            return
+        self._gallery_return_sid = sid
+        self._view_mode = "single"
+        self._rail.set_view_mode("single")
+        self._plot_stack.setCurrentIndex(0)
+        self.set_active_sequence(
+            sid, self._sequence_for_id(sid), ungap=self._ungap_for_plot
+        )
+        self._sync_engine_controls()
+        self._loaded_for = None
+        self.ensure_loaded()
 
     def _too_long_status_message(self, *, fastga_available_now: bool) -> str:
         del fastga_available_now  # same copy whether FastGA is installed
@@ -2352,12 +2539,20 @@ class DotplotPanel(QWidget):
             self._compute_fastga(key)
 
     def _apply_line_width(self, step: int) -> None:
-        self._canvas.set_line_width_step(int(step))
+        width = int(step)
+        self._canvas.set_line_width_step(width)
+        self._gallery.set_line_width_step(width)
 
     def _recompute(self) -> None:
         if self._mode == "alignment":
             if self._alignments is not None:
                 self._show_selected_pair()
+            return
+        if self._view_mode == "grid" and len(self._sequence_ids) > 1:
+            self._gallery.set_compute_params(
+                word_size=int(self._word.value()),
+                include_reverse=self._reverse.isChecked(),
+            )
             return
         if self._loaded_for is None:
             return

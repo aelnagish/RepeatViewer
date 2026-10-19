@@ -250,6 +250,12 @@ class DotplotRail(QWidget):
     computeClicked = Signal()
     cancelClicked = Signal()
     zoomSliderChanged = Signal(int)
+    viewModeChanged = Signal(str)  # "single" | "grid"
+    galleryPageStep = Signal(int)  # -1 / +1
+    galleryPageSelected = Signal(int)  # 0-based page index from dropdown
+    galleryPageSizeChanged = Signal(int)
+    galleryThumbSizeChanged = Signal(int)
+    returnToGridClicked = Signal()
 
     TAB_DISPLAY = 0
 
@@ -506,6 +512,123 @@ class DotplotRail(QWidget):
         form.addRow(self.sequence_label, sequence_row)
         self.sync_sequence_step_buttons()
 
+        # Always directly under Sequence (Grid and Single).
+        self.word_label = QLabel("Word size:", self._params_host)
+        self.word = QSpinBox(self._params_host)
+        self.word.setRange(MIN_WORD_SIZE, MAX_WORD_SIZE)
+        self.word.setValue(DEFAULT_WORD_SIZE)
+        self._expanding_spin(self.word)
+        self.word.setToolTip(
+            "Length of the exact match used to place a dot. Larger = stricter "
+            "and faster; smaller = more sensitive and noisier."
+        )
+        form.addRow(self.word_label, self.word)
+
+        self.line_width_label = QLabel("Line width:", self._params_host)
+        self.line_width = QSpinBox(self._params_host)
+        self.line_width.setRange(_MIN_LINE_WIDTH_STEP, _MAX_LINE_WIDTH_STEP)
+        self.line_width.setValue(_DEFAULT_LINE_WIDTH_STEP)
+        self._expanding_spin(self.line_width)
+        self.line_width.setToolTip(
+            "Match and self-diagonal thickness for Grid thumbnails and "
+            "the Single plot.\n"
+            "Steps 1–15 use a fine gradient (1–4.5 screen pixels)."
+        )
+        form.addRow(self.line_width_label, self.line_width)
+
+        # Multi-sequence: Grid (default) vs Single (one plot).
+        self.view_mode_label = QLabel("View:", self._params_host)
+        self.view_mode_combo = QComboBox(self._params_host)
+        self.view_mode_combo.addItem("Grid", "grid")
+        self.view_mode_combo.addItem("Single", "single")
+        self.view_mode_combo.setToolTip(
+            "Grid: many sequences at a glance (paged; default for MSA / multi-FASTA).\n"
+            "Single: one self-dotplot at a time (◀/▶ to step)."
+        )
+        self.view_mode_combo.currentIndexChanged.connect(
+            self._on_view_mode_changed
+        )
+        form.addRow(self.view_mode_label, self.view_mode_combo)
+
+        self.page_size_label = QLabel("Per page:", self._params_host)
+        self.page_size = QSpinBox(self._params_host)
+        self.page_size.setRange(4, 100)
+        self.page_size.setValue(20)
+        self.page_size.setToolTip(
+            "How many self-dotplots to show per Grid page (default 20, max 100)."
+        )
+        self._expanding_spin(self.page_size)
+        form.addRow(self.page_size_label, self.page_size)
+
+        self.thumb_size_label = QLabel("Plot size:", self._params_host)
+        self.thumb_size = QSpinBox(self._params_host)
+        self.thumb_size.setRange(80, 280)
+        self.thumb_size.setSingleStep(10)
+        self.thumb_size.setValue(140)
+        self.thumb_size.setSuffix(" px")
+        self.thumb_size.setToolTip(
+            "Side length of each Grid plot (width and height). "
+            "The grid fills the window width with square tiles."
+        )
+        self._expanding_spin(self.thumb_size)
+        form.addRow(self.thumb_size_label, self.thumb_size)
+
+        # Page picker mirrors Sequence: dropdown + ◀/▶.
+        self.gallery_page_label = QLabel("Page:", self._params_host)
+        self.gallery_page_combo = QComboBox(self._params_host)
+        self.gallery_page_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.gallery_page_combo.setMinimumContentsLength(8)
+        self.gallery_page_combo.setSizePolicy(spin_expand, QSizePolicy.Policy.Fixed)
+        self.gallery_page_combo.setToolTip(
+            "Which Grid page (sequence range) to display."
+        )
+        self.gallery_page_combo.currentIndexChanged.connect(
+            self._on_gallery_page_combo_changed
+        )
+        self.gallery_prev_btn = QToolButton(self._params_host)
+        self.gallery_prev_btn.setText("◀")
+        self.gallery_prev_btn.setAutoRaise(True)
+        self.gallery_prev_btn.setFixedSize(22, 22)
+        self.gallery_prev_btn.setToolTip("Previous Grid page")
+        self.gallery_prev_btn.clicked.connect(
+            lambda: self.galleryPageStep.emit(-1)
+        )
+        self.gallery_next_btn = QToolButton(self._params_host)
+        self.gallery_next_btn.setText("▶")
+        self.gallery_next_btn.setAutoRaise(True)
+        self.gallery_next_btn.setFixedSize(22, 22)
+        self.gallery_next_btn.setToolTip("Next Grid page")
+        self.gallery_next_btn.clicked.connect(
+            lambda: self.galleryPageStep.emit(1)
+        )
+        gallery_page_row = QWidget(self._params_host)
+        gallery_page_row.setMinimumWidth(0)
+        gallery_page_layout = QHBoxLayout(gallery_page_row)
+        gallery_page_layout.setContentsMargins(0, 0, 0, 0)
+        gallery_page_layout.setSpacing(2)
+        gallery_page_layout.addWidget(self.gallery_page_combo, 1)
+        gallery_page_layout.addWidget(self.gallery_prev_btn, 0)
+        gallery_page_layout.addWidget(self.gallery_next_btn, 0)
+        form.addRow(self.gallery_page_label, gallery_page_row)
+        self.page_size.valueChanged.connect(self.galleryPageSizeChanged.emit)
+        self.thumb_size.valueChanged.connect(self.galleryThumbSizeChanged.emit)
+        self._updating_gallery_page_combo = False
+
+        # Created here so visibility helpers can run; placed in the form after
+        # "Show reverse" below.
+        self.return_grid_btn = QPushButton("◀ Back to Grid", self._params_host)
+        self.return_grid_btn.setToolTip(
+            "Return to the Grid view at the same page / sequence."
+        )
+        self.return_grid_btn.clicked.connect(self.returnToGridClicked.emit)
+        self.return_grid_btn.hide()
+
+        self.set_view_mode_visible(False)
+        self.set_gallery_nav_visible(False)
+        self.set_return_to_grid_visible(False)
+
         self.filter_len_label = QLabel("Min length:", self._params_host)
         self.filter_len = QSpinBox(self._params_host)
         self.filter_len.setRange(0, 10_000_000)
@@ -543,17 +666,6 @@ class DotplotRail(QWidget):
             "but a window of a few hundred kb is instant."
         )
         form.addRow(self.region_size_label, self.region_size)
-
-        self.word_label = QLabel("Word size:", self._params_host)
-        self.word = QSpinBox(self._params_host)
-        self.word.setRange(MIN_WORD_SIZE, MAX_WORD_SIZE)
-        self.word.setValue(DEFAULT_WORD_SIZE)
-        self._expanding_spin(self.word)
-        self.word.setToolTip(
-            "Length of the exact match used to place a dot. Larger = stricter "
-            "and faster; smaller = more sensitive and noisier."
-        )
-        form.addRow(self.word_label, self.word)
 
         self.reverse = QCheckBox("Show reverse", self._params_host)
         self.reverse.setChecked(True)
@@ -601,18 +713,10 @@ class DotplotRail(QWidget):
         )
         form.addRow(self.seed_freq_label, self.seed_freq)
 
-        self.line_width_label = QLabel("Line width:", self._params_host)
-        self.line_width = QSpinBox(self._params_host)
-        self.line_width.setRange(_MIN_LINE_WIDTH_STEP, _MAX_LINE_WIDTH_STEP)
-        self.line_width.setValue(_DEFAULT_LINE_WIDTH_STEP)
-        self._expanding_spin(self.line_width)
-        self.line_width.setToolTip(
-            "Match and self-diagonal thickness.\n"
-            "Steps 1–15 use a fine gradient (1–4.5 screen pixels)."
-        )
-        form.addRow(self.line_width_label, self.line_width)
         # Appear last among the common self-dotplot controls.
         form.addRow(self.reverse)
+        # Directly under "Show reverse" (Single mode after opening a thumb).
+        form.addRow(self.return_grid_btn)
 
         params_col.addLayout(form)
 
@@ -755,6 +859,93 @@ class DotplotRail(QWidget):
         enabled = count > 1
         self.sequence_prev_btn.setEnabled(enabled)
         self.sequence_next_btn.setEnabled(enabled)
+
+    def view_mode(self) -> str:
+        data = self.view_mode_combo.currentData()
+        return str(data or "single")
+
+    def set_view_mode(self, mode: str) -> None:
+        want = "grid" if str(mode).strip().lower() == "grid" else "single"
+        idx = self.view_mode_combo.findData(want)
+        if idx < 0 or self.view_mode_combo.currentIndex() == idx:
+            return
+        self.view_mode_combo.blockSignals(True)
+        self.view_mode_combo.setCurrentIndex(idx)
+        self.view_mode_combo.blockSignals(False)
+
+    def set_view_mode_visible(self, visible: bool) -> None:
+        visible = bool(visible)
+        self.view_mode_label.setVisible(visible)
+        self.view_mode_combo.setVisible(visible)
+        if not visible:
+            self.set_gallery_nav_visible(False)
+            self.set_return_to_grid_visible(False)
+
+    def set_gallery_nav_visible(self, visible: bool) -> None:
+        visible = bool(visible)
+        self.page_size_label.setVisible(visible)
+        self.page_size.setVisible(visible)
+        self.thumb_size_label.setVisible(visible)
+        self.thumb_size.setVisible(visible)
+        self.gallery_page_label.setVisible(visible)
+        self.gallery_page_combo.setVisible(visible)
+        self.gallery_prev_btn.setVisible(visible)
+        self.gallery_next_btn.setVisible(visible)
+
+    def set_return_to_grid_visible(self, visible: bool) -> None:
+        self.return_grid_btn.setVisible(bool(visible))
+
+    def set_gallery_page_choices(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        total: int,
+    ) -> None:
+        """Fill the Page dropdown like Sequence (ranges + ◀/▶)."""
+        page = max(0, int(page))
+        page_size = max(1, int(page_size))
+        total = max(0, int(total))
+        page_count = max(1, (total + page_size - 1) // page_size) if total else 1
+        page = min(page, page_count - 1)
+        self._updating_gallery_page_combo = True
+        try:
+            self.gallery_page_combo.clear()
+            if total <= 0:
+                self.gallery_page_combo.addItem("—", -1)
+                self.gallery_prev_btn.setEnabled(False)
+                self.gallery_next_btn.setEnabled(False)
+                return
+            for i in range(page_count):
+                start = i * page_size + 1
+                end = min(total, (i + 1) * page_size)
+                self.gallery_page_combo.addItem(
+                    f"{start}–{end} of {total}", i
+                )
+            self.gallery_page_combo.setCurrentIndex(page)
+            self.gallery_prev_btn.setEnabled(page > 0)
+            self.gallery_next_btn.setEnabled(page + 1 < page_count)
+        finally:
+            self._updating_gallery_page_combo = False
+
+    def set_gallery_page_text(self, text: str) -> None:
+        # Kept for callers; Page dropdown now carries the range label.
+        del text
+
+    def _on_gallery_page_combo_changed(self, index: int) -> None:
+        if self._updating_gallery_page_combo:
+            return
+        if index < 0:
+            return
+        page = self.gallery_page_combo.itemData(index)
+        if page is None:
+            return
+        self.galleryPageSelected.emit(int(page))
+
+    def _on_view_mode_changed(self, _index: int = -1) -> None:
+        mode = self.view_mode()
+        self.set_gallery_nav_visible(mode == "grid")
+        self.viewModeChanged.emit(mode)
 
     def sync_control_visibility(
         self,

@@ -1808,6 +1808,16 @@ class FilePreviewPage(QWidget):
                 overview.select_by_position(
                     int(pending[0]), int(pending[1]), sequence_id=seq_id
                 )
+                # Layout may settle after the tab switch; re-center the row.
+                if seq_id:
+                    row = overview._row_for_id(seq_id)
+                    if row >= 0:
+                        QTimer.singleShot(
+                            50,
+                            lambda r=row: overview._center_selection_vertically(
+                                rows={r}
+                            ),
+                        )
             else:
                 panel = self._ensure_annotation_panel()
                 # Load only if this panel has no sequence yet: load_path() re-parses
