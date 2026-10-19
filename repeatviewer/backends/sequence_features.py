@@ -618,9 +618,13 @@ def _cleanup_legacy_sidecars(fasta_path: Path) -> None:
 
 
 def is_sequence_map_hidden_file(path: Path) -> bool:
-    """True for sequence-map JSON sidecars (hidden from the file list)."""
+    """True for sequence-map / coverage JSON sidecars (hidden from the file list)."""
     name = path.name
-    return name.endswith(".seqmap_RV.json") or name.endswith(".seqmap.json")
+    return (
+        name.endswith(".seqmap_RV.json")
+        or name.endswith(".seqmap.json")
+        or name.endswith(".blastcov_RV.json")
+    )
 
 
 def companion_annotation_files_for_delete(path: Path) -> list[Path]:
@@ -653,10 +657,13 @@ def companion_annotation_files_for_delete(path: Path) -> list[Path]:
     if suffix in {".fa", ".fasta", ".fna", ".faa", ".fas"} or name.lower().endswith(
         ".fa.gz"
     ):
+        from repeatviewer.backends.msa_blast_coverage import blast_coverage_sidecar_path
+
         for candidate in (
             sidecar_path(resolved),
             legacy_stem_sidecar_path(resolved),
             legacy_sidecar_path(resolved),
+            blast_coverage_sidecar_path(resolved),
         ):
             _add(candidate)
         return companions
@@ -676,8 +683,11 @@ def companion_annotation_renames_for_fasta(
     """Map existing JSON sidecars of ``old_fasta`` onto ``new_fasta`` names.
 
     Exported ``.RV.gff3`` files are left in place; only ``*.seqmap_RV.json``
-    (plus legacy JSON names) stay paired after a FASTA rename.
+    (plus legacy JSON names) and ``*.blastcov_RV.json`` stay paired after a
+    FASTA rename.
     """
+    from repeatviewer.backends.msa_blast_coverage import blast_coverage_sidecar_path
+
     old = old_fasta.expanduser().resolve()
     new = new_fasta.expanduser().resolve()
     if old == new:
@@ -689,6 +699,7 @@ def companion_annotation_renames_for_fasta(
         (sidecar_path(old), sidecar_path(new)),
         (legacy_stem_sidecar_path(old), sidecar_path(new)),
         (legacy_sidecar_path(old), sidecar_path(new)),
+        (blast_coverage_sidecar_path(old), blast_coverage_sidecar_path(new)),
     ):
         if not src.is_file():
             continue

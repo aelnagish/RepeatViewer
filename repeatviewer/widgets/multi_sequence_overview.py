@@ -1575,7 +1575,6 @@ class _BarsCanvas(QWidget):
             for key, (bg, fg) in self._msa_colors.items()
         }
         self._msa_col_freqs = []
-        self.blastCoverageInvalidated.emit()
         self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
         self._original_index = list(range(len(self._record_ids)))
@@ -1628,7 +1627,6 @@ class _BarsCanvas(QWidget):
         )
         self._rebuild_msa_qcolor_cache()
         self._rebuild_msa_conservation()
-        self.blastCoverageInvalidated.emit()
         self._clear_drag_paint_cache()
         self._record_ids = list(record_ids)
         self._original_index = list(range(len(self._record_ids)))
@@ -5487,7 +5485,6 @@ class MultiSequenceOverviewPanel(QWidget):
         )
         self._bars_scroll.horizontalScrollBar().valueChanged.connect(self._on_hscroll)
         self._bars.rowsChanged.connect(self._sync_names_column)
-        self._bars.blastCoverageInvalidated.connect(self.clear_blast_coverage)
         self._bars.featureActivated.connect(self._on_feature_activated)
         self._bars.featureResized.connect(self._on_feature_resized)
         self._bars.zoomChanged.connect(self._on_zoom_changed)
@@ -6351,19 +6348,86 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_coverage_shim()
         self._sync_names_column()
 
-    def clear_blast_coverage(self) -> None:
-        """Drop the top-of-MSA BLAST coverage plot (keeps the show toggle)."""
+    def clear_blast_coverage(self, *, delete_file: bool = False) -> None:
+        """Drop the top-of-MSA BLAST coverage plot (keeps the show toggle).
+
+        When ``delete_file`` is True, also remove ``{stem}.blastcov_RV.json``.
+        """
         self._coverage_profile.clear()
         self._sync_coverage_shim()
+        if delete_file:
+            from repeatviewer.backends.msa_blast_coverage import (
+                delete_blast_coverage_json,
+            )
+
+            delete_blast_coverage_json(self._path)
+
+    def discard_blast_coverage_session(self) -> None:
+        """Clear the plot and delete the JSON cache (preview close / leave file)."""
+        self.clear_blast_coverage(delete_file=True)
 
     def set_blast_coverage(self, values: list[int] | None) -> None:
-        """Store consensus BLAST coverage (MSA-column depths) for the top track."""
+        """Store consensus BLAST coverage and write ``{stem}.blastcov_RV.json``."""
+        from repeatviewer.backends.msa_blast_coverage import (
+            delete_blast_coverage_json,
+            save_blast_coverage_json,
+        )
+
+        if not values:
+            self.clear_blast_coverage(delete_file=True)
+            return
+        cleaned = [max(0, int(v)) for v in values]
+        self._coverage_profile.set_coverage(cleaned)
+        self._sync_coverage_shim()
+        self._update_scale()
+        try:
+            save_blast_coverage_json(self._path, cleaned)
+        except OSError:
+            # Plot still works in memory if the sidecar cannot be written.
+            pass
+
+    def blast_coverage(self) -> list[int]:
+        return self._coverage_profile.coverage()
+
+    def _restore_blast_coverage_from_json(self) -> None:
+        """Reload cached coverage when MSA width still matches."""
+        from repeatviewer.backends.msa_blast_coverage import load_blast_coverage_json
+
+        values = load_blast_coverage_json(self._path)
+        if not values:
+            self.clear_blast_coverage(delete_file=False)
+            return
+        width = self._bars.max_length() if self.is_msa_mode() else 0
+        if width > 0 and len(values) != width:
+            # Stale vs current alignment — drop cache; Cov must be re-run.
+            self.clear_blast_coverage(delete_file=True)
+            return
         self._coverage_profile.set_coverage(values)
         self._sync_coverage_shim()
         self._update_scale()
 
-    def blast_coverage(self) -> list[int]:
-        return self._coverage_profile.coverage()
+    def _remap_blast_coverage_after_column_delete(
+        self, start: int, end: int
+    ) -> None:
+        """Splice deleted MSA columns out of the coverage track (keep the plot)."""
+        from repeatviewer.backends.msa_blast_coverage import (
+            save_blast_coverage_json,
+            splice_coverage_columns,
+        )
+
+        current = self._coverage_profile.coverage()
+        if not current:
+            return
+        remapped = splice_coverage_columns(current, start, end)
+        if not remapped:
+            self.clear_blast_coverage(delete_file=True)
+            return
+        self._coverage_profile.set_coverage(remapped)
+        self._sync_coverage_shim()
+        try:
+            save_blast_coverage_json(self._path, remapped)
+        except OSError:
+            pass
 
     def _sync_coverage_shim(self) -> None:
         h = int(self._coverage_profile.track_height())
@@ -7720,6 +7784,9 @@ class MultiSequenceOverviewPanel(QWidget):
 
         self._features = new_features
         self._lengths = {rid: new_width for rid in self._record_ids}
+        # Full-column delete: splice coverage in place (do not clear the plot).
+        if hard_delete and not is_regional:
+            self._remap_blast_coverage_after_column_delete(start, end)
         keep_ppb = self._bars.pixels_per_base()
         self._bars.set_msa_data(
             self._record_ids,
@@ -7802,6 +7869,10 @@ class MultiSequenceOverviewPanel(QWidget):
             self._bars.set_pixels_per_base(keep_ppb)
             self._bars.set_selected_rows([])
             self._bars.set_region_selection(None)
+            # Coverage was spliced with deletes; drop it if width no longer matches.
+            cov = self.blast_coverage()
+            if cov and len(cov) != new_width:
+                self.clear_blast_coverage(delete_file=True)
             self._sync_names_column()
             self._update_scale()
             self._sync_header_position_spins()
@@ -7980,7 +8051,17 @@ class MultiSequenceOverviewPanel(QWidget):
         When ``msa_mode`` is True (or auto-detected via equal lengths), paint
         aligned residue rows instead of length bars.
         """
-        self._path = path.expanduser().resolve()
+        new_path = path.expanduser().resolve()
+        # Leaving a file: drop its coverage cache (Cov must be re-run next time).
+        try:
+            old_path = Path(self._path).expanduser().resolve()
+        except OSError:
+            old_path = Path(self._path)
+        if old_path != new_path:
+            self.discard_blast_coverage_session()
+        else:
+            self.clear_blast_coverage(delete_file=False)
+        self._path = new_path
         self.clear_find_hits()  # hits belong to the previous file
         self._fasta_seq_cache = None
         use_msa = bool(msa_mode) if msa_mode is not None else is_aligned_fasta(self._path)
@@ -8137,6 +8218,8 @@ class MultiSequenceOverviewPanel(QWidget):
         self._sync_names_column()
         self._update_scale()
         self._sync_header_position_spins()
+        # Restore session coverage cache when width still matches.
+        self._restore_blast_coverage_from_json()
         # New MSA: always start at top-left (do not keep prior zoom/scroll).
         self._reset_overview_to_start()
         QTimer.singleShot(0, self._try_initial_fit)
@@ -10073,6 +10156,7 @@ class MultiSequenceOverviewPanel(QWidget):
         self, start: int, end: int, *, without_gaps: bool = False
     ) -> None:
         """Extract the selected region from target sequence(s) to a new FASTA."""
+        from repeatviewer.backends.sequence_compose import msa_extract_name_stem
         from repeatviewer.widgets.sequence_map_viewer import _ExtractSequenceDialog
 
         title = "Extract Sequence without gap" if without_gaps else "Extract Sequence"
@@ -10093,12 +10177,16 @@ class MultiSequenceOverviewPanel(QWidget):
             QMessageBox.warning(self, title, str(exc))
             return
         seq_len = max(1, len(primary_seq))
+        if self.is_msa_mode() and len(targets) == 1:
+            default_name = msa_extract_name_stem(self._path, primary)
+        else:
+            default_name = f"{primary}_{lo}_{hi}"
         dialog = _ExtractSequenceDialog(
             sequence_id=primary if len(targets) == 1 else f"{len(targets)}_sequences",
             sequence_length=seq_len,
             start=lo,
             end=min(hi, seq_len),
-            default_name=f"{primary}_{lo}_{hi}",
+            default_name=default_name,
             reverse=False,
             parent=self,
         )
@@ -10158,6 +10246,7 @@ class MultiSequenceOverviewPanel(QWidget):
             SequenceComposeError,
             extract_records,
             proposed_extract_path,
+            proposed_msa_extract_path,
         )
         from repeatviewer.widgets.file_conflict import confirm_existing_file_path
 
@@ -10171,9 +10260,14 @@ class MultiSequenceOverviewPanel(QWidget):
             )
             return
 
-        proposed = proposed_extract_path(
-            self._path, ids, self._path.parent, single_file=True
-        )
+        if self.is_msa_mode() and len(ids) == 1:
+            proposed = proposed_msa_extract_path(
+                self._path, ids[0], self._path.parent
+            )
+        else:
+            proposed = proposed_extract_path(
+                self._path, ids, self._path.parent, single_file=True
+            )
         confirmed = confirm_existing_file_path(
             self,
             proposed,

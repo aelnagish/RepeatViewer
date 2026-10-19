@@ -2368,6 +2368,18 @@ class FilePreviewPage(QWidget):
         if hasattr(self._html, "teardown"):
             self._html.teardown()
 
+    def discard_msa_blast_coverage(self) -> None:
+        """Drop MSA Cov plot + ``*.blastcov_RV.json`` when this preview closes."""
+        overview = getattr(self, "_annotation_overview", None)
+        if overview is None:
+            return
+        discard = getattr(overview, "discard_blast_coverage_session", None)
+        if callable(discard):
+            try:
+                discard()
+            except RuntimeError:
+                pass
+
     def _active_text_editor(self) -> QTextEdit:
         return self._fasta_text if self._single_fasta_mode else self._text
 
@@ -3286,6 +3298,7 @@ class PreviewTabWidget(QTabWidget):
         elif _switching_html_preview(widget.path, resolved):
             was_current = self.currentIndex() == index
             # Unbind before deleteLater — Overview may own the shared zoom bar.
+            widget.discard_msa_blast_coverage()
             widget.release_shared_annotation_zoom_bar()
             self._forget_lru(widget)
             widget.teardown_html_preview()
@@ -3494,6 +3507,7 @@ class PreviewTabWidget(QTabWidget):
         while self.count():
             widget = self.widget(0)
             if isinstance(widget, FilePreviewPage):
+                widget.discard_msa_blast_coverage()
                 widget.release_shared_annotation_zoom_bar()
                 widget.teardown_html_preview()
             self.removeTab(0)
@@ -3546,6 +3560,7 @@ class PreviewTabWidget(QTabWidget):
             widget.persist_annotation_view_for_session()
             key = str(widget.path)
             self._path_to_index.pop(key, None)
+            widget.discard_msa_blast_coverage()
             widget.release_shared_annotation_zoom_bar()
             widget.teardown_html_preview()
         self.removeTab(index)

@@ -4,12 +4,17 @@ Primary Cov path: majority consensus (threshold 0) → BLAST vs the project
 genome → one coverage array aligned to MSA columns (consensus has no gaps and
 the same width as the alignment).
 
+Coverage is cached beside the MSA as ``{stem}.blastcov_RV.json`` while the
+file stays open; column deletes splice that array. Closing the preview deletes
+the cache so Cov must be re-run.
+
 Helpers also support per-row ungapped queries with gaps projected to 0.
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import tempfile
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -19,6 +24,84 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 from repeatviewer.backends.msa_coordinates import GAP_CHARS, ungap_sequence
+
+_BLASTCOV_SUFFIX = ".blastcov_RV.json"
+_BLASTCOV_FORMAT_VERSION = 1
+
+
+def blast_coverage_sidecar_path(fasta_path: Path | str) -> Path:
+    """Hidden cache next to the MSA: ``{stem}.blastcov_RV.json``."""
+    path = Path(fasta_path).expanduser().resolve()
+    return path.parent / f"{path.stem}{_BLASTCOV_SUFFIX}"
+
+
+def is_blast_coverage_sidecar(path: Path | str) -> bool:
+    return Path(path).name.endswith(_BLASTCOV_SUFFIX)
+
+
+def splice_coverage_columns(
+    coverage: Sequence[int | float],
+    start_1based: int,
+    end_1based: int,
+) -> list[int]:
+    """Drop inclusive 1-based columns ``[start, end]`` from a coverage array."""
+    values = [max(0, int(v)) for v in coverage]
+    n = len(values)
+    if n <= 0:
+        return []
+    a = max(1, min(n, int(start_1based)))
+    b = max(1, min(n, int(end_1based)))
+    if b < a:
+        a, b = b, a
+    lo, hi = a - 1, b
+    return values[:lo] + values[hi:]
+
+
+def save_blast_coverage_json(
+    fasta_path: Path | str,
+    coverage: Sequence[int],
+) -> Path:
+    """Write MSA-column coverage beside ``fasta_path`` (overwrites)."""
+    out = blast_coverage_sidecar_path(fasta_path)
+    cleaned = [max(0, int(v)) for v in coverage]
+    payload = {
+        "format_version": _BLASTCOV_FORMAT_VERSION,
+        "source": "msa_consensus_blast",
+        "msa_width": len(cleaned),
+        "coverage": cleaned,
+    }
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return out
+
+
+def load_blast_coverage_json(fasta_path: Path | str) -> list[int] | None:
+    """Load cached coverage, or ``None`` when missing / invalid."""
+    path = blast_coverage_sidecar_path(fasta_path)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("coverage")
+    if not isinstance(raw, list) or not raw:
+        return None
+    try:
+        return [max(0, int(v)) for v in raw]
+    except (TypeError, ValueError):
+        return None
+
+
+def delete_blast_coverage_json(fasta_path: Path | str) -> None:
+    """Remove the coverage cache for ``fasta_path`` if present."""
+    path = blast_coverage_sidecar_path(fasta_path)
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        pass
 
 
 def interpolate_coverage_across_gaps(

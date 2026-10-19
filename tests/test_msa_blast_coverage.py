@@ -92,6 +92,28 @@ def test_coverage_axis_tick_helpers() -> None:
     assert abs(_coverage_log_y(100, peak=100, bottom_y=40, usable=38) - 2.0) < 1e-6
 
 
+def test_blast_coverage_json_roundtrip_and_splice(tmp_path: Path) -> None:
+    from repeatviewer.backends.msa_blast_coverage import (
+        blast_coverage_sidecar_path,
+        delete_blast_coverage_json,
+        load_blast_coverage_json,
+        save_blast_coverage_json,
+        splice_coverage_columns,
+    )
+
+    fasta = tmp_path / "aln.fa"
+    fasta.write_text(">a\nACGT\n", encoding="utf-8")
+    cov = [1, 2, 3, 4, 5, 6]
+    path = save_blast_coverage_json(fasta, cov)
+    assert path == blast_coverage_sidecar_path(fasta)
+    assert path.is_file()
+    assert load_blast_coverage_json(fasta) == cov
+    # Delete columns 2–4 (1-based) → keep 1 and 5–6.
+    assert splice_coverage_columns(cov, 2, 4) == [1, 5, 6]
+    delete_blast_coverage_json(fasta)
+    assert load_blast_coverage_json(fasta) is None
+
+
 def test_coverage_viewport_peak_safe_when_scrolled_past_end(qapp) -> None:
     """Horizontal scroll past the MSA end must not IndexError on peak calc."""
     from repeatviewer.widgets.multi_sequence_overview import _MsaTopCoverageProfile

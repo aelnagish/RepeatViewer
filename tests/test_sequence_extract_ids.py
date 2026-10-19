@@ -11,7 +11,10 @@ from repeatviewer.backends.sequence_compose import (
     SequenceComposeError,
     count_matching_ids,
     extract_records_by_ids,
+    msa_extract_name_stem,
     parse_id_list,
+    proposed_extract_path,
+    proposed_msa_extract_path,
     read_id_file,
 )
 
@@ -185,6 +188,17 @@ def test_count_matching_ids_reports_found_and_missing(tmp_path: Path) -> None:
     assert summary.requested_ids == 3
     assert summary.missing == ["nope"]
     assert summary.records_read == 4
+
+
+def test_msa_extract_name_uses_original_file_and_sequence(tmp_path: Path) -> None:
+    source = tmp_path / "consensus#LTR.raw.fa"
+    source.write_text(">Input_seq\nACGT\n", encoding="utf-8")
+    assert msa_extract_name_stem(source, "Input_seq") == "consensus#LTR.raw_Input_seq"
+    proposed = proposed_msa_extract_path(source, "chr1:10-20", tmp_path)
+    assert proposed.name == "consensus#LTR.raw_chr1_10-20.fa"
+    # Unaligned extract still uses the sequence name alone.
+    plain = proposed_extract_path(source, ["Input_seq"], tmp_path, single_file=True)
+    assert plain.name == "Input_seq.fa"
 
 
 def test_count_matching_ids_writes_nothing(tmp_path: Path) -> None:

@@ -153,6 +153,48 @@ def proposed_extract_path(
     return folder / f"{source.name}_extr.fa"
 
 
+def msa_extract_name_stem(source: Path, record_id: str) -> str:
+    """``{original file stem}_{sequence name}`` for an MSA extract.
+
+    The file stem keeps characters such as ``#`` that appear in the alignment
+    name. The sequence id is sanitized for the filesystem.
+    """
+    from repeatviewer.backends.separate_fasta import sanitize_name
+
+    file_part = Path(source).stem
+    for char, replacement in (
+        ("/", "__"),
+        ("\\", "__"),
+        (" ", "_"),
+        ("|", "_"),
+        ("<", "_"),
+        (":", "_"),
+        ('"', "_"),
+        ("*", "_"),
+        ("?", "_"),
+    ):
+        file_part = file_part.replace(char, replacement)
+    file_part = file_part.strip("._") or "sequence"
+    seq_part = sanitize_name(str(record_id)).strip("._") or "sequence"
+    return f"{file_part}_{seq_part}"
+
+
+def proposed_msa_extract_path(
+    source: Path,
+    record_id: str,
+    out_dir: Path | None = None,
+) -> Path:
+    """MSA display extract: ``{original_file_name}_{sequence_name}{suffix}``.
+
+    The multi-sequence (unaligned) overview keeps :func:`proposed_extract_path`.
+    """
+    source = Path(source).expanduser().resolve()
+    folder = (out_dir or source.parent).expanduser().resolve()
+    return folder / (
+        f"{msa_extract_name_stem(source, record_id)}{extract_source_suffix(source)}"
+    )
+
+
 def proposed_single_record_path(source: Path, record_id: str, out_dir: Path | None = None) -> Path:
     """Path for one extracted sequence, using Separate Sequences sanitization."""
     from repeatviewer.backends.separate_fasta import sanitize_name
