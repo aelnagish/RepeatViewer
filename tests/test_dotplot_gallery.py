@@ -76,7 +76,7 @@ def test_dotplot_panel_defaults_to_grid_and_returns(
     panel.ensure_loaded()
     qapp.processEvents()
 
-    assert panel._rail.view_mode_combo.isVisible()
+    assert not panel._rail.view_mode_combo.isVisible()
     assert panel._view_mode == "grid"
     assert panel._plot_stack.currentIndex() == 1
     assert panel._gallery.page_size() == 20
@@ -101,6 +101,37 @@ def test_dotplot_panel_defaults_to_grid_and_returns(
     assert panel._gallery.page() == 1
     assert any(t.sequence_id() == "seq22" for t in panel._gallery._thumbs)
 
+    panel.close()
+
+
+def test_open_single_for_sequence_from_grid(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    """Overview 'Show self-dotplot' must open Single, not stay on Grid."""
+    path = tmp_path / "multi.fa"
+    lines = []
+    for i in range(10):
+        lines.append(f">seq{i}")
+        lines.append("ACGTACGTACGTACGTACGT")
+    path.write_text("\n".join(lines) + "\n")
+
+    panel = DotplotPanel(path)
+    panel.set_record_choices(
+        [f"seq{i}" for i in range(10)],
+        sequence_loader=lambda sid: "ACGTACGTACGTACGTACGT",
+    )
+    panel.show()
+    qapp.processEvents()
+    panel.ensure_loaded()
+    qapp.processEvents()
+    assert panel._view_mode == "grid"
+
+    panel.open_single_for_sequence("seq7")
+    qapp.processEvents()
+    assert panel._view_mode == "single"
+    assert panel._plot_stack.currentIndex() == 0
+    assert panel.sequence_id() == "seq7"
+    assert panel._rail.return_grid_btn.isVisible()
     panel.close()
 
 

@@ -217,6 +217,9 @@ def index_path(folder: Path) -> Path:
 
 
 _CACHE: dict[str, tuple[float, list[CytoImage]]] = {}
+# Sentinel mtime when index.json is missing — avoids re-stat'ing per FASTA row
+# while opening large folders with no cytogenetic store.
+_MISSING_INDEX_MTIME = -1.0
 
 
 def _index_mtime(folder: Path) -> float | None:
@@ -232,7 +235,10 @@ def load_images(folder: Path) -> list[CytoImage]:
     key = str(folder)
     mtime = _index_mtime(folder)
     if mtime is None:
-        _CACHE.pop(key, None)
+        cached = _CACHE.get(key)
+        if cached is not None and cached[0] == _MISSING_INDEX_MTIME:
+            return cached[1]
+        _CACHE[key] = (_MISSING_INDEX_MTIME, [])
         return []
     cached = _CACHE.get(key)
     if cached is not None and cached[0] == mtime:
@@ -240,11 +246,26 @@ def load_images(folder: Path) -> list[CytoImage]:
     try:
         raw = json.loads(index_path(folder).read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        _CACHE[key] = (_MISSING_INDEX_MTIME, [])
         return []
     items = raw.get("images") if isinstance(raw, dict) else None
     images = [img for img in (CytoImage.from_dict(x) for x in items or []) if img]
     _CACHE[key] = (mtime, images)
     return images
+
+
+def image_counts_by_sequence(folder: Path) -> dict[str, int]:
+    """How many images link to each FASTA basename in ``folder`` (one index load)."""
+    counts: dict[str, int] = {}
+    for img in load_images(folder):
+        seen: set[str] = set()
+        for target in img.targets:
+            name = str(getattr(target, "sequence", "") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def save_images(folder: Path, images: Iterable[CytoImage]) -> None:

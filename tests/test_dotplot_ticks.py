@@ -92,6 +92,76 @@ def test_zoom_keeps_selection_visible(qapp) -> None:
     canvas.close()
 
 
+def test_preserve_view_word_size_does_not_drift(qapp) -> None:
+    """Zoomed word-size recomputes must keep scroll/hit mapping stable.
+
+    Restoring via centerOn() rounded through integer scrollbars and crept ~1 px
+    per change, so hits walked away from the crosshair after spinning Word size.
+    """
+    from PySide6.QtCore import QPointF, QRectF
+
+    from repeatviewer.backends.dotplot import (
+        STRAND_FORWARD,
+        DotplotResult,
+        DotplotSegment,
+    )
+    from repeatviewer.widgets.dotplot_view import DotplotCanvas
+
+    canvas = DotplotCanvas()
+    canvas.resize(900, 700)
+    canvas.show()
+    qapp.processEvents()
+    seg = DotplotSegment(500, 800, 100, STRAND_FORWARD)
+    canvas.show_result(
+        DotplotResult(
+            sequence_id="t",
+            sequence_length=2_000,
+            word_size=8,
+            segments=[seg],
+            include_reverse=False,
+        )
+    )
+    qapp.processEvents()
+    canvas.reset_zoom()
+    qapp.processEvents()
+    canvas._selection = QRectF(450.0, 750.0, 200.0, 200.0)
+    assert canvas.zoom_to_selection()
+    qapp.processEvents()
+
+    sx, sy = 550.0, 850.0
+    before_map = canvas.mapFromScene(QPointF(sx, sy))
+    before_scroll = (
+        canvas.horizontalScrollBar().value(),
+        canvas.verticalScrollBar().value(),
+    )
+    for ws in (10, 15, 20, 25, 30, 35, 40, 45):
+        canvas.show_result(
+            DotplotResult(
+                sequence_id="t",
+                sequence_length=2_000,
+                word_size=ws,
+                segments=[seg],
+                include_reverse=False,
+            ),
+            preserve_view=True,
+        )
+        qapp.processEvents()
+
+    after_map = canvas.mapFromScene(QPointF(sx, sy))
+    after_scroll = (
+        canvas.horizontalScrollBar().value(),
+        canvas.verticalScrollBar().value(),
+    )
+    assert after_scroll == before_scroll, (
+        f"scroll drifted across word-size recomputes: "
+        f"{before_scroll} -> {after_scroll}"
+    )
+    assert after_map == before_map, (
+        f"scene→view mapping drifted: {before_map} -> {after_map}"
+    )
+    canvas.close()
+
+
 def test_ensure_min_bp_rect_expands_sub_base_drag() -> None:
     """At high zoom a few-pixel drag is < 1 bp; still become a 1×1 selection."""
     bounds = QRectF(0.0, 0.0, 10_000.0, 10_000.0)

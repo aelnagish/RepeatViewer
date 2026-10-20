@@ -536,19 +536,17 @@ class DotplotRail(QWidget):
         )
         form.addRow(self.line_width_label, self.line_width)
 
-        # Multi-sequence: Grid (default) vs Single (one plot).
+        # View Grid/Single combo removed: multi-seq home is always Grid.
+        # Single is reached only by clicking a thumb or Overview "Show self-dotplot".
         self.view_mode_label = QLabel("View:", self._params_host)
         self.view_mode_combo = QComboBox(self._params_host)
         self.view_mode_combo.addItem("Grid", "grid")
         self.view_mode_combo.addItem("Single", "single")
-        self.view_mode_combo.setToolTip(
-            "Grid: many sequences at a glance (paged; default for MSA / multi-FASTA).\n"
-            "Single: one self-dotplot at a time (◀/▶ to step)."
-        )
+        self.view_mode_combo.hide()
+        self.view_mode_label.hide()
         self.view_mode_combo.currentIndexChanged.connect(
             self._on_view_mode_changed
         )
-        form.addRow(self.view_mode_label, self.view_mode_combo)
 
         self.page_size_label = QLabel("Per page:", self._params_host)
         self.page_size = QSpinBox(self._params_host)
@@ -874,12 +872,10 @@ class DotplotRail(QWidget):
         self.view_mode_combo.blockSignals(False)
 
     def set_view_mode_visible(self, visible: bool) -> None:
-        visible = bool(visible)
-        self.view_mode_label.setVisible(visible)
-        self.view_mode_combo.setVisible(visible)
-        if not visible:
-            self.set_gallery_nav_visible(False)
-            self.set_return_to_grid_visible(False)
+        # Always hidden — multi-seq display is Grid; no View dropdown.
+        del visible
+        self.view_mode_label.setVisible(False)
+        self.view_mode_combo.setVisible(False)
 
     def set_gallery_nav_visible(self, visible: bool) -> None:
         visible = bool(visible)

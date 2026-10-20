@@ -470,14 +470,23 @@ class FileListTableWidget(QTableWidget):
         if cell is not None:
             super().scrollToItem(cell, hint)
 
-    def begin_bulk_file_insert(self) -> None:
-        """Cache file colors once for a large folder rebuild."""
+    def begin_bulk_file_insert(self, folder: Path | None = None) -> None:
+        """Cache file colors (and cyto counts) once for a folder rebuild."""
         from repeatviewer.widgets.file_colors import load_file_colors
 
         self._bulk_file_colors = load_file_colors()
+        self._bulk_cyto_counts: dict[str, int] | None = {}
+        if folder is not None:
+            try:
+                from repeatviewer.backends.cyto_images import image_counts_by_sequence
+
+                self._bulk_cyto_counts = image_counts_by_sequence(folder)
+            except Exception:  # noqa: BLE001 - listing must not fail on cyto
+                self._bulk_cyto_counts = {}
 
     def end_bulk_file_insert(self) -> None:
         self._bulk_file_colors = None
+        self._bulk_cyto_counts = None
 
     def add_file_row(
         self,

@@ -820,10 +820,17 @@ class DotplotCanvas(QGraphicsView):
             and self._length > 0
             and self._item is not None
         )
+        # Restore exact scroll offsets — not centerOn(). centerOn maps through
+        # floating-point scene coords and integer scrollbars, drifting ~1 px per
+        # word-size recompute; after a zoom that crawl makes hits miss the
+        # crosshair (same bug on single-sequence and multi-sequence Single).
         saved_transform = self.transform() if same_length else None
         saved_fit = self._fit_scale if same_length else 0.0
-        saved_center = (
-            self.mapToScene(self.viewport().rect().center())
+        saved_scroll = (
+            (
+                self.horizontalScrollBar().value(),
+                self.verticalScrollBar().value(),
+            )
             if same_length
             else None
         )
@@ -837,13 +844,16 @@ class DotplotCanvas(QGraphicsView):
         scene.addItem(self._item)
         scene.setSceneRect(0, 0, result.sequence_length, result.sequence_length)
 
-        if saved_transform is not None and saved_center is not None:
+        if saved_transform is not None and saved_scroll is not None:
             # Keep pan/zoom when only word size / reverse-complement toggled.
             self.setTransform(saved_transform)
             self._fit_scale = saved_fit
-            self.centerOn(saved_center)
+            self.horizontalScrollBar().setValue(saved_scroll[0])
+            self.verticalScrollBar().setValue(saved_scroll[1])
             self._needs_fit = False
+            self._position_rulers()
             self.viewport().update()
+            self._refresh_overlay()
             self._refresh_rulers()
             return
 
@@ -2029,24 +2039,23 @@ class DotplotPanel(QWidget):
                 sid, self._sequence_for_id(sid), ungap=self._ungap_for_plot
             )
             if len(ids) > 1:
+                # Multi-seq display is always Grid (no View dropdown).
+                # Single is only via thumb click / Overview "Show self-dotplot".
                 if not same_ids:
-                    # New id list → Grid from page 0.
                     self._view_mode = "grid"
                     self._rail.set_view_mode("grid")
                     if self.isVisible():
                         self._show_gallery(reset_page=True)
-                elif self._view_mode == "grid":
-                    # Same sequences: keep Grid page/scroll across tab switches.
+                elif self._view_mode == "single" and self._gallery_return_sid:
+                    # Keep an open Single detail view across a list resync.
+                    self._rail.set_view_mode("single")
+                    self._plot_stack.setCurrentIndex(0)
+                    self._rail.set_return_to_grid_visible(True)
+                else:
+                    self._view_mode = "grid"
                     self._rail.set_view_mode("grid")
                     if self.isVisible():
                         self._show_gallery(reset_page=False)
-                else:
-                    # Same sequences: keep Single view.
-                    self._rail.set_view_mode("single")
-                    self._plot_stack.setCurrentIndex(0)
-                    self._rail.set_return_to_grid_visible(
-                        self._gallery_return_sid is not None
-                    )
             else:
                 self._view_mode = "single"
                 self._rail.set_view_mode("single")
@@ -2483,10 +2492,12 @@ class DotplotPanel(QWidget):
             total=len(self._sequence_ids),
         )
 
-    def _on_gallery_thumb_clicked(self, sequence_id: str) -> None:
-        """Leave Grid and open the clicked sequence as a full Single plot."""
+    def open_single_for_sequence(self, sequence_id: str) -> None:
+        """Show one sequence in Single view (from Grid thumb or Overview menu)."""
         sid = str(sequence_id or "").strip()
         if not sid:
+            return
+        if sid not in self._sequence_ids and self._sequence_combo.findData(sid) < 0:
             return
         self._gallery_return_sid = sid
         self._view_mode = "single"
@@ -2498,6 +2509,10 @@ class DotplotPanel(QWidget):
         self._sync_engine_controls()
         self._loaded_for = None
         self.ensure_loaded()
+
+    def _on_gallery_thumb_clicked(self, sequence_id: str) -> None:
+        """Leave Grid and open the clicked sequence as a full Single plot."""
+        self.open_single_for_sequence(sequence_id)
 
     def _too_long_status_message(self, *, fastga_available_now: bool) -> str:
         del fastga_available_now  # same copy whether FastGA is installed

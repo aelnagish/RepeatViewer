@@ -1618,6 +1618,9 @@ class FilePreviewPage(QWidget):
                 preferred_id=preferred,
                 sequence_loader=overview.sequence_text_for_dotplot,
             )
+            # Overview "Show self-dotplot" asks for that one sequence, not Grid.
+            if pending:
+                panel.open_single_for_sequence(pending)
             return
         if self._annotation_panel is None:
             return
