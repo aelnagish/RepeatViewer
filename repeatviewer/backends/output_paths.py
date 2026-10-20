@@ -12,6 +12,7 @@ def next_numbered_path(path: Path) -> Path:
 
         reads.fa_FastGA.paf → reads.fa_FastGA_2.paf
         reads.fa_TEAid.html → reads.fa_TEAid_2.html
+        reads.fa_pTEAid.html → reads.fa_pTEAid_2.html
         reads.fa_0.8_co.fa  → reads.fa_0.8_co_2.fa
     """
     path = Path(path)

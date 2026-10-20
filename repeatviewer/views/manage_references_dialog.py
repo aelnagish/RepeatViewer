@@ -2085,6 +2085,24 @@ class ManageReferencesDialog(QDialog):
         save_workspace(self._project)
         self.references_changed.emit()
 
+    def raise_add_dialog_if_open(self) -> None:
+        """Keep Add database above this window (not above other apps)."""
+        dialog = self._add_dialog
+        if dialog is None:
+            return
+        try:
+            if not dialog.isVisible():
+                return
+            dialog.raise_()
+        except RuntimeError:
+            return
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            # Clicking Manage must not bury an open Add dialog behind it.
+            QTimer.singleShot(0, self.raise_add_dialog_if_open)
+
     def _add_database(self) -> None:
         if self._add_dialog is not None and self._add_dialog.isVisible():
             self._add_dialog.raise_()
@@ -2097,11 +2115,10 @@ class ManageReferencesDialog(QDialog):
             initial = DB_KIND_HMM_PROTEIN
         else:
             initial = DB_KIND_CDD
-        # Parent to the main window so stacking stays above RepeatViewer only
-        # (not a global always-on-top over Safari / Finder / …).
-        host = self.window() if self.window() is not None else self
+        # Parent to Manage Database so Add stacks above it via Qt parenting —
+        # never WindowStaysOnTopHint (that covers Safari / Finder / …).
         dialog = AddDatabaseDialog(
-            self._project, initial_kind=initial, section=section, parent=host
+            self._project, initial_kind=initial, section=section, parent=self
         )
         dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
         dialog.setModal(False)
@@ -2309,6 +2326,7 @@ def open_manage_references(
     if existing is not None and existing.isVisible():
         existing.apply_role_filter(role_filter)
         existing.raise_()
+        existing.raise_add_dialog_if_open()
         existing.activateWindow()
         return existing
     dialog = ManageReferencesDialog(project, parent, role_filter=role_filter)

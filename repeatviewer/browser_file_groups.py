@@ -80,6 +80,8 @@ _TOOL_OUTPUT_SUFFIXES: tuple[str, ...] = (
     "_div_plot.html",
     "_abund_plot.html",
     "_abundance_plot.html",
+    # Pan-genome before single-genome: ``_pteaid.html`` also ends with ``_teaid.html``.
+    "_pteaid.html",
     "_TEAid.html",
     "_teaid.html",
     # Flexidot
@@ -121,7 +123,7 @@ _NUMBERED_MAP_RE = re.compile(
     r"_(?:minimap|hisat|map)(?:_\d+)?\.rvmap$",
     re.IGNORECASE,
 )
-_NUMBERED_TEAID_RE = re.compile(r"_TEAid(?:_\d+)?\.html$", re.IGNORECASE)
+_NUMBERED_TEAID_RE = re.compile(r"_(?:p)?TEAid(?:_\d+)?\.html$", re.IGNORECASE)
 _NUMBERED_FLEXIDOT_RE = re.compile(
     r"_flexidot(?:_multi)?(?:_\d+)?\.(?:png|html)$",
     re.IGNORECASE,

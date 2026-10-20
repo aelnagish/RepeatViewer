@@ -246,6 +246,25 @@ def test_manage_database_dialog_smoke(qapp, isolated_settings, tmp_path, monkeyp
     dialog.close()
 
 
+def test_add_database_stays_above_manage_not_global_on_top(qapp) -> None:
+    """Add is parented to Manage; never uses global always-on-top."""
+    manage = ManageReferencesDialog(RepeatViewerProject())
+    manage.show()
+    qapp.processEvents()
+    manage._add_database()
+    qapp.processEvents()
+    add = manage._add_dialog
+    assert add is not None and add.isVisible()
+    assert add.parentWidget() is manage
+    assert not (add.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+    manage.raise_()
+    manage.raise_add_dialog_if_open()
+    qapp.processEvents()
+    assert add.isVisible()
+    add.close()
+    manage.close()
+
+
 def test_add_database_dialog_hmm(qapp, tmp_path) -> None:
     hmm = tmp_path / "Pfam.hmm"
     hmm.write_text("HMMER3/f\n")

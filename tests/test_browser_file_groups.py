@@ -23,6 +23,8 @@ def test_file_family_key_groups_align_and_ops() -> None:
     assert file_family_key("reads.fa_orfs.fa") == "reads.fa"
     assert file_family_key("reads.fa_translated.faa") == "reads.fa"
     assert file_family_key("reads.fa_TEAid.html") == "reads.fa"
+    assert file_family_key("reads.fa_pTEAid.html") == "reads.fa"
+    assert file_family_key("reads.fa_pTEAid_2.html") == "reads.fa"
     assert file_family_key("reads.fa_flexidot.png") == "reads.fa"
     assert file_family_key("reads.fa_hmmer.txt") == "reads.fa"
     assert file_family_key("reads.fa_hmmer2.txt") == "reads.fa"

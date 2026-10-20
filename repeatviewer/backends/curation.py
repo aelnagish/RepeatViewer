@@ -153,7 +153,7 @@ def cleanup_teaid_side_files(
         if resolved in {keep_html, input_file}:
             continue
         name = entry.name
-        if name.endswith("_TEAid.html"):
+        if name.endswith(("_TEAid.html", "_pTEAid.html")):
             continue
         if entry.is_dir() and name.endswith("_self_blast"):
             prefix = name[: -len("_self_blast")]
@@ -861,7 +861,7 @@ def run_on_sequence(
             scratch_dir = out_dir / f"_teaid_{seq_path.stem}_pan"
             scratch_dir.mkdir(parents=True, exist_ok=True)
             teaid_work_dir = scratch_dir
-            html_path = next_numbered_path(out_dir / f"{seq_path.name}_TEAid.html")
+            html_path = next_numbered_path(out_dir / f"{seq_path.name}_pTEAid.html")
         elif genome_label:
             scratch_dir = out_dir / f"_teaid_{seq_path.stem}{label_suffix}"
             scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -918,8 +918,10 @@ def run_on_sequence(
             if scratch_dir is not None:
                 shutil.rmtree(scratch_dir, ignore_errors=True)
             raise RuntimeError("TE-Aid returned failure.")
-        scratch_name = f"{seq_path.name}_TEAid.html" if pan_genome_run else (
-            f"{seq_path.name}{label_suffix}_TEAid.html"
+        scratch_name = (
+            f"{seq_path.name}_pTEAid.html"
+            if pan_genome_run
+            else f"{seq_path.name}{label_suffix}_TEAid.html"
         )
         scratch_html = teaid_work_dir / scratch_name
         if scratch_dir is not None:

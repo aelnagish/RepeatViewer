@@ -1634,12 +1634,22 @@ def _assemble_teaid_pan_genome_figure(
     return fig
 
 
-def _write_teaid_html(fig, output_dir, input_file, *, output_name_tag=None):
+def _write_teaid_html(
+    fig,
+    output_dir,
+    input_file,
+    *,
+    output_name_tag=None,
+    pan_genome: bool = False,
+):
     from repeatviewer.pan_genome import genome_output_suffix
 
     tag = genome_output_suffix(output_name_tag) if output_name_tag else ''
+    # Pan-genome reports use _pTEAid.html so they are distinct from single-genome
+    # _TEAid.html (and group correctly in the Files list).
+    report = '_pTEAid.html' if pan_genome else '_TEAid.html'
     output_html_path = os.path.join(
-        output_dir, f'{os.path.basename(input_file)}{tag}_TEAid.html'
+        output_dir, f'{os.path.basename(input_file)}{tag}{report}'
     )
     pio.write_html(
         fig,
@@ -1731,7 +1741,7 @@ def teaid_pan_genome_plotter(
         x_axis_label=x_axis_label,
     )
     emit_phase(progress, 4, TEAID_PHASES, f"{base}: writing HTML…")
-    _write_teaid_html(fig, output_dir, input_file)
+    _write_teaid_html(fig, output_dir, input_file, pan_genome=True)
     emit_phase(progress, TEAID_PHASES, TEAID_PHASES, f"{base}: finished")
     logging.info('TE-Aid pan-genome finished: %s.', os.path.basename(input_file))
     return True

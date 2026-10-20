@@ -116,7 +116,10 @@ class PreviewDuplicateWindow(QWidget):
         self._status_bar.setSizeGripEnabled(False)
         self._status_bar.setFixedHeight(26)
         self._task_progress = TaskProgressPanel()
-        self._status_bar.addPermanentWidget(self._task_progress, 1)
+        # No stretch — same as MainWindow: keep label+bar packed next to Stop.
+        # stretch=1 expands the panel across the status strip and leaves the bar
+        # floating in the middle.
+        self._status_bar.addPermanentWidget(self._task_progress)
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setToolTip("Stop the currently running job")
         self._stop_btn.setMaximumHeight(22)

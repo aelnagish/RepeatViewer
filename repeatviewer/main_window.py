@@ -10166,6 +10166,11 @@ class MainWindow(QMainWindow):
         for dialog in self._iter_open_tool_dialogs():
             try:
                 dialog.raise_()
+                # Add database is a child of Manage Database; raising Manage alone
+                # can bury it — put Add back on top within RepeatViewer only.
+                raise_add = getattr(dialog, "raise_add_dialog_if_open", None)
+                if callable(raise_add):
+                    raise_add()
             except RuntimeError:
                 continue
         self._raise_preview_duplicate_windows()

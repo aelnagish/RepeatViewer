@@ -5145,7 +5145,17 @@ class GenomeBlastDatabaseRow(QWidget):
 
         self._combo = QComboBox(self)
         self._combo.setFixedWidth(TOOL_PARAMS_FIELD_WIDTH)
+        # Fixed height: TE-Aid pangenome rows must not squash when more genomes
+        # are added and the dialog briefly measures under a tight max height.
+        self._combo.ensurePolished()
+        self._combo.setFixedHeight(max(22, self._combo.sizeHint().height()))
+        self._combo.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         self._combo.currentIndexChanged.connect(lambda *_: self.selection_changed.emit())
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -5341,6 +5351,10 @@ class PanGenomeBlastListWidget(QWidget):
         self._manage_title = manage_title
         self._blast_manager_dialog = None
         self._rows: list[tuple[QWidget, GenomeBlastDatabaseRow, QPushButton]] = []
+        # Grow with rows; never shrink genome combos to fit a short dialog.
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -5350,7 +5364,7 @@ class PanGenomeBlastListWidget(QWidget):
         self._rows_layout = QVBoxLayout(self._rows_host)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.setSpacing(4)
-        outer.addWidget(self._rows_host)
+        outer.addWidget(self._rows_host, 0)
 
         manage = QPushButton("Manage Database", self)
         manage.clicked.connect(self._manage_databases)
@@ -5400,6 +5414,9 @@ class PanGenomeBlastListWidget(QWidget):
         emit_resize: bool = True,
     ) -> GenomeBlastDatabaseRow:
         wrap = QWidget(self._rows_host)
+        wrap.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         row_layout = QHBoxLayout(wrap)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
@@ -5415,12 +5432,16 @@ class PanGenomeBlastListWidget(QWidget):
         )
         remove = QPushButton("Remove", wrap)
         remove.setToolTip("Remove this genome from the list")
+        remove.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        remove.setFixedHeight(genome._combo.height())
         remove.clicked.connect(lambda: self._remove_row(wrap))
-        row_layout.addWidget(genome, 0, Qt.AlignmentFlag.AlignLeft)
-        row_layout.addWidget(remove, 0, Qt.AlignmentFlag.AlignLeft)
+        row_layout.addWidget(genome, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(remove, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         row_layout.addStretch(1)
         self._rows.append((wrap, genome, remove))
-        self._rows_layout.addWidget(wrap)
+        self._rows_layout.addWidget(wrap, 0)
         self._sync_remove_buttons()
         if emit_resize:
             self.size_changed.emit()
@@ -11012,7 +11033,15 @@ class TeaAidParamsDialog(QDialog):
     def _on_teaid_pan_list_resized(self) -> None:
         if self.isVisible() and self._mode_pan.isChecked():
             self._teaid_compact_size = None
-            self._resize_for_teaid_advanced(self._advanced_settings_btn.isChecked())
+            # Defer so the new genome row's sizeHint is ready before we pin height.
+            QTimer.singleShot(0, self._resize_teaid_after_pan_change)
+
+    def _resize_teaid_after_pan_change(self) -> None:
+        if not self.isVisible() or not self._mode_pan.isChecked():
+            return
+        self._pan_list.updateGeometry()
+        self._teaid_basic.updateGeometry()
+        self._resize_for_teaid_advanced(self._advanced_settings_btn.isChecked())
 
     def _sync_teaid_mode(self, *, resize: bool = True) -> None:
         pan = self._mode_pan.isChecked()

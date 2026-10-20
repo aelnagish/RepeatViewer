@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from repeatviewer.widgets.help_button import make_help_button
 from repeatviewer.workflows import (
     WORKFLOW_CATEGORY_SEQUENCES,
     WORKFLOW_CATEGORY_TOOLS,
@@ -42,6 +43,13 @@ _ROLE_WORKFLOW_NAME = Qt.ItemDataRole.UserRole + 1
 _ROLE_STEP_TOOL_ID = Qt.ItemDataRole.UserRole
 _ROLE_STEP_KEEP = Qt.ItemDataRole.UserRole + 1
 
+_WORKFLOWS_HELP = (
+    "Steps use each tool’s currently saved parameters. "
+    "Only tools whose input format matches the previous output can be added. "
+    "Unticked intermediate outputs are deleted after a successful run; "
+    "the final step is always kept."
+)
+
 
 class WorkflowDesignerDialog(QDialog):
     """Design and manage named tool pipelines."""
@@ -51,7 +59,7 @@ class WorkflowDesignerDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Design and manage your workflows")
-        self.setMinimumSize(760, 440)
+        self.setMinimumSize(640, 280)
         self._dirty = False
         self._current_id: str | None = None
         self._updating_steps = False
@@ -65,6 +73,10 @@ class WorkflowDesignerDialog(QDialog):
         self._workflow_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._workflow_list.currentItemChanged.connect(self._on_workflow_selected)
         self._workflow_list.model().rowsMoved.connect(self._on_workflows_reordered)
+        self._workflow_list.setMinimumHeight(120)
+        self._workflow_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
 
         self._steps_list = QListWidget(self)
         self._steps_list.setToolTip(
@@ -77,6 +89,10 @@ class WorkflowDesignerDialog(QDialog):
         self._steps_list.currentRowChanged.connect(lambda _r: self._update_controls())
         self._steps_list.model().rowsMoved.connect(self._on_steps_reordered)
         self._steps_list.itemChanged.connect(self._on_step_item_changed)
+        self._steps_list.setMinimumHeight(120)
+        self._steps_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
 
         # One column each so the Workflows list and Delete share the same width.
         self._new_btn = QPushButton("New", self)
@@ -118,9 +134,18 @@ class WorkflowDesignerDialog(QDialog):
         right_btns.addStretch(1)
         right_btns.addWidget(self._remove_btn)
 
+        workflows_header = QHBoxLayout()
+        workflows_header.setContentsMargins(0, 0, 0, 0)
+        workflows_header.setSpacing(6)
+        workflows_header.addWidget(QLabel("Workflows", self))
+        workflows_header.addWidget(
+            make_help_button(self, "Workflows", _WORKFLOWS_HELP)
+        )
+        workflows_header.addStretch(1)
+
         left_col = QVBoxLayout()
         left_col.setSpacing(6)
-        left_col.addWidget(QLabel("Workflows", self))
+        left_col.addLayout(workflows_header)
         left_col.addWidget(self._workflow_list, 1)
         left_col.addLayout(left_btns)
 
@@ -141,15 +166,7 @@ class WorkflowDesignerDialog(QDialog):
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet("color: #c44;")
-
-        hint = QLabel(
-            "Steps use each tool’s currently saved parameters. "
-            "Only tools whose input format matches the previous output can be added. "
-            "Unticked intermediate outputs are deleted after a successful run; "
-            "the final step is always kept.",
-            self,
-        )
-        hint.setWordWrap(True)
+        self._status.setVisible(False)
 
         self._close_btn = QPushButton("Close", self)
         self._save_btn = QPushButton("Save", self)
@@ -161,14 +178,15 @@ class WorkflowDesignerDialog(QDialog):
         buttons.addWidget(self._save_btn)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
         layout.addLayout(columns, 1)
         layout.addWidget(self._status)
-        layout.addWidget(hint)
         layout.addLayout(buttons)
 
         self._reload_workflows()
         self._update_controls()
+        # Compact default: lists grow if the user resizes, but open fitted.
+        self.resize(720, 320)
 
     def _last_step_tool_id(self) -> str | None:
         if self._steps_list.count() == 0:
@@ -474,8 +492,10 @@ class WorkflowDesignerDialog(QDialog):
         error = validate_workflow_steps(tool_ids) if tool_ids else "Add at least one step."
         if tool_ids and error is None:
             self._status.clear()
+            self._status.setVisible(False)
         else:
             self._status.setText(error or "")
+            self._status.setVisible(bool(error))
 
     def _mark_dirty(self) -> None:
         self._dirty = True

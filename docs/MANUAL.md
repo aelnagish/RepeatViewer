@@ -622,7 +622,8 @@ collapsible **Advanced Settings**, and **Options**.
 | Advanced | Full-/mid-length hits | Color bands by hit length vs consensus |
 | Options | Process output | Live genome BLAST and self-BLAST progress window |
 
-**Output:** `<name>_TEAid.html`, rendered in the preview pane.
+**Output:** `<name>_TEAid.html` (single genome) or `<name>_pTEAid.html` (pangenome),
+rendered in the preview pane.
 
 ### Flexidot
 
@@ -1262,7 +1263,8 @@ as BLAST), e.g. `reads.fa` → `reads.fa_mafft.fa`, `reads.fa_flexidot.html`.
 | `<name>_rowdiv.fa` | MSA Clean | Divergent rows removed |
 | `<name>_rowgap.fa` | MSA Clean | Gappy rows removed |
 | `<file.fasta>_<threshold>_co.fa` | Consensus | Consensus sequence |
-| `<name>_TEAid.html` | TE-Aid | Interactive TE report |
+| `<name>_TEAid.html` | TE-Aid | Interactive TE report (single genome) |
+| `<name>_pTEAid.html` | TE-Aid | Interactive TE report (pangenome) |
 | `<name>_flexidot.html` | Flexidot | Interactive dotplot |
 | `<name>_flexidot.gff` | Flexidot | Match coordinates |
 | `<name>_flexidot_legend.png` | Flexidot | Plot legend |

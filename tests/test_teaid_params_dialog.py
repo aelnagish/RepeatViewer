@@ -100,6 +100,25 @@ def test_teaid_dialog_blast_style_sections(qapp: QApplication) -> None:
     assert dlg._hit_high_pct.x() < dlg._hit_color_high_btn.x()
     assert dlg._hit_mid_pct.x() < dlg._hit_color_mid_btn.x()
 
+def test_teaid_pangenome_combo_height_stable_when_adding(qapp: QApplication) -> None:
+    """Adding genomes must not squash the genome dropdown height."""
+    dlg = _teaid_dialog(qapp)
+    dlg._mode_pan.setChecked(True)
+    qapp.processEvents()
+    dlg._resize_for_teaid_advanced(False)
+    qapp.processEvents()
+    assert len(dlg._pan_list._rows) >= 2
+    h0 = dlg._pan_list._rows[0][1]._combo.height()
+    assert h0 >= 22
+    dlg._pan_list._on_add_genome()
+    qapp.processEvents()
+    dlg._resize_teaid_after_pan_change()
+    qapp.processEvents()
+    heights = [genome._combo.height() for _wrap, genome, _rm in dlg._pan_list._rows]
+    assert len(heights) >= 3
+    assert all(h == h0 for h in heights), heights
+
+
 def test_teaid_options_has_process_output(qapp: QApplication) -> None:
     dlg = _teaid_dialog(qapp)
     dlg._tabs.setCurrentIndex(1)

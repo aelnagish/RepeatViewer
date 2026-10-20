@@ -99,7 +99,8 @@ class _SplitPreviewPane(QWidget):
         self._status_bar.setSizeGripEnabled(False)
         self._status_bar.setFixedHeight(26)
         self._task_progress = TaskProgressPanel()
-        self._status_bar.addPermanentWidget(self._task_progress, 1)
+        # No stretch — pack label+bar next to Stop (see preview_duplicate_window).
+        self._status_bar.addPermanentWidget(self._task_progress)
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setToolTip("Stop the currently running job")
         self._stop_btn.setMaximumHeight(22)
